@@ -153,7 +153,8 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
                 owner_corp_id: corp_id,
                 solar_system_id: 30_000_142,
                 name: "OfficeCitadel".into(),
-                state: "Armor_Vulnerable".into(),
+                state: "ArmorVulnerable".into(),
+                quantum_core_installed: true,
                 position: [0.0, 0.0, 0.0],
                 ..Default::default()
             },
@@ -216,7 +217,7 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
     sess.structure_id = None;
     sess.station_id = Some(station_id);
     ctx.db.with_mut_snapshot(|snap| {
-        for i in 0..16 {
+        for i in 0..24 {
             let iid = 930_000 + i;
             snap.items.insert(
                 iid,
@@ -233,7 +234,7 @@ async fn office_manager_fulcrum_upwell_capacity_roles_and_wallet_branches_kill_m
             );
         }
     });
-    assert_eq!(call_office(&ctx, &mut sess, "GetPriceQuote", &[PyRep::Integer(station_id)]).await.unwrap().unwrap(), PyRep::Real(90_000.0));
+    assert_eq!(call_office(&ctx, &mut sess, "GetPriceQuote", &[PyRep::Integer(station_id)]).await.unwrap().unwrap(), PyRep::Real(130_000.0));
     assert_eq!(call_office(&ctx, &mut sess, "GetEmptyOfficeCount", &[PyRep::Integer(station_id)]).await.unwrap().unwrap(), PyRep::Integer(0));
     assert_eq!(call_office(&ctx, &mut sess, "RentOffice", &[PyRep::Integer(station_id)]).await.unwrap().unwrap_err().code, "StationOfficesFull");
     assert_eq!(call_office(&ctx, &mut sess, "GetMyCorporationsOffice", &[PyRep::Integer(station_id)]).await.unwrap().unwrap_err().code, "NoOfficeAtStation");

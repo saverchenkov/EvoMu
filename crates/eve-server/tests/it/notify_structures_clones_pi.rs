@@ -1657,12 +1657,16 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
 
     let struct_id = 1_031_000_000_099_i64;
     let owner_corp_id = 98_000_099_i64;
+    let mut owner_uid = 2_u64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.corporations.insert(
-            owner_corp_id,
-            CorporationRecord::new(owner_corp_id, "Citadel Host", "CHST", PILOT_B)
-                .with_master_wallet(IskCents::from_isk(500_000)),
-        );
+        let mut owner_corp = CorporationRecord::new(owner_corp_id, "Citadel Host", "CHST", PILOT_B)
+            .with_master_wallet(IskCents::from_isk(500_000));
+        owner_corp.members.insert(PILOT_B);
+        snap.corporations.insert(owner_corp_id, owner_corp);
+        if let Some(ch_b) = snap.characters.get_mut(&PILOT_B) {
+            ch_b.corporation_id = owner_corp_id;
+            owner_uid = ch_b.user_id;
+        }
         snap.structures.insert(
             struct_id,
             UpwellStructureRecord {
@@ -1672,34 +1676,257 @@ async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications
                 solar_system_id: dest_sys_id,
                 name: "Static Office Astrahus".into(),
                 state: "ShieldVulnerable".into(),
+                quantum_core_installed: false,
                 ..Default::default()
             },
         );
-        snap.station_office_rental_costs.insert(struct_id, 40_000.0);
-        let existing_office = snap.next_entity_id + 1;
-        snap.next_entity_id = existing_office;
-        snap.items.insert(
-            existing_office,
-            make_item(existing_office, 27, 98_000_088, struct_id, InventoryFlag::Hangar, 1, true),
-        );
+        for i in 0..25_i64 {
+            let existing_office = snap.next_entity_id + 1;
+            snap.next_entity_id = existing_office;
+            snap.items.insert(
+                existing_office,
+                make_item(
+                    existing_office,
+                    27,
+                    98_000_100 + i,
+                    struct_id,
+                    InventoryFlag::Hangar,
+                    1,
+                    true,
+                ),
+            );
+        }
         let ch = snap.characters.get_mut(&PILOT_A).unwrap();
         ch.station_id = None;
         ch.structure_id = Some(struct_id);
     });
+    ctx.db
+        .acquire_online_lock(owner_uid, 9_241, Some(PILOT_B), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
     sess_a.station_id = None;
     sess_a.structure_id = Some(struct_id);
+
+    // Un-cored Upwell structure rejects RentOffice & GetPriceQuote with StructureNotOperational
+    // and reports 0 empty offices, emitting no notifications.
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)])
+            .await
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "StructureNotOperational"
+    );
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    // Cored structure with docking-only ACL (SETTING_HOUSING_CAN_DOCK=19 / legacy 1) without domain 20
+    // STILL denies office rental with StructureServiceAccessDenied.
+    ctx.db.with_mut_snapshot(|snap| {
+        use eve_server::services::station_structure::structure_upwell_ops::{
+            load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+        };
+        use eve_server::services::structure_profile_services::{
+            encode_service_setting_bps, SETTING_CORP_RENT_OFFICE, SETTING_HOUSING_CAN_DOCK,
+        };
+        snap.structures.get_mut(&struct_id).unwrap().quantum_core_installed = true;
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            901,
+            AccessGroupRecord {
+                group_id: 901,
+                creator_id: PILOT_B,
+                owner_corp_id,
+                name: "Dock Only".into(),
+                description: String::new(),
+                members: HashMap::from([(new_corp_id, 1)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 901,
+            owner_corp_id,
+            ..Default::default()
+        };
+        prof.allowed_corporations.insert(new_corp_id);
+        prof.general_settings.insert(1, true);
+        prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+        prof.service_acl_rules.insert(1, vec![(901, 0)]);
+        prof.service_acl_rules.insert(SETTING_HOUSING_CAN_DOCK, vec![(901, 0)]);
+        ext.profiles_by_id.insert(901, prof.clone());
+        ext.access_profiles.insert(struct_id, prof);
+        save_ext_state(snap, &ext);
+        let _ = encode_service_setting_bps(SETTING_CORP_RENT_OFFICE, 0.0);
+    });
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    // Grant domain 20 (SETTING_CORP_RENT_OFFICE) tier at 40,000 ISK for new_corp_id even with
+    // 25 offices already present -> GetEmptyOfficeCount > 24 and full Upwell notification batch fires.
+    ctx.db.with_mut_snapshot(|snap| {
+        use eve_server::services::station_structure::structure_upwell_ops::{
+            load_ext_state, save_ext_state, AccessGroupRecord,
+        };
+        use eve_server::services::structure_profile_services::{
+            encode_service_setting_bps, SETTING_CORP_RENT_OFFICE,
+        };
+        let fee_bps = encode_service_setting_bps(SETTING_CORP_RENT_OFFICE, 40_000.0).unwrap();
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            902,
+            AccessGroupRecord {
+                group_id: 902,
+                creator_id: PILOT_B,
+                owner_corp_id,
+                name: "Paid Office Tenants".into(),
+                description: String::new(),
+                members: HashMap::from([(new_corp_id, 1)]),
+            },
+        );
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.service_acl_rules.insert(SETTING_CORP_RENT_OFFICE, vec![(902, fee_bps)]);
+        save_ext_state(snap, &ext);
+    });
+    let empty_upwell = rpc(&ctx, &mut sess_a, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("GetEmptyOfficeCount on occupied Upwell structure")
+        .as_i64()
+        .unwrap();
+    assert!(empty_upwell > 24);
     let upwell_quote = rpc(&ctx, &mut sess_a, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)])
         .await
         .expect("GetPriceQuote on occupied Upwell structure");
     assert_eq!(upwell_quote, PyRep::Real(40_000.0));
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
     let rent_upwell = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)])
         .await
         .expect("RentOffice on occupied Upwell structure");
     assert_eq!(rent_upwell.dict_get("cost").and_then(|v| v.as_f64()), Some(40_000.0));
+    let upwell_office_id = rent_upwell.dict_get("officeID").and_then(PyRep::as_i64).expect("upwell officeID");
+    let upwell_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let upwell_bills = find_notif(&upwell_notifs_a, "OnBillReceived");
+    assert_eq!(upwell_bills[0].dict_get("debtorID"), Some(&PyRep::Integer(new_corp_id)));
+    assert_eq!(upwell_bills[0].dict_get("creditorID"), Some(&PyRep::Integer(owner_corp_id)));
+    assert_eq!(
+        find_notif(&upwell_notifs_a, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(new_corp_id),
+            PyRep::Real(110_000.0),
+        ]
+    );
+    let _ = find_notif(&upwell_notifs_a, "OnItemChange");
+    assert_eq!(
+        find_notif(&upwell_notifs_a, "OnOfficeRentalChange"),
+        &[PyRep::Integer(new_corp_id), PyRep::Integer(upwell_office_id)]
+    );
+    assert!(!upwell_notifs_a.iter().any(|(e, _)| e == "OnOfficeRentalChanged"));
+    let owner_notifs_b: Vec<_> = ctx
+        .drain_notifications_for_char(PILOT_B)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect();
+    assert_eq!(
+        find_notif(&owner_notifs_b, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(owner_corp_id),
+            PyRep::Real(540_000.0),
+        ]
+    );
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
             snap.corporations[&new_corp_id].division_balance(1),
             IskCents::from_isk(110_000)
         );
+        assert_eq!(
+            snap.corporations[&owner_corp_id].division_balance(1),
+            IskCents::from_isk(540_000)
+        );
     });
+
+    // Free (0 ISK) Upwell office tier succeeds cleanly with zero wallet balance, omitting
+    // OnAccountChange & OnBillReceived while still emitting OnItemChange & OnOfficeRentalChange.
+    let free_struct_id = 1_031_000_000_100_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        use eve_server::services::station_structure::structure_upwell_ops::{
+            load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+        };
+        use eve_server::services::structure_profile_services::{
+            encode_service_setting_bps, SETTING_CORP_RENT_OFFICE,
+        };
+        snap.structures.insert(
+            free_struct_id,
+            UpwellStructureRecord {
+                structure_id: free_struct_id,
+                type_id: 35_832,
+                owner_corp_id,
+                solar_system_id: dest_sys_id,
+                name: "Free Office Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        let free_bps = encode_service_setting_bps(SETTING_CORP_RENT_OFFICE, 0.0).unwrap();
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            903,
+            AccessGroupRecord {
+                group_id: 903,
+                creator_id: PILOT_B,
+                owner_corp_id,
+                name: "Free Office Allies".into(),
+                description: String::new(),
+                members: HashMap::from([(new_corp_id, 1)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id: 903,
+            owner_corp_id,
+            ..Default::default()
+        };
+        prof.service_acl_rules.insert(SETTING_CORP_RENT_OFFICE, vec![(903, free_bps)]);
+        ext.profiles_by_id.insert(903, prof.clone());
+        ext.access_profiles.insert(free_struct_id, prof);
+        save_ext_state(snap, &ext);
+        snap.corporations
+            .get_mut(&new_corp_id)
+            .unwrap()
+            .set_division_balance(1, IskCents::from_isk(0));
+        snap.characters.get_mut(&PILOT_A).unwrap().structure_id = Some(free_struct_id);
+    });
+    sess_a.structure_id = Some(free_struct_id);
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "officeManager", "GetPriceQuote", &[PyRep::Integer(free_struct_id)])
+            .await
+            .unwrap(),
+        PyRep::Real(0.0)
+    );
+    let rent_free = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(free_struct_id)])
+        .await
+        .expect("0 ISK free Upwell RentOffice");
+    assert_eq!(rent_free.dict_get("cost").and_then(|v| v.as_f64()), Some(0.0));
+    let free_office_id = rent_free.dict_get("officeID").and_then(PyRep::as_i64).expect("free officeID");
+    let free_notifs_a = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!free_notifs_a.iter().any(|(e, _)| e == "OnAccountChange"));
+    assert!(!free_notifs_a.iter().any(|(e, _)| e == "OnBillReceived"));
+    let _ = find_notif(&free_notifs_a, "OnItemChange");
+    assert_eq!(
+        find_notif(&free_notifs_a, "OnOfficeRentalChange"),
+        &[PyRep::Integer(new_corp_id), PyRep::Integer(free_office_id)]
+    );
+    assert!(ctx.drain_notifications_for_char(PILOT_B).is_empty());
 }
