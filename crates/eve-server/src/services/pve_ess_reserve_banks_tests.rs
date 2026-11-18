@@ -13,6 +13,59 @@ fn shared_sde() -> Arc<SdeRegistry> {
     Arc::clone(SDE.get_or_init(|| Arc::new(SdeRegistry::with_canonical_seed())))
 }
 
+fn synthetic_inv_type(
+    type_id: eve_sde::TypeId,
+    group_id: eve_sde::GroupId,
+    name: &str,
+) -> eve_sde::InvType {
+    eve_sde::InvType {
+        type_id,
+        group_id,
+        category_id: 0,
+        name: name.into(),
+        mass: 0.0,
+        volume: 0.0,
+        capacity: 0.0,
+        radius: 0.0,
+        base_price: 0.0,
+        published: true,
+        portion_size: 1,
+        market_group_id: None,
+        race_id: None,
+        faction_id: None,
+        variation_parent_type_id: None,
+        description_id: None,
+        icon_id: None,
+        graphic_id: None,
+        sound_id: None,
+        meta_group_id: None,
+        meta_level: None,
+        tech_level: None,
+        default_effect_id: None,
+        description: String::new(),
+        effect_ids: Vec::new(),
+        default_attributes: Default::default(),
+    }
+}
+
+fn synthetic_solar_system(
+    solar_system_id: SolarSystemId,
+    security_status: f64,
+) -> eve_sde::SolarSystem {
+    eve_sde::SolarSystem {
+        solar_system_id,
+        constellation_id: 20_000_001,
+        region_id: 10_000_001,
+        name: format!("Synthetic-{solar_system_id}"),
+        security_status,
+        radius: 1_000_000_000.0,
+        galactic_pos_ly: [0.0; 3],
+        planet_ids: Vec::new(),
+        stations: Vec::new(),
+        wormhole_class_id: None,
+    }
+}
+
 #[test]
 fn ess_reserve_pulse_curve_conservation_research_and_storyline_helpers() {
     // Curve spool-up and 100% conservation across all N pulses
@@ -36,20 +89,12 @@ fn ess_reserve_pulse_curve_conservation_research_and_storyline_helpers() {
     assert_eq!(max_affordable_datacores(550.0), 5);
     assert_eq!(max_affordable_datacores(-10.0), 0);
     let mut dc_sde = (*sde).clone();
-    if let Some(sample_skill) = dc_sde.types.values().next().cloned() {
-        let mut mech_skill = sample_skill.clone();
-        mech_skill.type_id = SKILL_MECHANICS;
-        mech_skill.group_id = 270;
-        mech_skill.published = true;
-        dc_sde.types.insert(SKILL_MECHANICS, mech_skill);
+    let mech_skill = synthetic_inv_type(SKILL_MECHANICS, 270, "Synthetic Mechanics");
+    dc_sde.types.insert(SKILL_MECHANICS, mech_skill);
 
-        let mut custom_dc = sample_skill;
-        custom_dc.type_id = 99_333_001;
-        custom_dc.group_id = 333;
-        custom_dc.published = true;
-        custom_dc.default_attributes.insert(182, SKILL_MECHANICS as f64);
-        dc_sde.types.insert(custom_dc.type_id, custom_dc);
-    }
+    let mut custom_dc = synthetic_inv_type(99_333_001, 333, "Synthetic Datacore");
+    custom_dc.default_attributes.insert(182, SKILL_MECHANICS as f64);
+    dc_sde.types.insert(custom_dc.type_id, custom_dc);
     assert_eq!(resolve_datacore_for_research_skill(&dc_sde, SKILL_MECHANICS), Some(99_333_001));
     assert!(resolve_datacore_for_research_skill(&dc_sde, SKILL_SCIENCE).is_none());
     assert!(is_storyline_qualifying_agent_type(2));
@@ -59,7 +104,8 @@ fn ess_reserve_pulse_curve_conservation_research_and_storyline_helpers() {
     let cruiser_tid = sde
         .types
         .values()
-        .find(|t| ESS_ALLOWED_SHIP_GROUP_IDS.contains(&t.group_id))
+        .filter(|t| ESS_ALLOWED_SHIP_GROUP_IDS.contains(&t.group_id))
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .expect("SDE has ESS-eligible hull");
     assert!(is_ess_gate_eligible_hull(&sde, cruiser_tid));
@@ -80,7 +126,8 @@ async fn ess_bubble_restriction_main_bank_autopayout_and_bounty_split() {
     let null_sys: SolarSystemId = sde
         .solar_systems
         .values()
-        .find(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .expect("SDE has K-space null-sec system");
 
@@ -199,7 +246,13 @@ async fn ess_bubble_restriction_main_bank_autopayout_and_bounty_split() {
         .is_ok()
     );
 
-    if let Some(mwd_mod) = ctx.sde.types.values().find(|t| t.group_id == 46) {
+    if let Some(mwd_mod) = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.group_id == 46)
+        .min_by_key(|t| t.type_id)
+    {
         let mwd_err =
             check_ess_module_activation_allowed(&ctx, null_sys, ship_id, mwd_mod, "moduleBonusMicrowarpdrive")
                 .await
@@ -212,7 +265,8 @@ async fn ess_bubble_restriction_main_bank_autopayout_and_bounty_split() {
         .sde
         .types
         .values()
-        .find(|t| t.group_id == 26 && t.published)
+        .filter(|t| t.group_id == 26 && t.published)
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .unwrap_or(626);
     let cruiser_ship_id: i64 = 1_050_300_202;
@@ -283,20 +337,12 @@ fn rnd_research_validation_and_storyline_sixteenth_mission_offer() {
     let station_id: i64 = 60_003_760;
     let sys_id: SolarSystemId = 30_000_142;
 
-    if let Some(sample_skill) = sde.types.values().next().cloned() {
-        let mut mech_skill = sample_skill.clone();
-        mech_skill.type_id = SKILL_MECHANICS;
-        mech_skill.group_id = 270;
-        mech_skill.published = true;
-        sde.types.insert(SKILL_MECHANICS, mech_skill);
+    let mech_skill = synthetic_inv_type(SKILL_MECHANICS, 270, "Synthetic Mechanics");
+    sde.types.insert(SKILL_MECHANICS, mech_skill);
 
-        let mut custom_dc = sample_skill;
-        custom_dc.type_id = 99_333_001;
-        custom_dc.group_id = 333;
-        custom_dc.published = true;
-        custom_dc.default_attributes.insert(182, SKILL_MECHANICS as f64);
-        sde.types.insert(custom_dc.type_id, custom_dc);
-    }
+    let mut custom_dc = synthetic_inv_type(99_333_001, 333, "Synthetic Datacore");
+    custom_dc.default_attributes.insert(182, SKILL_MECHANICS as f64);
+    sde.types.insert(custom_dc.type_id, custom_dc);
 
     let rnd_agent = eve_sde::AgentInfo {
         agent_id: 3_018_418,
@@ -499,68 +545,55 @@ fn wave4_agent_mission_completion_tracking_and_datacore_exclusions() {
     assert!(resolve_datacore_for_research_skill(&sde, SKILL_RESEARCH_PROJECT_MANAGEMENT).is_none());
     assert!(resolve_datacore_for_research_skill(&sde, 34).is_none());
 
-    if let Some(mut base) = sde.types.values().next().cloned() {
-        let mut sk = base.clone();
-        sk.type_id = 99_340;
-        sk.group_id = 270;
-        sk.published = true;
-        sde.types.insert(99_340, sk);
+    let sk = synthetic_inv_type(99_340, 270, "Synthetic Research Skill");
+    sde.types.insert(99_340, sk);
 
-        base.type_id = 99_333;
-        base.group_id = 333;
-        base.published = false;
-        base.default_attributes.insert(182, 99_340.0);
-        sde.types.insert(99_333, base.clone());
-        assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), None);
+    let mut base = synthetic_inv_type(99_333, 333, "Synthetic Datacore");
+    base.published = false;
+    base.default_attributes.insert(182, 99_340.0);
+    sde.types.insert(99_333, base.clone());
+    assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), None);
 
-        let mut published_dc = base.clone();
-        published_dc.type_id = 99_334;
-        published_dc.published = true;
-        sde.types.insert(99_334, published_dc);
-        assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), Some(99_334));
+    let mut published_dc = base.clone();
+    published_dc.type_id = 99_334;
+    published_dc.published = true;
+    sde.types.insert(99_334, published_dc);
+    assert_eq!(resolve_datacore_for_research_skill(&sde, 99_340), Some(99_334));
 
-        // ESS gate hull eligibility against every allowed and disallowed ship group
-        for (idx, &gid) in ESS_ALLOWED_SHIP_GROUP_IDS.iter().enumerate() {
-            let tid = 98_000 + idx as u32;
-            let mut hull = base.clone();
-            hull.type_id = tid;
-            hull.group_id = gid;
-            sde.types.insert(tid, hull);
-            assert!(
-                is_ess_gate_eligible_hull(&sde, tid),
-                "group {gid} must be allowed through ESS gate"
-            );
-        }
-        for (idx, gid) in [0_u32, 25, 29, 30, 31, 485, 513, 547, 883].into_iter().enumerate() {
-            let tid = 98_500 + idx as u32;
-            let mut hull = base.clone();
-            hull.type_id = tid;
-            hull.group_id = gid;
-            sde.types.insert(tid, hull);
-            assert!(
-                !is_ess_gate_eligible_hull(&sde, tid),
-                "disallowed ship group {gid} must be rejected at ESS gate"
-            );
-        }
-        assert!(!is_ess_gate_eligible_hull(&sde, 99_999_999));
+    // ESS gate hull eligibility against every allowed and disallowed ship group
+    for (idx, &gid) in ESS_ALLOWED_SHIP_GROUP_IDS.iter().enumerate() {
+        let tid = 98_000 + idx as u32;
+        let mut hull = synthetic_inv_type(tid, gid, "Synthetic Allowed Hull");
+        hull.category_id = 6;
+        sde.types.insert(tid, hull);
+        assert!(
+            is_ess_gate_eligible_hull(&sde, tid),
+            "group {gid} must be allowed through ESS gate"
+        );
     }
-
-    if let Some(mut sys) = sde.solar_systems.values().next().cloned() {
-        sys.solar_system_id = 30_999_001;
-        sys.security_status = 0.0;
-        sde.solar_systems.insert(30_999_001, sys.clone());
-        assert!(is_kspace_nullsec(&sde, 30_999_001));
-
-        sys.solar_system_id = 30_999_002;
-        sys.security_status = 0.01;
-        sde.solar_systems.insert(30_999_002, sys.clone());
-        assert!(!is_kspace_nullsec(&sde, 30_999_002));
-
-        sys.solar_system_id = 31_000_001;
-        sys.security_status = -1.0;
-        sde.solar_systems.insert(31_000_001, sys);
-        assert!(!is_kspace_nullsec(&sde, 31_000_001));
+    for (idx, gid) in [0_u32, 25, 29, 30, 31, 485, 513, 547, 883].into_iter().enumerate() {
+        let tid = 98_500 + idx as u32;
+        let mut hull = synthetic_inv_type(tid, gid, "Synthetic Disallowed Hull");
+        hull.category_id = 6;
+        sde.types.insert(tid, hull);
+        assert!(
+            !is_ess_gate_eligible_hull(&sde, tid),
+            "disallowed ship group {gid} must be rejected at ESS gate"
+        );
     }
+    assert!(!is_ess_gate_eligible_hull(&sde, 99_999_999));
+
+    sde.solar_systems
+        .insert(30_999_001, synthetic_solar_system(30_999_001, 0.0));
+    assert!(is_kspace_nullsec(&sde, 30_999_001));
+
+    sde.solar_systems
+        .insert(30_999_002, synthetic_solar_system(30_999_002, 0.01));
+    assert!(!is_kspace_nullsec(&sde, 30_999_002));
+
+    sde.solar_systems
+        .insert(31_000_001, synthetic_solar_system(31_000_001, -1.0));
+    assert!(!is_kspace_nullsec(&sde, 31_000_001));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -577,7 +610,8 @@ async fn wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges() {
     let null_sys = sde
         .solar_systems
         .values()
-        .find(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap();
     let char_id = 90_099_201_i64;
@@ -685,21 +719,47 @@ async fn wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges() {
     let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(500_000.1, 0.0, 0.0)).await;
     assert!(check_ess_intrusion_bubble_restriction(&ctx, null_sys, ship_id, "cloak").await.is_ok());
 
-    // Module check: group_id == 46 with attr 554 (MWD sig radius bonus) blocked, vs group_id == 46 without attr 554 (Afterburner) allowed!
+    // Module check: group_id == 46 with attr 554, attr 986, effect 6730, or "Microwarpdrive" name
+    // is blocked inside the 75 km bubble, while a clean group_id == 46 Afterburner is allowed.
     let _ = sys_handle.set_ball_position(ship_id, ess_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
-    let mut mwd_by_attr = sde.types.values().next().cloned().unwrap();
-    mwd_by_attr.group_id = 46;
-    mwd_by_attr.default_attributes.clear();
-    mwd_by_attr.default_attributes.insert(554, 500.0);
+    let mut prop_mod = synthetic_inv_type(99_046_001, 46, "Synthetic Afterburner");
+    prop_mod.default_attributes.insert(554, 500.0);
     assert_eq!(
-        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &mwd_by_attr, "")
+        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &prop_mod, "")
             .await
             .unwrap_err()
             .code,
         "EssIntrusionBubbleMwdBlocked"
     );
-    mwd_by_attr.default_attributes.clear();
-    assert!(check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &mwd_by_attr, "").await.is_ok());
+    prop_mod.default_attributes.clear();
+    assert!(check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &prop_mod, "").await.is_ok());
+
+    prop_mod.default_attributes.insert(986, 25.0);
+    assert_eq!(
+        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &prop_mod, "")
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleMwdBlocked"
+    );
+    prop_mod.default_attributes.clear();
+    prop_mod.effect_ids.push(6730);
+    assert_eq!(
+        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &prop_mod, "")
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleMwdBlocked"
+    );
+    prop_mod.effect_ids.clear();
+    prop_mod.name = "Synthetic 50MN Microwarpdrive".into();
+    assert_eq!(
+        check_ess_module_activation_allowed(&ctx, null_sys, ship_id, &prop_mod, "")
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleMwdBlocked"
+    );
 
     // 3. ESS gate exact 2_500.0m boundary + force uncloak on eligible hull activation
     let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
