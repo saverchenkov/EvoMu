@@ -62,6 +62,15 @@ pub fn handle_pi_colonies(
                 };
                 let (sim_extracted, sim_processed) = if elapsed > 0 {
                     let (e, p) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    if e == 0 {
+                        crate::services::industry_pi::pi_resource_helpers::decay_colony_extracted_commodities(&mut col, elapsed);
+                        let mut depl_state = load_planet_depletion(snap, planet_id);
+                        if depl_state.last_updated_unix == 0 && baseline > 0 && baseline < now_unix {
+                            depl_state.last_updated_unix = baseline;
+                        }
+                        crate::services::industry_pi::pi_resource_helpers::regenerate_planet_depletion(&mut depl_state, now_unix);
+                        save_planet_depletion(snap, &depl_state);
+                    }
                     let tot_e = e.saturating_add(std::mem::take(&mut net.pending_login_extracted));
                     let tot_p = p.saturating_add(std::mem::take(&mut net.pending_login_processed));
                     snap.planetary_colonies.insert((char_id, planet_id), col.clone());
@@ -1247,10 +1256,21 @@ pub fn handle_pi_colonies(
                                     })
                                     .unwrap_or(86_400);
                                 let prog_dur = requested_dur.clamp(cyc_secs, MAX_EXTRACTOR_PROGRAM_SECS);
+                                let prev_expiry_unix = pin.expiry_time_unix;
                                 pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
                                 if let Some((depl_tid, elapsed_c, plat, plon, heads, rad)) = deferred_depl_update {
                                     let mut depl_state = load_planet_depletion(snap, planet_id);
                                     depl_state.planet_id = planet_id;
+                                    // Only replenish over idle time strictly after the prior program expired.
+                                    let idle_start = prev_expiry_unix.unwrap_or(now_unix);
+                                    if now_unix > idle_start {
+                                        if depl_state.last_updated_unix < idle_start {
+                                            depl_state.last_updated_unix = idle_start;
+                                        }
+                                        crate::services::industry_pi::pi_resource_helpers::regenerate_planet_depletion(&mut depl_state, now_unix);
+                                    } else if now_unix > 0 {
+                                        depl_state.last_updated_unix = now_unix;
+                                    }
                                     let res_depl = depl_state.resource_depletion.entry(depl_tid).or_insert(0.0);
                                     let depl_delta = (0.015 * elapsed_c * 0.25).min(0.45);
                                     *res_depl = (*res_depl + depl_delta).min(0.90);

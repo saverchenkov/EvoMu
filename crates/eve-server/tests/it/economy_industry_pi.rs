@@ -913,14 +913,14 @@ async fn test_pi_colony_command_center_pins_and_links() {
             ("planetID", PyRep::Integer(JITA_PLANET_ID)),
             ("resourceTypeID", PyRep::Integer(first_res_type_id)),
             ("advancedPlanetology", PyRep::Integer(2)), ("planetology", PyRep::Integer(4)), ("remoteSensing", PyRep::Integer(3)),
-            ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(10)), // client CreateResourceInfo fields
+            ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(25)),
         ])],
     )
     .await
     .expect("GetResourceData");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
     assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(10)));
-    assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(5))), "exactly data/numBands/proximity");
+    assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(3))), "server computes proximity=3 (System) and clamps newBand");
     let Some(PyRep::Bytes(sh_b)) = rd_kv.get("data") else { panic!("Expected SH bytes"); };
     assert_eq!(sh_b.len(), 10 * 10 * 4);
     let sh_vals: Vec<f32> = sh_b

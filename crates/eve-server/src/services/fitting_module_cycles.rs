@@ -1094,10 +1094,11 @@ async fn handle_module_cycles_inner(
             } else if has_speed_factor_attr && speed_factor > 0.0 {
                 let speed_boost_attr = mod_state.get_attribute(567, &ctx.sde);
                 let ship_mass = fit.ship.get_attribute(attr_ids::MASS, &ctx.sde);
-                let mass_addition = if matches!(
-                    m.state,
-                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                ) {
+                let mass_addition = if !fit.pending_overload_modules.contains(&module_id)
+                    && matches!(
+                        m.state,
+                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                    ) {
                     0.0
                 } else {
                     mod_state.get_attribute(
@@ -2010,6 +2011,7 @@ async fn handle_module_cycles_inner(
                     }
                 }
             });
+            fit.pending_overload_modules.remove(&module_id);
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;

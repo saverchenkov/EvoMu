@@ -23,6 +23,9 @@ pub const MAX_DISPLAY_QUALITY: f64 = PLANET_RESOURCE_MAX_VALUE * 255.0 * 0.5;
 pub const PLANET_RESOURCE_PROXIMITY_LIMITS: [(usize, usize); 5] =
     [(2, 6), (4, 10), (6, 15), (10, 20), (15, 30)];
 
+/// Exponential recovery half-life (`12h`) for planetary resource depletion once extraction stops.
+pub const PI_DEPLETION_RECOVERY_HALF_LIFE_SECS: f64 = 43_200.0;
+
 /// Persistent planet resource depletion state record stored in `WorldStateSnapshot.owner_notes`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct PlanetResourceDepletionState {
@@ -42,6 +45,9 @@ pub struct PlanetResourceDepletionState {
     /// Unix timestamp of last depletion simulation run.
     #[serde(default)]
     pub gm_last_sim_unix: u64,
+    /// Unix timestamp when resource/local depletion state was last persisted/regenerated.
+    #[serde(default)]
+    pub last_updated_unix: u64,
     /// GM-injected resource nugget layers boosting local resource density.
     #[serde(default)]
     pub nugget_layers: Vec<PiNuggetLayer>,
@@ -262,23 +268,74 @@ pub fn resolve_planet_resource_distribution_weight(
     fallback_globaltypes_resource_weight(restriction_tid, resource_tid).unwrap_or(0.75)
 }
 
-fn global_colony_and_gm_depletion(
+pub fn depletion_recovery_factor(last_unix: u64, now_unix: u64) -> f64 {
+    if last_unix == 0 || now_unix <= last_unix {
+        1.0
+    } else {
+        let elapsed = (now_unix - last_unix) as f64;
+        0.5_f64.powf(elapsed / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS)
+    }
+}
+
+/// Applies time-based planetary resource replenishment to `state` up to `now_unix`.
+pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now_unix: u64) {
+    if state.last_updated_unix > 0 && now_unix > state.last_updated_unix {
+        let factor = depletion_recovery_factor(state.last_updated_unix, now_unix);
+        for v in state.resource_depletion.values_mut() {
+            *v *= factor;
+        }
+        state.resource_depletion.retain(|_, v| *v >= 1e-4);
+        for spot in &mut state.local_depletion {
+            spot.amount_depleted *= factor;
+        }
+        state.local_depletion.retain(|s| s.amount_depleted >= 1e-4);
+        state.gm_depletion_rate *= factor;
+        if state.gm_depletion_rate < 1e-4 {
+            state.gm_depletion_rate = 0.0;
+        }
+    }
+    if now_unix > 0 {
+        state.last_updated_unix = now_unix;
+    }
+}
+
+/// Decays colony cumulative extraction pressure over idle `elapsed_secs` when extractors stop.
+pub fn decay_colony_extracted_commodities(
+    col: &mut eve_db::PlanetaryColonyRecord,
+    elapsed_secs: u64,
+) {
+    if elapsed_secs == 0 || col.extracted_commodities.is_empty() {
+        return;
+    }
+    let factor = 0.5_f64.powf((elapsed_secs as f64) / PI_DEPLETION_RECOVERY_HALF_LIFE_SECS);
+    for qty in col.extracted_commodities.values_mut() {
+        *qty = ((*qty as f64) * factor).floor() as u64;
+    }
+    col.extracted_commodities.retain(|_, q| *q > 0);
+}
+
+fn global_colony_and_gm_depletion_at(
     snap: &WorldStateSnapshot,
     planet_id: i64,
     resource_tid: TypeId,
+    now_unix: u64,
 ) -> (f64, f64, PlanetResourceDepletionState) {
-    let mut colony_extracted_qty = 0_u64;
+    let mut colony_extracted_effective = 0.0_f64;
     for col in snap.planetary_colonies.values() {
         if col.planet_id == planet_id {
-            colony_extracted_qty += col
+            let qty = col
                 .extracted_commodities
                 .get(&resource_tid)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or(0) as f64;
+            if qty > 0.0 {
+                colony_extracted_effective += qty * depletion_recovery_factor(col.last_extracted_unix, now_unix);
+            }
         }
     }
-    let colony_depletion = ((colony_extracted_qty as f64) / 100_000.0).min(0.40);
-    let depl_state = load_planet_depletion(snap, planet_id);
+    let colony_depletion = (colony_extracted_effective / 100_000.0).min(0.40);
+    let mut depl_state = load_planet_depletion(snap, planet_id);
+    regenerate_planet_depletion(&mut depl_state, now_unix);
     let gm_depl = depl_state
         .resource_depletion
         .get(&resource_tid)
@@ -338,7 +395,7 @@ pub fn compute_planet_resource_sh_coefficients(
 ) -> Vec<f32> {
     let mut coeffs = compute_planet_sh_bands_base(&ctx.sde, planet_id, resource_tid, num_bands);
     let (colony_depl, gm_depl, depl_state) =
-        global_colony_and_gm_depletion(snap, planet_id, resource_tid);
+        global_colony_and_gm_depletion_at(snap, planet_id, resource_tid, ctx.now_unix());
     let global_depletion = (colony_depl + gm_depl).min(0.85);
     let scale = 1.0 - global_depletion;
     for c in &mut coeffs {
@@ -391,7 +448,7 @@ pub fn compute_planet_resource_density(
     let base_richness = sum.clamp(0.15, 0.90);
 
     let (colony_depletion, gm_depl, depl_state) =
-        global_colony_and_gm_depletion(snap, planet_id, resource_tid);
+        global_colony_and_gm_depletion_at(snap, planet_id, resource_tid, ctx.now_unix());
 
     let mut local_depl = 0.0;
     for spot in &depl_state.local_depletion {

@@ -909,7 +909,17 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
     assert!(notes.iter().any(|n| {
         n.event == "OnHeatRemoved" && n.args == vec![PyRep::Integer(1175), PyRep::Integer(hi_mod)]
     }));
-    assert!(notes.iter().any(|n| n.event == "OnModuleAttributeChanges"));
+    assert!(
+        !notes.iter().any(|n| n.event == "OnModuleAttributeChanges"),
+        "StopOverload must not overwrite module damage (attr 3) to 0.0: {notes:?}"
+    );
+    assert_eq!(
+        call_dogma(&ctx, &mut sess_no_sys, "StopOverload", &[PyRep::Integer(999_999_999)])
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotFound"
+    );
 
     // StopOverloadRack with solar_system_id = None clears MedSlot0 Overloaded
     let r_stop_med = call_dogma(&ctx, &mut sess_no_sys, "StopOverloadRack", &[PyRep::Integer(med_mod)])

@@ -144,7 +144,7 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     let res_data = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
         ("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(first_p0_tid)),
         ("planetology", PyRep::Integer(3)), ("advancedPlanetology", PyRep::Integer(2)),
-        ("remoteSensing", PyRep::Integer(4)), ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(9)),
+        ("remoteSensing", PyRep::Integer(4)), ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(25)),
     ])]).await.expect("GetResourceData with Remote Sensing");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
     assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(9)));
@@ -156,7 +156,41 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
         .collect();
     assert!(sh_vals.iter().all(|v| v.is_finite()));
     assert!(sh_vals[0] > 0.0 && sh_vals[1..9].iter().any(|v| v.abs() > 1e-5));
-    assert_eq!(rd_kv.get("proximity"), Some(&PyRep::Integer(5)));
+    assert_eq!(rd_kv.get("proximity"), Some(&PyRep::Integer(3)), "server computes proximity=3 (System) instead of echoing bogus client proximity=5");
+
+    // Out-of-range uncolonized scan denial (Amarr planet is > 9 ly from Jita) and colony-bypass Distant newBand cap (6)
+    if let Some((amarr_planet_id, amarr_p0_tid)) = ctx.sde.solar_systems.get(&30_002_187).and_then(|s| {
+        s.planet_ids.first().copied().and_then(|pid| {
+            eve_server::services::industry_pi::list_sde_planet_p0_resources(&ctx, 30_002_187, pid)
+                .first()
+                .copied()
+                .map(|tid| (pid, tid))
+        })
+    }) {
+        let range_err = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
+            ("planetID", PyRep::Integer(amarr_planet_id)), ("resourceTypeID", PyRep::Integer(i64::from(amarr_p0_tid))),
+            ("newBand", PyRep::Integer(12)),
+        ])]).await.unwrap_err();
+        assert_eq!(range_err.code, "PlanetOutOfScanRange");
+
+        ctx.db.with_mut_snapshot(|snap| {
+            grant_skills(snap, char_id, &[(PLANETOLOGY_SKILL, 5), (ADV_PLANETOLOGY_SKILL, 5)]);
+            snap.planetary_colonies.insert(
+                (char_id, amarr_planet_id),
+                eve_db::PlanetaryColonyRecord {
+                    owner_id: char_id, planet_id: amarr_planet_id, solar_system_id: 30_002_187,
+                    command_center_level: 1, pins_count: 1, last_extracted_unix: 0, extracted_commodities: HashMap::new(),
+                },
+            );
+        });
+        let distant_res = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
+            ("planetID", PyRep::Integer(amarr_planet_id)), ("resourceTypeID", PyRep::Integer(i64::from(amarr_p0_tid))),
+            ("newBand", PyRep::Integer(12)),
+        ])]).await.expect("Colony bypasses scan range cap");
+        assert_eq!(distant_res.dict_get("proximity"), Some(&PyRep::Integer(0)));
+        assert_eq!(distant_res.dict_get("numBands"), Some(&PyRep::Integer(6)), "Distant proximity caps newBand to PLANET_RESOURCE_PROXIMITY_LIMITS[0].1 = 6");
+        ctx.db.with_mut_snapshot(|snap| { snap.planetary_colonies.remove(&(char_id, amarr_planet_id)); });
+    }
 
     // 2. feat:pi.command-center: Deployment rules, errors, upgrade mechanics
     sess.station_id = Some(60_003_760);
@@ -369,13 +403,20 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
         seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE, char_id, ship_id, 1);
     });
 
-    let _ = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![
+    let deploy_res = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![
         cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, 0.10, 0.10),
         cmd_up_cc_tup(0, 1, 3),
         cmd_pin_tup(1, 102, EXTRACTOR_CONTROL_UNIT_TYPE, 0.11, 0.11),
         cmd_link(1, 102),
         cmd_prog(102, AQUEOUS_LIQUIDS_P0_TYPE, 0.02, 3),
     ])]).await.expect("Deploy network");
+    let PyRep::KeyVal(deploy_kv) = deploy_res else { panic!("Expected KeyVal"); };
+    let Some(PyRep::List(deploy_pins)) = deploy_kv.get("pins") else { panic!("Expected pins"); };
+    let ecu_pin_id = deploy_pins
+        .iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(EXTRACTOR_CONTROL_UNIT_TYPE as i64))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("ecu pinID");
 
     // 1. feat:pi.pi-depletion: Depletion calculation & Flush depletion effect
     let initial_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo before Flush");
@@ -418,6 +459,20 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
     assert!(
         (depleted_qual / MAX_DISPLAY_QUALITY) < (initial_aq_qual / MAX_DISPLAY_QUALITY),
         "Normalized V24 quality must strictly decrease after Flush extraction"
+    );
+
+    // Cancel extractor and advance clock 48 hours to verify time-based resource regeneration
+    let _ = rpc(&ctx, &mut sess, "planetMgr", "CancelInstallProgram", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(ecu_pin_id)]).await.expect("CancelInstallProgram");
+    ctx.advance_virtual_clock(172_800);
+    let _ = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetColony after 48h idle");
+    let regen_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo after regeneration");
+    let PyRep::Dict(regen_entries) = regen_info else { panic!("Expected Dict"); };
+    let regen_qual = regen_entries.iter().find_map(|(k, v)| {
+        (k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64)).then(|| v.as_f64()).flatten()
+    }).unwrap();
+    assert!(
+        regen_qual > depleted_qual,
+        "Idle planet resource quality must regenerate over time: depleted={depleted_qual}, after_48h={regen_qual}"
     );
 
     // 2. feat:pi.factory-cycles: Factory consumes inputs and produces output per schematic

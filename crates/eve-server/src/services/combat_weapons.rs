@@ -186,6 +186,7 @@ fn finalize_weapon_activation_overload_and_delay(
             snap.module_active_states.insert(module_id);
         });
     }
+    fit.pending_overload_modules.remove(&module_id);
     let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
     if is_overloaded {
         crate::services::fitting_cycles_overheat::emit_module_heat_added(

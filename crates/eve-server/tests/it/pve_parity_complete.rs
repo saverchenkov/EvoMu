@@ -5110,6 +5110,210 @@ fn row_field<'a>(cols: &[String], row: &'a [PyRep], name: &str) -> Option<&'a Py
     cols.iter().position(|c| c == name).and_then(|i| row.get(i))
 }
 
+fn walk_sde_skills_l5(sde: &eve_sde::SdeRegistry, tid: u32, skills: &mut std::collections::BTreeSet<u32>) {
+    let Some(t) = sde.types.get(&tid) else { return };
+    for attr in [182_u16, 183, 184, 1285, 1289, 1290] {
+        if let Some(&sk) = t.default_attributes.get(&attr).filter(|&&v| v > 0.0) {
+            let sid = sk as u32;
+            if skills.insert(sid) {
+                walk_sde_skills_l5(sde, sid, skills);
+            }
+        }
+    }
+}
+
+async fn equip_combat_thrasher_and_hacking(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    sys_id: u32,
+    ship_id: i64,
+) -> Vec<i64> {
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    const THRASHER: u32 = 16_242;
+    const GUN_TID: u32 = 2_881;
+    const AMMO_TID: u32 = 21_906;
+    const GYRO_TID: u32 = 519;
+    let hi_flags = [
+        InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2,
+        InventoryFlag::HiSlot3, InventoryFlag::HiSlot4, InventoryFlag::HiSlot5,
+        InventoryFlag::HiSlot6,
+    ];
+    let mut guns = Vec::new();
+    let mut ammo_id = 0_i64;
+    let mut ship_pos = DVec3::new(120_000_000.0, 0.0, 80_000_000.0);
+    if let Ok(Some((_, b))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await {
+        ship_pos = b.position;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id: THRASHER, owner_id: char_id,
+            location_id: i64::from(sys_id), flag: InventoryFlag::None,
+            quantity: 1, singleton: true, ..Default::default()
+        });
+        for (idx, flag) in hi_flags.into_iter().enumerate() {
+            let gid = ship_id + 10 + (idx as i64);
+            snap.items.insert(gid, InventoryItemRecord {
+                item_id: gid, type_id: GUN_TID, owner_id: char_id,
+                location_id: ship_id, flag, quantity: 1, singleton: true, ..Default::default()
+            });
+            snap.module_online_states.insert(gid, true);
+            guns.push(gid);
+        }
+        snap.items.insert(ship_id + 1, InventoryItemRecord {
+            item_id: ship_id + 1, type_id: 22_175, owner_id: char_id,
+            location_id: ship_id, flag: InventoryFlag::MedSlot0,
+            quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(ship_id + 1, true);
+        for (idx, flag) in [InventoryFlag::LoSlot0, InventoryFlag::LoSlot1].into_iter().enumerate() {
+            let mid = ship_id + 20 + (idx as i64);
+            snap.items.insert(mid, InventoryItemRecord {
+                item_id: mid, type_id: GYRO_TID, owner_id: char_id,
+                location_id: ship_id, flag, quantity: 1, singleton: true, ..Default::default()
+            });
+            snap.module_online_states.insert(mid, true);
+        }
+        ammo_id = ship_id + 30;
+        snap.items.insert(ammo_id, InventoryItemRecord {
+            item_id: ammo_id, type_id: AMMO_TID, owner_id: char_id,
+            location_id: ship_id, flag: InventoryFlag::Cargo,
+            quantity: 5_000, singleton: false, ..Default::default()
+        });
+        let mut req_skills: std::collections::BTreeSet<u32> = [
+            3_300, 3_301, 3_310, 3_311, 3_312, 3_315, 3_413, 3_417, 3_418, 3_426, 3_428, 3_429, 21_718,
+        ].into_iter().collect();
+        for tid in [THRASHER, GUN_TID, GYRO_TID, 22_175] {
+            walk_sde_skills_l5(&ctx.sde, tid, &mut req_skills);
+        }
+        let cskills = snap.skills.entry(char_id).or_default();
+        for sid in req_skills {
+            cskills.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 1_280_000.0 });
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_remove_ball(ship_id);
+    let _ = sys_handle.spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id, type_id: THRASHER, radius: 100.0, position: ship_pos,
+            velocity: DVec3::ZERO, max_velocity: 420.0, inertia: 2.0,
+            mass: 1_600_000.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        ctx.build_ship_combat_state(char_id, ship_id, THRASHER),
+    ).await;
+    let g_reps: Vec<PyRep> = guns.iter().map(|&g| PyRep::Integer(g)).collect();
+    rpc(ctx, sess, "dogmaIM", "LoadAmmo", &[
+        PyRep::Integer(ship_id), PyRep::List(g_reps), PyRep::List(vec![PyRep::Integer(ammo_id)]),
+    ]).await.expect("LoadAmmo onto combat turrets");
+    guns
+}
+
+async fn destroy_npc_via_weapons(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    guns: &[i64],
+    npc_id: i64,
+    rng_seed: Option<u64>,
+) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if sys_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none() {
+        return;
+    }
+    follow_until_within(ctx, sess, sys_id, ship_id, npc_id, 4_500.0).await;
+    let _ = rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)]).await;
+    for _ in 0..30 {
+        if sys_handle.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == npc_id && l.locked) {
+            break;
+        }
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    for step in 0..160 {
+        if sys_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none() {
+            return;
+        }
+        if let Some(seed) = rng_seed {
+            ctx.set_mechanic_rng_seed(Some(seed));
+        }
+        if step % 2 == 0 {
+            for &gid in guns {
+                let _ = rpc(ctx, sess, "dogmaIM", "Activate", &[
+                    PyRep::Integer(gid), PyRep::String("targetAttack".into()), PyRep::Integer(npc_id),
+                ]).await;
+            }
+        }
+        let _ = sys_handle.step_manual(2.0).await;
+        ctx.db.clock().advance_secs(2);
+    }
+    assert!(
+        sys_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_none(),
+        "NPC {npc_id} must be destroyed by live weapon cycles"
+    );
+}
+
+async fn fly_stargates_via_rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    ship_id: i64,
+    dest_sys: u32,
+) {
+    let start_sys = sess.solar_system_id.unwrap();
+    if start_sys == dest_sys {
+        return;
+    }
+    let mut prev: HashMap<u32, (u32, i64, u32)> = HashMap::new();
+    let mut q = std::collections::VecDeque::from([start_sys]);
+    let mut seen = std::collections::HashSet::from([start_sys]);
+    while let Some(sys) = q.pop_front() {
+        if sys == dest_sys { break; }
+        let mut gates: Vec<(&i64, &eve_sde::StargateJump)> = ctx.sde.jumps.iter().filter(|(_, j)| j.from_solar_system_id == sys).collect();
+        gates.sort_by_key(|g| *g.0);
+        for (&gid, j) in gates {
+            if seen.insert(j.to_solar_system_id) {
+                prev.insert(j.to_solar_system_id, (sys, gid, j.to_solar_system_id));
+                q.push_back(j.to_solar_system_id);
+            }
+        }
+    }
+    let mut route = Vec::new();
+    let mut cur = dest_sys;
+    while cur != start_sys {
+        let &(p, gid, n) = prev.get(&cur).unwrap_or_else(|| panic!("no stargate route {start_sys} -> {dest_sys}"));
+        route.push((p, gid, n));
+        cur = p;
+    }
+    route.reverse();
+    for (cur_sys, gid, next_sys) in route {
+        let sys_h = ctx.systems.get_or_spawn(cur_sys);
+        match rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gid), PyRep::Real(0.0)]).await {
+            Ok(_) => step_until_warp_landed_at(ctx, sess, cur_sys, ship_id).await,
+            Err(e) if e.code == "WarpDistanceTooShort" => {}
+            Err(e) => panic!("CmdWarpToStuff stargate {gid}: {e:?}"),
+        }
+        let beyonce_oid = ctx.bind_object(sess, "beyonce", i64::from(cur_sys)).unwrap();
+        let kw = HashMap::new();
+        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None).await;
+        let _ = ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(gid), PyRep::Real(500.0)], &kw, None).await;
+        if let Some((_, gb)) = sys_h.get_ball_snapshot(gid).await.ok().flatten() {
+            for _ in 0..240 {
+                let _ = sys_h.step_manual(1.0).await;
+                if let Ok(Some((_, sb))) = sys_h.get_ball_snapshot(ship_id).await {
+                    if (sb.position.distance(gb.position) - gb.radius).max(0.0) <= 2_000.0 { break; }
+                }
+            }
+        }
+        ctx.db.clock().advance_secs(12);
+        let _ = sys_h.step_manual(12.0).await;
+        rpc(ctx, sess, "beyonce", "CmdStargateJump", &[PyRep::Integer(gid), PyRep::Integer(i64::from(next_sys))])
+            .await
+            .unwrap_or_else(|e| panic!("CmdStargateJump {gid} -> {next_sys}: {e:?}"));
+        sess.solar_system_id = Some(next_sys);
+        ctx.db.clock().advance_secs(12);
+    }
+}
+
 #[tokio::test]
 async fn test_pve_dungeon_system_authentic_lifecycle() {
     // parity: feat:pve.dungeon-system
@@ -5119,13 +5323,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let (mut sess, ship_id) = setup_pilot(&ctx, PILOT_A, JITA).await;
-    equip_data_analyzer_and_hacking(&ctx, PILOT_A, JITA, ship_id, 587);
-    let lethal = DamageVector {
-        em: 100_000_000.0,
-        thermal: 100_000_000.0,
-        kinetic: 100_000_000.0,
-        explosive: 100_000_000.0,
-    };
+    let guns = equip_combat_thrasher_and_hacking(&ctx, &mut sess, PILOT_A, JITA, ship_id).await;
 
     // 1. Discover SDE-loaded multi-room dungeon DSG-30000142 (Guristas Scout Outpost, dungeon 98 in sde_dungeons)
     let sde_d98 = ctx
@@ -5189,8 +5387,33 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
 
     let sys_handle = ctx.systems.get_or_spawn(JITA);
     let inst_state0 = get_dungeon_instance_state(&ctx, dsg_inst_id).expect("dungeon instance state");
+    assert_eq!(inst_state0.dict_get("archetypeID").and_then(|v| v.as_i64()), sde_d98.archetype_id.map(i64::from));
+    assert_eq!(inst_state0.dict_get("factionID").and_then(|v| v.as_i64()), sde_d98.faction_id.map(i64::from));
+    assert_eq!(inst_state0.dict_get("difficulty").and_then(|v| v.as_i64()), sde_d98.difficulty.map(i64::from));
     let entry_gate_id = inst_state0.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
     assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.ok().flatten().is_some());
+
+    // Verify SDE gas dungeon table (`sde_dungeon_gas_types`) also spawns gas cloud props
+    let gas_did = 1351_u32;
+    let gas_inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        &ctx,
+        PILOT_A,
+        JITA,
+        gas_did,
+        "Gas",
+        [150_000_000.0, 0.0, 0.0],
+        false,
+    )
+    .await
+    .expect("spawn SDE gas dungeon instance");
+    let gas_rep = get_dungeon_instance_state(&ctx, gas_inst_id).expect("gas dungeon state");
+    let PyRep::List(gas_rooms) = gas_rep.dict_get("rooms").expect("gas rooms") else { panic!() };
+    let PyRep::List(gas_obj_tids) = gas_rooms[0].dict_get("objectTypeIDs").expect("gas objectTypeIDs") else { panic!() };
+    let expected_gas_tid = ctx.sde.dungeon_gas_types[&gas_did][0];
+    assert!(
+        gas_obj_tids.contains(&PyRep::Integer(i64::from(expected_gas_tid))),
+        "SDE gas dungeon {gas_did} must spawn gas cloud type {expected_gas_tid} from sde_dungeon_gas_types"
+    );
 
     // 3. Activate entry acceleration gate via live keeper.ActivateAccelerationGate -> enters Room 1
     let gate1_rep = rpc(
@@ -5210,6 +5433,14 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
         panic!("Expected objectBallIDs");
     };
     let r1_beacon_id = r1_objs[0].as_i64().unwrap();
+    let r1_state = get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
+    let PyRep::List(r1_rooms) = r1_state.dict_get("rooms").unwrap() else { panic!() };
+    let PyRep::List(r1_tids) = r1_rooms[0].dict_get("objectTypeIDs").unwrap() else { panic!() };
+    let expected_ast_tid = ctx.sde.dungeon_asteroids[&98][0].type_id;
+    assert!(
+        r1_tids.contains(&PyRep::Integer(i64::from(expected_ast_tid))),
+        "Dungeon 98 Room 1 must spawn asteroid type {expected_ast_tid} from sde_dungeon_asteroid_counts"
+    );
     let PyRep::List(r1_wave1) = gate1_rep.dict_get("npcBallIDs").expect("npcBallIDs") else {
         panic!("Expected npcBallIDs");
     };
@@ -5254,11 +5485,9 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
         "Approaching Room 1 relay beacon via CmdFollowBall must trigger reinforcement spawn"
     );
 
-    // 5. Destroy all Room 1 defenders through combat pipeline -> unlocks Room 1 -> Room 2 gate
+    // 5. Destroy all Room 1 defenders through live dogmaIM.Activate weapon cycles -> unlocks Room 1 -> Room 2 gate
     for n in r1_all_npcs {
-        let _ = sys_handle
-            .apply_damage_with_attacker(n.as_i64().unwrap(), lethal, Some(PILOT_A))
-            .await;
+        destroy_npc_via_weapons(&ctx, &mut sess, JITA, ship_id, &guns, n.as_i64().unwrap(), None).await;
     }
     let gate_unlocked = ctx.db.with_snapshot(|snap| {
         !snap.dungeon_runtime.instances[&dsg_inst_id].rooms[0].gate_locked
@@ -5308,12 +5537,10 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
         "invbroker.LootAll on Overseer Strongbox must spawn OnLoot ambush wave"
     );
 
-    // 7. Destroy Room 2 boss & ambush via combat -> fires CompleteDungeon + ballpark cleanup
+    // 7. Destroy Room 2 boss & ambush via live dogmaIM.Activate weapon cycles -> fires CompleteDungeon + ballpark cleanup
     let _ = ctx.drain_notifications_for_char(PILOT_A);
     for n in r2_all_npcs {
-        let _ = sys_handle
-            .apply_damage_with_attacker(n.as_i64().unwrap(), lethal, Some(PILOT_A))
-            .await;
+        destroy_npc_via_weapons(&ctx, &mut sess, JITA, ship_id, &guns, n.as_i64().unwrap(), None).await;
     }
     let st_final = get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
     assert_eq!(st_final.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
@@ -5328,7 +5555,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
         "OnDungeonCompleted must fire upon clearing Room 2 overseer"
     );
 
-    // 8. Clear a CombatAnomaly via CmdWarpToStuff + combat with positive escalation RNG -> verify GetMyEscalatingPathDetails + epinstance warp
+    // 8. Clear a CombatAnomaly via CmdWarpToStuff + weapon combat -> verify escalation + live CmdStargateJump travel
     let esc_seed = (1_u64..100_000)
         .find(|&s| {
             let r = eve_server::rng::MechanicRng::seeded(s);
@@ -5372,9 +5599,10 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
         if wave_ids.is_empty() {
             break;
         }
-        ctx.set_mechanic_rng_seed(Some(esc_seed));
-        for bid in wave_ids {
-            let _ = sys_handle.apply_damage_with_attacker(bid, lethal, Some(PILOT_A)).await;
+        let n_wave = wave_ids.len();
+        for (idx, bid) in wave_ids.into_iter().enumerate() {
+            let seed = (idx + 1 == n_wave).then_some(esc_seed);
+            destroy_npc_via_weapons(&ctx, &mut sess, JITA, ship_id, &guns, bid, seed).await;
         }
     }
 
@@ -5390,35 +5618,7 @@ async fn test_pve_dungeon_system_authentic_lifecycle() {
     assert_eq!(row_field(&esc_cols, &esc_rows[0], "stepIndex").and_then(|v| v.as_i64()), Some(1));
     assert!(row_field(&esc_cols, &esc_rows[0], "totalSteps").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
 
-    if esc_dest_sys != JITA {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-                ch.solar_system_id = esc_dest_sys;
-            }
-            if let Some(sh) = snap.items.get_mut(&ship_id) {
-                sh.location_id = i64::from(esc_dest_sys);
-            }
-        });
-        sess.solar_system_id = Some(esc_dest_sys);
-        let dest_h = ctx.systems.get_or_spawn(esc_dest_sys);
-        let _ = dest_h
-            .spawn_ball_with_combat(
-                Ball {
-                    id: ship_id,
-                    type_id: 587,
-                    position: DVec3::new(100_000_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 2.0,
-                    mass: 1_000_000.0,
-                    radius: 100.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_ship_combat_state(PILOT_A, ship_id, 587),
-            )
-            .await;
-    }
+    fly_stargates_via_rpc(&ctx, &mut sess, ship_id, esc_dest_sys).await;
     rpc(
         &ctx,
         &mut sess,
@@ -5567,6 +5767,24 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
         explosive: 100_000_000.0,
     };
 
+    // 0. Inactive / unconfigured season must NOT suppress or fabricate perpetual seasonal event sites
+    let inactive_sites = eve_server::services::pve_special_sites_combat::ensure_seasonal_event_sites_for_system(&ctx, JITA).await;
+    assert!(
+        inactive_sites.is_empty(),
+        "No seasonal event sites may spawn when no active season is configured"
+    );
+    let _ = rpc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("GetCombatAnomalyInstances outside seasonal window");
+    let inactive_anom = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&JITA)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+    });
+    assert!(!inactive_anom, "GetCombatAnomalyInstances must not spawn seasonal sites when unconfigured");
+
     // 1. Configure active Crimson Harvest window and discover site via live dungeonInstanceCacheMgr RPC
     let now_ft = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
@@ -5629,6 +5847,21 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     assert!(
         !details.crate_loot_pool.is_empty(),
         "Seasonal site must resolve FSD crate loot table entries"
+    );
+
+    // 1b. BF-3 regression: initial exploration seeding after seasonal spawn must retain SHK-* hackables
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(JITA, false);
+    });
+    ensure_system_pve_sites_seeded(&ctx, JITA).await;
+    let shk_retained = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&JITA)
+            .is_some_and(|list| list.iter().any(|s| s.site_id == details.exploration_site_id))
+    });
+    assert!(
+        shk_retained,
+        "ensure_system_pve_sites_seeded must preserve active seasonal SHK-* hackable site"
     );
 
     // 2. Warp to the seasonal site via live custom_agency_provider.warp_to_content

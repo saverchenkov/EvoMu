@@ -406,10 +406,13 @@ pub async fn handle_active_overload_toggle(
     already_active: bool,
 ) -> PyRep {
     let _ = sys.update_module_overload(ship_id, module_id, true).await;
-    if !already_active {
+    if already_active {
+        fit.pending_overload_modules.remove(&module_id);
+    } else {
         if let Some(fm) = fit.modules.get_mut(&module_id) {
             fm.state = eve_dogma::ModuleState::Overloaded;
         }
+        fit.pending_overload_modules.insert(module_id);
         fit.recalculate_stats(&ctx.sde);
         ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
         ctx.invalidate_and_push_fit(ship_id);

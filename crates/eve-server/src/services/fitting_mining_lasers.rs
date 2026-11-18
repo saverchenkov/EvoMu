@@ -417,16 +417,22 @@ pub(crate) async fn handle_mining_and_deactivate(
                     client_error: None,
                 }));
             };
+            let mut fit = match ctx.fit(char_id, ship_id) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
+            };
+            if !fit.modules.contains_key(&module_id) {
+                let mut err = BridgeRpcError::user_error("ModuleNotFound");
+                err.message = format!("Module {module_id} is not fitted to active ship {ship_id}");
+                return Some(Err(err));
+            }
             let was_cycling = if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 sys.update_module_overload(ship_id, module_id, false).await.unwrap_or(false)
             } else {
                 false
             };
-            let mut fit = match ctx.fit(char_id, ship_id) {
-                Ok(f) => f,
-                Err(e) => return Some(Err(e)),
-            };
+            fit.pending_overload_modules.remove(&module_id);
             if !was_cycling {
                 if let Some(fm) = fit.modules.get_mut(&module_id) {
                     if fm.state == eve_dogma::ModuleState::Overloaded {
@@ -446,21 +452,6 @@ pub(crate) async fn handle_mining_and_deactivate(
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnHeatRemoved { heat_id, module_id },
-            );
-            ctx.emit_typed(
-                crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnModuleAttributeChanges {
-                    changes: PyRep::List(vec![PyRep::Tuple(vec![
-                        PyRep::String("OnModuleAttributeChange".into()),
-                        PyRep::Integer(char_id),
-                        PyRep::Integer(module_id),
-                        PyRep::Integer(eve_sde::attr_ids::DAMAGE as i64),
-                        PyRep::Integer(ctx.now_client_sim_filetime_ticks()),
-                        PyRep::Real(0.0),
-                        PyRep::Real(0.0),
-                        PyRep::None,
-                    ])]),
-                },
             );
 
             Some(Ok(PyRep::keyval([
@@ -544,6 +535,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             };
             let mut notified_modules = Vec::new();
             let mut cycling_modules = Vec::new();
+            let mut pending_to_insert = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
                 let Some(r_idx) = crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id) else {
                     continue;
@@ -564,6 +556,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                         }
                     } else if fm.state == eve_dogma::ModuleState::Online {
                         fm.state = eve_dogma::ModuleState::Overloaded;
+                        pending_to_insert.push(mid);
                         notified_modules.push(mid);
                     } else if fm.state == eve_dogma::ModuleState::Active {
                         cycling_modules.push(mid);
@@ -579,13 +572,22 @@ pub(crate) async fn handle_mining_and_deactivate(
                     notified_modules.push(mid);
                 }
             }
+            fit.pending_overload_modules.extend(pending_to_insert);
             notified_modules.sort_unstable();
             let sync_idle_overload_state = |fit: &mut eve_dogma::ShipFittingEngine, mid: i64| {
-                if let Some(fm) = fit.modules.get_mut(&mid) {
-                    if overloaded && fm.state == eve_dogma::ModuleState::Active {
-                        fm.state = eve_dogma::ModuleState::Overloaded;
-                    } else if !overloaded && fm.state == eve_dogma::ModuleState::Overloaded {
-                        fm.state = eve_dogma::ModuleState::Online;
+                if overloaded {
+                    if let Some(fm) = fit.modules.get_mut(&mid) {
+                        if fm.state == eve_dogma::ModuleState::Active {
+                            fm.state = eve_dogma::ModuleState::Overloaded;
+                            fit.pending_overload_modules.insert(mid);
+                        }
+                    }
+                } else {
+                    fit.pending_overload_modules.remove(&mid);
+                    if let Some(fm) = fit.modules.get_mut(&mid) {
+                        if fm.state == eve_dogma::ModuleState::Overloaded {
+                            fm.state = eve_dogma::ModuleState::Online;
+                        }
                     }
                 }
             };

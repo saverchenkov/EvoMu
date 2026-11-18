@@ -148,6 +148,7 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
         let state = PlanetResourceDepletionState {
             planet_id,
             resource_depletion: HashMap::from([(2268, 0.20)]),
+            last_updated_unix: 0,
             nugget_layers: Default::default(),
             local_depletion: vec![
                 PiDepletionSpot {
@@ -308,6 +309,38 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
         sh_before[0].to_le_bytes(),
         "depleted custom planet SH monopole must differ from fresh planet"
     );
+
+    // Time-based depletion regeneration (`last_updated_unix` + colony extraction decay)
+    let mut reg_state = PlanetResourceDepletionState {
+        planet_id: custom_planet_id,
+        resource_depletion: HashMap::from([(2268, 0.80)]),
+        local_depletion: vec![PiDepletionSpot {
+            latitude: 0.1,
+            longitude: 0.2,
+            radius: 0.2,
+            resource_type_id: 2268,
+            amount_depleted: 0.40,
+        }],
+        gm_depletion_rate: 0.40,
+        last_updated_unix: 1_700_000_000,
+        ..Default::default()
+    };
+    regenerate_planet_depletion(&mut reg_state, 1_700_000_000 + 43_200);
+    assert!((reg_state.resource_depletion[&2268] - 0.40).abs() < 1e-6);
+    assert!((reg_state.gm_depletion_rate - 0.20).abs() < 1e-6);
+    assert!((reg_state.local_depletion[0].amount_depleted - 0.20).abs() < 1e-6);
+
+    let mut reg_col = PlanetaryColonyRecord {
+        owner_id: 90_000_001,
+        planet_id: custom_planet_id,
+        solar_system_id: 30_000_142,
+        command_center_level: 1,
+        pins_count: 1,
+        extracted_commodities: HashMap::from([(2268, 80_000)]),
+        last_extracted_unix: 1_700_000_000,
+    };
+    decay_colony_extracted_commodities(&mut reg_col, 43_200);
+    assert_eq!(reg_col.extracted_commodities[&2268], 40_000);
 
     // Suppress unused mut warning if ctx wasn't mutated directly
     let _ = &mut ctx;

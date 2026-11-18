@@ -150,6 +150,10 @@ fn first_known_type(sde: &eve_sde::SdeRegistry, candidates: &[u32]) -> Option<u3
         .find(|tid| sde.types.contains_key(tid))
 }
 
+// DERIVED: Client FSD provides `season.fsdbinary`, `crates.fsdbinary`, `challenges.fsdbinary`, and
+// `sde_dungeons` header entries (`archetype_id == 45`), but omits CCP's per-site NPC ship picks,
+// wave/relay pairings, and security-status ISK scaling; those ship/relay candidate lists and sec
+// multipliers are server-derived, while crate loot tables and challenge points come from FSD.
 fn resolve_seasonal_event_spec(
     sde: &eve_sde::SdeRegistry,
     season: &eve_db::SeasonConfig,
@@ -838,17 +842,20 @@ pub async fn ensure_seasonal_event_sites_for_system(
 ) -> Vec<crate::services::pve_special_sites::SeasonalEventSiteRecord> {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let now_sec = ctx.now_unix();
-    let season = ctx.db.with_snapshot(|snap| {
-        if snap.seasons_and_campaigns.season_configuration.is_some() {
-            crate::services::season_fsd::load_season_config(snap)
-        } else {
-            crate::services::season_fsd::load_seasons_catalog(snap, &ctx.sde, now_ft)
-                .into_values()
+    let active_season: Option<crate::services::season_fsd::SeasonConfig> = ctx.db.with_snapshot(|snap| {
+        if let Some(cfg) = snap.seasons_and_campaigns.season_configuration.clone() {
+            (now_ft >= cfg.start_time_ft && now_ft <= cfg.end_time_ft).then_some(cfg)
+        } else if !snap.seasons_and_campaigns.seasons_catalog.is_empty() {
+            snap.seasons_and_campaigns
+                .seasons_catalog
+                .values()
                 .find(|s| now_ft >= s.start_time_ft && now_ft <= s.end_time_ft)
-                .unwrap_or_else(|| crate::services::season_fsd::load_season_config(snap))
+                .cloned()
+        } else {
+            None
         }
     });
-    let in_window = now_ft >= season.start_time_ft && now_ft <= season.end_time_ft;
+    let in_window = active_season.is_some();
 
     let (expired_ids, expired_balls, expired_anom_ids, mut active_sites) =
         with_pve_special_reg(ctx, |reg| {
@@ -857,7 +864,8 @@ pub async fn ensure_seasonal_event_sites_for_system(
             let mut exp_anoms = Vec::new();
             if let Some(list) = reg.seasonal_event_sites.get_mut(&sys_id) {
                 list.retain(|s| {
-                    let valid = !s.completed
+                    let valid = in_window
+                        && !s.completed
                         && now_ft >= s.window_start_ft
                         && now_ft <= s.window_end_ft;
                     if !valid {
@@ -912,7 +920,7 @@ pub async fn ensure_seasonal_event_sites_for_system(
         }
     }
 
-    if in_window && active_sites.is_empty() {
+    if let Some(season) = active_season.filter(|_| active_sites.is_empty()) {
         let spec = resolve_seasonal_event_spec(&ctx.sde, &season, sys_id);
 
         let (new_site, relay_bid) = with_pve_special_reg(ctx, |reg| {

@@ -239,30 +239,7 @@ pub async fn handle_pve_hacking(
                     client_error: None,
                 }));
             };
-            // Preserve previously spawned Seasonal (`SHK-`) hackables across initial
-            // exploration seeding, which only retains `Expedition` sites.
-            let preserved_special_hackables: Vec<_> = with_pve_exploration_reg(ctx, |reg| {
-                reg.sites_by_system
-                    .get(&sys_id)
-                    .map(|list| {
-                        list.iter()
-                            .filter(|s| s.site_id.starts_with("SHK-"))
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            if !preserved_special_hackables.is_empty() {
-                with_pve_exploration_reg(ctx, |reg| {
-                    let list = reg.sites_by_system.entry(sys_id).or_default();
-                    for site in preserved_special_hackables {
-                        if !list.iter().any(|x| x.site_id == site.site_id) {
-                            list.push(site);
-                        }
-                    }
-                });
-            }
             let container_id = if args.len() == 1 && matches!(args.first(), Some(PyRep::None)) {
                 0
             } else if let Some(explicit_id) = args

@@ -483,13 +483,17 @@ pub fn handle(
             });
             let (pins_rep, links_rep, routes_rep) = pi_colonies::format_pi_pins_links(&net);
 
+            let now_unix = ctx.now_unix();
             let mut res_entries = Vec::with_capacity(p0_resources.len());
             for (idx, &tid) in p0_resources.iter().enumerate() {
                 let extracted_qty = colony_opt
                     .as_ref()
-                    .and_then(|c| c.extracted_commodities.get(&tid).copied())
-                    .unwrap_or(0);
-                let depletion = ((extracted_qty as f64) / 100_000.0).min(0.40);
+                    .and_then(|c| {
+                        let q = c.extracted_commodities.get(&tid).copied().unwrap_or(0) as f64;
+                        Some(q * pi_resource_helpers::depletion_recovery_factor(c.last_extracted_unix, now_unix))
+                    })
+                    .unwrap_or(0.0);
+                let depletion = (extracted_qty / 100_000.0).min(0.40);
                 let quality = (0.85 - (idx as f64) * 0.08 - depletion).clamp(0.25, 1.0);
                 res_entries.push(PyRep::keyval([
                     ("resourceTypeID", PyRep::Integer(tid as i64)),
@@ -604,7 +608,6 @@ pub fn handle(
                 (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()))
             };
             let requested_band = info_field("newBand");
-            let requested_proximity = info_field("proximity");
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -639,13 +642,18 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl) =
+            let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl, has_colony, char_sys_id) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let rs = sk.and_then(|m| m.get(&13279)).map(|s| s.level).unwrap_or(0);
                     let pl = sk.and_then(|m| m.get(&2406)).map(|s| s.level).unwrap_or(0);
                     let apl = sk.and_then(|m| m.get(&2403)).map(|s| s.level).unwrap_or(0);
-                    (rs, pl, apl)
+                    let has_col = snap.planetary_colonies.contains_key(&(char_id, planet_id));
+                    let csys = session
+                        .solar_system_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                        .unwrap_or(sys_id);
+                    (rs, pl, apl, has_col, csys)
                 });
             if remote_sensing_lvl < 1 {
                 return Some(Err(BridgeRpcError {
@@ -654,18 +662,37 @@ pub fn handle(
                     client_error: None,
                 }));
             }
+            let planet_sys = ctx.sde.solar_systems.get(&sys_id);
+            let char_sys = ctx.sde.solar_systems.get(&char_sys_id);
+            if !has_colony && char_sys_id != sys_id {
+                if let (Some(cs), Some(ps)) = (char_sys, planet_sys) {
+                    let dx = cs.galactic_pos_ly[0] - ps.galactic_pos_ly[0];
+                    let dy = cs.galactic_pos_ly[1] - ps.galactic_pos_ly[1];
+                    let dz = cs.galactic_pos_ly[2] - ps.galactic_pos_ly[2];
+                    let dist_ly = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let max_ly = f64::from(2 * u32::from(remote_sensing_lvl.min(5)) - 1);
+                    if dist_ly > max_ly + 1e-6 {
+                        let mut err = BridgeRpcError::user_error("PlanetOutOfScanRange");
+                        err.message = format!(
+                            "Planet {planet_id} in system {sys_id} is {dist_ly:.2} ly away (Remote Sensing level {remote_sensing_lvl} max {max_ly:.0} ly)"
+                        );
+                        return Some(Err(err));
+                    }
+                }
+            }
+            let server_proximity: usize = match (char_sys, planet_sys) {
+                _ if char_sys_id == sys_id => 3,
+                (Some(cs), Some(ps)) if cs.constellation_id == ps.constellation_id => 2,
+                (Some(cs), Some(ps)) if cs.region_id == ps.region_id => 1,
+                _ => 0,
+            };
+            let (_min_b, prox_max_b) = PLANET_RESOURCE_PROXIMITY_LIMITS[server_proximity];
             let skill_cap =
                 (2 + (planetology_lvl as usize) + 2 * (adv_planetology_lvl as usize)).clamp(2, 16);
-            let num_bands = if let Some(b) = requested_band {
-                (b.max(1) as usize).min(skill_cap)
-            } else if let Some(prox) = requested_proximity.filter(|&p| (0..=4).contains(&p)) {
-                let (min_b, max_b) = PLANET_RESOURCE_PROXIMITY_LIMITS[prox as usize];
-                (min_b + (planetology_lvl as usize) + 2 * (adv_planetology_lvl as usize))
-                    .min(max_b)
-                    .max(1)
-            } else {
-                skill_cap
-            };
+            let max_allowed = skill_cap.min(prox_max_b);
+            let num_bands = requested_band
+                .map(|b| (b.max(1) as usize).min(max_allowed))
+                .unwrap_or(max_allowed);
             let sh_coeffs = ctx.db.with_snapshot(|snap| {
                 compute_planet_resource_sh_coefficients(
                     ctx,
@@ -683,7 +710,7 @@ pub fn handle(
             Some(Ok(PyRep::keyval([
                 ("data", PyRep::Bytes(sh_bytes)),
                 ("numBands", PyRep::Integer(num_bands as i64)),
-                ("proximity", requested_proximity.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("proximity", PyRep::Integer(server_proximity as i64)),
             ])))
         }
 
