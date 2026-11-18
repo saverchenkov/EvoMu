@@ -693,6 +693,18 @@ pub fn process_ship_destruction_with_aggression(
 
 const BLUETIME_TICKS_PER_SEC: i64 = 10_000_000;
 
+/// Formats the V24 `what` argument (`(UE_TYPEID, type_id)` or `"ship"` fallback) for self-destruct notices.
+fn self_destruct_what_arg(ship_type_id: u32) -> PyRep {
+    if ship_type_id > 0 {
+        PyRep::Tuple(vec![
+            PyRep::Integer(4), // const.UE_TYPEID
+            PyRep::Integer(i64::from(ship_type_id)),
+        ])
+    } else {
+        PyRep::String("ship".into())
+    }
+}
+
 /// Emits a typed `OnRemoteMessage` notification (`msg_id`, `dict`) to `target_char_id`.
 fn emit_self_destruct_remote_notice(
     ctx: &ServerContext,
@@ -724,14 +736,7 @@ fn emit_self_destruct_initiated_notices(
     ship_type_id: u32,
     remaining_secs: u64,
 ) {
-    let what = if ship_type_id > 0 {
-        PyRep::Tuple(vec![
-            PyRep::Integer(4), // const.UE_TYPEID
-            PyRep::Integer(i64::from(ship_type_id)),
-        ])
-    } else {
-        PyRep::String("ship".into())
-    };
+    let what = self_destruct_what_arg(ship_type_id);
     emit_self_destruct_remote_notice(
         ctx,
         char_id,

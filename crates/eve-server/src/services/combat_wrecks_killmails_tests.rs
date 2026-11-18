@@ -1187,9 +1187,9 @@ async fn self_destruct_and_abort_emit_v24_remote_messages_to_pilot_and_observers
         Some(&PyRep::Integer(expected_rem_secs * BLUETIME_TICKS_PER_SEC))
     );
 
-    // 4. beyonce.CmdSelfDestruct start + expiry detonation emits SelfDestructImmediate / SelfDestructImmediateOther.
+    // 4. ship.SelfDestruct restart + expiry detonation emits SelfDestructImmediate / SelfDestructImmediateOther.
     let cmd_start =
-        handle_wrecks_killmails(&ctx, &mut session, "beyonce", "CmdSelfDestruct", &[], &kw)
+        handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
             .await
             .unwrap()
             .unwrap();
@@ -1207,7 +1207,7 @@ async fn self_destruct_and_abort_emit_v24_remote_messages_to_pilot_and_observers
 
     vclock.advance_secs(SELF_DESTRUCT_COUNTDOWN_SECS);
     let cmd_detonate =
-        handle_wrecks_killmails(&ctx, &mut session, "beyonce", "CmdSelfDestruct", &[], &kw)
+        handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
             .await
             .unwrap()
             .unwrap();
