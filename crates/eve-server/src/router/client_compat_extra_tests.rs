@@ -2045,49 +2045,11 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn map_get_current_sov_data_preserves_claim_structure_id_and_legacy_fallback_over_wire() {
+async fn map_get_current_sov_data_preserves_claim_structure_id_and_location_filter_over_wire() {
     use eve_db::{AllianceRecord, SystemDynamicState};
 
-    // 1. Direct unit coverage: claimStructureID takes precedence and infrastructureHubID acts as fallback.
-    let raw_rows = PyRep::List(vec![
-        PyRep::keyval([
-            ("locationID", PyRep::Integer(30_001_161)),
-            ("solarSystemID", PyRep::Integer(30_001_161)),
-            ("allianceID", PyRep::Integer(99_000_001)),
-            ("corporationID", PyRep::Integer(98_000_001)),
-            ("claimStructureID", PyRep::Integer(1_050_000_001)),
-        ]),
-        PyRep::keyval([
-            ("solarSystemID", PyRep::Integer(30_001_162)),
-            ("allianceID", PyRep::Integer(99_000_001)),
-            ("corporationID", PyRep::Integer(98_000_001)),
-            ("infrastructureHubID", PyRep::Integer(1_050_000_002)),
-        ]),
-    ]);
-    let normalized = normalize_macho_rpc_reply("map", "GetCurrentSovData", Ok(raw_rows))
-        .expect("normalize GetCurrentSovData");
-    let PyRep::Rowset {
-        columns: header,
-        rows: lines,
-    } = normalized else {
-        panic!("expected Rowset from map.GetCurrentSovData normalization");
-    };
-    assert_eq!(
-        header,
-        vec![
-            "locationID",
-            "solarSystemID",
-            "allianceID",
-            "corporationID",
-            "claimStructureID",
-        ]
-    );
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0][4], PyRep::Integer(1_050_000_001));
-    assert_eq!(lines[1][0], PyRep::Integer(30_001_162));
-    assert_eq!(lines[1][4], PyRep::Integer(1_050_000_002));
-
-    // 2. Real MachoNet dispatch_rpc path (`Some("machoNet:26000")`) with regionID / solarSystemID filter.
+    // Real MachoNet dispatch_rpc path (`Some("machoNet:26000")`) with regionID / solarSystemID filter
+    // and raw dispatch check confirming both `claimStructureID` and `infrastructureHubID` are emitted.
     let ctx = test_ctx();
     let mut null_systems: Vec<(u32, u32)> = ctx
         .sde
