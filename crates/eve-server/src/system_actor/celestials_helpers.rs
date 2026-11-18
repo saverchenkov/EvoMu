@@ -960,7 +960,7 @@ pub(crate) fn fast_forward_clock_in_actor(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     solar_system_id: SolarSystemId,
     ballpark: &mut Ballpark,
@@ -972,6 +972,39 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
+    warp_provenance: &mut HashMap<BallId, crate::system_actor::types::WarpProvenance>,
+    warp_tracking: &crate::system_actor::types::SharedWarpTracking,
+) {
+    fast_forward_clock_in_actor_with_epochs_and_seq(
+        solar_system_id,
+        ballpark,
+        ship_id,
+        secs,
+        sim_elapsed_secs,
+        db_opt,
+        ball_space_entry_epochs,
+        ball_positions_actor,
+        scrambled_balls_actor,
+        event_tx_actor,
+        None,
+        warp_provenance,
+        warp_tracking,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fast_forward_clock_in_actor_with_epochs_and_seq(
+    solar_system_id: SolarSystemId,
+    ballpark: &mut Ballpark,
+    ship_id: BallId,
+    secs: u64,
+    sim_elapsed_secs: &mut f64,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ball_space_entry_epochs: &HashMap<BallId, u64>,
+    ball_positions_actor: &Arc<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls_actor: &Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+    event_tx_actor: &tokio::sync::broadcast::Sender<crate::system_actor::TickBroadcast>,
+    broadcast_seq_gate: Option<&std::sync::Mutex<u64>>,
     warp_provenance: &mut HashMap<BallId, crate::system_actor::types::WarpProvenance>,
     warp_tracking: &crate::system_actor::types::SharedWarpTracking,
 ) {
@@ -1088,7 +1121,11 @@ pub(crate) fn fast_forward_clock_in_actor_with_epochs(
     }
     crate::system_actor::sync_ball_positions(ballpark, ball_positions_actor, scrambled_balls_actor);
     let broadcast = crate::system_actor::build_tick_broadcast(solar_system_id, ballpark, all_events);
-    let _ = event_tx_actor.send(broadcast);
+    if let Some(gate) = broadcast_seq_gate {
+        crate::system_actor::send_tick_broadcast_sequenced_owned(event_tx_actor, gate, broadcast);
+    } else {
+        let _ = event_tx_actor.send(broadcast);
+    }
 }
 
 /// Records wallclock warp-stop timestamps (`tokio::time::Instant`) whenever warp ends via

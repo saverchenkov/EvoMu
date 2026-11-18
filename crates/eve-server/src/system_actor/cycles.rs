@@ -2682,12 +2682,18 @@ impl SystemHandle {
             mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
         let tick = bp.current_tick;
+        let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
+        let warp_events = broadcast.events.clone();
+        crate::system_actor::send_tick_broadcast_sequenced_owned(
+            &self.event_tx,
+            &broadcast_seq_gate,
+            broadcast,
+        );
         drop(bp);
         crate::system_actor::flush_post_unlock_actions(&self.post_unlock_actions);
-        self.record_warp_stops_from_events(&broadcast.events);
-        let _ = self.event_tx.send(broadcast);
+        self.record_warp_stops_from_events(&warp_events);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             if !death_futs.is_empty() || step_fut.is_some() || destroyed_lease.is_some() {
                 let _ = handle.spawn(async move {

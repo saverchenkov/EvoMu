@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod celestials;
-use celestials::fast_forward_clock_in_actor_with_epochs;
+use celestials::fast_forward_clock_in_actor_with_epochs_and_seq;
 pub use celestials::*;
 mod belts;
 pub use belts::*;
@@ -47,6 +47,77 @@ use tokio::sync::{broadcast, mpsc};
 
 /// Bounded mailbox capacity per solar system actor.
 pub const SYSTEM_MAILBOX_CAPACITY: usize = 256;
+
+/// Atomically assigns the next monotonic `TickBroadcast.broadcast_seq` and sends `broadcast`
+/// onto `event_tx` while holding `broadcast_seq_gate`, preserving strict FIFO seq ordering (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced_owned(
+    event_tx: &broadcast::Sender<TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    mut broadcast: TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast);
+}
+
+/// Assigns `broadcast.broadcast_seq` in-place under `broadcast_seq_gate` and sends a clone onto
+/// `event_tx` (`GH #1172`).
+pub(crate) fn send_tick_broadcast_sequenced(
+    event_tx: &broadcast::Sender<TickBroadcast>,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+    broadcast: &mut TickBroadcast,
+) {
+    let mut seq = broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *seq = seq.saturating_add(1);
+    broadcast.broadcast_seq = *seq;
+    let _ = event_tx.send(broadcast.clone());
+}
+
+fn drain_observer_updates_in_actor(
+    ballpark: &mut Ballpark,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    observer_ball_id: BallId,
+    last_visible_stamp_actor: &std::sync::atomic::AtomicU64,
+    last_fx_stamp_actor: &std::sync::atomic::AtomicU64,
+    broadcast_seq_gate: &std::sync::Mutex<u64>,
+) -> (u64, Vec<DestinyEvent>, PyRep, u64) {
+    sync_player_slim_items(ballpark, db_opt);
+    let events = ballpark.drain_observer_events(observer_ball_id);
+    if events
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+    {
+        let min_floor = last_visible_stamp_actor
+            .load(std::sync::atomic::Ordering::Acquire)
+            .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire));
+        ballpark.current_tick = ballpark.current_tick.saturating_add(1).max(min_floor);
+        last_visible_stamp_actor.fetch_max(
+            ballpark.current_tick,
+            std::sync::atomic::Ordering::AcqRel,
+        );
+    }
+    let stamp = ballpark.current_tick as u32;
+    let fx_floor = last_visible_stamp_actor
+        .load(std::sync::atomic::Ordering::Acquire)
+        .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
+        as u32;
+    let pyrep = belts::encode_destiny_updates_with_fx_floor(
+        stamp,
+        fx_floor,
+        &events,
+        Some(ballpark),
+        Some(last_fx_stamp_actor),
+    );
+    let broadcast_seq = *broadcast_seq_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    (ballpark.current_tick, events, pyrep, broadcast_seq)
+}
 
 /// DERIVED default maintenance/downtime belt respawn period in seconds (86,400s = 1 day),
 /// configurable via `ServerConfig::belt_respawn_interval_secs` (`D-5`, `MN-03`).
@@ -847,6 +918,7 @@ impl SystemRegistry {
             warp_tracking: self.warp_tracking.clone(),
             ..Default::default()
         };
+        let broadcast_seq_gate_actor = Arc::clone(&initial_actor_state.broadcast_seq_gate);
         if db_read_safe {
             let dyn_ids: Vec<BallId> = initial_ballpark
                 .balls
@@ -1668,38 +1740,29 @@ impl SystemRegistry {
                                 observer_ball_id,
                                 reply,
                             } => {
-                                sync_player_slim_items(&mut ballpark, &db_opt);
-                                let events = ballpark.drain_observer_events(observer_ball_id);
-                                if events
-                                    .iter()
-                                    .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
-                                {
-                                    let min_floor = last_visible_stamp_actor
-                                        .load(std::sync::atomic::Ordering::Acquire)
-                                        .max(
-                                            last_fx_stamp_actor
-                                                .load(std::sync::atomic::Ordering::Acquire),
-                                        );
-                                    ballpark.current_tick =
-                                        ballpark.current_tick.saturating_add(1).max(min_floor);
-                                    last_visible_stamp_actor.fetch_max(
-                                        ballpark.current_tick,
-                                        std::sync::atomic::Ordering::AcqRel,
-                                    );
-                                }
-                                let stamp = ballpark.current_tick as u32;
-                                let fx_floor = last_visible_stamp_actor
-                                    .load(std::sync::atomic::Ordering::Acquire)
-                                    .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
-                                    as u32;
-                                let pyrep = belts::encode_destiny_updates_with_fx_floor(
-                                    stamp,
-                                    fx_floor,
-                                    &events,
-                                    Some(&ballpark),
-                                    Some(&last_fx_stamp_actor),
+                                let (tick, events, pyrep, _seq) = drain_observer_updates_in_actor(
+                                    &mut ballpark,
+                                    &db_opt,
+                                    observer_ball_id,
+                                    &last_visible_stamp_actor,
+                                    &last_fx_stamp_actor,
+                                    &broadcast_seq_gate_actor,
                                 );
-                                let _ = reply.send((ballpark.current_tick, events, pyrep));
+                                let _ = reply.send((tick, events, pyrep));
+                            }
+                            SystemCommand::DrainObserverUpdatesWithSeq {
+                                observer_ball_id,
+                                reply,
+                            } => {
+                                let res = drain_observer_updates_in_actor(
+                                    &mut ballpark,
+                                    &db_opt,
+                                    observer_ball_id,
+                                    &last_visible_stamp_actor,
+                                    &last_fx_stamp_actor,
+                                    &broadcast_seq_gate_actor,
+                                );
+                                let _ = reply.send(res);
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
                                 let is_invuln_stronghold = db_opt
@@ -2296,7 +2359,7 @@ impl SystemRegistry {
                                     ballpark.balls.get(&ship_id).map(|b| &b.mode),
                                     Some(eve_destiny::MovementMode::Warp { .. })
                                 );
-                                fast_forward_clock_in_actor_with_epochs(
+                                fast_forward_clock_in_actor_with_epochs_and_seq(
                                     solar_system_id,
                                     &mut ballpark,
                                     ship_id,
@@ -2307,6 +2370,7 @@ impl SystemRegistry {
                                     &ball_positions_actor,
                                     &scrambled_balls_actor,
                                     &event_tx_actor,
+                                    Some(&broadcast_seq_gate_actor),
                                     warp_provenance,
                                     warp_tracking,
                                 );
@@ -2490,13 +2554,18 @@ impl SystemRegistry {
                                                 flushed_max_stamp,
                                                 std::sync::atomic::Ordering::AcqRel,
                                             );
-                                            let _ = event_tx_actor.send(TickBroadcast {
-                                                solar_system_id,
-                                                tick: ballpark.current_tick,
-                                                events: Vec::new(),
-                                                observer_events,
-                                                observer_updates_pyrep,
-                                            });
+                                            send_tick_broadcast_sequenced_owned(
+                                                &event_tx_actor,
+                                                &broadcast_seq_gate_actor,
+                                                TickBroadcast {
+                                                    solar_system_id,
+                                                    tick: ballpark.current_tick,
+                                                    broadcast_seq: 0,
+                                                    events: Vec::new(),
+                                                    observer_events,
+                                                    observer_updates_pyrep,
+                                                },
+                                            );
                                         }
                                     }
                                 }
@@ -2816,7 +2885,7 @@ impl SystemRegistry {
                                     .load(std::sync::atomic::Ordering::Acquire)
                                     .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
                                     as u32;
-                                let broadcast = belts::build_tick_broadcast_with_fx_floor(
+                                let mut broadcast = belts::build_tick_broadcast_with_fx_floor(
                                     solar_system_id,
                                     &mut ballpark,
                                     events,
@@ -2826,7 +2895,11 @@ impl SystemRegistry {
                                 );
                                 celestials::record_warp_stops_from_events_in_map(&broadcast.events, &warp_stopped_at_actor);
                                 if has_subscribers {
-                                    let _ = event_tx_actor.send(broadcast.clone());
+                                    send_tick_broadcast_sequenced(
+                                        &event_tx_actor,
+                                        &broadcast_seq_gate_actor,
+                                        &mut broadcast,
+                                    );
                                 }
                                 Some(broadcast)
                             } else {

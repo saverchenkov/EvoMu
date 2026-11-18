@@ -131,6 +131,7 @@ fn active_module_cycle_and_system_actor_state_defaults_and_variants() {
     let tb = TickBroadcast {
         solar_system_id: 30_000_142,
         tick: 99,
+        broadcast_seq: 0,
         events: vec![],
         observer_events: std::collections::BTreeMap::new(),
         observer_updates_pyrep: std::collections::BTreeMap::new(),
@@ -410,6 +411,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::GetSetState { .. } => "GetSetState",
             SystemCommand::GetBubbleIdForBall { .. } => "GetBubbleIdForBall",
             SystemCommand::DrainObserverUpdates { .. } => "DrainObserverUpdates",
+            SystemCommand::DrainObserverUpdatesWithSeq { .. } => "DrainObserverUpdatesWithSeq",
             SystemCommand::ApplyDamage { .. } => "ApplyDamage",
             SystemCommand::ApplyTrueDamage { .. } => "ApplyTrueDamage",
             SystemCommand::StepManual { .. } => "StepManual",

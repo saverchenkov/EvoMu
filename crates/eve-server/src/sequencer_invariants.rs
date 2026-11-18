@@ -15,7 +15,11 @@
 
 use crate::flight_recorder::{FlightRecorder, SessionSequencerCounters};
 use crate::outbound_sequencer::{SequencerLedgerEvent, SequencerLedgerEventKind};
-use eve_destiny::wire::decode_add_balls;
+use eve_destiny::wire::{
+    decode_add_balls, BALL_FLAG_IS_FREE, DST_BALL_BOID, DST_BALL_FIELD, DST_BALL_FOLLOW,
+    DST_BALL_FORMATION, DST_BALL_GOTO, DST_BALL_MINIBALL, DST_BALL_MISSILE, DST_BALL_MUSHROOM,
+    DST_BALL_ORBIT, DST_BALL_RIGID, DST_BALL_STOP, DST_BALL_TROLL, DST_BALL_WARP,
+};
 use eve_destiny::BallId;
 use eve_proto::PyRep;
 use std::collections::{HashMap, HashSet};
@@ -51,6 +55,12 @@ pub struct SequencerGuardState {
     pub mode: InvariantValidatorMode,
     pub last_emitted_epoch_and_stamp: Option<(u32, u32)>,
     pub last_addballs_stamp: HashMap<BallId, u32>,
+    /// Per-epoch tombstones for entities whose `RemoveBall`/`RemoveBalls` arrived while the entity
+    /// was unmaterialized (`GH #1172`), preventing a reordered same-stamp `AddBalls2` from resurrecting
+    /// a ghost ball. Cleared on `SetState` and space epoch resets.
+    pub removed_tombstone_stamps: HashMap<BallId, u32>,
+    /// Per-epoch materialized ball set observed by `validate_outgoing_destiny_frame` (`GH #1172`).
+    pub validator_materialized: HashSet<BallId>,
     pub counters: SessionSequencerCounters,
 }
 
@@ -58,6 +68,16 @@ impl SequencerGuardState {
     pub fn reset_epoch_state(&mut self) {
         self.last_emitted_epoch_and_stamp = None;
         self.last_addballs_stamp.clear();
+        self.removed_tombstone_stamps.clear();
+        self.validator_materialized.clear();
+    }
+
+    /// Marks an externally pre-populated ball ID as materialized for the Destiny validator
+    /// (used when attaching `ClientWireSession` mid-flight via `seed_materialized_*`).
+    pub fn seed_validator_materialized(&mut self, id: BallId) {
+        if id > 0 {
+            self.validator_materialized.insert(id);
+        }
     }
 
     pub fn note_prevented_jolt_counter(&mut self) {
@@ -153,31 +173,62 @@ impl SequencerGuardState {
         let n = items_taken.len();
         let mut mat_effects: Vec<(bool, Vec<BallId>, Vec<BallId>)> = Vec::with_capacity(n);
         let mut dep_targets: Vec<Option<(String, BallId)>> = Vec::with_capacity(n);
+        let mut entry_actions: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut eff_stamps: Vec<u32> = Vec::with_capacity(n);
         for entry in &items_taken {
             mat_effects.push(collect_materialization_effect(entry));
             dep_targets.push(extract_dependent_destiny_target_from_entry(entry));
+            if let Some((st, act, _)) = parse_destiny_entry(entry) {
+                eff_stamps.push(st.unwrap_or(frame_stamp));
+                entry_actions.push(Some(act.to_string()));
+            } else {
+                eff_stamps.push(frame_stamp);
+                entry_actions.push(None);
+            }
         }
 
         // Pass 1: Identify premature dependent updates whose target is materialized later in the same dispatch.
         let mut deferred_after: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut is_deferred = vec![false; n];
         let mut sim_mat = materialized.clone();
+        let mut sim_tombstones = self.removed_tombstone_stamps.clone();
 
         for i in 0..n {
             let (resets, ref added, ref removed) = mat_effects[i];
+            let eff_stamp = eff_stamps[i];
             if resets {
                 sim_mat.clear();
-            }
-            for &id in added {
-                sim_mat.insert(id);
-            }
-            for &id in removed {
-                sim_mat.remove(&id);
+                sim_tombstones.clear();
+                for &id in added {
+                    sim_mat.insert(id);
+                }
+            } else {
+                for &id in added {
+                    if sim_tombstones.get(&id).is_some_and(|&t| eff_stamp <= t) {
+                        continue;
+                    }
+                    sim_tombstones.remove(&id);
+                    sim_mat.insert(id);
+                }
+                for &id in removed {
+                    if !sim_mat.remove(&id) {
+                        sim_tombstones
+                            .entry(id)
+                            .and_modify(|t| *t = (*t).max(eff_stamp))
+                            .or_insert(eff_stamp);
+                    }
+                }
             }
             if let Some((_, target_id)) = dep_targets[i] {
                 if !sim_mat.contains(&target_id) {
-                    if let Some(mat_idx) = ((i + 1)..n).find(|&m| mat_effects[m].1.contains(&target_id))
-                    {
+                    if let Some(mat_idx) = ((i + 1)..n).find(|&m| {
+                        let (m_resets, ref m_added, _) = mat_effects[m];
+                        m_added.contains(&target_id)
+                            && (m_resets
+                                || !sim_tombstones
+                                    .get(&target_id)
+                                    .is_some_and(|&t| eff_stamps[m] <= t))
+                    }) {
                         deferred_after[mat_idx].push(i);
                         is_deferred[i] = true;
                     }
@@ -195,19 +246,75 @@ impl SequencerGuardState {
             }
         }
 
-        // Pass 2: Advance real `materialized` and drop any remaining unmaterialized dependent updates.
+        // Pass 2: Advance real `materialized`, suppress/tombstone unmaterialized `RemoveBall*`,
+        // block same-or-earlier-stamp tombstoned `AddBalls*`, and drop remaining dependent updates.
         let mut entries_opt: Vec<Option<PyRep>> = items_taken.into_iter().map(Some).collect();
         let mut filtered = Vec::with_capacity(n);
         for idx in ordered_indices {
+            let Some(mut entry) = entries_opt[idx].take() else {
+                continue;
+            };
+            let eff_stamp = eff_stamps[idx];
             let (resets, ref added, ref removed) = mat_effects[idx];
             if resets {
                 materialized.clear();
-            }
-            for &id in added {
-                materialized.insert(id);
-            }
-            for &id in removed {
-                materialized.remove(&id);
+                self.removed_tombstone_stamps.clear();
+                for &id in added {
+                    materialized.insert(id);
+                }
+            } else if matches!(
+                entry_actions[idx].as_deref(),
+                Some("AddBalls2" | "AddBalls" | "AddBall")
+            ) {
+                let mut suppressed_adds = HashSet::new();
+                for &id in added {
+                    if let Some(&tomb_stamp) = self.removed_tombstone_stamps.get(&id) {
+                        if eff_stamp <= tomb_stamp {
+                            suppressed_adds.insert(id);
+                            events.push(SequencerLedgerEvent {
+                                kind: SequencerLedgerEventKind::Dropped,
+                                epoch,
+                                stamp: frame_stamp,
+                                reason: format!(
+                                    "tombstoned-addballs:ball={id}:stamp={eff_stamp}<=tombstone={tomb_stamp}"
+                                ),
+                                packet_kind: entry_actions[idx].clone(),
+                            });
+                            continue;
+                        }
+                    }
+                    self.removed_tombstone_stamps.remove(&id);
+                    materialized.insert(id);
+                }
+                if !suppressed_adds.is_empty() && !filter_add_balls_entry(&mut entry, &suppressed_adds) {
+                    continue;
+                }
+            } else if matches!(entry_actions[idx].as_deref(), Some("RemoveBalls" | "RemoveBall")) {
+                let mut present_removals = Vec::with_capacity(removed.len());
+                let mut suppressed_any = false;
+                for &id in removed {
+                    if materialized.remove(&id) {
+                        present_removals.push(id);
+                    } else {
+                        suppressed_any = true;
+                        self.removed_tombstone_stamps
+                            .entry(id)
+                            .and_modify(|t| *t = (*t).max(eff_stamp))
+                            .or_insert(eff_stamp);
+                        events.push(SequencerLedgerEvent {
+                            kind: SequencerLedgerEventKind::Dropped,
+                            epoch,
+                            stamp: frame_stamp,
+                            reason: format!(
+                                "ghost-remove-tombstoned:ball={id}:stamp={eff_stamp}"
+                            ),
+                            packet_kind: entry_actions[idx].clone(),
+                        });
+                    }
+                }
+                if suppressed_any && !filter_remove_entry(&mut entry, &present_removals) {
+                    continue;
+                }
             }
             if let Some((ref action_name, target_id)) = dep_targets[idx] {
                 if !materialized.contains(&target_id) {
@@ -223,10 +330,13 @@ impl SequencerGuardState {
                     continue;
                 }
             }
-            if let Some(entry) = entries_opt[idx].take() {
-                filtered.push(entry);
-            }
+            filtered.push(entry);
         }
+
+        const TOMBSTONE_RETENTION_WINDOW_TICKS: u32 = 64;
+        let retain_floor = frame_stamp.saturating_sub(TOMBSTONE_RETENTION_WINDOW_TICKS);
+        self.removed_tombstone_stamps
+            .retain(|_, &mut tomb| tomb >= retain_floor);
 
         let keep = !filtered.is_empty();
         match updates {
@@ -345,7 +455,7 @@ impl SequencerGuardState {
             _ => (epoch, frame_stamp),
         });
 
-        // 4. `remove-after-addballs` (`SetState` resets `last_addballs_stamp`).
+        // 4. `remove-after-addballs` (`SetState` resets `last_addballs_stamp` and `validator_materialized`).
         for entry in entries {
             let Some((entry_stamp, action, args_opt)) = parse_destiny_entry(entry) else {
                 continue;
@@ -353,19 +463,33 @@ impl SequencerGuardState {
             let eff_stamp = entry_stamp.unwrap_or(frame_stamp);
             if action == "SetState" {
                 self.last_addballs_stamp.clear();
+                self.validator_materialized.clear();
+                if let Some(args) = args_opt {
+                    let mut added = Vec::new();
+                    extract_set_state_entities(args, &mut added);
+                    for id in added {
+                        self.validator_materialized.insert(id);
+                    }
+                }
             } else if matches!(action, "AddBalls2" | "AddBalls" | "AddBall") {
                 if let Some(args) = args_opt {
                     let mut added = Vec::new();
                     extract_add_balls_entities(action, args, &mut added);
                     for id in added {
                         self.last_addballs_stamp.insert(id, eff_stamp);
+                        self.validator_materialized.insert(id);
                     }
                 }
             } else if matches!(action, "RemoveBalls" | "RemoveBall") {
                 if let Some(args) = args_opt {
                     let mut removed = Vec::new();
                     extract_remove_balls_entities(args, &mut removed);
+                    let mut entry_violated = false;
                     for id in removed {
+                        let was_materialized = self.validator_materialized.remove(&id);
+                        if entry_violated {
+                            continue;
+                        }
                         if let Some(&add_stamp) = self.last_addballs_stamp.get(&id) {
                             if eff_stamp <= add_stamp {
                                 violations.push((
@@ -374,8 +498,18 @@ impl SequencerGuardState {
                                         "{action} for ball={id} at stamp={eff_stamp} <= last AddBalls stamp={add_stamp}"
                                     ),
                                 ));
-                                break;
+                                entry_violated = true;
+                                continue;
                             }
+                        }
+                        if !was_materialized {
+                            violations.push((
+                                INV_REMOVE_AFTER_ADDBALLS,
+                                format!(
+                                    "{action} for unmaterialized ball={id} at stamp={eff_stamp} in epoch={epoch}"
+                                ),
+                            ));
+                            entry_violated = true;
                         }
                     }
                 }
@@ -435,6 +569,209 @@ fn push_unique(out: &mut Vec<BallId>, id: BallId) {
     if id > 0 && !out.contains(&id) {
         out.push(id);
     }
+}
+
+fn parse_destiny_entry_mut(entry: &mut PyRep) -> Option<(&str, &mut PyRep)> {
+    let outer = match entry {
+        PyRep::Tuple(items) | PyRep::List(items) if items.len() >= 2 => items,
+        _ => return None,
+    };
+    let action_pair = match &mut outer[1] {
+        PyRep::Tuple(items) | PyRep::List(items) if items.len() >= 2 => items,
+        _ => return None,
+    };
+    let (action_rep, rest) = action_pair.split_first_mut()?;
+    let action = action_rep.as_str()?;
+    let args = rest.first_mut()?;
+    Some((action, args))
+}
+
+fn filter_remove_entry(entry: &mut PyRep, keep_ids: &[BallId]) -> bool {
+    if keep_ids.is_empty() {
+        return false;
+    }
+    let Some((action, args)) = parse_destiny_entry_mut(entry) else {
+        return true;
+    };
+    if action == "RemoveBall" {
+        return true;
+    }
+    if action == "RemoveBalls" {
+        match args {
+            PyRep::Tuple(items) | PyRep::List(items) => {
+                if let Some(PyRep::List(inner) | PyRep::Tuple(inner)) = items.first_mut() {
+                    *inner = keep_ids.iter().map(|&id| PyRep::Integer(id)).collect();
+                } else {
+                    *items = keep_ids.iter().map(|&id| PyRep::Integer(id)).collect();
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn scan_add_balls_record_spans(bytes: &[u8]) -> Option<Vec<(BallId, usize, usize)>> {
+    if bytes.len() < 5 {
+        return None;
+    }
+    let mut off = 5usize;
+    let mut spans = Vec::new();
+    while off < bytes.len() {
+        let start = off;
+        let id_bytes: [u8; 8] = bytes.get(off..off + 8)?.try_into().ok()?;
+        let id = i64::from_le_bytes(id_bytes);
+        off += 8;
+        let mode = *bytes.get(off)?;
+        off += 1;
+        // radius (4) + position xyz (24) = 28
+        if off + 28 > bytes.len() {
+            return None;
+        }
+        off += 28;
+        let flags = *bytes.get(off)?;
+        off += 1;
+        let is_rigid = mode == DST_BALL_RIGID;
+        if !is_rigid {
+            // mass (8) + cloak (1) + alliance_id (8) + corp_id (4) + harmonic (4) = 25
+            if off + 25 > bytes.len() {
+                return None;
+            }
+            off += 25;
+        }
+        if !is_rigid && (flags & BALL_FLAG_IS_FREE) != 0 {
+            // max_velocity (4) + velocity xyz (24) + inertia (4) + speed_fraction (4) = 36
+            if off + 36 > bytes.len() {
+                return None;
+            }
+            off += 36;
+        }
+        // formation_id (1)
+        if off + 1 > bytes.len() {
+            return None;
+        }
+        off += 1;
+        let tail = match mode {
+            DST_BALL_GOTO => 24,
+            DST_BALL_FOLLOW | DST_BALL_ORBIT => 12,
+            DST_BALL_WARP => 52,
+            DST_BALL_MISSILE => 48,
+            DST_BALL_MUSHROOM => 24,
+            DST_BALL_TROLL => 4,
+            DST_BALL_FORMATION => 16,
+            DST_BALL_STOP | DST_BALL_BOID | DST_BALL_MINIBALL | DST_BALL_FIELD
+            | DST_BALL_RIGID => 0,
+            _ => return None,
+        };
+        if off + tail > bytes.len() {
+            return None;
+        }
+        off += tail;
+        spans.push((id, start, off));
+    }
+    Some(spans)
+}
+
+fn filter_add_balls_chunk(chunk: &mut PyRep, drop_ids: &HashSet<BallId>) -> bool {
+    if let Some(id) = positive_i64(chunk) {
+        return !drop_ids.contains(&id);
+    }
+    match chunk {
+        PyRep::Bytes(bytes) => {
+            let Some(spans) = scan_add_balls_record_spans(bytes) else {
+                return true;
+            };
+            let mut filtered = Vec::with_capacity(bytes.len());
+            filtered.extend_from_slice(&bytes[..5]);
+            for &(id, start, end) in &spans {
+                if !drop_ids.contains(&id) {
+                    filtered.extend_from_slice(&bytes[start..end]);
+                }
+            }
+            if filtered.len() <= 5 {
+                return false;
+            }
+            *bytes = filtered;
+            true
+        }
+        PyRep::Tuple(parts) | PyRep::List(parts) => {
+            let binary_spans = if let Some(PyRep::Bytes(bytes)) = parts.first() {
+                scan_add_balls_record_spans(bytes)
+            } else {
+                None
+            };
+            if let Some(spans) = binary_spans {
+                if let Some(PyRep::Bytes(bytes)) = parts.first_mut() {
+                    let mut filtered = Vec::with_capacity(bytes.len());
+                    filtered.extend_from_slice(&bytes[..5]);
+                    for &(id, start, end) in &spans {
+                        if !drop_ids.contains(&id) {
+                            filtered.extend_from_slice(&bytes[start..end]);
+                        }
+                    }
+                    if filtered.len() <= 5 {
+                        return false;
+                    }
+                    *bytes = filtered;
+                }
+                if let Some(PyRep::List(extra_or_slims) | PyRep::Tuple(extra_or_slims)) =
+                    parts.get_mut(1)
+                {
+                    if extra_or_slims.len() == spans.len() {
+                        let mut i = 0usize;
+                        extra_or_slims.retain(|_| {
+                            let keep = !drop_ids.contains(&spans[i].0);
+                            i += 1;
+                            keep
+                        });
+                    } else {
+                        extra_or_slims.retain(|elem| {
+                            let elem_id = extract_slim_ball_id(elem)
+                                .or_else(|| positive_i64(elem))
+                                .or_else(|| match elem {
+                                    PyRep::Tuple(pair) | PyRep::List(pair) => {
+                                        pair.first().and_then(extract_slim_ball_id)
+                                    }
+                                    _ => None,
+                                });
+                            elem_id.map_or(true, |id| !drop_ids.contains(&id))
+                        });
+                    }
+                }
+                if let Some(PyRep::Dict(dmg_entries)) = parts.get_mut(2) {
+                    dmg_entries.retain(|(k, _)| {
+                        positive_i64(k).map_or(true, |id| !drop_ids.contains(&id))
+                    });
+                }
+                true
+            } else {
+                parts.retain_mut(|elem| filter_add_balls_chunk(elem, drop_ids));
+                !parts.is_empty()
+            }
+        }
+        other => extract_slim_ball_id(other).map_or(true, |id| !drop_ids.contains(&id)),
+    }
+}
+
+fn filter_add_balls_entry(entry: &mut PyRep, drop_ids: &HashSet<BallId>) -> bool {
+    if drop_ids.is_empty() {
+        return true;
+    }
+    let Some((action, args)) = parse_destiny_entry_mut(entry) else {
+        return true;
+    };
+    let mut all_ids = Vec::new();
+    extract_add_balls_entities(action, args, &mut all_ids);
+    if all_ids.is_empty() || !all_ids.iter().any(|id| drop_ids.contains(id)) {
+        return true;
+    }
+    if all_ids.iter().all(|id| drop_ids.contains(id)) {
+        return false;
+    }
+    if action == "AddBall" {
+        return false;
+    }
+    filter_add_balls_chunk(args, drop_ids)
 }
 
 /// Extracts all ball IDs materialized by a `SetState` `args` payload (`ego`, `slims`, `state`).
@@ -868,7 +1205,17 @@ mod tests {
                 1,
                 103,
                 &PyRep::List(vec![
-                    make_entry(103, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]),
+                    make_entry(
+                        103,
+                        "SetState",
+                        vec![PyRep::keyval([
+                            ("ego", PyRep::Integer(1)),
+                            (
+                                "slims",
+                                PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(500))])]),
+                            ),
+                        ])],
+                    ),
                     make_entry(
                         103,
                         "RemoveBalls",
@@ -960,5 +1307,173 @@ mod tests {
             );
         });
         assert!(panic_res.is_err());
+    }
+
+    #[test]
+    fn raw_unmaterialized_remove_balls_flags_remove_after_addballs_and_gate_tombstones_ghost_add() {
+        let fr = FlightRecorder::new();
+
+        // Raw emission of RemoveBalls for never-materialized ball 9001 must flag INV_REMOVE_AFTER_ADDBALLS.
+        let mut raw_guard = SequencerGuardState {
+            mode: InvariantValidatorMode::RecordAndEmit,
+            ..Default::default()
+        };
+        let raw_v = raw_guard.validate_outgoing_destiny_frame(
+            Some(&fr),
+            77,
+            1,
+            50,
+            &PyRep::List(vec![make_entry(
+                50,
+                "RemoveBalls",
+                vec![PyRep::List(vec![PyRep::Integer(9001)])],
+            )]),
+        );
+        assert_eq!(raw_v, vec![INV_REMOVE_AFTER_ADDBALLS]);
+        assert_eq!(fr.session_sequencer_counters(77).invariant_violations, 1);
+
+        // StrictPanic mode must panic loudly on raw unmaterialized RemoveBalls too.
+        let strict_res = std::panic::catch_unwind(|| {
+            let mut strict = SequencerGuardState {
+                mode: InvariantValidatorMode::StrictPanic,
+                ..Default::default()
+            };
+            strict.validate_outgoing_destiny_frame(
+                None,
+                78,
+                1,
+                50,
+                &PyRep::List(vec![make_entry(
+                    50,
+                    "RemoveBalls",
+                    vec![PyRep::List(vec![PyRep::Integer(9001)])],
+                )]),
+            );
+        });
+        assert!(strict_res.is_err());
+
+        // Real multi-ball wire payloads through reconcile_destiny_updates_with_gate:
+        // RemoveBalls([500, 9001]) when 500 is materialized and 9001 is not must keep only [500]
+        // and tombstone 9001 at stamp 50, suppressing 9001 from a same-stamp AddBalls2([501, 9001]).
+        let mut park = eve_destiny::Ballpark::new(30_000_142);
+        let mk_ball = |id| Ball {
+            id,
+            type_id: 587,
+            position: DVec3::new(1000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        };
+        let b501 = mk_ball(501);
+        let b9001 = mk_ball(9001);
+        park.add_ball(mk_ball(500));
+        park.add_ball(b501.clone());
+        park.add_ball(b9001.clone());
+
+        let mut gate = SequencerGuardState::default();
+        let mut materialized = HashSet::from([500_i64]);
+        let mut events = Vec::new();
+
+        let mut rm_updates = PyRep::List(vec![make_entry(
+            50,
+            "RemoveBalls",
+            vec![PyRep::List(vec![PyRep::Integer(500), PyRep::Integer(9001)])],
+        )]);
+        assert!(gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            50,
+            &mut rm_updates,
+            &mut events,
+        ));
+        assert!(!materialized.contains(&500));
+        assert_eq!(gate.removed_tombstone_stamps.get(&9001), Some(&50));
+        let PyRep::List(rm_items) = &rm_updates else {
+            panic!("expected List");
+        };
+        let mut kept_removed = Vec::new();
+        let (_, _, rm_args) = parse_destiny_entry(&rm_items[0]).unwrap();
+        extract_remove_balls_entities(rm_args.unwrap(), &mut kept_removed);
+        assert_eq!(kept_removed, vec![500]);
+
+        let mut add_updates = PyRep::List(vec![eve_destiny::wire::encode_add_balls2_action(
+            50,
+            &[&b501, &b9001],
+            Some(&park),
+        )]);
+        assert!(gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            50,
+            &mut add_updates,
+            &mut events,
+        ));
+        assert!(materialized.contains(&501));
+        assert!(!materialized.contains(&9001));
+        let PyRep::List(add_items) = &add_updates else {
+            panic!("expected List");
+        };
+        let mut kept_added = Vec::new();
+        let (_, add_act, add_args) = parse_destiny_entry(&add_items[0]).unwrap();
+        extract_add_balls_entities(add_act, add_args.unwrap(), &mut kept_added);
+        assert_eq!(kept_added, vec![501]);
+
+        // Later stamp 51 respawn of 9001 must supersede stamp-50 tombstone cleanly.
+        let mut later_add = PyRep::List(vec![eve_destiny::wire::encode_add_balls2_action(
+            51,
+            &[&b9001],
+            Some(&park),
+        )]);
+        assert!(gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            51,
+            &mut later_add,
+            &mut events,
+        ));
+        assert!(materialized.contains(&9001));
+        assert!(!gate.removed_tombstone_stamps.contains_key(&9001));
+
+        // Tombstones older than the 64-tick retention window must be pruned to bound growth.
+        let mut stale_rm = PyRep::List(vec![make_entry(
+            51,
+            "RemoveBalls",
+            vec![PyRep::List(vec![PyRep::Integer(9002)])],
+        )]);
+        assert!(!gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            51,
+            &mut stale_rm,
+            &mut events,
+        ));
+        assert_eq!(gate.removed_tombstone_stamps.get(&9002), Some(&51));
+        let mut noop_far = PyRep::List(vec![make_entry(
+            200,
+            "Stop",
+            vec![PyRep::Integer(501)],
+        )]);
+        assert!(gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            200,
+            &mut noop_far,
+            &mut events,
+        ));
+        assert!(!gate.removed_tombstone_stamps.contains_key(&9002));
     }
 }
