@@ -419,6 +419,12 @@ pub async fn handle_ship_or_npc_destruction(
             _ => 26557,
         }
     });
+    let wreck_name = ctx
+        .sde
+        .types
+        .get(&wreck_type_id)
+        .map(|t| t.name.clone())
+        .filter(|n| !n.is_empty());
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()
@@ -606,8 +612,16 @@ pub async fn handle_ship_or_npc_destruction(
                 },
                 ctx.build_type_combat_state(wreck_type_id),
                 eve_destiny::SlimItemMeta {
-                    group_id: 186, category_id: 2, owner_id: wreck_owner_id, char_id: None,
-                    corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
+                    group_id: 186,
+                    category_id: 2,
+                    owner_id: wreck_owner_id,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: wreck_name,
+                    ..Default::default()
                 },
             )
             .await;

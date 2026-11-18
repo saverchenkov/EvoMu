@@ -963,3 +963,57 @@ async fn step_system_entropic_spools_destroys_unpiloted_corp_ship_without_npc_fa
         );
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_ship_or_npc_destruction_npc_wreck_populates_sde_type_name() {
+    let (mut ctx, _, attacker_id, attacker_ship, sys_id) = make_spool_test_ctx();
+    let mut sde = (*ctx.sde).clone();
+    let mut wreck_type = make_fighter_type(26_557, 186, 2, 10_000.0, Vec::new());
+    wreck_type.name = "Frigate Wreck".to_string();
+    sde.types.insert(26_557, wreck_type);
+    sde.wrecks.insert(500_001, 26_557);
+    ctx.sde = Arc::new(sde);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let now_unix = ctx.now_unix();
+    let npc_id = 1_896_000_123i64;
+    let npc_ball = spawn_spool_ball(
+        &ctx,
+        sys_id,
+        npc_id,
+        500_001,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        0.0,
+        0.0,
+        10.0,
+        0.0,
+    )
+    .await;
+
+    let res = handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_handle,
+        attacker_id,
+        attacker_ship,
+        47_271,
+        47_240,
+        npc_id,
+        &npc_ball,
+        None,
+        sys_id,
+        1_250.0,
+        now_unix,
+    )
+    .await;
+
+    assert!(res.wreck_id > 0, "NPC turret kill must spawn wreck");
+    let wreck_slim = sys_handle
+        .get_ball_slim_item(res.wreck_id)
+        .await
+        .unwrap()
+        .expect("NPC wreck slim item present");
+    assert_eq!(
+        wreck_slim.dict_get("name"),
+        Some(&eve_proto::PyRep::String("Frigate Wreck".into()))
+    );
+}

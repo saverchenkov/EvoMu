@@ -139,28 +139,30 @@ pub fn populate_persisted_space_objects(
             if player_ship_ids.contains(&item.item_id) {
                 continue;
             }
-            let (group_id, category_id, mass, radius, max_vel) = sde
+            let (group_id, category_id, mass, radius, max_vel, type_name) = sde
                 .types
                 .get(&item.type_id)
                 .map(|t| {
                     let mv = t.default_attributes.get(&37).copied().unwrap_or(0.0);
+                    let name = (!t.name.is_empty()).then(|| t.name.clone());
                     (
                         t.group_id,
                         t.category_id,
                         t.mass.max(100.0),
                         t.radius.max(10.0),
                         mv,
+                        name,
                     )
                 })
                 .unwrap_or_else(|| {
                     if item.type_id == 26557 {
-                        (186, 2, 10_000.0, 30.0, 0.0)
+                        (186, 2, 10_000.0, 30.0, 0.0, None)
                     } else if item.type_id == 23 {
-                        (12, 2, 1_000.0, 20.0, 0.0)
+                        (12, 2, 1_000.0, 20.0, 0.0, None)
                     } else if item.type_id == 25 {
-                        (14, 2, 80.0, 5.0, 0.0)
+                        (14, 2, 80.0, 5.0, 0.0, None)
                     } else {
-                        (0, 0, 1_000.0, 25.0, 0.0)
+                        (0, 0, 1_000.0, 25.0, 0.0, None)
                     }
                 });
 
@@ -269,7 +271,9 @@ pub fn populate_persisted_space_objects(
                     corp_id: -1,
                     alliance_id: -1,
                     security_status: 0.0,
-                    is_cloaked: false, ..Default::default()
+                    is_cloaked: false,
+                    name: type_name,
+                    ..Default::default()
                 },
             );
             if !is_drone {
