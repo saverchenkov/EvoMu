@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "max_raw_encode_field_calls": 3,
-  "max_files_with_raw_encode_field": 1,
-  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 262 calls / 31 files (batch 8) down to 3 calls / 1 file (batch 9: remaining 3 calls are in quasar_gateway.rs L656-L658, owned by r11/e09-locks-b2)."
+  "max_raw_encode_field_calls": 0,
+  "max_files_with_raw_encode_field": 0,
+  "notes": "RFC-3 C-9 (#933) falling ratchet for raw encode_{varint,bytes,string,fixed32,fixed64}_field(...) calls in crates/eve-server/src/. Tightened from 3 calls / 1 file down to 0 calls / 0 files after migrating eve_public.character.GetNamesByUserResponse in quasar_gateway.rs to eve_proto::pb::message(...)."
 }

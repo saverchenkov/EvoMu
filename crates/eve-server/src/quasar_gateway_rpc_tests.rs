@@ -495,3 +495,182 @@ fn internal_envelopes_event_publishing_and_machonet_rpc_dispatch() {
     player.role = service_roles::ROLE_PLAYER_DEFAULT;
     assert!(require_admin_role(&AuthoritativeContext::for_session(Some(1), None, None, 0, "t", vec![])).is_err());
 }
+
+#[test]
+fn get_names_by_user_encodes_descriptor_checked_characters_empty_and_rejects_unauthenticated() {
+    let reg = QuasarDescriptorRegistry::open_default().expect("open default descriptor DB");
+    let router = new_router_with_descriptors(Arc::clone(&reg));
+    let now = 4_000_000u64;
+
+    // Seed two characters for user_id=42_420 in reverse ID order to verify deterministic sorting,
+    // plus one character for user_id=42_421 to verify user isolation.
+    router.db.with_mut_snapshot(|snap| {
+        let template = snap.characters.values().next().expect("demo character").clone();
+        for (cid, uid, name) in [
+            (90_001_002_i64, 42_420_u64, "BetaPilot"),
+            (90_001_001_i64, 42_420_u64, "AlphaPilot"),
+            (90_001_999_i64, 42_421_u64, "OtherUserPilot"),
+        ] {
+            let mut ch = template.clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.name = name.into();
+            snap.characters.insert(cid, ch);
+        }
+    });
+
+    // 1. Authenticated pre-character user receives all own characters sorted by character_id.
+    let sess_multi = make_session(Some(42_420), None, None, service_roles::ROLE_PLAYER_DEFAULT);
+    let rsp = router.handle_public_request(
+        &sess_multi,
+        &make_pub_req("eve_public.character.GetNamesByUserRequest", Vec::new(), None),
+        None,
+        false,
+        now,
+    );
+    assert_eq!(rsp.status_code, STATUS_OK);
+    let payload = rsp.payload.expect("GetNamesByUserResponse payload");
+    assert_eq!(
+        payload.type_url,
+        format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse")
+    );
+    let decoded = reg
+        .decode_dynamic("eve_public.character.GetNamesByUserResponse", &payload.value)
+        .expect("decode GetNamesByUserResponse");
+    assert_eq!(
+        reg.encode_dynamic(&decoded).expect("re-encode GetNamesByUserResponse"),
+        payload.value
+    );
+
+    let DynamicValue::Repeated(entries) = decoded
+        .get(1)
+        .expect("characters repeated field #1 present")
+    else {
+        panic!("expected Repeated for characters field #1, got {:?}", decoded.get(1));
+    };
+    let actual_chars: Vec<(u32, String)> = entries
+        .iter()
+        .map(|item| {
+            let DynamicValue::Message(entry_msg) = item else {
+                panic!("expected CharacterName message, got {item:?}");
+            };
+            let DynamicValue::Message(id_msg) = entry_msg
+                .get(1)
+                .expect("CharacterName.identifier field #1")
+            else {
+                panic!("expected Identifier message, got {:?}", entry_msg.get(1));
+            };
+            let Some(DynamicValue::Uint32(seq)) = id_msg.get(1) else {
+                panic!("expected Identifier.sequential Uint32, got {:?}", id_msg.get(1));
+            };
+            let Some(DynamicValue::String(name)) = entry_msg.get(2) else {
+                panic!("expected CharacterName.name String, got {:?}", entry_msg.get(2));
+            };
+            (*seq, name.clone())
+        })
+        .collect();
+    assert_eq!(
+        actual_chars,
+        vec![
+            (90_001_001_u32, "AlphaPilot".to_string()),
+            (90_001_002_u32, "BetaPilot".to_string()),
+        ]
+    );
+
+    // Byte-exact protobuf wire equivalence check against expected nested CharacterName framing.
+    let expected_wire = WireMessage {
+        fields: actual_chars
+            .iter()
+            .map(|(cid, name)| {
+                let id_wire = WireMessage {
+                    fields: vec![WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(*cid as u64),
+                    }],
+                }
+                .encode();
+                let entry_wire = WireMessage {
+                    fields: vec![
+                        WireField {
+                            field_number: 1,
+                            value: WireValue::LengthDelimited(id_wire),
+                        },
+                        WireField {
+                            field_number: 2,
+                            value: WireValue::LengthDelimited(name.as_bytes().to_vec()),
+                        },
+                    ],
+                }
+                .encode();
+                WireField {
+                    field_number: 1,
+                    value: WireValue::LengthDelimited(entry_wire),
+                }
+            })
+            .collect(),
+    }
+    .encode();
+    assert_eq!(payload.value, expected_wire);
+
+    // 2. Authenticated user with zero characters receives 200 OK with empty payload.
+    let sess_empty = make_session(Some(99_999), None, None, service_roles::ROLE_PLAYER_DEFAULT);
+    let empty_rsp = router.handle_public_request(
+        &sess_empty,
+        &make_pub_req("eve_public.character.GetNamesByUserRequest", Vec::new(), None),
+        None,
+        false,
+        now,
+    );
+    assert_eq!(empty_rsp.status_code, STATUS_OK);
+    let empty_payload = empty_rsp.payload.expect("empty GetNamesByUserResponse payload");
+    assert_eq!(
+        empty_payload.type_url,
+        format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse")
+    );
+    assert!(empty_payload.value.is_empty());
+    let empty_decoded = reg
+        .decode_dynamic("eve_public.character.GetNamesByUserResponse", &empty_payload.value)
+        .expect("decode empty GetNamesByUserResponse");
+    assert_eq!(empty_decoded.get(1), None);
+
+    // 3. Unauthenticated caller rejected with 401 both via gateway dispatch and direct handler call.
+    let sess_unauth = make_session(None, None, None, service_roles::ROLE_PLAYER_DEFAULT);
+    let unauth_rsp = router.handle_public_request(
+        &sess_unauth,
+        &make_pub_req("eve_public.character.GetNamesByUserRequest", Vec::new(), None),
+        None,
+        false,
+        now,
+    );
+    assert_eq!(unauth_rsp.status_code, STATUS_UNAUTHORIZED);
+
+    let handler = router
+        .handlers
+        .read()
+        .unwrap()
+        .get("eve_public.character.GetNamesByUserRequest")
+        .cloned()
+        .expect("GetNamesByUserRequest handler registered");
+    let unauth_ctx = AuthoritativeContext::default();
+    let handler_err = handler(
+        &unauth_ctx,
+        &GoogleAny::default(),
+        &DynamicQuasarMessage::new("eve_public.character.GetNamesByUserRequest"),
+    )
+    .expect_err("unauthenticated handler call must return 401");
+    assert_eq!(handler_err.0, STATUS_UNAUTHORIZED);
+
+    // 4. Missing descriptor in active pb registry maps cleanly to 500 without panicking.
+    let empty_reg = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let auth_ctx =
+        AuthoritativeContext::for_session(Some(42_420), None, None, 0, "tranquility", vec![1; 16]);
+    let missing_desc_err = eve_proto::pb::with_registry_override(empty_reg, || {
+        handler(
+            &auth_ctx,
+            &GoogleAny::default(),
+            &DynamicQuasarMessage::new("eve_public.character.GetNamesByUserRequest"),
+        )
+    })
+    .expect_err("missing descriptor must surface internal error tuple");
+    assert_eq!(missing_desc_err.0, STATUS_INTERNAL_ERROR);
+}

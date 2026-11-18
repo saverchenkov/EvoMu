@@ -9,8 +9,7 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_varint_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
 };
 use eve_sde::SdeRegistry;
 use std::collections::{HashMap, HashSet};
