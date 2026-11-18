@@ -149,7 +149,9 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
                 }
                 let raw_elapsed = last_step.elapsed();
                 let lateness_ms = (raw_elapsed.as_millis() as i64).saturating_sub(1_000);
-                let (elapsed, next_remainder) =
+                let total_elapsed = raw_elapsed.saturating_add(subsec_remainder);
+                let raw_full_secs = total_elapsed.as_secs();
+                let (_clamped_steps, next_remainder) =
                     eve_server::sp6_lifecycle::accumulate_physics_ticker_steps(
                         raw_elapsed,
                         subsec_remainder,
@@ -160,11 +162,11 @@ async fn run_server(boot_start: std::time::Instant) -> Result<()> {
                     .max(0.0);
                 last_step = std::time::Instant::now();
                 let tick_work_start = std::time::Instant::now();
-                if !physics_ctx.is_clock_paused() {
+                if !physics_ctx.is_clock_paused() && raw_full_secs > 0 {
                     if let Err(panic_msg) = eve_server::sp6_lifecycle::catch_unwind_future(
                         eve_server::sp6_lifecycle::step_active_systems_physics_tick_with_budget(
                             &physics_ctx,
-                            elapsed,
+                            raw_full_secs,
                             cadence_lateness_ms,
                             eve_server::sp6_lifecycle::PHYSICS_TICK_STEP_BUDGET,
                         ),

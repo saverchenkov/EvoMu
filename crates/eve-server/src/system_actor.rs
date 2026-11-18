@@ -88,19 +88,8 @@ fn drain_observer_updates_in_actor(
 ) -> (u64, Vec<DestinyEvent>, PyRep, u64) {
     sync_player_slim_items(ballpark, db_opt);
     let events = ballpark.drain_observer_events(observer_ball_id);
-    if events
-        .iter()
-        .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
-    {
-        let min_floor = last_visible_stamp_actor
-            .load(std::sync::atomic::Ordering::Acquire)
-            .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire));
-        ballpark.current_tick = ballpark.current_tick.saturating_add(1).max(min_floor);
-        last_visible_stamp_actor.fetch_max(
-            ballpark.current_tick,
-            std::sync::atomic::Ordering::AcqRel,
-        );
-    }
+    // `#1169`: `Ballpark::current_tick` increments exclusively inside `Ballpark::step` when `1.0 s`
+    // of simulated physics is integrated — never inside `DrainObserverUpdates`.
     let stamp = ballpark.current_tick as u32;
     let fx_floor = last_visible_stamp_actor
         .load(std::sync::atomic::Ordering::Acquire)
@@ -113,6 +102,16 @@ fn drain_observer_updates_in_actor(
         Some(ballpark),
         Some(last_fx_stamp_actor),
     );
+    if !events.is_empty()
+        && !events
+            .iter()
+            .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+    {
+        last_visible_stamp_actor.fetch_max(
+            u64::from(stamp.max(fx_floor)),
+            std::sync::atomic::Ordering::AcqRel,
+        );
+    }
     let broadcast_seq = *broadcast_seq_gate
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -2622,7 +2621,12 @@ impl SystemRegistry {
                             let pre_tick_caps = cycles::snapshot_player_ship_capacitors(&ballpark, db_opt.as_ref());
                             let pre_missile_positions =
                                 missiles::snapshot_missile_positions(&ballpark, active_guided_missiles);
+                            // `#1169`: `Ballpark::step(dt_sim)` integrates continuous motion while
+                            // `Ballpark::sim_tick_accum` advances `current_tick` strictly once per
+                            // completed `1.0 s` of simulated physics.
+                            let prev_tick = ballpark.current_tick;
                             let events = ballpark.step(dt_sim);
+                            let completed_sim_steps = ballpark.current_tick.saturating_sub(prev_tick);
                             missiles::flush_pending_missile_deploy_fx(
                                 &mut ballpark,
                                 pending_missile_deploy_fx,
@@ -2785,36 +2789,38 @@ impl SystemRegistry {
                                     );
                                 }
                             }
-                            for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
-                            }
-                            for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-                                notify_tx_opt.as_ref(),
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
-                            }
-                            for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-                                notify_tx_opt.as_ref(),
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
+                            for _ in 0..completed_sim_steps {
+                                for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
+                                for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                    pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                    notify_tx_opt.as_ref(),
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
+                                for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                    pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                    notify_tx_opt.as_ref(),
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
                             }
                             {
                                 let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
@@ -2880,7 +2886,13 @@ impl SystemRegistry {
                             }
                             let current_tick = ballpark.current_tick;
                             let has_subscribers = event_tx_actor.receiver_count() > 0;
-                            let broadcast_opt = if has_subscribers || matches!(step_reply, StepReply::Full(_)) {
+                            let has_pending_destiny_updates = !events.is_empty()
+                                || !ballpark.pending_events.is_empty()
+                                || !ballpark.observer_events.is_empty();
+                            let should_emit_broadcast = matches!(step_reply, StepReply::Full(_))
+                                || (has_subscribers
+                                    && (completed_sim_steps > 0 || has_pending_destiny_updates));
+                            let broadcast_opt = if should_emit_broadcast {
                                 let fx_floor = last_visible_stamp_actor
                                     .load(std::sync::atomic::Ordering::Acquire)
                                     .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))

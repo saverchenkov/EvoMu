@@ -815,11 +815,20 @@ async fn fx_stamps_never_backstep_under_tidi() {
             );
         }
     }
+    // Under 0.25x TiDi, lines 783 & 787 integrated 0.50s sim time (`accum = 0.50`);
+    // one more 1.0s wall step reaches 0.75s (`current_tick` stays at `scene_tick_1`), and the
+    // fourth completes 1.00s sim time (`scene_tick_1 + 1`, never jumped to `prime_stamp`) (`#1169`).
+    let bcast_mid = sys.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        bcast_mid.tick,
+        scene_tick_1,
+        "0.75s accumulated sim time under 0.25x TiDi must not increment current_tick yet"
+    );
     let bcast_next = sys.step_manual(1.0).await.unwrap();
     assert_eq!(
         bcast_next.tick,
         scene_tick_1 + 1,
-        "Scene stamp (ballpark.current_tick) must stay unchanged when clamping FX floor"
+        "Completing 1.0s sim time under 0.25x TiDi must increment scene tick by +1 without jumping to FX floor"
     );
 
     // Docking stops active propulsion OnSpecialFX BEFORE RemoveBall detach.

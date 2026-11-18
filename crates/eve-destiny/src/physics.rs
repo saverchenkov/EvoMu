@@ -62,9 +62,20 @@ impl Ballpark {
             return Vec::new();
         }
         let dt = dt.min(60.0);
-        self.current_tick += 1;
-        if self.sim_unix_secs > 0 {
-            self.sim_unix_secs = self.sim_unix_secs.saturating_add(dt.round().max(0.0) as u64);
+        // Only advance `current_tick` per whole `1.0 s` of integrated simulation physics (`#1169`).
+        self.sim_tick_accum += dt;
+        let whole_sim_secs = if self.sim_tick_accum >= 1.0 - 1e-9 {
+            let whole = (self.sim_tick_accum + 1e-9).floor().max(0.0) as u64;
+            self.sim_tick_accum = (self.sim_tick_accum - whole as f64).max(0.0);
+            whole
+        } else {
+            0
+        };
+        if whole_sim_secs > 0 {
+            self.current_tick = self.current_tick.saturating_add(whole_sim_secs);
+            if self.sim_unix_secs > 0 {
+                self.sim_unix_secs = self.sim_unix_secs.saturating_add(whole_sim_secs);
+            }
         }
         let current_tick = self.current_tick;
         self.same_tick_owner_goto_tick
@@ -249,11 +260,12 @@ impl Ballpark {
                 }
 
                 let was_aligning = phase == WarpPhase::Aligning;
-                if phase == WarpPhase::Aligning && dt > 0.0 {
+                let align_step_ticks = whole_sim_secs.min(u32::MAX as u64) as u32;
+                if phase == WarpPhase::Aligning && align_step_ticks > 0 {
                     let align_ticks = warp_align_ticks
                         .entry(ball.id)
-                        .and_modify(|c| *c = c.saturating_add(1))
-                        .or_insert(1);
+                        .and_modify(|c| *c = c.saturating_add(align_step_ticks))
+                        .or_insert(align_step_ticks);
                     if *align_ticks >= FORCED_WARP_ALIGN_TICKS {
                         // Match V24 `_destiny.so` `Destiny::AlignForWarp` (`-effectStamp >= 181`):
                         // capitals/titans whose effective align exceeds 181s force-enter warp
@@ -352,7 +364,7 @@ impl Ballpark {
         self.step_collision_bumping_with_dynamics(&dynamic_ids, &pre_step_dynamic_balls, &positions, dt);
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
-        let elapsed_ticks = (dt.floor() as u32).max(1);
+        let elapsed_ticks = whole_sim_secs.min(u32::MAX as u64) as u32;
         let mut gate_decloaked = Vec::new();
         for (&id, cs) in &mut self.combat_states {
             cs.sync_action_breaks();
@@ -1797,4 +1809,56 @@ impl Ballpark {
 }
 
 #[cfg(test)] #[path = "physics_unit_tests.rs"] mod physics_unit_tests;
+
+#[cfg(test)]
+mod tick_accumulation_1169_tests {
+    use crate::{Ball, Ballpark, MovementMode};
+    use glam::DVec3;
+
+    #[test]
+    fn ballpark_step_advances_current_tick_only_per_whole_sim_second() {
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(Ball {
+            id: 42,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(100.0, 0.0, 0.0),
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection {
+                direction: DVec3::X,
+            },
+        });
+        let t0 = bp.current_tick;
+        for step_idx in 1..=9 {
+            let _ = bp.step(0.1);
+            assert_eq!(
+                bp.current_tick, t0,
+                "sub-1.0s step {step_idx}/9 must not increment Ballpark::current_tick (#1169)"
+            );
+        }
+        assert!(
+            bp.balls[&42].position.x > 80.0,
+            "sub-1.0s steps must still integrate continuous ship motion"
+        );
+        let _ = bp.step(0.1);
+        assert_eq!(
+            bp.current_tick,
+            t0 + 1,
+            "10th 0.1s step completes 1.0 sim second and advances current_tick by 1"
+        );
+        assert!(
+            (bp.balls[&42].position.x - 100.0).abs() < 1e-6,
+            "10 x 0.1s at 100 m/s must equal 100m total travel, got {}",
+            bp.balls[&42].position.x
+        );
+        let _ = bp.step(1.0);
+        assert_eq!(bp.current_tick, t0 + 2);
+        let _ = bp.step(2.0);
+        assert_eq!(bp.current_tick, t0 + 4);
+    }
+}
 

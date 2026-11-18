@@ -1231,6 +1231,21 @@ pub async fn execute_call_req_wire(
             })
         })
     });
+    if service == "beyonce" && method == "UpdateStateRequest" {
+        let stream_live = matches!(
+            wire.wire_state.destiny,
+            DestinyStream::Live { set_state_stamp, .. } if set_state_stamp > 0
+        );
+        if !stream_live {
+            if let Some(cid) = session.character_id {
+                crate::services::space_destiny::reset_update_state_rate_limit(
+                    ctx,
+                    session.session_id,
+                    cid,
+                );
+            }
+        }
+    }
     let rpc_res = crate::router::dispatch::with_active_rpc_call_id(
         call_id,
         ctx.dispatch_rpc(

@@ -10,6 +10,35 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+const UPDATE_STATE_COOLDOWN_TICKS: u64 = 5;
+const UPDATE_STATE_COOLDOWN_WALL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct ExplicitUpdateStateGuard {
+    sys_id: u32,
+    ship_id: i64,
+    last_push_tick: u64,
+    last_push_at: Instant,
+}
+
+fn explicit_update_state_guards(
+) -> &'static Mutex<HashMap<(usize, u64, i64), ExplicitUpdateStateGuard>> {
+    static GUARDS: OnceLock<Mutex<HashMap<(usize, u64, i64), ExplicitUpdateStateGuard>>> =
+        OnceLock::new();
+    GUARDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Clears any per-session `beyonce.UpdateStateRequest` cooldown for `(session_id, char_id)` so a
+/// lag-resync or re-attachment immediately delivers a fresh `SetState` snapshot (`#1169`).
+pub(crate) fn reset_update_state_rate_limit(ctx: &ServerContext, session_id: u64, char_id: i64) {
+    let key = (Arc::as_ptr(&ctx.db) as usize, session_id, char_id);
+    if let Ok(mut map) = explicit_update_state_guards().lock() {
+        map.remove(&key);
+    }
+}
 
 pub use eve_db::EssReservePulseState;
 
@@ -470,7 +499,7 @@ pub async fn handle(
             Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args, kwargs).await)
         }
         ("beyonce", "UpdateStateRequest") => {
-            Some(handle_update_state_request(ctx, session, bound_entry).await)
+            Some(handle_update_state_request_inner(ctx, session, bound_entry, true).await)
         }
         ("beyonce", "AdminGetBubbleID") => {
             Some(handle_admin_get_bubble_id(ctx, session, bound_entry, args).await)
@@ -788,6 +817,15 @@ pub(crate) async fn handle_update_state_request(
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
 ) -> Result<PyRep, BridgeRpcError> {
+    handle_update_state_request_inner(ctx, session, bound_entry, false).await
+}
+
+async fn handle_update_state_request_inner(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    is_explicit_rpc: bool,
+) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = match bound_entry {
         Some(_) => {
@@ -827,6 +865,7 @@ pub(crate) async fn handle_update_state_request(
     )
     .await;
     let handle = ctx.systems.get_or_spawn(sys_id);
+    let mut spawned_new_ball = false;
     let ship_ball = match handle
         .get_ball_snapshot(ship_id)
         .await
@@ -837,6 +876,7 @@ pub(crate) async fn handle_update_state_request(
         })? {
         Some((_, b)) => b,
         None => {
+            spawned_new_ball = true;
             let Some(ship_item) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned())
             else {
                 return Ok(PyRep::None);
@@ -905,6 +945,7 @@ pub(crate) async fn handle_update_state_request(
             ball
         }
     };
+    let mut did_warp_finish = false;
     if matches!(ship_ball.mode, MovementMode::Stop) {
         handle.clear_warp_provenance(ship_id);
         ctx.return_warps
@@ -923,6 +964,7 @@ pub(crate) async fn handle_update_state_request(
             .unwrap_or_else(|e| e.into_inner())
             .remove(&ship_id);
         if removed_active || removed_pending {
+            did_warp_finish = true;
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 OnWarpFinished {
@@ -941,6 +983,7 @@ pub(crate) async fn handle_update_state_request(
             .await;
         }
     }
+    let mut forced_stop_warp = false;
     if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
         let provenance = handle.warp_provenance(ship_id);
         let is_emergency_combat_state = handle
@@ -975,6 +1018,7 @@ pub(crate) async fn handle_update_state_request(
             // warp nor an active SP-6 reconnect return-warp; stop at current coordinates before `SetState`.
             let _ = handle.force_stop_warp(ship_id);
             clear_warp_tracking(ctx, Some(&handle), ship_id);
+            forced_stop_warp = true;
         }
     }
     if !ctx.db.with_snapshot(|s| s.dungeon_runtime.instances.is_empty()) {
@@ -982,14 +1026,62 @@ pub(crate) async fn handle_update_state_request(
     }
     crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
     crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id).await;
-    handle
-        .push_set_state(ship_id)
-        .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyQueryFailed".into(),
-            message: e,
-            client_error: None,
-        })?;
+    let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
+    let current_tick = handle
+        .ballpark
+        .read()
+        .ok()
+        .map(|b| b.current_tick)
+        .unwrap_or(0);
+    let guard_key = (Arc::as_ptr(&ctx.db) as usize, session.session_id, char_id);
+    let mut should_push_set_state = true;
+    if !is_explicit_rpc {
+        if let Ok(mut map) = explicit_update_state_guards().lock() {
+            map.remove(&guard_key);
+        }
+    } else {
+        let mut map = explicit_update_state_guards()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let force_bypass =
+            !was_bootstrapped || spawned_new_ball || forced_stop_warp || did_warp_finish;
+        let in_cooldown = !force_bypass
+            && map.get(&guard_key).copied().is_some_and(|prev| {
+                prev.sys_id == sys_id
+                    && prev.ship_id == ship_id
+                    && current_tick >= prev.last_push_tick
+                    && current_tick.saturating_sub(prev.last_push_tick)
+                        < UPDATE_STATE_COOLDOWN_TICKS
+                    && prev.last_push_at.elapsed() < UPDATE_STATE_COOLDOWN_WALL
+            });
+        if in_cooldown {
+            should_push_set_state = false;
+        } else {
+            if map.len() > 4_096 {
+                let now = Instant::now();
+                map.retain(|_, v| now.duration_since(v.last_push_at) < Duration::from_secs(600));
+            }
+            map.insert(
+                guard_key,
+                ExplicitUpdateStateGuard {
+                    sys_id,
+                    ship_id,
+                    last_push_tick: current_tick,
+                    last_push_at: Instant::now(),
+                },
+            );
+        }
+    }
+    if should_push_set_state {
+        handle
+            .push_set_state(ship_id)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+                client_error: None,
+            })?;
+    }
     ctx.mark_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
     Ok(PyRep::None)

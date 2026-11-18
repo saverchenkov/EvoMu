@@ -78,6 +78,7 @@ pub struct SessionWireState {
     flight_recorder: Option<Arc<FlightRecorder>>,
     guard: SequencerGuardState,
     synthetic_remove_floor: Option<(u32, u32)>,
+    last_wire_epoch_and_stamp: Option<(u32, u32)>,
 }
 
 impl SessionWireState {
@@ -94,6 +95,7 @@ impl SessionWireState {
             flight_recorder: None,
             guard: SequencerGuardState::default(),
             synthetic_remove_floor: None,
+            last_wire_epoch_and_stamp: None,
         }
     }
 
@@ -211,6 +213,7 @@ impl SessionWireState {
         self.materialized.clear();
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
+        self.last_wire_epoch_and_stamp = None;
         self.destiny = DestinyStream::AwaitingSetState { epoch: ep };
         ep
     }
@@ -234,6 +237,7 @@ impl SessionWireState {
         self.materialized.clear();
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
+        self.last_wire_epoch_and_stamp = None;
         self.destiny = DestinyStream::Detached;
     }
 
@@ -312,13 +316,18 @@ impl SessionWireState {
     /// `#845`, `#1077 §A`), enforcing strict per-epoch stamp monotonicity for non-`SetState` batches.
     pub fn accept_destiny_batch_with_reason(
         &mut self,
-        batch: DestinyBatch,
+        mut batch: DestinyBatch,
     ) -> AcceptDestinyOutcome {
         if batch.is_empty() {
             return AcceptDestinyOutcome::Empty;
         }
         let batch_epoch = batch.epoch;
         let batch_stamp = batch.stamp;
+        let prev_wire_stamp = self
+            .last_wire_epoch_and_stamp
+            .filter(|&(ep, _)| ep == batch_epoch)
+            .map(|(_, st)| st)
+            .unwrap_or(0);
         match self.destiny {
             DestinyStream::Detached => AcceptDestinyOutcome::Dropped {
                 epoch: batch_epoch,
@@ -341,11 +350,23 @@ impl SessionWireState {
                         reason: "awaiting_set_state".to_string(),
                     };
                 }
+                // Issue #1169: SetState must remain stamped at Ballpark::current_tick globally; if
+                // this single session's wire already emitted a higher stamp in this epoch (e.g. an
+                // FX-floored delta before broadcast lag resync), clamp only this session's wire
+                // SetState up to `prev_wire_stamp` so client monotonicity (`INV_MONOTONIC_STAMP`)
+                // holds without inflating `Ballpark::current_tick`.
+                let wire_stamp = if batch_stamp < prev_wire_stamp {
+                    restamp_batch_entries(&mut batch, prev_wire_stamp);
+                    prev_wire_stamp
+                } else {
+                    batch_stamp
+                };
                 self.destiny = DestinyStream::Live {
                     epoch,
-                    set_state_stamp: batch_stamp,
-                    last_stamp: batch_stamp,
+                    set_state_stamp: wire_stamp,
+                    last_stamp: wire_stamp,
                 };
+                self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
                 AcceptDestinyOutcome::Accepted(batch)
             }
             DestinyStream::Live {
@@ -361,12 +382,19 @@ impl SessionWireState {
                     };
                 }
                 if batch.has_set_state {
-                    let new_last = last_stamp.max(batch_stamp);
+                    let wire_floor = prev_wire_stamp.max(last_stamp).max(set_state_stamp);
+                    let wire_stamp = if batch_stamp < wire_floor {
+                        restamp_batch_entries(&mut batch, wire_floor);
+                        wire_floor
+                    } else {
+                        batch_stamp
+                    };
                     self.destiny = DestinyStream::Live {
                         epoch,
-                        set_state_stamp: batch_stamp,
-                        last_stamp: new_last,
+                        set_state_stamp: wire_stamp,
+                        last_stamp: wire_stamp,
                     };
+                    self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
                     AcceptDestinyOutcome::Accepted(batch)
                 } else {
                     let trusted_stamp = last_stamp.max(set_state_stamp);
@@ -396,6 +424,7 @@ impl SessionWireState {
                         set_state_stamp,
                         last_stamp: batch_stamp,
                     };
+                    self.last_wire_epoch_and_stamp = Some((epoch, batch_stamp));
                     AcceptDestinyOutcome::Accepted(batch)
                 }
             }
@@ -2684,5 +2713,78 @@ mod tests {
             vec![crate::sequencer_invariants::INV_REMOVE_AFTER_ADDBALLS]
         );
         assert_eq!(raw_wire.sequencer_counters().invariant_violations, 1);
+    }
+
+    #[test]
+    fn reattach_set_state_preserves_same_stamp_and_clamps_below_wire_floor() {
+        let fr = Arc::new(FlightRecorder::new());
+        let mut wire = SessionWireState::new(98_116_901, 9601).with_flight_recorder(Arc::clone(&fr));
+        wire.set_invariant_validator_mode(InvariantValidatorMode::RecordAndEmit);
+        let ep = wire.enter_space(Some(30_000_142));
+
+        let init = DestinyBatch::new(
+            ep,
+            40,
+            true,
+            named_update(40, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+        );
+        let init_frame = sequence_tick(&mut wire, init).expect("initial SetState accepted");
+        assert!(matches!(
+            init_frame,
+            OutFrame::DoDestinyUpdate { stamp: 40, has_set_state: true, .. }
+        ));
+
+        // Equal-stamp re-attachment SetState at current_tick (= 40) is accepted cleanly without bumping.
+        let same_tick_reattach = DestinyBatch::new(
+            ep,
+            40,
+            true,
+            named_update(40, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+        );
+        let reattach_frame =
+            sequence_tick(&mut wire, same_tick_reattach).expect("same-stamp SetState accepted");
+        assert!(matches!(
+            reattach_frame,
+            OutFrame::DoDestinyUpdate { stamp: 40, has_set_state: true, .. }
+        ));
+        assert_eq!(
+            wire.destiny,
+            DestinyStream::Live {
+                epoch: ep,
+                set_state_stamp: 40,
+                last_stamp: 40,
+            }
+        );
+
+        // Suppose an FX-floored delta bumped this wire's last emitted stamp to 43 while ballpark tick is 41.
+        let fx_delta = DestinyBatch::new(ep, 43, false, dummy_updates("OnSpecialFX", 43));
+        assert!(sequence_tick(&mut wire, fx_delta).is_some());
+
+        // Subsequent lag transition + SetState stamped at current_tick = 41 must clamp ONLY this session's
+        // SetState wire stamp up to 43 so INV_MONOTONIC_STAMP holds cleanly on the wire.
+        assert_eq!(wire.on_broadcast_lagged(), Some(ep));
+        let lag_resync = DestinyBatch::new(
+            ep,
+            41,
+            true,
+            named_update(41, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+        );
+        let (resync_frame, _) = sequence_tick_with_events(&mut wire, lag_resync);
+        match resync_frame.expect("lag resync SetState emitted") {
+            OutFrame::DoDestinyUpdate { stamp, has_set_state, .. } => {
+                assert!(has_set_state);
+                assert_eq!(stamp, 43);
+            }
+            other => panic!("expected DoDestinyUpdate, got {other:?}"),
+        }
+        assert_eq!(wire.sequencer_counters().invariant_violations, 0);
+        assert_eq!(
+            wire.destiny,
+            DestinyStream::Live {
+                epoch: ep,
+                set_state_stamp: 43,
+                last_stamp: 43,
+            }
+        );
     }
 }

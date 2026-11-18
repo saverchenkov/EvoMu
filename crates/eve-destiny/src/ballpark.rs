@@ -96,6 +96,7 @@ impl Ballpark {
             warp_align_ticks: BTreeMap::new(),
             ecm_jam_sources: BTreeMap::new(),
             zarzakh_tracking: BTreeMap::new(),
+            sim_tick_accum: 0.0,
         }
     }
 

@@ -1025,3 +1025,140 @@ async fn update_state_request_respects_warp_provenance_and_clears_landed_or_canc
             .any(|n| n.event == "OnWarpFinished")
     );
 }
+
+#[tokio::test]
+async fn live_update_state_request_spam_does_not_bump_tick_or_jolt_peers_1169() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_a = 95_001_i64;
+    let ship_a = 89_501_i64;
+    let char_b = 95_002_i64;
+    let ship_b = 89_502_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let seed_char = snap.characters.values().next().cloned().expect("seed char");
+        for (cid, sid) in [(char_a, ship_a), (char_b, ship_b)] {
+            let mut ch = seed_char.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("Pilot-{cid}");
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+            put_item(
+                snap,
+                Some(sid),
+                588,
+                cid,
+                i64::from(sys_id),
+                InventoryFlag::None,
+                1,
+                true,
+            );
+            snap.item_positions.insert(sid, [0.0, 0.0, 0.0]);
+        }
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(ship_a, 588, DVec3::ZERO))
+        .await;
+    let _ = sys_h
+        .spawn_ball(test_ship_ball(ship_b, 588, DVec3::new(2_000.0, 0.0, 0.0)))
+        .await;
+    let mut sys_rx = sys_h.subscribe();
+
+    let mut sess_a = make_session(char_a, 98_000_001, Some(sys_id), Some(ship_a), 0);
+    sess_a.session_id = 95_001;
+    sess_a.user_id = Some(char_a as u64);
+    let bound = bound_sys(sys_id);
+    let kw = HashMap::new();
+
+    // Initial bootstrap + SetState drain moves stream to Live.
+    handle(
+        &ctx,
+        &mut sess_a,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (init_tick, init_evs, _) = sys_h.drain_observer_updates(ship_a).await.unwrap();
+    assert!(
+        init_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "initial UpdateStateRequest must emit SetState"
+    );
+    let _ = sys_h.drain_observer_updates(ship_b).await.unwrap();
+    while sys_rx.try_recv().is_ok() {}
+
+    let tick_before = sys_h.ballpark.read().unwrap().current_tick;
+    assert_eq!(init_tick, tick_before);
+
+    // 20 consecutive UpdateStateRequest calls without a physics step MUST leave ballpark.current_tick
+    // unchanged, coalesce redundant SetState pushes, and emit zero future-lead broadcasts/jolts to peers.
+    for _ in 0..20 {
+        let rsp = handle(
+            &ctx,
+            &mut sess_a,
+            Some(&bound),
+            "beyonce",
+            "UpdateStateRequest",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("UpdateStateRequest ok");
+        assert_eq!(rsp, PyRep::None);
+
+        let (drain_tick, drain_evs, _) = sys_h.drain_observer_updates(ship_a).await.unwrap();
+        assert_eq!(drain_tick, tick_before, "drain must not advance ballpark.current_tick");
+        assert!(
+            drain_evs.is_empty(),
+            "consecutive Live UpdateStateRequest calls must be rate-limited/coalesced"
+        );
+    }
+
+    assert_eq!(sys_h.ballpark.read().unwrap().current_tick, tick_before);
+    assert!(
+        sys_rx.try_recv().is_err(),
+        "UpdateStateRequest bursts must emit zero peer TickBroadcast jolts"
+    );
+    let (peer_tick, peer_evs, _) = sys_h.drain_observer_updates(ship_b).await.unwrap();
+    assert_eq!(peer_tick, tick_before);
+    assert!(
+        peer_evs.is_empty(),
+        "peer observer queue must stay clean across UpdateStateRequest bursts"
+    );
+
+    // Lag recovery (`reset_update_state_rate_limit`) re-allows SetState cleanly at `tick_before`.
+    reset_update_state_rate_limit(&ctx, sess_a.session_id, char_a);
+    handle(
+        &ctx,
+        &mut sess_a,
+        Some(&bound),
+        "beyonce",
+        "UpdateStateRequest",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (lag_tick, lag_evs, _) = sys_h.drain_observer_updates(ship_a).await.unwrap();
+    assert_eq!(lag_tick, tick_before);
+    assert!(
+        lag_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "lag reset must permit immediate resync SetState at current_tick"
+    );
+}

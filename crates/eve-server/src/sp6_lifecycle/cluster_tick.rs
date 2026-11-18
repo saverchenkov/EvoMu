@@ -2096,19 +2096,17 @@ pub fn clamp_physics_ticker_backlog(raw_elapsed_secs: u64) -> u64 {
 }
 
 /// Accumulates wall-clock ticker elapsed time while preserving sub-second remainders across
-/// slight >1 s jitter (`#1207`), returning `(clamped_steps, next_remainder)`.
+/// all wakes (both sub-1 s wakeups and multi-second overruns) (`#1207`, `#1169`), returning
+/// `(clamped_steps, next_remainder)`. Returns `0` steps when `< 1 s` total has elapsed so the
+/// caller waits for a full simulated second while retaining the fractional remainder.
 pub fn accumulate_physics_ticker_steps(
     raw_elapsed: std::time::Duration,
     subsec_remainder: std::time::Duration,
 ) -> (u64, std::time::Duration) {
     let total = raw_elapsed.saturating_add(subsec_remainder);
     let full_secs = total.as_secs();
-    let next_remainder = if full_secs == 0 || full_secs > MAX_PHYSICS_BACKLOG_STEPS {
-        std::time::Duration::ZERO
-    } else {
-        total.saturating_sub(std::time::Duration::from_secs(full_secs))
-    };
-    (clamp_physics_ticker_backlog(full_secs), next_remainder)
+    let next_remainder = total.saturating_sub(std::time::Duration::from_secs(full_secs));
+    (full_secs.min(MAX_PHYSICS_BACKLOG_STEPS), next_remainder)
 }
 
 /// Computes effective TiDi autoscaler lateness (ms overrun past the 1,000 ms tick window) from
@@ -2296,17 +2294,133 @@ pub async fn step_active_systems_physics_tick_with_budget(
     .await;
 }
 
+const FILETIME_TICKS_PER_SEC: i64 = 10_000_000;
+
+/// Reconciles multi-second physics ticker overruns (`raw_steps > MAX_PHYSICS_BACKLOG_STEPS`) by
+/// shifting system sim-clock anchors backward by the skipped simulation time and emitting
+/// `DoSimClockRebase` to online in-space pilots so client clocks do not run ahead of `Ballpark`
+/// stamps (`#1169`, `#1149`).
+fn reconcile_physics_overrun_sim_clock(
+    ctx: &ServerContext,
+    stepped_systems: &[(SolarSystemId, crate::system_actor::SystemHandle)],
+    skipped_wall_secs: u64,
+) {
+    if skipped_wall_secs == 0 || stepped_systems.is_empty() {
+        return;
+    }
+    let system_tidi: std::collections::HashMap<SolarSystemId, f64> = stepped_systems
+        .iter()
+        .map(|(sys_id, handle)| (*sys_id, handle.tidi_factor().clamp(0.10, 1.0)))
+        .collect();
+
+    let mut online_chars_by_sys: std::collections::HashMap<SolarSystemId, Vec<i64>> =
+        std::collections::HashMap::new();
+    let candidates: Vec<(SolarSystemId, i64, u64)> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| {
+                system_tidi.contains_key(&c.solar_system_id)
+                    && c.station_id.is_none()
+                    && c.structure_id.is_none()
+            })
+            .map(|c| (c.solar_system_id, c.character_id, c.user_id))
+            .collect()
+    });
+    for (sys_id, char_id, user_id) in candidates {
+        if ctx.is_character_online(char_id, user_id) {
+            online_chars_by_sys.entry(sys_id).or_default().push(char_id);
+        }
+    }
+    if online_chars_by_sys.is_empty() {
+        return;
+    }
+    for chars in online_chars_by_sys.values_mut() {
+        chars.sort_unstable();
+        chars.dedup();
+    }
+
+    let now_wall_ft = ctx.now_machonet_wallclock_filetime_ticks();
+    let mut rebases_to_emit: Vec<(i64, i64, i64)> = Vec::new();
+    {
+        let mut cn = ctx
+            .systems
+            .cluster_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for (sys_id, chars) in online_chars_by_sys {
+            let tidi = system_tidi.get(&sys_id).copied().unwrap_or(1.0);
+            let (old_ft, new_ft, eff_factor) =
+                if let Some(&(anchor_wall_ft, anchor_sim_ft, prev_factor)) =
+                    cn.sim_clock_anchoring.get(&sys_id)
+                {
+                    let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft).max(0);
+                    let eff = prev_factor.clamp(0.10, 1.0);
+                    let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * eff).round() as i64;
+                    let skipped_sim_ft =
+                        ((skipped_wall_secs as f64) * (FILETIME_TICKS_PER_SEC as f64) * eff)
+                            .round() as i64;
+                    let old_ft = anchor_sim_ft.saturating_add(elapsed_wall_ft);
+                    let new_ft = anchor_sim_ft
+                        .saturating_add(dilated_elapsed_ft)
+                        .saturating_sub(skipped_sim_ft)
+                        .min(old_ft);
+                    (old_ft, new_ft, eff)
+                } else {
+                    let skipped_sim_ft =
+                        ((skipped_wall_secs as f64) * (FILETIME_TICKS_PER_SEC as f64) * tidi)
+                            .round() as i64;
+                    (now_wall_ft, now_wall_ft.saturating_sub(skipped_sim_ft), tidi)
+                };
+            if new_ft >= old_ft {
+                continue;
+            }
+            cn.sim_clock_anchoring
+                .insert(sys_id, (now_wall_ft, new_ft, eff_factor));
+            let gen = cn.rebase_generation_by_system.entry(sys_id).or_insert(0);
+            *gen = gen.saturating_add(1);
+            let gen_val = *gen;
+            let prev_act = cn
+                .last_sim_activation_ft_by_system
+                .get(&sys_id)
+                .copied()
+                .unwrap_or(0);
+            cn.last_sim_activation_ft_by_system
+                .insert(sys_id, new_ft.max(prev_act));
+            for char_id in chars {
+                cn.char_rebased_system_gen.insert(char_id, (sys_id, gen_val));
+                rebases_to_emit.push((char_id, old_ft, new_ft));
+            }
+        }
+    }
+
+    for (char_id, old_ft, new_ft) in rebases_to_emit {
+        ctx.emit_typed_with_id_type(
+            NotificationTarget::Character(char_id),
+            "solarsystemid2",
+            crate::router::notify_registry::DoSimClockRebase {
+                times: eve_proto::PyRep::Tuple(vec![
+                    eve_proto::PyRep::Integer(old_ft),
+                    eve_proto::PyRep::Integer(new_ft),
+                ]),
+            },
+        );
+    }
+}
+
 async fn step_active_systems_physics_tick_inner(
     ctx: &ServerContext,
     elapsed_secs: u64,
     cadence_lateness_ms: f64,
     wait_budget: Option<std::time::Duration>,
 ) {
+    if elapsed_secs == 0 {
+        return;
+    }
     let now_unix = ctx.now_unix();
     let mult = ctx.time_acceleration_multiplier();
-    let steps = elapsed_secs
-        .saturating_mul(mult)
-        .clamp(1, MAX_PHYSICS_BACKLOG_STEPS);
+    let raw_steps = elapsed_secs.saturating_mul(mult);
+    let steps = raw_steps.clamp(1, MAX_PHYSICS_BACKLOG_STEPS);
+    let skipped_steps = raw_steps.saturating_sub(MAX_PHYSICS_BACKLOG_STEPS);
     let active_handles = ctx.systems.active_system_handles();
     if active_handles.is_empty() {
         return;
@@ -2325,6 +2439,10 @@ async fn step_active_systems_physics_tick_inner(
         }
         active_to_step.push((sys_id, handle));
     }
+    if active_to_step.is_empty() {
+        return;
+    }
+    let stepped_systems = active_to_step.clone();
     if active_to_step.len() <= 1 && wait_budget.is_none() {
         for (sys_id, handle) in active_to_step {
             let Some(_step_guard) = ctx.systems.try_begin_physics_step(sys_id) else {
@@ -2334,11 +2452,16 @@ async fn step_active_systems_physics_tick_inner(
                 if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                     continue;
                 }
+                let step_lateness_ms = if step_idx == 0 {
+                    cadence_lateness_ms
+                } else {
+                    0.0
+                };
                 step_single_system_physics_step_with_lateness(
                     ctx,
                     sys_id,
                     &handle,
-                    cadence_lateness_ms,
+                    step_lateness_ms,
                 )
                 .await;
             }
@@ -2359,11 +2482,16 @@ async fn step_active_systems_physics_tick_inner(
                     if step_idx == 0 && handle.take_auto_stepped_at(now_unix) {
                         continue;
                     }
+                    let step_lateness_ms = if step_idx == 0 {
+                        cadence_lateness_ms
+                    } else {
+                        0.0
+                    };
                     step_single_system_physics_step_with_lateness(
                         &ctx_cloned,
                         sys_id,
                         &handle,
-                        cadence_lateness_ms,
+                        step_lateness_ms,
                     )
                     .await;
                 }
@@ -2371,28 +2499,31 @@ async fn step_active_systems_physics_tick_inner(
             });
         }
         drop(done_tx);
-        if launched == 0 {
-            return;
-        }
-        let wait_all = async {
-            let mut remaining = launched;
-            while remaining > 0 {
-                if done_rx.recv().await.is_none() {
-                    break;
+        if launched > 0 {
+            let wait_all = async {
+                let mut remaining = launched;
+                while remaining > 0 {
+                    if done_rx.recv().await.is_none() {
+                        break;
+                    }
+                    remaining -= 1;
                 }
-                remaining -= 1;
+            };
+            if let Some(budget) = wait_budget {
+                if tokio::time::timeout(budget, wait_all).await.is_err() {
+                    tracing::debug!(
+                        budget_ms = budget.as_millis() as u64,
+                        "Physics tick wait budget reached; slow systems continue in background (#1208)"
+                    );
+                }
+            } else {
+                wait_all.await;
             }
-        };
-        if let Some(budget) = wait_budget {
-            if tokio::time::timeout(budget, wait_all).await.is_err() {
-                tracing::debug!(
-                    budget_ms = budget.as_millis() as u64,
-                    "Physics tick wait budget reached; slow systems continue in background (#1208)"
-                );
-            }
-        } else {
-            wait_all.await;
         }
+    }
+    if skipped_steps > 0 {
+        let skipped_wall_secs = skipped_steps / mult.max(1);
+        reconcile_physics_overrun_sim_clock(ctx, &stepped_systems, skipped_wall_secs);
     }
 }
 

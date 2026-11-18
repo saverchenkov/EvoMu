@@ -5189,3 +5189,153 @@ async fn wave3_targeted_system_actor_ewar_missile_and_social_edges() {
             .any(|m| m.missile_ball_id == missile_kill_id && m.impacted)
     );
 }
+
+#[tokio::test]
+async fn property_interleaved_drains_and_steps_preserve_tick_step_invariant_1169() {
+    let ctx = test_ctx();
+    let mut seed: u64 = 0x1169_CAFE_BABE_0001;
+    let mut next_u64 = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    for trace in 0..8 {
+        let sys_id = 30_000_142_u32 + trace;
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        let ship_id = 91_000_i64 + i64::from(trace);
+        let _ = sys
+            .spawn_ball(Ball {
+                id: ship_id,
+                type_id: 588,
+                position: DVec3::ZERO,
+                velocity: DVec3::new(100.0, 0.0, 0.0),
+                max_velocity: 100.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: MovementMode::GotoDirection { direction: DVec3::X },
+            })
+            .await;
+        let tidi_choices = [1.0_f64, 0.5, 0.25, 0.10];
+        let tidi = tidi_choices[(next_u64() as usize) % tidi_choices.len()];
+        sys.set_tidi_factor_raw(tidi);
+
+        let initial_tick = sys.ballpark.read().unwrap().current_tick;
+        let mut completed_sim_second_steps = 0_u64;
+        let mut sim_accum = 0.0_f64;
+
+        for _ in 0..45 {
+            match next_u64() % 4 {
+                0 => {
+                    let _ = sys.push_set_state(ship_id).await;
+                }
+                1 => {
+                    let (t, _, _) = sys.drain_observer_updates(ship_id).await.unwrap();
+                    assert_eq!(
+                        t,
+                        initial_tick + completed_sim_second_steps,
+                        "drain_observer_updates must never advance current_tick"
+                    );
+                }
+                2 => {
+                    let (t, _, _, _) = sys.drain_observer_updates_with_seq(ship_id).await.unwrap();
+                    assert_eq!(
+                        t,
+                        initial_tick + completed_sim_second_steps,
+                        "drain_observer_updates_with_seq must never advance current_tick"
+                    );
+                }
+                _ => {
+                    let wall_choices = [0.2_f64, 0.5, 1.0, 2.0];
+                    let wall_dt = wall_choices[(next_u64() as usize) % wall_choices.len()];
+                    sim_accum += wall_dt * tidi;
+                    if sim_accum >= 1.0 - 1e-9 {
+                        let steps = (sim_accum + 1e-9).floor().max(0.0) as u64;
+                        sim_accum = (sim_accum - (steps as f64)).max(0.0);
+                        completed_sim_second_steps += steps;
+                    }
+                    let tb = sys.step_manual(wall_dt).await.unwrap();
+                    assert_eq!(
+                        tb.tick,
+                        initial_tick + completed_sim_second_steps,
+                        "TickBroadcast tick must equal initial_tick + completed_sim_second_steps"
+                    );
+                }
+            }
+            let cur_tick = sys.ballpark.read().unwrap().current_tick;
+            assert_eq!(
+                cur_tick,
+                initial_tick + completed_sim_second_steps,
+                "Ballpark::current_tick invariant broken (tidi={tidi})"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn tidi_10_percent_10s_wallclock_advances_1_tick_and_1s_travel_1169() {
+    let ctx = test_ctx();
+    let ship_1x_id = 92_001_i64;
+    let ship_tidi_id = 92_002_i64;
+    let sys_1x = ctx.systems.get_or_spawn(30_000_142);
+    let sys_tidi = ctx.systems.get_or_spawn(30_000_143);
+
+    let make_cruising_ship = |id: i64| Ball {
+        id,
+        type_id: 588,
+        position: DVec3::ZERO,
+        velocity: DVec3::new(150.0, 0.0, 0.0),
+        max_velocity: 150.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::GotoDirection { direction: DVec3::X },
+    };
+    let _ = sys_1x.spawn_ball(make_cruising_ship(ship_1x_id)).await;
+    let _ = sys_tidi.spawn_ball(make_cruising_ship(ship_tidi_id)).await;
+
+    let tick_1x_0 = sys_1x.ballpark.read().unwrap().current_tick;
+    let tb_1x = sys_1x.step_manual(1.0).await.unwrap();
+    let (_, pos_1x_after) = sys_1x.get_ball_snapshot(ship_1x_id).await.unwrap().unwrap();
+    assert_eq!(tb_1x.tick, tick_1x_0 + 1);
+    assert!(pos_1x_after.position.x > 100.0, "ship should cruise along +X");
+
+    sys_tidi.set_tidi_factor_raw(0.10);
+    let tick_tidi_0 = sys_tidi.ballpark.read().unwrap().current_tick;
+    for wall_sec in 1..=9 {
+        let tb = sys_tidi.step_manual(1.0).await.unwrap();
+        assert_eq!(
+            tb.tick, tick_tidi_0,
+            "wall second {wall_sec}/10 under 10% TiDi must not emit an early full tick stamp"
+        );
+        assert_eq!(
+            sys_tidi.ballpark.read().unwrap().current_tick,
+            tick_tidi_0
+        );
+    }
+    let tb_tenth = sys_tidi.step_manual(1.0).await.unwrap();
+    let (_, pos_tidi_after) = sys_tidi
+        .get_ball_snapshot(ship_tidi_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tb_tenth.tick,
+        tick_tidi_0 + 1,
+        "10s of wall-clock under tidi=0.10 must advance current_tick by exactly 1"
+    );
+    assert_eq!(
+        sys_tidi.ballpark.read().unwrap().current_tick,
+        tick_tidi_0 + 1
+    );
+    assert!(
+        (pos_tidi_after.position.x - pos_1x_after.position.x).abs() < 1e-6,
+        "1.0s simulated travel under 10% TiDi ({}) must match 1.0x single-step travel ({})",
+        pos_tidi_after.position.x,
+        pos_1x_after.position.x
+    );
+}

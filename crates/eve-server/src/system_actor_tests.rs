@@ -749,9 +749,10 @@ async fn issue_803_drain_observer_updates_increments_tick_on_set_state() {
     assert!(events
         .iter()
         .any(|ev| matches!(ev, DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == capsule_id)));
-    assert!(
-        tick_set_state > tick_before,
-        "SetState drain must advance ballpark tick ({tick_set_state} > {tick_before}) to prevent Park.FlushState stamp collision"
+    assert_eq!(
+        tick_set_state,
+        tick_before,
+        "SetState drain must stamp at current_tick without inflating ballpark tick (#1169)"
     );
 }
 

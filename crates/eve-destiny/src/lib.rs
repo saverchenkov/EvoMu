@@ -1460,6 +1460,9 @@ pub struct Ballpark {
     /// Per-ball Zarzakh gravity-hazard exposure state (`#1331`, `D-6`).
     #[serde(default)]
     pub zarzakh_tracking: BTreeMap<BallId, ZarzakhExposureState>,
+    /// Fractional simulation seconds accumulated since the last `current_tick` increment (`#1169`).
+    #[serde(skip, default)]
+    pub sim_tick_accum: f64,
 }
 
 /// Per-ball Zarzakh Jovian gravity-hazard exposure timer stored directly on [`Ballpark`] (`#1331`, `D-6`).

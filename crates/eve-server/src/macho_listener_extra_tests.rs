@@ -1645,13 +1645,21 @@ async fn test_1172_step_n_tick_broadcast_delivers_before_peer_set_state_n_plus_1
         "Step N TickBroadcast must carry AddBalls2({entity_x}) for ego observer"
     );
 
-    // 2. Peer B drains SetState while ego's sys_rx still holds TickBroadcast(N), bumping tick to N + 1.
+    // 2. Peer B drains SetState while ego's sys_rx still holds TickBroadcast(N); SetState must
+    //    preserve `ballpark.current_tick == N` (#1169), then advancing Step N + 1 precedes ego's RPC drain.
     sys_handle.push_set_state(peer_ship).await.unwrap();
-    let (tick_np1, _, _) = sys_handle.drain_observer_updates(peer_ship).await.unwrap();
+    let (tick_peer_drain, _, _) = sys_handle.drain_observer_updates(peer_ship).await.unwrap();
+    assert_eq!(
+        tick_peer_drain,
+        step_n.tick,
+        "peer SetState drain must not inflate ballpark current_tick (#1169)"
+    );
+    let step_np1 = sys_handle.step_manual(1.0).await.unwrap();
+    let tick_np1 = step_np1.tick;
     assert_eq!(
         tick_np1,
         step_n.tick + 1,
-        "peer SetState drain must bump ballpark tick from N to N + 1"
+        "1.0s physics step must advance ballpark tick from N to N + 1"
     );
 
     // 3. Ego executes an RPC (CmdSetSpeedFraction) which calls drain_observer_updates_with_seq at
