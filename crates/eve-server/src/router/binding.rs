@@ -1558,53 +1558,90 @@ impl ServerContext {
     ) -> Result<eve_proto::PyRep, BridgeRpcError> {
         use eve_proto::{DBRowDescriptor, PyRep};
 
-        let (owner_id, loc_id, group_id, category_id, rows) = self.db.with_snapshot(|snap| {
-            let Some(container) = snap.items.get(&container_id) else {
-                return Err(BridgeRpcError {
-                    code: "ItemNotFound".into(),
-                    message: format!("Container item {container_id} not found"),
-                    client_error: None,
-                });
-            };
-            let (grp, cat) = self
-                .sde
-                .types
-                .get(&container.type_id)
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((0, 0));
-            let rows: Vec<Vec<PyRep>> = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == container_id)
-                .map(|i| {
-                    let (g, c) = self
-                        .sde
-                        .types
-                        .get(&i.type_id)
-                        .map(|t| (t.group_id as i64, t.category_id as i64))
-                        .unwrap_or((0, 0));
-                    let qty = if i.is_blueprint_copy {
-                        -2
-                    } else if i.singleton {
-                        -1
-                    } else {
-                        i.quantity as i64
-                    };
-                    vec![
-                        PyRep::Integer(i.item_id),
-                        PyRep::Integer(i.type_id as i64),
-                        PyRep::Integer(i.owner_id),
-                        PyRep::Integer(i.location_id),
-                        PyRep::Integer(i.flag as i64),
-                        PyRep::Integer(qty),
-                        PyRep::Integer(g),
-                        PyRep::Integer(c),
-                        PyRep::String(String::new()),
-                    ]
-                })
-                .collect();
-            Ok((container.owner_id, container.location_id, grp, cat, rows))
-        })?;
+        let (owner_id, loc_id, group_id, category_id, owned_docked_or_ship_rooted, rows) =
+            self.db.with_snapshot(|snap| {
+                let Some(container) = snap.items.get(&container_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Container item {container_id} not found"),
+                        client_error: None,
+                    });
+                };
+                let (grp, cat) = self
+                    .sde
+                    .types
+                    .get(&container.type_id)
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((0, 0));
+                let mut owned_docked_or_ship_rooted = session.ship_id == Some(container_id);
+                if !owned_docked_or_ship_rooted && container.owner_id == char_id {
+                    let mut cur = container.location_id;
+                    for _ in 0..8 {
+                        if cur == container_id {
+                            break;
+                        }
+                        if session.station_id == Some(cur)
+                            || session.structure_id == Some(cur)
+                            || session.ship_id == Some(cur)
+                            || self.sde.stations.contains_key(&cur)
+                            || snap
+                                .structures
+                                .get(&cur)
+                                .is_some_and(|st| st.state != "Destroyed")
+                        {
+                            owned_docked_or_ship_rooted = true;
+                            break;
+                        }
+                        let Some(parent) = snap.items.get(&cur) else {
+                            break;
+                        };
+                        if parent.owner_id != char_id {
+                            // Never traverse through a foreign ship/container ancestor (#1290).
+                            break;
+                        }
+                        cur = parent.location_id;
+                    }
+                }
+                let rows: Vec<Vec<PyRep>> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == container_id)
+                    .map(|i| {
+                        let (g, c) = self
+                            .sde
+                            .types
+                            .get(&i.type_id)
+                            .map(|t| (t.group_id as i64, t.category_id as i64))
+                            .unwrap_or((0, 0));
+                        let qty = if i.is_blueprint_copy {
+                            -2
+                        } else if i.singleton {
+                            -1
+                        } else {
+                            i.quantity as i64
+                        };
+                        vec![
+                            PyRep::Integer(i.item_id),
+                            PyRep::Integer(i.type_id as i64),
+                            PyRep::Integer(i.owner_id),
+                            PyRep::Integer(i.location_id),
+                            PyRep::Integer(i.flag as i64),
+                            PyRep::Integer(qty),
+                            PyRep::Integer(g),
+                            PyRep::Integer(c),
+                            PyRep::String(String::new()),
+                        ]
+                    })
+                    .collect();
+                Ok((
+                    container.owner_id,
+                    container.location_id,
+                    grp,
+                    cat,
+                    owned_docked_or_ship_rooted,
+                    rows,
+                ))
+            })?;
 
         let deny = || BridgeRpcError {
             code: "CantDoThatWithSomeoneElsesStuff".into(),
@@ -1613,17 +1650,18 @@ impl ServerContext {
         };
 
         if let Some(b) = bound_entry {
-            if b.object_id != container_id && b.object_id != loc_id {
+            let bound_is_session_mgr = b.service == "invbroker"
+                && (session.station_id == Some(b.object_id)
+                    || session.structure_id == Some(b.object_id)
+                    || (session.station_id.is_none()
+                        && session.solar_system_id.map(i64::from) == Some(b.object_id)));
+            if b.object_id != container_id && b.object_id != loc_id && !bound_is_session_mgr {
                 return Err(deny());
             }
         }
 
         if owner_id == char_id {
-            let co_located_docked_or_ship = session.ship_id == Some(container_id)
-                || session.station_id == Some(loc_id)
-                || session.structure_id == Some(loc_id)
-                || session.ship_id == Some(loc_id);
-            if !co_located_docked_or_ship {
+            if !owned_docked_or_ship_rooted {
                 let Some(sys_id) = u32::try_from(loc_id).ok().filter(|s| {
                     session.station_id.is_none()
                         && session.structure_id.is_none()

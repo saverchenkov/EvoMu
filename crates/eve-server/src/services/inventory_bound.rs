@@ -222,10 +222,16 @@ pub fn handle(
             let is_structure = ctx
                 .db
                 .with_snapshot(|snap| snap.structures.contains_key(&item_id));
+            let is_station = ctx.sde.stations.contains_key(&item_id);
+            let solar_system_id_opt = u32::try_from(item_id)
+                .ok()
+                .filter(|sid| ctx.sde.solar_systems.contains_key(sid));
             let item_exists = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
                 || is_structure
+                || is_station
+                || solar_system_id_opt.is_some()
                 || ctx.db.with_snapshot(|snap| snap.items.contains_key(&item_id));
             if !item_exists {
                 return Some(Err(BridgeRpcError::user_error("FakeItemNotFound")));
@@ -260,9 +266,16 @@ pub fn handle(
             } else {
                 None
             };
+            let station_accessible =
+                is_station && session.station_id == Some(item_id) && at_location;
+            let solar_system_accessible = session.station_id.is_none()
+                && solar_system_id_opt.is_some_and(|sid| session.solar_system_id == Some(sid))
+                && at_location;
             let accessible = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
+                || station_accessible
+                || solar_system_accessible
                 || ctx.db.with_snapshot(|snap| {
                     if let Some(st) = snap.structures.get(&item_id) {
                         let is_corp_owned = session
@@ -659,6 +672,32 @@ fn self_inv_item(
                 PyRep::Integer(group_id),
                 PyRep::Integer(category_id),
                 PyRep::String(st.name.clone()),
+            ]));
+        }
+    }
+    if let Some(sid) = u32::try_from(object_id).ok().filter(|sid| {
+        (session.station_id.is_none() && session.solar_system_id == Some(*sid))
+            || allow_departed_location
+    }) {
+        if let Some(sys) = ctx.sde.solar_systems.get(&sid) {
+            let (group_id, category_id) = ctx
+                .sde
+                .types
+                .get(&5)
+                .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+                .unwrap_or((5, 2));
+            // DERIVED: Solar systems are static SDE celestials (`typeID = 5`, `groupID = 5`,
+            // `categoryID = 2`) located in their constellation with `ownerID = 1` (`ownerSystem`).
+            return Ok(header.build_dbrow(vec![
+                PyRep::Integer(i64::from(sys.solar_system_id)),
+                PyRep::Integer(5),
+                PyRep::Integer(1),
+                PyRep::Integer(i64::from(sys.constellation_id)),
+                PyRep::Integer(0),
+                PyRep::Integer(-1),
+                PyRep::Integer(group_id),
+                PyRep::Integer(category_id),
+                PyRep::String(sys.name.clone()),
             ]));
         }
     }
@@ -1628,7 +1667,7 @@ pub(crate) fn is_inventory_location_colocated(
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
     start_loc: i64,
 ) -> bool {
-    is_inventory_location_colocated_impl(None, snap, session, ch, pre_balls, start_loc, true)
+    is_inventory_location_colocated_impl(None, snap, session, ch, pre_balls, start_loc, true, false)
 }
 
 /// Strict SDE-aware variant of [`is_inventory_location_colocated`] for `invbroker.Add` / `MultiAdd`:
@@ -1651,9 +1690,37 @@ pub(crate) fn is_inventory_location_colocated_with_sde(
         pre_balls,
         start_loc,
         allow_system_root,
+        false,
     )
 }
 
+/// Source-looting variant of [`is_inventory_location_colocated_with_sde`] for `MultiAdd` that also allows
+/// in-space jetcans/wrecks (`type_id 23` or group `186 | 1247 | 1250`) inserted without a `Ball` when the
+/// caller's ship is spawned in space, while still enforcing `<= 2_500m` whenever coordinates exist.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn is_inventory_source_location_colocated_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+    start_loc: i64,
+    allow_system_root: bool,
+    allow_unpositioned_loot_can: bool,
+) -> bool {
+    is_inventory_location_colocated_impl(
+        Some(sde),
+        snap,
+        session,
+        ch,
+        pre_balls,
+        start_loc,
+        allow_system_root,
+        allow_unpositioned_loot_can,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn is_inventory_location_colocated_impl(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     snap: &eve_db::WorldStateSnapshot,
@@ -1662,6 +1729,7 @@ fn is_inventory_location_colocated_impl(
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
     start_loc: i64,
     allow_system_root: bool,
+    allow_unpositioned_loot_can: bool,
 ) -> bool {
     let ch_dock = if session.station_id.is_none()
         && session.structure_id.is_none()
@@ -1748,12 +1816,15 @@ fn is_inventory_location_colocated_impl(
                     .map(|p| p.0)
                     .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from));
                 let target_r = radius_for(cur);
-                let is_starbase_unit = sde_opt.is_some_and(|sde| {
-                    sde.types.get(&node.type_id).is_some_and(|t| t.category_id == 22)
-                });
+                let node_type = sde_opt.and_then(|sde| sde.types.get(&node.type_id));
+                let is_starbase_unit = node_type.is_some_and(|t| t.category_id == 22);
+                let is_unanchored_loot_can = allow_unpositioned_loot_can
+                    && (node.type_id == 23
+                        || node_type.is_some_and(|t| matches!(t.group_id, 186 | 1247 | 1250)));
                 let max_range = if is_starbase_unit { 5_000.0 } else { 2_500.0 };
                 return match (caller_pos, target_pos) {
                     (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= max_range,
+                    (Some(_), None) if is_unanchored_loot_can => true,
                     _ => false,
                 };
             }

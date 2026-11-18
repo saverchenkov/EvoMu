@@ -1373,9 +1373,12 @@ pub(super) async fn handle_get_container_contents(
             client_error: None,
         });
     };
+    // V24.02 sends `(containerID, locationID, password)` (`args[2]` is password, while legacy callers
+    // may pass `"password"` in kwargs or `(containerID, password)` in 2-arg form).
     let supplied_pw = kwargs
         .get("password")
         .and_then(|v| v.as_str())
+        .or_else(|| args.get(2).and_then(|a| a.as_str()))
         .or_else(|| args.get(1).and_then(|a| a.as_str()));
     crate::services::pve_crab_beacons::check_crab_loot_access(
         ctx,
@@ -2201,8 +2204,17 @@ fn validate_multi_add_in_snap(
                 client_error: None,
             });
         }
-        if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated_with_sde(
-            &ctx.sde, snap, session, ch, pre_balls, item.location_id, false,
+        let allow_unpos_can = looted_from_space_ids.contains(&item_id)
+            || snap.items.get(&item.location_id).is_some_and(|p| {
+                p.type_id == 23
+                    || ctx
+                        .sde
+                        .types
+                        .get(&p.type_id)
+                        .is_some_and(|t| matches!(t.group_id, 186 | 1247 | 1250))
+            });
+        if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_source_location_colocated_with_sde(
+            &ctx.sde, snap, session, ch, pre_balls, item.location_id, false, allow_unpos_can,
         ) {
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
