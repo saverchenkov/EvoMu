@@ -448,7 +448,14 @@ pub async fn handle_legacy_and_ess(
                     .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
                     .copied()
                     .unwrap_or(0.0);
-                if t.category_id != 11 || bounty <= 0.0 {
+                // Non-NPCs (`category_id != 11`) and non-combatant props/containers/billboards/clouds
+                // remain invulnerable; legitimate zero-bounty combat NPCs (Empire Navy, CONCORD mission
+                // ships, Storyline rats, Sleepers) are attackable.
+                let is_non_combat_npc_prop = matches!(
+                    t.group_id,
+                    306 | 319 | 323 | 335 | 784 | 925 | 952 | 1207 | 1872 | 1927 | 1928 | 4073
+                );
+                if t.category_id != 11 || is_non_combat_npc_prop {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: format!(
@@ -1131,7 +1138,7 @@ pub async fn handle_legacy_and_ess(
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
                 }
-                if is_kspace_nullsec {
+                if is_kspace_nullsec && main_cents.0 > 0 {
                     if let Some(st) = snap.system_states.get_mut(&sys_id) {
                         st.ess_main_bank = st
                             .ess_main_bank

@@ -1585,11 +1585,12 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap();
-    assert_eq!(pocket_ast.unwrap().type_id, 1230);
+    // L1 mission 4801 ("Starting Simple") resolves to Scordite (1228) per mission_id % 4 == 1
+    assert_eq!(pocket_ast.unwrap().type_id, 1228);
     assert!(ctx.db.with_snapshot(|snap| snap.bookmarks.contains_key(&bookmark_id)));
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1228));
     });
 
     let incomplete_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(6)], &kw, None).await;
@@ -1597,7 +1598,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
 
     let ore_item_id = 710_000_018_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(ore_item_id, make_item(ore_item_id, 1230, char_id, station_id, InventoryFlag::Hangar, 500, false));
+        snap.items.insert(ore_item_id, make_item(ore_item_id, 1228, char_id, station_id, InventoryFlag::Hangar, 500, false));
     });
 
     let complete_res = ctx

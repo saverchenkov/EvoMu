@@ -386,6 +386,7 @@ pub enum UserErrorKey {
     CannotLaunchFighterNotEnoughTubesAvailableForClass,
     CannotOpenFighterTubesWhileCloaked,
     CannotOpenFighterTubesWhileWarping,
+    AoeModuleActivationDeniedSafety,
 
     // --- Corporation, Fleet, Social & Planetary Interaction ---
     CrpAccessDenied,
@@ -493,6 +494,7 @@ impl UserErrorKey {
         Self::CannotLaunchFighterNotEnoughTubesAvailableForClass,
         Self::CannotOpenFighterTubesWhileCloaked,
         Self::CannotOpenFighterTubesWhileWarping,
+        Self::AoeModuleActivationDeniedSafety,
         Self::CrpAccessDenied,
         Self::AccessDenied,
         Self::InsufficientRoles,
@@ -600,6 +602,7 @@ impl UserErrorKey {
             }
             Self::CannotOpenFighterTubesWhileCloaked => "CannotOpenFighterTubesWhileCloaked",
             Self::CannotOpenFighterTubesWhileWarping => "CannotOpenFighterTubesWhileWarping",
+            Self::AoeModuleActivationDeniedSafety => "AoeModuleActivationDeniedSafety",
             Self::CrpAccessDenied => "CrpAccessDenied",
             Self::AccessDenied => "AccessDenied",
             Self::InsufficientRoles => "InsufficientRoles",
@@ -712,6 +715,7 @@ impl UserErrorKey {
             Self::CannotLaunchFighterNotEnoughTubesAvailableForClass => Some(5112),
             Self::CannotOpenFighterTubesWhileCloaked => Some(4872),
             Self::CannotOpenFighterTubesWhileWarping => Some(4827),
+            Self::AoeModuleActivationDeniedSafety => Some(3891),
             Self::CrpAccessDenied => Some(724),
             Self::AccessDenied => Some(7256),
             Self::InsufficientRoles => Some(3164),
@@ -825,6 +829,7 @@ impl UserErrorKey {
             | Self::CannotLaunchFighterNotEnoughTubesAvailableForClass
             | Self::CannotOpenFighterTubesWhileCloaked
             | Self::CannotOpenFighterTubesWhileWarping
+            | Self::AoeModuleActivationDeniedSafety
             | Self::AccessDenied
             | Self::AllianceNotFound
             | Self::AlreadyAtWar
@@ -918,6 +923,9 @@ impl UserErrorKey {
             }
             Self::EffectAlreadyActive2 => {
                 vec![("modulename".into(), PyRep::ascii_bytes(""))]
+            }
+            Self::AoeModuleActivationDeniedSafety => {
+                vec![("moduleName".into(), PyRep::ascii_bytes(""))]
             }
             Self::CustomInfo => vec![("info".into(), PyRep::ascii_bytes(self.as_str()))],
             Self::UnMachoDestination => {
@@ -2112,7 +2120,7 @@ mod tests {
 
     #[test]
     fn warp_too_short_and_destination_gone_decode_as_v24_notify_errors() {
-        assert_eq!(UserErrorKey::ALL.len(), 98);
+        assert_eq!(UserErrorKey::ALL.len(), 99);
         let expected = [
             (UserErrorKey::WarpTooShort, "WarpTooShort", 3435),
             (UserErrorKey::WarpDestinationGone, "WarpDestinationGone", 1679),

@@ -309,11 +309,12 @@ async fn test_mn18_mining_missions_market_and_goals() {
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);
     let pocket_ast = handle.get_asteroid_state(pocket_ast_id).await.unwrap().expect("pocket asteroid");
-    assert_eq!(pocket_ast.type_id, 1230);
+    // L1 mission 4801 ("Starting Simple") resolves to Scordite (1228, volume 0.15 m3)
+    assert_eq!(pocket_ast.type_id, 1228);
     let (_, pocket_ball) = handle.get_ball_snapshot(pocket_ast_id).await.unwrap().unwrap();
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1230));
+        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == 1228));
     });
 
     let incomplete = ctx
@@ -378,20 +379,26 @@ async fn test_mn18_mining_missions_market_and_goals() {
         })
         .await
         .unwrap();
+    // Scordite (1228) has volume 0.15 m3 -> 296.484375 m3/cycle delivers 1_976 units per cycle across 3 cycles to deplete 5_000 units
     let mine_pocket_c1 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
         .await
         .expect("first mining cycle");
-    assert_eq!(mine_pocket_c1.units_delivered, 2_964);
+    assert_eq!(mine_pocket_c1.units_delivered, 1_976);
     assert_eq!(mine_pocket_c1.stop, None);
     let mine_pocket_c2 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
         .await
         .expect("second mining cycle");
-    assert_eq!(mine_pocket_c2.units_delivered, 2_036);
+    assert_eq!(mine_pocket_c2.units_delivered, 1_976);
+    assert_eq!(mine_pocket_c2.stop, None);
+    let mine_pocket_c3 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
+        .await
+        .expect("third mining cycle");
+    assert_eq!(mine_pocket_c3.units_delivered, 1_048);
     assert_eq!(
-        mine_pocket_c2.stop,
+        mine_pocket_c3.stop,
         Some(eve_server::services::mining_cycle::MiningStopReason::AsteroidDepleted)
     );
-    let mined_mission_units = mine_pocket_c1.units_delivered + mine_pocket_c2.units_delivered;
+    let mined_mission_units = mine_pocket_c1.units_delivered + mine_pocket_c2.units_delivered + mine_pocket_c3.units_delivered;
     assert_eq!(mined_mission_units, 5_000);
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -411,7 +418,7 @@ async fn test_mn18_mining_missions_market_and_goals() {
     let remaining_ore: i32 = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .filter(|it| it.owner_id == char_id && it.location_id == m_ship_id && it.type_id == 1230)
+            .filter(|it| it.owner_id == char_id && it.location_id == m_ship_id && it.type_id == 1228)
             .map(|it| it.quantity)
             .sum()
     });

@@ -312,7 +312,7 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     assert!(after_sh < before_sh, "Standup Point Defense Battery must damage ship within perimeter");
 }
 
-async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+async fn run_overheat_fit(thermo_lvl: u8) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), eve_proto::BridgeRpcError> {
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 55_203, "demo", "demo-secret", PILOT_1).await;
 
@@ -412,15 +412,11 @@ async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64,
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(ship_id)])
         .await
         .expect("ShipOnlineModules");
-    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center), PyRep::None])
-        .await
-        .expect("dogmaIM.Overload mid");
+    rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center), PyRep::None]).await?;
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(mod_high), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1)])
         .await
         .expect("dogmaIM.Activate high");
-    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_high), PyRep::None])
-        .await
-        .expect("dogmaIM.Overload high");
+    rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_high), PyRep::None]).await?;
 
     // Step SystemActor across 80s (80 x 1.0s ticks) so high & mid (10s cycle -> 8 cycles = 80s) rack heat build
     for _ in 0..80 {
@@ -428,7 +424,7 @@ async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64,
         jita_handle.step_manual(1.0).await.expect("step overheat cycle");
     }
 
-    ctx.db.with_snapshot(|snap| {
+    Ok(ctx.db.with_snapshot(|snap| {
         let tr = snap.transient_item_attributes.get(&ship_id);
         let hi_h = tr.and_then(|m| m.get(&1175)).copied().unwrap_or(0.0);
         let med_h = tr.and_then(|m| m.get(&1176)).copied().unwrap_or(0.0);
@@ -439,7 +435,7 @@ async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64,
         let dlow = snap.items.get(&mod_low).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dhi = snap.items.get(&mod_high).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         (hi_h, med_h, low_h, dl, dc, dr, dlow, dhi)
-    })
+    }))
 }
 
 #[tokio::test]
@@ -450,12 +446,17 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
         "feat:modules.overheat-damage-propagation",
     ]);
 
-    let (hi_heat, med_heat, low_heat, dmg_left_0, dmg_center_0, dmg_right_0, dmg_low_0, _dmg_hi_0) =
-        run_overheat_fit(0).await;
+    assert_eq!(
+        run_overheat_fit(0).await.unwrap_err().code,
+        "DontHaveThermoDynamicsSkillz",
+        "Overload at Thermodynamics L0 must fail with DontHaveThermoDynamicsSkillz"
+    );
+    let (hi_heat, med_heat, low_heat, dmg_left_1, dmg_center_1, dmg_right_1, dmg_low_1, _dmg_hi_1) =
+        run_overheat_fit(1).await.expect("Thermodynamics I overheat");
     let (_hi_heat_4, _med_heat_4, _low_heat_4, _dmg_left_4, dmg_center_4, _dmg_right_4, _dmg_low_4, _dmg_hi_4) =
-        run_overheat_fit(4).await;
+        run_overheat_fit(4).await.expect("Thermodynamics IV overheat");
 
-    // Rifter SDE: heatGenerationMultiplier (1224) = 1.0 at Thermo 0; 125mm AC II (2873) heatAbsorbtionRateModifier (1180) = 0.02
+    // Rifter SDE: heatGenerationMultiplier (1224) = 1.0 across Thermo levels; 125mm AC II (2873) heatAbsorbtionRateModifier (1180) = 0.02
     assert!(hi_heat > 0.0, "High rack heat (attr 1175 heatHi) must accumulate during overloaded weapon cycles");
     // 5MN MWD II (440) heatAbsorbtionRateModifier (1180) = 0.04 -> rate = 1.0 * 0.04 = 0.04 over 80s
     let expected_med_heat = 1.0 - (-0.04_f64 * 80.0).exp();
@@ -466,16 +467,17 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     assert!(med_heat > hi_heat, "Higher heatAbsorbtionRateModifier (0.04 vs 0.02) must build more rack heat");
     assert_eq!(low_heat, 0.0, "Unheated low rack (attr 1177 heatLow) must remain 0.0");
 
-    assert!(dmg_center_0 > 0.0, "Overloaded center MWD must take heat damage from seeded roll");
+    assert!(dmg_center_1 > 0.0, "Overloaded center MWD must take heat damage from seeded roll");
     assert!(
-        dmg_left_0 > 0.0 || dmg_right_0 > 0.0,
-        "Adjacent mid-rack modules must take propagated heat damage from seeded roll (left={dmg_left_0}, right={dmg_right_0})"
+        dmg_left_1 > 0.0 || dmg_right_1 > 0.0,
+        "Adjacent mid-rack modules must take propagated heat damage from seeded roll (left={dmg_left_1}, right={dmg_right_1})"
     );
-    assert_eq!(dmg_low_0, 0.0, "Unheated low rack module must take 0 heat damage across rack boundary");
+    assert_eq!(dmg_low_1, 0.0, "Unheated low rack module must take 0 heat damage across rack boundary");
 
-    // Live SystemActor Thermodynamics IV must reduce heat damage by 20% (0.8x of level 0)
+    // Live SystemActor Thermodynamics IV (0.80x) vs Thermodynamics I (0.95x) -> exact (0.80 / 0.95) ratio
+    let expected_lvl4 = dmg_center_1 * (0.80 / 0.95);
     assert!(
-        (dmg_center_4 - 0.8 * dmg_center_0).abs() < 1e-6,
-        "Live SystemActor Thermodynamics IV must give 0.8x heat damage of level 0 (lvl4={dmg_center_4}, lvl0={dmg_center_0})"
+        (dmg_center_4 - expected_lvl4).abs() < 1e-6,
+        "Live SystemActor Thermodynamics IV (0.80x) vs I (0.95x) must scale heat damage by 0.80/0.95 (lvl4={dmg_center_4}, expected={expected_lvl4}, lvl1={dmg_center_1})"
     );
 }
