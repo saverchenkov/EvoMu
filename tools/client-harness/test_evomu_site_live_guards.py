@@ -1,4 +1,5 @@
 import builtins
+import math
 import os
 import sys
 import types
@@ -47,6 +48,7 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "sensorGfxHandler",
             "skillPlanPanel",
             "probeTracker",
+            "baseSpaceCamera",
             "viewStateSvc",
         })
 
@@ -2148,6 +2150,284 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             tracker.UpdateProbeState(101, 2)
         with self.assertRaises(KeyError):
             tracker.OnProbesIdle([types.SimpleNamespace(probeID=101, destination=(1.0, 1.0, 1.0))])
+
+    def test_1340_sanitize_camera_state_clears_non_finite_anchor_offset_and_ball(self):
+        flt_max_neg = -3.4028234663852886e+38
+        anchor_ball = object()
+
+        # Non-finite / > _CAMERA_MAX_SAFE_COORD _anchorOffset clears _anchorOffset and _anchorBall while keeping finite eye/at.
+        for bad_vec in (
+            (0.0, flt_max_neg, 0.0),
+            (float("nan"), 0.0, 0.0),
+            (0.0, float("inf"), 0.0),
+            (1e20, 0.0, 0.0),
+        ):
+            cam = types.SimpleNamespace(
+                _eyePosition=[-158.8684539794922, -48.97310256958008, -316.80694580078125],
+                _atPosition=[65.82464599609375, 3.0404305458068848, 25.63178825378418],
+                _anchorOffset=bad_vec,
+                _anchorBall=anchor_ball,
+                _eyeAndAtOffset=(0.0, flt_max_neg, 0.0),
+            )
+            self.assertTrue(evomu_site._sanitize_camera_state(cam))
+            self.assertIsNone(cam._anchorOffset)
+            self.assertIsNone(cam._anchorBall)
+            self.assertIsNone(cam._eyeAndAtOffset)
+            self.assertEqual(cam._eyePosition, [-158.8684539794922, -48.97310256958008, -316.80694580078125])
+            self.assertEqual(cam._atPosition, [65.82464599609375, 3.0404305458068848, 25.63178825378418])
+
+        # Normal finite _anchorOffset and _anchorBall are preserved untouched.
+        finite_cam = types.SimpleNamespace(
+            _eyePosition=[-158.8684539794922, -48.97310256958008, -316.80694580078125],
+            _atPosition=[65.82464599609375, 3.0404305458068848, 25.63178825378418],
+            _anchorOffset=(120.0, -45.0, 80.0),
+            _anchorBall=anchor_ball,
+            _eyeAndAtOffset=(1.0, 2.0, 3.0),
+        )
+        self.assertFalse(evomu_site._sanitize_camera_state(finite_cam))
+        self.assertEqual(finite_cam._anchorOffset, (120.0, -45.0, 80.0))
+        self.assertIs(finite_cam._anchorBall, anchor_ball)
+        self.assertEqual(finite_cam._eyeAndAtOffset, (1.0, 2.0, 3.0))
+
+    def test_1340_base_space_camera_reset_and_update_anchor_offset_guard(self):
+        flt_max_neg = -3.4028234663852886e+38
+
+        class DestinyBallInvalid(Exception):
+            pass
+
+        def _is_inf_vec3(values):
+            return any(math.fabs(c) > 1e38 for c in values)
+
+        def _is_nan_vec3(values):
+            return any(math.isnan(c) for c in values)
+
+        def _vec3_add(a, b):
+            return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+        def _vec3_sub(a, b):
+            return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+        bsc_mod = types.ModuleType("eve.client.script.ui.camera.baseSpaceCamera")
+        ball_positions = {}
+        raise_in_get_ball_pos = [False]
+        raise_in_add_offset = [False]
+        raise_in_set_eye = [False]
+
+        def GetBallPosition(ball):
+            if raise_in_get_ball_pos[0]:
+                raise RuntimeError("get_ball_pos_boom")
+            return ball_positions[ball]
+
+        class Camera(object):
+            default_eyePosition = [0.0, 500.0, 1000.0]
+            default_atPosition = [0.0, 0.0, 0.0]
+
+            def __init__(self):
+                self._eyePosition = list(self.default_eyePosition)
+                self._atPosition = list(self.default_atPosition)
+                self._eyeOffset = None
+                self._atOffset = None
+                self._eyeAndAtOffset = None
+                self._eyeTransitOffset = None
+                self._atTransitOffset = None
+                self.isActive = True
+
+            @property
+            def eyePosition(self):
+                return self._eyePosition
+
+            @eyePosition.setter
+            def eyePosition(self, value):
+                self.SetEyePosition(value)
+
+            @property
+            def atPosition(self):
+                return self._atPosition
+
+            @atPosition.setter
+            def atPosition(self, value):
+                self.SetAtPosition(value)
+
+            def SetEyePosition(self, value):
+                if raise_in_set_eye[0]:
+                    raise ValueError("set_eye_boom")
+                if _is_nan_vec3(value) or _is_inf_vec3(value):
+                    raise DestinyBallInvalid("Attempting to assign an invalid eyePosition value: %r" % (value,))
+                self._eyePosition = list(value)
+
+            def SetAtPosition(self, value):
+                if _is_nan_vec3(value) or _is_inf_vec3(value):
+                    raise DestinyBallInvalid("Attempting to assign an invalid atPosition value: %r" % (value,))
+                self._atPosition = list(value)
+
+            def _AddToEyeAndAtOffset(self, offset):
+                if raise_in_add_offset[0]:
+                    raise RuntimeError("add_offset_boom")
+                if _is_inf_vec3(offset) or _is_nan_vec3(offset):
+                    raise DestinyBallInvalid("Camera: Attempting to assign an invalid eyeAndAtOffset value: %r" % (offset,))
+                if not self._eyeAndAtOffset:
+                    self._eyeAndAtOffset = offset
+                else:
+                    self._eyeAndAtOffset = _vec3_add(self._eyeAndAtOffset, offset)
+
+            def OnDeactivated(self):
+                self.isActive = False
+                self._eyeAndAtOffset = None
+                self._atOffset = None
+                self._eyeOffset = None
+
+        class BaseSpaceCamera(Camera):
+            def __init__(self):
+                super().__init__()
+                self._anchorBall = None
+                self._anchorOffset = None
+
+            def ResetAnchorPos(self):
+                if self._anchorOffset:
+                    self.eyePosition = _vec3_add(self.eyePosition, self._anchorOffset)
+                    self.atPosition = _vec3_add(self.atPosition, self._anchorOffset)
+                self._anchorBall = None
+                self._anchorOffset = None
+
+            def UpdateAnchorOffset(self):
+                if self._anchorBall:
+                    self._anchorOffset = GetBallPosition(self._anchorBall)
+                    self._AddToEyeAndAtOffset(self._anchorOffset)
+                else:
+                    self._anchorOffset = None
+
+            def GetTrackPosition(self, ball):
+                if not ball:
+                    ret = (0.0, 0.0, 0.0)
+                else:
+                    ret = GetBallPosition(ball)
+                if self._anchorOffset:
+                    ret = _vec3_sub(ret, self._anchorOffset)
+                return ret
+
+        class ShipOrbitCamera(BaseSpaceCamera):
+            def OnDeactivated(self):
+                BaseSpaceCamera.OnDeactivated(self)
+                self.ResetAnchorPos()
+
+        class _FakeBall(object):
+            def __init__(self, ballpark=None):
+                self.ballpark = ballpark
+
+        bsc_mod.GetBallPosition = GetBallPosition
+        bsc_mod.BaseSpaceCamera = BaseSpaceCamera
+
+        # Late import hook via _EvomuMetaHook schedules _install_base_space_camera_guard.
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        evomu_site._EvomuMetaHook().find_module("eve.client.script.ui.camera.baseSpaceCamera")
+        self.assertEqual(scheduled, [evomu_site._install_base_space_camera_guard])
+
+        sys.modules["eve.client.script.ui.camera.baseSpaceCamera"] = bsc_mod
+        self.assertTrue(scheduled[0]())
+        self.assertIn("baseSpaceCamera", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        # Idempotent under repeated calls to both _install_base_space_camera_guard and _install_camera_dock_guard.
+        self.assertFalse(evomu_site._install_base_space_camera_guard())
+        evomu_site._install_camera_dock_guard()
+
+        # 1. Exact #1340 teardown sequence: OnDeactivated -> ResetAnchorPos with -FLT_MAX _anchorOffset.
+        cam = ShipOrbitCamera()
+        orig_eye = [-158.8684539794922, -48.97310256958008, -316.80694580078125]
+        orig_at = [65.82464599609375, 3.0404305458068848, 25.63178825378418]
+        cam._eyePosition = list(orig_eye)
+        cam._atPosition = list(orig_at)
+        dead_ball = _FakeBall(ballpark=object())
+        cam._anchorBall = dead_ball
+        cam._anchorOffset = (0.0, flt_max_neg, 0.0)
+
+        cam.OnDeactivated()
+        self.assertFalse(cam.isActive)
+        self.assertIsNone(cam._anchorBall)
+        self.assertIsNone(cam._anchorOffset)
+        self.assertEqual(cam.eyePosition, orig_eye)
+        self.assertEqual(cam.atPosition, orig_at)
+
+        # 2. > _CAMERA_MAX_SAFE_COORD _anchorOffset in ResetAnchorPos also clears cleanly without poisoning.
+        cam._anchorBall = dead_ball
+        cam._anchorOffset = (1e20, 0.0, 0.0)
+        cam.ResetAnchorPos()
+        self.assertIsNone(cam._anchorBall)
+        self.assertIsNone(cam._anchorOffset)
+        self.assertEqual(cam.eyePosition, orig_eye)
+        self.assertEqual(cam.atPosition, orig_at)
+
+        # 3. UpdateAnchorOffset: GetBallPosition returning -FLT_MAX or > _CAMERA_MAX_SAFE_COORD clears state cleanly.
+        for bad_pos in ((0.0, flt_max_neg, 0.0), (1e20, 0.0, 0.0), (float("nan"), 0.0, 0.0)):
+            ball_positions[dead_ball] = bad_pos
+            cam._anchorBall = dead_ball
+            cam._anchorOffset = None
+            cam._eyeAndAtOffset = None
+            cam.UpdateAnchorOffset()
+            self.assertIsNone(cam._anchorBall)
+            self.assertIsNone(cam._anchorOffset)
+            self.assertIsNone(cam._eyeAndAtOffset)
+
+        # Released ball (ballpark=None) clears _anchorBall/_anchorOffset without crashing or poisoning.
+        released_ball = _FakeBall(ballpark=None)
+        ball_positions[released_ball] = (0.0, flt_max_neg, 0.0)
+        cam._anchorBall = released_ball
+        cam._anchorOffset = (1.0, 2.0, 3.0)
+        cam.UpdateAnchorOffset()
+        self.assertIsNone(cam._anchorBall)
+        self.assertIsNone(cam._anchorOffset)
+
+        # 4. GetTrackPosition recovers safely when _anchorOffset or target ball returns -FLT_MAX.
+        cam._anchorBall = dead_ball
+        cam._anchorOffset = (0.0, flt_max_neg, 0.0)
+        ship_ball = _FakeBall(ballpark=object())
+        ball_positions[ship_ball] = (10.0, 20.0, 30.0)
+        self.assertEqual(cam.GetTrackPosition(ship_ball), (10.0, 20.0, 30.0))
+        self.assertIsNone(cam._anchorOffset)
+        self.assertIsNone(cam._anchorBall)
+
+        ball_positions[ship_ball] = (0.0, flt_max_neg, 0.0)
+        cam._anchorOffset = (10.0, 20.0, 30.0)
+        cam._anchorBall = _FakeBall(ballpark=object())
+        self.assertEqual(cam.GetTrackPosition(ship_ball), tuple(orig_at))
+        self.assertEqual(cam._anchorOffset, (10.0, 20.0, 30.0))
+
+        # 5. Normal finite behavior works identically to unguarded BaseSpaceCamera.
+        good_ball = _FakeBall(ballpark=object())
+        ball_positions[good_ball] = (100.0, -50.0, 25.0)
+        ball_positions[ship_ball] = (110.0, -30.0, 45.0)
+        cam = ShipOrbitCamera()
+        cam._eyePosition = [10.0, 20.0, 30.0]
+        cam._atPosition = [1.0, 2.0, 3.0]
+        cam._anchorBall = good_ball
+        cam.UpdateAnchorOffset()
+        self.assertEqual(cam._anchorOffset, (100.0, -50.0, 25.0))
+        self.assertEqual(cam._eyeAndAtOffset, (100.0, -50.0, 25.0))
+        self.assertEqual(cam.GetTrackPosition(ship_ball), (10.0, 20.0, 20.0))
+        cam.OnDeactivated()
+        self.assertIsNone(cam._anchorBall)
+        self.assertIsNone(cam._anchorOffset)
+        self.assertEqual(cam.eyePosition, [110.0, -30.0, 55.0])
+        self.assertEqual(cam.atPosition, [101.0, -48.0, 28.0])
+
+        # 6. Negative assertions: unrelated errors on valid finite inputs are NOT swallowed.
+        cam._anchorBall = good_ball
+        cam._anchorOffset = (10.0, 20.0, 30.0)
+        raise_in_get_ball_pos[0] = True
+        with self.assertRaises(RuntimeError):
+            cam.UpdateAnchorOffset()
+        with self.assertRaises(RuntimeError):
+            cam.GetTrackPosition(ship_ball)
+        raise_in_get_ball_pos[0] = False
+
+        raise_in_add_offset[0] = True
+        with self.assertRaises(RuntimeError):
+            cam.UpdateAnchorOffset()
+        raise_in_add_offset[0] = False
+
+        raise_in_set_eye[0] = True
+        with self.assertRaises(ValueError):
+            cam.ResetAnchorPos()
+        raise_in_set_eye[0] = False
 
 
 if __name__ == "__main__":
