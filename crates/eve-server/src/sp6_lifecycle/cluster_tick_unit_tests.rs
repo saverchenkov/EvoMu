@@ -3572,3 +3572,251 @@ fn populate_persisted_space_objects_populates_sde_type_name_on_wreck_slim_meta()
         Some(&eve_proto::PyRep::String(format!("Item {empty_name_wreck_id}")))
     );
 }
+
+#[tokio::test]
+async fn self_destruct_abort_before_tick_persist_not_resurrected_by_cluster_tick_gh_1174() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let base_now = 1_770_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now)));
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_002i64;
+    let ship_id = 830_901i64;
+
+    let km_before = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let ch = snap
+            .characters
+            .get_mut(&char_id)
+            .expect("demo character 90_000_002 present");
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.killmails.len()
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                ..eve_destiny::CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // 1. Start countdown, snapshot `rt_self_destructs` as the tick does, abort, then run persistence step.
+    let detonate_1 = base_now + 120;
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx, ship_id, char_id, sys_id, base_now, detonate_1,
+    );
+    let rt_snapshot = crate::sp6_lifecycle::snapshot_rt_self_destructs(&ctx, None);
+    assert_eq!(rt_snapshot.len(), 1);
+    assert_eq!(rt_snapshot[0].entry.ship_id, ship_id);
+    assert!(crate::sp6_lifecycle::abort_self_destruct_for_ship(
+        &ctx, ship_id
+    ));
+
+    // Persistence step with stale snapshot must NOT resurrect the aborted countdown.
+    crate::sp6_lifecycle::persist_rt_self_destructs_snapshot(&ctx, &rt_snapshot);
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.len()),
+        0
+    );
+    assert_eq!(
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.self_destruct_countdowns.len()
+        }),
+        0
+    );
+
+    // 2. Advance clock past `detonate_at_unix` and run cluster lifecycle ticks: ship survives intact.
+    ctx.advance_secs(125);
+    on_advance_secs(&ctx, ctx.now_unix(), 5);
+    tick_background_cluster(&ctx).await;
+
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.len()),
+        0
+    );
+    assert_eq!(
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.self_destruct_countdowns.len()
+        }),
+        0
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items.get(&ship_id).map(|i| (i.owner_id, i.location_id)),
+            Some((char_id, i64::from(sys_id)))
+        );
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.active_ship_id, ship_id);
+        assert_eq!(ch.station_id, None);
+        assert_eq!(ch.solar_system_id, sys_id);
+        assert_eq!(snap.killmails.len(), km_before);
+    });
+    assert!(sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    // 3. Abort-then-restart race: stale snapshot from old countdown must not overwrite new `detonate_at_unix`.
+    let t2 = ctx.now_unix();
+    let det2 = t2 + 120;
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx, ship_id, char_id, sys_id, t2, det2,
+    );
+    let stale_snap2 = crate::sp6_lifecycle::snapshot_rt_self_destructs(&ctx, None);
+    assert!(crate::sp6_lifecycle::abort_self_destruct_for_ship(
+        &ctx, ship_id
+    ));
+    let t3 = t2 + 15;
+    let det3 = t3 + 120;
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx, ship_id, char_id, sys_id, t3, det3,
+    );
+    crate::sp6_lifecycle::persist_rt_self_destructs_snapshot(&ctx, &stale_snap2);
+
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+            st.self_destructs.get(&ship_id).map(|e| e.detonate_at_unix)
+        }),
+        Some(det3)
+    );
+    ctx.advance_secs(121);
+    assert_eq!(ctx.now_unix(), det2 + 1);
+    on_advance_secs(&ctx, ctx.now_unix(), 1);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char_id].active_ship_id, ship_id);
+        assert_eq!(snap.killmails.len(), km_before);
+        assert_eq!(
+            snap.sp6_lifecycle
+                .self_destructs
+                .get(&ship_id)
+                .map(|e| e.detonate_at_unix),
+            Some(det3)
+        );
+    });
+}
+
+#[tokio::test]
+async fn self_destruct_due_countdown_aborts_cleanly_if_docked_or_unowned_gh_1174() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let base_now = 1_770_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now)));
+    let sys_id = 30_000_142u32;
+    let char_id = 90_000_002i64;
+    let ship_id = 830_902i64;
+    let station_id = 60_003_760i64;
+
+    let km_before = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let ch = snap
+            .characters
+            .get_mut(&char_id)
+            .expect("demo character 90_000_002 present");
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.killmails.len()
+    });
+
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx,
+        ship_id,
+        char_id,
+        sys_id,
+        base_now,
+        base_now + 120,
+    );
+    ctx.clock().advance_secs(125);
+    let now_due = ctx.now_unix();
+
+    // Pilot docks in station concurrently before due detonation executes.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.location_id = station_id;
+        }
+    });
+
+    let guarded = crate::combat::death_pipeline::execute_guarded_self_destruct_sync(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        glam::DVec3::ZERO,
+        now_due,
+        None,
+        true,
+    )
+    .expect("guarded self-destruct does not error on docked ship");
+    assert!(guarded.is_none());
+
+    on_advance_secs(&ctx, now_due, 1);
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items.get(&ship_id).map(|i| (i.owner_id, i.location_id)),
+            Some((char_id, station_id))
+        );
+        assert_eq!(snap.characters[&char_id].active_ship_id, ship_id);
+        assert_eq!(snap.killmails.len(), km_before);
+        assert_eq!(snap.sp6_lifecycle.self_destructs.len(), 0);
+    });
+    assert_eq!(
+        crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.self_destruct_countdowns.len()
+        }),
+        0
+    );
+}

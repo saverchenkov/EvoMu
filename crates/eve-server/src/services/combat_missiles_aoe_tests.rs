@@ -811,3 +811,134 @@ async fn unpiloted_corp_ship_destroyed_by_missile_or_aoe_creates_corp_killmail_a
         );
     });
 }
+
+#[tokio::test]
+async fn self_destruct_abort_before_aoe_tick_persist_not_resurrected_gh_1174() {
+    let (ctx, _session, char_id, _orig_ship_id, sys_id) = make_missile_and_aoe_ctx();
+    let base_now = 1_770_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_now)));
+    let target_ship_id = 200_000_998i64;
+
+    let km_before = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            target_ship_id,
+            make_fighter_item(
+                target_ship_id,
+                587,
+                char_id,
+                i64::from(sys_id),
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        let ch = snap
+            .characters
+            .get_mut(&char_id)
+            .expect("character present in test snapshot");
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = target_ship_id;
+        snap.killmails.len()
+    });
+    spawn_missile_target_ball(
+        &ctx,
+        sys_id,
+        target_ship_id,
+        587,
+        DVec3::new(500.0, 0.0, 0.0),
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+    )
+    .await;
+
+    // 1. Start countdown, step & snapshot as `step_missiles_and_breachers` does, abort, then persist.
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx,
+        target_ship_id,
+        char_id,
+        sys_id,
+        base_now,
+        base_now + 120,
+    );
+    let (rt_snapshot, snap_now) = step_and_snapshot_self_destructs_for_test(&ctx, sys_id, 1.0);
+    assert_eq!(rt_snapshot.len(), 1);
+    assert_eq!(rt_snapshot[0].entry.ship_id, target_ship_id);
+
+    assert!(crate::sp6_lifecycle::abort_self_destruct_for_ship(
+        &ctx,
+        target_ship_id
+    ));
+    let due_after_abort =
+        persist_and_collect_due_self_destructs_for_test(&ctx, &rt_snapshot, sys_id, snap_now);
+    assert_eq!(due_after_abort.len(), 0);
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.len()),
+        0
+    );
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        0
+    );
+
+    // 2. Advance past `detonate_at_unix` and run `step_missiles_and_breachers`: ship survives intact.
+    ctx.advance_secs(125);
+    let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
+
+    // 3. Also test snapshot taken while countdown is already due (`detonate_at_unix <= now_unix`)
+    //    followed by abort before AoE persistence/due-collection runs.
+    let now2 = ctx.now_unix();
+    crate::sp6_lifecycle::register_self_destruct_countdown(
+        &ctx,
+        target_ship_id,
+        char_id,
+        sys_id,
+        now2.saturating_sub(120),
+        now2,
+    );
+    let (due_rt_snapshot, due_snap_now) =
+        step_and_snapshot_self_destructs_for_test(&ctx, sys_id, 1.0);
+    assert_eq!(due_rt_snapshot.len(), 1);
+    assert!(crate::sp6_lifecycle::abort_self_destruct_for_ship(
+        &ctx,
+        target_ship_id
+    ));
+    let due_after_due_abort = persist_and_collect_due_self_destructs_for_test(
+        &ctx,
+        &due_rt_snapshot,
+        sys_id,
+        due_snap_now,
+    );
+    assert_eq!(due_after_due_abort.len(), 0);
+
+    let _ = step_missiles_and_breachers(&ctx, sys_id, 1.0).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle
+        .get_ball_snapshot(target_ship_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.len()),
+        0
+    );
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        0
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items
+                .get(&target_ship_id)
+                .map(|i| (i.owner_id, i.location_id)),
+            Some((char_id, i64::from(sys_id)))
+        );
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.active_ship_id, target_ship_id);
+        assert_eq!(ch.station_id, None);
+        assert_eq!(snap.killmails.len(), km_before);
+    });
+}

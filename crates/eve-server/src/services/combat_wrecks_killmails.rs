@@ -731,67 +731,149 @@ pub async fn handle_wrecks_killmails(
                 }));
             };
             let now_unix = ctx.now_unix();
-            let existing = with_combat_runtime(ctx, |rt| {
-                rt.self_destruct_countdowns.get(&ship_id).cloned()
-            });
-            if let Some(cd) = existing {
-                if now_unix < cd.detonate_at_unix {
-                    let remaining = cd.detonate_at_unix.saturating_sub(now_unix);
+            let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
+                .clamp(0.10, 1.0);
+            enum SelfDestructRpcAction {
+                Active { remaining: u64, detonate_at: u64 },
+                Detonate { expected_generation: u64 },
+            }
+            let decision: Result<SelfDestructRpcAction, BridgeRpcError> =
+                crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+                    &ctx.db,
+                    &*ctx.combat_ephemeral,
+                    |snap, rt| {
+                        let Some(ch) = snap.characters.get(&char_id) else {
+                            return Err(BridgeRpcError {
+                                code: "NoActiveShip".into(),
+                                message: "Character not found".into(),
+                                client_error: None,
+                            });
+                        };
+                        if ch.station_id.is_some() || ch.structure_id.is_some() {
+                            return Err(BridgeRpcError {
+                                code: "CannotSelfDestructWhileDocked".into(),
+                                message: "Cannot self-destruct a ship while docked in a station or structure".into(),
+                                client_error: None,
+                            });
+                        }
+                        if ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+                            return Err(BridgeRpcError {
+                                code: "NoActiveShip".into(),
+                                message: "Session ship is no longer active in this solar system".into(),
+                                client_error: None,
+                            });
+                        }
+                        let Some(ship_item) = snap.items.get(&ship_id) else {
+                            return Err(BridgeRpcError {
+                                code: "NoActiveShip".into(),
+                                message: "Active ship item not found".into(),
+                                client_error: None,
+                            });
+                        };
+                        if ship_item.owner_id != char_id
+                            || ship_item.location_id != i64::from(sys_id)
+                        {
+                            return Err(BridgeRpcError {
+                                code: "NoActiveShip".into(),
+                                message: "Ship is not owned by pilot in this solar system".into(),
+                                client_error: None,
+                            });
+                        }
+
+                        let rt_existing = rt.self_destruct_countdowns.get(&ship_id).cloned();
+                        let sp6_existing = snap.sp6_lifecycle.self_destructs.get(&ship_id).cloned();
+                        let existing = rt_existing.clone().or_else(|| {
+                            sp6_existing.as_ref().map(|e| SelfDestructCountdown {
+                                ship_id: e.ship_id,
+                                char_id: e.char_id,
+                                solar_system_id: e.solar_system_id,
+                                started_unix: e.started_unix,
+                                detonate_at_unix: e.detonate_at_unix,
+                            })
+                        });
+
+                        if let Some(cd) = existing {
+                            if sp6_existing.is_none() {
+                                snap.sp6_lifecycle.as_inner_mut().self_destructs.insert(
+                                    ship_id,
+                                    eve_db::SelfDestructPersistedEntry {
+                                        ship_id: cd.ship_id,
+                                        char_id: cd.char_id,
+                                        solar_system_id: cd.solar_system_id,
+                                        started_unix: cd.started_unix,
+                                        detonate_at_unix: cd.detonate_at_unix,
+                                    },
+                                );
+                            }
+                            if rt_existing.is_none() {
+                                rt.self_destruct_countdowns.insert(ship_id, cd.clone());
+                            }
+                            if now_unix < cd.detonate_at_unix {
+                                let remaining = cd.detonate_at_unix.saturating_sub(now_unix);
+                                return Ok(SelfDestructRpcAction::Active {
+                                    remaining,
+                                    detonate_at: cd.detonate_at_unix,
+                                });
+                            }
+                            return Ok(SelfDestructRpcAction::Detonate {
+                                expected_generation: rt.self_destruct_generation(ship_id),
+                            });
+                        }
+
+                        let scaled_secs = if tidi < 0.995 {
+                            ((SELF_DESTRUCT_COUNTDOWN_SECS as f64) / tidi).ceil().max(1.0) as u64
+                        } else {
+                            SELF_DESTRUCT_COUNTDOWN_SECS
+                        };
+                        let detonate_at = now_unix.saturating_add(scaled_secs);
+                        rt.bump_self_destruct_generation(ship_id);
+                        rt.self_destruct_sim_remaining_secs
+                            .insert(ship_id, SELF_DESTRUCT_COUNTDOWN_SECS as f64);
+                        rt.self_destruct_countdowns.insert(
+                            ship_id,
+                            SelfDestructCountdown {
+                                ship_id,
+                                char_id,
+                                solar_system_id: sys_id,
+                                started_unix: now_unix,
+                                detonate_at_unix: detonate_at,
+                            },
+                        );
+                        snap.sp6_lifecycle.as_inner_mut().self_destructs.insert(
+                            ship_id,
+                            eve_db::SelfDestructPersistedEntry {
+                                ship_id,
+                                char_id,
+                                solar_system_id: sys_id,
+                                started_unix: now_unix,
+                                detonate_at_unix: detonate_at,
+                            },
+                        );
+                        Ok(SelfDestructRpcAction::Active {
+                            remaining: scaled_secs,
+                            detonate_at,
+                        })
+                    },
+                );
+
+            let expected_generation = match decision {
+                Ok(SelfDestructRpcAction::Active {
+                    remaining,
+                    detonate_at,
+                }) => {
                     return Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
                         ("countdownStarted", PyRep::Bool(true)),
                         ("detonated", PyRep::Bool(false)),
                         ("remainingSeconds", PyRep::Integer(remaining as i64)),
-                        ("detonateAtUnix", PyRep::Integer(cd.detonate_at_unix as i64)),
+                        ("detonateAtUnix", PyRep::Integer(detonate_at as i64)),
                     ])));
                 }
-            } else {
-                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
-                    .clamp(0.10, 1.0);
-                let scaled_secs = if tidi < 0.995 {
-                    ((SELF_DESTRUCT_COUNTDOWN_SECS as f64) / tidi).ceil().max(1.0) as u64
-                } else {
-                    SELF_DESTRUCT_COUNTDOWN_SECS
-                };
-                let detonate_at = now_unix.saturating_add(scaled_secs);
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.self_destruct_sim_remaining_secs
-                        .insert(ship_id, SELF_DESTRUCT_COUNTDOWN_SECS as f64);
-                    rt.self_destruct_countdowns.insert(
-                        ship_id,
-                        SelfDestructCountdown {
-                            ship_id,
-                            char_id,
-                            solar_system_id: sys_id,
-                            started_unix: now_unix,
-                            detonate_at_unix: detonate_at,
-                        },
-                    );
-                });
-                crate::sp6_lifecycle::register_self_destruct_countdown(
-                    ctx,
-                    ship_id,
-                    char_id,
-                    sys_id,
-                    now_unix,
-                    detonate_at,
-                );
-                return Some(Ok(PyRep::keyval([
-                    ("shipID", PyRep::Integer(ship_id)),
-                    ("countdownStarted", PyRep::Bool(true)),
-                    ("detonated", PyRep::Bool(false)),
-                    (
-                        "remainingSeconds",
-                        PyRep::Integer(scaled_secs as i64),
-                    ),
-                    ("detonateAtUnix", PyRep::Integer(detonate_at as i64)),
-                ])));
-            }
-
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.self_destruct_countdowns.remove(&ship_id);
-            });
-            let _ = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
+                Ok(SelfDestructRpcAction::Detonate {
+                    expected_generation,
+                }) => expected_generation,
+                Err(err) => return Some(Err(err)),
+            };
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let pos = sys_handle
@@ -813,18 +895,19 @@ pub async fn handle_wrecks_killmails(
                     (stid, stid == 670, corp, all)
                 });
 
-            let res = crate::combat::death_pipeline::execute_self_destruct(
+            let res = crate::combat::death_pipeline::execute_self_destruct_guarded(
                 ctx,
                 sys_id,
                 char_id,
                 ship_id,
                 pos,
                 now_unix,
-            )
-            .await;
+                now_unix,
+                Some(expected_generation),
+            );
 
             match res {
-                Ok(death) => {
+                Ok(Some(death)) => {
                     let corpse_item_id: i64 = if is_capsule {
                         death.wreck_item_id
                     } else {
@@ -930,6 +1013,26 @@ pub async fn handle_wrecks_killmails(
                         ("insurancePayoutISK", PyRep::Real(death.insurance_payout_isk)),
                     ])))
                 }
+                Ok(None) => {
+                    let docked = ctx.db.with_snapshot(|snap| {
+                        snap.characters
+                            .get(&char_id)
+                            .is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some())
+                    });
+                    Some(Err(if docked {
+                        BridgeRpcError {
+                            code: "CannotSelfDestructWhileDocked".into(),
+                            message: "Cannot self-destruct a ship while docked in a station or structure".into(),
+                            client_error: None,
+                        }
+                    } else {
+                        BridgeRpcError {
+                            code: "SelfDestructAborted".into(),
+                            message: "Self-destruct countdown was aborted or invalidated before detonation".into(),
+                            client_error: None,
+                        }
+                    }))
+                }
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "SelfDestructFailed".into(),
                     message: e,
@@ -943,17 +1046,36 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ship_id = session.ship_id.unwrap_or_else(|| {
-                ctx.db
-                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
-                    .unwrap_or(0)
-            });
-            let aborted_rt = with_mut_combat_runtime(ctx, |rt| {
-                rt.self_destruct_sim_remaining_secs.remove(&ship_id);
-                rt.self_destruct_countdowns.remove(&ship_id).is_some()
-            });
-            let aborted_sp6 = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
-            let aborted = aborted_rt || aborted_sp6;
+            let (ship_id, aborted) = if let Some(sid) = session.ship_id {
+                (
+                    sid,
+                    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, sid),
+                )
+            } else {
+                crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+                    &ctx.db,
+                    &*ctx.combat_ephemeral,
+                    |snap, rt| {
+                        let sid = snap
+                            .characters
+                            .get(&char_id)
+                            .map(|c| c.active_ship_id)
+                            .unwrap_or(0);
+                        let sp6_aborted = snap
+                            .sp6_lifecycle
+                            .as_inner_mut()
+                            .self_destructs
+                            .remove(&sid)
+                            .is_some();
+                        rt.self_destruct_sim_remaining_secs.remove(&sid);
+                        let rt_aborted = rt.self_destruct_countdowns.remove(&sid).is_some();
+                        if sp6_aborted || rt_aborted {
+                            rt.bump_self_destruct_generation(sid);
+                        }
+                        (sid, sp6_aborted || rt_aborted)
+                    },
+                )
+            };
             Some(Ok(PyRep::keyval([
                 ("shipID", PyRep::Integer(ship_id)),
                 ("aborted", PyRep::Bool(aborted)),

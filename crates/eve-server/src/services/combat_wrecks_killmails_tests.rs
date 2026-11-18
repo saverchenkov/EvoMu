@@ -504,3 +504,455 @@ fn insurance_contract_persists_end_unix_across_reload_and_expires() {
 #[cfg(test)]
 #[path = "combat_wrecks_killmails_extra_unit_tests.rs"]
 mod combat_wrecks_killmails_extra_unit_tests;
+
+#[tokio::test]
+async fn self_destruct_rpc_aborts_if_cancelled_or_docked_before_detonate_commit_gh_1174() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let base_now = 1_770_000_000u64;
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_now),
+    ));
+    let ship_type = ctx.db.with_snapshot(|snap| snap.items[&ship_id].type_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_type,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let km_before = ctx.db.with_snapshot(|snap| snap.killmails.len());
+    let kwargs = HashMap::new();
+
+    // 1. Start countdown via RPC, cancel via RPC (`AbortSelfDestruct`), advance past due time,
+    //    then confirm guarded execution & RPC both refuse to detonate and ship survives.
+    let start_res = ctx
+        .dispatch_rpc(&mut session, "ship", None, "SelfDestruct", &[], &kwargs, None)
+        .await
+        .expect("start SelfDestruct");
+    assert_eq!(start_res.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+
+    let abort_res = ctx
+        .dispatch_rpc(
+            &mut session,
+            "ship",
+            None,
+            "AbortSelfDestruct",
+            &[],
+            &kwargs,
+            None,
+        )
+        .await
+        .expect("AbortSelfDestruct");
+    assert_eq!(abort_res.dict_get("aborted"), Some(&PyRep::Bool(true)));
+
+    ctx.advance_secs(125);
+    let now_due = ctx.now_unix();
+    let res_after_abort = crate::combat::death_pipeline::execute_self_destruct_guarded(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        DVec3::ZERO,
+        now_due,
+        now_due,
+        None,
+    )
+    .expect("guarded RPC self-destruct returns Ok(None) after abort");
+    assert!(res_after_abort.is_none());
+
+    // 2. Re-arm, advance until due, then dock character concurrently before detonation commits.
+    let start_res_2 = ctx
+        .dispatch_rpc(&mut session, "ship", None, "SelfDestruct", &[], &kwargs, None)
+        .await
+        .expect("restart SelfDestruct");
+    assert_eq!(
+        start_res_2.dict_get("countdownStarted"),
+        Some(&PyRep::Bool(true))
+    );
+    ctx.clock().advance_secs(125);
+    let station_id = 60_003_760i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.location_id = station_id;
+        }
+    });
+
+    let docked_err = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "SelfDestruct",
+        &[],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, "CannotSelfDestructWhileDocked");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items.get(&ship_id).map(|i| (i.owner_id, i.location_id)),
+            Some((char_id, station_id))
+        );
+        assert_eq!(snap.killmails.len(), km_before);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn self_destruct_rpc_cancel_concurrent_with_lifecycle_has_zero_post_cancel_destructions_gh_1174() {
+    let (ctx_owned, base_session, char_id, orig_ship_id, sys_id) = make_fighter_ctx_and_session();
+    let base_now = 1_770_000_000u64;
+    ctx_owned.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(base_now),
+    ));
+    let ctx = std::sync::Arc::new(ctx_owned);
+    let ship_type = ctx.db.with_snapshot(|snap| snap.items[&orig_ship_id].type_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let kwargs = HashMap::new();
+
+    // Helper closure to prepare a fresh undocked in-space ship and ball for `char_id`.
+    let prepare_ship = |ship_id: i64| {
+        let km_before = ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                ship_id,
+                make_fighter_item(
+                    ship_id,
+                    ship_type,
+                    char_id,
+                    i64::from(sys_id),
+                    InventoryFlag::None,
+                    1,
+                ),
+            );
+            let ch = snap
+                .characters
+                .get_mut(&char_id)
+                .expect("character present in test snapshot");
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            snap.killmails.len()
+        });
+        let mut sess = base_session.clone();
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(sys_id);
+        (km_before, sess)
+    };
+
+    let spawn_ball_for = |ship_id: i64| {
+        let sys_h = sys_handle.clone();
+        async move {
+            sys_h
+                .spawn_ball_with_combat(
+                    Ball {
+                        id: ship_id,
+                        type_id: ship_type,
+                        position: DVec3::ZERO,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 200.0,
+                        inertia: 1.0,
+                        mass: 1_000_000.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    CombatState {
+                        shield_hp: 500.0,
+                        max_shield_hp: 500.0,
+                        armor_hp: 500.0,
+                        max_armor_hp: 500.0,
+                        structure_hp: 500.0,
+                        max_structure_hp: 500.0,
+                        ..CombatState::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    // 0. Control: an un-aborted countdown started via RPC detonates when lifecycle advances past due.
+    let ctrl_ship_id = 910_000i64;
+    let (ctrl_km_before, mut ctrl_sess) = prepare_ship(ctrl_ship_id);
+    spawn_ball_for(ctrl_ship_id).await;
+    let ctrl_start = ctx
+        .dispatch_rpc(
+            &mut ctrl_sess,
+            "ship",
+            None,
+            "SelfDestruct",
+            &[],
+            &kwargs,
+            None,
+        )
+        .await
+        .expect("control SelfDestruct starts");
+    assert_eq!(
+        ctrl_start.dict_get("countdownStarted"),
+        Some(&PyRep::Bool(true))
+    );
+    ctx.clock().advance_secs(125);
+    crate::sp6_lifecycle::on_advance_secs(&ctx, ctx.now_unix(), 125);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ctrl_ship_id));
+        assert_eq!(snap.killmails.len(), ctrl_km_before + 1);
+    });
+
+    let mut post_cancel_destructions = 0usize;
+
+    // 1. Pre-due boundary race (24 iterations): cancel via `("ship", "AbortSelfDestruct")` RPC
+    //    concurrently with cluster lifecycle & AoE stepping before advancing past `detonate_at_unix`.
+    for i in 0..24i64 {
+        let ship_id = 911_000 + i;
+        let (km_before, mut start_sess) = prepare_ship(ship_id);
+        spawn_ball_for(ship_id).await;
+        let sd_start = ctx
+            .dispatch_rpc(
+                &mut start_sess,
+                "ship",
+                None,
+                "SelfDestruct",
+                &[],
+                &kwargs,
+                None,
+            )
+            .await
+            .expect("SelfDestruct start");
+        assert_eq!(
+            sd_start.dict_get("countdownStarted"),
+            Some(&PyRep::Bool(true))
+        );
+
+        ctx.clock().advance_secs(119);
+        let t_now = ctx.now_unix();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+        let ctx_abort = std::sync::Arc::clone(&ctx);
+        let b_abort = std::sync::Arc::clone(&barrier);
+        let mut abort_sess = start_sess.clone();
+        abort_sess.session_id = 10_000 + i as u64;
+        let abort_task = tokio::spawn(async move {
+            b_abort.wait().await;
+            if i % 3 != 0 {
+                tokio::task::yield_now().await;
+            }
+            let res = ctx_abort
+                .dispatch_rpc(
+                    &mut abort_sess,
+                    "ship",
+                    None,
+                    "AbortSelfDestruct",
+                    &[],
+                    &HashMap::new(),
+                    None,
+                )
+                .await
+                .expect("AbortSelfDestruct RPC succeeds");
+            res.dict_get("aborted") == Some(&PyRep::Bool(true))
+        });
+
+        let ctx_cluster = std::sync::Arc::clone(&ctx);
+        let b_cluster = std::sync::Arc::clone(&barrier);
+        let cluster_task = tokio::spawn(async move {
+            b_cluster.wait().await;
+            crate::sp6_lifecycle::on_advance_secs(&ctx_cluster, t_now, 1);
+        });
+
+        let ctx_aoe = std::sync::Arc::clone(&ctx);
+        let b_aoe = std::sync::Arc::clone(&barrier);
+        let aoe_task = tokio::spawn(async move {
+            b_aoe.wait().await;
+            let _ = crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers(
+                &ctx_aoe, sys_id, 1.0,
+            )
+            .await;
+        });
+
+        let aborted = abort_task.await.unwrap();
+        cluster_task.await.unwrap();
+        aoe_task.await.unwrap();
+        assert!(aborted, "pre-due AbortSelfDestruct RPC must cancel countdown on iter {i}");
+
+        // Advance well past original `detonate_at_unix` and run all lifecycle steppers.
+        ctx.advance_secs(15);
+        crate::sp6_lifecycle::on_advance_secs(&ctx, ctx.now_unix(), 15);
+        crate::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        let _ = crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers(
+            &ctx, sys_id, 1.0,
+        )
+        .await;
+
+        let survived = ctx.db.with_snapshot(|snap| {
+            snap.items.contains_key(&ship_id)
+                && snap.characters[&char_id].active_ship_id == ship_id
+                && snap.killmails.len() == km_before
+                && snap.sp6_lifecycle.self_destructs.is_empty()
+        });
+        if !survived {
+            post_cancel_destructions += 1;
+        }
+        assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_some());
+    }
+
+    // 2. Simultaneous due-time race (32 iterations): race `("ship", "AbortSelfDestruct")` RPC
+    //    directly against `on_advance_secs`, `step_missiles_and_breachers`, and due `SelfDestruct`.
+    for i in 0..32i64 {
+        let ship_id = 912_000 + i;
+        let (km_before, mut start_sess) = prepare_ship(ship_id);
+        spawn_ball_for(ship_id).await;
+        let sd_start = ctx
+            .dispatch_rpc(
+                &mut start_sess,
+                "ship",
+                None,
+                "SelfDestruct",
+                &[],
+                &kwargs,
+                None,
+            )
+            .await
+            .expect("SelfDestruct start");
+        assert_eq!(
+            sd_start.dict_get("countdownStarted"),
+            Some(&PyRep::Bool(true))
+        );
+
+        let expected_generation =
+            with_combat_runtime(&ctx, |rt| rt.self_destruct_generation(ship_id));
+        ctx.clock().advance_secs(120);
+        let t_due = ctx.now_unix();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+
+        let ctx_abort = std::sync::Arc::clone(&ctx);
+        let b_abort = std::sync::Arc::clone(&barrier);
+        let mut abort_sess = start_sess.clone();
+        abort_sess.session_id = 20_000 + i as u64;
+        let abort_task = tokio::spawn(async move {
+            b_abort.wait().await;
+            if i % 4 != 0 {
+                tokio::task::yield_now().await;
+            }
+            let res = ctx_abort
+                .dispatch_rpc(
+                    &mut abort_sess,
+                    "ship",
+                    None,
+                    "AbortSelfDestruct",
+                    &[],
+                    &HashMap::new(),
+                    None,
+                )
+                .await
+                .expect("AbortSelfDestruct RPC succeeds");
+            res.dict_get("aborted") == Some(&PyRep::Bool(true))
+        });
+
+        let ctx_cluster = std::sync::Arc::clone(&ctx);
+        let b_cluster = std::sync::Arc::clone(&barrier);
+        let cluster_task = tokio::spawn(async move {
+            b_cluster.wait().await;
+            if i % 4 == 1 {
+                tokio::task::yield_now().await;
+            }
+            crate::sp6_lifecycle::on_advance_secs(&ctx_cluster, t_due, 1);
+            crate::sp6_lifecycle::tick_background_cluster(&ctx_cluster).await;
+        });
+
+        let ctx_aoe = std::sync::Arc::clone(&ctx);
+        let b_aoe = std::sync::Arc::clone(&barrier);
+        let aoe_task = tokio::spawn(async move {
+            b_aoe.wait().await;
+            if i % 4 == 2 {
+                tokio::task::yield_now().await;
+            }
+            let _ = crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers(
+                &ctx_aoe, sys_id, 1.0,
+            )
+            .await;
+        });
+
+        let ctx_det = std::sync::Arc::clone(&ctx);
+        let b_det = std::sync::Arc::clone(&barrier);
+        let rpc_det_task = tokio::spawn(async move {
+            b_det.wait().await;
+            if i % 4 == 3 {
+                tokio::task::yield_now().await;
+            }
+            let _ = crate::combat::death_pipeline::execute_self_destruct_guarded(
+                &ctx_det,
+                sys_id,
+                char_id,
+                ship_id,
+                DVec3::ZERO,
+                t_due,
+                t_due,
+                Some(expected_generation),
+            );
+        });
+
+        let aborted = abort_task.await.unwrap();
+        cluster_task.await.unwrap();
+        aoe_task.await.unwrap();
+        rpc_det_task.await.unwrap();
+
+        // Run follow-up lifecycle & AoE ticks after the concurrent race settles.
+        ctx.advance_secs(5);
+        crate::sp6_lifecycle::on_advance_secs(&ctx, ctx.now_unix(), 5);
+        let _ = crate::services::combat_crimewatch::combat_missiles_aoe::step_missiles_and_breachers(
+            &ctx, sys_id, 1.0,
+        )
+        .await;
+
+        let ball_alive = sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_some();
+        let db_ok = ctx.db.with_snapshot(|snap| {
+            let clean_sd = !snap.sp6_lifecycle.self_destructs.contains_key(&ship_id);
+            if aborted {
+                clean_sd
+                    && snap.items.contains_key(&ship_id)
+                    && snap.characters[&char_id].active_ship_id == ship_id
+                    && snap.killmails.len() == km_before
+            } else {
+                clean_sd
+            }
+        });
+        if aborted && (!db_ok || !ball_alive) {
+            post_cancel_destructions += 1;
+        }
+        assert!(db_ok, "self-destruct state remained consistent on iter {i}");
+    }
+
+    assert_eq!(post_cancel_destructions, 0);
+    assert_eq!(
+        crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.self_destructs.len()),
+        0
+    );
+    assert_eq!(
+        with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.len()),
+        0
+    );
+}

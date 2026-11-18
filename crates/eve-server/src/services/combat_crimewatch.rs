@@ -384,6 +384,7 @@ pub struct CombatRuntimeState {
     pub detailed_killmails: HashMap<i64, DetailedKillmail>,
     pub container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
     pub self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
+    pub self_destruct_generations: HashMap<i64, u64>,
     pub sec_status_transactions: HashMap<i64, Vec<SecStatusTransaction>>,
     pub duel_challenges: HashMap<(i64, i64), u64>,
     pub corp_aggression_settings: HashMap<i64, bool>,
@@ -452,6 +453,8 @@ struct PersistedCombatExtendedPayload {
     aggression_assist_log: HashMap<i64, Vec<AssistLogEntry>>,
     container_lifetimes: HashMap<i64, ContainerLifetimeEntry>,
     self_destruct_countdowns: HashMap<i64, SelfDestructCountdown>,
+    #[serde(default)]
+    self_destruct_generations: HashMap<i64, u64>,
     modified_system_securities: HashMap<u32, f64>,
     sentry_gun_aggression: Vec<((u32, i64), SentryAggressionState)>,
     crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
@@ -615,6 +618,24 @@ impl CombatRuntimeState {
             .is_some_and(|&exp| now_unix < exp)
     }
 
+    /// Returns the monotonic self-destruct generation counter for `ship_id` (`0` if never set) (`#1174`).
+    pub fn self_destruct_generation(&self, ship_id: i64) -> u64 {
+        self.self_destruct_generations.get(&ship_id).copied().unwrap_or(0)
+    }
+
+    /// Increments and returns the monotonic self-destruct generation counter for `ship_id` (`#1174`).
+    pub fn bump_self_destruct_generation(&mut self, ship_id: i64) -> u64 {
+        let next = self
+            .self_destruct_generations
+            .get(&ship_id)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(1)
+            .max(1);
+        self.self_destruct_generations.insert(ship_id, next);
+        next
+    }
+
     /// Records an item or ball ID whose inventory/space state was destroyed so late
     /// client `dogmaIM.ItemGetInfo` queries return `None` instead of `TypeNotFound` (`#1032`).
     pub fn record_destroyed_item_id(&mut self, item_id: i64) {
@@ -692,6 +713,7 @@ impl CombatRuntimeState {
             self.aggression_assist_log.clear();
             self.container_lifetimes.clear();
             self.self_destruct_countdowns.clear();
+            self.self_destruct_generations.clear();
             self.modified_system_securities.clear();
             self.sentry_gun_aggression.clear();
             self.crimewatch_timer_states.clear();
@@ -725,6 +747,7 @@ impl CombatRuntimeState {
             self.aggression_assist_log = ext.aggression_assist_log;
             self.container_lifetimes = ext.container_lifetimes;
             self.self_destruct_countdowns = ext.self_destruct_countdowns;
+            self.self_destruct_generations = ext.self_destruct_generations;
             self.modified_system_securities = ext.modified_system_securities;
             self.sentry_gun_aggression = ext.sentry_gun_aggression.into_iter().collect();
             self.crimewatch_timer_states = ext.crimewatch_timer_states;
@@ -775,6 +798,7 @@ impl CombatRuntimeState {
             || !self.aggression_assist_log.is_empty()
             || !self.container_lifetimes.is_empty()
             || !self.self_destruct_countdowns.is_empty()
+            || !self.self_destruct_generations.is_empty()
             || !self.self_destruct_sim_remaining_secs.is_empty()
             || !self.modified_system_securities.is_empty()
             || !self.sentry_gun_aggression.is_empty()
@@ -817,6 +841,7 @@ impl CombatRuntimeState {
                 aggression_assist_log: self.aggression_assist_log.clone(),
                 container_lifetimes: self.container_lifetimes.clone(),
                 self_destruct_countdowns: self.self_destruct_countdowns.clone(),
+                self_destruct_generations: self.self_destruct_generations.clone(),
                 modified_system_securities: self.modified_system_securities.clone(),
                 sentry_gun_aggression: self
                     .sentry_gun_aggression
@@ -1030,18 +1055,98 @@ fn merge_recent_ids_3way(
     out
 }
 
+fn merge_monotonic_u64_map_3way(
+    base: &HashMap<i64, u64>,
+    db: &HashMap<i64, u64>,
+    ram: &HashMap<i64, u64>,
+) -> HashMap<i64, u64> {
+    let mut out = HashMap::new();
+    for map in [base, db, ram] {
+        for (&k, &v) in map {
+            out.entry(k)
+                .and_modify(|cur: &mut u64| {
+                    if v > *cur {
+                        *cur = v;
+                    }
+                })
+                .or_insert(v);
+        }
+    }
+    out
+}
+
+fn merge_self_destruct_map_by_gen_3way<V: PartialEq + Clone>(
+    base_gen: &HashMap<i64, u64>,
+    db_gen: &HashMap<i64, u64>,
+    ram_gen: &HashMap<i64, u64>,
+    base: &HashMap<i64, V>,
+    db: &HashMap<i64, V>,
+    ram: &HashMap<i64, V>,
+) -> HashMap<i64, V> {
+    let mut out = merge_map_3way(base, db, ram);
+    let mut keys: std::collections::HashSet<i64> = db_gen.keys().copied().collect();
+    keys.extend(ram_gen.keys().copied());
+    keys.extend(base_gen.keys().copied());
+    for k in keys {
+        let dg = db_gen.get(&k).copied().unwrap_or(0);
+        let rg = ram_gen.get(&k).copied().unwrap_or(0);
+        if dg > rg {
+            match db.get(&k) {
+                Some(v) => {
+                    out.insert(k, v.clone());
+                }
+                None => {
+                    out.remove(&k);
+                }
+            }
+        } else if rg > dg {
+            match ram.get(&k) {
+                Some(v) => {
+                    out.insert(k, v.clone());
+                }
+                None => {
+                    out.remove(&k);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn merge_extended_payload_3way(
     base: &PersistedCombatExtendedPayload,
     db: &PersistedCombatExtendedPayload,
     ram: &PersistedCombatExtendedPayload,
 ) -> PersistedCombatExtendedPayload {
+    let self_destruct_generations = merge_monotonic_u64_map_3way(
+        &base.self_destruct_generations,
+        &db.self_destruct_generations,
+        &ram.self_destruct_generations,
+    );
+    let self_destruct_countdowns = merge_self_destruct_map_by_gen_3way(
+        &base.self_destruct_generations,
+        &db.self_destruct_generations,
+        &ram.self_destruct_generations,
+        &base.self_destruct_countdowns,
+        &db.self_destruct_countdowns,
+        &ram.self_destruct_countdowns,
+    );
+    let self_destruct_sim_remaining_secs = merge_self_destruct_map_by_gen_3way(
+        &base.self_destruct_generations,
+        &db.self_destruct_generations,
+        &ram.self_destruct_generations,
+        &base.self_destruct_sim_remaining_secs,
+        &db.self_destruct_sim_remaining_secs,
+        &ram.self_destruct_sim_remaining_secs,
+    );
     PersistedCombatExtendedPayload {
         entropic_spools: merge_pair_vec_3way(&base.entropic_spools, &db.entropic_spools, &ram.entropic_spools),
         in_flight_missiles: merge_map_3way(&base.in_flight_missiles, &db.in_flight_missiles, &ram.in_flight_missiles),
         active_breacher_dots: merge_map_3way(&base.active_breacher_dots, &db.active_breacher_dots, &ram.active_breacher_dots),
         aggression_assist_log: merge_map_3way(&base.aggression_assist_log, &db.aggression_assist_log, &ram.aggression_assist_log),
         container_lifetimes: merge_map_3way(&base.container_lifetimes, &db.container_lifetimes, &ram.container_lifetimes),
-        self_destruct_countdowns: merge_map_3way(&base.self_destruct_countdowns, &db.self_destruct_countdowns, &ram.self_destruct_countdowns),
+        self_destruct_countdowns,
+        self_destruct_generations,
         modified_system_securities: merge_map_3way(&base.modified_system_securities, &db.modified_system_securities, &ram.modified_system_securities),
         sentry_gun_aggression: merge_pair_vec_3way(&base.sentry_gun_aggression, &db.sentry_gun_aggression, &ram.sentry_gun_aggression),
         crimewatch_timer_states: merge_map_3way(&base.crimewatch_timer_states, &db.crimewatch_timer_states, &ram.crimewatch_timer_states),
@@ -1068,7 +1173,7 @@ fn merge_extended_payload_3way(
         npc_scrambled_ships: merge_map_3way(&base.npc_scrambled_ships, &db.npc_scrambled_ships, &ram.npc_scrambled_ships),
         npc_sec_gain_intervals: merge_pair_vec_3way(&base.npc_sec_gain_intervals, &db.npc_sec_gain_intervals, &ram.npc_sec_gain_intervals),
         recently_destroyed_item_ids: merge_recent_ids_3way(&base.recently_destroyed_item_ids, &db.recently_destroyed_item_ids, &ram.recently_destroyed_item_ids),
-        self_destruct_sim_remaining_secs: merge_map_3way(&base.self_destruct_sim_remaining_secs, &db.self_destruct_sim_remaining_secs, &ram.self_destruct_sim_remaining_secs),
+        self_destruct_sim_remaining_secs,
     }
 }
 
