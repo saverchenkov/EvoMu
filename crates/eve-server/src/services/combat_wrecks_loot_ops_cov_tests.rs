@@ -666,3 +666,336 @@ async fn loot_all_abandoned_fleet_safety_stale_dock_and_war_ally_killmail_mutant
         .unwrap();
     });
 }
+
+#[tokio::test]
+async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let foreign_owner_id = 90_000_002_i64;
+    session.session_id = 91_206;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, session.session_id, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+
+    let mut sde = (*ctx.sde).clone();
+    // 26_557 = wreck (group 186, cat 2), 34/35/36 = mineral cargo items
+    sde.types
+        .insert(26_557, make_fighter_type(26_557, 186, 2, 100.0, vec![]));
+    sde.types
+        .insert(34, make_fighter_type(34, 18, 4, 100.0, vec![]));
+    sde.types
+        .insert(35, make_fighter_type(35, 18, 4, 250.0, vec![]));
+    sde.types
+        .insert(36, make_fighter_type(36, 18, 4, 1_000.0, vec![]));
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        ship_t.capacity = 5_000.0;
+    }
+    ctx.sde = Arc::new(sde);
+
+    let wreck_whole_id = 930_001_i64;
+    let wreck_split_id = 930_002_i64;
+    let item_whole_stack_id = 930_101_i64;
+    let item_whole_single_id = 930_102_i64;
+    let item_split_stack_id = 930_103_i64;
+    let item_locked_id = 930_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            wreck_whole_id,
+            make_fighter_item(
+                wreck_whole_id,
+                26_557,
+                foreign_owner_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.items.insert(
+            wreck_split_id,
+            make_fighter_item(
+                wreck_split_id,
+                26_557,
+                foreign_owner_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.items.insert(
+            item_whole_stack_id,
+            make_fighter_item(
+                item_whole_stack_id,
+                34,
+                foreign_owner_id,
+                wreck_whole_id,
+                InventoryFlag::None,
+                5, // 5 * 100 m3 = 500 m3
+            ),
+        );
+        let mut single_rec = make_fighter_item(
+            item_whole_single_id,
+            35,
+            foreign_owner_id,
+            wreck_whole_id,
+            InventoryFlag::None,
+            1, // 1 * 250 m3 = 250 m3 (singleton)
+        );
+        single_rec.singleton = true;
+        snap.items.insert(item_whole_single_id, single_rec);
+        snap.items.insert(
+            item_split_stack_id,
+            make_fighter_item(
+                item_split_stack_id,
+                36,
+                foreign_owner_id,
+                wreck_split_id,
+                InventoryFlag::None,
+                6, // 6 * 1000 m3 = 6000 m3; ship cap 5000 - 750 = 4250 -> fits 4 units, leaves 2
+            ),
+        );
+        snap.items.insert(
+            item_locked_id,
+            make_fighter_item(
+                item_locked_id,
+                35,
+                foreign_owner_id,
+                wreck_split_id,
+                InventoryFlag::Locked,
+                1,
+            ),
+        );
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions
+            .insert(wreck_whole_id, [500.0, 0.0, 0.0]);
+        snap.item_positions
+            .insert(wreck_split_id, [600.0, 0.0, 0.0]);
+    });
+
+    let now = ctx.now_unix();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        for wid in [wreck_whole_id, wreck_split_id] {
+            rt.container_lifetimes.insert(
+                wid,
+                crate::services::combat_crimewatch::ContainerLifetimeEntry {
+                    item_id: wid,
+                    solar_system_id: sys_id,
+                    type_id: 26_557,
+                    owner_id: foreign_owner_id,
+                    created_unix: now.saturating_sub(60),
+                    lifetime_secs: 7_200,
+                    is_abandoned: true,
+                },
+            );
+        }
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (bid, btype, pos) in [
+        (ship_id, 23_915_u32, DVec3::ZERO),
+        (wreck_whole_id, 26_557_u32, DVec3::new(500.0, 0.0, 0.0)),
+        (wreck_split_id, 26_557_u32, DVec3::new(600.0, 0.0, 0.0)),
+    ] {
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: btype,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 120.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let kw = std::collections::HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Whole moves from wreck_whole_id -> ship Cargo emit OnItemChange before OnWreckLootAll.
+    let res_whole = super::super::handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "invbroker",
+        "LootAll",
+        &[PyRep::Integer(wreck_whole_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::List(looted_whole_list) = res_whole
+        .dict_get("lootedItemIDs")
+        .expect("lootedItemIDs present")
+    else {
+        panic!("expected List for lootedItemIDs");
+    };
+    assert_eq!(looted_whole_list.len(), 2);
+    assert!(looted_whole_list.contains(&PyRep::Integer(item_whole_stack_id)));
+    assert!(looted_whole_list.contains(&PyRep::Integer(item_whole_single_id)));
+    assert_eq!(
+        res_whole.dict_get("remainingItemIDs"),
+        Some(&PyRep::List(Vec::new()))
+    );
+
+    let notifs_whole = ctx.drain_notifications_for_char(char_id);
+    let pos_loot_all_whole = notifs_whole
+        .iter()
+        .position(|n| n.event == "OnWreckLootAll")
+        .expect("OnWreckLootAll emitted");
+    let item_changes_whole: Vec<_> = notifs_whole
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(item_changes_whole.len(), 2);
+    for (idx, notif) in &item_changes_whole {
+        assert!(
+            *idx < pos_loot_all_whole,
+            "OnItemChange must precede OnWreckLootAll"
+        );
+        let PyRep::Dict(changes) = &notif.args[1] else {
+            panic!("expected Dict in OnItemChange changes, got {:?}", notif.args[1]);
+        };
+        assert!(
+            changes.iter().all(|(k, _)| k.as_i64() != Some(5)),
+            "legacy ixQuantity (5) must never be emitted: {changes:?}"
+        );
+        assert!(changes.contains(&(PyRep::Integer(2), PyRep::Integer(foreign_owner_id))));
+        assert!(changes.contains(&(PyRep::Integer(3), PyRep::Integer(wreck_whole_id))));
+        assert!(changes.contains(&(
+            PyRep::Integer(4),
+            PyRep::Integer(InventoryFlag::None as i64)
+        )));
+        assert_eq!(
+            notif.args[0].dbrow_get("locationID"),
+            Some(&PyRep::Integer(ship_id))
+        );
+        assert_eq!(
+            notif.args[0].dbrow_get("flagID"),
+            Some(&PyRep::Integer(InventoryFlag::Cargo as i64))
+        );
+        assert_eq!(
+            notif.args[0].dbrow_get("ownerID"),
+            Some(&PyRep::Integer(char_id))
+        );
+    }
+    let whole_ids: Vec<i64> = item_changes_whole
+        .iter()
+        .filter_map(|(_, n)| n.args[0].dbrow_get("itemID").and_then(PyRep::as_i64))
+        .collect();
+    assert!(whole_ids.contains(&item_whole_stack_id));
+    assert!(whole_ids.contains(&item_whole_single_id));
+
+    // 2. Partial split + skipped locked item from wreck_split_id:
+    //    emits OnItemChange for both remaining stack (ixStackSize=9, no ixQuantity=5)
+    //    and newly created Cargo stack (ixLocationID=0), and nothing for locked item.
+    let res_split = super::super::handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "invbroker",
+        "LootAll",
+        &[PyRep::Integer(wreck_split_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::List(looted_split_list) = res_split
+        .dict_get("lootedItemIDs")
+        .expect("lootedItemIDs present")
+    else {
+        panic!("expected List for lootedItemIDs");
+    };
+    assert_eq!(looted_split_list.len(), 1);
+    let split_cargo_id = looted_split_list[0].as_i64().expect("split cargo item id");
+    assert_ne!(split_cargo_id, item_split_stack_id);
+    assert_ne!(split_cargo_id, item_locked_id);
+    let PyRep::List(rem_split_list) = res_split
+        .dict_get("remainingItemIDs")
+        .expect("remainingItemIDs present")
+    else {
+        panic!("expected List for remainingItemIDs");
+    };
+    assert!(rem_split_list.contains(&PyRep::Integer(item_split_stack_id)));
+    assert_eq!(
+        ctx.db.get_item(item_locked_id).unwrap().location_id,
+        wreck_split_id
+    );
+
+    let notifs_split = ctx.drain_notifications_for_char(char_id);
+    let pos_loot_all_split = notifs_split
+        .iter()
+        .position(|n| n.event == "OnWreckLootAll")
+        .expect("OnWreckLootAll emitted on split");
+    let item_changes_split: Vec<_> = notifs_split
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.event == "OnItemChange")
+        .collect();
+    assert_eq!(
+        item_changes_split.len(),
+        2,
+        "partial split must emit OnItemChange for remaining stack and new cargo stack"
+    );
+    for (idx, _) in &item_changes_split {
+        assert!(*idx < pos_loot_all_split);
+    }
+    assert!(
+        item_changes_split
+            .iter()
+            .all(|(_, n)| n.args[0].dbrow_get("itemID") != Some(&PyRep::Integer(item_locked_id))),
+        "locked item must not emit OnItemChange"
+    );
+
+    let (_, rem_notif) = item_changes_split
+        .iter()
+        .find(|(_, n)| n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(item_split_stack_id)))
+        .expect("OnItemChange for remaining stack");
+    assert_eq!(
+        rem_notif.args[0].dbrow_get("locationID"),
+        Some(&PyRep::Integer(wreck_split_id))
+    );
+    assert_eq!(
+        rem_notif.args[0].dbrow_get("quantity"),
+        Some(&PyRep::Integer(2))
+    );
+    let PyRep::Dict(rem_changes) = &rem_notif.args[1] else {
+        panic!("expected Dict in remaining stack OnItemChange");
+    };
+    assert!(rem_changes.iter().all(|(k, _)| k.as_i64() != Some(5)));
+    assert!(rem_changes.contains(&(PyRep::Integer(9), PyRep::Integer(6))));
+
+    let (_, cargo_notif) = item_changes_split
+        .iter()
+        .find(|(_, n)| n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(split_cargo_id)))
+        .expect("OnItemChange for split cargo stack");
+    assert_eq!(
+        cargo_notif.args[0].dbrow_get("locationID"),
+        Some(&PyRep::Integer(ship_id))
+    );
+    assert_eq!(
+        cargo_notif.args[0].dbrow_get("flagID"),
+        Some(&PyRep::Integer(InventoryFlag::Cargo as i64))
+    );
+    assert_eq!(
+        cargo_notif.args[0].dbrow_get("ownerID"),
+        Some(&PyRep::Integer(char_id))
+    );
+    assert_eq!(
+        cargo_notif.args[0].dbrow_get("quantity"),
+        Some(&PyRep::Integer(4))
+    );
+    let PyRep::Dict(cargo_changes) = &cargo_notif.args[1] else {
+        panic!("expected Dict in split cargo stack OnItemChange");
+    };
+    assert!(cargo_changes.iter().all(|(k, _)| k.as_i64() != Some(5)));
+    assert!(cargo_changes.contains(&(PyRep::Integer(3), PyRep::Integer(0))));
+}

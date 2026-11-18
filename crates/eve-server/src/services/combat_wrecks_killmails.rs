@@ -691,6 +691,129 @@ pub fn process_ship_destruction_with_aggression(
     kill_id
 }
 
+const BLUETIME_TICKS_PER_SEC: i64 = 10_000_000;
+
+/// Formats the V24 `what` argument (`(UE_TYPEID, type_id)` or `"ship"` fallback) for self-destruct notices.
+fn self_destruct_what_arg(ship_type_id: u32) -> PyRep {
+    if ship_type_id > 0 {
+        PyRep::Tuple(vec![
+            PyRep::Integer(4), // const.UE_TYPEID
+            PyRep::Integer(i64::from(ship_type_id)),
+        ])
+    } else {
+        PyRep::String("ship".into())
+    }
+}
+
+/// Emits a typed `OnRemoteMessage` notification (`msg_id`, `dict`) to `target_char_id`.
+fn emit_self_destruct_remote_notice(
+    ctx: &ServerContext,
+    target_char_id: i64,
+    msg_id: &str,
+    entries: Vec<(&str, PyRep)>,
+) {
+    let dict = PyRep::Dict(
+        entries
+            .into_iter()
+            .map(|(k, v)| (PyRep::String(k.to_string()), v))
+            .collect(),
+    );
+    ctx.emit_typed(
+        crate::router::cache_notifications::NotificationTarget::Character(target_char_id),
+        crate::router::notify_registry::OnRemoteMessage {
+            msg_id: msg_id.to_string(),
+            dict: Some(dict),
+            kw: None,
+        },
+    );
+}
+
+/// Emits V24 `SelfDestructInitiated` (pilot) and `SelfDestructInitiatedOther` (grid observers).
+fn emit_self_destruct_initiated_notices(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    remaining_secs: u64,
+) {
+    let what = self_destruct_what_arg(ship_type_id);
+    emit_self_destruct_remote_notice(
+        ctx,
+        char_id,
+        "SelfDestructInitiated",
+        vec![
+            ("what", what),
+            ("when", PyRep::Integer(remaining_secs as i64)),
+        ],
+    );
+    let time_remaining_ticks = (remaining_secs as i64).saturating_mul(BLUETIME_TICKS_PER_SEC);
+    for (observer_char_id, _) in ctx.space_observer_chars_for_ship(ship_id, char_id) {
+        emit_self_destruct_remote_notice(
+            ctx,
+            observer_char_id,
+            "SelfDestructInitiatedOther",
+            vec![
+                ("charID", PyRep::Integer(char_id)),
+                ("shipTypeID", PyRep::Integer(i64::from(ship_type_id))),
+                ("timeRemaining", PyRep::Integer(time_remaining_ticks)),
+            ],
+        );
+    }
+}
+
+/// Emits V24 `SelfDestructAborted2` (pilot) and `SelfDestructAbortedOther2` (grid observers).
+fn emit_self_destruct_aborted_notices(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    remaining_secs: u64,
+) {
+    let time_left_ticks = (remaining_secs as i64).saturating_mul(BLUETIME_TICKS_PER_SEC);
+    emit_self_destruct_remote_notice(
+        ctx,
+        char_id,
+        "SelfDestructAborted2",
+        vec![("timeLeft", PyRep::Integer(time_left_ticks))],
+    );
+    for (observer_char_id, _) in ctx.space_observer_chars_for_ship(ship_id, char_id) {
+        emit_self_destruct_remote_notice(
+            ctx,
+            observer_char_id,
+            "SelfDestructAbortedOther2",
+            vec![
+                ("charID", PyRep::Integer(char_id)),
+                ("timeLeft", PyRep::Integer(time_left_ticks)),
+            ],
+        );
+    }
+}
+
+/// Emits V24 `SelfDestructImmediate` (pilot) and `SelfDestructImmediateOther` (pre-captured grid observers).
+fn emit_self_destruct_immediate_notices(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_type_id: u32,
+    pre_detonate_observers: &[(i64, u64)],
+) {
+    emit_self_destruct_remote_notice(
+        ctx,
+        char_id,
+        "SelfDestructImmediate",
+        vec![("shipTypeID", PyRep::Integer(i64::from(ship_type_id)))],
+    );
+    for &(observer_char_id, _) in pre_detonate_observers {
+        emit_self_destruct_remote_notice(
+            ctx,
+            observer_char_id,
+            "SelfDestructImmediateOther",
+            vec![
+                ("charID", PyRep::Integer(char_id)),
+                ("shipTypeID", PyRep::Integer(i64::from(ship_type_id))),
+            ],
+        );
+    }
+}
+
 /// Advances in-flight missiles and active Breacher Pod DoTs in `solar_system_id` by `dt` seconds
 
 
@@ -734,8 +857,15 @@ pub async fn handle_wrecks_killmails(
             let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
                 .clamp(0.10, 1.0);
             enum SelfDestructRpcAction {
-                Active { remaining: u64, detonate_at: u64 },
-                Detonate { expected_generation: u64 },
+                Active {
+                    remaining: u64,
+                    detonate_at: u64,
+                    started_fresh: bool,
+                    ship_type_id: u32,
+                },
+                Detonate {
+                    expected_generation: u64,
+                },
             }
             let decision: Result<SelfDestructRpcAction, BridgeRpcError> =
                 crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
@@ -779,6 +909,7 @@ pub async fn handle_wrecks_killmails(
                                 client_error: None,
                             });
                         }
+                        let ship_type_id = ship_item.type_id;
 
                         let rt_existing = rt.self_destruct_countdowns.get(&ship_id).cloned();
                         let sp6_existing = snap.sp6_lifecycle.self_destructs.get(&ship_id).cloned();
@@ -813,6 +944,8 @@ pub async fn handle_wrecks_killmails(
                                 return Ok(SelfDestructRpcAction::Active {
                                     remaining,
                                     detonate_at: cd.detonate_at_unix,
+                                    started_fresh: false,
+                                    ship_type_id,
                                 });
                             }
                             return Ok(SelfDestructRpcAction::Detonate {
@@ -852,6 +985,8 @@ pub async fn handle_wrecks_killmails(
                         Ok(SelfDestructRpcAction::Active {
                             remaining: scaled_secs,
                             detonate_at,
+                            started_fresh: true,
+                            ship_type_id,
                         })
                     },
                 );
@@ -860,7 +995,18 @@ pub async fn handle_wrecks_killmails(
                 Ok(SelfDestructRpcAction::Active {
                     remaining,
                     detonate_at,
+                    started_fresh,
+                    ship_type_id,
                 }) => {
+                    if started_fresh {
+                        emit_self_destruct_initiated_notices(
+                            ctx,
+                            char_id,
+                            ship_id,
+                            ship_type_id,
+                            remaining,
+                        );
+                    }
                     return Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
                         ("countdownStarted", PyRep::Bool(true)),
@@ -874,6 +1020,8 @@ pub async fn handle_wrecks_killmails(
                 }) => expected_generation,
                 Err(err) => return Some(Err(err)),
             };
+
+            let pre_detonate_observers = ctx.space_observer_chars_for_ship(ship_id, char_id);
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let pos = sys_handle
@@ -1004,6 +1152,12 @@ pub async fn handle_wrecks_killmails(
                         );
                         crate::services::map_service::record_solar_system_visit(ctx, char_id, ch.solar_system_id);
                     }
+                    emit_self_destruct_immediate_notices(
+                        ctx,
+                        char_id,
+                        ship_type_id,
+                        &pre_detonate_observers,
+                    );
                     Some(Ok(PyRep::keyval([
                         ("wreckID", PyRep::Integer(death.wreck_item_id)),
                         ("corpseID", PyRep::Integer(corpse_item_id)),
@@ -1046,36 +1200,45 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (ship_id, aborted) = if let Some(sid) = session.ship_id {
-                (
-                    sid,
-                    crate::sp6_lifecycle::abort_self_destruct_for_ship(ctx, sid),
-                )
-            } else {
+            let now_unix = ctx.now_unix();
+            let (ship_id, aborted, remaining_secs) =
                 crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
                     &ctx.db,
                     &*ctx.combat_ephemeral,
                     |snap, rt| {
-                        let sid = snap
-                            .characters
-                            .get(&char_id)
-                            .map(|c| c.active_ship_id)
-                            .unwrap_or(0);
-                        let sp6_aborted = snap
+                        let sid = session.ship_id.unwrap_or_else(|| {
+                            snap.characters
+                                .get(&char_id)
+                                .map(|c| c.active_ship_id)
+                                .unwrap_or(0)
+                        });
+                        let sp6_entry = snap
                             .sp6_lifecycle
                             .as_inner_mut()
                             .self_destructs
-                            .remove(&sid)
-                            .is_some();
-                        rt.self_destruct_sim_remaining_secs.remove(&sid);
-                        let rt_aborted = rt.self_destruct_countdowns.remove(&sid).is_some();
-                        if sp6_aborted || rt_aborted {
+                            .remove(&sid);
+                        let sim_rem = rt.self_destruct_sim_remaining_secs.remove(&sid);
+                        let rt_entry = rt.self_destruct_countdowns.remove(&sid);
+                        let was_active = sp6_entry.is_some() || rt_entry.is_some();
+                        if was_active {
                             rt.bump_self_destruct_generation(sid);
                         }
-                        (sid, sp6_aborted || rt_aborted)
+                        let rem = rt_entry
+                            .as_ref()
+                            .map(|e| e.detonate_at_unix.saturating_sub(now_unix))
+                            .or_else(|| {
+                                sp6_entry
+                                    .as_ref()
+                                    .map(|e| e.detonate_at_unix.saturating_sub(now_unix))
+                            })
+                            .or_else(|| sim_rem.map(|r| r.ceil().max(0.0) as u64))
+                            .unwrap_or(0);
+                        (sid, was_active, rem)
                     },
-                )
-            };
+                );
+            if aborted {
+                emit_self_destruct_aborted_notices(ctx, char_id, ship_id, remaining_secs);
+            }
             Some(Ok(PyRep::keyval([
                 ("shipID", PyRep::Integer(ship_id)),
                 ("aborted", PyRep::Bool(aborted)),
