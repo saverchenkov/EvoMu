@@ -2372,3 +2372,208 @@ async fn death_pipeline_insurance_payout_rolls_back_atomically_on_tx_err_and_pan
         assert_eq!(snap.characters[&victim].balance, bal_after_retry);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let attacker = 90_000_001i64;
+    let victim = 90_000_002i64;
+    let attacker_ship = 1_990_000_910i64;
+    let mto_ball_sync = 1_990_000_911i64;
+    let mto_ball_weapon = 1_990_000_912i64;
+    let unpiloted_hull = 1_990_000_913i64;
+    let victim_pod = 1_990_000_914i64;
+    let den_id = 1_090_000_011i64;
+    let now = ctx.now_unix();
+    let pos = DVec3::new(10_000.0, 0.0, 0.0);
+
+    spawn_ship(&ctx, sys_id, attacker_ship, attacker, 587, DVec3::ZERO, 0.0);
+    spawn_ship(&ctx, sys_id, unpiloted_hull, victim, 587, pos, 0.0);
+    spawn_ship(&ctx, sys_id, victim_pod, victim, 670, pos, 0.0);
+
+    let act_hex_1 = "cd".repeat(16);
+    let act_hex_2 = "ef".repeat(16);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    for mto_bid in [mto_ball_sync, mto_ball_weapon] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: mto_bid,
+                type_id: 24_690,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 12_000_000.0,
+                radius: 200.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(24_690),
+        );
+    }
+
+    let bal_before = ctx.db.with_mut_snapshot(|snap| {
+        for (mto_bid, act_hex, uuid_byte) in [
+            (mto_ball_sync, &act_hex_1, 0xCDu8),
+            (mto_ball_weapon, &act_hex_2, 0xEFu8),
+        ] {
+            snap.items.insert(
+                mto_bid,
+                make_item(
+                    mto_bid,
+                    24_690,
+                    500_010,
+                    i64::from(sys_id),
+                    InventoryFlag::None,
+                    1,
+                    0.0,
+                ),
+            );
+            snap.item_positions.insert(mto_bid, [pos.x, pos.y, pos.z]);
+            snap.sp6_lifecycle
+                .space_object_meta
+                .insert(mto_bid, eve_db::PersistedSpaceObjectMeta::default());
+            snap.sp6_lifecycle
+                .ship_combat_hp
+                .insert(mto_bid, eve_db::PersistedCombatHp::default());
+            snap.sov_runtime.mto_site_balls.insert(mto_bid, act_hex.clone());
+            snap.sov_runtime.mercenary_activities.insert(
+                act_hex.clone(),
+                eve_db::PersistedMercenaryActivity {
+                    uuid: vec![uuid_byte; 16],
+                    den_id,
+                    solar_system_id: sys_id,
+                    dungeon_id: 1,
+                    started: true,
+                    started_by: attacker,
+                    expiry_unix: now + 3_600,
+                    development_impact: 10,
+                    anarchy_impact: -10,
+                    infomorph_bonus: 25,
+                },
+            );
+        }
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            eve_db::PersistedMercenaryDen {
+                den_id,
+                type_id: crate::services::sov_gameplay::TYPE_MERCENARY_DEN,
+                owner_char_id: attacker,
+                skyhook_id: 1_960_000_099,
+                solar_system_id: sys_id,
+                planet_id: 40_000_001,
+                enabled: true,
+                cargo_extraction_enabled: true,
+                development_level: 40,
+                anarchy_level: 40,
+                infomorphs: 10,
+                simulated_at_unix: now,
+                next_activity_generation_unix: now + 3_600,
+            },
+        );
+        snap.characters[&attacker].balance
+    });
+
+    assert_eq!(
+        crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
+            &ctx,
+            mto_ball_sync
+        ),
+        None
+    );
+    assert_eq!(
+        crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
+            &ctx,
+            mto_ball_weapon
+        ),
+        None
+    );
+    assert_eq!(
+        crate::services::combat_crimewatch::combat_missiles_aoe::active_ship_victim_char_id(
+            &ctx,
+            unpiloted_hull
+        ),
+        Some(victim)
+    );
+
+    // 1. Direct `on_ball_destroyed_sync` on an MTO site ball completes MTO without player death.
+    let sync_res = on_ball_destroyed_sync(&ctx, sys_id, mto_ball_sync, Some(attacker_ship), pos)
+        .expect("on_ball_destroyed_sync succeeds for MTO ball");
+    assert!(
+        sync_res.is_none(),
+        "MTO site ball must bypass capsuleer execute_death_pipeline"
+    );
+    assert!(sys_handle.get_ball_snapshot(mto_ball_sync).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_sync));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&act_hex_1));
+        assert!(!snap.items.contains_key(&mto_ball_sync));
+        assert!(!snap.item_positions.contains_key(&mto_ball_sync));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&mto_ball_sync));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&mto_ball_sync));
+        let den = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
+        assert_eq!(den.development_level, 50);
+        assert_eq!(den.anarchy_level, 30);
+        assert!(snap.killmails.values().all(|km| km.victim_character_id != 500_010));
+    });
+
+    // 2. Weapon destruction path (`handle_ship_or_npc_destruction`) completes the second MTO.
+    let weapon_ball = Ball {
+        id: mto_ball_weapon,
+        type_id: 24_690,
+        position: pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 200.0,
+        inertia: 1.0,
+        mass: 12_000_000.0,
+        radius: 200.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_handle,
+        attacker,
+        attacker_ship,
+        587,
+        486,
+        mto_ball_weapon,
+        &weapon_ball,
+        None,
+        sys_id,
+        500.0,
+        now,
+    )
+    .await;
+    assert!(sys_handle.get_ball_snapshot(mto_ball_weapon).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_weapon));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&act_hex_2));
+        assert!(!snap.items.contains_key(&mto_ball_weapon));
+        let den = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
+        assert_eq!(den.development_level, 60);
+        assert_eq!(den.anarchy_level, 20);
+        assert_eq!(
+            snap.characters[&attacker].balance,
+            bal_before
+                .checked_add(IskCents::from_isk(15_000_000))
+                .unwrap()
+        );
+        assert!(snap.killmails.values().all(|km| km.victim_character_id != 500_010));
+    });
+
+    // 3. Unpiloted character-owned hull (`#835`) still routes through `execute_death_pipeline`.
+    let unpiloted_res =
+        on_ball_destroyed_sync(&ctx, sys_id, unpiloted_hull, Some(attacker_ship), pos)
+            .expect("unpiloted hull kill succeeds")
+            .expect("unpiloted hull produces DeathPipelineResult");
+    assert_eq!(unpiloted_res.ejected_capsule_id, None);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.killmails[&unpiloted_res.killmail_id].victim_character_id,
+            victim
+        );
+    });
+}

@@ -1457,16 +1457,58 @@ const fn ctx_victim_for_invalidation(victim_char_id: i64) -> i64 {
     victim_char_id
 }
 
+/// Resolves the victim character ID for a capsuleer ship or pod (`category_id == 6`)
+/// from an active pilot, disconnected ship entry, or unpiloted character owner (`#835`).
+/// Excludes MTO site balls (NPC-owned hulls tracked in `mto_site_balls`) and non-character owners.
+pub(crate) fn resolve_capsuleer_ship_char_in_snap(
+    snap: &eve_db::snapshot_ext::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    ball_id: i64,
+) -> Option<i64> {
+    // MTO site balls use a `category_id == 6` hull (`type_id == 24_690`) owned by
+    // NPC faction `500_010` and tracked in `mto_site_balls`, not a capsuleer ship.
+    if snap.sov_runtime.mto_site_balls.contains_key(&ball_id) {
+        return None;
+    }
+    let item = snap.items.get(&ball_id)?;
+    let is_ship = sde
+        .types
+        .get(&item.type_id)
+        .is_some_and(|t| t.category_id == 6);
+    if !is_ship {
+        return None;
+    }
+    snap.characters
+        .values()
+        .find(|c| c.active_ship_id == ball_id)
+        .map(|c| c.character_id)
+        .or_else(|| {
+            snap.sp6_lifecycle
+                .disconnected_ships
+                .values()
+                .find(|d| d.ship_id == ball_id)
+                .map(|d| d.char_id)
+        })
+        .or_else(|| {
+            snap.characters
+                .contains_key(&item.owner_id)
+                .then_some(item.owner_id)
+        })
+}
+
 /// Canonical unified ball destruction router (`#918`, `#835`, `#858`).
 ///
 /// Routes any ball reaching 0 structure HP — whether from a weapon/turret module cycle,
 /// missile/smartbomb/bomb/doomsday impact, or NPC AI tick — through one entry point:
 /// 1. Active player drones in space (`rt.active_drones_in_space`) -> cleaned up without ship death.
 /// 2. Extended NPC entities (`rt.npc_entities`) -> cleaned up without player ship death.
-/// 3. Ships (`category_id == 6` in `snap.items`, whether piloted, disconnected, or unpiloted) ->
-///    routed through `execute_death_pipeline_sync` (producing wreck, loot roll, insurance payout,
-///    and killmail; only piloted/disconnected ships spawn a capsule or transition the character).
-/// 4. Non-ship space objects (fighters, wrecks, jetcans, deployables, POCOs) -> cleaned up via
+/// 3. Capsuleer ships (`category_id == 6` in `snap.items`, piloted, disconnected, or unpiloted
+///    character-owned) -> routed through `execute_death_pipeline_sync` (producing wreck, loot roll,
+///    insurance payout, and killmail; only piloted/disconnected ships spawn a capsule or transition
+///    the character).
+/// 4. MTO site balls (`snap.sov_runtime.mto_site_balls`) -> completed via
+///    `sov_gameplay::on_space_entity_destroyed` and removed from ballpark without ship death.
+/// 5. Non-ship space objects (fighters, wrecks, jetcans, deployables, POCOs) -> cleaned up via
 ///    `cleanup_destroyed_non_ship_ball_sync`.
 pub fn on_ball_destroyed_sync(
     ctx: &ServerContext,
@@ -1517,30 +1559,8 @@ pub fn on_ball_destroyed_sync(
         return Ok(None);
     }
 
-    // 3. Ship (`category_id == 6` in `snap.items`, piloted, disconnected, or unpiloted)
-    let ship_victim_and_killer_opt = ctx.db.with_snapshot(|snap| {
-        let item = snap.items.get(&ball_id)?;
-        let is_ship = ctx
-            .sde
-            .types
-            .get(&item.type_id)
-            .is_some_and(|t| t.category_id == 6);
-        if !is_ship {
-            return None;
-        }
-        let vic = snap
-            .characters
-            .values()
-            .find(|c| c.active_ship_id == ball_id)
-            .map(|c| c.character_id)
-            .or_else(|| {
-                snap.sp6_lifecycle
-                    .disconnected_ships
-                    .values()
-                    .find(|d| d.ship_id == ball_id)
-                    .map(|d| d.char_id)
-            })
-            .unwrap_or(item.owner_id);
+    // 3. Capsuleer ship (`category_id == 6` in `snap.items`, piloted, disconnected, or unpiloted)
+    let (ship_victim_and_killer_opt, mto_entity_opt, mto_killer_opt) = ctx.db.with_snapshot(|snap| {
         let resolved_killer = killer_id_opt.map(|kid| {
             snap.characters
                 .get(&kid)
@@ -1553,7 +1573,15 @@ pub fn on_ball_destroyed_sync(
                 })
                 .unwrap_or(kid)
         });
-        Some((vic, resolved_killer))
+        if snap.sov_runtime.mto_site_balls.contains_key(&ball_id) {
+            let mto_type_id = snap.items.get(&ball_id).map(|it| it.type_id).unwrap_or(0);
+            let mto_killer = resolved_killer.filter(|k| snap.characters.contains_key(k));
+            return (None, Some(mto_type_id), mto_killer);
+        }
+        let Some(vic) = resolve_capsuleer_ship_char_in_snap(snap, &ctx.sde, ball_id) else {
+            return (None, None, None);
+        };
+        (Some((vic, resolved_killer)), None, None)
     });
 
     if let Some((victim_char_id, resolved_killer_opt)) = ship_victim_and_killer_opt {
@@ -1597,7 +1625,26 @@ pub fn on_ball_destroyed_sync(
         return Ok(Some(death_res));
     }
 
-    // 4. Non-ship space object (fighter, wreck, jetcan, deployable, POCO)
+    // 4. MTO site ball (`snap.sov_runtime.mto_site_balls`)
+    if let Some(mto_type_id) = mto_entity_opt {
+        crate::services::sov_gameplay::on_space_entity_destroyed(
+            ctx,
+            sys_id,
+            mto_killer_opt,
+            ball_id,
+            mto_type_id,
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&ball_id);
+            snap.item_positions.remove(&ball_id);
+            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+            snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
+        });
+        sys_handle.try_remove_ball(ball_id);
+        return Ok(None);
+    }
+
+    // 5. Non-ship space object (fighter, wreck, jetcan, deployable, POCO)
     cleanup_destroyed_non_ship_ball_sync(ctx, sys_id, ball_id);
     Ok(None)
 }
