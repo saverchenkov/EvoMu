@@ -3316,5 +3316,401 @@ class TestPlaytester1200OriginMainCutover(unittest.TestCase):
             self.assertIn("open_structure_cosmetics", pp_gm_s2)
 
 
+class TestBenignClientLogExceptionsFiltering1313(unittest.TestCase):
+    _MINIMAP_TRACE = (
+        "log.LogException args=() kwargs={}\n"
+        "Traceback (most recent call last):\n"
+        '  File "packages/carbonui/uilib.py", line 695, in Update\n'
+        '  File "packages/carbonui/graphs/minimap.py", line 100, in UpdateAlignment\n'
+        '  File "packages/carbonui/graphs/minimap.py", line 111, in _ResizeSlider\n'
+        "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'\n"
+    )
+    _MARKETBASE_RESIZE_TRACE = (
+        "log.LogException args=() kwargs={}\n"
+        "Traceback (most recent call last):\n"
+        '  File "packages/carbonui/uilib.py", line 695, in Update\n'
+        '  File "eve/client/script/ui/shared/market/marketbase.py", line 3718, in _OnResize\n'
+        "AttributeError: 'NoneType' object has no attribute 'max'\n"
+    )
+    _REAL_TRACE = (
+        "log.LogException args=() kwargs={}\n"
+        "Traceback (most recent call last):\n"
+        '  File "eve/client/script/ui/shared/market/marketWindow.py", line 412, in LoadMarketOrders\n'
+        "KeyError: 'orders'\n"
+    )
+    _UNHANDLED_TASKLET_TRACE = (
+        "logmodule.LogException args=(\"Unhandled exception in <TaskletExt object at 0x12, ctxt='market.LoadData'>\",)\n"
+        "Traceback (most recent call last):\n"
+        '  File "eve/client/script/ui/shared/market/marketWindow.py", line 210, in LoadData\n'
+        "UserError: ('CustomInfo', {'info': 'UnexpectedServerState'})\n"
+    )
+
+    def test_prompts_separate_benign_minimap_and_marketbase_log_exceptions_without_mutating_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            shot = root / "screen.png"
+            shot.write_bytes(b"png")
+
+            minimap_item = {
+                "headline": "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+                "trace": self._MINIMAP_TRACE,
+            }
+            marketbase_item = {
+                "headline": "AttributeError: 'NoneType' object has no attribute 'max'",
+                "trace": self._MARKETBASE_RESIZE_TRACE,
+            }
+            real_item = {
+                "headline": "KeyError: 'orders'",
+                "trace": self._REAL_TRACE,
+            }
+
+            raw_benign_fr = {
+                "log_exceptions": [minimap_item, marketbase_item],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            }
+            r_prompt = playtester.build_reasoning_prompt(
+                step_num=57954,
+                screenshot_path=shot,
+                burst_paths=[],
+                ui_snapshot={"active_view": "hangar"},
+                last_flight_recorder=raw_benign_fr,
+                memory=mem,
+                git_head="deadbeef",
+            )
+            self.assertEqual(len(raw_benign_fr["log_exceptions"]), 2)
+            self.assertIn('"benign_log_exceptions":', r_prompt)
+            self.assertIn('"log_exceptions":[]', r_prompt.replace(" ", ""))
+
+            p_prompt = playtester.build_planner_prompt(
+                step_num=53111,
+                screenshot_path=shot,
+                burst_paths=[],
+                ui_snapshot={"active_view": "inflight"},
+                last_flight_recorder=raw_benign_fr,
+                memory=mem,
+                git_head="deadbeef",
+            )
+            self.assertIn('"benign_log_exceptions":', p_prompt)
+            self.assertIn('"log_exceptions":[]', p_prompt.replace(" ", ""))
+
+            e_prompt = playtester.build_executor_prompt(
+                step_num=57954,
+                batch_id=1,
+                batch_step_idx=2,
+                delegated_plan={"plan_goal": "Market check", "max_batch_steps": 3, "steps": [{}, {}]},
+                screenshot_path=shot,
+                burst_paths=[],
+                ui_snapshot={"active_view": "hangar"},
+                last_flight_recorder=raw_benign_fr,
+                memory=mem,
+                batch_history=[{"batch_step": 1, "action_type": "click_widget"}],
+            )
+            self.assertIn('"benign_log_exceptions":', e_prompt)
+            self.assertIn('"log_exceptions":[]', e_prompt.replace(" ", ""))
+
+            mixed_fr = {
+                "log_exceptions": [minimap_item, real_item],
+                "quasar_errors": [],
+                "macho_exceptions": [],
+            }
+            partitioned = playtester.PlaytesterBugOracle.partition_flight_recorder_exceptions(mixed_fr)
+            self.assertEqual(partitioned["log_exceptions"], [real_item])
+            self.assertEqual(partitioned["benign_log_exceptions"], [minimap_item])
+            self.assertEqual(len(mixed_fr["log_exceptions"]), 2)
+
+    def test_evaluate_step_suppresses_channel5_for_1313_and_1299_while_preserving_real_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qdir = root / "queue"
+            tb = root / "client_tracebacks.log"
+            srv = root / "server.log"
+            shot = root / "screen.png"
+            sdir = root / "step"
+            qdir.mkdir()
+            sdir.mkdir()
+            tb.write_text("", encoding="utf-8")
+            srv.write_text("", encoding="utf-8")
+            shot.write_bytes(b"png")
+
+            mem = playtester.PlaytesterMemory(root, git_head="2cc883ab")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+
+            minimap_exc = {
+                "headline": "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+                "trace": self._MINIMAP_TRACE,
+            }
+            marketbase_exc = {
+                "headline": "AttributeError: 'NoneType' object has no attribute 'max'",
+                "trace": self._MARKETBASE_RESIZE_TRACE,
+            }
+
+            # 1. Issue #1313: Step N hits MapSlider._ResizeSlider -> Channel 1 drops it
+            q1 = oracle.evaluate_step(
+                step_num=57953,
+                git_head="2cc883ab",
+                decision={"action": {"type": "click_widget", "target": "entry_1"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {"log_exceptions": [minimap_exc], "quasar_errors": [], "macho_exceptions": []},
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(q1, [])
+            self.assertTrue(oracle._prev_step_dropped_all_log_excs)
+
+            # Step N+1 (even if Step N+1 action also fires MarketData._OnResize while filing #1313!)
+            dec_1313 = {
+                "action": {"type": "click_widget", "target": "marketDetailsTabmarketdata"},
+                "previous_action_verification": {
+                    "expectation_met": False,
+                    "discrepancy_summary": "AttributeError: 'MapSlider' object has no attribute 'minimumWidth' in minimap.py:_ResizeSlider",
+                },
+                "bug_report": {
+                    "should_file": True,
+                    "category": "client_exception",
+                    "severity": "medium",
+                    "subsystem": "market / carbonui.graphs.minimap",
+                    "title": "[Bug Report][market / carbonui] AttributeError: 'MapSlider' object has no attribute 'minimumWidth' in MapSlider._ResizeSlider",
+                    "expected_behavior": "Selecting Miner I renders Price History cleanly",
+                    "actual_behavior": "minimap.py line 111 (_ResizeSlider) AttributeError",
+                    "reproduction_steps": ["Select Miner I on Price History tab"],
+                },
+            }
+            q2 = oracle.evaluate_step(
+                step_num=57954,
+                git_head="2cc883ab",
+                decision=dec_1313,
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {"log_exceptions": [marketbase_exc], "quasar_errors": [], "macho_exceptions": []},
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "benign_log_exceptions": [minimap_exc], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(q2, [])
+
+            # 2. Issue #1299: MarketData._OnResize (raw or pre-partitioned) + Channel 5 client_exception -> suppressed
+            dec_1299 = {
+                "action": {"type": "close_window", "target": "market"},
+                "previous_action_verification": {
+                    "expectation_met": False,
+                    "discrepancy_summary": "marketbase.py:3718 _OnResize NoneType.max",
+                },
+                "bug_report": {
+                    "should_file": True,
+                    "category": "client_exception",
+                    "severity": "medium",
+                    "subsystem": "market_ui",
+                    "title": "[Client Exception] AttributeError: 'NoneType' object has no attribute 'max' in marketbase.py:_OnResize when selecting Market Data tab",
+                    "expected_behavior": "Market Data tab renders cleanly",
+                    "actual_behavior": "marketbase.py line 3718 (_OnResize) NoneType.max",
+                    "reproduction_steps": ["Click Market Data tab for Avatar (11567)"],
+                },
+            }
+            q3 = oracle.evaluate_step(
+                step_num=53111,
+                git_head="2cc883ab",
+                decision=dec_1299,
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [marketbase_exc], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(q3, [])
+
+            # 3. Negative checks: real non-benign traceback or unhandled tasklet crash MUST still be queued!
+            real_exc = {"headline": "KeyError: 'orders'", "trace": self._REAL_TRACE}
+            q_real = oracle.evaluate_step(
+                step_num=57955,
+                git_head="2cc883ab",
+                decision=dec_1299,
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {"log_exceptions": [marketbase_exc, real_exc], "quasar_errors": [], "macho_exceptions": []},
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "benign_log_exceptions": [marketbase_exc], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q_real), 1)
+            self.assertEqual(json.loads(q_real[0].read_text(encoding="utf-8"))["kind"], "client_traceback")
+
+            tasklet_exc = {
+                "headline": "UserError: ('CustomInfo', {'info': 'UnexpectedServerState'})",
+                "trace": self._UNHANDLED_TASKLET_TRACE,
+            }
+            q_tasklet = oracle.evaluate_step(
+                step_num=57956,
+                git_head="2cc883ab",
+                decision={"action": {"type": "click_widget", "target": "entry_1"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {"log_exceptions": [tasklet_exc], "quasar_errors": [], "macho_exceptions": []},
+                },
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(len(q_tasklet), 1)
+            self.assertEqual(json.loads(q_tasklet[0].read_text(encoding="utf-8"))["kind"], "client_traceback")
+
+            # Agent-diagnosed real client_exception when no benign layout race was involved -> NOT suppressed
+            dec_real_agent = {
+                "action": {"type": "click_widget", "target": "marketDetailsTabmarketdata"},
+                "previous_action_verification": {"expectation_met": False, "discrepancy_summary": "KeyError orders"},
+                "bug_report": {
+                    "should_file": True,
+                    "category": "client_exception",
+                    "severity": "high",
+                    "subsystem": "market",
+                    "title": "[Market] KeyError: 'orders' in marketWindow.py:412",
+                    "expected_behavior": "Orders populate cleanly",
+                    "actual_behavior": "KeyError: 'orders' raised in LoadMarketOrders",
+                    "reproduction_steps": ["Open market window"],
+                },
+            }
+            q_real_agent = oracle.evaluate_step(
+                step_num=57957,
+                git_head="2cc883ab",
+                decision=dec_real_agent,
+                exec_res={"action_ok": True, "flight_recorder": {"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []}},
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+                last_flight_recorder={"log_exceptions": [], "quasar_errors": [], "macho_exceptions": []},
+            )
+            self.assertEqual(len(q_real_agent), 1)
+            self.assertEqual(json.loads(q_real_agent[0].read_text(encoding="utf-8"))["kind"], "client_exception")
+
+    def test_execute_step_fr_delta_moves_benign_log_exceptions_without_forcing_escalation(self):
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            args = playtester.parse_args(["--worktree", str(wt)])
+            runner = playtester.PlaytesterRunner(args)
+            runner.oracle.async_write = False
+            runner.cached_git_head = "2cc883ab"
+            snap = {
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760},
+                "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+                "open_windows": [],
+                "modals": [],
+                "space": {},
+                "skills_state": {},
+                "wallet_state": {},
+            }
+            minimap_exc = {
+                "headline": "AttributeError: 'MapSlider' object has no attribute 'minimumWidth'",
+                "trace": self._MINIMAP_TRACE,
+            }
+
+            def fake_rpc_call(method, params=None, timeout=15.0):
+                if method == "get_state":
+                    return dict(snap)
+                if method == "execute_action":
+                    return {
+                        "action_ok": True,
+                        "flight_recorder": {
+                            "log_exceptions": [minimap_exc],
+                            "quasar_errors": [],
+                            "macho_exceptions": [],
+                        },
+                        "state_diff": {"ui_changed": True},
+                    }
+                return {"ok": True}
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = fake_rpc_call
+            plan_dec = {
+                "observation": "Market Price History open",
+                "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                "bug_report": {"should_file": False},
+                "current_goal": "Select Miner I",
+                "memory_update": {},
+                "delegated_plan": {
+                    "plan_goal": "Select Miner I then close market",
+                    "horizon_rationale": "2 direct steps",
+                    "max_batch_steps": 2,
+                    "steps": [
+                        {
+                            "step_number": 1,
+                            "exec_mode": "direct",
+                            "action": {"type": "wait", "wait_ms": 50},
+                        },
+                        {
+                            "step_number": 2,
+                            "exec_mode": "direct",
+                            "action": {"type": "wait", "wait_ms": 50},
+                        },
+                    ],
+                },
+            }
+            with mock.patch.object(playtester, "capture_window_screenshot", return_value={"ok": False}), \
+                 mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 0.2)):
+                fr_delta, _ = runner.execute_step(1, {}, [])
+
+            self.assertEqual(fr_delta.get("log_exceptions"), [])
+            self.assertEqual(fr_delta.get("benign_log_exceptions"), [minimap_exc])
+            self.assertFalse(runner._escalate_to_diagnostic_planner)
+            self.assertIsNone(runner._pending_assertion_escalation)
+            self.assertFalse(runner.batch_completed_flag)
+
+            # Real non-benign traceback must stay in fr_delta["log_exceptions"] and escalate normally
+            real_exc = {"headline": "KeyError: 'orders'", "trace": self._REAL_TRACE}
+            def fake_rpc_real(method, params=None, timeout=15.0):
+                if method == "get_state":
+                    return dict(snap)
+                if method == "execute_action":
+                    return {
+                        "action_ok": True,
+                        "flight_recorder": {
+                            "log_exceptions": [minimap_exc, real_exc],
+                            "quasar_errors": [],
+                            "macho_exceptions": [],
+                        },
+                        "state_diff": {"ui_changed": False},
+                    }
+                return {"ok": True}
+
+            runner.rpc.call.side_effect = fake_rpc_real
+            with mock.patch.object(playtester, "capture_window_screenshot", return_value={"ok": False}):
+                fr_delta_real, _ = runner.execute_step(2, fr_delta, [])
+
+            self.assertEqual(fr_delta_real.get("log_exceptions"), [real_exc])
+            self.assertEqual(fr_delta_real.get("benign_log_exceptions"), [minimap_exc])
+            self.assertTrue(runner._escalate_to_diagnostic_planner)
+            self.assertIsNotNone(runner._pending_assertion_escalation)
+            self.assertEqual(runner._pending_assertion_escalation.get("log_exceptions"), [real_exc])
+
+
 if __name__ == "__main__":
     unittest.main()
