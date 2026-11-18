@@ -1264,7 +1264,7 @@ pub fn normalize_macho_rpc_reply_at(
     } else if service == "agentMgr" && method == "GetMissionObjectiveInfo" {
         match rpc_res {
             Err(ref e) if e.code == "MissionNotActive" => return Ok(PyRep::None),
-            Ok(rep) => return Ok(normalize_agent_mission_objective_rep(rep)),
+            Ok(rep) => return Ok(normalize_agent_mission_objective_rep_at(rep, now_unix)),
             Err(e) => return Err(e),
         }
     } else if service == "agentMgr" && method == "GetMyJournalDetails" {
@@ -1484,7 +1484,11 @@ fn normalize_agent_mission_briefing_rep(rep: PyRep) -> PyRep {
     ])
 }
 
-fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
+/// Normalizes an `agentMgr.GetMissionObjectiveInfo` reply into the MachoNet
+/// objective dictionary shape, computing live `bonusRewards` remaining
+/// 100ns ticks against `now_unix` and clearing expired bonus tuples once
+/// `now_unix` exceeds `bonusExpiryUnix`.
+fn normalize_agent_mission_objective_rep_at(rep: PyRep, now_unix: Option<u64>) -> PyRep {
     if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
         return rep;
     }
@@ -1532,28 +1536,24 @@ fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
         ])]),
         _ => PyRep::List(Vec::new()),
     };
+    let win_secs = rep.dict_get("bonusWindowSecs").and_then(|v| v.as_i64()).filter(|&v| v > 0).unwrap_or(1_800);
+    let bonus_exp = rep.dict_get("bonusExpiryUnix").and_then(|v| v.as_i64());
+    let expired = matches!((bonus_exp, now_unix), (Some(exp), Some(now)) if (now as i64) > exp);
+    let rem_secs = match (bonus_exp, now_unix) {
+        (Some(exp), Some(now)) => exp.saturating_sub(now as i64).max(0),
+        _ => win_secs,
+    };
+    let (b_ticks, b_mins) = (rem_secs.saturating_mul(10_000_000), ((win_secs + 59) / 60).max(1));
     let bonus_rewards = match rep.dict_get("bonusRewards") {
-        Some(PyRep::List(items)) => PyRep::List(
-            items
-                .iter()
-                .map(|it| match it {
-                    PyRep::Tuple(els) if els.len() == 3 => PyRep::Tuple(vec![
-                        PyRep::Integer(18_000_000_000),
-                        els[0].clone(),
-                        els[1].clone(),
-                        els[2].clone(),
-                        PyRep::Integer(30),
-                    ]),
-                    other => other.clone(),
-                })
-                .collect(),
-        ),
+        _ if expired => PyRep::List(Vec::new()),
+        Some(PyRep::List(items)) => PyRep::List(items.iter().map(|it| match it {
+            PyRep::Tuple(els) if els.len() == 3 => PyRep::Tuple(vec![
+                PyRep::Integer(b_ticks), els[0].clone(), els[1].clone(), els[2].clone(), PyRep::Integer(b_mins),
+            ]),
+            other => other.clone(),
+        }).collect()),
         _ if bonus_reward > 0 => PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Integer(18_000_000_000),
-            PyRep::Integer(29), // const.typeCredits
-            PyRep::Integer(bonus_reward),
-            PyRep::None,
-            PyRep::Integer(30),
+            PyRep::Integer(b_ticks), PyRep::Integer(29), PyRep::Integer(bonus_reward), PyRep::None, PyRep::Integer(b_mins),
         ])]),
         _ => PyRep::List(Vec::new()),
     };

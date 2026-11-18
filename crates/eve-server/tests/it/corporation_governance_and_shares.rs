@@ -1687,10 +1687,9 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     assert!(gross_lp > 0 && gross_lp < 100_000, "L4 mission LP ({gross_lp}) must be positive and < 100k");
 
     let expected_isk_tax_cents = (eve_db::IskCents::from_isk(gross_isk).raw_cents() * 11 + 50) / 100;
-    let expected_net_lp = gross_lp - ((gross_lp * 11 + 50) / 100);
     ctx.db.with_snapshot(|s| {
         let lp_gained = s.characters[&PILOT_2].loyalty_points.get(&ag_corp).copied().unwrap_or(0) - lp_pre;
-        assert_eq!(lp_gained, expected_net_lp, "11% NPC corp LP tax must apply when mission ISK >= 100k");
+        assert_eq!(lp_gained, gross_lp, "NPC corps charge 0% LP tax even when mission ISK >= 100k");
         let new_entries: Vec<_> = s.wallet_journal.iter().skip(journal_idx).collect();
         assert!(
             new_entries.iter().any(|e| {

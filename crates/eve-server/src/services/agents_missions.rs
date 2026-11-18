@@ -573,11 +573,20 @@ pub async fn handle_with_bound(
                 .and_then(|mt| mt.offered_level)
                 .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
                 .unwrap_or(1);
+            let now = ctx.now_unix();
             let CharacterMissionRewards {
                 isk_reward,
                 lp_reward,
-                bonus_reward,
+                bonus_reward: raw_bonus_reward,
             } = compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
+            let bonus_window_secs =
+                mission_bonus_window_secs(ctx, char_id, m.agent_id, mission_id);
+            let bonus_expiry_unix = meta.as_ref().and_then(|mt| mt.bonus_expiry_unix);
+            let bonus_reward = if bonus_expiry_unix.is_some_and(|bexp| now > bexp) {
+                0
+            } else {
+                raw_bonus_reward
+            };
             let origin_sid = meta
                 .as_ref()
                 .and_then(|mt| mt.origin_station_id)
@@ -724,7 +733,28 @@ pub async fn handle_with_bound(
                 ("iskReward", PyRep::Integer(isk_reward)),
                 ("lpReward", PyRep::Integer(lp_reward)),
                 ("bonusReward", PyRep::Integer(bonus_reward)),
+                ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
+                ("bonusRewards", {
+                    let rem_secs = bonus_expiry_unix
+                        .map(|bexp| bexp.saturating_sub(now))
+                        .unwrap_or(bonus_window_secs);
+                    let window_mins = ((bonus_window_secs + 59) / 60).max(1) as i64;
+                    if bonus_reward > 0 {
+                        PyRep::List(vec![PyRep::Tuple(vec![
+                            PyRep::Integer(rem_secs.saturating_mul(10_000_000) as i64),
+                            PyRep::Integer(29), // const.typeCredits
+                            PyRep::Integer(bonus_reward),
+                            PyRep::None,
+                            PyRep::Integer(window_mins),
+                        ])])
+                    } else {
+                        PyRep::List(Vec::new())
+                    }
+                }),
             ];
+            if let Some(bexp) = bonus_expiry_unix {
+                info_fields.push(("bonusExpiryUnix", PyRep::Integer(bexp as i64)));
+            }
             if let Some(fid) = agent_faction_id {
                 info_fields.push(("factionID", PyRep::Integer(fid)));
             }
@@ -1060,13 +1090,13 @@ pub async fn handle_with_bound(
                         } else {
                             ctx.sde.missions
                                 .values().filter(|m| {
-                                    mission_matches_agent_pool(m, agent_info)
+                                    mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
                                         && m.has_standing_rewards
                                         && !snap.active_missions.contains_key(&(char_id, m.mission_id))
                                 }).min_by_key(|m| m.mission_id).or_else(|| {
                                     ctx.sde.missions
                                         .values().filter(|m| {
-                                            mission_matches_agent_pool(m, agent_info)
+                                            mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
                                                 && !snap.active_missions.contains_key(&(char_id, m.mission_id))
                                         }).min_by_key(|m| m.mission_id)
                                 })
@@ -1131,6 +1161,8 @@ pub async fn handle_with_bound(
                                 lp_reward,
                                 bonus_reward,
                             } = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
+                            let bonus_window_secs =
+                                mission_bonus_window_secs(ctx, char_id, agent_id, mission_id);
                             ctx.emit_typed(
                                 NotificationTarget::Character(char_id),
                                 OnAgentMissionChange {
@@ -1162,6 +1194,7 @@ pub async fn handle_with_bound(
                                 ("iskReward", PyRep::Integer(isk_reward)),
                                 ("lpReward", PyRep::Integer(lp_reward)),
                                 ("bonusReward", PyRep::Integer(bonus_reward)),
+                                ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
                                 ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                             ];
                             if let Some(dsid) = dest_sid {
@@ -1271,7 +1304,8 @@ pub async fn handle_with_bound(
 
                     let now = ctx.now_unix();
                     let accept_dur = 604_800_u64;
-                    let bonus_dur = mission_bonus_duration(agent_lvl);
+                    let bonus_dur =
+                        mission_bonus_window_secs(ctx, char_id, actual_agent_id, mission_id);
 
                     let m_info = ctx.db.with_snapshot(|snap| {
                         let m = snap.active_missions.get(&(char_id, mission_id))?;
@@ -1330,10 +1364,12 @@ pub async fn handle_with_bound(
                             snap.sp6_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
                         }
                         let mut granted_courier_item: Option<InventoryItemRecord> = None;
+                        let mut final_accept_expiry = now + accept_dur;
+                        let mut final_bonus_expiry = now + bonus_dur;
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
-                            meta.accepted_at_unix = Some(now);
-                            meta.accept_expiry_unix = Some(now + accept_dur);
-                            meta.bonus_expiry_unix = Some(now + bonus_dur);
+                            meta.accepted_at_unix.get_or_insert(now);
+                            final_accept_expiry = *meta.accept_expiry_unix.get_or_insert(now + accept_dur);
+                            final_bonus_expiry = *meta.bonus_expiry_unix.get_or_insert(now + bonus_dur);
                             let is_trade = tmpl_opt.as_ref().is_some_and(|t| t.content_template.as_deref().unwrap_or_default().contains("Trade"));
                             let is_courier = !is_trade && tmpl_opt.as_ref().is_some_and(|t| t.is_courier || t.content_template.as_deref().unwrap_or_default().contains("BasicCourier"));
                             if is_courier && meta.granted_courier_item_id.is_none() {
@@ -1354,9 +1390,9 @@ pub async fn handle_with_bound(
                             }
                             save_mission_meta(snap, char_id, &meta);
                         }
-                        Ok((spawned_npcs, granted_courier_item))
+                        Ok((spawned_npcs, granted_courier_item, final_accept_expiry, final_bonus_expiry))
                     });
-                    let (spawned_npcs, granted_courier_item) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let (spawned_npcs, granted_courier_item, expiry_unix, bonus_expiry_unix) = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
                     if let Some(ref courier_item) = granted_courier_item {
                         ctx.notify_item_mutation(char_id, None, Some(courier_item));
                     }
@@ -1400,8 +1436,6 @@ pub async fn handle_with_bound(
                         let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
                     }
 
-                    let expiry_unix = now + accept_dur;
-                    let bonus_expiry_unix = now + bonus_dur;
                     let mission_title = ctx.sde.missions.get(&mission_id).map(|m| m.title.clone()).unwrap_or_else(|| format!("Mission {mission_id}"));
                     let bookmark_id = ctx.db.with_mut_snapshot(|snap| {
                         snap.next_entity_id += 1;
@@ -1448,6 +1482,7 @@ pub async fn handle_with_bound(
                         ("bookmarkID", PyRep::Integer(bookmark_id)),
                         ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                         ("bonusExpiryUnix", PyRep::Integer(bonus_expiry_unix as i64)),
+                        ("bonusWindowSecs", PyRep::Integer(bonus_dur as i64)),
                         ("spawnedNpcBallID", first_npc_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                     ])))
                 }
@@ -1660,34 +1695,29 @@ pub async fn handle_with_bound(
                         let lp_mult = crate::services::pve_special_sites::get_incursion_effects_for_system_in_snap(&ctx.sde, snap, char_sys)
                             .map(|e| (1.0 - e.lp_penalty).clamp(0.0, 1.0))
                             .unwrap_or(1.0);
-                        let effective_lp = ((lp_reward.max(0) as f64) * lp_mult).round() as i64;
-                        let is_taxed_npc_corp = snap.characters.get(&char_id).is_some_and(|ch| {
-                            ch.corporation_id > 0
-                                && !snap.corporations.contains_key(&ch.corporation_id)
-                                && !matches!(ch.corporation_id, 1_000_179..=1_000_182 | 1_000_436 | 1_000_437)
-                        });
-                        let credited_lp = if is_taxed_npc_corp && isk_reward >= 100_000 {
-                            effective_lp - ((effective_lp.saturating_mul(11) + 50) / 100)
-                        } else {
-                            effective_lp
-                        };
+                        // NPC corporations charge 0% LP tax; independent 11% NPC-corp (or player-corp) ISK
+                        // taxation for base reward and time-bonus wallet journal entries (>= 100_000 ISK
+                        // threshold for NPC corps) is applied right below by `lp_store::record_lp_reward_log`.
+                        let credited_lp = ((lp_reward.max(0) as f64) * lp_mult).round() as i64;
 
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let reward_cents = IskCents::from_isk(isk_reward);
-                            ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-                            let bal_after_reward = ch.balance;
+                            if isk_reward > 0 {
+                                let reward_cents = IskCents::from_isk(isk_reward);
+                                ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+                                let bal_after_reward = ch.balance;
 
-                            snap.next_entity_id += 1;
-                            let jid1 = snap.next_entity_id;
-                            snap.wallet_journal.push(WalletJournalEntry {
-                                entry_id: jid1,
-                                character_id: char_id,
-                                entry_type: "agent_mission_reward".to_string(),
-                                amount: reward_cents,
-                                balance_after: bal_after_reward,
-                                reason: format!("Mission {mission_id} reward"),
-                            });
-                            snap.wallet_journal_timestamps.insert(jid1, now);
+                                snap.next_entity_id += 1;
+                                let jid1 = snap.next_entity_id;
+                                snap.wallet_journal.push(WalletJournalEntry {
+                                    entry_id: jid1,
+                                    character_id: char_id,
+                                    entry_type: "agent_mission_reward".to_string(),
+                                    amount: reward_cents,
+                                    balance_after: bal_after_reward,
+                                    reason: format!("Mission {mission_id} reward"),
+                                });
+                                snap.wallet_journal_timestamps.insert(jid1, now);
+                            }
 
                             if bonus_paid > 0 {
                                 let bonus_cents = IskCents::from_isk(bonus_paid);
@@ -1705,11 +1735,13 @@ pub async fn handle_with_bound(
                                 snap.wallet_journal_timestamps.insert(jid2, now);
                             }
 
-                            let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
-                            *lp_entry = lp_entry.saturating_add(credited_lp);
-                            if corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID && ch.corporation_id >= 98_000_000 {
-                                let c_lp = snap.corp_lp_balances.entry((ch.corporation_id, corp_id)).or_insert(0);
-                                *c_lp = c_lp.saturating_add(credited_lp);
+                            if credited_lp > 0 {
+                                let lp_entry = ch.loyalty_points.entry(corp_id).or_insert(0);
+                                *lp_entry = lp_entry.saturating_add(credited_lp);
+                                if corp_id == crate::services::lp_store_catalog::PARAGON_CORP_ID && ch.corporation_id >= 98_000_000 {
+                                    let c_lp = snap.corp_lp_balances.entry((ch.corporation_id, corp_id)).or_insert(0);
+                                    *c_lp = c_lp.saturating_add(credited_lp);
+                                }
                             }
                         }
                         crate::services::lp_store::record_lp_reward_log(

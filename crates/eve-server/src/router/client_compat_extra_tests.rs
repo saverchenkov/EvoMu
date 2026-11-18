@@ -1806,3 +1806,240 @@ fn module_attribute_changes_normalizes_list_entries_without_mangling() {
         );
     }
 }
+
+fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
+    normalize_agent_mission_objective_rep_at(rep, None)
+}
+
+#[tokio::test]
+async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
+    // 1. Direct unit coverage for `normalize_agent_mission_objective_rep_at` with custom `bonusWindowSecs` & `bonusExpiryUnix`
+    let now0 = 1_800_000_000_u64;
+    let rep_64m = normalize_agent_mission_objective_rep_at(
+        PyRep::keyval([
+            ("missionID", PyRep::Integer(13_514)),
+            ("missionState", PyRep::Integer(2)),
+            ("iskReward", PyRep::Integer(29_000)),
+            ("bonusReward", PyRep::Integer(37_000)),
+            ("bonusWindowSecs", PyRep::Integer(3_840)),
+            ("bonusExpiryUnix", PyRep::Integer((now0 + 2_000) as i64)),
+        ]),
+        Some(now0),
+    );
+    assert_eq!(
+        rep_64m.dict_get("bonusRewards"),
+        Some(&PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(2_000 * 10_000_000),
+            PyRep::Integer(29),
+            PyRep::Integer(37_000),
+            PyRep::None,
+            PyRep::Integer(64),
+        ])])),
+        "Active 64m mission must carry exact remaining 100ns ticks and 64-minute window"
+    );
+
+    let rep_expired = normalize_agent_mission_objective_rep_at(
+        PyRep::keyval([
+            ("missionID", PyRep::Integer(13_514)),
+            ("missionState", PyRep::Integer(2)),
+            ("iskReward", PyRep::Integer(29_000)),
+            ("bonusReward", PyRep::Integer(37_000)),
+            ("bonusWindowSecs", PyRep::Integer(3_840)),
+            ("bonusExpiryUnix", PyRep::Integer((now0 + 2_000) as i64)),
+        ]),
+        Some(now0 + 2_001),
+    );
+    assert_eq!(
+        rep_expired.dict_get("bonusRewards"),
+        Some(&PyRep::List(Vec::new())),
+        "Expired bonus window must omit bonusRewards over MachoNet"
+    );
+
+    // 2. End-to-end MachoNet dispatch (`Some("machoNet:26000")`) with pinned virtual clock
+    let ctx = test_ctx();
+    let clock = Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(now0));
+    ctx.set_clock(clock.clone());
+    let char_id = 90_000_001_i64;
+    let mut ag1 = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .expect("L1 security agent")
+        .clone();
+    ag1.solar_system_id = Some(30_000_142);
+    let ag4 = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 4 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .expect("L4 security agent")
+        .clone();
+    let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
+        let (uid, corp_id) = {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.clone_grade = 2;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(60_003_760);
+            (ch.user_id, ch.corporation_id)
+        };
+        snap.skills.remove(&char_id);
+        for (mid, aid, sys_id, win_s) in [
+            (13_514_u32, ag1.agent_id, ag1.solar_system_id.unwrap(), 3_840_u64),
+            (900_u32, ag4.agent_id, ag4.solar_system_id.unwrap(), 14_400_u64),
+        ] {
+            snap.active_missions.insert(
+                (char_id, mid),
+                eve_db::ActiveMissionRecord {
+                    character_id: char_id,
+                    mission_id: mid,
+                    agent_id: aid,
+                    solar_system_id: sys_id,
+                    state: "Accepted".into(),
+                    current_room_id: 1,
+                    npcs_remaining: 0,
+                    spawned_npc_ball_ids: Vec::new(),
+                    bookmark_id: None,
+                },
+            );
+            crate::services::agents_missions::save_mission_meta(
+                snap,
+                char_id,
+                &crate::services::agents_missions::MissionTimingAndCargoMeta {
+                    mission_id: mid,
+                    agent_id: aid,
+                    offered_at_unix: now0,
+                    offer_expiry_unix: now0 + 86_400,
+                    accepted_at_unix: Some(now0),
+                    accept_expiry_unix: Some(now0 + 604_800),
+                    bonus_expiry_unix: Some(now0 + win_s),
+                    offered_level: Some(if mid == 900 { 4 } else { 1 }),
+                    ..Default::default()
+                },
+            );
+        }
+        (uid, corp_id)
+    });
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(30_000_142),
+        station_id: Some(60_003_760),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // Initial 64m (13514 -> 3840s, 37_000 ISK) and 4h (900 -> 14400s, 510_000 ISK)
+    let wire_13514 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag1.agent_id), PyRep::Integer(13_514)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire 13514 initial");
+    assert_eq!(
+        wire_13514.dict_get("bonusRewards"),
+        Some(&PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(3_840 * 10_000_000),
+            PyRep::Integer(29),
+            PyRep::Integer(37_000),
+            PyRep::None,
+            PyRep::Integer(64),
+        ])])),
+        "64-minute mission must preserve 3840s ticks and 64m duration on wire"
+    );
+
+    let wire_900 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag4.agent_id), PyRep::Integer(900)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire 900 initial");
+    assert_eq!(
+        wire_900.dict_get("bonusRewards"),
+        Some(&PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(14_400 * 10_000_000),
+            PyRep::Integer(29),
+            PyRep::Integer(510_000),
+            PyRep::None,
+            PyRep::Integer(240),
+        ])])),
+        "4-hour mission must preserve 14400s ticks and 240m duration on wire"
+    );
+
+    // Advance 900s: countdown ticks drop to 2940s while window remains 64m; 900 drops to 13500s / 240m
+    eve_db::ServerClock::advance_secs(&*clock, 900);
+    let wire_13514_mid = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag1.agent_id), PyRep::Integer(13_514)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire 13514 mid");
+    assert_eq!(
+        wire_13514_mid.dict_get("bonusRewards"),
+        Some(&PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(2_940 * 10_000_000),
+            PyRep::Integer(29),
+            PyRep::Integer(37_000),
+            PyRep::None,
+            PyRep::Integer(64),
+        ])])),
+    );
+
+    // Advance past 13514 expiry (2941s more -> total +3841s): 13514 omits bonusRewards while 900 still has 10559s
+    eve_db::ServerClock::advance_secs(&*clock, 2_941);
+    let wire_13514_exp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag1.agent_id), PyRep::Integer(13_514)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire 13514 expired");
+    assert_eq!(wire_13514_exp.dict_get("bonusRewards"), Some(&PyRep::List(Vec::new())));
+
+    let wire_900_still_live = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(ag4.agent_id), PyRep::Integer(900)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("wire 900 still live");
+    assert_eq!(
+        wire_900_still_live.dict_get("bonusRewards"),
+        Some(&PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(10_559 * 10_000_000),
+            PyRep::Integer(29),
+            PyRep::Integer(510_000),
+            PyRep::None,
+            PyRep::Integer(240),
+        ])])),
+    );
+}

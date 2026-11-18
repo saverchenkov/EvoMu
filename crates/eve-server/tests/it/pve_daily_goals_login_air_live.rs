@@ -621,11 +621,17 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     assert_eq!(offer_isk, calc_isk);
     assert_eq!(offer_lp, calc_lp);
     assert_eq!(offer_bonus, calc_bonus);
-    assert_eq!(calc_bonus, calc_isk / 2);
+    assert!(calc_isk > 0 && calc_lp > 0 && calc_bonus > 0);
+    assert_ne!(calc_bonus, calc_isk / 2);
+    let offer_win = offer_info
+        .dict_get("bonusWindowSecs")
+        .and_then(|v| v.as_i64())
+        .expect("bonusWindowSecs");
+    assert!((600..7_200).contains(&offer_win));
 
-    // Validate scaling formulas:
+    // Validate scaling formulas independently against concrete Wiki-calibrated SDE missions:
     // LP = base_lp * (1.6288 - true_sec) * (1.0 + 0.1 * conn_lvl)
-    // ISK = base_isk * (1.0 + 0.05 * neg_lvl)
+    // ISK & bonus = catalog base * (1.0 + 0.05 * neg_lvl)
     let agent_info = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
     let agent_sys = agent_info.solar_system_id.unwrap_or(30_000_142);
     let true_sec = ctx
@@ -639,15 +645,27 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         23 => 2, // Mining Connections II
         _ => 4,  // Security Connections IV
     };
-    let tmpl = ctx.sde.missions.get(&mission_id).expect("mission template");
-    let base_lp = tmpl.lp_omega.max(100);
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let expected_lp = ((base_lp as f64) * sec_factor * (1.0 + 0.10 * (conn_lvl as f64))).round() as i64;
-    let base_isk = base_lp * 1_000;
-    let expected_isk = ((base_isk as f64) * (1.0 + 0.05 * 3.0)).round() as i64;
+    let conn_factor = 1.0 + 0.10 * (conn_lvl as f64);
 
-    assert_eq!(calc_lp, expected_lp, "LP reward must match Connections skill formula");
-    assert_eq!(calc_isk, expected_isk, "ISK reward must match Negotiation skill formula");
+    let w_denial = compute_character_mission_rewards(&ctx, char_id, agent_id, 13_777, agent_sys);
+    assert_eq!(w_denial.isk_reward, 77_050); // Denial Of Reconnaissance: 67,000 * 1.15
+    assert_eq!(w_denial.bonus_reward, 73_600); // 64,000 * 1.15
+    assert_eq!(
+        w_denial.lp_reward,
+        (73.0 * sec_factor * conn_factor).round() as i64,
+        "LP reward must match (1.6288 - true_sec) * Connections skill formula"
+    );
+
+    let w_patriotic = compute_character_mission_rewards(&ctx, char_id, agent_id, 13_514, agent_sys);
+    assert_eq!(w_patriotic.isk_reward, 33_350); // Patriotic Measures (4 of 5): 29,000 * 1.15
+    assert_eq!(w_patriotic.bonus_reward, 42_550); // 37,000 * 1.15
+    assert_eq!(
+        w_patriotic.lp_reward,
+        (35.0 * sec_factor * conn_factor).round() as i64,
+        "Distinct L1 missions must yield independent per-mission LP baselines"
+    );
+    assert_eq!(mission_bonus_window_secs(&ctx, char_id, agent_id, 13_514), 3_840);
 
     // Accept mission (DoAction 3)
     let accept_rep = common::borrow_wire_harness(&ctx, &mut pilot)
@@ -701,6 +719,32 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         Some(mission_id as i64)
     );
 
+    let comp_isk = complete_parts[1]
+        .dict_get("iskReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete iskReward");
+    let comp_bonus = complete_parts[1]
+        .dict_get("bonusReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete bonusReward");
+    let comp_lp = complete_parts[1]
+        .dict_get("lpReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete lpReward");
+    assert_eq!(comp_isk, calc_isk);
+    assert_eq!(comp_bonus, calc_bonus);
+    assert_eq!(comp_lp, calc_lp);
+
+    let npc_tax_cents = |isk: i64| -> i64 {
+        if isk >= 100_000 {
+            ((isk * 100) * 11 + 50) / 100
+        } else {
+            0
+        }
+    };
+    let expected_net_cents =
+        (calc_isk * 100 - npc_tax_cents(calc_isk)) + (calc_bonus * 100 - npc_tax_cents(calc_bonus));
+
     let bal_after = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
     assert!(
         bal_after > bal_before,
@@ -708,8 +752,8 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     );
     assert_eq!(
         bal_after - bal_before,
-        15_985_000,
-        "Net mission reward reflects calculated reward + bonus minus NPC corp tax"
+        expected_net_cents,
+        "Net mission wallet delta reflects calculated ISK + bonus minus 11% NPC corp tax where >= 100k"
     );
 
     let lp_after = ctx.db.with_snapshot(|s| {
@@ -720,4 +764,236 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
             .unwrap_or(0)
     });
     assert!(lp_after > 0, "Completed mission must credit LP reward to loyalty_points");
+    assert_eq!(lp_after, calc_lp, "NPC corps charge 0% LP tax");
+}
+
+// parity: feat:pve.mission-complete
+// parity: feat:pve.mission-lp-isk-reward-formula
+#[tokio::test]
+async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
+    eve_testkit::attest(&[
+        "feat:pve.mission-complete",
+        "feat:pve.mission-lp-isk-reward-formula",
+    ]);
+
+    let ctx = ServerContext::new();
+    pin_clock(&ctx);
+
+    let char_id = 93_000_201_i64;
+    let mut pilot = gm_pilot_docked(&ctx, 22_099, char_id).await;
+    slash_cmd(&ctx, &mut pilot, "/giveskill 3356 5").await; // Negotiation V (+25% ISK/bonus)
+    slash_cmd(&ctx, &mut pilot, "/giveskill 3895 4").await; // Security Connections IV (+40% LP)
+
+    let npc_corp_id = 1_000_009_i64; // Non-exempt NPC starter corp (11% ISK tax >= 100k, 0% LP tax)
+    let find_sec_agent = |level: u8| {
+        ctx.sde
+            .agents
+            .values()
+            .filter(|a| {
+                a.agent_type_id == 2
+                    && a.division_id == 24
+                    && a.level == level
+                    && a.station_id.is_some()
+                    && a.solar_system_id.is_some()
+            })
+            .min_by_key(|a| a.agent_id)
+            .expect("SDE Basic Security agent")
+            .clone()
+    };
+    let ag4 = find_sec_agent(4);
+    let ag2 = find_sec_agent(2);
+    let ag4_sys = ag4.solar_system_id.unwrap();
+    let ag4_sta = ag4.station_id.unwrap();
+    let ag2_sys = ag2.solar_system_id.unwrap();
+    let ag2_sta = ag2.station_id.unwrap();
+
+    // Case 1: L4 The Sansha Spies (900) — base ISK >= 100k AND bonus >= 100k (both independently taxed 11%; LP untaxed).
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = npc_corp_id;
+            ch.clone_grade = 2;
+            ch.solar_system_id = ag4_sys;
+            ch.station_id = Some(ag4_sta);
+            ch.standings.insert(ag4.agent_id, 7.0);
+            ch.standings.insert(ag4.corporation_id, 7.0);
+            ch.standings.insert(ag2.agent_id, 7.0);
+            ch.standings.insert(ag2.corporation_id, 7.0);
+        }
+        snap.active_missions.insert(
+            (char_id, 900),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 900,
+                agent_id: ag4.agent_id,
+                solar_system_id: ag4_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 900,
+                agent_id: ag4.agent_id,
+                offered_at_unix: now,
+                offer_expiry_unix: now + 86_400,
+                origin_station_id: Some(ag4_sta),
+                offered_level: Some(4),
+                ..Default::default()
+            },
+        );
+    });
+    pilot.corporation_id = Some(npc_corp_id);
+    pilot.solar_system_id = Some(ag4_sys);
+    pilot.station_id = Some(ag4_sta);
+    pilot.structure_id = None;
+
+    let kw = HashMap::new();
+    let bind4 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", None, "MachoBindObject", &[PyRep::Integer(ag4.agent_id), PyRep::None], &kw)
+        .await
+        .expect("bind ag4");
+    let oid4 = extract_bound_id_from_wire_rep(&bind4).expect("oid4");
+    common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", Some(oid4), "DoAction", &[PyRep::Integer(3)], &kw)
+        .await
+        .expect("accept 900");
+
+    let (bal_before_4, lp_before_4, j_start_4) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&char_id].balance.0,
+            s.characters[&char_id].loyalty_points.get(&ag4.corporation_id).copied().unwrap_or(0),
+            s.wallet_journal.len(),
+        )
+    });
+    let comp4 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", Some(oid4), "DoAction", &[PyRep::Integer(6)], &kw)
+        .await
+        .expect("complete 900");
+    let PyRep::Tuple(parts4) = comp4 else { panic!("Expected 2-tuple") };
+    let expected_isk_4 = 358_000_i64 * 5 / 4; // 447_500
+    let expected_bonus_4 = 510_000_i64 * 5 / 4; // 637_500
+    let truesec_4 = ctx.sde.solar_systems.get(&ag4_sys).map(|s| s.security_status).unwrap_or(1.0);
+    let expected_lp_4 = (1_979.0 * (1.6288 - truesec_4).max(0.01) * 1.40).round() as i64;
+    assert_eq!(parts4[1].dict_get("iskReward").and_then(|v| v.as_i64()), Some(expected_isk_4));
+    assert_eq!(parts4[1].dict_get("bonusReward").and_then(|v| v.as_i64()), Some(expected_bonus_4));
+    assert_eq!(parts4[1].dict_get("lpReward").and_then(|v| v.as_i64()), Some(expected_lp_4));
+
+    let tax_base_4_cents = ((expected_isk_4 * 100) * 11 + 50) / 100;
+    let tax_bonus_4_cents = ((expected_bonus_4 * 100) * 11 + 50) / 100;
+    let expected_net_4_cents =
+        (expected_isk_4 * 100 - tax_base_4_cents) + (expected_bonus_4 * 100 - tax_bonus_4_cents);
+    ctx.db.with_snapshot(|s| {
+        let bal_after = s.characters[&char_id].balance.0;
+        assert_eq!(bal_after - bal_before_4, expected_net_4_cents);
+        let lp_after = s.characters[&char_id].loyalty_points.get(&ag4.corporation_id).copied().unwrap_or(0);
+        assert_eq!(lp_after - lp_before_4, expected_lp_4, "NPC corp must pay untaxed LP");
+        let entries: Vec<_> = s.wallet_journal.iter().skip(j_start_4).collect();
+        assert!(entries.iter().any(|e| {
+            e.character_id == char_id
+                && e.entry_type == "agent_mission_reward_corporation_tax"
+                && e.amount.0 == -tax_base_4_cents
+        }));
+        assert!(entries.iter().any(|e| {
+            e.character_id == char_id
+                && e.entry_type == "agent_mission_time_bonus_reward_corporation_tax"
+                && e.amount.0 == -tax_bonus_4_cents
+        }));
+    });
+
+    // Case 2: L2 Foreign Investment (4886) with Neg V — base ISK = 102_500 (>= 100k, taxed 11%)
+    // while bonus ISK = 93_750 (< 100k, 0% tax!), and LP remains completely untaxed.
+    let now2 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = ag2_sys;
+            ch.station_id = Some(ag2_sta);
+        }
+        snap.active_missions.insert(
+            (char_id, 4886),
+            eve_db::ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 4886,
+                agent_id: ag2.agent_id,
+                solar_system_id: ag2_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 4886,
+                agent_id: ag2.agent_id,
+                offered_at_unix: now2,
+                offer_expiry_unix: now2 + 86_400,
+                origin_station_id: Some(ag2_sta),
+                offered_level: Some(2),
+                ..Default::default()
+            },
+        );
+    });
+    pilot.solar_system_id = Some(ag2_sys);
+    pilot.station_id = Some(ag2_sta);
+
+    let bind2 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", None, "MachoBindObject", &[PyRep::Integer(ag2.agent_id), PyRep::None], &kw)
+        .await
+        .expect("bind ag2");
+    let oid2 = extract_bound_id_from_wire_rep(&bind2).expect("oid2");
+    common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", Some(oid2), "DoAction", &[PyRep::Integer(3)], &kw)
+        .await
+        .expect("accept 4886");
+
+    let (bal_before_2, lp_before_2, j_start_2) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&char_id].balance.0,
+            s.characters[&char_id].loyalty_points.get(&ag2.corporation_id).copied().unwrap_or(0),
+            s.wallet_journal.len(),
+        )
+    });
+    let comp2 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", Some(oid2), "DoAction", &[PyRep::Integer(6)], &kw)
+        .await
+        .expect("complete 4886");
+    let PyRep::Tuple(parts2) = comp2 else { panic!("Expected 2-tuple") };
+    let expected_isk_2 = 82_000_i64 * 5 / 4; // 102_500 >= 100_000
+    let expected_bonus_2 = 75_000_i64 * 5 / 4; // 93_750 < 100_000
+    let truesec_2 = ctx.sde.solar_systems.get(&ag2_sys).map(|s| s.security_status).unwrap_or(1.0);
+    let expected_lp_2 = (113.0 * (1.6288 - truesec_2).max(0.01) * 1.40).round() as i64;
+    assert_eq!(parts2[1].dict_get("iskReward").and_then(|v| v.as_i64()), Some(expected_isk_2));
+    assert_eq!(parts2[1].dict_get("bonusReward").and_then(|v| v.as_i64()), Some(expected_bonus_2));
+    assert_eq!(parts2[1].dict_get("lpReward").and_then(|v| v.as_i64()), Some(expected_lp_2));
+
+    let tax_base_2_cents = ((expected_isk_2 * 100) * 11 + 50) / 100;
+    let expected_net_2_cents = (expected_isk_2 * 100 - tax_base_2_cents) + expected_bonus_2 * 100;
+    ctx.db.with_snapshot(|s| {
+        let bal_after = s.characters[&char_id].balance.0;
+        assert_eq!(bal_after - bal_before_2, expected_net_2_cents);
+        let lp_after = s.characters[&char_id].loyalty_points.get(&ag2.corporation_id).copied().unwrap_or(0);
+        assert_eq!(lp_after - lp_before_2, expected_lp_2, "NPC corp must pay untaxed LP");
+        let entries: Vec<_> = s.wallet_journal.iter().skip(j_start_2).collect();
+        assert!(entries.iter().any(|e| {
+            e.character_id == char_id
+                && e.entry_type == "agent_mission_reward_corporation_tax"
+                && e.amount.0 == -tax_base_2_cents
+        }));
+        assert!(
+            !entries.iter().any(|e| {
+                e.character_id == char_id
+                    && e.entry_type == "agent_mission_time_bonus_reward_corporation_tax"
+            }),
+            "Time bonus < 100k ISK must NOT incur NPC corp tax"
+        );
+    });
 }

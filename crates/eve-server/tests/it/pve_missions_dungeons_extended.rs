@@ -156,16 +156,27 @@ async fn test_mission_lp_isk_reward_formula() {
         sys_id,
     );
 
-    // Verify ISK has +15% negotiation multiplier
-    let base_lp = ctx.sde.missions.get(&mission_id).map_or(100, |t| t.lp_omega.max(100));
-    let base_isk = base_lp * 1_000;
-    let manual_expected_isk = ((base_isk as f64) * 1.15).round() as i64;
-    assert_eq!(expected_isk, manual_expected_isk);
+    // Rolled offer matches compute_character_mission_rewards and breaks old flat lp * 1_000 / isk / 2 stubs
+    assert_eq!(offer.dict_get("iskReward").and_then(|v| v.as_i64()), Some(expected_isk));
+    assert_eq!(offer.dict_get("lpReward").and_then(|v| v.as_i64()), Some(expected_lp));
+    assert_eq!(offer.dict_get("bonusReward").and_then(|v| v.as_i64()), Some(expected_bonus));
+    assert!(expected_isk > 0 && expected_lp > 0 && expected_bonus > 0);
+    assert_ne!(expected_bonus, expected_isk / 2);
+    let rolled_win = offer.dict_get("bonusWindowSecs").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!((600..7_200).contains(&rolled_win), "L1 mission bonus window must be < 2h");
 
-    // Verify LP has (1.6288 - true_sec) * (1 + 0.1 * 4) multiplier
+    // Independent Wiki catalog oracle checks with Negotiation III (1.15x) & SecConn IV (1.40x) on agent's solar system
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let conn_factor = 1.0 + 0.10 * 4.0; let manual_expected_lp = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
-    assert_eq!(expected_lp, manual_expected_lp);
+    let r_denial = compute_character_mission_rewards(&ctx, char_id, agent.agent_id, 13_777, sys_id);
+    assert_eq!(r_denial.isk_reward, 77_050); // Denial Of Reconnaissance: 67,000 * 1.15
+    assert_eq!(r_denial.bonus_reward, 73_600); // 64,000 * 1.15
+    assert_eq!(r_denial.lp_reward, (73.0 * sec_factor * 1.40).round() as i64);
+
+    let r_rail3 = compute_character_mission_rewards(&ctx, char_id, agent.agent_id, 13_492, sys_id);
+    assert_eq!(r_rail3.isk_reward, 16_100); // Interstellar Railroad (3 of 4): 14,000 * 1.15
+    assert_eq!(r_rail3.bonus_reward, 10_350); // 9,000 * 1.15
+    assert_eq!(r_rail3.lp_reward, (14.0 * sec_factor * 1.40).round() as i64);
+    assert_ne!(r_denial.isk_reward, r_rail3.isk_reward);
 
     // Accept and complete mission
     rpc_call(
@@ -807,11 +818,19 @@ async fn test_research_agent_daily_mission() {
         );
     });
 
+    let (bal_before, lp_before, j_start) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (
+            ch.balance.0,
+            ch.loyalty_points.get(&rnd_agent.corporation_id).copied().unwrap_or(0),
+            snap.wallet_journal.len(),
+        )
+    });
     let tally_before = ctx.db.with_snapshot(|snap| snap.mission_tally.get(&char_id).copied().unwrap_or(0));
     let initial_points_before = active_res[0].initial_points;
 
     // Complete daily mission
-    rpc_call(
+    let comp_rep = rpc_call(
         &ctx,
         &mut sess,
         "agentMgr",
@@ -820,6 +839,41 @@ async fn test_research_agent_daily_mission() {
     )
     .await
     .expect("Complete daily mission");
+    assert_eq!(
+        comp_rep.dict_get("iskReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 ISK"
+    );
+    assert_eq!(
+        comp_rep.dict_get("bonusReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 bonus ISK"
+    );
+    assert_eq!(
+        comp_rep.dict_get("lpReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 LP"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(
+            ch.balance.0, bal_before,
+            "Completing R&D daily mission must leave character ISK balance unchanged"
+        );
+        assert_eq!(
+            ch.loyalty_points.get(&rnd_agent.corporation_id).copied().unwrap_or(0),
+            lp_before,
+            "Completing R&D daily mission must leave character LP unchanged"
+        );
+        assert!(
+            !snap
+                .wallet_journal
+                .iter()
+                .skip(j_start)
+                .any(|e| e.character_id == char_id && e.entry_type == "agent_mission_reward"),
+            "Completing R&D daily mission must not create an agent_mission_reward wallet journal entry"
+        );
+    });
 
     // Completing adds 1 day's RP to active research entry
     let active_res_after = ctx.db.with_snapshot(|snap| {

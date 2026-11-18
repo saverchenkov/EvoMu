@@ -210,9 +210,17 @@ fn mission_rewards_and_courier_trade_mining_encounter_details_resolve() {
         lp_reward: lp,
         bonus_reward: bonus,
     } = compute_character_mission_rewards(&ctx, char_id, 3_018_921, 100, 30_000_142);
+    let def_100 = resolve_mission_reward_definition(&ctx, char_id, 3_018_921, 100);
+    assert_eq!(def_100.source, RewardCatalogSource::DerivedMissionCurve);
     assert_eq!(lp, 1_500);
-    assert_eq!(isk, 1_200_000);
-    assert_eq!(bonus, 600_000);
+    // Negotiation IV (+20%) scales per-mission base ISK and bonus ISK independently of base_lp * 1_000 / 2.
+    assert_eq!(isk, ((def_100.base_isk as f64) * 1.20).round() as i64);
+    assert_eq!(
+        bonus,
+        ((def_100.time_bonus_isk as f64) * 1.20).round() as i64
+    );
+    assert_ne!(def_100.base_isk, def_100.base_lp * 1_000);
+    assert_ne!(def_100.time_bonus_isk, def_100.base_isk / 2);
 
     let courier = resolve_courier_mission_details(&ctx, &tmpl, &ag).unwrap();
     assert_eq!(courier.cargo_type_id, 3810);
@@ -383,9 +391,307 @@ async fn wave4_courier_min_qty_clamp_missing_sde_mission_quit_and_bookmark_fallb
         .unwrap();
     assert_eq!(st, "Quit");
     assert!(!penalty && was_acc);
+    assert!(!bookmarks_remain(&ctx, char_id));
+}
+
+fn bookmarks_remain(ctx: &ServerContext, char_id: i64) -> bool {
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.items.contains_key(&55_999));
-        assert!(!snap.bookmarks.contains_key(&77_001));
-        assert!(snap.bookmarks.contains_key(&77_002) || snap.bookmarks.is_empty());
+        snap.bookmarks
+            .values()
+            .any(|b| b.owner_id == char_id && b.memo == "Mission Pocket Destination")
+    })
+}
+
+#[test]
+fn per_mission_wiki_catalog_and_derived_curves_produce_distinct_isk_bonus_windows_and_lp() {
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+    // Custom system with exact security_status = 0.6288 -> (1.6288 - 0.6288) = 1.0000
+    sde.solar_systems.insert(
+        30_910_001,
+        SolarSystem {
+            solar_system_id: 30_910_001,
+            region_id: 10_000_002,
+            constellation_id: 20_000_020,
+            name: "CatalogUnitSys".into(),
+            security_status: 0.6288,
+            radius: 1e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    let mut l1_sec = make_agent(3_900_001, 2, 24, 1);
+    l1_sec.solar_system_id = Some(30_910_001);
+    let mut l4_sec = make_agent(3_900_004, 2, 24, 4);
+    l4_sec.solar_system_id = Some(30_910_001);
+    sde.agents.insert(3_900_001, l1_sec);
+    sde.agents.insert(3_900_004, l4_sec);
+    ctx.sde = Arc::new(sde);
+
+    let char_id = 90_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2; // Omega
+        }
+        snap.skills.remove(&char_id);
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            3356, // Negotiation 4 -> 1.20x ISK & bonus
+            TrainedSkillRecord {
+                type_id: 3356,
+                level: 4,
+                skill_points: 100_000.0,
+            },
+        );
+        sk.insert(
+            3895, // Security Connections 3 -> 1.30x LP
+            TrainedSkillRecord {
+                type_id: 3895,
+                level: 3,
+                skill_points: 50_000.0,
+            },
+        );
     });
+
+    // Three real L1 SDE missions from Wiki reports must have distinct rewards and timers
+    let r_denial = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_777, 30_910_001);
+    assert_eq!(r_denial.isk_reward, 80_400); // 67,000 * 1.20
+    assert_eq!(r_denial.bonus_reward, 76_800); // 64,000 * 1.20
+    assert_eq!(r_denial.lp_reward, 95); // round(73 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_001, 13_777),
+        3_600
+    );
+
+    let r_rail3 = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_492, 30_910_001);
+    assert_eq!(r_rail3.isk_reward, 16_800); // 14,000 * 1.20
+    assert_eq!(r_rail3.bonus_reward, 10_800); // 9,000 * 1.20
+    assert_eq!(r_rail3.lp_reward, 18); // round(14 * 1.0 * 1.30)
+
+    let r_patriotic = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_514, 30_910_001);
+    assert_eq!(r_patriotic.isk_reward, 34_800); // 29,000 * 1.20
+    assert_eq!(r_patriotic.bonus_reward, 44_400); // 37,000 * 1.20
+    assert_eq!(r_patriotic.lp_reward, 46); // round(35 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_001, 13_514),
+        3_840 // 64m exact Wiki timer
+    );
+
+    // Distinct L4 security missions + L4 Anomic Burner must differ widely
+    let r_spies = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 900, 30_910_001);
+    assert_eq!(r_spies.isk_reward, 429_600); // 358,000 * 1.20
+    assert_eq!(r_spies.bonus_reward, 612_000); // 510,000 * 1.20
+    assert_eq!(r_spies.lp_reward, 2_573); // round(1,979 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 900),
+        14_400
+    );
+
+    let r_desp = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 13_741, 30_910_001);
+    assert_eq!(r_desp.isk_reward, 3_120_000); // 2,600,000 * 1.20
+    assert_eq!(r_desp.bonus_reward, 3_360_000); // 2,800,000 * 1.20
+    assert_eq!(r_desp.lp_reward, 17_163); // round(13,202 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 13_741),
+        21_600
+    );
+
+    let r_burner = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 16_154, 30_910_001);
+    assert_eq!(r_burner.isk_reward, 7_440_000); // 6,200,000 * 1.20
+    assert_eq!(r_burner.bonus_reward, 3_780_000); // 3,150,000 * 1.20
+    assert_eq!(r_burner.lp_reward, 18_850); // round(14,500 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 16_154),
+        10_800
+    );
+
+    // Derived non-Wiki SDE L1 Courier missions also vary independently and keep bonus window < 7_200s
+    let l1_cour_ids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("BasicCourier"))
+                && !matches!(m.mission_id, 13_491 | 13_512)
+        })
+        .take(5)
+        .map(|m| m.mission_id)
+        .collect();
+    assert!(l1_cour_ids.len() >= 2);
+    for &mid in &l1_cour_ids {
+        let win = mission_bonus_window_secs(&ctx, char_id, 3_900_001, mid);
+        assert!((600..7_200).contains(&win));
+    }
+    let def_a = resolve_mission_reward_definition(&ctx, char_id, 3_900_001, l1_cour_ids[0]);
+    let def_b = resolve_mission_reward_definition(&ctx, char_id, 3_900_001, l1_cour_ids[1]);
+    assert!(
+        (def_a.base_isk, def_a.time_bonus_isk, def_a.base_lp)
+            != (def_b.base_isk, def_b.time_bonus_isk, def_b.base_lp)
+    );
+}
+
+#[test]
+fn cosmos_and_data_center_agents_grant_zero_lp_on_real_sde_missions() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let dc_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 5)
+        .expect("Real SDE Data Center agent (agent_type_id == 5)")
+        .clone();
+    let cosmos_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 8)
+        .expect("Real SDE COSMOS agent (agent_type_id == 8)")
+        .clone();
+    let std_sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1)
+        .expect("Real SDE Basic L1 Security agent")
+        .clone();
+
+    let mut non_lp_mids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| m.lp_omega == 0 && !m.title.trim().is_empty())
+        .take(2)
+        .map(|m| m.mission_id)
+        .collect();
+    non_lp_mids.push(13_777); // Wiki Security mission that pays LP for Basic agents
+
+    for (label, agent) in [("DataCenter(5)", &dc_agent), ("COSMOS(8)", &cosmos_agent)] {
+        let sys_id = agent.solar_system_id.unwrap_or(30_000_142);
+        for &mid in &non_lp_mids {
+            let def = resolve_mission_reward_definition(&ctx, char_id, agent.agent_id, mid);
+            assert!(
+                !def.grants_lp && def.base_lp == 0 && def.base_lp_alpha == 0,
+                "{label} agent {} must not grant LP for mission {mid}: {def:?}",
+                agent.agent_id
+            );
+            assert!(def.base_isk > 0, "{label} agent {} mission {mid} must pay ISK", agent.agent_id);
+            let rewards = compute_character_mission_rewards(&ctx, char_id, agent.agent_id, mid, sys_id);
+            assert_eq!(
+                rewards.lp_reward, 0,
+                "{label} agent {} mission {mid} computed LP must be 0",
+                agent.agent_id
+            );
+            assert!(rewards.isk_reward > 0);
+        }
+    }
+
+    // Control check: standard Basic Security agent on 13_777 still pays positive LP.
+    let std_sys = std_sec_agent.solar_system_id.unwrap_or(30_000_142);
+    let std_rewards = compute_character_mission_rewards(&ctx, char_id, std_sec_agent.agent_id, 13_777, std_sys);
+    assert!(std_rewards.lp_reward > 0);
+}
+
+#[test]
+fn rnd_research_missions_award_zero_isk_and_zero_lp() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let rnd_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| is_rnd_agent(a) && a.solar_system_id.is_some())
+        .expect("SDE R&D agent")
+        .clone();
+    let rnd_sys = rnd_agent.solar_system_id.unwrap();
+    let rnd_mids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("Research"))
+        })
+        .map(|m| m.mission_id)
+        .collect();
+    assert!(!rnd_mids.is_empty(), "SDE must include Research missions");
+
+    for mid in rnd_mids {
+        let def = resolve_mission_reward_definition(&ctx, char_id, rnd_agent.agent_id, mid);
+        assert_eq!(def.base_isk, 0, "R&D mission {mid} base_isk must be 0");
+        assert_eq!(def.time_bonus_isk, 0, "R&D mission {mid} bonus ISK must be 0");
+        assert!(!def.grants_lp && def.base_lp == 0 && def.base_lp_alpha == 0);
+        let rewards = compute_character_mission_rewards(&ctx, char_id, rnd_agent.agent_id, mid, rnd_sys);
+        assert_eq!(rewards.isk_reward, 0);
+        assert_eq!(rewards.bonus_reward, 0);
+        assert_eq!(rewards.lp_reward, 0);
+        let win = mission_bonus_window_secs(&ctx, char_id, rnd_agent.agent_id, mid);
+        assert!((1_800..=5_400).contains(&win));
+    }
+}
+
+#[test]
+fn level_gating_blocks_higher_dungeon_and_anomic_offers_and_payouts_for_l1_agents() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let find_sec = |lvl: u8| {
+        ctx.sde
+            .agents
+            .values()
+            .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == lvl && a.solar_system_id.is_some())
+            .min_by_key(|a| a.agent_id)
+            .expect("SDE Basic Security agent")
+            .clone()
+    };
+    let ag1 = find_sec(1);
+    let ag2 = find_sec(2);
+    let ag3 = find_sec(3);
+    let ag4 = find_sec(4);
+    let mut ag1_zero = ag1.clone();
+    ag1_zero.solar_system_id = ag4.solar_system_id; // same true-sec for strict level check
+
+    // Pool matching with SDE enforces dungeon difficulty == agent.level and L4+ for Anomic/Burner
+    let t_l1 = &ctx.sde.missions[&13_777];
+    let t_l2 = &ctx.sde.missions[&4_886];
+    let t_l3 = &ctx.sde.missions[&1_140];
+    let t_l4 = &ctx.sde.missions[&900];
+    let t_l4_desp = &ctx.sde.missions[&13_741];
+    let t_burner = &ctx.sde.missions[&16_154];
+
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l1, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l2, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l3, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l4, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l4_desp, &ag1));
+    assert!(!mission_matches_agent_pool(&t_burner, &ag1));
+    assert!(!mission_matches_agent_pool(&t_burner, &ag3));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag3));
+
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l2, &ag2));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l3, &ag3));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l4, &ag4));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag4));
+
+    // L1 agent evaluating L2-L4/Burner missions cannot claim higher-level Wiki/Burner overrides
+    let ag1_sys = ag1.solar_system_id.unwrap();
+    for &high_mid in &[4_886_u32, 1_140, 900, 13_741, 16_154] {
+        let def = resolve_mission_reward_definition(&ctx, char_id, ag1.agent_id, high_mid);
+        assert!(
+            def.base_isk <= 90_000 && def.base_lp <= 120,
+            "L1 agent must stay in L1 reward bounds for mismatched mission {high_mid}: {def:?}"
+        );
+        let rw = compute_character_mission_rewards(&ctx, char_id, ag1.agent_id, high_mid, ag1_sys);
+        assert!(rw.isk_reward <= 90_000 && rw.bonus_reward <= 120_000);
+    }
+    // Canonical matching agents receive full Wiki/Burner definitions
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag2.agent_id, 4_886).base_isk, 82_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag3.agent_id, 1_140).base_isk, 692_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 900).base_isk, 358_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 16_154).base_isk, 6_200_000);
 }

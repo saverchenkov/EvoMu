@@ -334,6 +334,20 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         cmeta.origin_station_id = Some(st_id);
         save_mission_meta(snap, char_id, &cmeta);
     });
+    let expired_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(mid as i64)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo when bonus expired");
+    assert_eq!(
+        expired_obj.dict_get("bonusReward"),
+        Some(&PyRep::Integer(0)),
+        "GetMissionObjectiveInfo must also zero bonusReward once bonusExpiryUnix passes"
+    );
     assert_eq!(
         call_agent_mgr(
             &ctx,
@@ -1066,4 +1080,292 @@ async fn gh1023_courier_objective_info_emits_station_corp_owners_and_normalizes_
     assert_eq!(trans_vals[2], PyRep::Integer(expected_dropoff_owner));
     assert_ne!(trans_vals[0], PyRep::Integer(agent_id));
     assert_ne!(trans_vals[2], PyRep::Integer(agent_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
+    let ctx = test_ctx();
+    let clock = std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_800_100_000,
+    ));
+    ctx.set_clock(clock.clone());
+    let char_id = 90_000_001_i64;
+    let ag1 = find_standard_agent(&ctx, 1);
+    let ag4 = find_standard_agent(&ctx, 4);
+
+    // Seed Offered L1 Patriotic Measures (2 of 5) (13_512 -> 44m = 2_640s) and L4 The Sansha Spies (900 -> 4h = 14_400s)
+    let sys1 = ag1.solar_system_id.unwrap();
+    let st1 = ag1.station_id.unwrap();
+    let mut sess = char_session(char_id, Some(sys1), Some(st1));
+    let kw = HashMap::new();
+    let base_now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2; // Omega so L4 agent acceptance is allowed
+            ch.solar_system_id = sys1;
+            ch.station_id = Some(st1);
+        }
+        snap.active_missions.insert(
+            (char_id, 13_512),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 13_512,
+                agent_id: ag1.agent_id,
+                state: "Offered".into(),
+                solar_system_id: sys1,
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
+            },
+        );
+        let mut meta_13512 = make_meta(13_512, ag1.agent_id, base_now + 86_400, None);
+        meta_13512.required_delivery_type_id = Some(3683);
+        meta_13512.required_delivery_qty = 4;
+        meta_13512.granted_courier_item_id = Some(960_512);
+        meta_13512.granted_courier_qty = 4;
+        meta_13512.origin_station_id = Some(st1);
+        meta_13512.destination_station_id = Some(st1);
+        save_mission_meta(snap, char_id, &meta_13512);
+        snap.items.insert(
+            960_512,
+            InventoryItemRecord {
+                item_id: 960_512,
+                type_id: 3683,
+                owner_id: char_id,
+                location_id: st1,
+                flag: InventoryFlag::Hangar,
+                quantity: 4,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(960_512, format!("courier_cargo:{char_id}:13512"));
+    });
+
+    let acc_13512 = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(ag1.agent_id), PyRep::Integer(13_512)],
+        &kw,
+    )
+    .await
+    .expect("accept 13512");
+    assert_eq!(acc_13512.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(2_640)));
+    assert_eq!(
+        acc_13512.dict_get("bonusExpiryUnix"),
+        Some(&PyRep::Integer((base_now + 2_640) as i64))
+    );
+
+    // Before 2,640s elapse, GetMissionObjectiveInfo shows non-zero Wiki-calibrated bonusReward (25,000 ISK * neg_factor)
+    let obj_before = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag1.agent_id), PyRep::Integer(13_512)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo active");
+    assert_eq!(obj_before.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(2_640)));
+    assert!(obj_before.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap_or(0) >= 25_000);
+
+    // Advance 2,641s past 13_512's 44-minute window -> GetMissionObjectiveInfo and Complete both return 0 bonusReward
+    eve_db::ServerClock::advance_secs(&*clock, 2_641);
+    let obj_after = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag1.agent_id), PyRep::Integer(13_512)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo expired");
+    assert_eq!(obj_after.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+    let done_13512 = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag1.agent_id), PyRep::Integer(13_512)],
+        &kw,
+    )
+    .await
+    .expect("complete expired 13512");
+    assert_eq!(done_13512.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+
+    // L4 Sansha Spies (900) accepts with its 4h (14,400s) window and pays full 510,000*neg bonus before expiry
+    let sys4 = ag4.solar_system_id.unwrap();
+    let st4 = ag4.station_id.unwrap();
+    let now4 = ctx.now_unix();
+    let mut sess4 = char_session(char_id, Some(sys4), Some(st4));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys4;
+            ch.station_id = Some(st4);
+        }
+        snap.skills.remove(&char_id);
+        snap.active_missions.insert(
+            (char_id, 900),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 900,
+                agent_id: ag4.agent_id,
+                state: "Offered".into(),
+                solar_system_id: sys4,
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
+            },
+        );
+        let mut meta_900 = make_meta(900, ag4.agent_id, now4 + 86_400, None);
+        meta_900.offered_level = Some(4);
+        save_mission_meta(snap, char_id, &meta_900);
+    });
+    let acc_900 = call_agent_mgr(
+        &ctx,
+        &mut sess4,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(ag4.agent_id), PyRep::Integer(900)],
+        &kw,
+    )
+    .await
+    .expect("accept 900");
+    assert_eq!(acc_900.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(14_400)));
+    assert_eq!(
+        acc_900.dict_get("bonusExpiryUnix"),
+        Some(&PyRep::Integer((now4 + 14_400) as i64))
+    );
+    let done_900 = call_agent_mgr(
+        &ctx,
+        &mut sess4,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag4.agent_id), PyRep::Integer(900)],
+        &kw,
+    )
+    .await
+    .expect("complete 900 within 4h window");
+    assert_eq!(done_900.dict_get("iskReward"), Some(&PyRep::Integer(358_000)));
+    assert_eq!(done_900.dict_get("bonusReward"), Some(&PyRep::Integer(510_000)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
+    let ctx = test_ctx();
+    let clock = std::sync::Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_800_200_000,
+    ));
+    ctx.set_clock(clock.clone());
+    let char_id = 90_000_001_i64;
+    let ag1 = find_standard_agent(&ctx, 1);
+    let sys1 = ag1.solar_system_id.unwrap();
+    let st1 = ag1.station_id.unwrap();
+    let mut sess = char_session(char_id, Some(sys1), Some(st1));
+    let kw = HashMap::new();
+    let base_now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys1;
+            ch.station_id = Some(st1);
+        }
+        snap.skills.remove(&char_id);
+        snap.active_missions.insert(
+            (char_id, 13_777),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 13_777,
+                agent_id: ag1.agent_id,
+                state: "Offered".into(),
+                solar_system_id: sys1,
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: vec![],
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(snap, char_id, &make_meta(13_777, ag1.agent_id, base_now + 86_400, None));
+    });
+
+    let acc1 = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(ag1.agent_id), PyRep::Integer(13_777)],
+        &kw,
+    )
+    .await
+    .expect("first accept 13_777");
+    assert_eq!(acc1.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(3_600)));
+    let expected_accept_expiry = base_now + 604_800;
+    let expected_bonus_expiry = base_now + 3_600;
+    assert_eq!(
+        acc1.dict_get("expiryUnix"),
+        Some(&PyRep::Integer(expected_accept_expiry as i64))
+    );
+    assert_eq!(
+        acc1.dict_get("bonusExpiryUnix"),
+        Some(&PyRep::Integer(expected_bonus_expiry as i64))
+    );
+
+    // Despawn NPC balls so `can_respawn_missing` triggers on a later `DoAction(3)` call after bonus expiry.
+    let initial_balls = ctx.db.with_snapshot(|snap| {
+        snap.active_missions
+            .get(&(char_id, 13_777))
+            .map(|m| m.spawned_npc_ball_ids.clone())
+            .unwrap_or_default()
+    });
+    assert!(!initial_balls.is_empty());
+    let sys_handle = ctx.systems.get_or_spawn(sys1);
+    for bid in initial_balls {
+        let _ = sys_handle.remove_ball(bid).await;
+    }
+
+    eve_db::ServerClock::advance_secs(&*clock, 3_650);
+    let acc2 = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(ag1.agent_id), PyRep::Integer(13_777)],
+        &kw,
+    )
+    .await
+    .expect("re-accept 13_777 to respawn missing NPCs");
+    assert_eq!(
+        acc2.dict_get("expiryUnix"),
+        Some(&PyRep::Integer(expected_accept_expiry as i64)),
+        "re-accept must preserve original accept_expiry_unix"
+    );
+    assert_eq!(
+        acc2.dict_get("bonusExpiryUnix"),
+        Some(&PyRep::Integer(expected_bonus_expiry as i64)),
+        "re-accept must preserve original bonus_expiry_unix"
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let meta = load_mission_meta(snap, char_id, 13_777).expect("meta preserved");
+        assert_eq!(meta.accepted_at_unix, Some(base_now));
+        assert_eq!(meta.accept_expiry_unix, Some(expected_accept_expiry));
+        assert_eq!(meta.bonus_expiry_unix, Some(expected_bonus_expiry));
+    });
+
+    // Clear the respawned NPCs and complete -> expired bonus deadline must still yield bonusReward == 0.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, 13_777)) {
+            m.npcs_remaining = 0;
+        }
+    });
+    let done = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag1.agent_id), PyRep::Integer(13_777)],
+        &kw,
+    )
+    .await
+    .expect("complete respawned 13_777");
+    assert_eq!(done.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
 }

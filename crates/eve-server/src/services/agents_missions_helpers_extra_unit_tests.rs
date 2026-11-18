@@ -299,7 +299,7 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
 
     // Seed agents in divisions 22 (Distribution -> 3894), 23 (Mining -> 3893), 24 (Security -> 3895), and 18 (R&D -> None)
     for (aid, div, a_type, lvl) in [
-        (3_100_001, 22, 2, 1),
+        (3_100_001, 22, 2, 5),
         (3_100_002, 23, 2, 2),
         (3_100_003, 24, 2, 4),
         (3_100_004, 18, 4, 3),
@@ -372,10 +372,13 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
         lp_reward: lp_dist,
         bonus_reward: bonus_dist,
     } = compute_character_mission_rewards(&ctx, char_id, 3_100_001, 200, 30_000_142);
+    let def_200 = resolve_mission_reward_definition(&ctx, char_id, 3_100_001, 200);
     let lp_mine = compute_character_mission_rewards(&ctx, char_id, 3_100_002, 200, 30_000_142).lp_reward;
     let lp_rnd = compute_character_mission_rewards(&ctx, char_id, 3_100_004, 200, 30_000_142).lp_reward;
-    assert_eq!(isk_dist, 600_000);
-    assert_eq!(bonus_dist, 300_000);
+    assert_eq!(isk_dist, def_200.base_isk);
+    assert_eq!(bonus_dist, def_200.time_bonus_isk);
+    assert_ne!(bonus_dist, isk_dist / 2);
+    assert!(isk_dist >= 2_400_000);
     assert_eq!(lp_rnd, 0);
     assert!(lp_mine > lp_dist && lp_dist > lp_rnd);
 
@@ -644,6 +647,13 @@ fn wave4_agent_pool_divisions_npc_selector_and_mission_target_fallbacks() {
     assert!(!mission_matches_agent_pool(&t_mine, &agent(1, 1_000_009, 2, 99, 1)));
     assert!(!mission_matches_agent_pool(&t_mine, &agent(1, 1_000_009, 5, 24, 1)));
     assert!(!mission_matches_agent_pool(&t_none, &agent(1, 1_000_009, 12, 24, 1)));
+    let t_anomic = tmpl(16_154, "Anomic Base ", Some("BasicKill"), false);
+    assert!(!mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 1)));
+    assert!(!mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 3)));
+    assert!(mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 4)));
+    let t_epic_mining = tmpl(14_833, "Re-examining Options", Some("EpicArcAgentInteraction"), false);
+    assert!(!mission_matches_agent_pool(&t_epic_mining, &agent(1, 1_000_009, 2, 23, 1)));
+    assert!(mission_matches_agent_pool(&t_epic_mining, &agent(1, 1_000_009, 10, 23, 1)));
 
     // resolve_division_connections_skill all fallback division IDs
     assert_eq!(resolve_division_connections_skill(&ctx, 27), Some(3894));
@@ -993,25 +1003,34 @@ fn wave4_rewards_edge_branches_security_encounters_and_target_mission_id() {
         );
     });
 
-    // sec_factor clamp (0.01) + Storyline 1.5x floor (200 * 3/2 = 300 -> 300_000 ISK, Storyline LP = 0)
+    // sec_factor clamp (0.01) + Storyline zero LP with derived ISK/bonus (never base_lp * 1_000 or isk / 2)
     let CharacterMissionRewards {
         isk_reward: isk_st,
         lp_reward: lp_st,
         bonus_reward: bonus_st,
     } = compute_character_mission_rewards(&ctx, char_id, 4_200_001, 501, 30_300_001);
-    assert_eq!(isk_st, 300_000);
-    assert_eq!(bonus_st, 150_000);
+    let def_st = resolve_mission_reward_definition(&ctx, char_id, 4_200_001, 501);
+    assert_eq!(isk_st, def_st.base_isk);
+    assert_eq!(bonus_st, def_st.time_bonus_isk);
+    assert_ne!(bonus_st, isk_st / 2);
+    assert!(isk_st >= 190_000);
     assert_eq!(lp_st, 0);
 
-    // Normal zero LP -> min_level_lp = 200
-    let isk_nm =
-        compute_character_mission_rewards(&ctx, char_id, 4_200_001, 502, 30_300_001).isk_reward;
-    assert_eq!(isk_nm, 200_000);
+    // Normal zero-SDE-LP L2 mission still gets derived L2 Security ISK and LP rewards
+    let rew_nm = compute_character_mission_rewards(&ctx, char_id, 4_200_001, 502, 30_300_001);
+    let def_nm = resolve_mission_reward_definition(&ctx, char_id, 4_200_001, 502);
+    assert_eq!(rew_nm.isk_reward, def_nm.base_isk);
+    assert!(rew_nm.isk_reward >= 68_000);
+    assert!(rew_nm.lp_reward > 0);
 
-    // Alpha with lp_alpha == 0 halves lp_omega (1200 / 2 = 600 -> 600_000 ISK)
-    let isk_half =
-        compute_character_mission_rewards(&ctx, char_id, 4_200_001, 503, 30_300_001).isk_reward;
-    assert_eq!(isk_half, 600_000);
+    // Alpha with lp_alpha == 0 halves lp_omega (1200 / 2 = 600 base_lp_alpha) while ISK stays curve-derived
+    let def_half = resolve_mission_reward_definition(&ctx, char_id, 4_200_001, 503);
+    assert_eq!(def_half.base_lp, 1_200);
+    assert_eq!(def_half.base_lp_alpha, 600);
+    let rew_half = compute_character_mission_rewards(&ctx, char_id, 4_200_001, 503, 30_300_001);
+    assert_eq!(rew_half.isk_reward, def_half.base_isk);
+    assert_eq!(rew_half.lp_reward, 6); // round(600 * 0.01) == 6
+    assert_ne!(rew_half.isk_reward, 600_000);
 
     // Empty dungeons + empty spawn groups fallback in resolve_security_mission_encounter
     let enc_empty = resolve_security_mission_encounter(
@@ -1400,9 +1419,40 @@ fn compute_character_mission_rewards_exact_lp_and_isk_formula_non_unit_factors()
 
     // sec_factor = 1.6288 - 0.4 = 1.2288; conn_factor = 1.2; base_lp = 1_000
     // lp_reward = (1000 * 1.2288 * 1.2).round() = 1475
-    // isk_reward = (1_000_000 * 1.15).round() = 1_150_000; bonus = 575_000
+    // isk_reward and bonus_reward follow per-mission definition * Negotiation (1.15x)
+    let def_920 = resolve_mission_reward_definition(&ctx, char_id, 5_200_001, 920_001);
     let rewards = compute_character_mission_rewards(&ctx, char_id, 5_200_001, 920_001, test_sys);
     assert_eq!(rewards.lp_reward, 1_475);
-    assert_eq!(rewards.isk_reward, 1_150_000);
-    assert_eq!(rewards.bonus_reward, 575_000);
+    assert_eq!(
+        rewards.isk_reward,
+        ((def_920.base_isk as f64) * 1.15).round() as i64
+    );
+    assert_eq!(
+        rewards.bonus_reward,
+        ((def_920.time_bonus_isk as f64) * 1.15).round() as i64
+    );
+    assert_ne!(def_920.base_isk, 1_000_000);
+    assert_ne!(def_920.time_bonus_isk, def_920.base_isk / 2);
+
+    // Real Wiki / Heraldry / Storyline / EpicArc checks inside the same test harness
+    let sde_herald = (*ctx.sde).clone();
+    if let Some(herald_tmpl) = sde_herald.missions.get(&17_013) {
+        let def_her = resolve_mission_reward_definition(&ctx, char_id, 5_200_001, 17_013);
+        assert_eq!(
+            def_her.source,
+            RewardCatalogSource::SdeHeraldryAndDerivedStipend
+        );
+        assert_eq!(def_her.base_lp, herald_tmpl.lp_omega);
+        assert_eq!(def_her.base_lp_alpha, herald_tmpl.lp_alpha);
+        assert!(def_her.base_isk >= 100_000);
+        assert_ne!(def_her.base_isk, def_her.base_lp * 1_000);
+    }
+    let epic_rew = compute_character_mission_rewards(&ctx, char_id, 5_200_001, 14_946, test_sys);
+    assert_eq!(epic_rew.lp_reward, 0);
+    assert_eq!(epic_rew.isk_reward, 11_500_000); // Carry On 10,000,000 * 1.15
+    assert_eq!(epic_rew.bonus_reward, 1_150_000); // Carry On 1,000,000 * 1.15
+    let story_rew = compute_character_mission_rewards(&ctx, char_id, 5_200_001, 2_825, test_sys);
+    assert_eq!(story_rew.lp_reward, 0);
+    assert_eq!(story_rew.isk_reward, 17_250_000); // Courier Gone Missing 15,000,000 * 1.15
+    assert_eq!(story_rew.bonus_reward, 11_500_000); // Courier Gone Missing 10,000,000 * 1.15
 }

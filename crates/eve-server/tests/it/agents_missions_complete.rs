@@ -2766,4 +2766,185 @@ async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
     assert!(ore_consumed, "Delivered ore must be consumed from hangar on completion");
 }
 
+#[tokio::test]
+async fn test_per_mission_complete_courier_burner_storyline_epic_arc_rewards() {
+    // parity: feat:pve.mission-complete, feat:pve.mission-lp-isk-reward-formula
+    eve_testkit::attest(&[
+        "feat:pve.mission-complete",
+        "feat:pve.mission-lp-isk-reward-formula",
+    ]);
+
+    use eve_db::TrainedSkillRecord;
+    use eve_server::services::agents_missions::{save_mission_meta, MissionTimingAndCargoMeta};
+
+    let make_mission = |char_id: i64, mission_id: u32, agent_id: i64, sys_id: u32, state: &str| {
+        ActiveMissionRecord {
+            mission_id,
+            character_id: char_id,
+            agent_id,
+            solar_system_id: sys_id,
+            state: state.into(),
+            current_room_id: 1,
+            npcs_remaining: 0,
+            spawned_npc_ball_ids: Vec::new(),
+            bookmark_id: None,
+        }
+    };
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let char_id = 90_000_001_i64;
+    let mut sess = setup_pilot(&ctx, 790, "demo", "demo-secret", char_id).await;
+
+    // Train Negotiation 3 (+15% ISK/bonus) & Security Connections 4 (+40% LP) & Distribution Connections 2 (+20% LP)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.balance = eve_db::IskCents::from_isk(2_000_000);
+        }
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(3356, TrainedSkillRecord { type_id: 3356, level: 3, skill_points: 45_255.0 });
+        sk.insert(3895, TrainedSkillRecord { type_id: 3895, level: 4, skill_points: 135_765.0 });
+        sk.insert(3894, TrainedSkillRecord { type_id: 3894, level: 2, skill_points: 20_000.0 });
+    });
+
+    // 1. L1 Distribution Courier 13_512 (Patriotic Measures 2 of 5: 24,000 ISK, 25,000 bonus, 2,640s (44m), 23 base LP)
+    // Find a division-22 distribution L1 agent so Distribution Connections 2 (1.20x) applies
+    let dist_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.level == 1 && a.division_id == 22 && a.agent_type_id == 2 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("L1 distribution agent");
+    let (d_sys, d_st) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent.agent_id);
+    let dist_corp = dist_agent.corporation_id;
+    let d_sec = ctx.sde.solar_systems.get(&d_sys).map_or(1.0, |s| s.security_status);
+    let d_conn_mult = if dist_agent.division_id == 22 { 1.20 } else { 1.40 };
+    let now0 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert((char_id, 13_512), make_mission(char_id, 13_512, dist_agent.agent_id, d_sys, "Offered"));
+        snap.items.insert(980_512, InventoryItemRecord {
+            item_id: 980_512, type_id: 3683, owner_id: char_id, location_id: d_st,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 5, singleton: false, version: 1, ..Default::default()
+        });
+        snap.item_custom_names.insert(980_512, format!("courier_cargo:{char_id}:13512"));
+        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
+            mission_id: 13_512, agent_id: dist_agent.agent_id,
+            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
+            required_delivery_type_id: Some(3683), required_delivery_qty: 5,
+            granted_courier_item_id: Some(980_512), granted_courier_qty: 5,
+            origin_station_id: Some(d_st), destination_station_id: Some(d_st),
+            offered_level: Some(1), ..Default::default()
+        });
+    });
+    let acc_13512 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(13_512)]).await.expect("accept 13512");
+    assert_eq!(do_action_info(&acc_13512).dict_get("bonusWindowSecs"), Some(&PyRep::Integer(2_640)));
+    let done_13512 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(13_512)]).await.expect("complete 13512");
+    assert_eq!(do_action_info(&done_13512).dict_get("iskReward"), Some(&PyRep::Integer(27_600))); // 24,000 * 1.15
+    assert_eq!(do_action_info(&done_13512).dict_get("bonusReward"), Some(&PyRep::Integer(28_750))); // 25,000 * 1.15
+    assert_eq!(do_action_info(&done_13512).dict_get("lpReward"), Some(&PyRep::Integer((23.0 * (1.6288 - d_sec).max(0.01) * d_conn_mult).round() as i64)));
+
+    // 2. L4 Anomic Base 16_154 (6,200,000 ISK, 3,150,000 bonus, 10,800s, 14,500 base LP) vs L4 Desperate Maneuvers (13_741: 2,600,000 / 2,800,000 / 13,202 LP)
+    let l4_sec = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.level == 4 && a.division_id == 24 && a.agent_type_id == 2 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L4 security agent")
+        .clone();
+    let (s4_sys, _) = colocate_with_agent(&ctx, &mut sess, char_id, l4_sec.agent_id);
+    let s4_sec_status = ctx.sde.solar_systems[&s4_sys].security_status;
+    ctx.db.with_mut_snapshot(|snap| {
+        for mid in [16_154_u32, 13_741_u32] {
+            let mut m = make_mission(char_id, mid, l4_sec.agent_id, s4_sys, "Accepted");
+            m.npcs_remaining = 0;
+            snap.active_missions.insert((char_id, mid), m);
+            save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
+                mission_id: mid, agent_id: l4_sec.agent_id,
+                offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
+                accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
+                bonus_expiry_unix: Some(now0 + 10_800),
+                is_anomic_burner: mid == 16_154, offered_level: Some(4), ..Default::default()
+            });
+        }
+    });
+    let done_burner = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(16_154)]).await.expect("complete Anomic Base 16154");
+    assert_eq!(do_action_info(&done_burner).dict_get("iskReward"), Some(&PyRep::Integer(7_130_000))); // 6,200,000 * 1.15
+    assert_eq!(do_action_info(&done_burner).dict_get("bonusReward"), Some(&PyRep::Integer(3_622_500))); // 3,150,000 * 1.15
+    assert_eq!(do_action_info(&done_burner).dict_get("lpReward"), Some(&PyRep::Integer((14_500.0 * (1.6288 - s4_sec_status).max(0.01) * 1.40).round() as i64)));
+
+    let done_desp = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(13_741)]).await.expect("complete 13741");
+    assert_eq!(do_action_info(&done_desp).dict_get("iskReward"), Some(&PyRep::Integer(2_990_000))); // 2,600,000 * 1.15
+    assert_eq!(do_action_info(&done_desp).dict_get("bonusReward"), Some(&PyRep::Integer(3_220_000))); // 2,800,000 * 1.15
+    assert_eq!(do_action_info(&done_desp).dict_get("lpReward"), Some(&PyRep::Integer((13_202.0 * (1.6288 - s4_sec_status).max(0.01) * 1.40).round() as i64)));
+
+    // 3. Storyline (2_825: 15,000,000 / 10,000,000 / 0 LP) and Epic Arc (14_946: 10,000,000 / 1,000,000 / 0 LP) award 0 LP
+    let sl_agent = ctx.sde.agents.values().find(|a| a.agent_type_id == 6 && a.solar_system_id.is_some() && a.station_id.is_some()).expect("Storyline agent").clone();
+    let (sl_sys, sl_st) = colocate_with_agent(&ctx, &mut sess, char_id, sl_agent.agent_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut m = make_mission(char_id, 2_825, sl_agent.agent_id, sl_sys, "Accepted");
+        m.npcs_remaining = 0;
+        snap.active_missions.insert((char_id, 2_825), m);
+        snap.items.insert(982_825, InventoryItemRecord {
+            item_id: 982_825, type_id: 3683, owner_id: char_id, location_id: sl_st,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, version: 1, ..Default::default()
+        });
+        snap.item_custom_names.insert(982_825, format!("courier_cargo:{char_id}:2825"));
+        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
+            mission_id: 2_825, agent_id: sl_agent.agent_id,
+            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
+            accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
+            bonus_expiry_unix: Some(now0 + 10_800),
+            required_delivery_type_id: Some(3683), required_delivery_qty: 2,
+            granted_courier_item_id: Some(982_825), granted_courier_qty: 2,
+            origin_station_id: Some(sl_st), destination_station_id: Some(sl_st),
+            offered_level: Some(4), ..Default::default()
+        });
+    });
+    let done_sl = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(2_825)]).await.expect("complete storyline 2825");
+    assert_eq!(do_action_info(&done_sl).dict_get("iskReward"), Some(&PyRep::Integer(17_250_000)));
+    assert_eq!(do_action_info(&done_sl).dict_get("bonusReward"), Some(&PyRep::Integer(11_500_000)));
+    assert_eq!(do_action_info(&done_sl).dict_get("lpReward"), Some(&PyRep::Integer(0)));
+
+    let ea_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_type_id == 10
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some_and(|sid| {
+                    ctx.sde
+                        .stations
+                        .get(&sid)
+                        .is_some_and(|st| Some(st.solar_system_id) == a.solar_system_id)
+                })
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("Epic Arc agent with co-located station")
+        .clone();
+    let (ea_sys, _) = colocate_with_agent(&ctx, &mut sess, char_id, ea_agent.agent_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut m = make_mission(char_id, 14_946, ea_agent.agent_id, ea_sys, "Accepted");
+        m.npcs_remaining = 0;
+        snap.active_missions.insert((char_id, 14_946), m);
+        save_mission_meta(snap, char_id, &MissionTimingAndCargoMeta {
+            mission_id: 14_946, agent_id: ea_agent.agent_id,
+            offered_at_unix: now0, offer_expiry_unix: now0 + 86_400,
+            accepted_at_unix: Some(now0), accept_expiry_unix: Some(now0 + 604_800),
+            bonus_expiry_unix: Some(now0 + 21_600),
+            offered_level: Some(4), ..Default::default()
+        });
+    });
+    let done_ea = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(14_946)]).await.expect("complete Epic Arc 14946");
+    assert_eq!(do_action_info(&done_ea).dict_get("iskReward"), Some(&PyRep::Integer(11_500_000)));
+    assert_eq!(do_action_info(&done_ea).dict_get("bonusReward"), Some(&PyRep::Integer(1_150_000)));
+    assert_eq!(do_action_info(&done_ea).dict_get("lpReward"), Some(&PyRep::Integer(0)));
+    assert!(do_action_info(&done_ea).dict_get("rewardItemID").and_then(|v| v.as_i64()).is_some(), "Epic Arc completion must mint item reward");
+    let _ = dist_corp;
+}
+
 }
