@@ -999,3 +999,175 @@ async fn loot_all_emits_on_item_change_for_whole_and_split_moves_to_looter() {
     assert!(cargo_changes.iter().all(|(k, _)| k.as_i64() != Some(5)));
     assert!(cargo_changes.contains(&(PyRep::Integer(3), PyRep::Integer(0))));
 }
+
+#[tokio::test]
+async fn loot_all_partial_split_does_not_duplicate_on_item_change_for_non_character_owner() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let npc_corp_owner_id = 1_000_009_i64;
+    let foreign_corp_owner_id = 98_777_001_i64;
+    let foreign_char_owner_id = 90_000_002_i64;
+    session.session_id = 91_207;
+    let (uid, foreign_char_uid) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&char_id].user_id,
+            s.characters[&foreign_char_owner_id].user_id,
+        )
+    });
+    let lock_now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(uid, session.session_id, Some(char_id), true, lock_now)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(foreign_char_uid, 91_208, Some(foreign_char_owner_id), true, lock_now)
+        .unwrap();
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types
+        .insert(26_557, make_fighter_type(26_557, 186, 2, 100.0, vec![]));
+    sde.types
+        .insert(36, make_fighter_type(36, 18, 4, 100.0, vec![]));
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        ship_t.capacity = 400.0; // fits 4 units of qty=10 partial stacks cleanly
+    }
+    ctx.sde = Arc::new(sde);
+
+    let cases = [
+        (npc_corp_owner_id, 931_001_i64, 931_101_i64, false),
+        (foreign_corp_owner_id, 931_002_i64, 931_102_i64, false),
+        (foreign_char_owner_id, 931_003_i64, 931_103_i64, true),
+    ];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(!snap.characters.contains_key(&npc_corp_owner_id));
+        assert!(!snap.characters.contains_key(&foreign_corp_owner_id));
+        assert!(snap.characters.contains_key(&foreign_char_owner_id));
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        for &(owner_id, wreck_id, stack_id, _) in &cases {
+            snap.items.insert(
+                wreck_id,
+                make_fighter_item(wreck_id, 26_557, owner_id, sys_id as i64, InventoryFlag::None, 1),
+            );
+            snap.items.insert(
+                stack_id,
+                make_fighter_item(stack_id, 36, owner_id, wreck_id, InventoryFlag::None, 10),
+            );
+            snap.item_positions.insert(wreck_id, [500.0, 0.0, 0.0]);
+        }
+    });
+
+    let now = ctx.now_unix();
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (bid, btype, pos) in [
+        (ship_id, 23_915_u32, DVec3::ZERO),
+        (931_001_i64, 26_557_u32, DVec3::new(500.0, 0.0, 0.0)),
+        (931_002_i64, 26_557_u32, DVec3::new(500.0, 0.0, 0.0)),
+        (931_003_i64, 26_557_u32, DVec3::new(500.0, 0.0, 0.0)),
+    ] {
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: btype,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 120.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        for &(owner_id, wreck_id, _, _) in &cases {
+            rt.container_lifetimes.insert(
+                wreck_id,
+                crate::services::combat_crimewatch::ContainerLifetimeEntry {
+                    item_id: wreck_id,
+                    solar_system_id: sys_id,
+                    type_id: 26_557,
+                    owner_id,
+                    created_unix: now.saturating_sub(60),
+                    lifetime_secs: 7_200,
+                    is_abandoned: false,
+                },
+            );
+        }
+    });
+
+    let kw = std::collections::HashMap::new();
+    for &(owner_id, wreck_id, stack_id, is_foreign_char) in &cases {
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let _ = ctx.drain_notifications_for_char(owner_id);
+
+        let res = super::super::handle_wrecks_killmails(
+            &ctx,
+            &mut session,
+            "invbroker",
+            "LootAll",
+            &[PyRep::Integer(wreck_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let PyRep::List(looted_ids) = res.dict_get("lootedItemIDs").unwrap() else {
+            panic!("expected lootedItemIDs list");
+        };
+        assert_eq!(looted_ids.len(), 1);
+        let split_cargo_id = looted_ids[0].as_i64().unwrap();
+        assert_eq!(
+            res.dict_get("remainingItemIDs"),
+            Some(&PyRep::List(vec![PyRep::Integer(stack_id)]))
+        );
+
+        let looter_item_changes: Vec<_> = ctx
+            .drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "OnItemChange")
+            .collect();
+        let rem_for_looter: Vec<_> = looter_item_changes
+            .iter()
+            .filter(|n| n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(stack_id)))
+            .collect();
+        let split_for_looter: Vec<_> = looter_item_changes
+            .iter()
+            .filter(|n| n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(split_cargo_id)))
+            .collect();
+        assert_eq!(
+            rem_for_looter.len(),
+            1,
+            "looter must receive exactly one OnItemChange for remaining stack (owner={owner_id})"
+        );
+        assert_eq!(
+            split_for_looter.len(),
+            1,
+            "looter must receive exactly one OnItemChange for split cargo stack (owner={owner_id})"
+        );
+
+        if is_foreign_char {
+            let owner_rem: Vec<_> = ctx
+                .drain_notifications_for_char(owner_id)
+                .into_iter()
+                .filter(|n| {
+                    n.event == "OnItemChange"
+                        && n.args[0].dbrow_get("itemID") == Some(&PyRep::Integer(stack_id))
+                })
+                .collect();
+            assert_eq!(
+                owner_rem.len(),
+                1,
+                "foreign character owner must also receive one OnItemChange for remaining stack"
+            );
+        }
+
+        // Clear looted split stack from ship cargo before the next wreck case.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&split_cargo_id);
+        });
+    }
+}

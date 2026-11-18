@@ -529,9 +529,9 @@ async fn test_sp7_self_destruct_server_timer_detonates_without_second_client_cal
         .await
         .expect("LaunchDrones before self-destruct");
 
-    // Start 120s self-destruct via a single `ship.SelfDestruct([1])` call
+    // Start 120s self-destruct via a single `ship.SelfDestruct([ship_id])` call
     let start_res = ctx
-        .dispatch_rpc(&mut sess, "ship", None, "SelfDestruct", &[PyRep::Integer(1)], &empty, None)
+        .dispatch_rpc(&mut sess, "ship", None, "SelfDestruct", &[PyRep::Integer(ship_id)], &empty, None)
         .await
         .expect("SelfDestruct start");
     let PyRep::KeyVal(start_kv) = start_res else {

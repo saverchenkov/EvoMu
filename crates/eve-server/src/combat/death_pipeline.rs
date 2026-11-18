@@ -2179,6 +2179,57 @@ pub async fn execute_death_pipeline(
 /// Triggers self-destruct for a ship or capsule in space, executing the canonical death pipeline
 /// with the character as their own attacker (or the most recent PvP attacker within the 15-minute
 /// assist window) (`feat:ships.self-destruct`).
+fn latest_self_destruct_assist_aggressor(
+    ctx: &ServerContext,
+    ship_id: i64,
+    char_id: i64,
+    now_unix: u64,
+    require_positive_attacker: bool,
+) -> Option<i64> {
+    crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        let mut latest: Option<(u64, i64)> = None;
+        for key in [ship_id, char_id] {
+            if let Some(list) = rt.aggression_assist_log.get(&key) {
+                for e in list {
+                    if now_unix.saturating_sub(e.last_action_unix)
+                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && (!require_positive_attacker || e.attacker_char_id > 0)
+                        && e.attacker_char_id != char_id
+                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
+                    {
+                        latest = Some((e.last_action_unix, e.attacker_char_id));
+                    }
+                }
+            }
+        }
+        latest.map(|(_, cid)| cid)
+    })
+}
+
+/// Captures pre-detonation hull type and online grid observers before executing `run`,
+/// emitting V24 `SelfDestructImmediate` / `SelfDestructImmediateOther` notices only when detonation commits.
+fn run_self_destruct_with_immediate_notices(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    run: impl FnOnce() -> Result<Option<DeathPipelineResult>, String>,
+) -> Result<Option<DeathPipelineResult>, String> {
+    let (ship_type_id, pre_detonate_observers) =
+        crate::services::combat_crimewatch::combat_wrecks_killmails::collect_self_destruct_observer_context(
+            ctx, ship_id, char_id,
+        );
+    let res = run()?;
+    if res.is_some() {
+        crate::services::combat_crimewatch::combat_wrecks_killmails::emit_self_destruct_immediate_notices(
+            ctx,
+            char_id,
+            ship_type_id,
+            &pre_detonate_observers,
+        );
+    }
+    Ok(res)
+}
+
 pub async fn execute_self_destruct(
     ctx: &ServerContext,
     sys_id: u32,
@@ -2188,33 +2239,23 @@ pub async fn execute_self_destruct(
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
     let now_unix = ctx.now_unix();
-    let final_blow_char_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        let mut latest: Option<(u64, i64)> = None;
-        for key in [ship_id, char_id] {
-            if let Some(list) = rt.aggression_assist_log.get(&key) {
-                for e in list {
-                    if now_unix.saturating_sub(e.last_action_unix)
-                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                        && e.attacker_char_id != char_id
-                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
-                    {
-                        latest = Some((e.last_action_unix, e.attacker_char_id));
-                    }
-                }
-            }
-        }
-        latest.map(|(_, cid)| cid).unwrap_or(char_id)
-    });
-    execute_death_pipeline_sync_inner(
-        ctx,
-        sys_id,
-        char_id,
-        ship_id,
-        final_blow_char_id,
-        pos,
-        rng_seed,
-        true,
-    )
+    let final_blow_char_id =
+        latest_self_destruct_assist_aggressor(ctx, ship_id, char_id, now_unix, false)
+            .unwrap_or(char_id);
+    run_self_destruct_with_immediate_notices(ctx, char_id, ship_id, || {
+        execute_death_pipeline_sync_inner(
+            ctx,
+            sys_id,
+            char_id,
+            ship_id,
+            final_blow_char_id,
+            pos,
+            rng_seed,
+            true,
+        )
+        .map(Some)
+    })?
+    .ok_or_else(|| "Self-destruct did not commit".to_string())
 }
 
 pub(crate) fn execute_self_destruct_guarded(
@@ -2227,40 +2268,28 @@ pub(crate) fn execute_self_destruct_guarded(
     now_unix: u64,
     expected_generation: Option<u64>,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let final_blow_char_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        let mut latest: Option<(u64, i64)> = None;
-        for key in [ship_id, char_id] {
-            if let Some(list) = rt.aggression_assist_log.get(&key) {
-                for e in list {
-                    if now_unix.saturating_sub(e.last_action_unix)
-                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                        && e.attacker_char_id != char_id
-                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
-                    {
-                        latest = Some((e.last_action_unix, e.attacker_char_id));
-                    }
-                }
-            }
-        }
-        latest.map(|(_, cid)| cid).unwrap_or(char_id)
-    });
-    execute_death_pipeline_sync_with_guard(
-        ctx,
-        sys_id,
-        char_id,
-        ship_id,
-        final_blow_char_id,
-        pos,
-        rng_seed,
-        true,
-        Some(LiveSelfDestructGuard {
+    let final_blow_char_id =
+        latest_self_destruct_assist_aggressor(ctx, ship_id, char_id, now_unix, false)
+            .unwrap_or(char_id);
+    run_self_destruct_with_immediate_notices(ctx, char_id, ship_id, || {
+        execute_death_pipeline_sync_with_guard(
+            ctx,
             sys_id,
             char_id,
-            now_unix,
-            expected_generation,
-            require_active_countdown: true,
-        }),
-    )
+            ship_id,
+            final_blow_char_id,
+            pos,
+            rng_seed,
+            true,
+            Some(LiveSelfDestructGuard {
+                sys_id,
+                char_id,
+                now_unix,
+                expected_generation,
+                require_active_countdown: true,
+            }),
+        )
+    })
 }
 
 /// Validates live ship ownership, active ship, undocked state, and system presence before
@@ -2289,44 +2318,30 @@ pub(crate) fn execute_guarded_self_destruct_sync(
     expected_generation: Option<u64>,
     require_active_countdown: bool,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let last_aggressor = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-        let mut latest: Option<(u64, i64)> = None;
-        for key in [ship_id, char_id] {
-            if let Some(list) = rt.aggression_assist_log.get(&key) {
-                for e in list {
-                    if now_unix.saturating_sub(e.last_action_unix)
-                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                        && e.attacker_char_id > 0
-                        && e.attacker_char_id != char_id
-                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
-                    {
-                        latest = Some((e.last_action_unix, e.attacker_char_id));
-                    }
-                }
-            }
-        }
-        latest.map(|(_, cid)| cid)
-    });
+    let last_aggressor =
+        latest_self_destruct_assist_aggressor(ctx, ship_id, char_id, now_unix, true);
     let effective_attacker = last_aggressor.unwrap_or(char_id);
     let is_uncontested = last_aggressor.is_none();
 
-    execute_death_pipeline_sync_with_guard(
-        ctx,
-        sys_id,
-        char_id,
-        ship_id,
-        effective_attacker,
-        pos,
-        now_unix,
-        is_uncontested,
-        Some(LiveSelfDestructGuard {
+    run_self_destruct_with_immediate_notices(ctx, char_id, ship_id, || {
+        execute_death_pipeline_sync_with_guard(
+            ctx,
             sys_id,
             char_id,
+            ship_id,
+            effective_attacker,
+            pos,
             now_unix,
-            expected_generation,
-            require_active_countdown,
-        }),
-    )
+            is_uncontested,
+            Some(LiveSelfDestructGuard {
+                sys_id,
+                char_id,
+                now_unix,
+                expected_generation,
+                require_active_countdown,
+            }),
+        )
+    })
 }
 
 /// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).

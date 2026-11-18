@@ -1247,3 +1247,333 @@ async fn self_destruct_and_abort_emit_v24_remote_messages_to_pilot_and_observers
         Some(&PyRep::Integer(23_915))
     );
 }
+
+#[tokio::test]
+async fn self_destruct_server_timer_expiry_emits_immediate_notices_without_second_rpc() {
+    use eve_db::ServerClock;
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let vclock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_767_225_600));
+    ctx.set_clock(vclock.clone());
+    let now = ctx.now_unix();
+
+    let obs_char_id = 90_000_002_i64;
+    let obs_ship_id = 100_000_002_i64;
+    session.session_id = 92_201;
+    let (pilot_uid, obs_uid) = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            obs_ship_id,
+            make_fighter_item(
+                obs_ship_id,
+                23_915,
+                obs_char_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        if let Some(ch) = snap.characters.get_mut(&obs_char_id) {
+            ch.active_ship_id = obs_ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(obs_ship_id, [5_000.0, 0.0, 0.0]);
+        (
+            snap.characters[&char_id].user_id,
+            snap.characters[&obs_char_id].user_id,
+        )
+    });
+    ctx.db
+        .acquire_online_lock(pilot_uid, session.session_id, Some(char_id), true, now)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(obs_uid, 92_202, Some(obs_char_id), true, now)
+        .unwrap();
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (bid, pos) in [
+        (ship_id, DVec3::ZERO),
+        (obs_ship_id, DVec3::new(5_000.0, 0.0, 0.0)),
+    ] {
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: 23_915,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 120.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(obs_char_id);
+
+    // 1. Start 120s countdown via ONE `ship.SelfDestruct([ship_id])` RPC (no second RPC ever sent).
+    let start_res = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "SelfDestruct",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(start_res.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(obs_char_id);
+
+    // 2. Advancing 119s via 1 Hz lifecycle tick does not detonate yet or emit immediate notices.
+    let t0 = ctx.now_unix();
+    vclock.advance_secs(119);
+    crate::sp6_lifecycle::on_advance_secs(&ctx, t0, 119);
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&ship_id)));
+    for cid in [char_id, obs_char_id] {
+        assert!(!ctx
+            .drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnRemoteMessage"
+                && matches!(n.args.first(), Some(PyRep::String(s)) if s.starts_with("SelfDestructImmediate"))));
+    }
+
+    // 3. Advancing past T+120s triggers 1 Hz timer expiry -> emits SelfDestructImmediate + SelfDestructImmediateOther once.
+    let t119 = ctx.now_unix();
+    vclock.advance_secs(1);
+    crate::sp6_lifecycle::on_advance_secs(&ctx, t119, 1);
+
+    let cap_id = ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ship_id));
+        let ch = &snap.characters[&char_id];
+        assert_eq!(snap.items[&ch.active_ship_id].type_id, 670);
+        ch.active_ship_id
+    });
+
+    let pilot_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(pilot_notifs.iter().any(|n| n.event == "OnSessionChanged"));
+    let pilot_det: Vec<_> = pilot_notifs
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(pilot_det.len(), 1);
+    assert_eq!(
+        pilot_det[0].args[0],
+        PyRep::String("SelfDestructImmediate".into())
+    );
+    assert_eq!(
+        pilot_det[0].args[1].dict_get("shipTypeID"),
+        Some(&PyRep::Integer(23_915))
+    );
+
+    let obs_det: Vec<_> = ctx
+        .drain_notifications_for_char(obs_char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(obs_det.len(), 1);
+    assert_eq!(
+        obs_det[0].args[0],
+        PyRep::String("SelfDestructImmediateOther".into())
+    );
+    assert_eq!(
+        obs_det[0].args[1].dict_get("charID"),
+        Some(&PyRep::Integer(char_id))
+    );
+    assert_eq!(
+        obs_det[0].args[1].dict_get("shipTypeID"),
+        Some(&PyRep::Integer(23_915))
+    );
+
+    // 4. Subsequent lifecycle tick emits zero duplicate detonation notices; aborted countdown also emits zero.
+    let t120 = ctx.now_unix();
+    vclock.advance_secs(1);
+    crate::sp6_lifecycle::on_advance_secs(&ctx, t120, 1);
+    for cid in [char_id, obs_char_id] {
+        assert!(!ctx
+            .drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnRemoteMessage"
+                && matches!(n.args.first(), Some(PyRep::String(s)) if s.starts_with("SelfDestructImmediate"))));
+    }
+
+    let cap_ch = ctx.db.get_character(char_id).unwrap();
+    crate::router::apply_session_from_character(&mut session, &cap_ch, None, Some(&ctx.sde));
+    assert_eq!(session.ship_id, Some(cap_id));
+    let _ = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "SelfDestruct",
+        &[PyRep::Integer(cap_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let _ = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "AbortSelfDestruct",
+        &[PyRep::Integer(cap_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(obs_char_id);
+
+    let t_abort = ctx.now_unix();
+    vclock.advance_secs(120);
+    crate::sp6_lifecycle::on_advance_secs(&ctx, t_abort, 120);
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&cap_id)));
+    for cid in [char_id, obs_char_id] {
+        assert!(!ctx
+            .drain_notifications_for_char(cid)
+            .iter()
+            .any(|n| n.event == "OnRemoteMessage"
+                && matches!(n.args.first(), Some(PyRep::String(s)) if s.starts_with("SelfDestructImmediate"))));
+    }
+}
+
+#[tokio::test]
+async fn self_destruct_and_abort_validate_optional_pickid() {
+    let (ctx, mut session, char_id, ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let other_ship_id = ship_id + 999;
+
+    // Mismatched ship ID rejects cleanly without creating a countdown.
+    for (svc, meth) in [
+        ("ship", "SelfDestruct"),
+        ("ship", "AbortSelfDestruct"),
+    ] {
+        let err = handle_wrecks_killmails(
+            &ctx,
+            &mut session,
+            svc,
+            meth,
+            &[PyRep::Integer(other_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidShip", "{svc}.{meth} mismatch error");
+    }
+
+    // Malformed / non-positive pickid rejects with InvalidArgument.
+    for bad in [PyRep::Integer(0), PyRep::Integer(-5), PyRep::String("bad".into())] {
+        let err_sd = handle_wrecks_killmails(
+            &ctx,
+            &mut session,
+            "ship",
+            "SelfDestruct",
+            &[bad.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_sd.code, "InvalidArgument");
+
+        let err_abort = handle_wrecks_killmails(
+            &ctx,
+            &mut session,
+            "ship",
+            "AbortSelfDestruct",
+            &[bad],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_abort.code, "InvalidArgument");
+    }
+
+    // Matching pickid (positional & kwarg) starts countdown, mismatched Abort leaves countdown active, matching Abort cancels it.
+    let ok_sd = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "SelfDestruct",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ok_sd.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+
+    let err_abort_mismatch = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "AbortSelfDestruct",
+        &[PyRep::Integer(other_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_abort_mismatch.code, "InvalidShip");
+    assert!(with_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_countdowns.contains_key(&ship_id)
+    }));
+
+    let abort_ok = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "AbortSelfDestruct",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(abort_ok.dict_get("aborted"), Some(&PyRep::Bool(true)));
+
+    // `pickid` kwarg + omitted/None compatibility all work cleanly.
+    let mut pick_kw = HashMap::new();
+    pick_kw.insert("pickid".to_string(), PyRep::Integer(ship_id));
+    let ok_kw = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "SelfDestruct",
+        &[],
+        &pick_kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ok_kw.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+
+    let abort_none = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "AbortSelfDestruct",
+        &[PyRep::None],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(abort_none.dict_get("aborted"), Some(&PyRep::Bool(true)));
+    assert_eq!(ctx.db.get_character(char_id).unwrap().active_ship_id, ship_id);
+}

@@ -341,9 +341,15 @@ pub(super) async fn handle_loot_all(
         ctx.notify_item_mutation(char_id, pre.as_ref(), post.as_ref());
         if *notify_looter_split {
             if let (Some(pre_rec), Some(post_rec)) = (pre.as_ref(), post.as_ref()) {
-                let already_addressed_to_looter = post_rec.owner_id <= 0
-                    || post_rec.owner_id == char_id
-                    || looter_corp_id == Some(post_rec.owner_id);
+                // Match `notify_item_mutation`'s exact recipient resolution (`resolve_item_notification_target`):
+                // non-corp-hangar items with non-character owners (NPC corp, faction, foreign corp) already
+                // route to `char_id` above, so only emit an extra copy when the first one went elsewhere.
+                let (resolved_target, _) = ctx.resolve_item_notification_target(char_id, post_rec);
+                let already_addressed_to_looter = match resolved_target {
+                    NotificationTarget::Character(cid) => cid == char_id,
+                    NotificationTarget::Corporation(corp_id) => looter_corp_id == Some(corp_id),
+                    _ => false,
+                };
                 if !already_addressed_to_looter {
                     let _ = ctx.notify_item_record_change_with_target(
                         NotificationTarget::Character(char_id),

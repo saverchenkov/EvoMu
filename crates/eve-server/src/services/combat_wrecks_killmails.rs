@@ -788,13 +788,29 @@ fn emit_self_destruct_aborted_notices(
     }
 }
 
+/// Captures `(ship_type_id, online_grid_observers)` before a self-destruct mutation alters or despawns the hull.
+pub(crate) fn collect_self_destruct_observer_context(
+    ctx: &ServerContext,
+    ship_id: i64,
+    char_id: i64,
+) -> (u32, Vec<(i64, u64)>) {
+    let ship_type_id = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670)
+    });
+    let pre_detonate_observers = ctx.space_observer_chars_for_ship(ship_id, char_id);
+    (ship_type_id, pre_detonate_observers)
+}
+
 /// Emits V24 `SelfDestructImmediate` (pilot) and `SelfDestructImmediateOther` (pre-captured grid observers).
-fn emit_self_destruct_immediate_notices(
+pub(crate) fn emit_self_destruct_immediate_notices(
     ctx: &ServerContext,
     char_id: i64,
     ship_type_id: u32,
     pre_detonate_observers: &[(i64, u64)],
 ) {
+    if char_id <= 0 {
+        return;
+    }
     emit_self_destruct_remote_notice(
         ctx,
         char_id,
@@ -802,16 +818,36 @@ fn emit_self_destruct_immediate_notices(
         vec![("shipTypeID", PyRep::Integer(i64::from(ship_type_id)))],
     );
     for &(observer_char_id, _) in pre_detonate_observers {
-        emit_self_destruct_remote_notice(
-            ctx,
-            observer_char_id,
-            "SelfDestructImmediateOther",
-            vec![
-                ("charID", PyRep::Integer(char_id)),
-                ("shipTypeID", PyRep::Integer(i64::from(ship_type_id))),
-            ],
-        );
+        if observer_char_id > 0 && observer_char_id != char_id {
+            emit_self_destruct_remote_notice(
+                ctx,
+                observer_char_id,
+                "SelfDestructImmediateOther",
+                vec![
+                    ("charID", PyRep::Integer(char_id)),
+                    ("shipTypeID", PyRep::Integer(i64::from(ship_type_id))),
+                ],
+            );
+        }
     }
+}
+
+/// Validates optional `args[0]` / `kwargs["pickid"]` against `expected_ship_id` (`P2-2`).
+fn validate_optional_self_destruct_pickid(
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    expected_ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if let Some(target_ship_id) = RpcArgs::new(args, kwargs).opt_positive_i64(0, "pickid")? {
+        if target_ship_id != expected_ship_id {
+            let mut err = BridgeRpcError::user_error("InvalidShip");
+            err.message = format!(
+                "Self-destruct target ship {target_ship_id} does not match active ship {expected_ship_id}"
+            );
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Advances in-flight missiles and active Breacher Pod DoTs in `solar_system_id` by `dt` seconds
@@ -846,6 +882,9 @@ pub async fn handle_wrecks_killmails(
                     client_error: None,
                 }));
             };
+            if let Err(e) = validate_optional_self_destruct_pickid(args, kwargs, ship_id) {
+                return Some(Err(e));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -1021,8 +1060,6 @@ pub async fn handle_wrecks_killmails(
                 Err(err) => return Some(Err(err)),
             };
 
-            let pre_detonate_observers = ctx.space_observer_chars_for_ship(ship_id, char_id);
-
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let pos = sys_handle
                 .get_ball_snapshot(ship_id)
@@ -1032,16 +1069,10 @@ pub async fn handle_wrecks_killmails(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            let (ship_type_id, is_capsule, _vic_corp, _vic_all) =
-                ctx.db.with_snapshot(|snap| {
-                    let stid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
-                    let (corp, all) = snap
-                        .characters
-                        .get(&char_id)
-                        .map(|c| (c.corporation_id, c.alliance_id))
-                        .unwrap_or((1_000_009, None));
-                    (stid, stid == 670, corp, all)
-                });
+            let (ship_type_id, is_capsule) = ctx.db.with_snapshot(|snap| {
+                let stid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
+                (stid, stid == 670)
+            });
 
             let res = crate::combat::death_pipeline::execute_self_destruct_guarded(
                 ctx,
@@ -1152,12 +1183,6 @@ pub async fn handle_wrecks_killmails(
                         );
                         crate::services::map_service::record_solar_system_visit(ctx, char_id, ch.solar_system_id);
                     }
-                    emit_self_destruct_immediate_notices(
-                        ctx,
-                        char_id,
-                        ship_type_id,
-                        &pre_detonate_observers,
-                    );
                     Some(Ok(PyRep::keyval([
                         ("wreckID", PyRep::Integer(death.wreck_item_id)),
                         ("corpseID", PyRep::Integer(corpse_item_id)),
@@ -1202,7 +1227,7 @@ pub async fn handle_wrecks_killmails(
             };
             let now_unix = ctx.now_unix();
             let (ship_id, aborted, remaining_secs) =
-                crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+                match crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
                     &ctx.db,
                     &*ctx.combat_ephemeral,
                     |snap, rt| {
@@ -1212,6 +1237,7 @@ pub async fn handle_wrecks_killmails(
                                 .map(|c| c.active_ship_id)
                                 .unwrap_or(0)
                         });
+                        validate_optional_self_destruct_pickid(args, kwargs, sid)?;
                         let sp6_entry = snap
                             .sp6_lifecycle
                             .as_inner_mut()
@@ -1233,9 +1259,12 @@ pub async fn handle_wrecks_killmails(
                             })
                             .or_else(|| sim_rem.map(|r| r.ceil().max(0.0) as u64))
                             .unwrap_or(0);
-                        (sid, was_active, rem)
+                        Ok((sid, was_active, rem))
                     },
-                );
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             if aborted {
                 emit_self_destruct_aborted_notices(ctx, char_id, ship_id, remaining_secs);
             }
