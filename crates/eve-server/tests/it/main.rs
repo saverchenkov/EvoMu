@@ -166,6 +166,7 @@ mod r8_shard_d_combat_deployables;
 mod r8_shard_d_inventory_tackle;
 mod rpc_char_lifecycle;
 mod rpc_client_contracts;
+mod rpc_negative_matrix;
 mod sde_localization_resources;
 mod security_auditor_flags;
 mod seeded_rng;
