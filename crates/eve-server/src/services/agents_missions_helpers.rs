@@ -1715,9 +1715,22 @@ pub fn resolve_security_mission_encounter(
         ),
     };
 
-    // DERIVED: Identify hostile faction from dungeon faction, mission title keywords, or agent faction
-    let target_faction_id = if dungeon_faction > 0 {
+    let dungeon_title_lc = dungeon_name.to_lowercase();
+    let explicit_sleeper_or_drifter = title_clean.contains("sleeper")
+        || title_clean.contains("drifter")
+        || dungeon_title_lc.contains("sleeper")
+        || dungeon_title_lc.contains("drifter");
+    // SDE faction `500021` ("Unknown") is a sentinel for unspecified/generic mission enemies;
+    // avoid mapping it to Roaming Sleepers / Autothysian Lancers unless explicitly Sleeper/Drifter.
+    let effective_dungeon_faction = if dungeon_faction == 500_021 && !explicit_sleeper_or_drifter {
+        0
+    } else {
         dungeon_faction
+    };
+
+    // DERIVED: Identify hostile faction from dungeon faction, mission title keywords, or agent faction
+    let target_faction_id = if effective_dungeon_faction > 0 {
+        effective_dungeon_faction
     } else if title_clean.contains("guristas") {
         500010
     } else if title_clean.contains("angel") {
@@ -1731,7 +1744,7 @@ pub fn resolve_security_mission_encounter(
     } else if agent_faction > 0 {
         agent_faction
     } else {
-        ctx.sde.npc_spawn_groups.values().map(|sg| sg.faction_id).find(|&f| f > 0).unwrap_or(0)
+        ctx.sde.npc_spawn_groups.values().map(|sg| sg.faction_id).find(|&f| f > 0 && f != 500_021).unwrap_or(0)
     };
 
     let target_faction_name = match target_faction_id {
@@ -1751,29 +1764,46 @@ pub fn resolve_security_mission_encounter(
         _ => 3,
     };
 
+    let is_combat_mission_spawn_group = |sg: &eve_sde::NpcSpawnGroupInfo| {
+        if sg.npc_type_ids.is_empty() {
+            return false;
+        }
+        // Exclude non-combatant props/structures and roaming Drifter/Sleeper groups unless explicitly requested
+        if matches!(sg.spawn_group_id, 11 | 12 | 13 | 14 | 18 | 179 | 181 | 183 | 216) {
+            return false;
+        }
+        if !explicit_sleeper_or_drifter
+            && target_faction_id != 500_024
+            && matches!(sg.spawn_group_id, 226 | 277 | 292..=295)
+        {
+            return false;
+        }
+        true
+    };
+
     let matching_group = ctx
         .sde
         .npc_spawn_groups
         .values()
         .filter(|sg| {
             let name_low = sg.group_name.to_lowercase();
-            (name_low.contains(&target_faction_name.to_lowercase()) || sg.faction_id == target_faction_id)
+            is_combat_mission_spawn_group(sg)
+                && (name_low.contains(&target_faction_name.to_lowercase()) || sg.faction_id == target_faction_id)
                 && sg.ship_class == target_ship_class
-                && !sg.npc_type_ids.is_empty()
         })
         .min_by_key(|sg| sg.spawn_group_id)
         .or_else(|| {
             ctx.sde
                 .npc_spawn_groups
                 .values()
-                .filter(|sg| (sg.faction_id == target_faction_id || sg.group_name.contains("Deadspace")) && !sg.npc_type_ids.is_empty())
+                .filter(|sg| is_combat_mission_spawn_group(sg) && (sg.faction_id == target_faction_id || sg.group_name.contains("Deadspace")))
                 .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
         })
         .or_else(|| {
             ctx.sde
                 .npc_spawn_groups
                 .values()
-                .filter(|sg| !sg.npc_type_ids.is_empty())
+                .filter(|sg| is_combat_mission_spawn_group(sg))
                 .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
         });
 

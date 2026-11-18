@@ -734,7 +734,17 @@ pub async fn handle_weapons(
                         rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                     });
                     if sys_sec > 0.0 && safety != SafetyLevel::Red {
-                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "CantDoInCurrentSafetyLevel",
+                            "CantDoInCurrentSafetyLevel",
+                            eve_proto::ClientError::user_with_args(
+                                eve_proto::UserErrorKey::AoeModuleActivationDeniedSafety,
+                                [(
+                                    "moduleName",
+                                    eve_proto::UserErrorArg::Str(mod_type.name.clone()),
+                                )],
+                            ),
+                        )));
                     }
                 }
                 if mod_type.group_id == 862 {
