@@ -1027,6 +1027,145 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         self.assertEqual(fw_mod.EvaluateFit(object()), {"ship": 587})
         self.assertEqual(inv_calls, [1897500001])
 
+    def test_1290_1301_move_items_user_error_shows_dialog_without_log_exception_or_masking(self):
+        class UserError(Exception):
+            def __init__(self, msg, args=None):
+                Exception.__init__(self, msg, args or {})
+                self.msg = msg
+                self.dict = args or {}
+
+            def __repr__(self):
+                return f"UserError({self.msg!r}, {self.dict!r})"
+
+        class ExactUserError(Exception):
+            def __init__(self, msg, args=None):
+                super().__init__(msg, args or {})
+                self.msg = msg
+                self.dict = args or {}
+
+        eve_exc_mod = types.ModuleType("eveexceptions")
+        eve_exc_mod.UserError = ExactUserError
+        sys.modules["eveexceptions"] = eve_exc_mod
+
+        shown_dialogs = []
+        ui_msg_mod = types.ModuleType("player_messaging.client.ui_message")
+
+        def prompt_player_fsd_dialog(msg, err_dict=None):
+            shown_dialogs.append(("fsd", msg, err_dict))
+
+        ui_msg_mod.prompt_player_fsd_dialog = prompt_player_fsd_dialog
+        sys.modules["player_messaging.client.ui_message"] = ui_msg_mod
+
+        log_mod_calls = []
+        log_mod = types.ModuleType("logmodule")
+        log_mod.uiMessageFunc = lambda msg, err_dict=None: shown_dialogs.append(("logui", msg, err_dict))
+        log_mod.LogException = lambda *a, **kw: log_mod_calls.append((a, kw))
+        sys.modules["logmodule"] = log_mod
+
+        inv_mod = types.ModuleType("eve.client.script.ui.shared.inventory.invWindow")
+        inv_mod.prompt_player_fsd_dialog = prompt_player_fsd_dialog
+
+        class Inventory:
+            def _IsCurrentInventoryValid(self):
+                return True
+
+            def _MoveItems(self, entry, nodes):
+                entry.data.invController.OnDropData(nodes)
+                entry.Blink()
+                return "moved"
+
+        inv_mod.Inventory = Inventory
+        sys.modules["eve.client.script.ui.shared.inventory.invWindow"] = inv_mod
+        self.assertTrue(evomu_site._install_inventory_transition_guard())
+
+        wnd = Inventory()
+        blinks = []
+
+        class Controller:
+            def __init__(self, mode):
+                self.mode = mode
+
+            def OnDropData(self, _nodes):
+                if self.mode == "avatar_1290":
+                    raise ExactUserError("NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0})
+                if self.mode == "venture_1301":
+                    raise UserError("NotEnoughCargoSpace", {"volume": 1.6, "available": 0.0})
+                if self.mode == "runtime_bug":
+                    raise RuntimeError("genuine_move_items_bug")
+                return True
+
+        def mk_entry(mode):
+            return types.SimpleNamespace(
+                data=types.SimpleNamespace(invController=Controller(mode)),
+                Blink=lambda: blinks.append(mode),
+            )
+
+        # #1290 & #1301 overfilled cargo NotEnoughCargoSpace UserErrors must display dialog cleanly without LogException.
+        self.assertIsNone(wnd._MoveItems(mk_entry("avatar_1290"), [object()]))
+        self.assertIsNone(wnd._MoveItems(mk_entry("venture_1301"), [object()]))
+        self.assertEqual(
+            shown_dialogs,
+            [
+                ("fsd", "NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0}),
+                ("fsd", "NotEnoughCargoSpace", {"volume": 1.6, "available": 0.0}),
+            ],
+        )
+        self.assertEqual(log_mod_calls, [])
+        self.assertEqual(blinks, [])
+
+        # Fallback to logmodule.uiMessageFunc works when prompt_player_fsd_dialog raises or is unavailable.
+        def failing_fsd_dialog(_msg, _err_dict=None):
+            raise KeyError("missing_static_dialog")
+
+        inv_mod.prompt_player_fsd_dialog = failing_fsd_dialog
+        ui_msg_mod.prompt_player_fsd_dialog = failing_fsd_dialog
+        self.assertIsNone(wnd._MoveItems(mk_entry("avatar_1290"), [object()]))
+        self.assertEqual(
+            shown_dialogs[-1],
+            ("logui", "NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0}),
+        )
+
+        # Fallback also reaches eve.Message when logmodule.uiMessageFunc fails, and recovers when primary is absent.
+        eve_calls = []
+        builtins.eve = types.SimpleNamespace(
+            Message=lambda msg, err_dict=None: eve_calls.append((msg, err_dict))
+        )
+        orig_ui_msg = log_mod.uiMessageFunc
+        try:
+            log_mod.uiMessageFunc = failing_fsd_dialog
+            self.assertIsNone(wnd._MoveItems(mk_entry("venture_1301"), [object()]))
+            self.assertEqual(
+                eve_calls,
+                [("NotEnoughCargoSpace", {"volume": 1.6, "available": 0.0})],
+            )
+        finally:
+            log_mod.uiMessageFunc = orig_ui_msg
+            delattr(builtins, "eve")
+
+        delattr(inv_mod, "prompt_player_fsd_dialog")
+        sys.modules.pop("player_messaging.client.ui_message", None)
+        self.assertIsNone(wnd._MoveItems(mk_entry("avatar_1290"), [object()]))
+        self.assertEqual(
+            shown_dialogs[-1],
+            ("logui", "NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0}),
+        )
+
+        # When every dialog presenter fails/is unavailable, UserError must re-raise rather than silently drop.
+        log_mod.uiMessageFunc = failing_fsd_dialog
+        try:
+            with self.assertRaises(ExactUserError):
+                wnd._MoveItems(mk_entry("avatar_1290"), [object()])
+        finally:
+            log_mod.uiMessageFunc = orig_ui_msg
+
+        # Genuine non-UserError exceptions must propagate unmasked.
+        with self.assertRaises(RuntimeError):
+            wnd._MoveItems(mk_entry("runtime_bug"), [object()])
+
+        # Successful drop passes through normally and calls entry.Blink().
+        self.assertEqual(wnd._MoveItems(mk_entry("ok"), [object()]), "moved")
+        self.assertEqual(blinks, ["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

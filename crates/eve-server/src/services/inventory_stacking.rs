@@ -138,6 +138,13 @@ pub(crate) async fn handle_multi_add(
     let flag = InventoryFlag::from_u16(raw_flag_u16);
     let flag_u16 = flag as u16;
     validate_multi_add_dest_flag(flag_u16)?;
+    ctx.db.with_snapshot(|snap| {
+        super::inventory_bound::validate_ship_only_bay_target_in_snap(ctx, snap, new_loc, flag_u16)
+    })?;
+    let supplied_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.iter().find_map(|a| a.as_str()));
     let active_ship_id = session
         .ship_id
         .or_else(|| {
@@ -155,8 +162,8 @@ pub(crate) async fn handle_multi_add(
         });
     }
     for &item_id in &item_ids {
-        fitting_containers_ships::validate_container_and_bay_move(
-            ctx, char_id, item_id, new_loc, flag_u16, kwargs, None,
+        fitting_containers_ships::validate_container_and_bay_move_for_add_with_args(
+            ctx, char_id, item_id, new_loc, flag_u16, args, kwargs, None,
         )?;
     }
     let mut looted_from_space_ids: HashSet<i64> = HashSet::new();
@@ -189,7 +196,7 @@ pub(crate) async fn handle_multi_add(
     let pre_balls = crate::services::structure_acl_defense_rules::snapshot_system_balls_for_inventory(
         ctx, session, char_id,
     );
-    let fitted_unfit_ids = ctx.db.with_snapshot(|snap| {
+    let (fitted_unfit_ids, _) = ctx.db.with_snapshot(|snap| {
         validate_multi_add_in_snap(
             ctx,
             snap,
@@ -203,6 +210,7 @@ pub(crate) async fn handle_multi_add(
             is_ship_hold,
             eval_cargo_cap,
             &pre_balls,
+            supplied_pw,
         )
     })?;
     if !fitted_unfit_ids.is_empty() && session.station_id.is_none() && session.structure_id.is_none() {
@@ -334,8 +342,8 @@ pub(crate) async fn handle_multi_add(
             }
         }
     }
-    let (moved, old_containers) = ctx.db.try_with_mut_snapshot(|snap| {
-        validate_multi_add_in_snap(
+    let (moved, old_containers, dst_ship_bay_foreign_owner) = ctx.db.try_with_mut_snapshot(|snap| {
+        let (_, src_foreign_ship_bay_ids) = validate_multi_add_in_snap(
             ctx,
             snap,
             session,
@@ -348,9 +356,14 @@ pub(crate) async fn handle_multi_add(
             is_ship_hold,
             eval_cargo_cap,
             &pre_balls,
+            supplied_pw,
         )?;
         let mut moved = Vec::with_capacity(item_ids.len());
         let mut old_containers = HashSet::new();
+        let dest_ship_bay_owner = super::inventory_bound::ship_bay_target_owner_in_snap(
+            ctx, snap, new_loc, flag_u16,
+        );
+        let dst_ship_bay_foreign_owner = dest_ship_bay_owner.filter(|&o| o != char_id);
         let dst_struct_corp = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag)
             .then(|| snap.structures.get(&new_loc).map(|st| st.owner_corp_id))
             .flatten()
@@ -372,14 +385,20 @@ pub(crate) async fn handle_multi_add(
             let old_loc = it_snapshot.location_id;
             let it_tid = it_snapshot.type_id;
             let it_qty = it_snapshot.quantity;
+            let src_ship_bay_owner = super::inventory_bound::foreign_ship_owner_at_loc_in_snap(
+                ctx, snap, old_loc, old_flag_u16, char_id,
+            );
             let new_owner = if dst_struct_corp > 0 {
                 dst_struct_corp
             } else if (116..=122).contains(&flag_u16) && caller_corp_id > 0 {
                 caller_corp_id
+            } else if let Some(ship_owner) = dest_ship_bay_owner {
+                ship_owner
             } else if (116..=122).contains(&old_flag_u16)
                 || matches!(old_flag_u16, 62 | 133 | 173 | 187)
                 || matches!(flag, InventoryFlag::Hangar | InventoryFlag::Cargo)
                 || is_ship_hold
+                || src_ship_bay_owner.is_some()
                 || looted_from_space_ids.contains(&item_id)
             {
                 char_id
@@ -389,17 +408,51 @@ pub(crate) async fn handle_multi_add(
             let is_space_loot = looted_from_space_ids.contains(&item_id);
             let is_struct_fuel_src = snap.structures.contains_key(&old_loc)
                 && (old_flag == InventoryFlag::StructureFuel || old_flag_u16 == 172);
-            let bypass_corp_take = is_space_loot || is_struct_fuel_src;
+            let bypass_take =
+                is_space_loot || is_struct_fuel_src || src_foreign_ship_bay_ids.contains(&item_id);
+            let pre_descendants: Vec<eve_db::InventoryItemRecord> = if new_owner != pre_item.owner_id
+                || dest_ship_bay_owner.is_some()
+                || src_ship_bay_owner.is_some()
+            {
+                let mut visited = HashSet::from([item_id]);
+                let mut frontier = vec![item_id];
+                let mut out = Vec::new();
+                for _ in 0..8 {
+                    if frontier.is_empty() {
+                        break;
+                    }
+                    let next_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|it| frontier.contains(&it.location_id) && !visited.contains(&it.item_id))
+                        .map(|it| it.item_id)
+                        .collect();
+                    frontier.clear();
+                    for cid in next_ids {
+                        if visited.insert(cid) {
+                            frontier.push(cid);
+                            if let Some(child) = snap.items.get(&cid) {
+                                if child.owner_id != new_owner {
+                                    out.push(child.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            } else {
+                Vec::new()
+            };
             let mut spec = eve_db::TransferItemSpec::move_whole(
-                if bypass_corp_take { None } else { Some(char_id) },
-                if bypass_corp_take { Some(it_snapshot.owner_id) } else { None },
+                if bypass_take { None } else { Some(char_id) },
+                if bypass_take { Some(it_snapshot.owner_id) } else { None },
                 Some(new_owner),
                 new_loc,
                 flag,
             );
             spec.reject_fitted = false;
             spec.active_ship_id = active_ship_id;
-            snap.transfer_inventory_item(item_id, spec).map_err(|e| BridgeRpcError {
+            let tx_item = snap.transfer_inventory_item(item_id, spec).map_err(|e| BridgeRpcError {
                 code: "InventoryMoveFailed".into(),
                 message: e.to_string(),
                 client_error: None,
@@ -414,10 +467,81 @@ pub(crate) async fn handle_multi_add(
             let (fin_opt, _) = crate::services::structure_acl_defense_rules::finalize_fuel_bay_move_in_snap(
                 ctx, snap, item_id, old_loc, old_flag, new_loc, flag, char_id, caller_corp_id,
             );
+            let merged_into_other =
+                tx_item.item_id != item_id || fin_opt.as_ref().is_some_and(|f| f.item_id != item_id);
+            let recursive_owner_changes: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)> =
+                if !merged_into_other
+                    && (new_owner != pre_item.owner_id
+                        || dest_ship_bay_owner.is_some()
+                        || src_ship_bay_owner.is_some())
+                {
+                    let mut extra = snap.set_owner_recursive(item_id, new_owner);
+                    extra.retain(|(pre_c, _)| pre_c.item_id != item_id);
+                    let mut out: Vec<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord)> =
+                        pre_descendants
+                            .into_iter()
+                            .filter_map(|pre_c| {
+                                let post_c = snap.items.get(&pre_c.item_id)?;
+                                (post_c.owner_id != pre_c.owner_id)
+                                    .then(|| (pre_c, post_c.clone()))
+                            })
+                            .collect();
+                    for pair in extra {
+                        if !out.iter().any(|(p, _)| p.item_id == pair.0.item_id) {
+                            out.push(pair);
+                        }
+                    }
+                    out
+                } else {
+                    Vec::new()
+                };
             let post_it = snap.items.get(&item_id).cloned();
-            moved.push((pre_item, post_it, fin_opt, it_tid, it_qty));
+            moved.push((
+                pre_item,
+                post_it,
+                fin_opt,
+                it_tid,
+                it_qty,
+                src_ship_bay_owner,
+                recursive_owner_changes,
+            ));
         }
-        Ok((moved, old_containers))
+        fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
+            for (pre_item, post_it, fin_opt, _, _, _, _) in &moved {
+                let fin_id = fin_opt
+                    .as_ref()
+                    .map(|r| r.item_id)
+                    .or_else(|| post_it.as_ref().map(|r| r.item_id))
+                    .unwrap_or(pre_item.item_id);
+                if fin_id != pre_item.item_id {
+                    st.custom_item_flags.remove(&pre_item.item_id);
+                }
+                if matches!(flag_u16, 90 | 155) {
+                    st.custom_item_flags.insert(fin_id, flag_u16);
+                } else {
+                    st.custom_item_flags.remove(&fin_id);
+                }
+            }
+        });
+        if supplied_pw.is_some() {
+            let src_pairs: Vec<(i64, u16)> = moved
+                .iter()
+                .map(|(pre, _, _, _, _, _, _)| (pre.location_id, pre.flag as u16))
+                .collect();
+            for (src_loc, src_flag_u16) in src_pairs {
+                fitting_containers_ships::record_ship_bay_unlock_for_ancestors_snap(
+                    ctx,
+                    snap,
+                    char_id,
+                    new_loc,
+                    flag_u16,
+                    src_loc,
+                    src_flag_u16,
+                    supplied_pw,
+                );
+            }
+        }
+        Ok((moved, old_containers, dst_ship_bay_foreign_owner))
     })?;
     let mut despawn_set = HashSet::new();
     for (old_cont, item_id, it_tid, it_qty) in old_containers {
@@ -433,7 +557,7 @@ pub(crate) async fn handle_multi_add(
         despawn_set.insert(old_cont);
     }
     let mut moved_ids = Vec::with_capacity(moved.len());
-    for (pre_item, post_it, fin_opt, it_tid, it_qty) in moved {
+    for (pre_item, post_it, fin_opt, it_tid, it_qty, src_ship_bay_owner, recursive_owner_changes) in moved {
         let fin_id = fin_opt
             .as_ref()
             .map(|r| r.item_id)
@@ -451,15 +575,26 @@ pub(crate) async fn handle_multi_add(
             if fin.item_id != pre_item.item_id {
                 super::inventory_bound::emit_inv_item_deleted(ctx, char_id, &pre_item);
                 let old_target_qty = (fin.quantity - it_qty).max(0) as i64;
-                super::inventory_bound::emit_inv_item_change(
-                    ctx,
-                    char_id,
-                    &fin,
-                    vec![
-                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                        (9, PyRep::Integer(old_target_qty)),
-                    ],
-                );
+                let changes = vec![
+                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
+                    (9, PyRep::Integer(old_target_qty)),
+                ];
+                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes.clone());
+                for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
+                    if extra_owner != char_id && !prev_dup {
+                        if src_ship_bay_owner == Some(extra_owner) {
+                            super::inventory_bound::emit_inv_item_deleted(ctx, extra_owner, &pre_item);
+                        }
+                        if dst_ship_bay_foreign_owner == Some(extra_owner) {
+                            super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &fin, changes.clone());
+                        }
+                    }
+                }
             } else {
                 let mut changes = vec![
                     (3, PyRep::Integer(pre_item.location_id)),
@@ -468,7 +603,17 @@ pub(crate) async fn handle_multi_add(
                 if fin.owner_id != pre_item.owner_id {
                     changes.push((2, PyRep::Integer(pre_item.owner_id)));
                 }
-                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes);
+                super::inventory_bound::emit_inv_item_change(ctx, char_id, &fin, changes.clone());
+                for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
+                    if extra_owner != char_id && !prev_dup {
+                        super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &fin, changes.clone());
+                    }
+                }
             }
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -479,6 +624,24 @@ pub(crate) async fn handle_multi_add(
                     arg3: None,
                 },
             );
+            for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
+                if extra_owner != char_id && !prev_dup {
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(extra_owner),
+                        crate::router::notify_registry::ProcessInventoryChange {
+                            arg0: PyRep::Integer(fin.item_id),
+                            arg1: PyRep::Integer(fin.location_id),
+                            arg2: PyRep::Integer(fin.flag as i64),
+                            arg3: None,
+                        },
+                    );
+                }
+            }
         } else if let Some(updated) = post_it {
             let mut changes = vec![
                 (3, PyRep::Integer(pre_item.location_id)),
@@ -487,7 +650,7 @@ pub(crate) async fn handle_multi_add(
             if updated.owner_id != pre_item.owner_id {
                 changes.push((2, PyRep::Integer(pre_item.owner_id)));
             }
-            super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes);
+            super::inventory_bound::emit_inv_item_change(ctx, char_id, &updated, changes.clone());
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::ProcessInventoryChange {
@@ -497,6 +660,44 @@ pub(crate) async fn handle_multi_add(
                     arg3: None,
                 },
             );
+            for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
+                if extra_owner != char_id && !prev_dup {
+                    super::inventory_bound::emit_inv_item_change(ctx, extra_owner, &updated, changes.clone());
+                    ctx.emit_typed(
+                        crate::router::NotificationTarget::Character(extra_owner),
+                        crate::router::notify_registry::ProcessInventoryChange {
+                            arg0: PyRep::Integer(updated.item_id),
+                            arg1: PyRep::Integer(updated.location_id),
+                            arg2: PyRep::Integer(updated.flag as i64),
+                            arg3: None,
+                        },
+                    );
+                }
+            }
+        }
+        for (pre_child, post_child) in &recursive_owner_changes {
+            let owner_delta = vec![(2, PyRep::Integer(pre_child.owner_id))];
+            super::inventory_bound::emit_inv_item_change(ctx, char_id, post_child, owner_delta.clone());
+            for (idx, extra_owner) in [dst_ship_bay_foreign_owner, src_ship_bay_owner]
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let prev_dup = idx == 1 && dst_ship_bay_foreign_owner == Some(extra_owner);
+                if extra_owner != char_id && !prev_dup {
+                    super::inventory_bound::emit_inv_item_change(
+                        ctx,
+                        extra_owner,
+                        post_child,
+                        owner_delta.clone(),
+                    );
+                }
+            }
         }
         moved_ids.push(fin_id);
     }
@@ -722,12 +923,14 @@ async fn handle_multi_add_auto_fit(
                     client_error: None,
                 });
             }
-            if !crate::services::inventory_bound::is_inventory_location_colocated(
+            if !crate::services::inventory_bound::is_inventory_location_colocated_with_sde(
+                &ctx.sde,
                 snap,
                 session,
                 ch,
                 &pre_balls,
                 item.location_id,
+                false,
             ) {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),
@@ -1357,7 +1560,13 @@ fn handle_list_impl(
         crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
             rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
         });
-    let unit_check: Result<bool, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
+    enum ShipListAccess {
+        NotShip,
+        Owner,
+        Foreign { can_sma: bool, can_fh: bool },
+    }
+
+    let unit_check: Result<(bool, ShipListAccess, Option<i64>), BridgeRpcError> = ctx.db.with_snapshot(|snap| {
         if let Some(it) = snap.items.get(&bound_loc_id) {
             let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
             let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
@@ -1367,57 +1576,262 @@ fn handle_list_impl(
                 && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
                 && fleet_shipping_authorized;
             let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
-            if !is_unit || !is_auth {
-                return Ok(false);
-            }
-            if (30_000_000..=39_999_999).contains(&it.location_id) && !session.has_gm_role() {
-                let sys_id = session.solar_system_id.unwrap_or(0);
-                if session.station_id.is_some()
-                    || session.structure_id.is_some()
-                    || sys_id == 0
-                    || it.location_id != sys_id as i64
-                {
-                    return Err(BridgeRpcError {
-                        code: "NotInSameSolarSystem".into(),
-                        message: format!("Caller must be in space in system {} to list container {bound_loc_id}", it.location_id),
-                        client_error: None,
-                    });
-                }
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let ship_id = session.ship_id.unwrap_or(0);
-                let s_pos = sys_handle
-                    .get_ball_position_sync(ship_id)
-                    .or_else(|| snap.item_positions.get(&ship_id).copied().map(glam::DVec3::from));
-                let u_pos = sys_handle
-                    .get_ball_position_sync(bound_loc_id)
-                    .or_else(|| snap.item_positions.get(&bound_loc_id).copied().map(glam::DVec3::from));
-                let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
-                if let Some((s, u)) = s_pos.zip(u_pos) {
-                    let ship_r = snap
-                        .items
-                        .get(&ship_id)
-                        .and_then(|si| ctx.sde.types.get(&si.type_id))
-                        .map(|t| t.radius)
-                        .unwrap_or(0.0);
-                    let cont_r = ctx.sde.types.get(&it.type_id).map(|t| t.radius).unwrap_or(0.0);
-                    let edge_dist = (s.distance(u) - ship_r - cont_r).max(0.0);
-                    if edge_dist > max_range {
+            if is_unit && is_auth {
+                if (30_000_000..=39_999_999).contains(&it.location_id) && !session.has_gm_role() {
+                    let sys_id = session.solar_system_id.unwrap_or(0);
+                    if session.station_id.is_some()
+                        || session.structure_id.is_some()
+                        || sys_id == 0
+                        || it.location_id != sys_id as i64
+                    {
                         return Err(BridgeRpcError {
-                            code: "OutOfRange".into(),
-                            message: format!("Container {bound_loc_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"),
+                            code: "NotInSameSolarSystem".into(),
+                            message: format!("Caller must be in space in system {} to list container {bound_loc_id}", it.location_id),
                             client_error: None,
                         });
                     }
-                } else if it.owner_id != char_id {
-                    return Ok(false);
+                    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+                    let ship_id = session.ship_id.unwrap_or(0);
+                    let s_pos = sys_handle_opt
+                        .as_ref()
+                        .and_then(|h| h.get_ball_position_sync(ship_id))
+                        .or_else(|| snap.item_positions.get(&ship_id).copied().map(glam::DVec3::from));
+                    let u_pos = sys_handle_opt
+                        .as_ref()
+                        .and_then(|h| h.get_ball_position_sync(bound_loc_id))
+                        .or_else(|| snap.item_positions.get(&bound_loc_id).copied().map(glam::DVec3::from));
+                    let max_range = if cat == 22 { 5_000.0 } else { 2_500.0 };
+                    if let Some((s, u)) = s_pos.zip(u_pos) {
+                        let ship_r = snap
+                            .items
+                            .get(&ship_id)
+                            .and_then(|si| ctx.sde.types.get(&si.type_id))
+                            .map(|t| t.radius)
+                            .unwrap_or(0.0);
+                        let cont_r = ctx.sde.types.get(&it.type_id).map(|t| t.radius).unwrap_or(0.0);
+                        let edge_dist = (s.distance(u) - ship_r - cont_r).max(0.0);
+                        if edge_dist > max_range {
+                            return Err(BridgeRpcError {
+                                code: "OutOfRange".into(),
+                                message: format!("Container {bound_loc_id} is out of range ({edge_dist:.1}m > {max_range:.0}m)"),
+                                client_error: None,
+                            });
+                        }
+                    } else if it.owner_id != char_id {
+                        return Ok((false, ShipListAccess::NotShip, None));
+                    }
+                }
+                return Ok((true, ShipListAccess::NotShip, None));
+            }
+            if is_unit {
+                let supplied_pw = kwargs
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| args.iter().find_map(|a| a.as_str()));
+                if let Some((host_ship, _)) =
+                    super::inventory_bound::find_ship_bay_ancestor_in_snap(
+                        ctx,
+                        snap,
+                        it.location_id,
+                        it.flag as u16,
+                    )
+                {
+                    if host_ship.owner_id != char_id {
+                        let _ = super::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+                            ctx,
+                            snap,
+                            session,
+                            char_id,
+                            it.location_id,
+                            it.flag as u16,
+                            supplied_pw,
+                            false,
+                        )?;
+                        let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
+                        if ch_dock > 0 {
+                            if host_ship.location_id != ch_dock {
+                                return Err(BridgeRpcError {
+                                    code: "BoundObjectOwnershipViolation".into(),
+                                    message: format!(
+                                        "Character {char_id} is not docked at container {bound_loc_id}'s host ship"
+                                    ),
+                                    client_error: None,
+                                });
+                            }
+                        } else if (30_000_000..=39_999_999).contains(&host_ship.location_id) {
+                            let sys_id = session.solar_system_id.unwrap_or(0);
+                            if sys_id == 0 || host_ship.location_id != sys_id as i64 {
+                                return Err(BridgeRpcError {
+                                    code: "NotInSameSolarSystem".into(),
+                                    message: format!(
+                                        "Caller must be in space in system {} to list container {bound_loc_id}",
+                                        host_ship.location_id
+                                    ),
+                                    client_error: None,
+                                });
+                            }
+                            let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+                            let ship_id = session.ship_id.unwrap_or(0);
+                            let s_pos = sys_handle_opt
+                                .as_ref()
+                                .and_then(|h| h.get_ball_position_sync(ship_id))
+                                .or_else(|| snap.item_positions.get(&ship_id).copied().map(glam::DVec3::from));
+                            let u_pos = sys_handle_opt
+                                .as_ref()
+                                .and_then(|h| h.get_ball_position_sync(host_ship.item_id))
+                                .or_else(|| snap.item_positions.get(&host_ship.item_id).copied().map(glam::DVec3::from));
+                            if let Some((s, u)) = s_pos.zip(u_pos) {
+                                let ship_r = snap
+                                    .items
+                                    .get(&ship_id)
+                                    .and_then(|si| ctx.sde.types.get(&si.type_id))
+                                    .map(|t| t.radius)
+                                    .unwrap_or(0.0);
+                                let host_r = ctx
+                                    .sde
+                                    .types
+                                    .get(&host_ship.type_id)
+                                    .map(|t| t.radius)
+                                    .unwrap_or(0.0);
+                                let edge_dist = (s.distance(u) - ship_r - host_r).max(0.0);
+                                if edge_dist > 2_500.0 {
+                                    return Err(BridgeRpcError {
+                                        code: "OutOfRange".into(),
+                                        message: format!(
+                                            "Container {bound_loc_id} is out of range ({edge_dist:.1}m > 2500m)"
+                                        ),
+                                        client_error: None,
+                                    });
+                                }
+                            } else {
+                                return Err(BridgeRpcError {
+                                    code: "OutOfRange".into(),
+                                    message: format!("Host ship {} position is out of range", host_ship.item_id),
+                                    client_error: None,
+                                });
+                            }
+                        } else {
+                            return Ok((false, ShipListAccess::NotShip, None));
+                        }
+                        return Ok((true, ShipListAccess::NotShip, Some(host_ship.item_id)));
+                    }
                 }
             }
-            Ok(true)
+            if cat == 6 {
+                if it.owner_id == char_id || session.has_gm_role() {
+                    return Ok((false, ShipListAccess::Owner, None));
+                }
+                let ch_dock = session.station_id.or(session.structure_id).unwrap_or(0);
+                if ch_dock > 0 {
+                    if it.location_id != ch_dock {
+                        return Err(BridgeRpcError {
+                            code: "BoundObjectOwnershipViolation".into(),
+                            message: format!("Character {char_id} is not docked at ship {bound_loc_id}'s location"),
+                            client_error: None,
+                        });
+                    }
+                } else if (30_000_000..=39_999_999).contains(&it.location_id) {
+                    let sys_id = session.solar_system_id.unwrap_or(0);
+                    if sys_id == 0 || it.location_id != sys_id as i64 {
+                        return Err(BridgeRpcError {
+                            code: "NotInSameSolarSystem".into(),
+                            message: format!("Caller must be in space in system {} to list ship {bound_loc_id}", it.location_id),
+                            client_error: None,
+                        });
+                    }
+                    let sys_handle_opt = ctx.systems.get_or_spawn_if_runtime(sys_id);
+                    let ship_id = session.ship_id.unwrap_or(0);
+                    let s_pos = sys_handle_opt
+                        .as_ref()
+                        .and_then(|h| h.get_ball_position_sync(ship_id))
+                        .or_else(|| snap.item_positions.get(&ship_id).copied().map(glam::DVec3::from));
+                    let u_pos = sys_handle_opt
+                        .as_ref()
+                        .and_then(|h| h.get_ball_position_sync(bound_loc_id))
+                        .or_else(|| snap.item_positions.get(&bound_loc_id).copied().map(glam::DVec3::from));
+                    if let Some((s, u)) = s_pos.zip(u_pos) {
+                        let ship_r = snap
+                            .items
+                            .get(&ship_id)
+                            .and_then(|si| ctx.sde.types.get(&si.type_id))
+                            .map(|t| t.radius)
+                            .unwrap_or(0.0);
+                        let target_r = ctx.sde.types.get(&it.type_id).map(|t| t.radius).unwrap_or(0.0);
+                        let edge_dist = (s.distance(u) - ship_r - target_r).max(0.0);
+                        if edge_dist > 2_500.0 {
+                            return Err(BridgeRpcError {
+                                code: "OutOfRange".into(),
+                                message: format!("Ship {bound_loc_id} is out of range ({edge_dist:.1}m > 2500m)"),
+                                client_error: None,
+                            });
+                        }
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "OutOfRange".into(),
+                            message: format!("Ship {bound_loc_id} position is out of range"),
+                            client_error: None,
+                        });
+                    }
+                } else {
+                    return Ok((false, ShipListAccess::Foreign { can_sma: false, can_fh: false }, None));
+                }
+                let supplied_pw = kwargs
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| args.iter().find_map(|a| a.as_str()));
+                let can_sma = fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                    snap, char_id, bound_loc_id, it.owner_id, true, supplied_pw,
+                );
+                let can_fh = fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                    snap, char_id, bound_loc_id, it.owner_id, false, supplied_pw,
+                );
+                if let Some(flags) = flags_filter {
+                    let wants_sma = flags.iter().any(|&f| matches!(f, 90 | 138));
+                    let wants_fh = flags.iter().any(|&f| f == 155);
+                    if (wants_sma || wants_fh) && !((wants_sma && can_sma) || (wants_fh && can_fh)) {
+                        let deny_sma = wants_sma && !wants_fh;
+                        return Err(BridgeRpcError {
+                            code: if deny_sma { "SMAAccessDenied" } else { "FleetHangarAccessDenied" }.into(),
+                            message: if deny_sma {
+                                "Ship Maintenance Bay access denied by ship configuration or password"
+                            } else {
+                                "Fleet Hangar access denied by ship configuration or password"
+                            }
+                            .into(),
+                            client_error: None,
+                        });
+                    }
+                }
+                return Ok((
+                    false,
+                    ShipListAccess::Foreign { can_sma, can_fh },
+                    (can_sma || can_fh).then_some(bound_loc_id),
+                ));
+            }
+            Ok((false, ShipListAccess::NotShip, None))
         } else {
-            Ok(false)
+            Ok((false, ShipListAccess::NotShip, None))
         }
     });
-    let is_deployable_or_shipping_unit = unit_check?;
+    let (is_deployable_or_shipping_unit, ship_list_access, foreign_unlock_ship_id) = unit_check?;
+    if let Some(unlock_ship_id) = foreign_unlock_ship_id {
+        if let Some(supplied_pw) = kwargs
+            .get("password")
+            .and_then(|v| v.as_str())
+            .or_else(|| args.iter().find_map(|a| a.as_str()))
+        {
+            fitting_containers_ships::write_container_ship_state(ctx, |st| {
+                if st
+                    .ship_configs
+                    .get(&unlock_ship_id)
+                    .and_then(|cfg| cfg.password.as_deref())
+                    == Some(supplied_pw)
+                {
+                    st.unlocked_containers.insert((char_id, unlock_ship_id));
+                }
+            });
+        }
+    }
     let rows = if let Some(flags) = flags_filter {
         if flags.is_empty() {
             Vec::new()
@@ -1429,24 +1843,37 @@ fn handle_list_impl(
                     .map(|i| item_to_packed_cells(ctx, i))
                     .collect()
             })
+        } else if let ShipListAccess::Foreign { can_sma, can_fh } = ship_list_access {
+            ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .filter(|i| {
+                        i.location_id == bound_loc_id
+                            && ((can_sma && matches!(i.flag as u16, 90 | 138))
+                                || (can_fh && (i.flag as u16) == 155))
+                            && flags.contains(&(i.flag as i64))
+                    })
+                    .map(|i| item_to_packed_cells(ctx, i))
+                    .collect()
+            })
         } else {
             let mut out_rows = Vec::new();
+            let mut seen_ids = HashSet::new();
             if flags.iter().any(|f| (116..=122).contains(f)) {
                 let corp_id = session.corporation_id.or_else(|| {
                     ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
                 }).unwrap_or(0);
                 ctx.db.with_snapshot(|snap| {
-                    out_rows.extend(
-                        snap.items
-                            .values()
-                            .filter(|i| {
-                                i.location_id == bound_loc_id
-                                    && i.owner_id == corp_id
-                                    && (116..=122).contains(&(i.flag as i64))
-                                    && flags.contains(&(i.flag as i64))
-                            })
-                            .map(|i| item_to_packed_cells(ctx, i)),
-                    );
+                    for i in snap.items.values().filter(|i| {
+                        i.location_id == bound_loc_id
+                            && i.owner_id == corp_id
+                            && (116..=122).contains(&(i.flag as i64))
+                            && flags.contains(&(i.flag as i64))
+                    }) {
+                        if seen_ids.insert(i.item_id) {
+                            out_rows.push(item_to_packed_cells(ctx, i));
+                        }
+                    }
                 });
             }
             if flags.iter().any(|&f| matches!(f, 62 | 187)) {
@@ -1458,31 +1885,48 @@ fn handle_list_impl(
                     })
                     .unwrap_or(0);
                 ctx.db.with_snapshot(|snap| {
-                    out_rows.extend(
-                        snap.items
-                            .values()
-                            .filter(|i| {
-                                i.location_id == bound_loc_id
-                                    && (i.owner_id == char_id || (corp_id > 0 && i.owner_id == corp_id))
-                                    && matches!(i.flag as i64, 62 | 187)
-                                    && flags.contains(&(i.flag as i64))
-                            })
-                            .map(|i| item_to_packed_cells(ctx, i)),
-                    );
+                    for i in snap.items.values().filter(|i| {
+                        i.location_id == bound_loc_id
+                            && (i.owner_id == char_id || (corp_id > 0 && i.owner_id == corp_id))
+                            && matches!(i.flag as i64, 62 | 187)
+                            && flags.contains(&(i.flag as i64))
+                    }) {
+                        if seen_ids.insert(i.item_id) {
+                            out_rows.push(item_to_packed_cells(ctx, i));
+                        }
+                    }
+                });
+            }
+            if matches!(ship_list_access, ShipListAccess::Owner)
+                && flags.iter().any(|&f| matches!(f, 90 | 138 | 155))
+            {
+                ctx.db.with_snapshot(|snap| {
+                    for i in snap.items.values().filter(|i| {
+                        i.location_id == bound_loc_id
+                            && matches!(i.flag as u16, 90 | 138 | 155)
+                            && flags.contains(&(i.flag as i64))
+                    }) {
+                        if seen_ids.insert(i.item_id) {
+                            out_rows.push(item_to_packed_cells(ctx, i));
+                        }
+                    }
                 });
             }
             if flags.iter().any(|f| !matches!(f, 62 | 116..=122 | 187)) {
-                out_rows.extend(
-                    ctx.db
-                        .get_items_for_character(char_id)
-                        .into_iter()
-                        .filter(|i| {
-                            i.location_id == bound_loc_id
-                                && !matches!(i.flag as i64, 62 | 116..=122 | 187)
-                                && flags.contains(&(i.flag as i64))
-                        })
-                        .map(|i| item_to_packed_cells(ctx, &i)),
-                );
+                for i in ctx
+                    .db
+                    .get_items_for_character(char_id)
+                    .into_iter()
+                    .filter(|i| {
+                        i.location_id == bound_loc_id
+                            && !matches!(i.flag as i64, 62 | 116..=122 | 187)
+                            && flags.contains(&(i.flag as i64))
+                    })
+                {
+                    if seen_ids.insert(i.item_id) {
+                        out_rows.push(item_to_packed_cells(ctx, &i));
+                    }
+                }
             }
             out_rows
         }
@@ -1491,6 +1935,29 @@ fn handle_list_impl(
             snap.items
                 .values()
                 .filter(|i| i.location_id == bound_loc_id)
+                .map(|i| item_to_packed_cells(ctx, i))
+                .collect()
+        })
+    } else if let ShipListAccess::Foreign { can_sma, can_fh } = ship_list_access {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == bound_loc_id
+                        && ((can_sma && matches!(i.flag as u16, 90 | 138))
+                            || (can_fh && (i.flag as u16) == 155))
+                })
+                .map(|i| item_to_packed_cells(ctx, i))
+                .collect()
+        })
+    } else if matches!(ship_list_access, ShipListAccess::Owner) {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| {
+                    i.location_id == bound_loc_id
+                        && (i.owner_id == char_id || matches!(i.flag as u16, 90 | 138 | 155))
+                })
                 .map(|i| item_to_packed_cells(ctx, i))
                 .collect()
         })
@@ -1583,8 +2050,10 @@ fn validate_multi_add_in_snap(
     is_ship_hold: bool,
     eval_cargo_cap: Option<f64>,
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
-) -> Result<Vec<(i64, i64, u16)>, BridgeRpcError> {
+    supplied_pw: Option<&str>,
+) -> Result<(Vec<(i64, i64, u16)>, HashSet<i64>), BridgeRpcError> {
     let mut fitted_unfit_ids: Vec<(i64, i64, u16)> = Vec::new();
+    let mut src_foreign_ship_bay_ids: HashSet<i64> = HashSet::new();
     let ch = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
         code: "CharacterNotFound".into(),
         message: format!("Character {char_id} not found"),
@@ -1605,12 +2074,28 @@ fn validate_multi_add_in_snap(
     };
     let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
 
+    super::inventory_bound::validate_ship_only_bay_target_in_snap(ctx, snap, new_loc, flag_u16)?;
+    let dst_foreign_ship_opt = super::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+        ctx, snap, session, char_id, new_loc, flag_u16, supplied_pw, true,
+    )?;
     let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
     let dest_type_opt = snap.items.get(&new_loc).and_then(|d| ctx.sde.types.get(&d.type_id));
 
-    crate::services::inventory_bound::validate_multiadd_destination(
-        snap, session, ch, char_id, new_loc, dest_is_struct_fuel, pre_balls,
-    )?;
+    if dst_foreign_ship_opt.is_some() {
+        if !crate::services::inventory_bound::is_inventory_location_colocated_with_sde(
+            &ctx.sde, snap, session, ch, pre_balls, new_loc, false,
+        ) {
+            return Err(BridgeRpcError {
+                code: "DestinationAccessDenied".into(),
+                message: format!("Destination {new_loc} not reachable"),
+                client_error: None,
+            });
+        }
+    } else {
+        crate::services::inventory_bound::validate_multiadd_destination_with_sde(
+            &ctx.sde, snap, session, ch, char_id, new_loc, dest_is_struct_fuel, pre_balls,
+        )?;
+    }
 
     let mut batch_vol = 0.0;
     for &item_id in item_ids {
@@ -1621,9 +2106,22 @@ fn validate_multi_add_in_snap(
                 client_error: None,
             });
         };
+        crate::services::inventory_bound::validate_movable_item_not_piloted_or_bare_space_in_snap(
+            snap, char_id, item, new_loc, flag_u16,
+        )?;
         let src_is_struct_fuel = crate::services::inventory_bound::validate_multiadd_structure_fuel_transfers(
             ctx, snap, session, char_id, item, new_loc, dest_is_struct_fuel, ch_dock, ch_sys, caller_ship_id, pre_balls,
         )?;
+        let src_foreign_ship_opt = if src_is_struct_fuel {
+            None
+        } else {
+            super::inventory_bound::check_foreign_ship_bay_ancestor_chain_in_snap(
+                ctx, snap, session, char_id, item.location_id, item.flag as u16, supplied_pw, false,
+            )?
+        };
+        if src_foreign_ship_opt.is_some() {
+            src_foreign_ship_bay_ids.insert(item_id);
+        }
         let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
         if is_corp_item && !src_is_struct_fuel {
             crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
@@ -1634,7 +2132,12 @@ fn validate_multi_add_in_snap(
                 item,
             )?;
         }
-        if !src_is_struct_fuel && item.owner_id != char_id && !is_corp_item && !looted_from_space_ids.contains(&item_id) {
+        if !src_is_struct_fuel
+            && item.owner_id != char_id
+            && !is_corp_item
+            && !looted_from_space_ids.contains(&item_id)
+            && src_foreign_ship_opt.is_none()
+        {
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!("Character {char_id} is not authorized to move item {item_id}"),
@@ -1698,14 +2201,19 @@ fn validate_multi_add_in_snap(
                 client_error: None,
             });
         }
-        if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated(
-            snap, session, ch, pre_balls, item.location_id,
+        if !src_is_struct_fuel && !crate::services::inventory_bound::is_inventory_location_colocated_with_sde(
+            &ctx.sde, snap, session, ch, pre_balls, item.location_id, false,
         ) {
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!("Item {item_id} location not reachable"),
                 client_error: None,
             });
+        }
+        if let Some(dest_item) = snap.items.get(&new_loc) {
+            fitting_containers_ships::validate_ship_bay_item_rules_in_snap(
+                ctx, snap, item_id, item, dest_item, flag_u16,
+            )?;
         }
         if let Some(dest_type) = dest_type_opt {
             if is_ship_hold && dest_type.category_id == 6 {
@@ -1724,7 +2232,7 @@ fn validate_multi_add_in_snap(
             }
         }
         batch_vol += fitting_containers_ships::effective_item_unit_volume(&ctx.sde, item)
-            * (item.quantity as f64);
+            * (item.quantity.max(1) as f64);
     }
 
     if let Some(dest_type) = dest_type_opt {
@@ -1777,50 +2285,34 @@ fn validate_multi_add_in_snap(
                     });
                 }
             }
-        } else if flag_u16 == 90 && dest_type.category_id == 6 {
-            let sma_cap = dest_type.default_attributes.get(&908).copied().unwrap_or(0.0);
-            if sma_cap > 0.0 {
-                let used: f64 = snap
-                    .items
-                    .values()
-                    .filter(|i| {
-                        i.location_id == new_loc && matches!(i.flag as u16, 90 | 138) && !item_ids.contains(&i.item_id)
-                    })
-                    .map(|i| fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i))
-                    .sum();
-                if used + batch_vol > sma_cap + 1e-4 {
-                    return Err(BridgeRpcError {
-                        code: "CapacityExceeded".into(),
-                        message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
-                        client_error: None,
-                    });
-                }
-            }
-        } else if flag_u16 == 155 && dest_type.category_id == 6 {
-            let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
-            if fh_cap > 0.0 {
-                let used: f64 = snap
-                    .items
-                    .values()
-                    .filter(|i| {
-                        i.location_id == new_loc && (i.flag as u16) == 155 && !item_ids.contains(&i.item_id)
-                    })
-                    .map(|i| {
-                        fitting_containers_ships::effective_item_unit_volume(&ctx.sde, i)
-                            * (i.quantity as f64)
-                    })
-                    .sum();
-                if used + batch_vol > fh_cap + 1e-4 {
-                    return Err(BridgeRpcError {
-                        code: "CapacityExceeded".into(),
-                        message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
-                        client_error: None,
-                    });
-                }
+        } else if matches!(flag_u16, 90 | 155) && dest_type.category_id == 6 {
+            if let Some(dest_item) = snap.items.get(&new_loc) {
+                fitting_containers_ships::validate_ship_bay_existence_in_snap(
+                    ctx, dest_item, flag_u16,
+                )?;
+                fitting_containers_ships::validate_ship_bay_batch_capacity_in_snap(
+                    ctx,
+                    snap,
+                    dest_item,
+                    new_loc,
+                    flag_u16,
+                    item_ids,
+                    batch_vol,
+                    true,
+                )?;
+                fitting_containers_ships::validate_ship_bay_acl_in_snap(
+                    ctx,
+                    snap,
+                    char_id,
+                    new_loc,
+                    dest_item,
+                    flag_u16,
+                    supplied_pw,
+                )?;
             }
         }
     }
-    Ok(fitted_unfit_ids)
+    Ok((fitted_unfit_ids, src_foreign_ship_bay_ids))
 }
 
 #[cfg(test)]

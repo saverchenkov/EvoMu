@@ -1433,6 +1433,42 @@ def _is_inventory_not_accessible_error(exc):
     return _matches_user_error_keys(exc, ("InventoryNotAccessible",))
 
 
+def _is_user_error_exception(exc):
+    """Return True if *exc* is an eveexceptions.UserError instance (#1290, #1301)."""
+    if exc is None:
+        return False
+    eve_exc_mod = sys.modules.get("eveexceptions")
+    user_error_cls = getattr(eve_exc_mod, "UserError", None) if eve_exc_mod is not None else None
+    if isinstance(user_error_cls, type) and isinstance(exc, user_error_cls):
+        return True
+    return type(exc).__name__ == "UserError" and hasattr(exc, "msg") and hasattr(exc, "dict")
+
+
+def _present_user_error_dialog(exc, inv_mod=None):
+    """Display a client UserError dialog cleanly without escaping into TaskletExt LogException (#1290, #1301)."""
+    msg = getattr(exc, "msg", None)
+    if not msg:
+        args = getattr(exc, "args", ()) or ()
+        msg = args[0] if args else None
+    if not msg:
+        return False
+    err_dict = getattr(exc, "dict", None)
+    for mod, attr in (
+        (inv_mod, "prompt_player_fsd_dialog"),
+        (sys.modules.get("player_messaging.client.ui_message"), "prompt_player_fsd_dialog"),
+        (sys.modules.get("logmodule"), "uiMessageFunc"),
+        (getattr(__builtin__, "eve", None), "Message"),
+    ):
+        dialog_fn = getattr(mod, attr, None) if mod is not None else None
+        if callable(dialog_fn):
+            try:
+                dialog_fn(msg, err_dict)
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def _is_container_inaccessible_error(exc):
     """Return True if *exc* indicates an opened container/inventory is no longer accessible."""
     return _matches_user_error_keys(exc, _CONTAINER_INACCESSIBLE_ERROR_KEYS)
@@ -1553,6 +1589,24 @@ def _install_inventory_transition_guard():
 
             _wrapped_update_selected_items._evomu_camera_guard = True
             inv_cls._UpdateSelectedItems = _wrapped_update_selected_items
+
+        # V24 OnTreeViewDropData launches StartTasklet(self._MoveItems, entry, nodes).
+        # BaseInvContainer._AddItem re-raises NotEnoughCargoSpace when free < 0 (already-overfilled hold),
+        # so catch domain UserErrors here and show the FSD dialog instead of triggering TaskletExt LogException (#1290, #1301).
+        orig_move_items = getattr(inv_cls, "_MoveItems", None)
+        if callable(orig_move_items) and not getattr(orig_move_items, "_evomu_camera_guard", False):
+            def _wrapped_move_items(self, *args, **kwargs):
+                try:
+                    return orig_move_items(self, *args, **kwargs)
+                except Exception as exc:
+                    if not _is_user_error_exception(exc):
+                        raise
+                    if not _present_user_error_dialog(exc, inv_mod=inv_mod):
+                        raise
+                    return None
+
+            _wrapped_move_items._evomu_camera_guard = True
+            inv_cls._MoveItems = _wrapped_move_items
 
         _HOOKED_CAMERA_GUARD_TARGETS.add("invWindow")
         changed = True

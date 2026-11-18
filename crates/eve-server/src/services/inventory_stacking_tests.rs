@@ -1207,7 +1207,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .code,
         "CapacityExceeded"
     );
-    // Fleet Hangar (155) CapacityExceeded (50 m3 > 20 m3) and SMA (90) CapacityExceeded (ship > 100 m3)
+    // Fleet Hangar (155) NotEnoughSpecialBaySpace (50 m3 > 20 m3) and SMA (90) NotEnoughSpecialBaySpace (ship > 100 m3)
     assert_eq!(
         handle_multi_add(
             &ctx,
@@ -1219,7 +1219,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
     assert_eq!(
         handle_multi_add(
@@ -1232,7 +1232,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
 
     // Auto-fit guards: CannotMoveActiveShip (self onto self), InvalidFittingTarget (foreign ship), ItemNotFittableModule (ore), CannotRefitDamagedModule (damaged EHE), InvalidLocation (already fitted)
@@ -4043,6 +4043,198 @@ fn foreign_ship_bay_password_and_alsc_password_per_action_enforced() {
     assert_eq!(ok_alsc_stack.dict_get("mergedCount"), Some(&PyRep::Integer(2)));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_ship_bay_list_visibility_and_multiadd_owner_transfer() {
+    use crate::services::inventory_fitting::fitting_containers_ships::ShipAccessConfig;
 
+    let mut sde_mut = (*shared_sde()).clone();
+    let carrier_tid = 999_801u32;
+    let mut carrier = sde_mut.types[&587].clone();
+    carrier.type_id = carrier_tid;
+    carrier.group_id = 30;
+    carrier.category_id = 6;
+    carrier.name = "Synthetic List Carrier".into();
+    carrier.capacity = 1_000.0;
+    carrier.default_attributes.insert(908, 1_000_000.0);
+    carrier.default_attributes.insert(912, 10_000.0);
+    sde_mut.types.insert(carrier_tid, carrier);
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde_mut), Arc::new(WorldRepository::with_demo_seed()));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
 
+    let owner_id = 92_801_001i64;
+    let mate_id = 92_801_002i64;
+    let owner_corp = 98_801_001i64;
+    let mate_corp = 98_801_002i64;
+    let sys_id = 30_000_142u32;
+    let station_id = 60_003_760i64;
+    let wrong_station = 60_008_494i64;
+    let owner_ship = 1_000_801_001i64;
+    let mate_ship = 1_000_801_002i64;
+    let owner_cargo_mod = 1_000_801_010i64;
+    let owner_fh_trit = 1_000_801_011i64;
+    let owner_sma_rifter = 1_000_801_012i64;
+    let mate_hangar_trit = 1_000_801_013i64;
+    let mate_hangar_pyerite = 1_000_801_014i64;
+
+    ensure_char(&ctx, owner_id, owner_corp, Some(station_id), sys_id, owner_ship);
+    ensure_char(&ctx, mate_id, mate_corp, Some(station_id), sys_id, mate_ship);
+    insert_item(&ctx, owner_ship, carrier_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, mate_ship, 587, mate_id, station_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, owner_cargo_mod, 34, owner_id, owner_ship, InventoryFlag::Cargo, 5, false);
+    insert_item(&ctx, owner_fh_trit, 34, owner_id, owner_ship, InventoryFlag::FleetHangar, 20, false);
+    insert_item(&ctx, owner_sma_rifter, 587, owner_id, owner_ship, InventoryFlag::ShipHangar, 1, true);
+    insert_item(&ctx, mate_hangar_trit, 34, mate_id, station_id, InventoryFlag::Hangar, 15, false);
+    insert_item(&ctx, mate_hangar_pyerite, 35, mate_id, station_id, InventoryFlag::Hangar, 8, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            777_801,
+            FleetRecord {
+                fleet_id: 777_801,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_ship,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: None,
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let owner_sess = make_session(owner_id, owner_corp, Some(station_id), Some(sys_id), Some(owner_ship));
+    let mut mate_sess = make_session(mate_id, mate_corp, Some(station_id), Some(sys_id), Some(mate_ship));
+    let bound_owner_for_owner = make_bound(owner_ship, owner_id);
+    let bound_owner_for_mate = make_bound(owner_ship, mate_id);
+    let kw = HashMap::new();
+
+    let extract_ids = |rep: PyRep| -> Vec<i64> {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.iter().filter_map(|r| dbrow_col_i64(r, "itemID")).collect()
+    };
+
+    // 1. Authorized fleetmate List returns 90 | 155 items only (never owner's Cargo flag 5).
+    let mate_list_ids = extract_ids(
+        handle_list(&ctx, &mate_sess, Some(&bound_owner_for_mate), &[], &kw).expect("foreign ship list"),
+    );
+    assert!(mate_list_ids.contains(&owner_fh_trit));
+    assert!(mate_list_ids.contains(&owner_sma_rifter));
+    assert!(!mate_list_ids.contains(&owner_cargo_mod));
+
+    // 2. MultiAdd by fleetmate into owner_ship FleetHangar transfers owner_id = owner_id, notifies owner_id, and Pilot A sees both items in List.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    let moved_ids = handle_multi_add(
+        &ctx,
+        &mut mate_sess,
+        Some(&bound_owner_for_mate),
+        &[
+            PyRep::List(vec![PyRep::Integer(mate_hangar_trit), PyRep::Integer(mate_hangar_pyerite)]),
+            PyRep::Integer(owner_ship),
+            PyRep::Integer(155),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd into foreign FleetHangar");
+    assert!(!matches!(moved_ids, PyRep::None));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mate_hangar_trit].quantity, 15);
+        assert_eq!(snap.items[&mate_hangar_trit].owner_id, owner_id);
+        assert_eq!(snap.items[&mate_hangar_trit].location_id, owner_ship);
+        assert_eq!(snap.items[&mate_hangar_trit].flag, InventoryFlag::FleetHangar);
+        assert_eq!(snap.items[&mate_hangar_pyerite].owner_id, owner_id);
+        assert_eq!(snap.items[&mate_hangar_pyerite].location_id, owner_ship);
+        assert_eq!(snap.items[&mate_hangar_pyerite].flag, InventoryFlag::FleetHangar);
+    });
+    let owner_list_ids = extract_ids(
+        handle_list(&ctx, &owner_sess, Some(&bound_owner_for_owner), &[], &kw).expect("owner list"),
+    );
+    assert!(owner_list_ids.contains(&mate_hangar_trit));
+    assert!(owner_list_ids.contains(&mate_hangar_pyerite));
+    let owner_notifs = ctx.drain_notifications_for_char(owner_id);
+    assert!(owner_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(owner_notifs.iter().any(|n| n.event == "ProcessInventoryChange"));
+
+    // 3. Disabling allow_fleet_hangar hides flag 155 and rejects ListByFlags([155]), while SMA flag 90 remains readable.
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.get_mut(&owner_ship).unwrap().allow_fleet_hangar = false;
+        save_container_ship_state(&ctx, &st);
+    }
+    assert_eq!(
+        handle_list_by_flags(
+            &ctx,
+            &mate_sess,
+            Some(&bound_owner_for_mate),
+            &[PyRep::List(vec![PyRep::Integer(155)])],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "FleetHangarAccessDenied"
+    );
+    let sma_only_ids = extract_ids(
+        handle_list(&ctx, &mate_sess, Some(&bound_owner_for_mate), &[], &kw).expect("list with only SMA allowed"),
+    );
+    assert_eq!(sma_only_ids, vec![owner_sma_rifter]);
+
+    // 4. Wrong dock returns BoundObjectOwnershipViolation; undocked wrong system -> NotInSameSolarSystem; > 2,500m -> OutOfRange.
+    let wrong_dock_sess = make_session(mate_id, mate_corp, Some(wrong_station), Some(sys_id), Some(mate_ship));
+    assert_eq!(
+        handle_list(&ctx, &wrong_dock_sess, Some(&bound_owner_for_mate), &[], &kw)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&owner_ship).unwrap().location_id = i64::from(sys_id);
+        snap.item_positions.insert(owner_ship, [10_000.0, 0.0, 0.0]);
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+    let wrong_sys_sess = make_session(mate_id, mate_corp, None, Some(30_000_144), Some(mate_ship));
+    assert_eq!(
+        handle_list(&ctx, &wrong_sys_sess, Some(&bound_owner_for_mate), &[], &kw)
+            .unwrap_err()
+            .code,
+        "NotInSameSolarSystem"
+    );
+    let far_space_sess = make_session(mate_id, mate_corp, None, Some(sys_id), Some(mate_ship));
+    assert_eq!(
+        handle_list(&ctx, &far_space_sess, Some(&bound_owner_for_mate), &[], &kw)
+            .unwrap_err()
+            .code,
+        "OutOfRange"
+    );
+
+    // 5. Within 2,500m after fleet kick: List is empty and explicit ListByFlags returns SMAAccessDenied.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_ship, [500.0, 0.0, 0.0]);
+        snap.fleets.get_mut(&777_801).unwrap().members.retain(|&m| m != mate_id);
+    });
+    assert!(extract_ids(handle_list(&ctx, &far_space_sess, Some(&bound_owner_for_mate), &[], &kw).unwrap()).is_empty());
+    assert_eq!(
+        handle_list_by_flags(
+            &ctx,
+            &far_space_sess,
+            Some(&bound_owner_for_mate),
+            &[PyRep::List(vec![PyRep::Integer(90)])],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "SMAAccessDenied"
+    );
+}
 

@@ -543,6 +543,291 @@ pub(crate) fn check_item_lock_impound_asset_safety_in_snap(
     Ok(())
 }
 
+/// Checks whether the target ship has an SMA (`flag 90`) or Fleet Hangar (`flag 155`).
+pub(crate) fn validate_ship_bay_existence_in_snap(
+    ctx: &ServerContext,
+    dest_item: &eve_db::InventoryItemRecord,
+    flag_u16: u16,
+) -> Result<(), BridgeRpcError> {
+    let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else {
+        return Ok(());
+    };
+    if dest_type.category_id != 6 {
+        return Ok(());
+    }
+    if flag_u16 == 90 {
+        let sma_cap = dest_type.default_attributes.get(&908).copied().unwrap_or(0.0);
+        if sma_cap <= 0.0 {
+            return Err(BridgeRpcError {
+                code: "NoShipMaintenanceBay".into(),
+                message: format!("Ship {} does not have a Ship Maintenance Bay", dest_type.name),
+                client_error: None,
+            });
+        }
+    } else if flag_u16 == 155 {
+        let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
+        if fh_cap <= 0.0 {
+            return Err(BridgeRpcError {
+                code: "NoFleetHangar".into(),
+                message: format!("Ship {} does not have a Fleet Hangar", dest_type.name),
+                client_error: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validates per-item SMA rules (`category_id == 6`, assembled singleton, no non-charge cargo).
+pub(crate) fn validate_ship_bay_item_rules_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    item_id: i64,
+    moving_item: &eve_db::InventoryItemRecord,
+    dest_item: &eve_db::InventoryItemRecord,
+    flag_u16: u16,
+) -> Result<(), BridgeRpcError> {
+    let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else {
+        return Ok(());
+    };
+    if dest_type.category_id != 6 || flag_u16 != 90 {
+        return Ok(());
+    }
+    let moving_cat = ctx
+        .sde
+        .types
+        .get(&moving_item.type_id)
+        .map(|t| t.category_id)
+        .unwrap_or(0);
+    if moving_cat != 6 {
+        return Err(BridgeRpcError {
+            code: "CannotStoreCargoInSMA".into(),
+            message: "Only ships can be stored in a Ship Maintenance Bay".into(),
+            client_error: None,
+        });
+    }
+    if !moving_item.singleton {
+        return Err(BridgeRpcError {
+            code: "OnlyAssembledShipsInSMA".into(),
+            message: "Only assembled ships can be stored in a Ship Maintenance Bay".into(),
+            client_error: None,
+        });
+    }
+    // Reject storing ship if it contains non-charge cargo (`category_id != 8` in cargo/holds)
+    let has_non_charge_cargo = snap.items.values().any(|child| {
+        if child.location_id != item_id || child.quantity <= 0 {
+            return false;
+        }
+        let cf = child.flag as u16;
+        if matches!(cf, 11..=34 | 87 | 92..=94 | 125..=132 | 158) {
+            return false;
+        }
+        let c_cat = ctx.sde.types.get(&child.type_id).map(|t| t.category_id).unwrap_or(0);
+        c_cat != 8
+    });
+    if has_non_charge_cargo {
+        return Err(BridgeRpcError {
+            code: "ShipHasNonChargeCargo".into(),
+            message: "Cannot store ship in Ship Maintenance Bay while it carries cargo other than charges/ammo".into(),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+/// Validates batch volume capacity for SMA (`flag 90 | 138`) and Fleet Hangar (`flag 155`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_ship_bay_batch_capacity_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    dest_item: &eve_db::InventoryItemRecord,
+    new_loc: i64,
+    flag_u16: u16,
+    excluded_item_ids: &[i64],
+    batch_total_vol: f64,
+    typed_capacity_error: bool,
+) -> Result<(), BridgeRpcError> {
+    let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else {
+        return Ok(());
+    };
+    if dest_type.category_id != 6 {
+        return Ok(());
+    }
+    if flag_u16 == 90 {
+        let sma_cap = dest_type.default_attributes.get(&908).copied().unwrap_or(0.0);
+        if sma_cap <= 0.0 {
+            return Err(BridgeRpcError {
+                code: "NoShipMaintenanceBay".into(),
+                message: format!("Ship {} does not have a Ship Maintenance Bay", dest_type.name),
+                client_error: None,
+            });
+        }
+        let used_sma: f64 = snap
+            .items
+            .values()
+            // Stored hulls carry `invFlagShipHangar` (90) or `SpecializedShipHold` (138, set by `ship.StoreVessel`).
+            .filter(|i| {
+                i.location_id == new_loc
+                    && matches!(i.flag as u16, 90 | 138)
+                    && !excluded_item_ids.contains(&i.item_id)
+            })
+            .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64))
+            .sum();
+        if used_sma + batch_total_vol > sma_cap + 1e-4 {
+            return Err(if typed_capacity_error {
+                crate::services::inventory_fitting::ship_hold_capacity_error(flag_u16, sma_cap, used_sma, batch_total_vol)
+            } else {
+                BridgeRpcError {
+                    code: "CapacityExceeded".into(),
+                    message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
+                    client_error: None,
+                }
+            });
+        }
+    } else if flag_u16 == 155 {
+        let fh_cap = dest_type.default_attributes.get(&912).copied().unwrap_or(0.0);
+        if fh_cap <= 0.0 {
+            return Err(BridgeRpcError {
+                code: "NoFleetHangar".into(),
+                message: format!("Ship {} does not have a Fleet Hangar", dest_type.name),
+                client_error: None,
+            });
+        }
+        let used_fh: f64 = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == new_loc
+                    && (i.flag as u16) == 155
+                    && !excluded_item_ids.contains(&i.item_id)
+            })
+            .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity.max(1) as f64))
+            .sum();
+        if used_fh + batch_total_vol > fh_cap + 1e-4 {
+            return Err(if typed_capacity_error {
+                crate::services::inventory_fitting::ship_hold_capacity_error(flag_u16, fh_cap, used_fh, batch_total_vol)
+            } else {
+                BridgeRpcError {
+                    code: "CapacityExceeded".into(),
+                    message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
+                    client_error: None,
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validates SMA (`flag 90`) and Fleet Hangar (`flag 155`) fleet/corp ACL & password.
+pub(crate) fn validate_ship_bay_acl_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    new_loc: i64,
+    dest_item: &eve_db::InventoryItemRecord,
+    flag_u16: u16,
+    supplied_pw: Option<&str>,
+) -> Result<(), BridgeRpcError> {
+    let Some(dest_type) = ctx.sde.types.get(&dest_item.type_id) else {
+        return Ok(());
+    };
+    if dest_type.category_id != 6 {
+        return Ok(());
+    }
+    if flag_u16 == 90 {
+        if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, true, supplied_pw) {
+            return Err(BridgeRpcError {
+                code: "SMAAccessDenied".into(),
+                message: "Ship Maintenance Bay access denied by ship configuration or password".into(),
+                client_error: None,
+            });
+        }
+    } else if flag_u16 == 155 {
+        if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, false, supplied_pw) {
+            return Err(BridgeRpcError {
+                code: "FleetHangarAccessDenied".into(),
+                message: "Fleet Hangar access denied by ship configuration or password".into(),
+                client_error: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Shared in-snapshot validation for SMA (`flag 90`) and Fleet Hangar (`flag 155`) rules,
+/// capacity, and bay ACL/password. Used by pre-validation and inside `Add`'s write transaction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_ship_bay_capacity_and_rules_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item_id: i64,
+    moving_item: &eve_db::InventoryItemRecord,
+    new_loc: i64,
+    dest_item: &eve_db::InventoryItemRecord,
+    flag_u16: u16,
+    moving_total_vol: f64,
+    supplied_pw: Option<&str>,
+    typed_capacity_error: bool,
+) -> Result<(), BridgeRpcError> {
+    validate_ship_bay_existence_in_snap(ctx, dest_item, flag_u16)?;
+    validate_ship_bay_item_rules_in_snap(ctx, snap, item_id, moving_item, dest_item, flag_u16)?;
+    validate_ship_bay_batch_capacity_in_snap(
+        ctx,
+        snap,
+        dest_item,
+        new_loc,
+        flag_u16,
+        &[item_id],
+        moving_total_vol,
+        typed_capacity_error,
+    )?;
+    validate_ship_bay_acl_in_snap(ctx, snap, char_id, new_loc, dest_item, flag_u16, supplied_pw)
+}
+
+/// Persists a character's password unlock for any foreign ship shared bay (`90 | 138 | 155`)
+/// along the destination or source ancestor chain once a transfer/merge has succeeded.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_ship_bay_unlock_for_ancestors_snap(
+    ctx: &ServerContext,
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    dest_loc: i64,
+    dest_flag_u16: u16,
+    src_loc: i64,
+    src_flag_u16: u16,
+    supplied_pw: Option<&str>,
+) {
+    let Some(pw) = supplied_pw else {
+        return;
+    };
+    let mut ship_ids = Vec::new();
+    for (start, flag0) in [(dest_loc, dest_flag_u16), (src_loc, src_flag_u16)] {
+        let mut cur = start;
+        let mut cur_flag = flag0;
+        for _ in 0..8 {
+            let Some(node) = snap.items.get(&cur) else {
+                break;
+            };
+            let is_ship = ctx.sde.types.get(&node.type_id).is_some_and(|t| t.category_id == 6);
+            if is_ship && node.owner_id != char_id && matches!(cur_flag, 90 | 138 | 155) {
+                ship_ids.push(node.item_id);
+            }
+            cur_flag = node.flag as u16;
+            cur = node.location_id;
+        }
+    }
+    if ship_ids.is_empty() {
+        return;
+    }
+    write_container_ship_state_snap(snap, |st| {
+        for sid in ship_ids {
+            if st.ship_configs.get(&sid).and_then(|c| c.password.as_deref()) == Some(pw) {
+                st.unlocked_containers.insert((char_id, sid));
+            }
+        }
+    });
+}
+
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
 pub(crate) fn validate_container_and_bay_move(
     ctx: &ServerContext,
@@ -553,6 +838,55 @@ pub(crate) fn validate_container_and_bay_move(
     kwargs: &HashMap<String, PyRep>,
     requested_qty: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
+    validate_container_and_bay_move_impl(ctx, char_id, item_id, new_loc, flag_u16, &[], kwargs, requested_qty, false)
+}
+
+/// Same validation as [`validate_container_and_bay_move`] for `invbroker.Add`, emitting typed V24
+/// `NotEnoughSpecialBaySpace` user errors for SMA (`flag 90`) and Fleet Hangar (`flag 155`) overflows.
+#[allow(dead_code)]
+pub(crate) fn validate_container_and_bay_move_for_add(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    new_loc: i64,
+    flag_u16: u16,
+    kwargs: &HashMap<String, PyRep>,
+    requested_qty: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    validate_container_and_bay_move_impl(ctx, char_id, item_id, new_loc, flag_u16, &[], kwargs, requested_qty, true)
+}
+
+/// Variant of [`validate_container_and_bay_move_for_add`] that also inspects positional `args` for password fallback.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_container_and_bay_move_for_add_with_args(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    new_loc: i64,
+    flag_u16: u16,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    requested_qty: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    validate_container_and_bay_move_impl(ctx, char_id, item_id, new_loc, flag_u16, args, kwargs, requested_qty, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_container_and_bay_move_impl(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    new_loc: i64,
+    flag_u16: u16,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    requested_qty: Option<i64>,
+    typed_capacity_error: bool,
+) -> Result<(), BridgeRpcError> {
+    let supplied_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.iter().find_map(|a| a.as_str()));
     if item_id == new_loc {
         return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into(), client_error: None });
     }
@@ -634,7 +968,7 @@ pub(crate) fn validate_container_and_bay_move(
                 && !st.unlocked_containers.contains(&(src_loc, char_id))
                 && !st.unlocked_containers.contains(&(char_id, src_loc))
             {
-                let provided = kwargs.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                let provided = supplied_pw.unwrap_or("");
                 if provided != req_pw {
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordNeededToOpen".into(),
@@ -796,126 +1130,24 @@ pub(crate) fn validate_container_and_bay_move(
             return Ok(Some((dest_type.group_id, moving_item.type_id, moving_item.quantity)));
         }
 
-        // Ship Maintenance Bay (`flag 90`)
-        if flag_u16 == 90 && dest_type.category_id == 6 {
-            let sma_cap = dest_type
-                .default_attributes
-                .get(&908)
-                .copied()
-                .unwrap_or(0.0);
-            if sma_cap <= 0.0 {
-                return Err(BridgeRpcError {
-                    code: "NoShipMaintenanceBay".into(),
-                    message: format!("Ship {} does not have a Ship Maintenance Bay", dest_type.name),
-                    client_error: None,
-                });
-            }
-            if moving_cat != 6 {
-                return Err(BridgeRpcError {
-                    code: "CannotStoreCargoInSMA".into(),
-                    message: "Only ships can be stored in a Ship Maintenance Bay".into(),
-                    client_error: None,
-                });
-            }
-            if !moving_item.singleton {
-                return Err(BridgeRpcError {
-                    code: "OnlyAssembledShipsInSMA".into(),
-                    message: "Only assembled ships can be stored in a Ship Maintenance Bay".into(),
-                    client_error: None,
-                });
-            }
-            // Reject storing ship if it contains non-charge cargo (`category_id != 8` in cargo/holds)
-            let has_non_charge_cargo = snap.items.values().any(|child| {
-                if child.location_id != item_id || child.quantity <= 0 {
-                    return false;
-                }
-                let cf = child.flag as u16;
-                if matches!(cf, 11..=34 | 87 | 92..=94 | 125..=132 | 158) {
-                    return false;
-                }
-                let c_cat = ctx.sde.types.get(&child.type_id).map(|t| t.category_id).unwrap_or(0);
-                c_cat != 8
-            });
-            if has_non_charge_cargo {
-                return Err(BridgeRpcError {
-                    code: "ShipHasNonChargeCargo".into(),
-                    message: "Cannot store ship in Ship Maintenance Bay while it carries cargo other than charges/ammo".into(),
-                    client_error: None,
-                });
-            }
-            let used_sma: f64 = snap
-                .items
-                .values()
-                // Stored hulls carry `invFlagShipHangar` (90) or `SpecializedShipHold` (138, set by `ship.StoreVessel`).
-                .filter(|i| i.location_id == new_loc && matches!(i.flag as u16, 90 | 138) && i.item_id != item_id)
-                .map(|i| effective_item_unit_volume(&ctx.sde, i))
-                .sum();
-            if used_sma + moving_total_vol > sma_cap + 1e-4 {
-                return Err(BridgeRpcError {
-                    code: "CapacityExceeded".into(),
-                    message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
-                    client_error: None,
-                });
-            }
-            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
-            if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, true, supplied_pw) {
-                return Err(BridgeRpcError {
-                    code: "SMAAccessDenied".into(),
-                    message: "Ship Maintenance Bay access denied by ship configuration or password".into(),
-                    client_error: None,
-                });
-            }
-        }
-
-        // Fleet Hangar (`flag 155`)
-        if flag_u16 == 155 && dest_type.category_id == 6 {
-            let fh_cap = dest_type
-                .default_attributes
-                .get(&912)
-                .copied()
-                .unwrap_or(0.0);
-            if fh_cap <= 0.0 {
-                return Err(BridgeRpcError {
-                    code: "NoFleetHangar".into(),
-                    message: format!("Ship {} does not have a Fleet Hangar", dest_type.name),
-                    client_error: None,
-                });
-            }
-            let used_fh: f64 = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == new_loc && (i.flag as u16) == 155 && i.item_id != item_id)
-                .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
-                .sum();
-            if used_fh + moving_total_vol > fh_cap + 1e-4 {
-                return Err(BridgeRpcError {
-                    code: "CapacityExceeded".into(),
-                    message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
-                    client_error: None,
-                });
-            }
-            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
-            if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, false, supplied_pw) {
-                return Err(BridgeRpcError {
-                    code: "FleetHangarAccessDenied".into(),
-                    message: "Fleet Hangar access denied by ship configuration or password".into(),
-                    client_error: None,
-                });
-            }
+        if matches!(flag_u16, 90 | 155) && dest_type.category_id == 6 {
+            validate_ship_bay_capacity_and_rules_in_snap(
+                ctx,
+                snap,
+                char_id,
+                item_id,
+                moving_item,
+                new_loc,
+                dest_item,
+                flag_u16,
+                moving_total_vol,
+                supplied_pw,
+                typed_capacity_error,
+            )?;
         }
 
         Ok(None)
     })?;
-
-    if let Some(supplied_pw) = kwargs.get("password").and_then(|v| v.as_str()) {
-        write_container_ship_state(ctx, |st| {
-            if let Some(cfg) = st.ship_configs.get(&new_loc) {
-                if cfg.password.as_deref() == Some(supplied_pw) {
-                    st.unlocked_containers.insert((char_id, new_loc));
-                }
-            }
-        });
-    }
 
     if let Some((grp, _, _)) = snap_check {
         let mut st = read_container_ship_state(ctx);
@@ -923,7 +1155,7 @@ pub(crate) fn validate_container_and_bay_move(
         let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(new_loc, char_id));
         if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
             if !req_pw.is_empty() && need_check {
-                let provided = kwargs.get("password").and_then(|v| v.as_str()).unwrap_or("");
+                let provided = supplied_pw.unwrap_or("");
                 let now_unix = ctx.now_unix_secs();
                 let tid = ctx.db.with_snapshot(|s| s.items.get(&new_loc).map(|i| i.type_id)).unwrap_or(0);
                 if provided != req_pw {

@@ -532,12 +532,14 @@ fn validate_location_reachability_in_snap(
         } else {
             target_loc
         };
-        let colocated = crate::services::inventory_bound::is_inventory_location_colocated(
+        let colocated = crate::services::inventory_bound::is_inventory_location_colocated_with_sde(
+            &ctx.sde,
             snap,
             session,
             ch,
             pre_balls,
             coloc_probe,
+            false,
         ) || (ch.station_id.is_none()
             && ch.structure_id.is_none()
             && session.solar_system_id.is_none()
@@ -556,11 +558,21 @@ fn validate_location_reachability_in_snap(
 
     let is_in_space_root = (30_000_000..=39_999_999).contains(&chain.root_loc)
         && !snap.structures.contains_key(&chain.root_loc);
+    let target_flag_u16 = target_bay_flag.map(|f| f as u16).unwrap_or(InventoryFlag::Cargo as u16);
+    let foreign_ship_ancestor = (!session.has_gm_role())
+        .then(|| {
+            inventory_bound::find_ship_bay_ancestor_in_snap(ctx, snap, target_loc, target_flag_u16)
+                .filter(|(host, _)| host.owner_id != char_id)
+        })
+        .flatten();
     let container_hops = &chain.chain_locs[..chain.chain_locs.len().saturating_sub(1)];
     if check_container_owner || !is_in_space_root {
         for &anc_id in container_hops {
             if let Some(node) = snap.items.get(&anc_id) {
+                let inside_foreign_ship_bay = foreign_ship_ancestor
+                    .is_some_and(|(host, _)| anc_id == host.item_id || node.owner_id == host.owner_id);
                 let allowed_container = session.has_gm_role()
+                    || inside_foreign_ship_bay
                     || node.owner_id == char_id
                     || node.owner_id == 0
                     || (is_in_space_root && node.type_id == 23)
@@ -579,9 +591,58 @@ fn validate_location_reachability_in_snap(
     }
 
     // Check foreign ship bay access and password strictly after co-location and range checks
-    // so remote/out-of-range callers cannot probe ship bay passwords.
+    // (for both docked and in-space ships) so out-of-range callers cannot probe passwords.
     let mut ship_bay_unlock = None;
-    if is_in_space_root {
+    if let Some((host_ship, entry_flag_u16)) = foreign_ship_ancestor {
+        if check_container_owner && !matches!(entry_flag_u16, 90 | 155) {
+            return Err(BridgeRpcError {
+                code: access_err_code.into(),
+                message: format!("Character {char_id} cannot access inventory {target_loc}"),
+                client_error: None,
+            });
+        }
+        let (is_sma, deny_code) = match entry_flag_u16 {
+            155 => (false, "FleetHangarAccessDenied"),
+            90 | 138 => (true, "SMAAccessDenied"),
+            _ => {
+                return Err(BridgeRpcError {
+                    code: access_err_code.into(),
+                    message: format!("Character {char_id} cannot access inventory {target_loc}"),
+                    client_error: None,
+                });
+            }
+        };
+        if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+            snap,
+            char_id,
+            host_ship.item_id,
+            host_ship.owner_id,
+            is_sma,
+            provided_pw,
+        ) {
+            return Err(BridgeRpcError {
+                code: deny_code.into(),
+                message: format!(
+                    "Character {char_id} lacks ship bay access or valid password for {}",
+                    host_ship.item_id
+                ),
+                client_error: None,
+            });
+        }
+        if let Some(cfg) = cs_state.ship_configs.get(&host_ship.item_id) {
+            if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty()) {
+                let already_unlocked = cs_state
+                    .unlocked_containers
+                    .contains(&(char_id, host_ship.item_id))
+                    || cs_state
+                        .unlocked_containers
+                        .contains(&(host_ship.item_id, char_id));
+                if !already_unlocked && provided_pw == Some(req_pw) {
+                    ship_bay_unlock = Some((char_id, host_ship.item_id));
+                }
+            }
+        }
+    } else if is_in_space_root {
         if let Some(&root_obj_id) = container_hops.last() {
             if let Some(root_item) = snap.items.get(&root_obj_id) {
                 let is_foreign_ship = root_item.owner_id != char_id
@@ -593,61 +654,13 @@ fn validate_location_reachability_in_snap(
                         .get(&root_item.type_id)
                         .is_some_and(|t| t.category_id == 6);
                 if is_foreign_ship {
-                    let root_bay_flag = container_hops
-                        .len()
-                        .checked_sub(2)
-                        .and_then(|idx| snap.items.get(&container_hops[idx]).map(|c| c.flag))
-                        .or(target_bay_flag);
-                    if !check_container_owner
-                        || matches!(
-                            root_bay_flag,
-                            Some(InventoryFlag::FleetHangar | InventoryFlag::ShipHangar)
-                        )
-                    {
-                        let (is_sma, deny_code) = match root_bay_flag {
-                            Some(InventoryFlag::FleetHangar) => (false, "FleetHangarAccessDenied"),
-                            Some(InventoryFlag::ShipHangar) => (true, "SMAAccessDenied"),
-                            _ => {
-                                return Err(BridgeRpcError {
-                                    code: access_err_code.into(),
-                                    message: format!(
-                                        "Character {char_id} cannot access inventory {target_loc}"
-                                    ),
-                                    client_error: None,
-                                });
-                            }
-                        };
-                        if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                            snap,
-                            char_id,
-                            root_obj_id,
-                            root_item.owner_id,
-                            is_sma,
-                            provided_pw,
-                        ) {
-                            return Err(BridgeRpcError {
-                                code: deny_code.into(),
-                                message: format!(
-                                    "Character {char_id} lacks ship bay access or valid password for {root_obj_id}"
-                                ),
-                                client_error: None,
-                            });
-                        }
-                        if let Some(cfg) = cs_state.ship_configs.get(&root_obj_id) {
-                            if let Some(req_pw) = cfg.password.as_deref().filter(|s| !s.is_empty())
-                            {
-                                let already_unlocked = cs_state
-                                    .unlocked_containers
-                                    .contains(&(char_id, root_obj_id))
-                                    || cs_state
-                                        .unlocked_containers
-                                        .contains(&(root_obj_id, char_id));
-                                if !already_unlocked && provided_pw == Some(req_pw) {
-                                    ship_bay_unlock = Some((char_id, root_obj_id));
-                                }
-                            }
-                        }
-                    }
+                    return Err(BridgeRpcError {
+                        code: access_err_code.into(),
+                        message: format!(
+                            "Character {char_id} cannot access inventory {target_loc}"
+                        ),
+                        client_error: None,
+                    });
                 }
             }
         }
@@ -664,11 +677,15 @@ fn execute_split_stack_in_tx(
     loc_hint: Option<i64>,
     item_id: i64,
     split_quantity: i32,
+    args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Result<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord), BridgeRpcError> {
+) -> Result<(eve_db::InventoryItemRecord, eve_db::InventoryItemRecord, Option<i64>), BridgeRpcError> {
     let loaded_tube_items = snapshot_loaded_tube_items(ctx);
     let pre_balls = snapshot_pre_balls(ctx, session, char_id);
-    let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
+    let provided_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.iter().find_map(|a| a.as_str()));
 
     ctx.db.try_with_mut_snapshot(|guard| {
         let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
@@ -691,8 +708,22 @@ fn execute_split_stack_in_tx(
                 client_error: None,
             })?;
 
+        inventory_bound::validate_movable_item_not_piloted_or_bare_space_in_snap(
+            guard,
+            char_id,
+            &item,
+            0,
+            item.flag as u16,
+        )?;
+        let foreign_ship_bay_owner = inventory_bound::foreign_ship_owner_at_loc_in_snap(
+            ctx,
+            guard,
+            item.location_id,
+            item.flag as u16,
+            char_id,
+        );
         let is_corp_item = ch.corporation_id > 0 && item.owner_id == ch.corporation_id;
-        if item.owner_id != char_id && !is_corp_item {
+        if item.owner_id != char_id && !is_corp_item && foreign_ship_bay_owner.is_none() {
             return Err(BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: format!("Character {char_id} does not own stack {item_id}"),
@@ -726,7 +757,7 @@ fn execute_split_stack_in_tx(
             "SplitFailed",
             false,
         )?;
-        if is_corp_item {
+        if is_corp_item && foreign_ship_bay_owner.is_none() {
             crate::services::inventory_bound::validate_corp_source_item_take_access_in_snap(
                 ctx,
                 guard,
@@ -788,16 +819,27 @@ fn execute_split_stack_in_tx(
             unlock_pairs.push(pair);
         }
 
-        let split_res = guard
+        let (orig, mut new_i) = guard
             .split_stack_in_snap(item.owner_id, item_id, split_quantity)
             .map_err(|e| BridgeRpcError {
                 code: "SplitFailed".into(),
                 message: e.to_string(),
                 client_error: None,
             })?;
-        // Persist container unlock only after `split_stack_in_snap` succeeds inside the same tx.
+        if let Some(ship_owner) = foreign_ship_bay_owner {
+            if let Some(rec) = guard.items.get_mut(&new_i.item_id) {
+                rec.owner_id = ship_owner;
+            }
+            new_i.owner_id = ship_owner;
+        }
+        // Persist container unlock and native bay custom flag only after `split_stack_in_snap` succeeds.
         persist_unlocked_containers_in_snap(guard, &unlock_pairs);
-        Ok(split_res)
+        if matches!(new_i.flag as u16, 90 | 155) {
+            fitting_containers_ships::write_container_ship_state_snap(guard, |st| {
+                st.custom_item_flags.insert(new_i.item_id, new_i.flag as u16);
+            });
+        }
+        Ok((orig, new_i, foreign_ship_bay_owner))
     })
 }
 
@@ -830,25 +872,32 @@ pub(in crate::services) fn handle_stack_ops(
                 loc_hint,
                 item_id,
                 split_quantity,
+                args,
                 kwargs,
             ) {
-                Ok((orig, new_i)) => {
+                Ok((orig, new_i, foreign_ship_bay_owner)) => {
                     let old_orig_qty = (orig.quantity + new_i.quantity) as i64;
+                    let orig_changes = vec![
+                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
+                        (9, PyRep::Integer(old_orig_qty)),
+                    ];
+                    let new_changes = vec![(3, PyRep::Integer(0))];
                     inventory_bound::emit_inv_item_change(
                         ctx,
                         char_id,
                         &orig,
-                        vec![
-                            // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                            (9, PyRep::Integer(old_orig_qty)),
-                        ],
+                        orig_changes.clone(),
                     );
                     inventory_bound::emit_inv_item_change(
                         ctx,
                         char_id,
                         &new_i,
-                        vec![(3, PyRep::Integer(0))],
+                        new_changes.clone(),
                     );
+                    if let Some(ship_owner) = foreign_ship_bay_owner.filter(|&o| o != char_id) {
+                        inventory_bound::emit_inv_item_change(ctx, ship_owner, &orig, orig_changes);
+                        inventory_bound::emit_inv_item_change(ctx, ship_owner, &new_i, new_changes);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("originalItemID", PyRep::Integer(orig.item_id)),
                         ("originalQuantity", PyRep::Integer(orig.quantity as i64)),
@@ -928,11 +977,15 @@ pub(in crate::services) fn handle_stack_ops(
                     old_src_qty: i32,
                     updated_dst: eve_db::InventoryItemRecord,
                     old_dst_qty: i32,
+                    old_dst_owner: i64,
+                    foreign_ship_owner: Option<i64>,
                 },
                 Full {
                     deleted_src: eve_db::InventoryItemRecord,
                     updated_dst: eve_db::InventoryItemRecord,
                     old_dst_qty: i32,
+                    old_dst_owner: i64,
+                    foreign_ship_owner: Option<i64>,
                 },
             }
             let bound_loc = bound_entry.map(|b| b.object_id).filter(|&id| id > 0);
@@ -1002,13 +1055,39 @@ pub(in crate::services) fn handle_stack_ops(
                             client_error: None,
                         })?
                         .clone();
-                    if src.owner_id != char_id || tgt.owner_id != char_id {
+                    let src_foreign_ship_owner = inventory_bound::foreign_ship_owner_at_loc_in_snap(
+                        ctx,
+                        guard,
+                        src.location_id,
+                        src.flag as u16,
+                        char_id,
+                    );
+                    let owner_ok = |it: &eve_db::InventoryItemRecord| {
+                        it.owner_id == char_id
+                            || (src_foreign_ship_owner.is_some()
+                                && Some(it.owner_id) == src_foreign_ship_owner)
+                    };
+                    if !owner_ok(&src) || !owner_ok(&tgt) {
                         return Err(BridgeRpcError {
                             code: "StackFailed".into(),
                             message: "Stack ownership mismatch".into(),
                             client_error: None,
                         });
                     }
+                    inventory_bound::validate_movable_item_not_piloted_or_bare_space_in_snap(
+                        guard,
+                        char_id,
+                        &src,
+                        0,
+                        src.flag as u16,
+                    )?;
+                    inventory_bound::validate_movable_item_not_piloted_or_bare_space_in_snap(
+                        guard,
+                        char_id,
+                        &tgt,
+                        0,
+                        tgt.flag as u16,
+                    )?;
                     if tgt.type_id != src.type_id
                         || tgt.location_id != src.location_id
                         || tgt.flag != src.flag
@@ -1178,6 +1257,7 @@ pub(in crate::services) fn handle_stack_ops(
                         })?;
                     let old_src_qty = src.quantity;
                     let old_dst_qty = tgt.quantity;
+                    let old_dst_owner = tgt.owner_id;
                     if merge_qty < old_src_qty {
                         let updated_src = {
                             let src_mut = guard.items.get_mut(&src_id).unwrap();
@@ -1188,6 +1268,9 @@ pub(in crate::services) fn handle_stack_ops(
                         let updated_dst = {
                             let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
                             tgt_mut.quantity = new_tgt_qty;
+                            if let Some(ship_owner) = src_foreign_ship_owner {
+                                tgt_mut.owner_id = ship_owner;
+                            }
                             tgt_mut.version += 1;
                             tgt_mut.clone()
                         };
@@ -1196,12 +1279,17 @@ pub(in crate::services) fn handle_stack_ops(
                             old_src_qty,
                             updated_dst,
                             old_dst_qty,
+                            old_dst_owner,
+                            foreign_ship_owner: src_foreign_ship_owner,
                         });
                     } else {
                         guard.remove_system_cleanup_item(src_id);
                         let updated_dst = {
                             let tgt_mut = guard.items.get_mut(&dst_id).unwrap();
                             tgt_mut.quantity = new_tgt_qty;
+                            if let Some(ship_owner) = src_foreign_ship_owner {
+                                tgt_mut.owner_id = ship_owner;
+                            }
                             tgt_mut.version += 1;
                             tgt_mut.clone()
                         };
@@ -1209,6 +1297,8 @@ pub(in crate::services) fn handle_stack_ops(
                             deleted_src: src,
                             updated_dst,
                             old_dst_qty,
+                            old_dst_owner,
+                            foreign_ship_owner: src_foreign_ship_owner,
                         });
                     }
                 }
@@ -1227,33 +1317,69 @@ pub(in crate::services) fn handle_stack_ops(
                         old_src_qty,
                         updated_dst,
                         old_dst_qty,
+                        old_dst_owner,
+                        foreign_ship_owner,
                     } => {
+                        let src_changes = vec![(9, PyRep::Integer(old_src_qty as i64))];
+                        let mut dst_changes = vec![(9, PyRep::Integer(old_dst_qty as i64))];
+                        if updated_dst.owner_id != old_dst_owner {
+                            dst_changes.push((2, PyRep::Integer(old_dst_owner)));
+                        }
                         inventory_bound::emit_inv_item_change(
                             ctx,
                             char_id,
                             &updated_src,
-                            vec![(9, PyRep::Integer(old_src_qty as i64))],
+                            src_changes.clone(),
                         );
                         inventory_bound::emit_inv_item_change(
                             ctx,
                             char_id,
                             &updated_dst,
-                            vec![(9, PyRep::Integer(old_dst_qty as i64))],
+                            dst_changes.clone(),
                         );
+                        if let Some(ship_owner) = foreign_ship_owner.filter(|&o| o != char_id) {
+                            inventory_bound::emit_inv_item_change(
+                                ctx,
+                                ship_owner,
+                                &updated_src,
+                                src_changes,
+                            );
+                            inventory_bound::emit_inv_item_change(
+                                ctx,
+                                ship_owner,
+                                &updated_dst,
+                                dst_changes,
+                            );
+                        }
                         updated_records.push(updated_dst);
                     }
                     MergeChangeEvent::Full {
                         deleted_src,
                         updated_dst,
                         old_dst_qty,
+                        old_dst_owner,
+                        foreign_ship_owner,
                     } => {
+                        let mut dst_changes = vec![(9, PyRep::Integer(old_dst_qty as i64))];
+                        if updated_dst.owner_id != old_dst_owner {
+                            dst_changes.push((2, PyRep::Integer(old_dst_owner)));
+                        }
                         inventory_bound::emit_inv_item_deleted(ctx, char_id, &deleted_src);
                         inventory_bound::emit_inv_item_change(
                             ctx,
                             char_id,
                             &updated_dst,
-                            vec![(9, PyRep::Integer(old_dst_qty as i64))],
+                            dst_changes.clone(),
                         );
+                        if let Some(ship_owner) = foreign_ship_owner.filter(|&o| o != char_id) {
+                            inventory_bound::emit_inv_item_deleted(ctx, ship_owner, &deleted_src);
+                            inventory_bound::emit_inv_item_change(
+                                ctx,
+                                ship_owner,
+                                &updated_dst,
+                                dst_changes,
+                            );
+                        }
                         updated_records.push(updated_dst);
                     }
                 }
@@ -1356,7 +1482,7 @@ pub(in crate::services) fn handle_stack_ops(
             let provided_pw = kwargs.get("password").and_then(|v| v.as_str());
             let loaded_tube_items = snapshot_loaded_tube_items(ctx);
             let pre_balls = snapshot_pre_balls(ctx, session, char_id);
-            let outcome = match ctx.db.try_with_mut_snapshot(|guard| {
+            let (outcome, foreign_ship_owner) = match ctx.db.try_with_mut_snapshot(|guard| {
                 let ch = character_or_session_fallback(guard, session, char_id)?;
                 let cs_state = fitting_containers_ships::read_container_ship_state_snap(guard);
                 let chain = collect_container_chain(guard, target_loc, 9);
@@ -1405,33 +1531,54 @@ pub(in crate::services) fn handle_stack_ops(
                 if let Some(pair) = ship_unlock {
                     unlock_pairs.push(pair);
                 }
-                let outcome = guard.stack_all_items_in_snap(
+                let foreign_ship_owner = inventory_bound::foreign_ship_owner_at_loc_in_snap(
+                    ctx,
+                    guard,
+                    target_loc,
+                    target_flag as u16,
                     char_id,
+                );
+                let stack_owner = foreign_ship_owner.unwrap_or(char_id);
+                let outcome = guard.stack_all_items_in_snap(
+                    stack_owner,
                     target_loc,
                     target_flag,
                     &loaded_tube_items,
                 );
                 persist_unlocked_containers_in_snap(guard, &unlock_pairs);
-                Ok(outcome)
+                Ok((outcome, foreign_ship_owner))
             }) {
-                Ok(outcome) => outcome,
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
+            let ship_notify = foreign_ship_owner.filter(|&o| o != char_id);
             for old_src in &outcome.deleted_sources {
                 inventory_bound::emit_inv_item_deleted(ctx, char_id, old_src);
+                if let Some(ship_owner) = ship_notify {
+                    inventory_bound::emit_inv_item_deleted(ctx, ship_owner, old_src);
+                }
             }
             let mut survivors = Vec::with_capacity(outcome.survivors.len());
             for survivor in &outcome.survivors {
+                let changes = vec![
+                    // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
+                    (9, PyRep::Integer(survivor.old_quantity as i64)),
+                ];
                 inventory_bound::emit_inv_item_change(
                     ctx,
                     char_id,
                     &survivor.updated,
-                    vec![
-                        // Omit ixQuantity (5): V24.01 invCache uses ixStackSize (9).
-                        (9, PyRep::Integer(survivor.old_quantity as i64)),
-                    ],
+                    changes.clone(),
                 );
+                if let Some(ship_owner) = ship_notify {
+                    inventory_bound::emit_inv_item_change(
+                        ctx,
+                        ship_owner,
+                        &survivor.updated,
+                        changes,
+                    );
+                }
                 survivors.push(PyRep::keyval([
                     ("itemID", PyRep::Integer(survivor.updated.item_id)),
                     ("typeID", PyRep::Integer(survivor.updated.type_id as i64)),

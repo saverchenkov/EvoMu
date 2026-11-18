@@ -2543,3 +2543,217 @@ async fn moveme_with_inflight_ship_and_station_invbroker_allows_get_self_inv_ite
         "InvalidBoundObject"
     );
 }
+
+#[test]
+fn issue_1290_ship_bay_targets_foreign_bay_auth_and_station_fuel_redirect() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let owner_id = 95_900_001i64;
+    let mate_id = 95_900_002i64;
+    let owner_corp = 98_900_001i64;
+    let mate_corp = 98_900_002i64;
+    let station_id = 60_003_760i64;
+    let keepstar_id = 1_030_900_000_001i64;
+    let owner_titan = 1_000_959_001i64;
+    let mate_ship = 1_000_959_002i64;
+    let fuel_item = 1_000_959_010i64;
+    let mate_station_item = 1_000_959_011i64;
+    let mate_owned_bay_item = 1_000_959_012i64;
+    let box_id = 1_000_959_013i64;
+    let titan_tid = 999_901u32;
+
+    let ctx = {
+        let mut sde_mut = (*shared_sde()).clone();
+        let mut titan = sde_mut.types[&587].clone();
+        titan.type_id = titan_tid;
+        titan.group_id = 30;
+        titan.category_id = 6;
+        titan.name = "Synthetic Keepstar Titan".into();
+        titan.default_attributes.insert(908, 1_000_000.0);
+        titan.default_attributes.insert(912, 10_000.0);
+        titan.default_attributes.insert(1549, 50_000.0);
+        sde_mut.types.insert(titan_tid, titan);
+        let c = ServerContext::with_sde_and_repository(Arc::new(sde_mut), Arc::new(WorldRepository::with_demo_seed()));
+        c.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+        c
+    };
+    let _ = ctx.db;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("seed char");
+        let mut owner = base_ch.clone();
+        owner.character_id = owner_id;
+        owner.user_id = owner_id as u64;
+        owner.name = "TitanOwner".into();
+        owner.corporation_id = owner_corp;
+        owner.station_id = Some(station_id);
+        owner.structure_id = None;
+        owner.active_ship_id = owner_titan;
+        snap.characters.insert(owner_id, owner);
+
+        let mut mate = base_ch;
+        mate.character_id = mate_id;
+        mate.user_id = mate_id as u64;
+        mate.name = "TitanMate".into();
+        mate.corporation_id = mate_corp;
+        mate.station_id = Some(station_id);
+        mate.structure_id = None;
+        mate.active_ship_id = mate_ship;
+        snap.characters.insert(mate_id, mate);
+
+        snap.structures.insert(
+            keepstar_id,
+            UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: 35834,
+                owner_corp_id: owner_corp,
+                solar_system_id: 30_000_142,
+                name: "Test Keepstar".into(),
+                state: "ShieldVulnerable".into(),
+                position: [0.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            777_901,
+            FleetRecord {
+                fleet_id: 777_901,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+
+        let mk = |item_id, type_id, oid, loc, flag, qty, singleton| InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: oid,
+            location_id: loc,
+            flag,
+            quantity: qty,
+            singleton,
+            version: 1,
+            ..Default::default()
+        };
+        snap.items.insert(owner_titan, mk(owner_titan, titan_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk(mate_ship, 587, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(fuel_item, mk(fuel_item, 16274, owner_id, station_id, InventoryFlag::Hangar, 50, false));
+        snap.items.insert(mate_station_item, mk(mate_station_item, 34, mate_id, station_id, InventoryFlag::Hangar, 10, false));
+        snap.items.insert(mate_owned_bay_item, mk(mate_owned_bay_item, 34, mate_id, owner_titan, InventoryFlag::FleetHangar, 10, false));
+        snap.items.insert(box_id, mk(box_id, 3293, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_titan,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("pw123".into()),
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let owner_sess = SessionState {
+        user_id: Some(owner_id as u64),
+        character_id: Some(owner_id),
+        corporation_id: Some(owner_corp),
+        station_id: Some(station_id),
+        solar_system_id: Some(30_000_142),
+        ship_id: Some(owner_titan),
+        ..Default::default()
+    };
+    let mate_sess = SessionState {
+        user_id: Some(mate_id as u64),
+        character_id: Some(mate_id),
+        corporation_id: Some(mate_corp),
+        station_id: Some(station_id),
+        solar_system_id: Some(30_000_142),
+        ship_id: Some(mate_ship),
+        ..Default::default()
+    };
+
+    // 1. resolve_inv_target_location: ship-only bay flags (155, 177, 179, 181, 182, 185) + NPC station 133 redirect to ship,
+    //    while unbound 133 at an Upwell structure stays targeted at the structure's own fuel bay.
+    let station_bound = bound_invbroker(owner_id, station_id);
+    for bay_flag in [133u16, 155, 177, 179, 181, 182, 185] {
+        assert_eq!(
+            resolve_inv_target_location(
+                &ctx,
+                &owner_sess,
+                Some(&station_bound),
+                &[PyRep::Integer(fuel_item), PyRep::Integer(station_id), PyRep::Integer(i64::from(bay_flag))],
+                Some(station_id),
+                Some(bay_flag),
+                false,
+            ),
+            Some(owner_titan),
+            "station-bound flag {bay_flag} must redirect onto ship"
+        );
+    }
+    let ks_bound = bound_invbroker(owner_id, keepstar_id);
+    assert_eq!(
+        resolve_inv_target_location(
+            &ctx,
+            &owner_sess,
+            Some(&ks_bound),
+            &[PyRep::Integer(fuel_item), PyRep::Integer(keepstar_id), PyRep::Integer(133)],
+            Some(keepstar_id),
+            Some(133),
+            false,
+        ),
+        Some(keepstar_id),
+        "structure fuel bay flag 133 must NOT redirect onto ship"
+    );
+    assert_eq!(
+        resolve_inv_target_location(
+            &ctx,
+            &owner_sess,
+            Some(&ks_bound),
+            &[PyRep::Integer(fuel_item), PyRep::Integer(keepstar_id), PyRep::Integer(155)],
+            Some(keepstar_id),
+            Some(155),
+            false,
+        ),
+        Some(owner_titan),
+        "structure-bound FleetHangar flag 155 must redirect onto ship"
+    );
+
+    // 2. Non-ship destinations reject ship-only bay flags with InvalidInventoryFlag.
+    ctx.db.with_snapshot(|snap| {
+        for flag_u16 in [155u16, 177, 179, 181, 182, 185] {
+            for non_ship in [station_id, keepstar_id, box_id] {
+                let err = validate_ship_only_bay_target_in_snap(&ctx, snap, non_ship, flag_u16).unwrap_err();
+                assert_eq!(err.code, "InvalidInventoryFlag");
+            }
+        }
+        assert!(validate_ship_only_bay_target_in_snap(&ctx, snap, owner_titan, 155).is_ok());
+
+        // 3. recheck_invbroker_add_auth_in_snap blocks foreign Cargo (flag 5) and enforces ACL+password on foreign 155 even when item.owner_id == mate_id.
+        let kw_empty = HashMap::new();
+        let mut kw_pw = HashMap::new();
+        kw_pw.insert("password".to_string(), PyRep::String("pw123".into()));
+
+        let src_hangar = &snap.items[&mate_station_item];
+        assert!(
+            recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_hangar, Some(src_hangar), owner_titan, InventoryFlag::Cargo, &[], &kw_pw).is_err(),
+            "foreign ship Cargo (flag 5) must be blocked"
+        );
+        let dep_no_pw = recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_hangar, Some(src_hangar), owner_titan, InventoryFlag::FleetHangar, &[], &kw_empty).unwrap_err();
+        assert_eq!(dep_no_pw.code, "FleetHangarAccessDenied");
+        assert!(recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_hangar, Some(src_hangar), owner_titan, InventoryFlag::FleetHangar, &[], &kw_pw).is_ok());
+
+        let src_bay = &snap.items[&mate_owned_bay_item];
+        let ext_no_pw = recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_bay, Some(src_bay), station_id, InventoryFlag::Hangar, &[], &kw_empty).unwrap_err();
+        assert_eq!(ext_no_pw.code, "FleetHangarAccessDenied");
+        assert!(recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_bay, Some(src_bay), station_id, InventoryFlag::Hangar, &[], &kw_pw).is_ok());
+    });
+}

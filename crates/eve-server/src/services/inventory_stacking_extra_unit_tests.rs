@@ -1505,7 +1505,7 @@ async fn multi_add_multi_item_volume_exact_bounds_across_holds_containers_sma_an
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
     handle_multi_add(
         &ctx,
@@ -1559,7 +1559,7 @@ async fn multi_add_multi_item_volume_exact_bounds_across_holds_containers_sma_an
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
     handle_multi_add(
         &ctx,
