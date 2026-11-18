@@ -78,14 +78,16 @@ async fn test_live_mining_belts_as_balls_and_sec_band_ore_distribution() {
             .collect()
     };
     assert_eq!(ore_ids(1.0, 10_000_002), BTreeSet::from([1230, 1228]));
-    assert_eq!(ore_ids(0.7, 10_000_002), BTreeSet::from([1230, 1228, 18]));
+    assert_eq!(ore_ids(0.7, 10_000_002), BTreeSet::from([1230, 1228, 1224, 18]));
     assert_eq!(ore_ids(0.7, 10_000_043), BTreeSet::from([1230, 1228, 1224]));
     let low_ores = ore_ids(0.3, 10_000_032);
     assert!(!low_ores.contains(&1230) && !low_ores.contains(&1228));
-    assert!(low_ores.contains(&20) && low_ores.contains(&1226));
-    let null_ores = ore_ids(-0.8, 10_000_050);
-    assert!(null_ores.contains(&22) && null_ores.contains(&1223) && null_ores.contains(&11396));
-    assert_eq!(ore_ids(-0.5, 10_000_070).len(), 3);
+    assert!(low_ores.contains(&1227) && low_ores.contains(&1226) && !low_ores.contains(&20));
+    let delve_null_ores = ore_ids(-0.8, 10_000_050);
+    assert!(delve_null_ores.contains(&1223) && delve_null_ores.contains(&11396) && !delve_null_ores.contains(&22));
+    let detorid_null_ores = ore_ids(-0.8, 10_000_005);
+    assert!(detorid_null_ores.contains(&22) && detorid_null_ores.contains(&1223) && detorid_null_ores.contains(&11396));
+    assert_eq!(ore_ids(-0.5, 10_000_070).len(), 4);
 
     // 2. Spawn live pilot in space in Perimeter (1.0 Caldari) and verify belts & asteroids as balls
     let mut pilot = common::gm_pilot_in_space(&ctx, 95_001, PILOT_A, 587, PERIMETER_SYS).await;

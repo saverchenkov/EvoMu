@@ -274,7 +274,7 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         mode: MovementMode::Rigid,
     });
 
-    // Ship inside 150 km safe zone (at 50 km) vs ship outside safe zone (at 500 km) with 40 hull HP
+    // Ship inside 150 km safe zone (at 50 km), ship outside safe zone (at 500 km), and drone (category 18) outside safe zone
     bp.add_ball(Ball {
         id: 80_001,
         type_id: 587,
@@ -287,6 +287,7 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     });
+    bp.combat_states.get_mut(&80_001).unwrap().max_structure_hp = 100.0;
     bp.combat_states.get_mut(&80_001).unwrap().structure_hp = 100.0;
     bp.add_ball(Ball {
         id: 80_002,
@@ -300,15 +301,106 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     });
-    bp.combat_states.get_mut(&80_002).unwrap().structure_hp = 40.0;
+    bp.combat_states.get_mut(&80_002).unwrap().max_structure_hp = 1_000.0;
+    bp.combat_states.get_mut(&80_002).unwrap().structure_hp = 1_000.0;
+
+    // 250 km immunity beacon (`78486`) protects a ship at 200 km (`150 km < 200 km <= 250 km`),
+    // while `78487` (`125 km` safe zone) does NOT protect a ship at 135 km.
+    bp.add_ball(Ball {
+        id: 70_250,
+        type_id: 78_486,
+        position: DVec3::new(10_000_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e9,
+        radius: 1.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    });
+    bp.add_ball(Ball {
+        id: 80_003,
+        type_id: 587,
+        position: DVec3::new(10_200_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&80_003).unwrap().max_structure_hp = 500.0;
+    bp.combat_states.get_mut(&80_003).unwrap().structure_hp = 500.0;
+
+    // Drone (`type_list 573`, category 18) outside all safe zones is eligible for deathzone damage.
+    let drone_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 18 && t.published)
+        .map(|t| t.type_id)
+        .unwrap_or(2454);
+    bp.add_ball(Ball {
+        id: 80_004,
+        type_id: drone_tid,
+        position: DVec3::new(505_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 400.0,
+        inertia: 1.0,
+        mass: 1e3,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&80_004).unwrap().max_structure_hp = 200.0;
+    bp.combat_states.get_mut(&80_004).unwrap().structure_hp = 200.0;
 
     // Non-Zarzakh system does nothing
     assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_000_142).is_empty());
 
-    // Zarzakh system destroys exposed 40 HP hull and leaves safe-zone ship unharmed
-    let destroyed = step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000);
-    assert_eq!(destroyed, vec![80_002]);
+    // First 10s safety grace period (`current_tick` 1..=12): 0 damage at tick 1..=12
+    for t in 1..=12u64 {
+        bp.current_tick = t;
+        let dead = step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000);
+        assert!(dead.is_empty());
+    }
+    assert!((bp.combat_states[&80_002].structure_hp - 1_000.0).abs() < 1e-6);
+
+    // At tick 13 (+12s = 10s safety + 2s period), first tick deals 0.5% max_structure_hp (5.0 HP on 1,000 HP hull)
+    bp.current_tick = 13;
+    assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    assert!((bp.combat_states[&80_002].structure_hp - 995.0).abs() < 1e-6);
+    assert!((bp.combat_states[&80_004].structure_hp - 199.0).abs() < 1e-6);
+
+    // Moving 80_002 briefly inside safe zone at tick 14 resets its grace timer
+    bp.balls.get_mut(&80_002).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    bp.current_tick = 14;
+    assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    bp.balls.get_mut(&80_002).unwrap().position = DVec3::new(500_000.0, 0.0, 0.0);
+    for t in 15..=26u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert!(
+        (bp.combat_states[&80_002].structure_hp - 995.0).abs() < 1e-6,
+        "safe-zone re-entry must reset the 10s grace timer"
+    );
+
+    // Sustained exposure through t=70 destroys exposed 80_002 & 80_004 while safe-zone ships stay unharmed
+    let mut destroyed_all = Vec::new();
+    for t in 27..=70u64 {
+        bp.current_tick = t;
+        destroyed_all.extend(step_zarzakh_gravity_hazard_in_ballpark(
+            &mut bp,
+            Some(&ctx.sde),
+            30_100_000,
+        ));
+    }
+    assert!(destroyed_all.contains(&80_002), "exposed ship must be destroyed at ~50s");
+    assert!(destroyed_all.contains(&80_004), "exposed eligible drone must be destroyed");
     assert!((bp.combat_states[&80_001].structure_hp - 100.0).abs() < 1e-6);
+    assert!((bp.combat_states[&80_003].structure_hp - 500.0).abs() < 1e-6);
 
     // Verify `nav_attr_ids` / `max_velocity_cloak_attr_id` resolves primary and fallback attributes on both full and synthetic SdeRegistry
     assert!(max_velocity_cloak_attr_id(&ctx.sde).is_some());
@@ -339,4 +431,414 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
     assert_eq!(synth_ids.cloaking_targeting_delay, Some(9901));
     assert_eq!(synth_ids.max_velocity_modifier, Some(9902));
     assert_eq!(max_velocity_cloak_attr_id(&synth_sde), Some(9902));
+}
+
+#[test]
+fn zarzakh_gravity_hazard_exempts_committed_warp_and_pauses_invuln() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let mut bp = Ballpark::new(30_100_000);
+    bp.add_ball(Ball {
+        id: 90_001,
+        type_id: 587,
+        position: DVec3::new(500_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&90_001).unwrap().max_structure_hp = 1_000.0;
+    bp.combat_states.get_mut(&90_001).unwrap().structure_hp = 1_000.0;
+
+    // 1. Gate cloak for t=1..=10 does not burn safetyDuration at all
+    bp.combat_states.get_mut(&90_001).unwrap().gate_cloak_remaining_ticks = 10;
+    for t in 1..=10u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert!(
+        bp.zarzakh_tracking.get(&90_001).is_none(),
+        "gate cloak must not start or burn safetyDuration"
+    );
+    bp.combat_states.get_mut(&90_001).unwrap().gate_cloak_remaining_ticks = 0;
+
+    // Expose for t=11..=15 -> next_damage_tick = 11 + 10 + 2 = 23
+    for t in 11..=15u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert_eq!(bp.zarzakh_tracking[&90_001].next_damage_tick, 23);
+
+    // 2. Tethered (t=16..=20), undock invuln (t=21..=22), warp-exit invuln (t=23..=24),
+    // and committed warp phases Accelerating/Cruising/Decelerating (t=25..=27) pause next_damage_tick cleanly
+    bp.combat_states.get_mut(&90_001).unwrap().is_tethered = true;
+    for t in 16..=20u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    bp.combat_states.get_mut(&90_001).unwrap().is_tethered = false;
+
+    bp.combat_states.get_mut(&90_001).unwrap().undock_invulnerable_remaining_ticks = 2;
+    for t in 21..=22u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    bp.combat_states.get_mut(&90_001).unwrap().undock_invulnerable_remaining_ticks = 0;
+
+    bp.combat_states.get_mut(&90_001).unwrap().warp_exit_invulnerable_remaining_ticks = 2;
+    for t in 23..=24u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    bp.combat_states.get_mut(&90_001).unwrap().warp_exit_invulnerable_remaining_ticks = 0;
+
+    for (t, phase) in [
+        (25u64, eve_destiny::WarpPhase::Accelerating),
+        (26u64, eve_destiny::WarpPhase::Cruising),
+        (27u64, eve_destiny::WarpPhase::Decelerating),
+    ] {
+        bp.balls.get_mut(&90_001).unwrap().mode = MovementMode::Warp {
+            origin: DVec3::new(500_000.0, 0.0, 0.0),
+            destination: DVec3::new(1e10, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1e10,
+            phase,
+            elapsed_warp_time: 1.0,
+        };
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert_eq!(bp.zarzakh_tracking[&90_001].next_damage_tick, 35);
+    assert_eq!(bp.zarzakh_tracking[&90_001].ui_state, 0);
+
+    bp.balls.get_mut(&90_001).unwrap().mode = MovementMode::Stop;
+    for t in 28..=34u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert!((bp.combat_states[&90_001].structure_hp - 1_000.0).abs() < 1e-6);
+
+    bp.current_tick = 35;
+    assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    assert!((bp.combat_states[&90_001].structure_hp - 995.0).abs() < 1e-6);
+
+    // 3. WarpPhase::Aligning IS still exposed; switching to Cruising pauses mid-ramp without further damage
+    let mut bp_align = Ballpark::new(30_100_000);
+    bp_align.add_ball(Ball {
+        id: 90_002,
+        type_id: 587,
+        position: DVec3::new(505_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Warp {
+            origin: DVec3::new(505_000.0, 0.0, 0.0),
+            destination: DVec3::new(1e10, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1e10,
+            phase: eve_destiny::WarpPhase::Aligning,
+            elapsed_warp_time: 0.0,
+        },
+    });
+    bp_align.combat_states.get_mut(&90_002).unwrap().max_structure_hp = 1_000.0;
+    bp_align.combat_states.get_mut(&90_002).unwrap().structure_hp = 1_000.0;
+    for t in 1..=13u64 {
+        bp_align.current_tick = t;
+        assert!(
+            step_zarzakh_gravity_hazard_in_ballpark(&mut bp_align, Some(&ctx.sde), 30_100_000).is_empty()
+        );
+    }
+    assert!((bp_align.combat_states[&90_002].structure_hp - 995.0).abs() < 1e-6);
+
+    bp_align.balls.get_mut(&90_002).unwrap().mode = MovementMode::Warp {
+        origin: DVec3::new(505_000.0, 0.0, 0.0),
+        destination: DVec3::new(1e10, 0.0, 0.0),
+        warp_speed_au_s: 3.0,
+        total_distance: 1e10,
+        phase: eve_destiny::WarpPhase::Cruising,
+        elapsed_warp_time: 5.0,
+    };
+    for t in 14..=18u64 {
+        bp_align.current_tick = t;
+        assert!(
+            step_zarzakh_gravity_hazard_in_ballpark(&mut bp_align, Some(&ctx.sde), 30_100_000).is_empty()
+        );
+    }
+    assert!((bp_align.combat_states[&90_002].structure_hp - 995.0).abs() < 1e-6);
+    assert_eq!(bp_align.zarzakh_tracking[&90_002].ui_state, 0);
+}
+
+#[test]
+fn zarzakh_gravity_hazard_tracks_per_ballpark_and_cleans_removed_balls() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let mut bp1 = Ballpark::new(30_100_000);
+    let mut bp2 = Ballpark::new(30_100_000);
+    for bp in [&mut bp1, &mut bp2] {
+        bp.add_ball(Ball {
+            id: 91_001,
+            type_id: 587,
+            position: DVec3::new(500_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        bp.combat_states.get_mut(&91_001).unwrap().max_structure_hp = 1_000.0;
+        bp.combat_states.get_mut(&91_001).unwrap().structure_hp = 1_000.0;
+    }
+
+    for t in 1..=13u64 {
+        bp1.current_tick = t;
+        step_zarzakh_gravity_hazard_in_ballpark(&mut bp1, Some(&ctx.sde), 30_100_000);
+    }
+    bp2.current_tick = 1;
+    step_zarzakh_gravity_hazard_in_ballpark(&mut bp2, Some(&ctx.sde), 30_100_000);
+
+    assert!((bp1.combat_states[&91_001].structure_hp - 995.0).abs() < 1e-6);
+    assert!((bp2.combat_states[&91_001].structure_hp - 1_000.0).abs() < 1e-6);
+    assert_eq!(bp1.zarzakh_tracking[&91_001].ticks_applied, 1);
+    assert_eq!(bp2.zarzakh_tracking[&91_001].ticks_applied, 0);
+
+    bp1.remove_ball(91_001);
+    assert!(!bp1.zarzakh_tracking.contains_key(&91_001));
+    assert!(bp2.zarzakh_tracking.contains_key(&91_001));
+}
+
+#[test]
+fn zarzakh_safe_zones_resolve_sde_components_not_display_names() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    assert!(ctx
+        .sde
+        .space_components_by_type
+        .get(&79_018)
+        .is_some_and(|c| c.iter().any(|s| s == "shipcasterLauncher")));
+    assert!(ctx
+        .sde
+        .space_components_by_type
+        .get(&78_485)
+        .is_some_and(|c| c.iter().any(|s| s == "deathzoneImmunityGenerator")));
+
+    let mut synth = eve_sde::SdeRegistry::default();
+    let ship_tpl = ctx.sde.types[&587].clone();
+    synth.types.insert(587, ship_tpl.clone());
+
+    let mut fake_named = ship_tpl.clone();
+    fake_named.type_id = 999_001;
+    fake_named.group_id = 4736; // Orbital Skyhook — NOT Shipcaster (4549)
+    fake_named.category_id = 65;
+    fake_named.name = "Renamed Shipcaster Fulcrum Test".into();
+    synth.types.insert(999_001, fake_named);
+
+    let mut comp_immunity = ship_tpl.clone();
+    comp_immunity.type_id = 999_002;
+    comp_immunity.group_id = 99_999;
+    comp_immunity.category_id = 2;
+    comp_immunity.name = "Neutral Tower".into();
+    synth.types.insert(999_002, comp_immunity);
+    synth
+        .space_components_by_type
+        .insert(999_002, vec!["deathzoneImmunityGenerator".into()]);
+
+    let mut comp_shipcaster = ship_tpl;
+    comp_shipcaster.type_id = 999_003;
+    comp_shipcaster.group_id = 99_999;
+    comp_shipcaster.category_id = 2;
+    comp_shipcaster.name = "Unnamed Launcher".into();
+    synth.types.insert(999_003, comp_shipcaster);
+    synth
+        .space_components_by_type
+        .insert(999_003, vec!["shipcasterLauncher".into()]);
+
+    let mut bp = Ballpark::new(30_100_000);
+    for (aid, tid, x) in [
+        (71_001_i64, 999_001_u32, 0.0),
+        (71_002, 999_002, 2_000_000.0),
+        (71_003, 999_003, 4_000_000.0),
+    ] {
+        bp.add_ball(Ball {
+            id: aid,
+            type_id: tid,
+            position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e9,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        });
+    }
+    for (sid, x) in [
+        (92_001_i64, 10_000.0),
+        (92_002, 2_010_000.0),
+        (92_003, 4_010_000.0),
+    ] {
+        bp.add_ball(Ball {
+            id: sid,
+            type_id: 587,
+            position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        bp.combat_states.get_mut(&sid).unwrap().max_structure_hp = 1_000.0;
+        bp.combat_states.get_mut(&sid).unwrap().structure_hp = 1_000.0;
+    }
+
+    for t in 1..=13u64 {
+        bp.current_tick = t;
+        step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&synth), 30_100_000);
+    }
+
+    assert!(
+        (bp.combat_states[&92_001].structure_hp - 995.0).abs() < 1e-6,
+        "display-name substring 'Shipcaster'/'Fulcrum' must NOT create a safe zone"
+    );
+    assert!((bp.combat_states[&92_002].structure_hp - 1_000.0).abs() < 1e-6);
+    assert!((bp.combat_states[&92_003].structure_hp - 1_000.0).abs() < 1e-6);
+}
+
+#[test]
+fn zarzakh_gravity_hazard_emits_warning_danger_and_clear_deathzone_notifications() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let char_id = 930_001_i64;
+    let ship_id = 930_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch =
+            clone_char_with(snap, char_id, "Deathzone Notif Pilot", 98_000_001, 30_100_000, ship_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let mut bp = Ballpark::new(30_100_000);
+    let gate_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 10)
+        .map(|t| t.type_id)
+        .unwrap_or(16);
+    bp.add_ball(Ball {
+        id: 70_001,
+        type_id: gate_tid,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e9,
+        radius: 5000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    });
+    bp.add_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::new(500_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&ship_id).unwrap().max_structure_hp = 1_000.0;
+    bp.combat_states.get_mut(&ship_id).unwrap().structure_hp = 1_000.0;
+
+    let drain_dz = || -> Vec<crate::router::PendingMachoNotification> {
+        ctx.drain_notifications_for_char(char_id)
+            .into_iter()
+            .filter(|n| n.event == "OnDeathzoneStateUpdate")
+            .collect()
+    };
+
+    for t in 1..=5u64 {
+        bp.current_tick = t;
+        step_zarzakh_gravity_hazard_with_notifications(
+            &mut bp,
+            Some(&ctx.sde),
+            Some(&ctx.db),
+            30_100_000,
+            Some(&*ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+        );
+    }
+    assert!(drain_dz().is_empty(), "No warning before warningDuration window");
+
+    bp.current_tick = 6;
+    step_zarzakh_gravity_hazard_with_notifications(
+        &mut bp,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        30_100_000,
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    );
+    let warn_notifs = drain_dz();
+    assert_eq!(warn_notifs.len(), 1);
+    assert_eq!(warn_notifs[0].args.first(), Some(&PyRep::Integer(30_100_000)));
+    assert_eq!(warn_notifs[0].args.get(1), Some(&PyRep::Integer(ship_id)));
+    assert!(matches!(
+        warn_notifs[0].args.get(2),
+        Some(PyRep::KeyVal(items))
+            if items.iter().any(|(k, v)| k == "dangerLevel" && matches!(v, PyRep::Real(x) if (*x - 0.5).abs() < 1e-6))
+    ));
+
+    for t in 7..=12u64 {
+        bp.current_tick = t;
+        step_zarzakh_gravity_hazard_with_notifications(
+            &mut bp,
+            Some(&ctx.sde),
+            Some(&ctx.db),
+            30_100_000,
+            Some(&*ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+        );
+    }
+    assert!(drain_dz().is_empty(), "Warning state must not spam on every tick");
+
+    bp.current_tick = 13;
+    step_zarzakh_gravity_hazard_with_notifications(
+        &mut bp,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        30_100_000,
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    );
+    let danger_notifs = drain_dz();
+    assert_eq!(danger_notifs.len(), 1);
+    assert!(matches!(
+        danger_notifs[0].args.get(2),
+        Some(PyRep::KeyVal(items))
+            if items.iter().any(|(k, v)| k == "dangerLevel" && matches!(v, PyRep::Real(x) if (*x - 1.0).abs() < 1e-6))
+    ));
+
+    bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    bp.current_tick = 14;
+    step_zarzakh_gravity_hazard_with_notifications(
+        &mut bp,
+        Some(&ctx.sde),
+        Some(&ctx.db),
+        30_100_000,
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    );
+    let clear_notifs = drain_dz();
+    assert_eq!(clear_notifs.len(), 1);
+    assert_eq!(clear_notifs[0].args.get(2), Some(&PyRep::None));
 }

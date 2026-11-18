@@ -95,6 +95,7 @@ impl Ballpark {
             last_acquired_tick_by_ball: BTreeMap::new(),
             warp_align_ticks: BTreeMap::new(),
             ecm_jam_sources: BTreeMap::new(),
+            zarzakh_tracking: BTreeMap::new(),
         }
     }
 
@@ -931,6 +932,7 @@ impl Ballpark {
         self.last_acquired_tick_by_ball.remove(&ball_id);
         self.warp_align_ticks.remove(&ball_id);
         self.ecm_jam_sources.remove(&ball_id);
+        self.zarzakh_tracking.remove(&ball_id);
         self.scheduled_observer_events
             .retain(|(_, obs_id, _)| *obs_id != ball_id);
         Some((removed, old_grid_id, was_static))
@@ -1183,6 +1185,15 @@ impl Ballpark {
         raw_hull_damage: f64,
     ) -> Option<(f64, bool, Option<Ball>)> {
         let ball_snap = self.balls.get(&ball_id).cloned()?;
+        if matches!(
+            ball_snap.mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Accelerating | WarpPhase::Cruising | WarpPhase::Decelerating,
+                ..
+            }
+        ) {
+            return Some((0.0, false, Some(ball_snap)));
+        }
         let grid_id = self.ball_grid_ids.get(&ball_id).copied();
         let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
             let cs = self.combat_states.get_mut(&ball_id)?;

@@ -259,9 +259,142 @@ pub fn belt_asteroid_base_id(solar_system_id: SolarSystemId) -> i64 {
     750_000_000 + sys_offset
 }
 
+/// Inserts a belt celestial (`group_id == 9`) into `ballpark` when `populate_asteroid_belt_entities`
+/// is called standalone without a prior `populate_system_celestials` pass.
+fn ensure_belt_celestial_ball(
+    ballpark: &mut Ballpark,
+    cel: &eve_sde::CelestialInfo,
+    sde: &SdeRegistry,
+) {
+    if ballpark.balls.contains_key(&cel.celestial_id) {
+        return;
+    }
+    let type_rec = sde.types.get(&cel.type_id);
+    let category_id = type_rec.map(|t| t.category_id).unwrap_or(2);
+    let radius = if cel.radius > 0.0 {
+        cel.radius
+    } else {
+        type_rec
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(1_000.0)
+    };
+    let mass = type_rec
+        .map(|t| t.mass)
+        .filter(|&m| m > 0.0 && m < 1.0e30)
+        .unwrap_or(1.0e12);
+    ballpark.add_static_ball_with_meta(
+        Ball {
+            id: cel.celestial_id,
+            type_id: cel.type_id,
+            position: cel.position,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass,
+            radius,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        SlimItemMeta {
+            group_id: cel.group_id,
+            category_id,
+            owner_id: 1,
+            char_id: None,
+            corp_id: -1,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+            name: (!cel.name.is_empty()).then(|| cel.name.clone()),
+            ..Default::default()
+        },
+    );
+}
+
+/// Computes deterministic per-asteroid ore quantities (aligned to SDE `portion_size`),
+/// spherical radius, finite rock mass, and semicircular belt arc coordinates.
+fn build_belt_asteroid_rock(
+    asteroid_id: i64,
+    belt_id: i64,
+    idx: usize,
+    belt_pos: DVec3,
+    ore_type: &eve_sde::InvType,
+) -> (AsteroidState, Ball, SlimItemMeta) {
+    // DERIVED: Client SDE (`asteroidcountbytypeidbeltid.static`) supplies per-belt counts by `type_id`,
+    // while `sde_types` supplies per-unit `volume` and `portion_size` (and stores a uniform `radius = 1.0`
+    // and `1.0e35` sentinel mass on ores). Individual asteroid rock volumes (`1,800..3,400 m³`), semicircular
+    // belt arc placement within 8.5 km, scaled grid radius (`>= 60 m`), and silicate/metallic bulk mass
+    // (`3,000 kg/m³`) are server-only deterministic seeding bounds.
+    let unit_vol = ore_type.volume.max(0.01);
+    let batch = ore_type.portion_size.max(1);
+    let mix = ((belt_id as u64)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ ((idx as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0xbf58_476d_1ce4_e5b9))
+        ^ u64::from(ore_type.type_id).wrapping_mul(0x94d0_49bb_1331_11eb))
+    .rotate_left(17);
+    let size_factor = 0.9 + ((mix % 801) as f64) / 1_000.0;
+    let target_m3 = 2_000.0 * size_factor;
+    let raw_units = ((target_m3 / unit_vol).round() as u64).max(batch);
+    let units = (raw_units / batch).max(1) * batch;
+    let total_m3 = (units as f64) * unit_vol;
+    let equiv_sphere_r = (3.0 * total_m3 / (4.0 * std::f64::consts::PI)).cbrt();
+    let rock_radius = (equiv_sphere_r * 12.0).clamp(60.0, 2_500.0);
+    let rock_mass = (total_m3 * 3_000.0).max(1.0e6);
+
+    let offset = if idx == 0 {
+        DVec3::new(200.0, -100.0, 150.0)
+    } else {
+        let angle = (idx as f64) * 0.28;
+        let arc_r = 2_000.0 + ((idx % 10) as f64) * 650.0;
+        DVec3::new(
+            arc_r * angle.cos(),
+            (((idx % 5) as f64) - 2.0) * 180.0,
+            arc_r * angle.sin(),
+        )
+    };
+
+    let ast_state = AsteroidState {
+        asteroid_id,
+        belt_id,
+        type_id: ore_type.type_id,
+        initial_units: units,
+        remaining_units: units,
+        unit_volume: unit_vol,
+        depleted: false,
+        respawn_at_tick: None,
+    };
+    let ball = Ball {
+        id: asteroid_id,
+        type_id: ore_type.type_id,
+        position: belt_pos + offset,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 0.0,
+        mass: rock_mass,
+        radius: rock_radius,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    };
+    let meta = SlimItemMeta {
+        group_id: ore_type.group_id,
+        category_id: ore_type.category_id,
+        owner_id: 1,
+        char_id: None,
+        corp_id: -1,
+        alliance_id: -1,
+        security_status: 0.0,
+        is_cloaked: false,
+        name: (!ore_type.name.is_empty()).then(|| ore_type.name.clone()),
+        ..Default::default()
+    };
+    (ast_state, ball, meta)
+}
+
 /// Populates asteroid belt entities around asteroid belt celestials.
 /// Uses exact per-belt asteroid counts from `res:/staticdata/asteroidcountbytypeidbeltid.static`
-/// (`40,928` belts) when present in `SdeRegistry`, falling back to `SdeRegistry::belt_ores_for_system`
+/// when present in `SdeRegistry`, falling back to `SdeRegistry::belt_ores_for_system`
 /// for synthetic belt celestials in unit tests.
 pub fn populate_asteroid_belt_entities(
     ballpark: &mut Ballpark,
@@ -278,6 +411,7 @@ pub fn populate_asteroid_belt_entities(
 
     for cel in sde.celestials_in_system_slice(solar_system_id) {
         if cel.group_id == 9 {
+            ensure_belt_celestial_ball(ballpark, cel, sde);
             let belt_pos = cel.position;
 
             let mut belt_spawn_seq: Vec<&eve_sde::InvType> = Vec::new();
@@ -313,71 +447,9 @@ pub fn populate_asteroid_belt_entities(
             for (idx, ore_type) in belt_spawn_seq.into_iter().enumerate() {
                 let id = ast_id_counter;
                 ast_id_counter += 1;
-
-                // DERIVED: V24.01 client static data provides exact asteroid counts per belt and type
-                // (`asteroidcountbytypeidbeltid.static`), while per-asteroid ore volume and spatial
-                // arc coordinates are server-only; we scale each rock to ~2,000 m³ rounded to SDE
-                // `portion_size` and distribute rocks along a semicircular belt arc within 8.5 km.
-                let unit_vol = ore_type.volume.max(0.01);
-                let batch = ore_type.portion_size.max(1);
-                let raw_units = ((2_000.0 / unit_vol).round() as u64).max(batch);
-                let units = (raw_units / batch).max(1) * batch;
-                let total_m3 = (units as f64) * unit_vol;
-                let scaled_radius =
-                    (ore_type.radius.max(1.0) * 5.0 * total_m3.cbrt()).clamp(60.0, 2_500.0);
-
-                let offset = if idx == 0 {
-                    DVec3::new(200.0, -100.0, 150.0)
-                } else {
-                    let angle = (idx as f64) * 0.28;
-                    let arc_r = 2_000.0 + ((idx % 10) as f64) * 650.0;
-                    DVec3::new(
-                        arc_r * angle.cos(),
-                        (((idx % 5) as f64) - 2.0) * 180.0,
-                        arc_r * angle.sin(),
-                    )
-                };
-                let pos = belt_pos + offset;
-
-                let ast_state = AsteroidState {
-                    asteroid_id: id,
-                    belt_id: cel.celestial_id,
-                    type_id: ore_type.type_id,
-                    initial_units: units,
-                    remaining_units: units,
-                    unit_volume: unit_vol,
-                    depleted: false,
-                    respawn_at_tick: None,
-                };
-
-                let ball = Ball {
-                    id,
-                    type_id: ore_type.type_id,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 0.0,
-                    mass: (total_m3 * 5.0e7).max(ore_type.mass),
-                    radius: scaled_radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Rigid,
-                };
-
-                ballpark.add_static_ball_with_meta(
-                    ball,
-                    SlimItemMeta {
-                        group_id: ore_type.group_id,
-                        category_id: ore_type.category_id,
-                        owner_id: 1,
-                        char_id: None,
-                        corp_id: -1,
-                        alliance_id: -1,
-                        security_status: 0.0,
-                        is_cloaked: false,
-                        name: (!ore_type.name.is_empty()).then(|| ore_type.name.clone()),
-                        ..Default::default()
-                    },
-                );
+                let (ast_state, ball, meta) =
+                    build_belt_asteroid_rock(id, cel.celestial_id, idx, belt_pos, ore_type);
+                ballpark.add_static_ball_with_meta(ball, meta);
                 states.push(ast_state);
             }
         }

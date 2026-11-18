@@ -254,8 +254,18 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
             break;
         }
     }
-    let sample_init = ctx.db.get_asteroid(sample_ast_id).expect("CmdWarpToStuff must populate belt AsteroidRecord in ctx.db").quantity as u64;
-    assert_eq!(sample_init, 20_000);
+    let sample_ast = ctx.db.get_asteroid(sample_ast_id).expect("CmdWarpToStuff must populate belt AsteroidRecord in ctx.db");
+    let sample_init = sample_ast.quantity as u64;
+    let sample_type = ctx.sde.types.get(&sample_ast.type_id).expect("Belt asteroid SDE type");
+    assert!(
+        sample_init > 0 && sample_init % sample_type.portion_size.max(1) == 0,
+        "Seeded belt asteroid quantity {sample_init} must be positive and portion-aligned"
+    );
+    let sample_vol = (sample_init as f64) * sample_type.volume;
+    assert!(
+        (1_800.0..=3_400.0).contains(&sample_vol),
+        "Seeded belt asteroid volume {sample_vol} m³ must stay within deterministic bounds"
+    );
     for belt_ast_id in 750_000_000i64..=750_000_003 {
         let (_, ast_b) = perim.get_ball_snapshot(belt_ast_id).await.unwrap().expect("Belt asteroid ball spawned by CmdWarpToStuff");
         let _ = perim.set_ball_position(ship_id, ast_b.position + DVec3::new(500.0, 0.0, 0.0)).await;
@@ -266,7 +276,7 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
         }
         let _ = perim.set_capacitor(ship_id, 437.5).await;
         ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(miner_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(belt_ast_id)], &kw, None).await.expect("Activate Strip Miner I on belt asteroid");
-        for _ in 0..3 {
+        for _ in 0..8 {
             if ctx.db.get_asteroid(belt_ast_id).unwrap().quantity == 0 { break; }
             let _ = perim.set_capacitor(ship_id, 437.5).await;
             ctx.set_mechanic_rng_seed(Some(crate::mining_cycle_engine::seed_for(&[false], 0.01)));

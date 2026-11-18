@@ -275,22 +275,25 @@ async fn test_b22_mining_excavator_npc_hauler_and_belt_ores() {
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 55_103, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. Test DERIVED belt ore distribution across security bands & empire regions
+    // 1. Test canonical belt ore distribution across security bands & empire regions
     let ores_1_0 = ctx.sde.belt_ores_for_security_and_region(1.0, 10_000_002);
     let ids_1_0: Vec<u32> = ores_1_0.iter().map(|t| t.type_id).collect();
     assert_eq!(ids_1_0, vec![1230, 1228], "1.0 high-sec must only contain Veldspar (1230) and Scordite (1228)");
 
     let ores_amarr_07 = ctx.sde.belt_ores_for_security_and_region(0.7, 10_000_043); // Domain (Amarr)
     let ids_amarr_07: Vec<u32> = ores_amarr_07.iter().map(|t| t.type_id).collect();
-    assert!(ids_amarr_07.contains(&1224) && !ids_amarr_07.contains(&20), "0.7 Amarr must contain Pyroxeres and no Kernite");
+    assert!(ids_amarr_07.contains(&1224) && !ids_amarr_07.contains(&18) && !ids_amarr_07.contains(&20), "0.7 Amarr must contain Pyroxeres and no Plagioclase/Kernite");
 
-    let ores_low = ctx.sde.belt_ores_for_security_and_region(0.3, 10_000_032); // Sinq Laison (Low-sec)
+    let ores_low = ctx.sde.belt_ores_for_security_and_region(0.3, 10_000_032); // Sinq Laison (Gallente Low-sec)
     let ids_low: Vec<u32> = ores_low.iter().map(|t| t.type_id).collect();
-    assert!(ids_low.contains(&20) && ids_low.contains(&1227) && !ids_low.contains(&1230), "0.3 low-sec must contain Kernite/Omber and no Veldspar");
+    assert!(ids_low.contains(&1226) && ids_low.contains(&1227) && !ids_low.contains(&1230), "0.3 Gallente low-sec must contain Jaspet/Omber and no Veldspar");
 
-    let ores_null = ctx.sde.belt_ores_for_security_and_region(-0.8, 10_000_050); // Querious (Null)
-    let ids_null: Vec<u32> = ores_null.iter().map(|t| t.type_id).collect();
-    assert!(ids_null.contains(&22) && ids_null.contains(&11396), "Deep null-sec must contain Arkonor and Mercoxit");
+    let ores_null_g = ctx.sde.belt_ores_for_security_and_region(-0.8, 10_000_050); // Querious (Class G Null)
+    let ids_null_g: Vec<u32> = ores_null_g.iter().map(|t| t.type_id).collect();
+    assert!(ids_null_g.contains(&1223) && ids_null_g.contains(&11396) && !ids_null_g.contains(&22), "Deep null-sec Querious (G6) must contain Bistot/Mercoxit and no Arkonor");
+    let ores_null_f = ctx.sde.belt_ores_for_security_and_region(-0.8, 10_000_005); // Detorid (Class F Null)
+    let ids_null_f: Vec<u32> = ores_null_f.iter().map(|t| t.type_id).collect();
+    assert!(ids_null_f.contains(&22) && ids_null_f.contains(&1223) && ids_null_f.contains(&11396), "Deep null-sec Detorid (F6) must contain Arkonor, Bistot, and Mercoxit");
 
     // 2. Test feat:mining.excavator-drones: negative case (ship_id 100_000_001 without mining module -> NoMiningModuleFitted)
     let unequipped_ship = 100_000_001_i64;

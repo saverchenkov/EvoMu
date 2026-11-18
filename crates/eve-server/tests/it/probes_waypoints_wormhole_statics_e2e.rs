@@ -434,14 +434,25 @@ async fn parity_shard_5_waypoints_gravity_hazard_and_wormhole_statics() {
     }
     let hull_before_safe = bp.combat_states[&safe_ship].structure_hp;
     let hull_before_haz = bp.combat_states[&hazard_ship].structure_hp;
-    step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), ZARZAKH_SYSTEM);
+    for t in 1..=12_u64 {
+        bp.current_tick = t;
+        step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), ZARZAKH_SYSTEM);
+    }
+    assert_eq!(
+        bp.combat_states[&hazard_ship].structure_hp, hull_before_haz,
+        "ship outside safe zone must take 0 hazard damage during 10s safetyDuration grace"
+    );
+    for t in 13..=16_u64 {
+        bp.current_tick = t;
+        step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), ZARZAKH_SYSTEM);
+    }
     assert_eq!(
         bp.combat_states[&safe_ship].structure_hp, hull_before_safe,
         "ship inside 150km safe zone must take 0 Jovian hazard damage"
     );
     assert!(
         bp.combat_states[&hazard_ship].structure_hp < hull_before_haz,
-        "ship outside 150km safe zone must take Jovian gravity hull damage"
+        "ship outside 150km safe zone must take progressive Jovian gravity hull damage after grace period"
     );
 
     // 3. Wormhole info buckets, W-space statics per class, and lifetime decay stages
