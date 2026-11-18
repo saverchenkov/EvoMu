@@ -825,3 +825,137 @@ async fn direct_module_harvest_respects_mining_yield_multiplier() {
         assert_eq!(ore_units, 2_000);
     });
 }
+
+#[tokio::test]
+async fn reprocess_multi_item_batch_skips_insufficient_portion_stacks() {
+    let mut ctx = test_ctx();
+    upsert_type(&mut ctx.sde, 1230, 462, 25, "Veldspar", 0.1, 0.0, 100, &[]);
+    upsert_type(&mut ctx.sde, 17470, 462, 25, "Veldspar II-Grade", 0.1, 0.0, 100, &[]);
+    {
+        let reg = Arc::make_mut(&mut ctx.sde);
+        reg.type_materials.insert(
+            1230,
+            vec![TypeMaterialEntry {
+                material_type_id: 34,
+                quantity: 400,
+            }],
+        );
+        reg.type_materials.insert(
+            17470,
+            vec![TypeMaterialEntry {
+                material_type_id: 34,
+                quantity: 440,
+            }],
+        );
+    }
+
+    let station_id = 60_003_760_i64;
+    let char_id = 90_000_001_i64;
+    let corp_id = 1_000_001_i64;
+    let small_ore = 99_116_101_i64;
+    let small_other = 99_116_102_i64;
+    let valid_ore = 99_116_103_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        snap.items.insert(
+            small_ore,
+            make_item(small_ore, 1230, char_id, station_id, InventoryFlag::Hangar, 9),
+        );
+        snap.items.insert(
+            small_other,
+            make_item(small_other, 1230, char_id, station_id, InventoryFlag::Hangar, 5),
+        );
+        snap.items.insert(
+            valid_ore,
+            make_item(valid_ore, 17470, char_id, station_id, InventoryFlag::Hangar, 400),
+        );
+    });
+
+    let mut sess = make_session(char_id, corp_id, Some(30_000_142), None);
+    sess.station_id = Some(station_id);
+
+    // #1161: batch [9x Veldspar, 400x Veldspar II-Grade] skips 9x Veldspar cleanly
+    let kw = std::collections::HashMap::new();
+    let batch_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "reprocessingSvc",
+            None,
+            "Reprocess",
+            &[
+                PyRep::List(vec![PyRep::Integer(small_ore), PyRep::Integer(valid_ore)]),
+                PyRep::Integer(station_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(station_id),
+                PyRep::Integer(InventoryFlag::Hangar as i64),
+            ],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("batch Reprocess with mixed valid/insufficient stacks must succeed");
+    let PyRep::Tuple(parts) = batch_res else {
+        panic!("expected 2-tuple from V24 5-arg Reprocess, got {batch_res:?}");
+    };
+    let PyRep::List(input_ids) = &parts[0] else {
+        panic!("expected inputItemIDs List");
+    };
+    assert_eq!(input_ids.len(), 1);
+    assert_eq!(input_ids[0].as_i64(), Some(valid_ore));
+    let PyRep::Dict(out_by_tid) = &parts[1] else {
+        panic!("expected outputByTypeID Dict");
+    };
+    let trit_out = out_by_tid
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(34))
+        .and_then(|(_, v)| v.as_i64())
+        .unwrap_or(0);
+    assert!(trit_out > 0, "expected Tritanium output from valid_ore");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&small_ore).map(|i| i.quantity), Some(9));
+        assert!(!snap.items.contains_key(&valid_ore));
+    });
+
+    // Single insufficient stack still returns InsufficientBatchPortion
+    let single_err = handle(
+        &ctx,
+        &mut sess,
+        "reprocessingSvc",
+        "Reprocess",
+        &[
+            PyRep::List(vec![PyRep::Integer(small_ore)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(single_err.code, "InsufficientBatchPortion");
+
+    // Multi-item batch where ALL stacks are < portion_size still returns InsufficientBatchPortion
+    let all_small_err = handle(
+        &ctx,
+        &mut sess,
+        "reprocessingSvc",
+        "Reprocess",
+        &[
+            PyRep::List(vec![PyRep::Integer(small_ore), PyRep::Integer(small_other)]),
+            PyRep::Integer(station_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(station_id),
+            PyRep::Integer(InventoryFlag::Hangar as i64),
+        ],
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(all_small_err.code, "InsufficientBatchPortion");
+}

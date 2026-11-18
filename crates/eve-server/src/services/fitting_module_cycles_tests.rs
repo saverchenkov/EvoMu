@@ -247,7 +247,7 @@ async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
         .is_err()
     );
 
-    // Overload Afterburner: succeeds, emits OnHeatAdded & OnGodmaShipEffect, and returns overloaded=true
+    // Overload Afterburner while idle: pre-arms overload without activating (emits OnHeatAdded, not OnGodmaShipEffect)
     let ov_rep = handle_module_cycles(
         &ctx,
         &mut sess,
@@ -263,7 +263,23 @@ async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
     assert_eq!(ov_rep.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnHeatAdded"));
-    assert!(notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    assert!(!notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+
+    // Activate Afterburner: emits OnGodmaShipEffect while remaining pre-overloaded
+    let act_rep = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ab_mod_id), PyRep::String("defaultEffect".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate afterburner");
+    assert!(act_rep.dict_get("active").and_then(|v| v.as_bool()).unwrap_or(false) || act_rep.dict_get("effectID").is_some());
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnGodmaShipEffect"));
 
     // Second Overload call while active succeeds with overloaded=true
     let toggle_rep = handle_module_cycles(

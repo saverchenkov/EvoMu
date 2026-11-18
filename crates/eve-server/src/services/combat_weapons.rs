@@ -300,7 +300,17 @@ pub async fn handle_weapons(
             let target_id_opt = match rpc
                 .opt_i64(2, "target")
                 .transpose()
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()).map(Ok))
+                .or_else(|| {
+                    args.get(1)
+                        .and_then(|a| a.as_i64())
+                        .filter(|&id| {
+                            method != "Overload"
+                                || !u16::try_from(id)
+                                    .ok()
+                                    .is_some_and(|eid| ctx.sde.effects.contains_key(&eid))
+                        })
+                        .map(Ok)
+                })
             {
                 Some(Ok(id)) => Some(id),
                 Some(Err(e)) => return Some(Err(e)),

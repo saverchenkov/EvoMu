@@ -2717,6 +2717,7 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     let (_, ab_norm) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)]).await.unwrap();
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     let (_, ab_ovl) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let cold_boost = ab_norm.max_velocity - ab_base.max_velocity;
     let ovl_boost = ab_ovl.max_velocity - ab_base.max_velocity;
@@ -3020,6 +3021,7 @@ async fn test_nanite_repair_and_overload_cross_module_lockout() {
         s.items.get_mut(&mod_a).unwrap().dynamic_attributes.insert(3, 10.0);
     });
     rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mod_b)]).await.unwrap();
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(mod_b)]).await.unwrap();
     let err2 = rpc(&ctx, &mut sess, "dogmaIM", "RepairModule", vec![PyRep::Integer(mod_a)]).await.unwrap_err();
     assert_eq!(err2.code, "CannotRepairWhileOverloaded");
 }

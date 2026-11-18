@@ -1693,6 +1693,7 @@ fn is_destructive_rpc(service: &str, method: &str) -> bool {
     matches!(
         (service, method),
         ("authentication", "Logout")
+            | ("dogmaIM", "Overload")
             | ("userSvc", "UserLogOffCharacter")
             | ("charUnboundMgr", "DeleteCharacter" | "PrepareCharacterForDelete")
             | ("machoNet", "TerminateAllClients" | "GracefulShutdown")
@@ -1951,6 +1952,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                             assert_world_invariants_before_reset(&ctx, &sig.rpc_key);
                             ctx.db
                                 .with_mut_snapshot(|snap| *snap = base_snapshot.clone());
+                            ctx.invalidate_ship_fitting(SHIP_ID);
                         }
                         break;
                     }

@@ -473,10 +473,13 @@ async fn dogma_overheat_nanite_online_and_session_edges() {
             .remove(&attr_ids::DAMAGE);
     });
 
-    // Overload mod_rep (active overloaded cycle) -> InitiateModuleRepairMany rejects CannotRepairWhileOverheating
+    // Pre-overload mod_rep then Activate (active overloaded cycle) -> InitiateModuleRepairMany rejects CannotRepairWhileOverheating
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_rep)], &kw, None)
         .await
-        .expect("Overload mod_rep starts active overloaded cycle");
+        .expect("Overload mod_rep pre-overloads module");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mod_rep)], &kw, None)
+        .await
+        .expect("Activate mod_rep starts active overloaded cycle");
     let nanite_while_ovh = ctx
         .dispatch_rpc(
             &mut sess,
@@ -503,7 +506,7 @@ async fn dogma_overheat_nanite_online_and_session_edges() {
     .await
     .expect("Deactivate mod_rep");
 
-    // Non-overloadable Damage Control rejects Overload with CannotOverloadModule; overloadable Afterburner toggles cleanly
+    // Non-overloadable Damage Control rejects Overload with CannotOverloadModule; overloadable Afterburner toggles & activates cleanly
     let dc_ovl_err = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_dc)], &kw, None)
         .await
@@ -512,6 +515,9 @@ async fn dogma_overheat_nanite_online_and_session_edges() {
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_ab)], &kw, None)
         .await
         .expect("Overload Afterburner");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mod_ab)], &kw, None)
+        .await
+        .expect("Activate pre-overloaded Afterburner");
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_ab)], &kw, None)
         .await
         .expect("Deactivate Afterburner");
