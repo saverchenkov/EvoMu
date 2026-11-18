@@ -994,3 +994,136 @@ fn rpc_auth_validation_not_found_wire_decoding_implants_and_milestone_type_varia
     );
 }
 
+#[test]
+fn personal_skill_plan_delete_clears_active_only_when_matching_and_persists() {
+    use crate::quasar_gateway::STATUS_OK;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    let mgr = Arc::new(SkillPlanManager::new_with_db(Some(Arc::clone(&db))));
+    register_skill_handlers(&router, Arc::clone(&db), Arc::clone(&mgr));
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let cid = 90_000_001_u32;
+    let ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid),
+        Some(1_000_009),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+
+    let make_create = |name: &str| {
+        let mut attr = DynamicQuasarMessage::new("Attr");
+        attr.fields.insert(1, DynamicValue::String(name.into()));
+        let mut req = DynamicQuasarMessage::new("Create");
+        req.fields.insert(1, DynamicValue::Message(Box::new(attr)));
+        req
+    };
+
+    handlers["eve_public.character.skill.plan.CreateRequest"](
+        &ctx,
+        &dummy_any,
+        &make_create("Plan Active"),
+    )
+    .expect("create active plan");
+    handlers["eve_public.skill.plan.CreateRequest"](
+        &ctx,
+        &dummy_any,
+        &make_create("Plan Spare"),
+    )
+    .expect("create spare plan");
+
+    let plans = mgr.get_personal_plans(cid);
+    assert_eq!(plans.len(), 2);
+    let active_uuid = plans.iter().find(|p| p.name == "Plan Active").unwrap().uuid;
+    let spare_uuid = plans.iter().find(|p| p.name == "Plan Spare").unwrap().uuid;
+
+    handlers["eve_public.character.skill.plan.SetActiveRequest"](
+        &ctx,
+        &dummy_any,
+        &uuid_msg(1, active_uuid),
+    )
+    .expect("set active plan");
+    assert_eq!(mgr.get_active_plan(cid).unwrap().uuid, active_uuid);
+
+    // Deleting a non-active plan removes only that plan and preserves active_plans.
+    let spare_del = handlers["eve_public.skill.plan.DeleteRequest"](
+        &ctx,
+        &dummy_any,
+        &uuid_msg(1, spare_uuid),
+    )
+    .expect("delete spare plan");
+    assert!(spare_del.type_url.ends_with("eve_public.skill.plan.DeleteResponse"));
+    assert_eq!(mgr.get_personal_plans(cid).len(), 1);
+    assert_eq!(mgr.get_active_plan(cid).unwrap().uuid, active_uuid);
+    assert_eq!(
+        handlers["eve_public.skill.plan.DeleteRequest"](
+            &ctx,
+            &dummy_any,
+            &uuid_msg(1, spare_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+
+    // Deleting the active plan via character.skill.plan.DeleteRequest removes the plan,
+    // clears active_plans cleanly (never leaving a stale UUID), and emits no bogus notice.
+    let active_del = handlers["eve_public.character.skill.plan.DeleteRequest"](
+        &ctx,
+        &dummy_any,
+        &uuid_msg(1, active_uuid),
+    )
+    .expect("delete active plan");
+    assert!(active_del.type_url.ends_with("eve_public.character.skill.plan.DeleteResponse"));
+    assert!(mgr.get_personal_plans(cid).is_empty());
+    assert!(
+        mgr.active_plans.read().unwrap().get(&cid).is_none(),
+        "active_plans entry must be cleared when active personal skill plan is deleted"
+    );
+    assert!(router.pending_notices.read().unwrap().is_empty());
+
+    // GetAllResponse must contain zero plans and GetActiveResponse must return 16 zero bytes.
+    let all_resp = handlers["eve_public.character.skill.plan.GetAllRequest"](
+        &ctx,
+        &dummy_any,
+        &DynamicQuasarMessage::new("Req"),
+    )
+    .expect("GetAllRequest after delete");
+    let all_wm = WireMessage::decode(&all_resp.value).expect("decode GetAllResponse");
+    assert!(all_wm.fields.is_empty(), "expected no skill_plans after deleting both");
+
+    for get_active_ep in [
+        "eve_public.character.skill.plan.GetActiveRequest",
+        "eve_public.skill.plan.GetActiveRequest",
+    ] {
+        let act_resp = handlers[get_active_ep](&ctx, &dummy_any, &DynamicQuasarMessage::new("Req"))
+            .expect(get_active_ep);
+        let act_wm = WireMessage::decode(&act_resp.value).expect("decode GetActiveResponse");
+        let id_bytes = act_wm.fields[0].value.as_bytes().expect("Identifier bytes");
+        let id_wm = WireMessage::decode(id_bytes).expect("decode Identifier");
+        assert_eq!(id_wm.fields[0].value.as_bytes().expect("uuid"), &[0u8; 16]);
+    }
+
+    // Re-deleting now returns STATUS_NOT_FOUND and DB reload preserves empty plans + empty active map.
+    let _ = STATUS_OK;
+    assert_eq!(
+        handlers["eve_public.character.skill.plan.DeleteRequest"](
+            &ctx,
+            &dummy_any,
+            &uuid_msg(1, active_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    let reloaded = SkillPlanManager::new_with_db(Some(Arc::clone(&db)));
+    assert!(reloaded.get_personal_plans(cid).is_empty());
+    assert!(reloaded.active_plans.read().unwrap().get(&cid).is_none());
+}
+

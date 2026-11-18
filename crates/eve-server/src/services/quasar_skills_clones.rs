@@ -259,12 +259,24 @@ impl SkillPlanManager {
             .personal_plans
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = map.get_mut(&char_id) {
+        let removed = if let Some(list) = map.get_mut(&char_id) {
             let len_before = list.len();
             list.retain(|p| &p.uuid != uuid);
-            return list.len() < len_before;
+            list.len() < len_before
+        } else {
+            false
+        };
+        drop(map);
+        if removed {
+            let mut active = self
+                .active_plans
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if active.get(&char_id) == Some(uuid) {
+                active.remove(&char_id);
+            }
         }
-        false
+        removed
     }
 
     pub fn delete_corp_plan(&self, corp_id: u32, uuid: &[u8; 16]) -> bool {
@@ -430,6 +442,37 @@ pub fn extract_active_plan_uuid(any: &GoogleAny, dyn_msg: &DynamicQuasarMessage)
     None
 }
 
+/// Registers a personal skill plan delete handler shared between the legacy
+/// `eve_public.skill.plan` and current `eve_public.character.skill.plan` namespaces.
+fn register_personal_plan_delete_handler(
+    router: &PublicGatewayRouter,
+    manager: Arc<SkillPlanManager>,
+    request_type: &'static str,
+    response_type: &'static str,
+    missing_uuid_msg: &'static str,
+    not_found_msg: &'static str,
+) {
+    let response_type_url = format!("{TYPE_GOOGLEAPIS_PREFIX}{response_type}");
+    router.register_handler(
+        request_type,
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
+            let target_uuid =
+                extract_uuid(dyn_msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, missing_uuid_msg.into()))?;
+            if !manager.delete_personal_plan(cid, &target_uuid) {
+                return Err((STATUS_NOT_FOUND, not_found_msg.into()));
+            }
+            manager.save_to_db();
+            Ok(GoogleAny {
+                type_url: response_type_url.clone(),
+                value: Vec::new(),
+            })
+        }),
+    );
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -545,25 +588,13 @@ pub fn register_skill_handlers(
     );
 
     // 4. eve_public.skill.plan.DeleteRequest -> DeleteResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
+    register_personal_plan_delete_handler(
+        router,
+        Arc::clone(&manager),
         "eve_public.skill.plan.DeleteRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()));
-            };
-            if !mgr.delete_personal_plan(cid, &target_uuid) {
-                return Err((STATUS_NOT_FOUND, "Skill plan not found".into()));
-            }
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.skill.plan.DeleteResponse"),
-                value: Vec::new(),
-            })
-        }),
+        "eve_public.skill.plan.DeleteResponse",
+        "Missing skill_plan Identifier.uuid",
+        "Skill plan not found",
     );
 
     // 5. eve_public.skill.plan.GetActiveRequest -> GetActiveResponse
@@ -1151,26 +1182,13 @@ pub fn register_skill_handlers(
         }),
     );
 
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
+    register_personal_plan_delete_handler(
+        router,
+        Arc::clone(&manager),
         "eve_public.character.skill.plan.DeleteRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let target_uuid = extract_uuid(dyn_msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skill plan Identifier.uuid".into()))?;
-            let mut plans = mgr.personal_plans.write().unwrap_or_else(|e| e.into_inner());
-            let list = plans.get_mut(&cid).ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?;
-            let pos = list.iter().position(|p| p.uuid == target_uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?;
-            list.remove(pos);
-            drop(plans);
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.DeleteResponse"),
-                value: Vec::new(),
-            })
-        }),
+        "eve_public.character.skill.plan.DeleteResponse",
+        "Missing skill plan Identifier.uuid",
+        "Character skill plan not found",
     );
 
     // 19. Character skill plan milestone endpoints
