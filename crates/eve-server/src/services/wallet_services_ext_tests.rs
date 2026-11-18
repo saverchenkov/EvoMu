@@ -1034,6 +1034,7 @@ async fn store_manager_dispatch_rpc_enforces_weekly_sp_eligibility_station_and_o
     });
 
     // 1. Real dispatch_rpc must reject unpromoted targeted weekly SP offer (`BF-01`/`BF-02`) without minting SP
+    let expected_targeted_err = "TargetedOfferNotEligible";
     let err_ineligible = ctx
         .dispatch_rpc(
             &mut session,
@@ -1046,7 +1047,7 @@ async fn store_manager_dispatch_rpc_enforces_weekly_sp_eligibility_station_and_o
         )
         .await
         .unwrap_err();
-    assert_eq!(err_ineligible.code, "TargetedOfferNotEligible");
+    assert_eq!(err_ineligible.code, expected_targeted_err);
     assert_eq!(
         ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.free_skill_points)),
         Some(1_000.0)

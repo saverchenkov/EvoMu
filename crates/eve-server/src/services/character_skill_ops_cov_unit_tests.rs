@@ -897,12 +897,13 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
             None
         );
     });
+    let expected_invalid_offer = "InvalidOffer";
     assert_eq!(
         crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw)
             .unwrap()
             .unwrap_err()
             .code,
-        "InvalidOffer"
+        expected_invalid_offer
     );
 
     // 3) Offer 1005 with `price_plex == 0` and `"OMEGA-WEEKLY"` tag matches case-insensitively
