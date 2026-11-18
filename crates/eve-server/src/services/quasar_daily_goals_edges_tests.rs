@@ -306,3 +306,317 @@ fn gameplay_events_and_handler_rpc_edges() {
     assert!(!sp_bytes.is_empty());
     assert_ne!(isk_bytes, sp_bytes);
 }
+
+fn decode_get_response_window_and_earnings(any: &GoogleAny) -> (u64, u64, u64, usize) {
+    let wm = WireMessage::decode(&any.value).expect("decode GetResponse wire");
+    let attrs_bytes = wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 1)
+        .and_then(|f| f.value.as_bytes())
+        .expect("GetResponse.goal");
+    let attrs_wm = WireMessage::decode(attrs_bytes).expect("decode Attributes wire");
+    let ts_secs = |field_num: u32| -> u64 {
+        let ts_bytes = attrs_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == field_num)
+            .and_then(|f| f.value.as_bytes())
+            .expect("Timestamp field");
+        let ts_wm = WireMessage::decode(ts_bytes).expect("decode Timestamp wire");
+        ts_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint())
+            .unwrap_or(0)
+    };
+    let progress = wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 2)
+        .and_then(|f| f.value.as_varint())
+        .unwrap_or(0);
+    let earnings_count = wm.fields.iter().filter(|f| f.field_number == 4).count();
+    (ts_secs(10), ts_secs(11), progress, earnings_count)
+}
+
+fn collect_list_uuids(any: &GoogleAny, nested_id: bool) -> Vec<[u8; 16]> {
+    let wm = WireMessage::decode(&any.value).expect("decode list response wire");
+    wm.fields
+        .iter()
+        .filter(|f| f.field_number == 1)
+        .filter_map(|f| f.value.as_bytes())
+        .filter_map(|entry_bytes| {
+            let entry_wm = WireMessage::decode(entry_bytes).ok()?;
+            let id_bytes = if nested_id {
+                entry_wm
+                    .fields
+                    .iter()
+                    .find(|f| f.field_number == 1)
+                    .and_then(|f| f.value.as_bytes())?
+            } else {
+                entry_bytes
+            };
+            let id_wm = WireMessage::decode(id_bytes).ok()?;
+            let uuid_bytes = id_wm
+                .fields
+                .iter()
+                .find(|f| f.field_number == 1)
+                .and_then(|f| f.value.as_bytes())?;
+            uuid_bytes.try_into().ok()
+        })
+        .collect()
+}
+
+#[test]
+fn get_request_serves_expired_rotated_and_persisted_goals_while_active_lists_exclude_them() {
+    let (router, db) = make_router_and_db();
+    let mgr = &router.progression.daily_goals;
+    let cid = 211_338_001u32;
+    // Odd day_bucket (20789) from GH #1338: `SDEDG` #2 (MineOre) rotates out in favor of `SDEDG` #5.
+    let odd_day_now: u64 = 1_796_209_417;
+    assert_eq!(daily_goal_day_bucket(odd_day_now) % 2, 1);
+    seed_char(&db, cid as i64, 98_133_801, 1_000_000, 5_000);
+    let user_ctx = make_ctx(Some(cid), 0, odd_day_now);
+
+    let mut sdedg2_uuid = [0u8; 16];
+    sdedg2_uuid[..5].copy_from_slice(b"SDEDG");
+    sdedg2_uuid[15] = 2;
+
+    // 1. Fresh character calling `eve_public.dailygoal.api.GetRequest` on rotated-out `SDEDG` #2 -> 200 OK
+    // with past `active_after`/`active_until` and omitted `earnings`.
+    let pub_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &make_uuid_req("eve_public.dailygoal.api.GetRequest", &sdedg2_uuid),
+    )
+    .expect("eve_public GetRequest for rotated-out SDEDG #2 must succeed");
+    let (pub_after, pub_until, pub_prog, pub_earnings) =
+        decode_get_response_window_and_earnings(&pub_rsp);
+    assert!(pub_after < pub_until && pub_until < odd_day_now);
+    assert_eq!(pub_prog, 0);
+    assert_eq!(pub_earnings, 0, "expired goal GetResponse must omit earnings");
+
+    // 2. Internal `eve.dailygoal.api.GetRequest` matches expired window consistently.
+    let int_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &make_uuid_req("eve.dailygoal.api.GetRequest", &sdedg2_uuid),
+    )
+    .expect("eve GetRequest for rotated-out SDEDG #2 must succeed");
+    let (int_after, int_until, _, _) = decode_get_response_window_and_earnings(&int_rsp);
+    assert_eq!((int_after, int_until), (pub_after, pub_until));
+
+    // 3. Active lists and redeem/progress RPCs MUST still exclude rotated-out `SDEDG` #2.
+    let active_goals = mgr.get_or_init_goals_at(cid, odd_day_now);
+    assert!(!active_goals.iter().any(|g| g.uuid == sdedg2_uuid));
+    let active_uuid = active_goals[0].uuid;
+
+    let all_curr_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCurrentRequest"),
+            value: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(!collect_list_uuids(&all_curr_rsp, true).contains(&sdedg2_uuid));
+
+    let all_int_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.GetAllRequest"),
+            value: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(!collect_list_uuids(&all_int_rsp, false).contains(&sdedg2_uuid));
+
+    assert_eq!(
+        dispatch(
+            &router,
+            &user_ctx,
+            &make_uuid_req("eve.dailygoal.api.GetProgressRequest", &sdedg2_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        dispatch(
+            &router,
+            &user_ctx,
+            &make_uuid_req("eve_public.dailygoal.api.RedeemRequest", &sdedg2_uuid),
+        )
+        .unwrap_err()
+        .0,
+        STATUS_NOT_FOUND
+    );
+
+    // Active goal GetRequest still advertises active window and earnings.
+    let active_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &make_uuid_req("eve_public.dailygoal.api.GetRequest", &active_uuid),
+    )
+    .unwrap();
+    let (act_after, act_until, _, act_earnings) =
+        decode_get_response_window_and_earnings(&active_rsp);
+    assert!(act_after <= odd_day_now && odd_day_now < act_until);
+    assert!(act_earnings > 0);
+
+    // 4. Historical expired persisted goal (not in templates, from an earlier day bucket) returns 200 OK
+    // with its historical expired window, preserves stored progress, omits earnings, and stays excluded from reward lists.
+    let hist_uuid = [0x44u8; 16];
+    let hist_bucket = daily_goal_day_bucket(odd_day_now) - 3;
+    let mut hist_tpl = active_goals[0].template.clone();
+    hist_tpl.uuid = hist_uuid;
+    hist_tpl.isk_reward = 250_000;
+    {
+        let mut map = mgr.character_goals.write().unwrap();
+        map.get_mut(&cid).unwrap().push(CharacterDailyGoal {
+            uuid: hist_uuid,
+            template: hist_tpl,
+            current_progress: 10,
+            completed: true,
+            claimed: false,
+            paid_completion: false,
+            completed_at_unix: Some(odd_day_now - 259_200),
+            claimed_at_unix: None,
+            day_bucket: hist_bucket,
+            expired: true,
+            prematurely_deactivated: false,
+        });
+    }
+
+    let hist_pub_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &make_uuid_req("eve_public.dailygoal.api.GetRequest", &hist_uuid),
+    )
+    .expect("expired persisted goal must resolve on eve_public.GetRequest");
+    let (h_after, h_until, h_prog, h_earnings) =
+        decode_get_response_window_and_earnings(&hist_pub_rsp);
+    assert_eq!((h_after, h_until), daily_goal_window_unix(hist_bucket));
+    assert!(h_until < odd_day_now);
+    assert_eq!(h_prog, 10);
+    assert_eq!(h_earnings, 0, "expired completed goal must omit earnings");
+
+    let hist_int_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &make_uuid_req("eve.dailygoal.api.GetRequest", &hist_uuid),
+    )
+    .expect("expired persisted goal must resolve on eve.GetRequest");
+    let (hi_after, hi_until, _, _) = decode_get_response_window_and_earnings(&hist_int_rsp);
+    assert_eq!((hi_after, hi_until), (h_after, h_until));
+
+    let rewards_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllWithRewardsRequest"
+            ),
+            value: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(!collect_list_uuids(&rewards_rsp, false).contains(&hist_uuid));
+
+    let ent_rsp = dispatch(
+        &router,
+        &user_ctx,
+        &GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest"
+            ),
+            value: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(!collect_list_uuids(&ent_rsp, true).contains(&hist_uuid));
+
+    // 5. Unknown random UUID still returns STATUS_NOT_FOUND on both GetRequest handlers.
+    for rpc in ["eve_public.dailygoal.api.GetRequest", "eve.dailygoal.api.GetRequest"] {
+        assert_eq!(
+            dispatch(&router, &user_ctx, &make_uuid_req(rpc, &[0xAB; 16]))
+                .unwrap_err()
+                .0,
+            STATUS_NOT_FOUND
+        );
+    }
+}
+
+#[test]
+fn get_request_template_fallback_and_prematurely_deactivated_stays_not_found() {
+    let (router, db) = make_router_and_db();
+    let mgr = &router.progression.daily_goals;
+    let even_day_now: u64 = 1_796_123_017; // day_bucket = 20788 (even): SDEDG #2 is active, SDEDG #5 rotates out
+    assert_eq!(daily_goal_day_bucket(even_day_now) % 2, 0);
+
+    // 1. Direct template-catalog fallback when `character_goals` has no entry for character/UUID.
+    let uninit_cid = 211_338_002u32;
+    let mut sdedg2_uuid = [0u8; 16];
+    sdedg2_uuid[..5].copy_from_slice(b"SDEDG");
+    sdedg2_uuid[15] = 2;
+    let cat_resolved = mgr
+        .find_expired_or_template_goal(uninit_cid, &sdedg2_uuid, even_day_now)
+        .expect("template catalog fallback must resolve uninstantiated SDEDG UUID");
+    assert!(cat_resolved.is_expired_or_catalog);
+    assert_eq!(cat_resolved.current_progress, 0);
+    let (cat_after, cat_until) = resolved_goal_window_unix(&cat_resolved, even_day_now);
+    assert!(cat_after < cat_until && cat_until < even_day_now);
+
+    // Verify boundary timestamps in `resolved_goal_window_unix` always expire strictly before `now`.
+    for edge_now in [1u64, 50_000, 39_600 + 86_400, even_day_now] {
+        let (ea, eu) = resolved_goal_window_unix(&cat_resolved, edge_now);
+        assert!(ea <= eu && eu < edge_now, "edge_now={edge_now} got ({ea}, {eu})");
+    }
+
+    // 2. Admin-deactivated (`prematurely_deactivated = true`) goal MUST return 404 on BOTH GetRequest RPCs
+    // and MUST NOT resurrect via `mgr.get_templates()` fallback on the same day.
+    let cid = 211_338_003u32;
+    seed_char(&db, cid as i64, 98_133_803, 1_000_000, 5_000);
+    let user_ctx = make_ctx(Some(cid), 0, even_day_now);
+    let active_goals = mgr.get_or_init_goals_at(cid, even_day_now);
+    assert!(active_goals.iter().any(|g| g.uuid == sdedg2_uuid));
+
+    {
+        let mut map = mgr.character_goals.write().unwrap();
+        let g = map
+            .get_mut(&cid)
+            .unwrap()
+            .iter_mut()
+            .find(|g| g.uuid == sdedg2_uuid)
+            .unwrap();
+        g.expired = true;
+        g.prematurely_deactivated = true;
+    }
+
+    for rpc in ["eve_public.dailygoal.api.GetRequest", "eve.dailygoal.api.GetRequest"] {
+        assert_eq!(
+            dispatch(&router, &user_ctx, &make_uuid_req(rpc, &sdedg2_uuid))
+                .unwrap_err()
+                .0,
+            STATUS_NOT_FOUND,
+            "prematurely deactivated goal must remain 404 on {rpc}"
+        );
+    }
+
+    // 3. Rolling forward to the next day resets `prematurely_deactivated` so rotated/new-day history works normally.
+    let next_day_now = even_day_now + 86_400;
+    let next_day_ctx = make_ctx(Some(cid), 0, next_day_now);
+    let next_rsp = dispatch(
+        &router,
+        &next_day_ctx,
+        &make_uuid_req("eve_public.dailygoal.api.GetRequest", &sdedg2_uuid),
+    )
+    .expect("next-day rollover clears previous day's premature deactivation");
+    let (nd_after, nd_until, _, nd_earnings) = decode_get_response_window_and_earnings(&next_rsp);
+    assert!(nd_after < nd_until && nd_until < next_day_now);
+    assert_eq!(nd_earnings, 0);
+}
