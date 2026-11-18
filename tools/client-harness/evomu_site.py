@@ -1924,8 +1924,90 @@ def _install_slots_container_sync_guard():
     return True
 
 
+def _is_sensor_gfx_load_error(exc):
+    return "Couldn't get object" in str(exc)
+
+
+def _can_run_sensor_gfx_swipe(gfx_handler):
+    sess = getattr(__builtin__, "session", None)
+    if sess is not None and (
+        getattr(sess, "solarsystemid", None) is None
+        or getattr(sess, "stationid", None) is not None
+        or getattr(sess, "structureid", None) is not None
+        or getattr(sess, "mutating", False)
+    ):
+        return False
+    sm = getattr(__builtin__, "sm", None)
+    if sm is not None and callable(getattr(sm, "IsServiceRunning", None)):
+        try:
+            if sm.IsServiceRunning("subway"):
+                subway = sm.GetService("subway")
+                in_jump = getattr(subway, "InJump", None)
+                if callable(in_jump) and in_jump():
+                    return False
+        except Exception:
+            pass
+    if hasattr(gfx_handler, "sceneManager"):
+        scene_mgr = getattr(gfx_handler, "sceneManager", None)
+        if scene_mgr is None:
+            return False
+        get_scene = getattr(scene_mgr, "GetRegisteredScene", None)
+        if callable(get_scene) and get_scene("default") is None:
+            return False
+    return True
+
+
+def _make_sensor_start_gfx_swipe_guard(orig_fn):
+    def _wrapped_start_gfx_swipe(self, *args, **kwargs):
+        if not _can_run_sensor_gfx_swipe(self):
+            return None
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except RuntimeError as exc:
+            if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
+                return None
+            raise
+
+    _wrapped_start_gfx_swipe._evomu_camera_guard = True
+    return _wrapped_start_gfx_swipe
+
+
+def _make_sensor_gfx_swipe_thread_guard(orig_fn):
+    def _wrapped_gfx_swipe_thread(self, *args, **kwargs):
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except RuntimeError as exc:
+            if _is_sensor_gfx_load_error(exc) and getattr(self, "gfxSensorSwipe", None) is None:
+                return None
+            raise
+        finally:
+            if hasattr(self, "gfxSwipeThread"):
+                self.gfxSwipeThread = None
+
+    _wrapped_gfx_swipe_thread._evomu_camera_guard = True
+    return _wrapped_gfx_swipe_thread
+
+
+def _install_sensor_suite_gfx_guard():
+    """Guard sensorsuite.overlay.gfxhandler.GfxHandler against jump/scene-reload races (#1292, #1293)."""
+    if "sensorGfxHandler" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    gfx_mod = sys.modules.get("sensorsuite.overlay.gfxhandler")
+    gfx_cls = getattr(gfx_mod, "GfxHandler", None) if gfx_mod is not None else None
+    if gfx_cls is None or not (isinstance(gfx_cls, type) or hasattr(gfx_cls, "__bases__")):
+        return False
+    hooked = False
+    if _wrap_cls_method_if_present(gfx_cls, "StartGfxSwipe", _make_sensor_start_gfx_swipe_guard):
+        hooked = True
+    if _wrap_cls_method_if_present(gfx_cls, "_GfxSwipeThread", _make_sensor_gfx_swipe_thread_guard):
+        hooked = True
+    if hooked:
+        _HOOKED_CAMERA_GUARD_TARGETS.add("sensorGfxHandler")
+    return hooked
+
+
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293)."""
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
     _install_hangar_view_teardown_guard()
@@ -1934,6 +2016,7 @@ def _install_live_client_sync_guards():
     _install_modular_capital_hangar_guard()
     _install_wreck_rotation_guard()
     _install_slots_container_sync_guard()
+    _install_sensor_suite_gfx_guard()
 
 
 def _maybe_schedule_driver_on_main_thread():
