@@ -1039,18 +1039,15 @@ async fn sov_gameplay_mercden_repairs_dispatch_and_partial_extract_cov() {
     let _ = handle_mercden_component_call(&ctx, &sess, sys_id, char_id, ship_id, den_id, "mercenaryDen", "extract_infomorphs_to_ship", &[]).await;
 }
 
-#[tokio::test]
-async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_workforce() {
+fn seed_expired_vuln_cascade_snapshot(ctx: &ServerContext) -> (u32, u32, i64, i64, i64, i64, u64) {
     use crate::services::quasar_sov_hub::{
-        all_upgrade_definitions, compute_hub_resources, max_exportable_workforce,
-        planet_yield_for_planet, system_yield, UpgradeDefinition,
+        all_upgrade_definitions, max_exportable_workforce, planet_yield_for_planet, system_yield,
+        UpgradeDefinition,
     };
     use crate::services::quasar_sov_mercden::anarchy_workforce_disruption_pct;
-    use crate::services::quasar_sov_workforce::{exported_amount, imports};
+    use crate::services::quasar_sov_workforce::imports;
     use eve_db::durable_domain_types::{PersistedHubUpgrade, PersistedSovHubData};
     use eve_db::PersistedWorkforceMode;
-
-    let ctx = test_ctx();
 
     let sys_a: u32 = 30_000_669; // N3-JBX
     let sys_b: u32 = 30_000_671; // GN-PDU (1 jump)
@@ -1062,13 +1059,6 @@ async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_work
     let now = ctx.now_unix();
     let reinf_until = now.saturating_sub(200);
     let vuln_end = now.saturating_sub(10);
-
-    let mut sess_a = SessionState::new(7_710_001);
-    sess_a.solar_system_id = Some(sys_a);
-    let mut rx_a = ctx.quasar_gateway.subscribe_session(&sess_a, Vec::new(), now);
-    let mut sess_b = SessionState::new(7_710_002);
-    sess_b.solar_system_id = Some(sys_b);
-    let mut rx_b = ctx.quasar_gateway.subscribe_session(&sess_b, Vec::new(), now);
 
     let (planet_wf_id, planet_wf) = ctx
         .sde
@@ -1244,29 +1234,26 @@ async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_work
         assert_eq!(imports(snap, &ctx.sde, hub_b), vec![(sys_a, planet_wf)]);
     });
 
-    // Weapon hit arriving after vuln_end restores ShieldVulnerable + re-enables Den AND reconciles
-    // Hub A/Hub B workforce & exports before subtracting the incoming shield damage.
-    let PyRep::KeyVal(kv) = apply_mercenary_den_weapon_damage(&ctx, den_id, 50.0)
-        .await
-        .expect("vuln_end expired weapon damage succeeds")
-    else {
-        panic!("expected KeyVal damage outcome");
-    };
-    assert!(kv
-        .iter()
-        .any(|(k, v)| k == "state" && *v == PyRep::String("ShieldVulnerable".into())));
-    let shield_hp = kv
-        .iter()
-        .find_map(|(k, v)| match (k.as_str(), v) {
-            ("shieldHP", PyRep::Real(hp)) => Some(*hp),
-            _ => None,
-        })
-        .expect("shieldHP");
-    assert!((shield_hp - (MERC_DEN_BASE_HP - 50.0)).abs() < 1e-6);
+    (sys_a, sys_b, corp_id, hub_a, hub_b, den_id, expected_disrupted_planet)
+}
+
+fn assert_expired_vuln_cascade_outcome(
+    ctx: &ServerContext,
+    sys_a: u32,
+    hub_a: i64,
+    hub_b: i64,
+    den_id: i64,
+    expected_disrupted_planet: u64,
+    expected_shield_hp: f64,
+    rx_a: &mut tokio::sync::mpsc::Receiver<eve_proto::quasar::EvePublicNotice>,
+    rx_b: &mut tokio::sync::mpsc::Receiver<eve_proto::quasar::EvePublicNotice>,
+) {
+    use crate::services::quasar_sov_hub::compute_hub_resources;
+    use crate::services::quasar_sov_workforce::{exported_amount, imports};
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures[&den_id].state, "ShieldVulnerable");
-        assert!((snap.structures[&den_id].shield_hp - (MERC_DEN_BASE_HP - 50.0)).abs() < 1e-6);
+        assert!((snap.structures[&den_id].shield_hp - expected_shield_hp).abs() < 1e-6);
         assert!(snap.sov_runtime.mercenary_dens[&den_id].enabled);
         assert_eq!(
             compute_hub_resources(snap, &ctx.sde, hub_a).unwrap().workforce_local,
@@ -1308,4 +1295,108 @@ async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_work
     assert!(urls_b
         .iter()
         .any(|u| u.ends_with("upgrade.api.HubUpgradesSimulatedNotice")));
+}
+
+#[tokio::test]
+async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_workforce() {
+    let ctx = test_ctx();
+    let (sys_a, sys_b, _, hub_a, hub_b, den_id, expected_disrupted_planet) =
+        seed_expired_vuln_cascade_snapshot(&ctx);
+    let now = ctx.now_unix();
+
+    let mut sess_a = SessionState::new(7_710_001);
+    sess_a.solar_system_id = Some(sys_a);
+    let mut rx_a = ctx.quasar_gateway.subscribe_session(&sess_a, Vec::new(), now);
+    let mut sess_b = SessionState::new(7_710_002);
+    sess_b.solar_system_id = Some(sys_b);
+    let mut rx_b = ctx.quasar_gateway.subscribe_session(&sess_b, Vec::new(), now);
+
+    // Weapon hit arriving after vuln_end restores ShieldVulnerable + re-enables Den AND reconciles
+    // Hub A/Hub B workforce & exports before subtracting the incoming shield damage.
+    let PyRep::KeyVal(kv) = apply_mercenary_den_weapon_damage(&ctx, den_id, 50.0)
+        .await
+        .expect("vuln_end expired weapon damage succeeds")
+    else {
+        panic!("expected KeyVal damage outcome");
+    };
+    assert!(kv
+        .iter()
+        .any(|(k, v)| k == "state" && *v == PyRep::String("ShieldVulnerable".into())));
+    let shield_hp = kv
+        .iter()
+        .find_map(|(k, v)| match (k.as_str(), v) {
+            ("shieldHP", PyRep::Real(hp)) => Some(*hp),
+            _ => None,
+        })
+        .expect("shieldHP");
+    assert!((shield_hp - (MERC_DEN_BASE_HP - 50.0)).abs() < 1e-6);
+
+    assert_expired_vuln_cascade_outcome(
+        &ctx,
+        sys_a,
+        hub_a,
+        hub_b,
+        den_id,
+        expected_disrupted_planet,
+        MERC_DEN_BASE_HP - 50.0,
+        &mut rx_a,
+        &mut rx_b,
+    );
+}
+
+#[tokio::test]
+async fn apply_shield_repair_after_vuln_expiry_reenables_den_and_reconciles_workforce() {
+    let ctx = test_ctx();
+    let (sys_a, sys_b, _, hub_a, hub_b, den_id, expected_disrupted_planet) =
+        seed_expired_vuln_cascade_snapshot(&ctx);
+    let now = ctx.now_unix();
+    let ship_id: i64 = 1_097_710_030;
+
+    let mut sess_a = SessionState::new(7_710_011);
+    sess_a.solar_system_id = Some(sys_a);
+    let mut rx_a = ctx.quasar_gateway.subscribe_session(&sess_a, Vec::new(), now);
+    let mut sess_b = SessionState::new(7_710_012);
+    sess_b.solar_system_id = Some(sys_b);
+    let mut rx_b = ctx.quasar_gateway.subscribe_session(&sess_b, Vec::new(), now);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_a);
+    for (id, type_id, radius, pos) in [
+        (ship_id, 588, 50.0, DVec3::ZERO),
+        (den_id, TYPE_MERCENARY_DEN, 500.0, DVec3::new(5_000.0, 0.0, 0.0)),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id,
+                type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1.0e8,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    // Even a repair < 50% of MERC_DEN_BASE_HP triggers vuln_end expiry recovery first.
+    let (pct, enabled_now) =
+        apply_mercenary_den_shield_repair(&ctx, sys_a, ship_id, den_id, 500.0)
+            .await
+            .expect("vuln_end expired shield repair succeeds");
+    assert_eq!(pct, 100);
+    assert!(enabled_now);
+
+    assert_expired_vuln_cascade_outcome(
+        &ctx,
+        sys_a,
+        hub_a,
+        hub_b,
+        den_id,
+        expected_disrupted_planet,
+        MERC_DEN_BASE_HP,
+        &mut rx_a,
+        &mut rx_b,
+    );
 }

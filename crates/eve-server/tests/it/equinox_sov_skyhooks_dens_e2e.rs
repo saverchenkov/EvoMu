@@ -1979,23 +1979,23 @@ async fn e2e_skyhook_zero_shield_in_theft_window_reinforces_and_destructs_or_rep
     assert_eq!(cs.structure_hp, SKYHOOK_BASE_HULL_HP);
 }
 
-// parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj
+// parity: rpc:colonyResourcesMgr.GetMyCorporationSkyhooks
+// parity: rpc:map.GetCurrentSovData
+// parity: rpc:sovMgr.DestroySkyhooks
+// parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
-// parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
+// parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
+        "rpc:colonyResourcesMgr.GetMyCorporationSkyhooks",
+        "rpc:map.GetCurrentSovData",
+        "rpc:sovMgr.DestroySkyhooks",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
     ]);
 
     use eve_db::durable_domain_types::{

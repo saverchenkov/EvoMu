@@ -81,11 +81,9 @@ fn adm_all_index_tiers_hub_resolution_and_fuel_acl_precedence_kill_mutations() {
             },
         );
         assert_eq!(resolve_sov_hub_id(snap, None, Some(sys_id)), None);
-        assert_eq!(resolve_sov_hub_id(snap, Some(-55), Some(sys_id)), Some(-55));
-        assert_eq!(
-            resolve_sov_hub_id(snap, Some(i64::from(sys_id)), None),
-            Some(i64::from(sys_id))
-        );
+        assert_eq!(resolve_sov_hub_id(snap, Some(-55), Some(sys_id)), None);
+        assert_eq!(resolve_sov_hub_id(snap, Some(destroyed_hub_id), Some(sys_id)), None);
+        assert_eq!(resolve_sov_hub_id(snap, Some(i64::from(sys_id)), None), None);
 
         assert!(!can_access_sov_hub_fuel(
             snap,

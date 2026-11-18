@@ -1204,13 +1204,17 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
         );
     });
 
-    // 1. Hub resolution, fuel ACL check, and SetSovHubFuelAccessGroup reject destroyed tombstone and match live hub.
+    // 1. Hub resolution, fuel ACL check, and Set/GetSovHubFuelAccessGroup reject destroyed tombstones and non-hub structures.
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
             resolve_sov_hub_id(snap, Some(i64::from(sys_id)), None),
             Some(live_hub_id)
         );
         assert_eq!(resolve_sov_hub_id(snap, None, Some(sys_id)), Some(live_hub_id));
+        assert_eq!(resolve_sov_hub_id(snap, Some(live_hub_id), None), Some(live_hub_id));
+        assert_eq!(resolve_sov_hub_id(snap, Some(old_hub_id), Some(sys_id)), None);
+        assert_eq!(resolve_sov_hub_id(snap, Some(live_skyhook_id), Some(sys_id)), None);
+        assert_eq!(resolve_sov_hub_id(snap, Some(-99), Some(sys_id)), None);
         assert!(!can_access_sov_hub_fuel(
             snap,
             old_hub_id,
@@ -1246,7 +1250,20 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     .await
     .unwrap()
     .unwrap_err();
-    assert_eq!(old_hub_err.code, "CorpRoleDenied");
+    assert_eq!(old_hub_err.code, "InvalidArguments");
+
+    let skyhook_set_err = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "SetSovHubFuelAccessGroup",
+        &[PyRep::Integer(live_skyhook_id), PyRep::Integer(42)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(skyhook_set_err.code, "InvalidArguments");
 
     let set_live_res = handle(
         &ctx,
@@ -1263,7 +1280,112 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.sov_runtime.fuel_access_groups.get(&live_hub_id), Some(&42));
         assert!(!snap.sov_runtime.fuel_access_groups.contains_key(&old_hub_id));
+        assert!(!snap.sov_runtime.fuel_access_groups.contains_key(&live_skyhook_id));
     });
+
+    // Authorized owner director can read fuel ACL; non-hub / tombstone IDs fail InvalidArguments.
+    let get_live = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "GetSovHubFuelAccessGroup",
+        &[PyRep::Integer(live_hub_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(get_live, PyRep::Integer(42));
+    let get_old_err = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "GetSovHubFuelAccessGroup",
+        &[PyRep::Integer(old_hub_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(get_old_err.code, "InvalidArguments");
+    let get_skyhook_err = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "GetSovHubFuelAccessGroup",
+        &[PyRep::Integer(live_skyhook_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(get_skyhook_err.code, "InvalidArguments");
+
+    // Unauthorized caller is denied GetSovHubFuelAccessGroup unless present in the configured fuel ACL.
+    let outsider_id: i64 = 2_119_100_002;
+    let acl_member_id: i64 = 2_119_100_003;
+    let outsider_corp_id: i64 = 98_910_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [outsider_id, acl_member_id] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Char {cid}"),
+                    corporation_id: outsider_corp_id,
+                    solar_system_id: sys_id,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.corporations.insert(
+            outsider_corp_id,
+            CorporationRecord::new(outsider_corp_id, "Outsider Corp", "OUT", outsider_id),
+        );
+        let mut ext = load_ext_state(snap);
+        let mut members = HashMap::new();
+        members.insert(acl_member_id, 0);
+        ext.owner_groups.insert(
+            42,
+            AccessGroupRecord {
+                group_id: 42,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Hub Fuel ACL".into(),
+                description: String::new(),
+                members,
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+    let mut outsider_sess = sov_session(outsider_id, outsider_corp_id, sys_id, None);
+    let get_denied = handle(
+        &ctx,
+        &mut outsider_sess,
+        "sovMgr",
+        "GetSovHubFuelAccessGroup",
+        &[PyRep::Integer(live_hub_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(get_denied.code, "CorpRoleDenied");
+
+    let mut acl_sess = sov_session(acl_member_id, outsider_corp_id, sys_id, None);
+    let get_acl_ok = handle(
+        &ctx,
+        &mut acl_sess,
+        "sovMgr",
+        "GetSovHubFuelAccessGroup",
+        &[PyRep::Integer(live_hub_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(get_acl_ok, PyRep::Integer(42));
 
     // 2. GetMyCorporationSkyhooks returns only the live Skyhook (not the destroyed tombstone).
     let my_skyhooks = handle(
@@ -1350,4 +1472,56 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     .unwrap()
     .unwrap();
     assert_eq!(after_skyhooks, PyRep::List(Vec::new()));
+}
+
+#[test]
+fn resolve_sov_hub_id_prefers_sov_hubs_registered_live_hub_over_unregistered() {
+    use eve_db::durable_domain_types::PersistedSovHubData;
+    use eve_db::UpwellStructureRecord;
+
+    let ctx = test_ctx();
+    let sys_id: u32 = 30_000_670;
+    let corp_id: i64 = 98_910_011;
+    let destroyed_id: i64 = 1_092_000_000;
+    let unregistered_id: i64 = 1_092_000_001;
+    let registered_id: i64 = 1_092_000_002;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, state) in [
+            (destroyed_id, "Destroyed"),
+            (unregistered_id, "ShieldVulnerable"),
+            (registered_id, "ShieldVulnerable"),
+        ] {
+            snap.structures.insert(
+                id,
+                UpwellStructureRecord {
+                    structure_id: id,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("Hub {id}"),
+                    state: state.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sov_runtime.sov_hubs.insert(
+            registered_id,
+            PersistedSovHubData {
+                hub_id: registered_id,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(resolve_sov_hub_id(snap, Some(destroyed_id), Some(sys_id)), None);
+        assert_eq!(
+            resolve_sov_hub_id(snap, Some(i64::from(sys_id)), None),
+            Some(registered_id)
+        );
+        assert_eq!(resolve_sov_hub_id(snap, None, Some(sys_id)), Some(registered_id));
+        assert_eq!(
+            resolve_sov_hub_id(snap, Some(unregistered_id), None),
+            Some(unregistered_id)
+        );
+    });
 }
