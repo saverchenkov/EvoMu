@@ -1674,7 +1674,10 @@ async fn fast_forward_and_sync_space_clock_recharges_cap_and_emits_cap_sync_with
     );
     let _ = ctx.drain_notifications_for_char(char_id);
 
+    let sim_before = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
     fast_forward_and_sync_space_clock(&ctx, char_id, Some((sys_id, ship_id)), 6_000).await;
+    let sim_after = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+    let wall_after = ctx.now_blueos_filetime_ticks();
 
     let post = sys_h
         .get_combat_state(ship_id)
@@ -1695,4 +1698,22 @@ async fn fast_forward_and_sync_space_clock_recharges_cap_and_emits_cap_sync_with
         !notifs.iter().any(|n| n.event == "DoSimClockRebase"),
         "#1015: must never emit DoSimClockRebase"
     );
+    // `#1268`: OnModuleAttributeChanges after +6000s fast-forward uses unrebased system sim clock
+    // instead of jumping +6000s ahead of client sim time (`wall_after`).
+    let mut checked_ts = 0usize;
+    for n in notifs.iter().filter(|n| n.event == "OnModuleAttributeChanges") {
+        if let Some(PyRep::List(entries)) = n.args.first() {
+            for entry in entries {
+                if let PyRep::Tuple(t) | PyRep::List(t) = entry {
+                    let ts = t[4].as_i64().expect("OnModuleAttributeChange timestamp");
+                    assert!(
+                        ts >= sim_before && ts <= sim_after,
+                        "expected sim-aligned ts in [{sim_before}, {sim_after}], got {ts} (wall_after={wall_after})"
+                    );
+                    checked_ts += 1;
+                }
+            }
+        }
+    }
+    assert!(checked_ts >= 1, "expected at least 1 OnModuleAttributeChanges entry");
 }

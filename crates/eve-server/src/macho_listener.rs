@@ -802,9 +802,37 @@ fn build_destiny_batch(
             _ => None,
         })
         .unwrap_or(false);
+    let base_stamp = stamp as u32;
+    let batch_stamp = if !has_set_state {
+        let mut inferred: Option<u32> = None;
+        let mut uniform = true;
+        if let PyRep::List(items) | PyRep::Tuple(items) = &updates {
+            for entry in items {
+                if let Some((Some(entry_stamp), _, _)) =
+                    crate::sequencer_invariants::parse_destiny_entry(entry)
+                {
+                    match inferred {
+                        None => inferred = Some(entry_stamp),
+                        Some(prev) if prev != entry_stamp => {
+                            uniform = false;
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+        if uniform {
+            inferred.filter(|&s| s > base_stamp).unwrap_or(base_stamp)
+        } else {
+            base_stamp
+        }
+    } else {
+        base_stamp
+    };
     Some(crate::outbound_sequencer::DestinyBatch {
         epoch,
-        stamp: stamp as u32,
+        stamp: batch_stamp,
         has_set_state,
         updates,
         wait_for_bubble,

@@ -1343,3 +1343,152 @@ async fn test_1147_wire_warp_cancel_and_natural_exit_suppress_ego_fx_and_arm_set
     );
 }
 
+#[tokio::test]
+async fn build_destiny_batch_and_sequencer_deliver_fx_floor_damage_state_without_regression() {
+    use crate::outbound_sequencer::{
+        normalize_server_destiny_batch, sequence_tick_with_events, OutFrame, SessionWireState,
+    };
+    use eve_destiny::{Ball, CombatState, DestinyEvent, MovementMode};
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    let sys_id = 30_000_142_u32;
+    let ship_id = 99_200_001_i64;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 11567,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 2.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 800.0,
+                max_shield_hp: 1_000.0,
+                armor_hp: 800.0,
+                max_armor_hp: 1_000.0,
+                structure_hp: 800.0,
+                max_structure_hp: 1_000.0,
+                capacitor: 0.0,
+                max_capacitor: 1_000.0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    sys_handle.push_set_state(ship_id).await.unwrap();
+    let (init_tick, init_evs, init_pyrep) =
+        sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    let mut rx = sys_handle.subscribe();
+    let mut wire = SessionWireState::new(1268, 1268);
+    let ep = wire.enter_space(Some(sys_id));
+
+    let set_state_batch = build_destiny_batch(
+        &ctx,
+        ep,
+        init_tick,
+        &init_evs,
+        init_pyrep,
+        &[],
+        SelfDestinyWireContext::NonDock,
+    )
+    .expect("SetState batch");
+    for sub in normalize_server_destiny_batch(&mut wire, set_state_batch) {
+        let (frame, evs) = sequence_tick_with_events(&mut wire, sub);
+        assert!(frame.is_some(), "SetState must emit DoDestinyUpdate");
+        assert!(evs.is_empty(), "SetState produced unexpected sequencer drops: {evs:?}");
+    }
+
+    // Advance wire last_stamp ahead of current_tick via an FX-floored update (simulating Doomsday
+    // OnSpecialFX clamped above ballpark.current_tick under TiDi).
+    let fx_floor = init_tick + 5;
+    let fx_evs = vec![DestinyEvent::OnSpecialFX {
+        ball_id: ship_id,
+        module_id: Some(9001),
+        guid: "effects.DoomsdayBeam".to_string(),
+        is_active: true,
+    }];
+    let fx_pyrep = eve_destiny::wire::encode_destiny_updates(fx_floor as u32, &fx_evs, None);
+    let fx_batch = build_destiny_batch(
+        &ctx,
+        ep,
+        init_tick,
+        &fx_evs,
+        fx_pyrep,
+        &[],
+        SelfDestinyWireContext::NonDock,
+    )
+    .expect("FX batch");
+    assert_eq!(fx_batch.stamp, fx_floor as u32);
+    for sub in normalize_server_destiny_batch(&mut wire, fx_batch) {
+        let (frame, evs) = sequence_tick_with_events(&mut wire, sub);
+        assert!(frame.is_some());
+        assert!(evs.is_empty());
+    }
+
+    // Mirror actor `last_fx_stamp = fx_floor`, heal ship, flush peer/self updates while tick == init_tick.
+    sys_handle
+        .last_fx_stamp
+        .fetch_max(fx_floor, std::sync::atomic::Ordering::AcqRel);
+    let _ = sys_handle.heal_combat_state(ship_id).await.unwrap();
+    let flushed = sys_handle.flush_peer_observer_updates(None).await.unwrap();
+    assert!(flushed >= 1);
+
+    let bcast = rx.try_recv().expect("flushed TickBroadcast");
+    let dmg_evs = bcast
+        .observer_events
+        .get(&ship_id)
+        .expect("ego OnDamageStateChange event");
+    let dmg_pyrep = bcast
+        .observer_updates_pyrep
+        .get(&ship_id)
+        .expect("ego OnDamageStateChange updates_pyrep")
+        .clone();
+
+    let dmg_batch = build_destiny_batch(
+        &ctx,
+        ep,
+        bcast.tick,
+        dmg_evs,
+        dmg_pyrep,
+        &[],
+        SelfDestinyWireContext::NonDock,
+    )
+    .expect("OnDamageStateChange batch");
+    assert_eq!(
+        dmg_batch.stamp, fx_floor as u32,
+        "build_destiny_batch must lift batch.stamp to uniform entry stamp fx_floor={fx_floor}"
+    );
+
+    let mut delivered_damage = false;
+    for sub in normalize_server_destiny_batch(&mut wire, dmg_batch) {
+        let (frame_opt, evs) = sequence_tick_with_events(&mut wire, sub);
+        assert!(
+            evs.is_empty(),
+            "heal OnDamageStateChange must not trigger sequencer drop: {evs:?}"
+        );
+        if let Some(OutFrame::DoDestinyUpdate { stamp, updates, .. }) = frame_opt {
+            assert_eq!(stamp, fx_floor as u32);
+            if let PyRep::List(entries) = updates {
+                for entry in &entries {
+                    if let Some((Some(st), "OnDamageStateChange", Some(_))) =
+                        crate::sequencer_invariants::parse_destiny_entry(entry)
+                    {
+                        assert_eq!(st, fx_floor as u32);
+                        delivered_damage = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(delivered_damage, "OnDamageStateChange must be delivered, not dropped as stamp_regression");
+}
+

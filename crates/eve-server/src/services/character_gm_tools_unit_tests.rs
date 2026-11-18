@@ -1930,3 +1930,86 @@ async fn gm_advancetime_heal_cap_upgrade_and_gm_fit_process_inv_change() {
     assert!(fit_notifs.iter().any(|n| n.event == "OnItemChange"));
     assert!(fit_notifs.iter().any(|n| n.event == "OnMultipleItemChange"));
 }
+
+#[tokio::test]
+async fn gm_heal_uses_system_sim_clock_after_advancetime_for_attr_changes() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let mut sess = gm_session(char_id, ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    ctx.db
+        .acquire_online_lock(1, sess.session_id.max(1), Some(char_id), true, ctx.now_unix())
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(sys_id);
+            ship.flag = eve_db::InventoryFlag::None;
+        }
+        crate::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = eve_destiny::CombatState::default();
+    cs.max_capacitor = 168_750.0;
+    cs.capacitor = 0.0;
+    cs.max_shield_hp = 325_000.0;
+    cs.shield_hp = 260_000.0;
+    sys_h.try_spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: 11567,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        cs,
+    );
+
+    // Advance virtual clock by 6,000s (as `advance_server_time(6000)` does) without rebasing client sim clock.
+    ctx.advance_virtual_clock(6_000);
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let sim_before = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+
+    handle_gm_slash_ext(&ctx, &mut sess, char_id, "/heal")
+        .await
+        .expect("handled")
+        .expect("/heal succeeds");
+
+    let sim_after = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+    let wall_after = ctx.now_blueos_filetime_ticks();
+    assert!(
+        wall_after - sim_after >= 50_000_000_000,
+        "virtual clock should remain ~6000s ahead of unrebased client sim clock"
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    let mut checked = 0usize;
+    for n in notifs.iter().filter(|n| n.event == "OnModuleAttributeChanges") {
+        if let Some(PyRep::List(entries)) = n.args.first() {
+            for entry in entries {
+                if let PyRep::Tuple(t) | PyRep::List(t) = entry {
+                    let ts = t[4].as_i64().expect("timestamp");
+                    assert!(
+                        ts >= sim_before && ts <= sim_after,
+                        "expected /heal OnModuleAttributeChange ts in [{sim_before}, {sim_after}], got {ts} (wall_after={wall_after})"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked >= 2, "expected capacitor + shield attr changes from /heal");
+}

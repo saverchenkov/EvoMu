@@ -1680,7 +1680,7 @@ pub(crate) async fn fast_forward_and_sync_space_clock(
             );
         }
         if shield_changed && post_cs.max_shield_hp > 0.0 {
-            let now_ft = ctx.now_blueos_filetime_ticks();
+            let now_ft = ctx.now_system_sim_filetime_ticks_for_ship(notify_cid, ship_id);
             let old_shield = pre_cs
                 .as_ref()
                 .map(|c| c.shield_hp)

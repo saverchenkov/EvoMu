@@ -751,20 +751,35 @@ pub(super) fn encode_destiny_updates_with_fx_floor(
     ballpark: Option<&Ballpark>,
     last_fx_stamp_opt: Option<&std::sync::atomic::AtomicU64>,
 ) -> PyRep {
-    let items: Vec<PyRep> = events
+    // `#1268`: Keep a single uniform Destiny stamp across the entire update batch whenever
+    // `fx_floor_stamp > stamp`, so mixed `(OnSpecialFX, OnDamageStateChange)` or standalone
+    // non-FX observer flushes (e.g. `/heal`) never mix stamps or regress behind `last_fx_stamp`.
+    let has_set_state = events
         .iter()
-        .map(|ev| {
-            let ev_stamp = if matches!(ev, DestinyEvent::OnSpecialFX { .. }) {
-                let s = stamp.max(fx_floor_stamp);
-                if let Some(a) = last_fx_stamp_opt {
-                    a.fetch_max(u64::from(s), std::sync::atomic::Ordering::AcqRel);
-                }
-                s
-            } else {
-                stamp
-            };
-            encode_destiny_event(ev_stamp, ev, ballpark)
-        })
+        .any(|ev| matches!(ev, DestinyEvent::SetState { .. }));
+    let batch_stamp = if has_set_state {
+        ballpark.map(|p| p.current_tick as u32).unwrap_or(stamp)
+    } else {
+        stamp.max(fx_floor_stamp)
+    };
+    if events
+        .iter()
+        .any(|ev| matches!(ev, DestinyEvent::OnSpecialFX { .. }))
+    {
+        if let Some(a) = last_fx_stamp_opt {
+            a.fetch_max(u64::from(batch_stamp), std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+    let ordered = events
+        .iter()
+        .filter(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+        .chain(
+            events
+                .iter()
+                .filter(|ev| !matches!(ev, DestinyEvent::SetState { .. })),
+        );
+    let items: Vec<PyRep> = ordered
+        .map(|ev| encode_destiny_event(batch_stamp, ev, ballpark))
         .collect();
     PyRep::List(items)
 }
@@ -830,7 +845,7 @@ pub(super) fn build_tick_broadcast_with_fx_floor(
         let has_fx = obs_evs
             .iter()
             .any(|ev| matches!(ev, DestinyEvent::OnSpecialFX { .. }));
-        if has_fx && effective_fx_floor > stamp {
+        if !has_set_state && effective_fx_floor > stamp {
             observer_updates_pyrep.insert(
                 obs_id,
                 encode_destiny_updates_with_fx_floor(

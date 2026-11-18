@@ -1116,7 +1116,7 @@ impl ServerContext {
                 if cid > 0 {
                     if let Some(PyRep::List(items)) = recipient_args.first_mut() {
                         for item in items.iter_mut() {
-                            if let PyRep::Tuple(t) = item {
+                            if let PyRep::Tuple(t) | PyRep::List(t) = item {
                                 if matches!(t.get(1), Some(PyRep::None)) {
                                     t[1] = PyRep::Integer(cid);
                                 }
