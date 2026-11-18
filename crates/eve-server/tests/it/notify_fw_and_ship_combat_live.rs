@@ -85,22 +85,30 @@ async fn test_live_notify_ship_death_and_kill_notification() {
     let mut sess_a = login_pilot_undocked(&ctx, 94_001, "demo", "demo-secret", PILOT_A).await;
     let mut sess_b = login_pilot_undocked(&ctx, 94_002, "other", "other-secret", PILOT_B).await;
 
-    // Teleport both ships to Zarzakh (lawless space)
+    // Teleport both ships to Zarzakh inside The Fulcrum's 150 km safe zone so the
+    // Zarzakh gravity hazard deals zero damage and death comes strictly from weapon fire.
     slash(&ctx, &mut sess_a, "/tr 30100000").await;
     slash(&ctx, &mut sess_b, "/tr 30100000").await;
 
-    let _ship_a = sess_a.ship_id.expect("active ship a");
+    let ship_a = sess_a.ship_id.expect("active ship a");
     let ship_b = sess_b.ship_id.expect("active ship b");
 
+    let fulcrum_pos = ctx
+        .sde
+        .stations
+        .get(&60_015_187)
+        .expect("The Fulcrum station in Zarzakh")
+        .position;
     let sys_h = ctx.systems.get_or_spawn(SYS_ZARZAKH);
-    sys_h.set_ball_position(ship_b, DVec3::new(11_000.0, 0.0, 0.0)).await;
+    sys_h.set_ball_position(ship_a, fulcrum_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    sys_h.set_ball_position(ship_b, fulcrum_pos + DVec3::new(11_000.0, 0.0, 0.0)).await;
 
-    // Fit gun and give ammo to pilot A
+    // Fit gun and give compatible Small Projectile ammo (185 = EMP S) to pilot A
     slash(&ctx, &mut sess_a, "/setskill 3300 5").await; // Gunnery 5
-    slash(&ctx, &mut sess_a, "/setskill 3301 5").await; // Small Projectile Turret 5
-    let fit_rep = slash(&ctx, &mut sess_a, "/fit me 484").await; // Small Autocannon
+    slash(&ctx, &mut sess_a, "/setskill 3302 5").await; // Small Projectile Turret 5
+    let fit_rep = slash(&ctx, &mut sess_a, "/fit me 484").await; // 125mm Gatling AutoCannon I
     let gun_id = fit_rep.dict_get("itemID").expect("fitted gun itemID").as_i64().unwrap();
-    slash(&ctx, &mut sess_a, "/giveitem 218 100").await; // EMP S ammo
+    slash(&ctx, &mut sess_a, "/giveitem 185 200").await; // EMP S ammo
 
     drain_all(&ctx, PILOT_A);
     drain_all(&ctx, PILOT_B);
@@ -119,11 +127,30 @@ async fn test_live_notify_ship_death_and_kill_notification() {
     drain_all(&ctx, PILOT_A);
     drain_all(&ctx, PILOT_B);
 
-    for _ in 0..40 {
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(ship_b),
+        ],
+    )
+    .await
+    .expect("initial dogmaIM.Activate must succeed with compatible projectile ammo");
+
+    for _ in 0..100 {
         if sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none() {
             break;
         }
-        let _ = rpc(
+        ctx.advance_secs(5);
+        sys_h.step_manual(5.0).await.unwrap();
+        if sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none() {
+            break;
+        }
+        match rpc(
             &ctx,
             &mut sess_a,
             "dogmaIM",
@@ -134,11 +161,18 @@ async fn test_live_notify_ship_death_and_kill_notification() {
                 PyRep::Integer(ship_b),
             ],
         )
-        .await;
-        ctx.advance_secs(5);
-        let _ = sys_h.step_manual(5.0).await;
+        .await
+        {
+            Ok(_) => {}
+            Err(e) if e.code == "ModuleAlreadyActive" => {}
+            Err(e) => panic!("unexpected dogmaIM.Activate error: {e:?}"),
+        }
     }
 
+    assert!(
+        sys_h.get_ball_snapshot(ship_a).await.ok().flatten().is_some(),
+        "attacker ship_a must survive inside Zarzakh safe zone"
+    );
     assert!(
         sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none(),
         "ship_b must be destroyed by weapon fire"
