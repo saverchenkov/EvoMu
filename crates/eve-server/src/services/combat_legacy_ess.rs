@@ -4,6 +4,110 @@
 
 use super::*;
 
+/// Returns `true` when `group_id` is a canonical SDE Category 11 non-combatant prop, structure,
+/// container, billboard, cloud, capture/control point, or Homefront noncombatant rather than an
+/// attackable combat NPC.
+pub(crate) fn is_non_combat_npc_prop_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        306      // Spawn Container
+            | 319  // Large Collidable Structure
+            | 323  // Billboard
+            | 335  // Temporary Cloud
+            | 494  // Deadspace Overseer's Structure
+            | 496  // Deadspace Overseer's Belongings
+            | 784  // Large Collidable Ship
+            | 922  // Capture Point
+            | 925  // FW Infrastructure Hub
+            | 952  // Mission Container
+            | 1207 // Scatter Container
+            | 1872 // Structure Entities
+            | 1927 // Irregular Structure
+            | 1928 // Irregular Container
+            | 4073 // Temporary Collidable Structure
+            | 4494 // Control Point
+            | 4576 // Homefront Operations Structure
+            | 4771 // Homefront Operations Noncombatant
+    )
+}
+
+/// Returns `true` when `group_id` identifies invulnerable law-enforcement/authority NPCs
+/// (CONCORD, Police Drone, Customs Official, ambient/protective Sentry Guns, Homefront Allied
+/// Dreadnoughts) rather than attackable mission/combat NPCs. Note: `693..=698` (`Mission CONCORD *`)
+/// are attackable mission enemies and are intentionally excluded.
+pub(crate) fn is_invulnerable_npc_authority_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        99       // Sentry Gun
+            | 180  // Protective Sentry Gun
+            | 182  // Police Drone (CONCORD SWAT / surveillance police)
+            | 300  // Legacy/synthetic CONCORD fixture group ID
+            | 301  // Concord Drone (CONCORD Police / DED Special Operation)
+            | 446  // Customs Official
+            | 4572 // Homefront Operations Allied Dreadnought (all-zero damage resonances)
+    )
+}
+
+/// Returns `true` when `group_id` is a canonical SDE Sleeper, Autothysian Lancer, Seeker,
+/// Drifter, or Hidden Zenith Capital entity group.
+pub(crate) fn is_sleeper_or_drifter_npc_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        959..=961       // Deadspace Sleeper Sentinel
+            | 982..=1005 // Deadspace Sleeper Defender / Patroller
+            | 1307       // Roaming Sleepers Cruiser (Autothysian Lancer)
+            | 1310       // Drifter Battleship
+            | 1529       // Deadspace Sleeper Upgraded Avenger
+            | 1530       // Drifter Response Battleship
+            | 1768       // Seeker Scouts (Circadian Seeker)
+            | 1788       // Hidden Zenith Drifters
+            | 1804..=1807 // Hidden Zenith Empire Capitals
+            | 1956       // Drifter Reinforcements
+            | 4035       // Drifter Entities
+            | 4036       // Sleeper Entities
+    )
+}
+
+fn is_sde_zero_resonance_type(t: &eve_sde::InvType) -> bool {
+    const RES_ATTRS: [u16; 12] = [
+        eve_sde::attr_ids::SHIELD_EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::EM_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::THERMAL_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE,
+        eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE,
+    ];
+    // Synthetic test types omit resonance attributes (default 1.0 in build_type_combat_state);
+    // only treat an InvType as zero-resonance invulnerable when all 12 SDE resonance attrs are <= 0.0.
+    RES_ATTRS
+        .iter()
+        .all(|attr| t.default_attributes.get(attr).is_some_and(|&v| v <= 0.0))
+}
+
+fn is_combat_state_invulnerable(tcs: &eve_destiny::CombatState) -> bool {
+    tcs.is_tethered
+        || tcs.is_invulnerable()
+        || (tcs.shield_resonance == [0.0; 4]
+            && tcs.armor_resonance == [0.0; 4]
+            && tcs.structure_resonance == [0.0; 4])
+}
+
+/// Returns `true` when `t` is an attackable Category 11 combat NPC (zero-bounty mission/Navy/
+/// Storyline/Sleeper/Drifter/Triglavian NPCs included; props/containers, CONCORD/Police/Sentry,
+/// and 100%-resist invulnerable SDE NPC types excluded).
+pub(crate) fn is_attackable_npc_type(t: &eve_sde::InvType) -> bool {
+    t.category_id == 11
+        && !is_non_combat_npc_prop_group(t.group_id)
+        && !is_invulnerable_npc_authority_group(t.group_id)
+        && !is_sde_zero_resonance_type(t)
+}
+
 /// Updates a null-sec solar system's Dynamic Bounty System (`dbs_multiplier`) based on ratting
 /// volume (decays toward 0.50 floor) and capsuleer PvP ship losses (recovers toward 2.00 ceiling).
 /// (`feat:pve.dynamic-bounty`)
@@ -448,14 +552,11 @@ pub async fn handle_legacy_and_ess(
                     .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
                     .copied()
                     .unwrap_or(0.0);
-                // Non-NPCs (`category_id != 11`) and non-combatant props/containers/billboards/clouds
-                // remain invulnerable; legitimate zero-bounty combat NPCs (Empire Navy, CONCORD mission
-                // ships, Storyline rats, Sleepers) are attackable.
-                let is_non_combat_npc_prop = matches!(
-                    t.group_id,
-                    306 | 319 | 323 | 335 | 784 | 925 | 952 | 1207 | 1872 | 1927 | 1928 | 4073
-                );
-                if t.category_id != 11 || is_non_combat_npc_prop {
+                // Non-NPCs (`category_id != 11`), non-combatant props/structures/containers,
+                // CONCORD/Police/Sentry authorities, and zero-resonance invulnerable NPCs remain
+                // invulnerable; legitimate zero-bounty combat NPCs (Empire Navy, CONCORD mission
+                // ships, Storyline rats, Sleepers, Drifters) are attackable.
+                if !is_attackable_npc_type(t) {
                     return Some(Err(BridgeRpcError {
                         code: "TargetInvulnerable".into(),
                         message: format!(
@@ -552,7 +653,7 @@ pub async fn handle_legacy_and_ess(
                 .await
                 .ok()
                 .flatten()
-                .is_some_and(|tcs| tcs.is_tethered || tcs.is_invulnerable())
+                .is_some_and(|tcs| is_combat_state_invulnerable(&tcs))
             {
                 return Some(Err(BridgeRpcError {
                     code: "TargetInvulnerable".into(),
@@ -747,28 +848,33 @@ pub async fn handle_legacy_and_ess(
                                 .collect()
                         });
                     let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-                    let candidates: Vec<(i64, DVec3)> = all_balls
+                    let raw_candidates: Vec<(i64, DVec3)> = all_balls
                         .into_iter()
                         .filter(|b| {
                             b.id != ship_id
                                 && b.id != target_ball_id
                                 && !other_mission_balls.contains(&b.id)
+                                && b.position.distance(target_ball.position) <= 10_000.0
                                 && ctx
                                     .sde
                                     .types
                                     .get(&b.type_id)
-                                    .map(|t| {
-                                        t.category_id == 11
-                                            && t.default_attributes
-                                                .get(&eve_sde::attr_ids::ENTITY_KILL_BOUNTY)
-                                                .copied()
-                                                .unwrap_or(0.0)
-                                                > 0.0
-                                    })
-                                    .unwrap_or(false)
+                                    .is_some_and(is_attackable_npc_type)
                         })
                         .map(|b| (b.id, b.position))
                         .collect();
+                    let mut candidates = Vec::with_capacity(raw_candidates.len());
+                    for (bid, pos) in raw_candidates {
+                        let invuln = sys_handle
+                            .get_combat_state(bid)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|tcs| is_combat_state_invulnerable(&tcs));
+                        if !invuln {
+                            candidates.push((bid, pos));
+                        }
+                    }
                     let max_secondary_targets = weapon_type
                         .default_attributes
                         .get(&2104)

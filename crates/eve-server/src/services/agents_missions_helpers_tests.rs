@@ -695,3 +695,125 @@ fn level_gating_blocks_higher_dungeon_and_anomic_offers_and_payouts_for_l1_agent
     assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 900).base_isk, 358_000);
     assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 16_154).base_isk, 6_200_000);
 }
+
+#[test]
+fn resolve_security_mission_encounter_filters_by_canonical_group_id_not_spawn_index() {
+    use eve_sde::{DungeonTemplate, NpcSpawnGroupInfo};
+
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+    sde.dungeons.clear();
+    sde.npc_spawn_groups.clear();
+    sde.dungeons.insert(
+        9_100,
+        DungeonTemplate {
+            dungeon_id: 9_100,
+            name: "Guristas Scout Outpost".into(),
+            archetype_id: Some(20),
+            faction_id: Some(500_010),
+            difficulty: Some(1),
+        },
+    );
+
+    // 1. Place non-combat prop/authority/Sleeper groups at high shifted spawn_group_id indices
+    //    AND place the legitimate combat group (canonical group_id = 552) at old excluded index 11.
+    for (shifted_sgid, canonical_gid, name, fac) in [
+        (5_001_u32, 306_u32, "Spawn Container", 500_010_u32),
+        (5_002, 494, "Deadspace Overseer's Structure", 500_010),
+        (5_003, 922, "Capture Point", 500_010),
+        (5_004, 4073, "Temporary Collidable Structure", 500_010),
+        (5_005, 301, "Concord Drone", 500_010),
+        (5_006, 1307, "Roaming Sleepers Cruiser", 500_021),
+    ] {
+        sde.npc_spawn_groups.insert(
+            shifted_sgid,
+            NpcSpawnGroupInfo {
+                spawn_group_id: shifted_sgid,
+                group_id: canonical_gid,
+                group_name: name.into(),
+                faction_id: fac,
+                ship_class: 1,
+                npc_type_ids: vec![16_997],
+            },
+        );
+    }
+    sde.npc_spawn_groups.insert(
+        11,
+        NpcSpawnGroupInfo {
+            spawn_group_id: 11,
+            group_id: 552, // Guristas Frigate (valid combat NPC despite spawn_group_id == 11)
+            group_name: "Guristas Frigate".into(),
+            faction_id: 500_010,
+            ship_class: 1,
+            npc_type_ids: vec![16_997],
+        },
+    );
+    ctx.sde = Arc::new(sde.clone());
+
+    let ag = make_agent(3_018_921, 2, 24, 1);
+    let tmpl = make_tmpl(9_200, "Guristas Trouble", Some("BasicKill"), false);
+    let enc = resolve_security_mission_encounter(&ctx, &tmpl, &ag, 30_000_142);
+    assert_eq!(enc.spawn_group_id, 11);
+    assert_eq!(enc.npc_type_ids, vec![16_997]);
+
+    // 2. When only non-combat prop, authority, and non-explicit Sleeper/Drifter groups exist,
+    //    even fallback selection must reject all of them instead of picking a prop or CONCORD.
+    sde.npc_spawn_groups.remove(&11);
+    for (shifted_sgid, canonical_gid, name) in [
+        (5_007_u32, 319_u32, "Large Collidable Structure"),
+        (5_008, 496, "Deadspace Overseer's Belongings"),
+        (5_009, 4494, "Control Point"),
+        (5_010, 4576, "Homefront Operations Structure"),
+        (5_011, 4771, "Homefront Operations Noncombatant"),
+        (5_012, 300, "CONCORD Police"),
+        (5_013, 182, "Police Drone"),
+        (5_014, 1768, "Seeker Scouts"),
+        (5_015, 1804, "Hidden Zenith Amarr Capital"),
+    ] {
+        sde.npc_spawn_groups.insert(
+            shifted_sgid,
+            NpcSpawnGroupInfo {
+                spawn_group_id: shifted_sgid,
+                group_id: canonical_gid,
+                group_name: name.into(),
+                faction_id: 500_010,
+                ship_class: 1,
+                npc_type_ids: vec![99_999],
+            },
+        );
+    }
+    ctx.sde = Arc::new(sde.clone());
+    let fallback_enc = resolve_security_mission_encounter(&ctx, &tmpl, &ag, 30_000_142);
+    assert_eq!(
+        fallback_enc.spawn_group_id, 0,
+        "Non-combat props, authority NPCs, and non-explicit Sleepers must never match mission fallback"
+    );
+
+    // 3. Explicit Sleeper/Drifter encounter allows canonical Sleeper group_id regardless of shifted spawn_group_id
+    let sleeper_tmpl = make_tmpl(9_201, "Sleeper Incursion", Some("BasicKill"), false);
+    sde.dungeons.insert(
+        9_101,
+        DungeonTemplate {
+            dungeon_id: 9_101,
+            name: "Sleeper Incursion".into(),
+            archetype_id: Some(20),
+            faction_id: Some(500_024),
+            difficulty: Some(1),
+        },
+    );
+    sde.npc_spawn_groups.insert(
+        226,
+        NpcSpawnGroupInfo {
+            spawn_group_id: 226,
+            group_id: 1307,
+            group_name: "Roaming Sleepers Cruiser".into(),
+            faction_id: 500_024,
+            ship_class: 1,
+            npc_type_ids: vec![34_337],
+        },
+    );
+    ctx.sde = Arc::new(sde);
+    let sleeper_enc = resolve_security_mission_encounter(&ctx, &sleeper_tmpl, &ag, 30_000_142);
+    assert_eq!(sleeper_enc.spawn_group_id, 226);
+    assert_eq!(sleeper_enc.npc_type_ids, vec![34_337]);
+}
