@@ -269,27 +269,32 @@ pub(crate) fn settle_ship_insurance_payout_in_snap(
         )
         .with_context(eve_db::ledger::JournalContext::Type, i64::from(ship_type_id)),
     });
-    let mid = snap.alloc_entity_id();
-    let subject = format!("Insurance Payout for Ship {ship_id}");
-    snap.mails.push(eve_db::MailRecord {
-        message_id: mid,
-        sender_id: 1_000_132, // Secure Commerce Commission
-        recipient_id: victim_char_id,
-        subject: subject.clone(),
-        body: format!(
-            "Pend Insurance has credited {:.2} ISK following the destruction of ship {} (type {}).",
-            payout_isk, ship_id, ship_type_id
-        ),
-    });
-    snap.mail_timestamps.insert(mid, now_unix);
-    snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
+    let (mail_id, mail_subject) = if victim_char_id > 0 {
+        let mid = snap.alloc_entity_id();
+        let subject = format!("Insurance Payout for Ship {ship_id}");
+        snap.mails.push(eve_db::MailRecord {
+            message_id: mid,
+            sender_id: 1_000_132, // Secure Commerce Commission
+            recipient_id: victim_char_id,
+            subject: subject.clone(),
+            body: format!(
+                "Pend Insurance has credited {:.2} ISK following the destruction of ship {} (type {}).",
+                payout_isk, ship_id, ship_type_id
+            ),
+        });
+        snap.mail_timestamps.insert(mid, now_unix);
+        snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
+        (Some(mid), subject)
+    } else {
+        (None, String::new())
+    };
     ShipInsuranceSettlement {
         payout_isk,
         is_corp,
         credited_owner_id: jid_target,
         balance_after_isk: ba.to_wire_f64(),
-        mail_id: Some(mid),
-        mail_subject: subject,
+        mail_id,
+        mail_subject,
     }
 }
 

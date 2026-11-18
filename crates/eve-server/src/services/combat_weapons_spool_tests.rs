@@ -731,3 +731,235 @@ async fn step_system_entropic_spools_uses_surface_distance_on_capital_hull_1247(
         "out-of-range spool past 13,000m surface distance must stop cleanly"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_destruction_turret_on_unpiloted_corp_ship_attributes_corp_not_ceo() {
+    let (ctx, _, attacker_id, attacker_ship, sys_id) = make_spool_test_ctx();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let now_unix = ctx.now_unix();
+    let corp_id = 98_999_104i64;
+    let ally_id = 99_999_104i64;
+    let ceo_id = 90_999_104i64;
+    let ceo_ship = 200_999_104i64;
+    let corp_ship_id = 1_990_104_001i64;
+
+    spawn_spool_ball(&ctx, sys_id, attacker_ship, 47_271, DVec3::ZERO, 10_000.0, 10_000.0, 10_000.0, 5_000.0).await;
+    let corp_ship_ball = spawn_spool_ball(
+        &ctx,
+        sys_id,
+        corp_ship_id,
+        587,
+        DVec3::new(2_000.0, 0.0, 0.0),
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+    )
+    .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ceo = snap.characters[&attacker_id].clone();
+        ceo.character_id = ceo_id;
+        ceo.name = "Corp CEO".to_string();
+        ceo.corporation_id = corp_id;
+        ceo.alliance_id = Some(ally_id);
+        ceo.active_ship_id = ceo_ship;
+        snap.characters.insert(ceo_id, ceo);
+
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Target Spool Corp".to_string();
+        corp.ticker = "TSCRP".to_string();
+        corp.ceo_id = ceo_id;
+        corp.alliance_id = Some(ally_id);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            ceo_ship,
+            make_fighter_item(ceo_ship, 587, ceo_id, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            corp_ship_id,
+            make_fighter_item(corp_ship_id, 587, corp_id, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+        snap.item_positions.insert(corp_ship_id, [2_000.0, 0.0, 0.0]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(corp_ship_id, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(corp_ship_id, eve_db::PersistedCombatHp::default());
+    });
+
+    // Simulate turret handler passing `player_target_info = Some((corp.ceo_id, corp_ship_id))`.
+    let res = handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_handle,
+        attacker_id,
+        attacker_ship,
+        47_271,
+        47_240,
+        corp_ship_id,
+        &corp_ship_ball,
+        Some((ceo_id, corp_ship_id)),
+        sys_id,
+        250.0,
+        now_unix,
+    )
+    .await;
+
+    assert!(res.kill_id > 0, "corp ship turret kill must emit killmail");
+    assert!(res.wreck_id > 0, "corp ship turret kill must spawn wreck");
+    assert_eq!(res.corpse_id, 0);
+    assert!(
+        sys_handle.get_ball_snapshot(corp_ship_id).await.unwrap().is_none(),
+        "corp ship ball must be removed from Ballpark"
+    );
+    let wreck_slim = sys_handle
+        .get_ball_slim_item(res.wreck_id)
+        .await
+        .unwrap()
+        .expect("corp ship wreck slim item present");
+    assert_eq!(wreck_slim.dict_get("ownerID").and_then(eve_proto::PyRep::as_i64), Some(corp_id));
+    assert_eq!(wreck_slim.dict_get("corpID").and_then(eve_proto::PyRep::as_i64), Some(corp_id));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&corp_ship_id));
+        assert!(!snap.item_positions.contains_key(&corp_ship_id));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&corp_ship_id));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&corp_ship_id));
+        assert_eq!(snap.items[&res.wreck_id].owner_id, corp_id);
+        let km = &snap.killmails[&res.kill_id];
+        assert_eq!(km.victim_character_id, 0, "must not misattribute corp ship loss to CEO");
+        assert_eq!(km.victim_corp_id, corp_id);
+        assert_eq!(km.victim_alliance_id, Some(ally_id));
+        assert_eq!(km.attacker_character_id, attacker_id);
+        assert_eq!(snap.characters[&ceo_id].active_ship_id, ceo_ship, "CEO must not be podded");
+        assert!(!snap.mails.iter().any(|m| m.recipient_id <= 0));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_system_entropic_spools_destroys_unpiloted_corp_ship_without_npc_fallback() {
+    let (ctx, _, attacker_id, attacker_ship, sys_id) = make_spool_test_ctx();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let corp_id = 98_999_105i64;
+    let ally_id = 99_999_105i64;
+    let corp_ship_id = 1_990_104_002i64;
+    let mod1 = 740_105i64;
+    let ammo1 = 740_106i64;
+
+    spawn_spool_ball(&ctx, sys_id, attacker_ship, 47_271, DVec3::ZERO, 10_000.0, 10_000.0, 10_000.0, 5_000.0).await;
+    spawn_spool_ball(
+        &ctx,
+        sys_id,
+        corp_ship_id,
+        587,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+    )
+    .await;
+    sys_handle
+        .add_target_lock(
+            attacker_ship,
+            TargetLock {
+                target_id: corp_ship_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(50_000.0),
+            },
+        )
+        .await
+        .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Spool Victim Corp".to_string();
+        corp.ticker = "SVCRP".to_string();
+        corp.alliance_id = Some(ally_id);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            corp_ship_id,
+            make_fighter_item(corp_ship_id, 587, corp_id, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+        snap.item_positions.insert(corp_ship_id, [1_000.0, 0.0, 0.0]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(corp_ship_id, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(corp_ship_id, eve_db::PersistedCombatHp::default());
+
+        snap.skills.entry(attacker_id).or_default().insert(
+            12_210,
+            eve_db::TrainedSkillRecord {
+                type_id: 12_210,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+        snap.items.insert(mod1, make_fighter_item(mod1, 47_240, attacker_id, attacker_ship, InventoryFlag::HiSlot0, 1));
+        let mut ammo_rec = make_fighter_item(ammo1, 47_245, attacker_id, attacker_ship, InventoryFlag::HiSlot0, 5);
+        ammo_rec.singleton = false;
+        snap.items.insert(ammo1, ammo_rec);
+        snap.module_active_states.insert(mod1);
+        snap.module_active_charges.insert(mod1, 47_245);
+    });
+
+    let km_before = ctx.db.with_snapshot(|s| s.killmails.len());
+    let disint_t = ctx.sde.types.get(&47_240).unwrap();
+    handle_entropic_activation(
+        &ctx,
+        attacker_id,
+        attacker_ship,
+        sys_id,
+        mod1,
+        corp_ship_id,
+        disint_t,
+        Some(ammo1),
+        DamageVector::new(0.0, 500.0, 0.0, 0.0),
+        40.0,
+        3.0,
+    )
+    .unwrap();
+
+    step_system_entropic_spools(&ctx, sys_id, 3.1).await;
+
+    assert!(
+        sys_handle.get_ball_snapshot(corp_ship_id).await.unwrap().is_none(),
+        "entropic spool kill must remove unpiloted corp ship from Ballpark"
+    );
+    let expected_wreck_tid = ctx.sde.resolve_wreck_type_id(587, None).unwrap_or(26_557);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&corp_ship_id));
+        assert!(!snap.item_positions.contains_key(&corp_ship_id));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&corp_ship_id));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&corp_ship_id));
+        assert!(!snap.module_active_states.contains(&mod1));
+        assert!(
+            snap.committed_idempotency_keys
+                .contains(&(corp_ship_id, "ship_insurance_payout".to_string())),
+            "entropic spool kill of unpiloted corp ship must execute death pipeline, not NPC fallback"
+        );
+        assert_eq!(snap.killmails.len(), km_before + 1);
+        let km = snap
+            .killmails
+            .values()
+            .find(|k| k.victim_corp_id == corp_id && k.ship_type_id == 587)
+            .expect("corporate killmail emitted");
+        assert_eq!(km.victim_character_id, 0);
+        assert_eq!(km.victim_alliance_id, Some(ally_id));
+        assert!(
+            snap.items
+                .values()
+                .any(|it| it.type_id == expected_wreck_tid && it.owner_id == corp_id),
+            "wreck must belong to victim corporation, not attacker NPC fallback"
+        );
+    });
+}

@@ -367,9 +367,6 @@ pub fn execute_death_pipeline_sync_inner(
                 .get(&ship.type_id)
                 .map(|t| t.base_price)
                 .unwrap_or(230_000.0);
-            let explicit_pilot =
-                (victim_char_id > 0 && snap.characters.contains_key(&victim_char_id))
-                    .then_some(victim_char_id);
             let resolved_pilot = snap
                 .characters
                 .values()
@@ -382,11 +379,9 @@ pub fn execute_death_pipeline_sync_inner(
                         .find(|d| d.ship_id == victim_ship_id)
                         .map(|d| d.char_id)
                 });
-            let corp_owner_id = if explicit_pilot.is_none()
-                && resolved_pilot.is_none()
+            let corp_owner_id = if resolved_pilot.is_none()
                 && !snap.characters.contains_key(&ship.owner_id)
                 && snap.corporations.contains_key(&ship.owner_id)
-                && (victim_char_id <= 0 || victim_char_id == ship.owner_id)
             {
                 Some(ship.owner_id)
             } else {
@@ -909,15 +904,13 @@ pub fn execute_death_pipeline_sync_inner(
         };
 
         let ins_notify = if ins_settlement.payout_isk > 0.0 {
-            ins_settlement.mail_id.map(|mid| {
-                (
-                    ins_settlement.is_corp,
-                    ins_settlement.credited_owner_id,
-                    ins_settlement.balance_after_isk,
-                    mid,
-                    ins_settlement.mail_subject,
-                )
-            })
+            Some((
+                ins_settlement.is_corp,
+                ins_settlement.credited_owner_id,
+                ins_settlement.balance_after_isk,
+                ins_settlement.mail_id,
+                ins_settlement.mail_subject,
+            ))
         } else {
             None
         };
@@ -1152,7 +1145,7 @@ pub fn execute_death_pipeline_sync_inner(
         sys_handle.try_handoff_in_space_observer(victim_ship_id, cid, &[wreck_item_id, cid]);
     }
 
-    if let Some((ins_corp, owner_id, bal_wire, mid, subject)) = ins_notify {
+    if let Some((ins_corp, owner_id, bal_wire, mid_opt, subject)) = ins_notify {
         if ins_corp {
             let _ = ctx.emit_typed_with_id_type(
                 NotificationTarget::Corporation(owner_id),
@@ -1167,16 +1160,18 @@ pub fn execute_death_pipeline_sync_inner(
             let _ = ctx.notify_account_change(owner_id, "cash", owner_id, bal_wire);
         }
         if victim_char_id > 0 {
-            let sent = crate::services::mail_notify::SentMail {
-                message_id: mid,
-                sender_id: 1_000_132,
-                to_character_ids: &[victim_char_id],
-                to_list_id: None,
-                to_corp_or_alliance_id: None,
-                title: &subject,
-                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
-            };
-            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
+            if let Some(mid) = mid_opt {
+                let sent = crate::services::mail_notify::SentMail {
+                    message_id: mid,
+                    sender_id: 1_000_132,
+                    to_character_ids: &[victim_char_id],
+                    to_list_id: None,
+                    to_corp_or_alliance_id: None,
+                    title: &subject,
+                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+                };
+                crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
+            }
         }
     }
 

@@ -2791,3 +2791,139 @@ async fn unpiloted_corp_ship_and_non_mto_npc_hull_destroy_cleanly() {
         let _ = now;
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpiloted_corp_ship_insured_payout_and_ceo_misattribution_guard() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let attacker = 90_000_001i64;
+    let attacker_ship = 1_990_000_940i64;
+    let ceo_id = 90_999_941i64;
+    let ceo_ship = 1_990_000_941i64;
+    let corp_id = 98_000_941i64;
+    let ally_id = 99_000_941i64;
+    let insured_corp_ship = 1_990_000_942i64;
+    let direct_corp_ship = 1_990_000_943i64;
+    let now = ctx.now_unix();
+    let pos = DVec3::new(14_000.0, 0.0, 0.0);
+
+    spawn_ship(&ctx, sys_id, attacker_ship, attacker, 587, DVec3::ZERO, 0.0);
+    spawn_ship(&ctx, sys_id, ceo_ship, ceo_id, 587, pos, 0.0);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ceo = snap.characters[&attacker].clone();
+        ceo.character_id = ceo_id;
+        ceo.name = "Corp CEO".to_string();
+        ceo.corporation_id = corp_id;
+        ceo.alliance_id = Some(ally_id);
+        ceo.active_ship_id = ceo_ship;
+        snap.characters.insert(ceo_id, ceo);
+
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Insured Corp".to_string();
+        corp.ticker = "INSC".to_string();
+        corp.ceo_id = ceo_id;
+        corp.alliance_id = Some(ally_id);
+        snap.corporations.insert(corp_id, corp);
+
+        for (bid, payout) in [(insured_corp_ship, 500_000.0), (direct_corp_ship, 250_000.0)] {
+            snap.items.insert(
+                bid,
+                make_item(bid, 587, corp_id, i64::from(sys_id), InventoryFlag::None, 1, 0.0),
+            );
+            snap.item_positions.insert(bid, [pos.x, pos.y, pos.z]);
+            snap.insurance_contracts.insert(
+                bid,
+                eve_db::PersistedInsuranceContractRecord {
+                    ship_id: bid,
+                    ship_type_id: 587,
+                    owner_id: corp_id,
+                    level_name: "Platinum".into(),
+                    level_fraction: 1.0,
+                    cost_isk: 50_000.0,
+                    payout_isk: payout,
+                    start_unix: now.saturating_sub(100),
+                    end_unix: now + 3_600,
+                },
+            );
+        }
+    });
+
+    for bid in [insured_corp_ship, direct_corp_ship] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: 587,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(587),
+        );
+    }
+
+    let (corp_bal_before, mails_before) = ctx
+        .db
+        .with_snapshot(|s| (s.corporations[&corp_id].master_wallet_balance(), s.mails.len()));
+
+    // 1. Direct `settle_ship_insurance_payout_in_snap` with `victim_char_id == 0` credits corp div 1 without creating a `recipient_id == 0` mail.
+    let direct_settlement = ctx.db.with_mut_snapshot(|snap| {
+        crate::services::combat_crimewatch::combat_wrecks_killmails::settle_ship_insurance_payout_in_snap(
+            snap,
+            &ctx.sde,
+            0,
+            direct_corp_ship,
+            587,
+            false,
+            true,
+            now,
+        )
+    });
+    assert!((direct_settlement.payout_isk - 250_000.0).abs() < 1e-6);
+    assert!(direct_settlement.is_corp);
+    assert_eq!(direct_settlement.credited_owner_id, corp_id);
+    assert_eq!(direct_settlement.mail_id, None);
+    assert!(direct_settlement.mail_subject.is_empty());
+
+    // 2. Passing stale `victim_char_id = ceo_id` to `execute_death_pipeline_sync` for an unpiloted corp hull
+    //    must still resolve `corp_owner_id = Some(corp_id)` and `resolved_vic = 0`, credit corp div 1, and emit no char-0 mail.
+    let res = execute_death_pipeline_sync(
+        &ctx,
+        sys_id,
+        ceo_id,
+        insured_corp_ship,
+        attacker,
+        pos,
+        1,
+    )
+    .expect("insured unpiloted corp ship pipeline succeeds");
+    assert_eq!(res.ejected_capsule_id, None);
+    assert!((res.insurance_payout_isk - 500_000.0).abs() < 1e-6);
+
+    ctx.db.with_snapshot(|snap| {
+        let corp_bal_after = snap.corporations[&corp_id].master_wallet_balance();
+        assert_eq!(
+            corp_bal_after,
+            corp_bal_before
+                .checked_add(IskCents::from_f64_isk(750_000.0))
+                .unwrap(),
+            "corp division 1 wallet must receive both insurance payouts"
+        );
+        assert_eq!(snap.mails.len(), mails_before, "unpiloted corp insurance must not create recipient_id=0 mail");
+        assert!(!snap.mails.iter().any(|m| m.recipient_id <= 0));
+        assert!(!snap.mail_assigned_labels.keys().any(|(r, _)| *r <= 0));
+        assert_eq!(snap.items[&res.wreck_item_id].owner_id, corp_id);
+        let km = &snap.killmails[&res.killmail_id];
+        assert_eq!(km.victim_character_id, 0);
+        assert_eq!(km.victim_corp_id, corp_id);
+        assert_eq!(km.victim_alliance_id, Some(ally_id));
+        assert_eq!(snap.characters[&ceo_id].active_ship_id, ceo_ship);
+    });
+}
