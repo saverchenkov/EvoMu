@@ -1768,13 +1768,16 @@ pub fn resolve_security_mission_encounter(
         if sg.npc_type_ids.is_empty() {
             return false;
         }
-        // Exclude non-combatant props/structures and roaming Drifter/Sleeper groups unless explicitly requested
-        if matches!(sg.spawn_group_id, 11 | 12 | 13 | 14 | 18 | 179 | 181 | 183 | 216) {
+        // Exclude non-combatant props/structures and invulnerable CONCORD/Police/Sentry groups by canonical SDE group_id
+        if crate::services::combat_crimewatch::combat_legacy_ess::is_non_combat_npc_prop_group(sg.group_id)
+            || crate::services::combat_crimewatch::combat_legacy_ess::is_invulnerable_npc_authority_group(sg.group_id)
+        {
             return false;
         }
+        // Exclude roaming/wormhole Sleeper & Drifter groups unless explicitly Sleeper/Drifter
         if !explicit_sleeper_or_drifter
             && target_faction_id != 500_024
-            && matches!(sg.spawn_group_id, 226 | 277 | 292..=295)
+            && crate::services::combat_crimewatch::combat_legacy_ess::is_sleeper_or_drifter_npc_group(sg.group_id)
         {
             return false;
         }
@@ -1791,20 +1794,20 @@ pub fn resolve_security_mission_encounter(
                 && (name_low.contains(&target_faction_name.to_lowercase()) || sg.faction_id == target_faction_id)
                 && sg.ship_class == target_ship_class
         })
-        .min_by_key(|sg| sg.spawn_group_id)
+        .min_by_key(|sg| (sg.group_id, sg.spawn_group_id))
         .or_else(|| {
             ctx.sde
                 .npc_spawn_groups
                 .values()
                 .filter(|sg| is_combat_mission_spawn_group(sg) && (sg.faction_id == target_faction_id || sg.group_name.contains("Deadspace")))
-                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
+                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.group_id, sg.spawn_group_id))
         })
         .or_else(|| {
             ctx.sde
                 .npc_spawn_groups
                 .values()
                 .filter(|sg| is_combat_mission_spawn_group(sg))
-                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
+                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.group_id, sg.spawn_group_id))
         });
 
     let (spawn_group_id, npc_type_ids) = match matching_group {
