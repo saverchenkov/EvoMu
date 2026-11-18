@@ -1688,7 +1688,9 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
         let roll = super::csprng_unit_f64(ctx);
         let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
         if roll < jam_chance && jam_chance > 0.0 {
-            let _ = sys.apply_ecm_jam_from(ship_id, target_id, jam_duration_s).await;
+            let _ = sys
+                .apply_module_ecm_jam(ship_id, module_id, target_id, jam_duration_s)
+                .await;
             crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
                 ctx,
                 sys_id,

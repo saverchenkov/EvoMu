@@ -1045,6 +1045,13 @@ pub enum SystemCommand {
         duration_s: f64,
         reply: oneshot::Sender<bool>,
     },
+    ApplyEcmJamFromModule {
+        source_id: BallId,
+        module_id: i64,
+        target_id: BallId,
+        duration_s: f64,
+        reply: oneshot::Sender<bool>,
+    },
     ApplyEcmBurst {
         source_id: BallId,
         burst_radius_m: f64,

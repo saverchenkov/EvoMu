@@ -49,6 +49,7 @@ pub(crate) fn is_cycle_gated_module_group(group_id: u32) -> bool {
             | 1122
             | 650
             | 80
+            | 201
             | 353
     )
 }

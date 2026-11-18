@@ -1102,18 +1102,7 @@ impl Ballpark {
             }
         }
 
-        for cs in self.combat_states.values_mut() {
-            cs.sync_action_breaks();
-            if cs.ecm_jammed_remaining_s > 0.0 {
-                cs.ecm_jammed_remaining_s = (cs.ecm_jammed_remaining_s - dt).max(0.0);
-                if cs.ecm_jammed_remaining_s <= 0.0 {
-                    cs.ecm_jammed_by.clear();
-                }
-            }
-            if cs.lance_disrupted_remaining_s > 0.0 {
-                cs.lance_disrupted_remaining_s = (cs.lance_disrupted_remaining_s - dt).max(0.0);
-            }
-        }
+        self.tick_combat_and_ecm_timers(dt);
 
         // Advance target locks and validate lock breaks (`DG-4`, `DG-5`).
         let mut lost_events = Vec::new();

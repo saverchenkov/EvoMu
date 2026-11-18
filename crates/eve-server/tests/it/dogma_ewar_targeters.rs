@@ -115,6 +115,43 @@ pub(crate) fn extract_item_attr(info_rep: &PyRep, attr_id: i64) -> f64 {
     0.0
 }
 
+async fn stop_undocked_ship(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    sys: &eve_server::system_actor::SystemHandle,
+    ship_id: i64,
+) -> Ball {
+    let kw = HashMap::new();
+    let bind_res = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(sys_id)), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject beyonce");
+    let beyonce_oid = match &bind_res {
+        PyRep::Tuple(outer) => outer[0].as_i64().expect("beyonce bound_id integer") as u64,
+        PyRep::Integer(oid) => *oid as u64,
+        other => panic!("unexpected MachoBindObject response: {other:?}"),
+    };
+    ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &kw, None)
+        .await
+        .expect("CmdStop after Undock");
+    // Drain Scorpion deceleration so repeated EWAR/Burst step_manual calls never drift out of range.
+    sys.step_manual(300.0).await.unwrap();
+    sys.get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("ship ball in space")
+        .1
+}
+
 #[tokio::test]
 async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     // parity: plan:DG-5, feat:dogma.targeting-ships-sensor-strength, feat:modules.ecm, feat:modules.burst-jammer, feat:modules.sensor-dampener, feat:modules.tracking-disruptor, feat:modules.target-painter, rpc:charUnboundMgr.SelectCharacterID
@@ -245,11 +282,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
 
     let sys_id = sess.solar_system_id.expect("solar_system_id after Undock");
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .expect("ship ball in space");
+    let ship_ball = stop_undocked_ship(&ctx, &mut sess, sys_id, &sys, ship_id).await;
 
     // Seed target ship (victim_id) fitted with 200mm AutoCannon II (2889) and Light Missile Launcher I (499) + Scourge Light Missile (210)
     let target_char_id = 90_000_002i64;
@@ -387,6 +420,8 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
             ecm_jammed = true;
             break;
         }
+        sys.step_manual(21.0).await.unwrap();
+        sys.set_capacitor(ship_id, 5_000.0).await.unwrap();
     }
     assert!(
         ecm_jammed,
@@ -568,7 +603,7 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
             burst_jammed = true;
             break;
         }
-        sys.step_manual(25.0).await.unwrap();
+        sys.step_manual(31.0).await.unwrap();
         sys.set_capacitor(ship_id, 5_000.0).await.unwrap();
     }
     assert!(
@@ -586,4 +621,339 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
         td_mod_id, gd_mod_id, tp_mod_id, opt_script_id, trk_script_id,
         m_rng_script_id, m_prec_script_id, target_turret_id, target_launcher_id,
     ).await;
+}
+
+#[tokio::test]
+async fn test_targeted_ecm_no_zero_time_reroll_and_early_stop_clears_jam() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4104);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 640; // Scorpion
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    for tid in [640u32, 1957, 587] {
+        grant_all_required_skills_for_type(&ctx, char_id, tid);
+    }
+    grant_skills(
+        &ctx,
+        char_id,
+        &[
+            (3426, 5), // CPU Management
+            (3413, 5), // Power Grid Management
+            (3418, 5), // Capacitor Management
+            (3417, 5), // Capacitor Systems Operation
+            (3427, 5), // Electronic Warfare
+        ],
+    );
+
+    let ecm_a = 100_991_011i64;
+    let ecm_b = 100_991_012i64;
+    for mid in [ecm_a, ecm_b] {
+        seed_test_item(&ctx, mid, 1957, char_id, station_id, InventoryFlag::Hangar, 1);
+    }
+    for (mid, flag) in [(ecm_a, InventoryFlag::MedSlot0), (ecm_b, InventoryFlag::MedSlot1)] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[PyRep::Integer(mid), PyRep::Integer(ship_id), PyRep::Integer(flag as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("fit ECM module");
+    }
+    // Start ecm_a with 0.0 jam strength to verify missed roll cannot be spammed at dt = 0.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&ecm_a) {
+            for attr in 238u16..=241 {
+                item.dynamic_attributes.insert(attr, 0.0);
+            }
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let sys_id = sess.solar_system_id.expect("solar_system_id after Undock");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ship_ball = stop_undocked_ship(&ctx, &mut sess, sys_id, &sys, ship_id).await;
+
+    let victim_id = 100_991_001i64;
+    let ally_id = 100_991_002i64;
+    let victim_char = 90_000_002i64;
+    seed_test_item(&ctx, victim_id, 587, victim_char, sys_id as i64, InventoryFlag::None, 1);
+    for (bid, x_off) in [(victim_id, 5_000.0), (ally_id, 10_000.0)] {
+        sys.spawn_ball(Ball {
+            id: bid,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(x_off, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.2,
+            mass: 1_350_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ball");
+    }
+    let add_lock = |src, dst| {
+        let lock = TargetLock {
+            target_id: dst,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        };
+        sys.add_target_lock(src, lock)
+    };
+    add_lock(ship_id, victim_id).await.unwrap();
+    add_lock(victim_id, ship_id).await.unwrap();
+    add_lock(victim_id, ally_id).await.unwrap();
+
+    // 1. Missed ECM activation red-cycles on Deactivate and blocks dt = 0 re-rolls via both Deactivate and TakeModuleOffline.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(ecm_a),
+            PyRep::String("targetHostile".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate ecm_a (miss roll)");
+    assert_eq!(
+        sys.get_combat_state(victim_id).await.unwrap().unwrap().ecm_jammed_remaining_s,
+        0.0
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Deactivate",
+        &[PyRep::Integer(ecm_a), PyRep::String("targetHostile".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Deactivate ecm_a (red-cycle)");
+    assert_eq!(
+        sys.update_module_overload(ship_id, ecm_a, false).await,
+        Ok(true),
+        "Targeted ECM Deactivate must red-cycle until cycle end rather than aborting at t = 0"
+    );
+    let reroll_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(ecm_a),
+                PyRep::String("targetHostile".into()),
+                PyRep::Integer(victim_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(reroll_err.code, "ModuleReactivationDelay");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ecm_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline ecm_a");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "SetModuleOnline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ecm_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetModuleOnline ecm_a");
+    let offline_reroll_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(ecm_a),
+                PyRep::String("targetHostile".into()),
+                PyRep::Integer(victim_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(offline_reroll_err.code, "ModuleReactivationDelay");
+
+    // 2. Boost both ECMs to 100% jam chance, verify early stop clears active jam and preserves second ECM jam.
+    sys.step_manual(21.0).await.unwrap();
+    sys.set_capacitor(ship_id, 5_000.0).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        for mid in [ecm_a, ecm_b] {
+            if let Some(item) = snap.items.get_mut(&mid) {
+                for attr in 238u16..=241 {
+                    item.dynamic_attributes.insert(attr, 1_000.0);
+                }
+            }
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(ecm_a),
+            PyRep::String("targetHostile".into()),
+            PyRep::Integer(victim_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate deterministic ecm_a");
+    let jammed_cs = sys.get_combat_state(victim_id).await.unwrap().unwrap();
+    assert!(jammed_cs.ecm_jammed_remaining_s > 0.0);
+    assert_eq!(jammed_cs.ecm_jammed_by, vec![ship_id]);
+    assert_eq!(
+        sys.get_target_locks(victim_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.target_id)
+            .collect::<Vec<_>>(),
+        vec![ship_id]
+    );
+
+    let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ecm_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline ecm_a clears its active jam");
+    let cleared_cs = sys.get_combat_state(victim_id).await.unwrap().unwrap();
+    assert_eq!(cleared_cs.ecm_jammed_remaining_s, 0.0);
+    assert!(cleared_cs.ecm_jammed_by.is_empty());
+    let end_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        end_notifs.iter().any(|n| n.event == "OnEwarEnd"),
+        "Stopping ECM early must emit OnEwarEnd: {end_notifs:?}"
+    );
+    assert!(
+        add_lock(victim_id, ally_id).await.is_ok(),
+        "Unjammed victim must immediately be able to lock non-jammer targets again"
+    );
+
+    // 3. With both ecm_a and ecm_b active, stopping ecm_a keeps victim jammed by ecm_b until target unlock stops ecm_b.
+    sys.set_capacitor(ship_id, 6_875.0).await.unwrap();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "SetModuleOnline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ecm_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Re-online ecm_a");
+    sys.step_manual(21.0).await.unwrap();
+    sys.set_capacitor(ship_id, 6_875.0).await.unwrap();
+    for mid in [ecm_a, ecm_b] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                PyRep::Integer(mid),
+                PyRep::String("targetHostile".into()),
+                PyRep::Integer(victim_id),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate ecm module");
+    }
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_id), PyRep::Integer(ecm_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("TakeModuleOffline ecm_a while ecm_b active");
+    let still_jammed = sys.get_combat_state(victim_id).await.unwrap().unwrap();
+    assert!(
+        still_jammed.ecm_jammed_remaining_s > 0.0,
+        "Stopping ecm_a must not prematurely unjam victim still jammed by ecm_b"
+    );
+    assert_eq!(still_jammed.ecm_jammed_by, vec![ship_id]);
+
+    assert!(sys.remove_target_lock(ship_id, victim_id).await.unwrap());
+    let unjammed_after_unlock = sys.get_combat_state(victim_id).await.unwrap().unwrap();
+    assert_eq!(unjammed_after_unlock.ecm_jammed_remaining_s, 0.0);
+    assert!(unjammed_after_unlock.ecm_jammed_by.is_empty());
 }

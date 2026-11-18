@@ -2289,6 +2289,27 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub async fn apply_module_ecm_jam(
+        &self,
+        source_id: BallId,
+        module_id: i64,
+        target_id: BallId,
+        duration_s: f64,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::ApplyEcmJamFromModule {
+                source_id,
+                module_id,
+                target_id,
+                duration_s,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn apply_ecm_burst(
         &self,
         source_id: BallId,
