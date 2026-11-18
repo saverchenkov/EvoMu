@@ -751,6 +751,279 @@ fn clone_bay_rejects_empty_slots_offline_and_non_operational_structures() {
     assert_eq!(ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dest)));
 }
 
+#[test]
+fn clone_jump_emits_wallet_and_clone_update_notifications_and_credits_upwell_owner() {
+    let ctx = test_ctx();
+    let hs_stations: Vec<(u32, i64)> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.solar_system_id < 31_000_000 && s.region_id != POCHVEN_REGION_ID)
+        .flat_map(|s| s.stations.iter().map(move |st| (s.solar_system_id, st)))
+        .filter(|(_, st)| st.has_clone_bay && st.station_id != 60_015_187)
+        .map(|(sys_id, st)| (sys_id, st.station_id))
+        .take(2)
+        .collect();
+    assert!(hs_stations.len() >= 2, "expected at least two HS clone-bay stations");
+    let (sys_a, station_a) = hs_stations[0];
+    let (_sys_b, station_b) = hs_stations[1];
+
+    let jumper_cid = 97_610_001_i64;
+    let jumper_uid = jumper_cid as u64;
+    let jumper_corp = 98_610_001_i64;
+    let owner_cid = 97_610_002_i64;
+    let owner_uid = owner_cid as u64;
+    let owner_corp = 98_610_002_i64;
+    let struct_dep = 1_061_000_000_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, uid, corp, sys, st_id, bal) in [
+            (jumper_cid, jumper_uid, jumper_corp, sys_a, Some(station_a), IskCents::from_isk(500_000)),
+            (owner_cid, owner_uid, owner_corp, sys_a, Some(station_a), IskCents::from_isk(1_000_000)),
+        ] {
+            let mut ch = snap.characters.values().next().cloned().expect("demo char");
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.name = format!("Pilot {cid}");
+            ch.corporation_id = corp;
+            ch.clone_grade = 2;
+            ch.solar_system_id = sys;
+            ch.station_id = st_id;
+            ch.structure_id = None;
+            ch.balance = bal;
+            ch.last_clone_jump_unix = 0;
+            let cap_id = put_item(snap, 670, cid, station_a, InventoryFlag::Hangar, 1, true);
+            ch.active_ship_id = cap_id;
+            snap.characters.insert(cid, ch);
+
+            let uname = format!("u{uid}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+            snap.skills.entry(cid).or_default().insert(
+                24242,
+                TrainedSkillRecord {
+                    type_id: 24242,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+
+        let mut j_corp = eve_db::CorporationRecord::new(jumper_corp, "Jumper Corp", "JMPR", jumper_cid);
+        j_corp.members.insert(jumper_cid);
+        snap.corporations.insert(jumper_corp, j_corp);
+
+        let mut o_corp = eve_db::CorporationRecord::new(owner_corp, "Struct Owner Corp", "SOWR", owner_cid)
+            .with_master_wallet(IskCents::from_isk(2_000_000));
+        o_corp.members.insert(owner_cid);
+        snap.corporations.insert(owner_corp, o_corp);
+
+        snap.structures.insert(
+            struct_dep,
+            UpwellStructureRecord {
+                structure_id: struct_dep,
+                type_id: 35832,
+                owner_corp_id: owner_corp,
+                solar_system_id: sys_a,
+                name: "Clone Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            97_610_101,
+            InventoryItemRecord {
+                item_id: 97_610_101,
+                type_id: 35894,
+                owner_id: owner_corp,
+                location_id: struct_dep,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(97_610_101, true);
+        let mut ext = structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.insert(
+            struct_dep,
+            StructureAccessProfile {
+                profile_id: 97_610_201,
+                name: "OpenCloneBay".into(),
+                owner_corp_id: owner_corp,
+                ..Default::default()
+            },
+        );
+        save_ext_state(snap, &ext);
+
+        snap.jump_clones.insert(
+            jumper_cid,
+            vec![
+                JumpCloneRecord {
+                    jump_clone_id: 9601,
+                    character_id: jumper_cid,
+                    location_id: station_b,
+                    implants: Vec::new(),
+                },
+                JumpCloneRecord {
+                    jump_clone_id: 9602,
+                    character_id: jumper_cid,
+                    location_id: struct_dep,
+                    implants: Vec::new(),
+                },
+            ],
+        );
+    });
+
+    ctx.db
+        .acquire_online_lock(jumper_uid, 97_610_001, Some(jumper_cid), true, ctx.now_unix())
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(owner_uid, 97_610_002, Some(owner_cid), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(jumper_cid);
+    let _ = ctx.drain_notifications_for_char(owner_cid);
+
+    let cap_id = ctx.db.with_snapshot(|snap| snap.characters[&jumper_cid].active_ship_id);
+    let mut sess = make_session(jumper_uid, jumper_cid, jumper_corp, sys_a, Some(station_a), None, Some(cap_id));
+
+    // 1. InsufficientFunds fails cleanly with zero wallet or clone-jump notifications.
+    let err = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(9601)])
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, "InsufficientFunds");
+    assert!(ctx.drain_notifications_for_char(jumper_cid).is_empty());
+
+    // 2. Funded NPC -> NPC jump debits 900,000 ISK and emits OnAccountChange + OnCloneJumpUpdate.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().balance = IskCents::from_isk(5_000_000);
+    });
+    let npc_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(9601)])
+        .unwrap()
+        .expect("funded NPC clone jump must succeed");
+    assert_eq!(npc_ok.dict_get("locationID"), Some(&PyRep::Integer(station_b)));
+    let npc_notifs = ctx.drain_notifications_for_char(jumper_cid);
+    assert!(npc_notifs.iter().any(|n| n.event == "OnCloneJumpUpdate"));
+    assert_eq!(
+        npc_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(jumper_cid),
+            PyRep::Real(4_100_000.0),
+        ]]
+    );
+
+    // 3. Jump into Upwell structure -> same-structure free swap emits OnCloneJumpUpdate without OnAccountChange.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().last_clone_jump_unix = 0;
+    });
+    crate::services::space_destiny::clear_session_change_timer(&ctx, jumper_cid);
+    let _ = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(9602)])
+        .unwrap()
+        .expect("jump into Upwell structure must succeed");
+    let _ = ctx.drain_notifications_for_char(jumper_cid);
+
+    let swap_jc_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().last_clone_jump_unix = 0;
+        let clones = snap.jump_clones.get_mut(&jumper_cid).unwrap();
+        clones.push(JumpCloneRecord {
+            jump_clone_id: 9603,
+            character_id: jumper_cid,
+            location_id: struct_dep,
+            implants: Vec::new(),
+        });
+        9603_i64
+    });
+    crate::services::space_destiny::clear_session_change_timer(&ctx, jumper_cid);
+    let swap_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(swap_jc_id)])
+        .unwrap()
+        .expect("same-structure clone swap must succeed");
+    assert_eq!(swap_ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dep)));
+    let swap_notifs = ctx.drain_notifications_for_char(jumper_cid);
+    assert!(swap_notifs.iter().any(|n| n.event == "OnCloneJumpUpdate"));
+    assert!(
+        !swap_notifs.iter().any(|n| n.event == "OnAccountChange"),
+        "free same-structure clone swap must not emit OnAccountChange"
+    );
+
+    // 4. Leaving Upwell structure charges leave-behind fee and emits OnAccountChange to jumper and owner corp.
+    let (jumper_before, owner_before, dest_jc_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().last_clone_jump_unix = 0;
+        let target_id = snap.jump_clones[&jumper_cid]
+            .iter()
+            .find(|jc| jc.location_id != struct_dep)
+            .expect("off-structure jump clone")
+            .jump_clone_id;
+        (
+            snap.characters[&jumper_cid].balance,
+            snap.corporations[&owner_corp].division_balance(1),
+            target_id,
+        )
+    });
+    crate::services::space_destiny::clear_session_change_timer(&ctx, jumper_cid);
+    let _ = ctx.drain_notifications_for_char(owner_cid);
+    let dep_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(dest_jc_id)])
+        .unwrap()
+        .expect("leaving Upwell structure must succeed");
+    assert_ne!(dep_ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dep)));
+
+    let (jumper_after, owner_after) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters[&jumper_cid].balance,
+            snap.corporations[&owner_corp].division_balance(1),
+        )
+    });
+    assert!(jumper_after < jumper_before, "jumper balance must decrease");
+    assert_eq!(
+        owner_after.0 - owner_before.0,
+        jumper_before.0 - jumper_after.0,
+        "structure owner corp div 1 must be credited the exact leave-behind fee"
+    );
+    let jumper_notifs = ctx.drain_notifications_for_char(jumper_cid);
+    assert!(jumper_notifs.iter().any(|n| n.event == "OnCloneJumpUpdate"));
+    assert_eq!(
+        jumper_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(jumper_cid),
+            PyRep::Real(jumper_after.to_wire_f64()),
+        ]]
+    );
+    let owner_notifs = ctx.drain_notifications_for_char(owner_cid);
+    assert_eq!(
+        owner_notifs
+            .iter()
+            .filter(|n| n.event == "OnAccountChange")
+            .map(|n| n.args.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(owner_corp),
+            PyRep::Real(owner_after.to_wire_f64()),
+        ]]
+    );
+}
+
 #[cfg(test)]
 #[path = "character_clone_jump_rules_extra_unit_tests.rs"]
 mod character_clone_jump_rules_extra_unit_tests;

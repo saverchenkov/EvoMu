@@ -575,4 +575,69 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
             PyRep::Real(540_000.0),
         ]]
     );
+
+    // A second corporation renting at the same Upwell structure pays the static owner fee
+    // (`40_000.0`), not an occupancy-scaled 1.5x NPC quote.
+    let corp2_id = 98_000_057_i64;
+    let char2_id = 90_000_057_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp2 =
+            eve_db::CorporationRecord::new(corp2_id, "Second Tenant", "TEN2", char2_id)
+                .with_master_wallet(IskCents::from_isk(100_000));
+        corp2.members.insert(char2_id);
+        corp2.member_roles.insert(char2_id, u64::MAX);
+        snap.corporations.insert(corp2_id, corp2);
+        let mut ch2 = snap.characters.get(&char_id).cloned().unwrap();
+        ch2.character_id = char2_id;
+        ch2.user_id = char2_id as u64;
+        ch2.name = "Tenant Two CEO".into();
+        ch2.corporation_id = corp2_id;
+        ch2.station_id = None;
+        ch2.structure_id = Some(struct_id);
+        snap.characters.insert(char2_id, ch2);
+    });
+    let mut sess2 = session.clone();
+    sess2.session_id = 9_057;
+    sess2.character_id = Some(char2_id);
+    sess2.user_id = Some(char2_id as u64);
+    sess2.corporation_id = Some(corp2_id);
+    sess2.corp_role = u64::MAX;
+    sess2.corp_account_key = 1000;
+    sess2.station_id = None;
+    sess2.structure_id = Some(struct_id);
+
+    let quote_upwell_2 = handle(
+        &ctx,
+        &mut sess2,
+        "officeManager",
+        "GetPriceQuote",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(quote_upwell_2, PyRep::Real(40_000.0));
+    let rent_upwell_2 = handle(
+        &ctx,
+        &mut sess2,
+        "officeManager",
+        "RentOffice",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rent_upwell_2.dict_get("cost").and_then(|v| v.as_f64()), Some(40_000.0));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.corporations[&corp2_id].division_balance(1),
+            IskCents::from_isk(60_000)
+        );
+        assert_eq!(
+            snap.corporations[&owner_corp_id].division_balance(1),
+            IskCents::from_isk(580_000)
+        );
+    });
 }

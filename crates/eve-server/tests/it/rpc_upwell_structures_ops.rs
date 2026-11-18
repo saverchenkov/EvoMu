@@ -520,3 +520,505 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         assert_eq!(it.flag, InventoryFlag::Deliveries);
     });
 }
+
+#[tokio::test]
+async fn structure_control_wire_tcp_rejects_unauthorized_and_roundtrips_authorized() {
+    use eve_db::corp_roles;
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+        CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,
+        SessionChange, MACHO_PROXY_NODE_ID, V24_BOOT_BUILD, V24_CODENAME_AT_REGION,
+        V24_MACHO_VERSION, V24_VERSION_NUMBER,
+    };
+    use eve_proto::{marshal, MACHONETERR_WRAPPEDEXCEPTION};
+    use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use eve_testkit::client_contract::SemanticLookupContext;
+    use eve_testkit::client_harness::{
+        ClientErrorResponse, ClientHarness, ClientWireExchange, ClientWireFrame,
+        ClientWireFrameKind, ClientWireTransport,
+    };
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::tcp::OwnedWriteHalf;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    fn call_id_from_addr(addr: &MachoAddress) -> u64 {
+        match addr {
+            MachoAddress::Client { call_id, .. }
+            | MachoAddress::Node { call_id, .. }
+            | MachoAddress::Any { call_id, .. } => *call_id,
+            MachoAddress::Broadcast { .. } => 0,
+        }
+    }
+
+    fn decode_tcp_wire_frame(
+        req_call_id: u64,
+        wire_rep: PyRep,
+        rpc_result: &mut Option<Result<PyRep, ClientErrorResponse>>,
+    ) -> ClientWireFrame {
+        let pkt = MachoPacket::from_pyrep(&wire_rep)
+            .unwrap_or_else(|| panic!("invalid MachoPacket from TCP socket: {wire_rep:?}"));
+        let call_id = match call_id_from_addr(&pkt.destination) {
+            0 => match call_id_from_addr(&pkt.source) {
+                0 => req_call_id,
+                cid => cid,
+            },
+            cid => cid,
+        };
+        let kind = match pkt.packet_type {
+            MachoPacketType::CallRsp => {
+                let reply = match &pkt.payload {
+                    PyRep::Tuple(outer) => match outer.first() {
+                        Some(PyRep::SubStream(inner)) => inner.as_ref().clone(),
+                        Some(other) => other.clone(),
+                        None => PyRep::None,
+                    },
+                    other => other.clone(),
+                };
+                *rpc_result = Some(Ok(reply.clone()));
+                ClientWireFrameKind::CallRsp { call_id, reply }
+            }
+            MachoPacketType::ErrorResponse => {
+                let body = pkt.payload.clone();
+                let err = ClientErrorResponse {
+                    code: "ErrorResponse".into(),
+                    message: format!("{body:?}"),
+                    wire_body: body.clone(),
+                };
+                *rpc_result = Some(Err(err));
+                ClientWireFrameKind::ErrorResponse { call_id, body }
+            }
+            MachoPacketType::SessionChangeNotification => ClientWireFrameKind::SessionChange {
+                packet: pkt.payload,
+            },
+            MachoPacketType::Notification => {
+                let (event, args) = pkt
+                    .extract_broadcast_notification()
+                    .unwrap_or_else(|| panic!("expected 3-layer GPCS notification, got {pkt:?}"));
+                ClientWireFrameKind::Notification {
+                    event: event.to_owned(),
+                    args: args.to_vec(),
+                }
+            }
+            other => panic!("unexpected TCP MachoPacketType {other:?}: {pkt:?}"),
+        };
+        ClientWireFrame {
+            kind,
+            wire_packet: wire_rep,
+        }
+    }
+
+    fn decode_wrapped_user_error(body: &PyRep) -> (String, Vec<(PyRep, PyRep)>) {
+        let PyRep::Tuple(parts) = body else {
+            panic!("expected ErrorResponse tuple, got {body:?}");
+        };
+        assert_eq!(parts[1], PyRep::Integer(MACHONETERR_WRAPPEDEXCEPTION));
+        let PyRep::Tuple(inner) = &parts[2] else {
+            panic!("expected inner payload tuple");
+        };
+        let PyRep::Bytes(raw) = &inner[0] else {
+            panic!("expected marshaled exception bytes");
+        };
+        let PyRep::ObjectEx { header, .. } = marshal::decode(raw).expect("decode UserError") else {
+            panic!("expected ObjectEx UserError");
+        };
+        let PyRep::Tuple(h) = *header else {
+            panic!("expected ObjectEx header tuple");
+        };
+        assert_eq!(h[0], PyRep::Token("eveexceptions.UserError".into()));
+        let PyRep::Tuple(u_args) = &h[1] else {
+            panic!("expected UserError args tuple");
+        };
+        let name = u_args[0].as_str().expect("UserError name").to_owned();
+        let PyRep::Dict(entries) = &u_args[1] else {
+            panic!("expected UserError dict");
+        };
+        (name, entries.clone())
+    }
+
+    struct TcpMachoWireTransport {
+        ctx: Arc<ServerContext>,
+        wr: OwnedWriteHalf,
+        rx: mpsc::UnboundedReceiver<PyRep>,
+        client_id: u64,
+        user_id: u64,
+        next_call_id: u64,
+    }
+
+    impl ClientWireTransport for TcpMachoWireTransport {
+        fn send_wire_call<'a>(
+            &'a mut self,
+            service: &'a str,
+            bound_id: Option<u64>,
+            method: &'a str,
+            args: &'a [PyRep],
+            kwargs: &'a HashMap<String, PyRep>,
+        ) -> Pin<Box<dyn Future<Output = ClientWireExchange> + Send + 'a>> {
+            let service = service.to_owned();
+            let method = method.to_owned();
+            let args_vec = args.to_vec();
+            let kw_pairs: Vec<(PyRep, PyRep)> = kwargs
+                .iter()
+                .map(|(k, v)| (PyRep::ascii_bytes(k), v.clone()))
+                .collect();
+            Box::pin(async move {
+                let call_id = self.next_call_id;
+                self.next_call_id = self.next_call_id.saturating_add(1);
+                let inner_tuple = if let Some(bid) = bound_id {
+                    let oid = format!("N={MACHO_PROXY_NODE_ID}:{bid}");
+                    PyRep::Tuple(vec![
+                        PyRep::ascii_bytes(&oid),
+                        PyRep::ascii_bytes(&method),
+                        PyRep::Tuple(args_vec),
+                        PyRep::Dict(kw_pairs),
+                    ])
+                } else {
+                    PyRep::Tuple(vec![
+                        PyRep::ascii_bytes(&method),
+                        PyRep::Tuple(args_vec),
+                        PyRep::Dict(kw_pairs),
+                    ])
+                };
+                let is_obj = i64::from(bound_id.is_some());
+                let req = MachoPacket {
+                    packet_type: MachoPacketType::CallReq,
+                    source: MachoAddress::Client {
+                        client_id: self.client_id,
+                        call_id,
+                        service: None,
+                    },
+                    destination: MachoAddress::Node {
+                        node_id: MACHO_PROXY_NODE_ID,
+                        service: Some(service.clone()),
+                        call_id: 0,
+                    },
+                    user_id: Some(self.user_id),
+                    payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(is_obj),
+                        PyRep::SubStream(Box::new(inner_tuple)),
+                    ])]),
+                    named_payload: HashMap::new(),
+                };
+                write_framed_pyrep(&mut self.wr, &req.to_pyrep())
+                    .await
+                    .unwrap_or_else(|e| panic!("write TCP CallReq {service}.{method}: {e}"));
+
+                let mut frames = Vec::new();
+                let mut rpc_result: Option<Result<PyRep, ClientErrorResponse>> = None;
+                while rpc_result.is_none() {
+                    let wire_rep = tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
+                        .await
+                        .unwrap_or_else(|_| panic!("timed out waiting for {service}.{method} reply"))
+                        .unwrap_or_else(|| panic!("TCP reader closed before {service}.{method} reply"));
+                    frames.push(decode_tcp_wire_frame(call_id, wire_rep, &mut rpc_result));
+                }
+                while let Ok(Some(wire_rep)) =
+                    tokio::time::timeout(Duration::from_millis(50), self.rx.recv()).await
+                {
+                    let mut ignored = None;
+                    frames.push(decode_tcp_wire_frame(call_id, wire_rep, &mut ignored));
+                }
+                ClientWireExchange {
+                    rpc_result: rpc_result.expect("CallRsp or ErrorResponse"),
+                    frames,
+                    marshal_errors: Vec::new(),
+                }
+            })
+        }
+
+        fn semantic_lookup(&self) -> Option<SemanticLookupContext<'_>> {
+            Some(SemanticLookupContext {
+                sde: &self.ctx.sde,
+                db: &self.ctx.db,
+            })
+        }
+
+        fn drain_pending_frames(&mut self) -> Vec<ClientWireFrame> {
+            let mut frames = Vec::new();
+            let mut ignored = None;
+            while let Ok(wire_rep) = self.rx.try_recv() {
+                frames.push(decode_tcp_wire_frame(0, wire_rep, &mut ignored));
+            }
+            frames
+        }
+    }
+
+    async fn connect_tcp_harness(
+        ctx: Arc<ServerContext>,
+        addr: SocketAddr,
+        username: &str,
+        password: &str,
+        char_id: i64,
+    ) -> (ClientHarness<TcpMachoWireTransport>, tokio::task::JoinHandle<()>) {
+        let mut s = TcpStream::connect(addr).await.expect("connect macho tcp");
+        let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let client_ver = PyRep::Tuple(vec![
+            PyRep::Integer(170_472),
+            PyRep::Integer(i64::from(V24_MACHO_VERSION)),
+            PyRep::Integer(0),
+            PyRep::Real(V24_VERSION_NUMBER),
+            PyRep::Integer(i64::from(V24_BOOT_BUILD)),
+            PyRep::ascii_bytes(V24_CODENAME_AT_REGION),
+        ]);
+        write_framed_pyrep(&mut s, &client_ver).await.unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_framed_pyrep(&mut s).await.unwrap().unwrap().as_str(),
+            Some("OK CC")
+        );
+        write_framed_pyrep(
+            &mut s,
+            &CryptoChallengePacket::new_password_login(username, password).to_pyrep(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_framed_pyrep(&mut s).await.unwrap().unwrap(),
+            PyRep::Integer(2)
+        );
+        let srv_hs = CryptoServerHandshake::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap())
+            .expect("CryptoServerHandshake");
+        let hs_res = CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        };
+        write_framed_pyrep(&mut s, &hs_res.to_pyrep()).await.unwrap();
+
+        let ack = CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap())
+            .expect("CryptoHandshakeAck");
+        let init_pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        assert_eq!(init_pkt.packet_type, MachoPacketType::SessionInitialStateNotification);
+        let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+            panic!("expected Client destination on SessionInitialStateNotification");
+        };
+        let sess0_pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        assert_eq!(sess0_pkt.packet_type, MachoPacketType::SessionChangeNotification);
+
+        let (mut rd, wr) = s.into_split();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<PyRep>();
+        let reader_task = tokio::spawn(async move {
+            while let Ok(Some(rep)) = read_framed_pyrep(&mut rd).await {
+                if frame_tx.send(rep).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut harness = ClientHarness::new(TcpMachoWireTransport {
+            ctx,
+            wr,
+            rx: frame_rx,
+            client_id,
+            user_id: ack.user_id,
+            next_call_id: 1,
+        });
+        let kw = HashMap::new();
+        let sel_out = harness
+            .call_exchange("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw)
+            .await;
+        assert!(sel_out.result.is_ok(), "SelectCharacterID failed: {:?}", sel_out.result);
+        assert!(sel_out.violations.is_empty(), "SelectCharacterID violations: {:?}", sel_out.violations);
+        (harness, reader_task)
+    }
+
+    common::ensure_quasar_tap_hook_installed();
+    let ctx = Arc::new(ServerContext::new());
+    common::pin_clock(&ctx);
+
+    let sys_id: u32 = 30_000_142;
+    let struct_id: i64 = 991_000_955;
+    let orig_ship_1 = ctx.db.with_mut_snapshot(|snap| {
+        let mut ship_1 = 0_i64;
+        for (pid, is_ceo) in [(PILOT_1, true), (PILOT_2, false)] {
+            let ch = snap.characters.get_mut(&pid).expect("seeded character");
+            ch.corporation_id = CORP_1;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_id);
+            let sid = ch.active_ship_id;
+            if is_ceo {
+                ship_1 = sid;
+            }
+            if let Some(item) = snap.items.get_mut(&sid) {
+                item.location_id = struct_id;
+                item.flag = InventoryFlag::Hangar;
+            }
+        }
+        let corp = snap.corporations.entry(CORP_1).or_default();
+        corp.corporation_id = CORP_1;
+        corp.ceo_id = PILOT_1;
+        corp.members.insert(PILOT_1);
+        corp.members.insert(PILOT_2);
+        corp.member_roles.insert(PILOT_1, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(PILOT_2, 0);
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: CORP_1,
+                solar_system_id: sys_id,
+                name: "Wire Reject+Roundtrip Astrahus".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 120,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        ship_1
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho tcp");
+    let addr = listener.local_addr().unwrap();
+    let ctx_server = Arc::clone(&ctx);
+    let accept_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx_server);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    let kw = HashMap::new();
+
+    // 1. Unauthorized non-director member without ACL is rejected cleanly over TCP wire.
+    let (mut unauth, unauth_reader) =
+        connect_tcp_harness(Arc::clone(&ctx), addr, "other", "other-secret", PILOT_2).await;
+    let denied_out = unauth
+        .call_exchange("structureControl", None, "TakeControl", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert!(
+        denied_out.violations.is_empty(),
+        "unauthorized TakeControl contract violations: {:?}",
+        denied_out.violations
+    );
+    let denied_err = denied_out
+        .result
+        .expect_err("unauthorized non-director TakeControl must fail over TCP wire");
+    let (err_name, err_entries) = decode_wrapped_user_error(&denied_err.wire_body);
+    assert!(
+        err_name == "CorpRoleDenied"
+            || err_entries.iter().any(|(k, v)| {
+                k.as_str() == Some("info") && v.as_str().is_some_and(|s| s.contains("CorpRoleDenied"))
+            }),
+        "expected CorpRoleDenied UserError, got {err_name}: {err_entries:?}"
+    );
+    assert!(
+        denied_out.session_change_packets.is_empty(),
+        "rejected TakeControl must emit zero SessionChangeNotification packets, got {:?}",
+        denied_out.session_change_packets
+    );
+    assert!(
+        !denied_out
+            .notifications
+            .iter()
+            .any(|(ev, _)| ev == "OnAssumeStructureControl"),
+        "rejected TakeControl must not emit OnAssumeStructureControl, got {:?}",
+        denied_out.notifications
+    );
+    let pilot_after_reject = unauth
+        .call_exchange("structureControl", None, "GetStructurePilot", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert_eq!(pilot_after_reject.result, Ok(PyRep::None));
+    assert!(pilot_after_reject.violations.is_empty());
+    drop(unauth);
+    unauth_reader.abort();
+
+    // 2. Authorized CEO takes control and releases with 0-arg ReleaseControl over TCP wire.
+    let (mut auth, auth_reader) =
+        connect_tcp_harness(Arc::clone(&ctx), addr, "demo", "demo-secret", PILOT_1).await;
+    let take_out = auth
+        .call_exchange("structureControl", None, "TakeControl", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert!(take_out.violations.is_empty(), "TakeControl violations: {:?}", take_out.violations);
+    let take_rep = take_out.result.expect("authorized TakeControl over TCP must succeed");
+    assert_eq!(take_rep.dict_get("pilotID"), Some(&PyRep::Integer(PILOT_1)));
+    assert_eq!(take_rep.dict_get("structureID"), Some(&PyRep::Integer(struct_id)));
+    assert!(
+        take_out.session_change_packets.iter().any(|p| {
+            SessionChange::from_pyrep(p).is_some_and(|sc| {
+                sc.changes.iter().any(|(k, (old_v, new_v))| {
+                    k == "shipid"
+                        && *old_v == PyRep::Integer(orig_ship_1)
+                        && *new_v == PyRep::Integer(struct_id)
+                })
+            })
+        }),
+        "TakeControl must emit SessionChangeNotification shipid ({orig_ship_1} -> {struct_id})"
+    );
+    assert!(
+        take_out
+            .notifications
+            .iter()
+            .any(|(ev, args)| ev == "OnAssumeStructureControl" && args.is_empty()),
+        "TakeControl must emit 0-arg OnAssumeStructureControl, got {:?}",
+        take_out.notifications
+    );
+    assert!(
+        !take_out.notifications.iter().any(|(ev, _)| ev == "OnSessionChanged"),
+        "OnSessionChanged must remain suppressed when SessionChangeNotification is emitted"
+    );
+
+    let pilot_during = auth
+        .call_exchange("structureControl", None, "GetStructurePilot", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert_eq!(pilot_during.result, Ok(PyRep::Integer(PILOT_1)));
+    assert!(pilot_during.violations.is_empty());
+
+    let rel_out = auth
+        .call_exchange("structureControl", None, "ReleaseControl", &[], &kw)
+        .await;
+    assert!(rel_out.violations.is_empty(), "ReleaseControl violations: {:?}", rel_out.violations);
+    assert_eq!(rel_out.result, Ok(PyRep::None));
+    assert!(
+        rel_out.session_change_packets.iter().any(|p| {
+            SessionChange::from_pyrep(p).is_some_and(|sc| {
+                sc.changes.iter().any(|(k, (old_v, new_v))| {
+                    k == "shipid"
+                        && *old_v == PyRep::Integer(struct_id)
+                        && *new_v == PyRep::Integer(orig_ship_1)
+                })
+            })
+        }),
+        "ReleaseControl must emit SessionChangeNotification shipid ({struct_id} -> {orig_ship_1})"
+    );
+    assert!(
+        rel_out
+            .notifications
+            .iter()
+            .any(|(ev, args)| ev == "OnRelinquishStructureControl" && args.is_empty()),
+        "ReleaseControl must emit 0-arg OnRelinquishStructureControl, got {:?}",
+        rel_out.notifications
+    );
+    assert!(
+        !rel_out.notifications.iter().any(|(ev, _)| ev == "OnSessionChanged"),
+        "OnSessionChanged must remain suppressed when SessionChangeNotification is emitted"
+    );
+
+    let pilot_after = auth
+        .call_exchange("structureControl", None, "GetStructurePilot", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert_eq!(pilot_after.result, Ok(PyRep::None));
+    assert!(pilot_after.violations.is_empty());
+
+    drop(auth);
+    auth_reader.abort();
+    accept_task.abort();
+}

@@ -249,6 +249,12 @@ fn office_rental_quote_in_snap(snap: &eve_db::WorldStateSnapshot, station_id: i6
         .copied()
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(10_000.0);
+    // Upwell citadels use a static owner-configured office rental fee (`Corporation_logistics.md`).
+    if snap.structures.contains_key(&station_id) {
+        return base;
+    }
+    // DERIVED: Dynamic NPC station office scaling (+50% of base per occupied slot as an
+    // approximation of EVE NPC station occupancy adjustment).
     base * (1.0 + (occupied as f64) * 0.5)
 }
 

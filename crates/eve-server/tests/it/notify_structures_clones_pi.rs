@@ -1421,3 +1421,285 @@ async fn notify_batch7_abyssal_void_missions_fw_sov_pvp_and_tourney() {
 }
 
 }
+
+#[tokio::test]
+async fn clone_jump_corp_creation_recruitment_ad_and_office_rental_notifications() {
+    use eve_db::{CorporationRecord, IskCents, JumpCloneRecord, TrainedSkillRecord, UpwellStructureRecord};
+
+    let ctx = new_ctx();
+    common::pin_clock(&ctx);
+
+    let (dest_sys_id, dest_station_id) = ctx.db.with_snapshot(|snap| {
+        ctx.sde
+            .solar_systems
+            .values()
+            .filter(|s| s.solar_system_id < 31_000_000 && s.region_id != 10_000_070)
+            .flat_map(|s| s.stations.iter().map(move |st| (s.solar_system_id, st)))
+            .find(|(_, st)| {
+                st.has_clone_bay
+                    && st.station_id != JITA_STATION
+                    && st.station_id != 60_015_187
+                    && !snap.items.values().any(|i| i.location_id == st.station_id && i.type_id == 27)
+            })
+            .map(|(sys_id, st)| (sys_id, st.station_id))
+            .expect("empty HS clone-bay station")
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let cap_id = snap.next_entity_id + 1;
+        snap.next_entity_id = cap_id;
+        snap.items.insert(
+            cap_id,
+            make_item(cap_id, 670, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true),
+        );
+        let ch = snap.characters.get_mut(&PILOT_A).expect("PILOT_A");
+        ch.solar_system_id = SYS_JITA;
+        ch.station_id = Some(JITA_STATION);
+        ch.structure_id = None;
+        ch.active_ship_id = cap_id;
+        ch.clone_grade = 2;
+        ch.last_clone_jump_unix = 0;
+        ch.balance = IskCents::from_isk(500_000);
+        snap.skills.entry(PILOT_A).or_default().insert(
+            24242,
+            TrainedSkillRecord {
+                type_id: 24242,
+                level: 2,
+                skill_points: 16_000.0,
+            },
+        );
+        snap.skills.entry(PILOT_A).or_default().insert(
+            3363,
+            TrainedSkillRecord {
+                type_id: 3363,
+                level: 2,
+                skill_points: 100_000.0,
+            },
+        );
+        snap.jump_clones.insert(
+            PILOT_A,
+            vec![JumpCloneRecord {
+                jump_clone_id: 8_801,
+                character_id: PILOT_A,
+                location_id: dest_station_id,
+                implants: Vec::new(),
+            }],
+        );
+    });
+
+    let mut sess_a = SessionState::new(9_240);
+    common::login_pilot(&ctx, &mut sess_a, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess_a, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)])
+        .await
+        .expect("SelectCharacterID");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_A);
+
+    // 1. jumpCloneSvc.CloneJump: InsufficientFunds fails cleanly; funded NPC jump emits
+    // OnCloneJumpUpdate, OnJumpCloneCacheInvalidated, and character OnAccountChange.
+    let cj_err = rpc(&ctx, &mut sess_a, "jumpCloneSvc", "CloneJump", &[PyRep::Integer(8_801)])
+        .await
+        .unwrap_err();
+    assert_eq!(cj_err.code, "InsufficientFunds");
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(5_000_000);
+    });
+    let cj_ok = rpc(&ctx, &mut sess_a, "jumpCloneSvc", "CloneJump", &[PyRep::Integer(8_801)])
+        .await
+        .expect("funded CloneJump");
+    assert_eq!(cj_ok.dict_get("locationID"), Some(&PyRep::Integer(dest_station_id)));
+    let cj_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(find_notif(&cj_notifs, "OnCloneJumpUpdate").is_empty());
+    let _ = find_notif(&cj_notifs, "OnJumpCloneCacheInvalidated");
+    assert_eq!(
+        find_notif(&cj_notifs, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(PILOT_A),
+            PyRep::Real(4_100_000.0),
+        ]
+    );
+
+    // 2. corpRegistry.AddCorporation: InsufficientFunds fails cleanly; funded emits
+    // OnAccountChange, OnCorporationChanged (41 cols), and OnSessionChanged.
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_A);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(500_000);
+    });
+    let corp_err = rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("Underfunded Corp".into()), PyRep::String("UFND".into())],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(corp_err.code, "InsufficientFunds");
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&PILOT_A).unwrap().balance = IskCents::from_isk(500_000_000);
+    });
+    let created = rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("Part1 Verification Corp".into()), PyRep::String("P1VC".into())],
+    )
+    .await
+    .expect("funded AddCorporation");
+    let new_corp_id = created.dict_get("corporationID").and_then(PyRep::as_i64).expect("corpID");
+    assert_eq!(sess_a.corporation_id, Some(new_corp_id));
+    let add_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        find_notif(&add_notifs, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(PILOT_A),
+            PyRep::Real(498_400_200.0),
+        ]
+    );
+    let corp_chg = find_notif(&add_notifs, "OnCorporationChanged");
+    assert_eq!(corp_chg.len(), 2);
+    assert_eq!(corp_chg[0], PyRep::Integer(new_corp_id));
+    assert!(matches!(&corp_chg[1], PyRep::Dict(d) if d.len() == 41));
+    let _ = find_notif(&add_notifs, "OnSessionChanged");
+
+    // 3. corpRecProxy.CreateRecruitmentAd: zero corp wallet -> NotEnoughISK + zero notifs;
+    // funded 9-arg creation emits corp OnAccountChange (-250,000 ISK) + OnCorporationRecruitmentAdChanged.
+    let ad_args = vec![
+        PyRep::Integer(14),
+        PyRep::Integer(7),
+        PyRep::Integer(1),
+        PyRep::String("Recruiting pilots".into()),
+        PyRep::List(vec![PyRep::Integer(PILOT_A)]),
+        PyRep::String("P1VC Recruitment".into()),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+        PyRep::Integer(0),
+    ];
+    let ad_err = rpc(&ctx, &mut sess_a, "corpRecProxy", "CreateRecruitmentAd", &ad_args)
+        .await
+        .unwrap_err();
+    assert_eq!(ad_err.code, "NotEnoughISK");
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&new_corp_id)
+            .unwrap()
+            .set_division_balance(1, IskCents::from_isk(1_000_000));
+    });
+    let ad_ok = rpc(&ctx, &mut sess_a, "corpRecProxy", "CreateRecruitmentAd", &ad_args)
+        .await
+        .expect("funded CreateRecruitmentAd");
+    assert!(ad_ok.dict_get("adID").and_then(PyRep::as_i64).is_some());
+    let ad_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        find_notif(&ad_notifs, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(new_corp_id),
+            PyRep::Real(750_000.0),
+        ]
+    );
+    let _ = find_notif(&ad_notifs, "OnCorporationRecruitmentAdChanged");
+
+    // 4. officeManager.RentOffice: NotEnoughISK atomic failure, NPC notification completeness,
+    // and static fee on Upwell structures (no occupancy scaling).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.station_office_rental_costs.insert(dest_station_id, 50_000.0);
+        snap.corporations
+            .get_mut(&new_corp_id)
+            .unwrap()
+            .set_division_balance(1, IskCents::from_isk(1_000));
+    });
+    let rent_err = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(dest_station_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(rent_err.code, "NotEnoughISK");
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A).is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations
+            .get_mut(&new_corp_id)
+            .unwrap()
+            .set_division_balance(1, IskCents::from_isk(200_000));
+    });
+    let rent_npc = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(dest_station_id)])
+        .await
+        .expect("funded NPC RentOffice");
+    assert_eq!(rent_npc.dict_get("cost").and_then(|v| v.as_f64()), Some(50_000.0));
+    let office_id = rent_npc.dict_get("officeID").and_then(PyRep::as_i64).expect("officeID");
+    let npc_rent_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = find_notif(&npc_rent_notifs, "OnBillReceived");
+    assert_eq!(
+        find_notif(&npc_rent_notifs, "OnAccountChange"),
+        &[
+            PyRep::String("cash".into()),
+            PyRep::Integer(new_corp_id),
+            PyRep::Real(150_000.0),
+        ]
+    );
+    let _ = find_notif(&npc_rent_notifs, "OnItemChange");
+    assert_eq!(
+        find_notif(&npc_rent_notifs, "OnOfficeRentalChange"),
+        &[PyRep::Integer(new_corp_id), PyRep::Integer(office_id)]
+    );
+    assert!(
+        !npc_rent_notifs.iter().any(|(e, _)| e == "OnOfficeRentalChanged"),
+        "server must emit OnOfficeRentalChange only, never raw OnOfficeRentalChanged"
+    );
+
+    let struct_id = 1_031_000_000_099_i64;
+    let owner_corp_id = 98_000_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            owner_corp_id,
+            CorporationRecord::new(owner_corp_id, "Citadel Host", "CHST", PILOT_B)
+                .with_master_wallet(IskCents::from_isk(500_000)),
+        );
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id,
+                solar_system_id: dest_sys_id,
+                name: "Static Office Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.station_office_rental_costs.insert(struct_id, 40_000.0);
+        let existing_office = snap.next_entity_id + 1;
+        snap.next_entity_id = existing_office;
+        snap.items.insert(
+            existing_office,
+            make_item(existing_office, 27, 98_000_088, struct_id, InventoryFlag::Hangar, 1, true),
+        );
+        let ch = snap.characters.get_mut(&PILOT_A).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+    });
+    sess_a.station_id = None;
+    sess_a.structure_id = Some(struct_id);
+    let upwell_quote = rpc(&ctx, &mut sess_a, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("GetPriceQuote on occupied Upwell structure");
+    assert_eq!(upwell_quote, PyRep::Real(40_000.0));
+    let rent_upwell = rpc(&ctx, &mut sess_a, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("RentOffice on occupied Upwell structure");
+    assert_eq!(rent_upwell.dict_get("cost").and_then(|v| v.as_f64()), Some(40_000.0));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.corporations[&new_corp_id].division_balance(1),
+            IskCents::from_isk(110_000)
+        );
+    });
+}
