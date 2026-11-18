@@ -842,6 +842,7 @@ def _install_camera_dock_guard():
                             scene_mgr.DeactivateFISCamera()
                 _install_hangar_view_teardown_guard()
                 _install_hangar_transition_guard()
+                _install_skill_plan_panel_signal_guard()
                 return orig_open_view(self, viewInfo, reopen=reopen, cameraID=cameraID, **kwargs)
             _wrapped_open_view._evomu_camera_guard = True
             vss_cls._OpenView = _wrapped_open_view
@@ -850,6 +851,7 @@ def _install_camera_dock_guard():
             def _wrapped_activate_view(self, *args, **kwargs):
                 _install_hangar_view_teardown_guard()
                 _install_hangar_transition_guard()
+                _install_skill_plan_panel_signal_guard()
                 return orig_activate_view(self, *args, **kwargs)
             _wrapped_activate_view._evomu_camera_guard = True
             vss_cls.ActivateView = _wrapped_activate_view
@@ -2375,8 +2377,201 @@ def _install_modular_hangar_camera_guard():
     return hooked_std or hooked_cap
 
 
+_SKILL_PLAN_PANEL_SIGNAL_SPECS = (
+    (
+        "skillPlanSignals",
+        "skills.skillplan.skillPlanSignals",
+        "skills.skillplan",
+        (
+            ("on_created", "OnSkillPlanCreated"),
+            ("on_saved", "OnSkillPlanSaved"),
+            ("on_deleted", "OnSkillPlanDeleted"),
+        ),
+    ),
+    (
+        "skillPlanUISignals",
+        "eve.client.script.ui.skillPlan.skillPlanUISignals",
+        "eve.client.script.ui.skillPlan",
+        (
+            ("on_create_new_personal_button", "OnCreateNewPersonalSkillPlanButton"),
+            ("on_create_new_corp_button", "OnCreateNewCorpSkillPlanButton"),
+            ("on_edit_button", "OnEditSkillPlanButton"),
+            ("on_delete_button", "OnDeleteSkillPlanButton"),
+            ("on_close_new_button", "OnCloseNewSkillPlanButton"),
+            ("on_selected", "OnSkillPlanSelected"),
+            ("on_close_button", "OnSkillPlanCloseButton"),
+            ("on_show_multi_training_msg", "OnShowMultiTrainingMessage"),
+            ("on_show_alpha_training_msg", "OnShowAlphaTrainingMessage"),
+        ),
+    ),
+)
+
+
+def _iter_skill_plan_signal_containers(panel_mod, attr_name, mod_name, pkg_name):
+    """Return unique skill-plan signal container modules/objects in lookup order (#1332)."""
+    containers = []
+    for candidate in (
+        getattr(panel_mod, attr_name, None) if panel_mod is not None else None,
+        sys.modules.get(mod_name),
+        getattr(sys.modules.get(pkg_name), attr_name, None) if pkg_name else None,
+    ):
+        if candidate is not None and not any(c is candidate for c in containers):
+            containers.append(candidate)
+    return containers
+
+
+def _iter_skill_plan_panel_signals(panel_mod):
+    """Yield ``(signal_obj, method_name)`` pairs across skill-plan signal containers (#1332)."""
+    for attr_name, mod_name, pkg_name, slot_pairs in _SKILL_PLAN_PANEL_SIGNAL_SPECS:
+        for container in _iter_skill_plan_signal_containers(panel_mod, attr_name, mod_name, pkg_name):
+            for sig_name, method_name in slot_pairs:
+                sig = getattr(container, sig_name, None)
+                if sig is not None:
+                    yield sig, method_name
+
+
+def _prune_empty_signal_methods(methods_map, obj, funcs):
+    """Remove empty WeakSet entries from ``Signal._methods`` so closed panels drop out immediately (#1332)."""
+    if hasattr(funcs, "__len__") and len(funcs) == 0 and hasattr(methods_map, "pop"):
+        try:
+            methods_map.pop(obj, None)
+        except Exception:
+            pass
+
+
+def _discard_panel_slot_from_signal(sig, panel, slot, orig_func=None):
+    """Idempotently disconnect *panel*'s slot (and any pre-wrap function) from *sig* (#1332)."""
+    disconnect_fn = getattr(sig, "disconnect", None)
+    if slot is not None and callable(disconnect_fn):
+        try:
+            disconnect_fn(slot)
+        except Exception:
+            pass
+    methods_map = getattr(sig, "_methods", None)
+    if methods_map is None or not hasattr(methods_map, "get"):
+        return
+    try:
+        funcs = methods_map.get(panel)
+    except Exception:
+        return
+    if funcs is None or not hasattr(funcs, "discard"):
+        return
+    slot_func = getattr(slot, "__func__", None) if slot is not None else None
+    if slot_func is not None:
+        funcs.discard(slot_func)
+    if orig_func is not None:
+        funcs.discard(orig_func)
+    _prune_empty_signal_methods(methods_map, panel, funcs)
+
+
+def _disconnect_skill_plan_panel_signals(panel, panel_mod=None, orig_slot_funcs=None):
+    """Disconnect all 12 SkillPlanPanel bound signal slots on panel teardown (#1332)."""
+    if panel is None:
+        return
+    live_panel_mod = sys.modules.get("eve.client.script.ui.skillPlan.skillPlanPanel") or panel_mod
+    for sig, method_name in _iter_skill_plan_panel_signals(live_panel_mod):
+        slot = getattr(panel, method_name, None)
+        orig_func = orig_slot_funcs.get(method_name) if orig_slot_funcs else None
+        _discard_panel_slot_from_signal(sig, panel, slot, orig_func=orig_func)
+
+
+def _make_skill_plan_panel_slot_guard(orig_fn):
+    """Guard a SkillPlanPanel global signal slot so destroyed instances no-op (#1332)."""
+    def _wrapped_skill_plan_panel_slot(self, *args, **kwargs):
+        if getattr(self, "destroyed", False):
+            return None
+        return orig_fn(self, *args, **kwargs)
+
+    _wrapped_skill_plan_panel_slot.__name__ = getattr(
+        orig_fn, "__name__", "_wrapped_skill_plan_panel_slot"
+    )
+    _wrapped_skill_plan_panel_slot._evomu_camera_guard = True
+    return _wrapped_skill_plan_panel_slot
+
+
+def _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots):
+    """Migrate pre-existing Signal._methods slots to guarded wrappers and purge destroyed panels (#1332)."""
+    if not wrapped_slots:
+        return
+    for sig, method_name in _iter_skill_plan_panel_signals(panel_mod):
+        pair = wrapped_slots.get(method_name)
+        if pair is None:
+            continue
+        orig_func, new_func = pair
+        methods_map = getattr(sig, "_methods", None)
+        if methods_map is None or not hasattr(methods_map, "items"):
+            continue
+        try:
+            entries = list(methods_map.items())
+        except Exception:
+            continue
+        for obj, funcs in entries:
+            if funcs is None or not hasattr(funcs, "discard"):
+                continue
+            try:
+                has_orig = orig_func in funcs
+            except Exception:
+                has_orig = False
+            if has_orig:
+                funcs.discard(orig_func)
+                if not getattr(obj, "destroyed", False) and hasattr(funcs, "add"):
+                    funcs.add(new_func)
+            _prune_empty_signal_methods(methods_map, obj, funcs)
+
+
+def _install_skill_plan_panel_signal_guard():
+    """Disconnect SkillPlanPanel global signals on Close and guard slots when destroyed (#1332)."""
+    if "skillPlanPanel" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    panel_mod = sys.modules.get("eve.client.script.ui.skillPlan.skillPlanPanel")
+    panel_cls = getattr(panel_mod, "SkillPlanPanel", None) if panel_mod is not None else None
+    if panel_cls is None or not (isinstance(panel_cls, type) or hasattr(panel_cls, "__bases__")):
+        return False
+
+    hooked = False
+    orig_slot_funcs = {}
+    wrapped_slots = {}
+    for _attr_name, _mod_name, _pkg_name, slot_pairs in _SKILL_PLAN_PANEL_SIGNAL_SPECS:
+        for _sig_name, method_name in slot_pairs:
+            orig_attr = getattr(panel_cls, method_name, None)
+            if callable(orig_attr) and not getattr(orig_attr, "_evomu_camera_guard", False):
+                orig_func = getattr(orig_attr, "__func__", orig_attr)
+                wrapped = _make_skill_plan_panel_slot_guard(orig_func)
+                setattr(panel_cls, method_name, wrapped)
+                new_attr = getattr(panel_cls, method_name, wrapped)
+                new_func = getattr(new_attr, "__func__", wrapped)
+                orig_slot_funcs[method_name] = orig_func
+                wrapped_slots[method_name] = (orig_func, new_func)
+                hooked = True
+
+    _migrate_skill_plan_signal_slots(panel_mod, wrapped_slots)
+
+    orig_close = getattr(panel_cls, "Close", None)
+    if callable(orig_close) and not getattr(orig_close, "_evomu_camera_guard", False):
+        orig_close_func = getattr(orig_close, "__func__", orig_close)
+
+        def _wrapped_skill_plan_panel_close(self, *args, **kwargs):
+            try:
+                return orig_close_func(self, *args, **kwargs)
+            finally:
+                _disconnect_skill_plan_panel_signals(
+                    self,
+                    panel_mod=panel_mod,
+                    orig_slot_funcs=orig_slot_funcs,
+                )
+
+        _wrapped_skill_plan_panel_close.__name__ = getattr(orig_close_func, "__name__", "Close")
+        _wrapped_skill_plan_panel_close._evomu_camera_guard = True
+        panel_cls.Close = _wrapped_skill_plan_panel_close
+        hooked = True
+
+    if hooked:
+        _HOOKED_CAMERA_GUARD_TARGETS.add("skillPlanPanel")
+    return hooked
+
+
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332)."""
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
     _install_hangar_view_teardown_guard()
@@ -2387,6 +2582,7 @@ def _install_live_client_sync_guards():
     _install_wreck_rotation_guard()
     _install_slots_container_sync_guard()
     _install_sensor_suite_gfx_guard()
+    _install_skill_plan_panel_signal_guard()
 
 
 def _maybe_schedule_driver_on_main_thread():
@@ -2428,17 +2624,18 @@ class _EvomuMetaHook(object):
         _install_fsd_typelist_preload_hook(preload_typelist=False)
         _install_camera_dock_guard()
         _install_live_client_sync_guards()
-        if (
-            fullname == "eve.client.script.environment.spaceObject.wreck"
-            and "wreck" not in _HOOKED_CAMERA_GUARD_TARGETS
+        for target_mod, target_key, install_fn in (
+            ("eve.client.script.environment.spaceObject.wreck", "wreck", _install_wreck_rotation_guard),
+            ("eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
         ):
-            uthread_mod = sys.modules.get("uthread")
-            uthread_new = getattr(uthread_mod, "new", None) if uthread_mod is not None else None
-            if callable(uthread_new):
-                try:
-                    uthread_new(_install_wreck_rotation_guard)
-                except Exception:
-                    pass
+            if fullname == target_mod and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
+                uthread_mod = sys.modules.get("uthread")
+                uthread_new = getattr(uthread_mod, "new", None) if uthread_mod is not None else None
+                if callable(uthread_new):
+                    try:
+                        uthread_new(install_fn)
+                    except Exception:
+                        pass
         _maybe_schedule_driver_on_main_thread()
         return None
 
