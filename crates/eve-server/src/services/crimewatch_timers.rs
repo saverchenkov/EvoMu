@@ -1189,9 +1189,51 @@ pub async fn handle_crimewatch(
                 };
             let now_unix = ctx.now_unix();
             let expiry_ft = ctx.now_blueos_filetime_ticks() + 600_000_000;
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.duel_challenges.insert((char_id, target_char_id), now_unix.saturating_add(60));
-            });
+            if let Err(err) = with_mut_combat_runtime(ctx, |rt| {
+                rt.duel_challenges.retain(|_, &mut exp| now_unix < exp);
+                if rt.has_limited_engagement_with(char_id, target_char_id, now_unix)
+                    || rt.has_limited_engagement_with(target_char_id, char_id, now_unix)
+                {
+                    return Err(BridgeRpcError {
+                        code: "DuelChallengeActiveEngagement".into(),
+                        message: format!(
+                            "Active Limited Engagement already exists between {char_id} and {target_char_id}"
+                        ),
+                        client_error: None,
+                    });
+                }
+                if rt
+                    .duel_challenges
+                    .get(&(target_char_id, char_id))
+                    .is_some_and(|&exp| now_unix < exp)
+                {
+                    return Err(BridgeRpcError {
+                        code: "DuelChallengeAlreadyPending".into(),
+                        message: format!(
+                            "A pending duel challenge already exists between {char_id} and {target_char_id}"
+                        ),
+                        client_error: None,
+                    });
+                }
+                if rt
+                    .duel_challenges
+                    .iter()
+                    .any(|(&(from_id, _), &exp)| from_id == char_id && now_unix < exp)
+                {
+                    return Err(BridgeRpcError {
+                        code: "DuelChallengeAlreadyPending".into(),
+                        message: format!(
+                            "Character {char_id} already has an active outgoing duel challenge"
+                        ),
+                        client_error: None,
+                    });
+                }
+                rt.duel_challenges
+                    .insert((char_id, target_char_id), now_unix.saturating_add(60));
+                Ok(())
+            }) {
+                return Some(Err(err));
+            }
             ctx.emit_typed(
                 NotificationTarget::Character(target_char_id),
                 OnDuelChallenge {
@@ -1246,7 +1288,7 @@ pub async fn handle_crimewatch(
                 let Some(&expires_at) = rt.duel_challenges.get(&(challenger_id, char_id)) else {
                     return false;
                 };
-                if now_unix > expires_at {
+                if now_unix >= expires_at {
                     rt.duel_challenges.remove(&(challenger_id, char_id));
                     return false;
                 }
@@ -1272,26 +1314,51 @@ pub async fn handle_crimewatch(
                 ) {
                     return Some(Err(e));
                 }
-                let accepted_ok = with_mut_combat_runtime(ctx, |rt| {
-                    let Some(expires_at) = rt.duel_challenges.remove(&(challenger_id, char_id))
+                enum RespondAcceptOutcome {
+                    NoPending,
+                    ActiveEngagement,
+                    Accepted,
+                }
+                let accept_outcome = with_mut_combat_runtime(ctx, |rt| {
+                    let Some(&expires_at) = rt.duel_challenges.get(&(challenger_id, char_id))
                     else {
-                        return false;
+                        return RespondAcceptOutcome::NoPending;
                     };
-                    if now_unix > expires_at {
-                        return false;
+                    if now_unix >= expires_at {
+                        rt.duel_challenges.remove(&(challenger_id, char_id));
+                        return RespondAcceptOutcome::NoPending;
                     }
+                    if rt.has_limited_engagement_with(char_id, challenger_id, now_unix)
+                        || rt.has_limited_engagement_with(challenger_id, char_id, now_unix)
+                    {
+                        rt.duel_challenges.remove(&(challenger_id, char_id));
+                        return RespondAcceptOutcome::ActiveEngagement;
+                    }
+                    rt.duel_challenges.remove(&(challenger_id, char_id));
                     rt.add_limited_engagement(char_id, challenger_id, now_unix);
                     rt.add_limited_engagement(challenger_id, char_id, now_unix);
-                    true
+                    RespondAcceptOutcome::Accepted
                 });
-                if !accepted_ok {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoPendingDuelChallenge".into(),
-                        message: format!(
-                            "No active duel challenge from {challenger_id} to {char_id}"
-                        ),
-                        client_error: None,
-                    }));
+                match accept_outcome {
+                    RespondAcceptOutcome::NoPending => {
+                        return Some(Err(BridgeRpcError {
+                            code: "NoPendingDuelChallenge".into(),
+                            message: format!(
+                                "No active duel challenge from {challenger_id} to {char_id}"
+                            ),
+                            client_error: None,
+                        }));
+                    }
+                    RespondAcceptOutcome::ActiveEngagement => {
+                        return Some(Err(BridgeRpcError {
+                            code: "DuelChallengeActiveEngagement".into(),
+                            message: format!(
+                                "Active Limited Engagement already exists between {char_id} and {challenger_id}"
+                            ),
+                            client_error: None,
+                        }));
+                    }
+                    RespondAcceptOutcome::Accepted => {}
                 }
                 let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
                 ctx.emit_typed(

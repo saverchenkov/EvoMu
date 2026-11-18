@@ -1356,3 +1356,383 @@ async fn quasar_local_chat_broadcast_career_progress_e2e() {
     assert_eq!(muted_rsp.status_code, STATUS_FORBIDDEN);
     assert_eq!(prog_of(chat_cid, "SofSendChatMessage"), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn salvage_live_rpc_dogma_and_cmd_salvage_career_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let salv_cid = 2_115_200_501_i64;
+    let ship_id = salv_cid + 50_000;
+    let salvager_id = 2_115_950_501_i64;
+    let salvage_drone_id = 2_115_950_502_i64;
+    let wreck_1 = 2_115_950_511_i64;
+    let wreck_2 = 2_115_950_512_i64;
+
+    seed_pilot(&ctx.db, salv_cid, 5701, "SalvageCareerPilot", 10_000_000_00, 1_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&salv_cid) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = JITA_SYS;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 626; // Vexor (has HiSlot0 + DroneBay + DroneBandwidth)
+            ship.location_id = i64::from(JITA_SYS);
+            ship.flag = InventoryFlag::None;
+        }
+        let sk = snap.skills.entry(salv_cid).or_default();
+        for tid in [3436_u32, 3438_u32, 25863_u32] {
+            sk.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+        for (item_id, type_id, loc_id, flag) in [
+            (salvager_id, 25861_u32, ship_id, InventoryFlag::HiSlot0),
+            (salvage_drone_id, 32787_u32, ship_id, InventoryFlag::DroneBay),
+            (wreck_1, 26557_u32, i64::from(JITA_SYS), InventoryFlag::None),
+            (wreck_2, 26557_u32, i64::from(JITA_SYS), InventoryFlag::None),
+        ] {
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: salv_cid,
+                    location_id: loc_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(5701, 71, Some(salv_cid), false, ctx.now_unix());
+
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    sys_h
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 626,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 10_000_000.0,
+                radius: 400.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(salv_cid, ship_id, 626),
+            ctx.build_ship_slim_meta(salv_cid, 626),
+        )
+        .await
+        .expect("spawn salvage ship");
+
+    for wid in [wreck_1, wreck_2] {
+        sys_h
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: wid,
+                    type_id: 26557,
+                    position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 10_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(26557),
+            )
+            .await
+            .expect("spawn wreck");
+        sys_h
+            .add_target_lock(
+                ship_id,
+                eve_destiny::TargetLock {
+                    target_id: wid,
+                    lock_time_ms: 100.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: None,
+                },
+            )
+            .await
+            .expect("lock wreck");
+    }
+
+    let mut salv_sess = sess(71, 5701, salv_cid, service_roles::ROLE_PLAYER_DEFAULT);
+    salv_sess.station_id = None;
+    salv_sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    let prog_of = |lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(salv_cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Live `dogmaIM.Activate` Salvager I -> PendingCycleAction::SalvageEnd -> execute_wreck_salvage_cycle
+    ctx.mechanic_rng.set_seed(Some(3));
+    ctx.dispatch_rpc(
+        &mut salv_sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(salvager_id), PyRep::Integer(wreck_1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("dogmaIM.Activate Salvager");
+    assert_eq!(
+        prog_of("IndustrialistSalvageWrecks10"),
+        0,
+        "salvage progress must not fire before SalvageEnd completes"
+    );
+
+    ctx.advance_secs(12);
+    sys_h
+        .step_manual(12.0)
+        .await
+        .expect("step salvager cycle to completion");
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&wreck_1)));
+    assert_eq!(prog_of("IndustrialistSalvageWrecks10"), 1);
+    assert_eq!(prog_of("IndustrialistSalvageWrecks25"), 1);
+
+    // 2. Live `ship.LaunchDrones` + `entity.CmdSalvage` -> execute_wreck_salvage_cycle
+    ctx.dispatch_rpc(
+        &mut salv_sess,
+        "ship",
+        None,
+        "LaunchDrones",
+        &[PyRep::List(vec![PyRep::Integer(salvage_drone_id)])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LaunchDrones");
+
+    ctx.mechanic_rng.set_seed(Some(3));
+    let drone_res = ctx
+        .dispatch_rpc(
+            &mut salv_sess,
+            "entity",
+            None,
+            "CmdSalvage",
+            &[PyRep::Integer(wreck_2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdSalvage");
+    assert_eq!(
+        drone_res.dict_get("salvaged").and_then(PyRep::as_bool),
+        Some(true)
+    );
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&wreck_2)));
+    assert_eq!(prog_of("IndustrialistSalvageWrecks10"), 2);
+    assert_eq!(prog_of("IndustrialistSalvageWrecks25"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duel_spam_and_active_limited_engagement_guards_e2e() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let d1 = 2_115_200_601_i64;
+    let d2 = 2_115_200_602_i64;
+    let d3 = 2_115_200_603_i64;
+    for (idx, cid) in [d1, d2, d3].into_iter().enumerate() {
+        let uid = 5801 + idx as u64;
+        seed_pilot(&ctx.db, cid, uid, &format!("DuelGuardPilot{idx}"), 10_000_000_00, 1_000);
+        let _ = ctx
+            .db
+            .acquire_online_lock(uid, 81 + idx as u64, Some(cid), false, ctx.now_unix());
+    }
+    let sys_h = ctx.systems.get_or_spawn(JITA_SYS);
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [d1, d2, d3] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = None;
+                ch.solar_system_id = JITA_SYS;
+            }
+            if let Some(ship) = snap.items.get_mut(&(cid + 50_000)) {
+                ship.location_id = i64::from(JITA_SYS);
+                ship.flag = InventoryFlag::None;
+            }
+        }
+    });
+    for (idx, cid) in [d1, d2, d3].into_iter().enumerate() {
+        let sid = cid + 50_000;
+        sys_h
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: glam::DVec3::new((idx as f64) * 1_000.0, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_067_000.0,
+                    radius: 400.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(cid, sid, 587),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await
+            .expect("spawn duel ball");
+    }
+
+    let make_space_sess = |sid: u64, uid: u64, cid: i64| -> SessionState {
+        let mut s = sess(sid, uid, cid, service_roles::ROLE_PLAYER_DEFAULT);
+        s.station_id = None;
+        s.ship_id = Some(cid + 50_000);
+        s
+    };
+    let mut s1 = make_space_sess(81, 5801, d1);
+    let mut s2 = make_space_sess(82, 5802, d2);
+    let mut s3 = make_space_sess(83, 5803, d3);
+    let kw = HashMap::new();
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Initial duel challenge succeeds once.
+    ctx.dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d2)], &kw, None)
+        .await
+        .expect("first StartDuelChallenge");
+    assert_eq!(prog_of(d1, "SofDuelChallenge"), 1);
+
+    // 2. Duplicate challenge, simultaneous second outgoing challenge, and reverse challenge while pending all fail.
+    let err_dup = ctx
+        .dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d2)], &kw, None)
+        .await
+        .expect_err("duplicate StartDuelChallenge must reject");
+    assert_eq!(err_dup.code, "DuelChallengeAlreadyPending");
+
+    let err_second_target = ctx
+        .dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d3)], &kw, None)
+        .await
+        .expect_err("second open outgoing StartDuelChallenge must reject");
+    assert_eq!(err_second_target.code, "DuelChallengeAlreadyPending");
+
+    let err_reverse = ctx
+        .dispatch_rpc(&mut s2, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d1)], &kw, None)
+        .await
+        .expect_err("reverse StartDuelChallenge while pending must reject");
+    assert_eq!(err_reverse.code, "DuelChallengeAlreadyPending");
+    assert_eq!(prog_of(d1, "SofDuelChallenge"), 1);
+    assert_eq!(prog_of(d2, "SofDuelChallenge"), 0);
+
+    // 3. Accepting activates mutual 300s Limited Engagement and credits SofDuelWin1 once per pilot.
+    ctx.dispatch_rpc(
+        &mut s2,
+        "crimewatch",
+        None,
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(d1), PyRep::Bool(true)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("RespondToDuelChallenge accept");
+    assert_eq!(prog_of(d1, "SofDuelWin1"), 1);
+    assert_eq!(prog_of(d2, "SofDuelWin1"), 1);
+
+    // 4. Active Limited Engagement blocks re-challenging in either direction and blocks forged RespondToDuelChallenge(accept).
+    let err_le_fwd = ctx
+        .dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d2)], &kw, None)
+        .await
+        .expect_err("StartDuelChallenge during active LE must reject");
+    assert_eq!(err_le_fwd.code, "DuelChallengeActiveEngagement");
+
+    let err_le_rev = ctx
+        .dispatch_rpc(&mut s2, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d1)], &kw, None)
+        .await
+        .expect_err("reverse StartDuelChallenge during active LE must reject");
+    assert_eq!(err_le_rev.code, "DuelChallengeActiveEngagement");
+    assert_eq!(prog_of(d1, "SofDuelChallenge"), 1);
+    assert_eq!(prog_of(d2, "SofDuelChallenge"), 0);
+
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.duel_challenges.insert((d1, d2), ctx.now_unix().saturating_add(60));
+    });
+    let err_accept_le = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "crimewatch",
+            None,
+            "RespondToDuelChallenge",
+            &[PyRep::Integer(d1), PyRep::Bool(true)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("RespondToDuelChallenge during active LE must reject");
+    assert_eq!(err_accept_le.code, "DuelChallengeActiveEngagement");
+    assert_eq!(prog_of(d1, "SofDuelWin1"), 1);
+    assert_eq!(prog_of(d2, "SofDuelWin1"), 1);
+
+    // 5. While in active LE with d2, d1 CAN still challenge a third pilot d3 (then d3 declines).
+    ctx.dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d3)], &kw, None)
+        .await
+        .expect("challenging different pilot while engaged with d2 must succeed");
+    ctx.dispatch_rpc(
+        &mut s3,
+        "crimewatch",
+        None,
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(d1), PyRep::Bool(false)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("d3 decline");
+
+    // 6. After the 300s Limited Engagement expires, a new duel between d1 and d2 succeeds normally.
+    ctx.advance_secs(301);
+    ctx.dispatch_rpc(&mut s1, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(d2)], &kw, None)
+        .await
+        .expect("StartDuelChallenge after LE expiry");
+    ctx.dispatch_rpc(
+        &mut s2,
+        "crimewatch",
+        None,
+        "RespondToDuelChallenge",
+        &[PyRep::Integer(d1), PyRep::Bool(true)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("RespondToDuelChallenge after LE expiry");
+    assert_eq!(prog_of(d1, "SofDuelWin1"), 2);
+    assert_eq!(prog_of(d2, "SofDuelWin1"), 2);
+}
