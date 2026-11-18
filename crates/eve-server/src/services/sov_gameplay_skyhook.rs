@@ -891,28 +891,20 @@ pub(crate) fn apply_skyhook_weapon_damage_with_attacker(
         if destroyed_now {
             let mut ext =
                 crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-            let outcome = crate::services::quasar_sov_workforce::with_system_hub_network_reconcile(
+            let outcome = crate::services::station_structure::structure_lifecycle::destroy_structure(
+                ctx,
                 snap,
-                &ctx.sde,
-                &pending,
-                sys_id,
+                &mut ext,
+                skyhook_id,
+                attacker_char_id,
                 now,
-                |snap| {
-                    let out =
-                        crate::services::station_structure::structure_lifecycle::destroy_structure(
-                            ctx,
-                            snap,
-                            &mut ext,
-                            skyhook_id,
-                            attacker_char_id,
-                            now,
-                        );
-                    cleanup_destroyed_skyhook_in_snap(snap, skyhook_id);
-                    Ok::<_, BridgeRpcError>(out)
-                },
-            )?;
+            );
             crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
             pending_sig = outcome.pending_signal_tracker_notifs;
+            pending
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(outcome.pending_quasar_notices);
             final_s_hp = 0.0;
             final_a_hp = 0.0;
             final_h_hp = 0.0;

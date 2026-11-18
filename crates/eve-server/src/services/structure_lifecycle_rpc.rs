@@ -779,6 +779,7 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
     })?;
     if let Some(ref destr) = out.destruction {
         crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(ctx, destr.pending_signal_tracker_notifs.clone());
+        life::flush_disposal_quasar_notices(ctx, destr, now_unix);
     }
     let destroyed = out.state == life::STATE_DESTROYED;
     let became_invuln = destroyed

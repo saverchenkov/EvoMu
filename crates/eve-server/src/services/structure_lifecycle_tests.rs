@@ -763,3 +763,188 @@ fn sync_all_structures_pauses_industry_jobs_when_fuel_depletes_and_marks_ready()
         assert!(!any_structure_or_industry_needs_sync(&ctx, snap, base_now));
     });
 }
+
+#[test]
+fn destroy_skyhook_and_package_sov_hub_clean_runtime_reconcile_network_and_queue_quasar_notices() {
+    use crate::services::quasar_sov_hub::{planet_yield_for_planet, star_power_for_system};
+    use crate::services::quasar_sov_workforce::systems_within_jumps;
+    use crate::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
+    use eve_db::{PersistedHubUpgrade, PersistedSovHubData, PersistedWorkforceMode};
+
+    let ctx = test_ctx();
+    let now = 1_750_100_000_u64;
+    let sde = &ctx.sde;
+    let (sys_a, planet_id, _planet_wf, sys_b) = [30_000_669_u32, 30_000_142_u32]
+        .into_iter()
+        .flat_map(|seed| systems_within_jumps(sde, seed, 8).into_keys())
+        .filter(|&sa| star_power_for_system(sde, sa) >= 250)
+        .find_map(|sa| {
+            let planet = sde
+                .celestials_in_system_slice(sa)
+                .iter()
+                .filter(|c| c.group_id == 7)
+                .find_map(|c| {
+                    let (_, wf) = planet_yield_for_planet(c.type_id, c.radius);
+                    (wf >= 3_000).then_some((c.celestial_id, wf))
+                })?;
+            let nb = systems_within_jumps(sde, sa, 1)
+                .into_iter()
+                .find(|&(sb, hops)| {
+                    hops == 1 && sb != sa && star_power_for_system(sde, sb) >= 250
+                })?
+                .0;
+            Some((sa, planet.0, planet.1, nb))
+        })
+        .expect("system pair with >=3000 workforce planet and neighbor system");
+
+    let corp_id = 98_920_001_i64;
+    let attacker_id = 90_000_002_i64;
+    let hub_a = 88_920_001_i64;
+    let hub_b = 88_920_002_i64;
+    let skyhook_id = 88_920_101_i64;
+    let export_amt = 1_500_u64;
+
+    let out_skyhook = ctx.db.with_mut_snapshot(|snap| {
+        let mut c = CorporationRecord::default();
+        c.corporation_id = corp_id;
+        c.ceo_id = 90_000_001;
+        snap.corporations.insert(corp_id, c);
+
+        for (id, ty, sys) in [
+            (hub_a, TYPE_SOVEREIGNTY_HUB, sys_a),
+            (hub_b, TYPE_SOVEREIGNTY_HUB, sys_b),
+            (skyhook_id, TYPE_ORBITAL_SKYHOOK, sys_a),
+        ] {
+            snap.structures.insert(
+                id,
+                UpwellStructureRecord {
+                    structure_id: id,
+                    type_id: ty,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("LifecycleSov {id}"),
+                    state: STATE_SHIELD_VULNERABLE.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        snap.sov_runtime.skyhook_reagent_bays.insert(skyhook_id, (81_143, 200, 100, now));
+        snap.sov_runtime.skyhook_reagents.insert(skyhook_id, (200, 100));
+        snap.sov_runtime.skyhook_maturity_rem.insert(skyhook_id, (100, 500));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, now - 60);
+        snap.sov_runtime.skyhook_theft_windows.insert(skyhook_id, (now + 100, now + 7_300));
+        snap.sov_runtime.skyhook_hackable.insert(skyhook_id, true);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(skyhook_id, (999_001, attacker_id, now + 60, 1_000.0));
+
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: export_amt,
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let mut ext = load_ext_state(snap);
+        let out = destroy_structure(&ctx, snap, &mut ext, skyhook_id, attacker_id, now);
+        save_ext_state(snap, &ext);
+        out
+    });
+
+    flush_disposal_quasar_notices(&ctx, &out_skyhook, now);
+
+    let skyhook_notice_urls: Vec<&str> = out_skyhook
+        .pending_quasar_notices
+        .iter()
+        .map(|(_, a)| a.type_url.as_str())
+        .collect();
+    assert!(skyhook_notice_urls.iter().any(|u| u.ends_with("ResourcesSimulatedNotice")));
+    assert!(skyhook_notice_urls.iter().any(|u| u.ends_with("StateChangedNotice")));
+    assert!(skyhook_notice_urls.iter().any(|u| u.ends_with("HubUpgradesSimulatedNotice")));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&skyhook_id));
+
+        let ha = &snap.sov_runtime.sov_hubs[&hub_a];
+        assert!(ha.upgrades[0].low_power);
+        assert_eq!(
+            ha.workforce,
+            PersistedWorkforceMode::Export {
+                destination: Some(sys_b),
+                amount: 0,
+            }
+        );
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+    });
+
+    // Re-enable Skyhook, reset both hubs online, then package Hub A -> Hub B must overload
+    // and emit Quasar notices when Hub A leaves space.
+    let out_pkg_hub = ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&skyhook_id).unwrap().state = STATE_SHIELD_VULNERABLE.into();
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        if let Some(ha) = snap.sov_runtime.sov_hubs.get_mut(&hub_a) {
+            ha.workforce = PersistedWorkforceMode::Export {
+                destination: Some(sys_b),
+                amount: export_amt,
+            };
+            ha.upgrades[0].low_power = false;
+        }
+        if let Some(hb) = snap.sov_runtime.sov_hubs.get_mut(&hub_b) {
+            hb.upgrades[0].low_power = false;
+        }
+        let mut ext = load_ext_state(snap);
+        let out = package_structure(&ctx, snap, &mut ext, hub_a, now + 10);
+        save_ext_state(snap, &ext);
+        out
+    });
+
+    flush_disposal_quasar_notices(&ctx, &out_pkg_hub, now + 10);
+    let hub_notice_urls: Vec<&str> = out_pkg_hub
+        .pending_quasar_notices
+        .iter()
+        .map(|(_, a)| a.type_url.as_str())
+        .collect();
+    assert!(hub_notice_urls.iter().any(|u| u.ends_with("ResourcesSimulatedNotice")));
+    assert!(hub_notice_urls.iter().any(|u| u.ends_with("HubUpgradesSimulatedNotice")));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.sov_hubs.contains_key(&hub_a));
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+    });
+}

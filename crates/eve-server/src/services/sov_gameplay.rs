@@ -52,15 +52,23 @@ pub const MERC_DEN_VULNERABILITY_WINDOW_SECS: u64 = 6 * 3_600;
 /// Base shield & hull HP of an anchored Mercenary Den.
 pub const MERC_DEN_BASE_HP: f64 = 5_000.0;
 
+pub(crate) fn flush_quasar_notice_items(
+    ctx: &ServerContext,
+    items: &[(crate::quasar_gateway::NoticeScope, eve_proto::quasar::GoogleAny)],
+    now_unix: u64,
+) {
+    for (scope, msg) in items {
+        let _ = ctx.quasar_gateway.publish_notice(scope.clone(), msg.clone(), now_unix);
+    }
+}
+
 pub(crate) fn flush_pending_quasar(ctx: &ServerContext, pending: &PendingNotices, now_unix: u64) {
     let items: Vec<_> = pending
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .drain(..)
         .collect();
-    for (scope, msg) in items {
-        let _ = ctx.quasar_gateway.publish_notice(scope, msg, now_unix);
-    }
+    flush_quasar_notice_items(ctx, &items, now_unix);
 }
 
 fn splitmix64(mut x: u64) -> u64 {

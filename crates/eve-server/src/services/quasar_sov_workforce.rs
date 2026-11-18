@@ -21,7 +21,7 @@ use eve_db::{PersistedSovHubData, PersistedWorkforceMode, WorldRepository, World
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{DynamicQuasarMessage, DynamicValue};
 use eve_sde::SdeRegistry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 /// Maximum stargate jumps between two hubs of a workforce transfer link (server rule).
@@ -513,17 +513,15 @@ pub(crate) fn reconcile_hub_workforce_network_and_emit(
     emit_hub_diffs(pending, before, &hub_views(snap, sde, extra));
 }
 
-/// Runs `mutate` inside a system Sov Hub network snapshot-reconcile bracket so mutations affecting
-/// local planetary power/workforce (e.g. Skyhook activation, deactivation, or destruction)
-/// immediately overload/clamp local and downstream hubs and publish Quasar notices.
-pub(crate) fn with_system_hub_network_reconcile<T, E>(
+/// Syncs local system Sov Hubs and captures connected hub IDs plus pre-mutation `HubView`
+/// snapshots before a structure or resource change mutates `snap`.
+pub(crate) fn begin_system_hub_network_reconcile(
     snap: &mut WorldStateSnapshot,
     sde: &SdeRegistry,
     pending: &PendingNotices,
     sys_id: u32,
     now_unix: u64,
-    mutate: impl FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
-) -> Result<T, E> {
+) -> (Vec<i64>, BTreeMap<i64, HubView>) {
     let local_hub_ids: Vec<i64> = snap
         .structures
         .iter()
@@ -549,6 +547,22 @@ pub(crate) fn with_system_hub_network_reconcile<T, E>(
         }
     }
     let before = hub_views(snap, sde, &extra);
+    (extra, before)
+}
+
+/// Runs `mutate` inside a system Sov Hub network snapshot-reconcile bracket so mutations affecting
+/// local planetary power/workforce (e.g. Skyhook activation, deactivation, or destruction)
+/// immediately overload/clamp local and downstream hubs and publish Quasar notices.
+pub(crate) fn with_system_hub_network_reconcile<T, E>(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    pending: &PendingNotices,
+    sys_id: u32,
+    now_unix: u64,
+    mutate: impl FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
+) -> Result<T, E> {
+    let (extra, before) =
+        begin_system_hub_network_reconcile(snap, sde, pending, sys_id, now_unix);
     let result = mutate(snap)?;
     reconcile_hub_workforce_network_and_emit(snap, sde, pending, &before, &extra);
     Ok(result)
