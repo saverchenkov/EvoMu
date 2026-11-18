@@ -2363,6 +2363,211 @@ def _stale_module_button_reason(node, sm=None):
     return ""
 
 
+def _coerce_optional_int(val):
+    if val is None or isinstance(val, bool):
+        return None
+    if type(val).__name__ in ("int", "long"):
+        return int(val)
+    return None
+
+
+def _invoke_dbl_callable(fn):
+    try:
+        fn()
+        return True, None
+    except Exception as exc:
+        if exc.__class__.__name__ == "UserError":
+            _notify_user_error(exc, async_uthread=True)
+            return False, _format_user_error(exc)
+        raise
+
+
+def _capture_dbl_click_ui_state(sm_obj):
+    wins = []
+    modal_count = 0
+    has_registry = False
+    try:
+        uic = _get_uicore()
+        reg = getattr(uic, "registry", None) if uic is not None else None
+        if reg is not None and hasattr(reg, "GetWindows"):
+            has_registry = True
+            for w in list(reg.GetWindows() or []):
+                if w is None or getattr(w, "destroyed", False) or not _is_visible(w):
+                    continue
+                wins.append((
+                    id(w),
+                    _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64),
+                    _safe_str(getattr(w, "caption", None) or "", 64),
+                ))
+        lyr = getattr(uic, "layer", None) if uic is not None else None
+        modal_lyr = getattr(lyr, "modal", None) if lyr is not None else None
+        for m in list(getattr(modal_lyr, "children", []) or []):
+            if m is not None and not getattr(m, "destroyed", False) and _is_visible(m):
+                modal_count += 1
+    except Exception:
+        pass
+    sess = getattr(__builtin__, "session", None)
+    ship_id = _coerce_optional_int(getattr(sess, "shipid", None)) if sess is not None else None
+    view_sig = None
+    is_deploying = False
+    if sm_obj is not None:
+        try:
+            svcs = getattr(sm_obj, "services", None)
+            vs = svcs.get("viewState") if isinstance(svcs, dict) else None
+            if vs is not None:
+                sec_vi = getattr(vs, "secondaryInfo", None)
+                cur_vi = vs.GetCurrentViewInfo() if hasattr(vs, "GetCurrentViewInfo") else None
+                view_sig = (
+                    _safe_str(getattr(cur_vi, "name", None) or "", 48),
+                    _safe_str(getattr(sec_vi, "name", None) or "", 48),
+                )
+            dep_svc = svcs.get("structureDeployment") if isinstance(svcs, dict) else None
+            if dep_svc is not None:
+                is_deploying = bool(getattr(dep_svc, "isDeploying", False) is True)
+        except Exception:
+            pass
+    return {
+        "has_registry": has_registry,
+        "wins": tuple(wins),
+        "modal_count": modal_count,
+        "ship_id": ship_id,
+        "view_sig": view_sig,
+        "is_deploying": is_deploying,
+        "flight_seq": _FLIGHT_SEQ,
+        "scatter_seq": _SCATTER_SEQ,
+    }
+
+
+def _extract_inventory_entry_info(entry, sr_node=None):
+    if entry is None:
+        return None
+    entry_cls = entry.__class__.__name__
+    entry_name = _safe_str(getattr(entry, "name", ""), 64)
+    rec = getattr(entry, "rec", None)
+    if rec is None and sr_node is not None:
+        rec = getattr(sr_node, "rec", None) or getattr(sr_node, "item", None)
+    type_id = _coerce_optional_int(getattr(rec, "typeID", None)) if rec is not None else None
+    if type_id is None and sr_node is not None:
+        type_id = _coerce_optional_int(getattr(sr_node, "typeID", None))
+    if (type_id is None or type_id <= 0) and entry_name.startswith("ItemEntry_"):
+        suffix = entry_name[len("ItemEntry_"):]
+        if suffix.isdigit():
+            type_id = int(suffix)
+    if type_id is None or type_id <= 0:
+        return None
+    if not (
+        entry_name.startswith("ItemEntry_")
+        or entry_cls in ("InvItem", "Item")
+        or rec is not None
+    ):
+        return None
+    item_id = _coerce_optional_int(getattr(rec, "itemID", None)) if rec is not None else None
+    if item_id is None and sr_node is not None:
+        item_id = _coerce_optional_int(getattr(sr_node, "itemID", None))
+    if item_id is not None and item_id <= 0:
+        item_id = None
+    category_id = _coerce_optional_int(getattr(rec, "categoryID", None)) if rec is not None else None
+    if category_id is None and sr_node is not None:
+        category_id = _coerce_optional_int(getattr(sr_node, "categoryID", None))
+    group_id = _coerce_optional_int(getattr(rec, "groupID", None)) if rec is not None else None
+    if group_id is None and sr_node is not None:
+        group_id = _coerce_optional_int(getattr(sr_node, "groupID", None))
+    if category_id is None or group_id is None:
+        try:
+            import evetypes as _evetypes
+            if category_id is None and hasattr(_evetypes, "GetCategoryID"):
+                category_id = _coerce_optional_int(_evetypes.GetCategoryID(type_id))
+            if group_id is None and hasattr(_evetypes, "GetGroupID"):
+                group_id = _coerce_optional_int(_evetypes.GetGroupID(type_id))
+        except Exception:
+            pass
+    is_container = bool(
+        (sr_node is not None and getattr(sr_node, "isContainer", False) is True)
+        or (getattr(entry, "isContainer", False) is True)
+        or (group_id in (12, 340, 448, 649))
+    )
+    return {
+        "type_id": type_id,
+        "item_id": item_id,
+        "category_id": category_id,
+        "group_id": group_id,
+        "is_container": is_container,
+    }
+
+
+def _maybe_showinfo_after_silent_item_dblclick(entry, sr_node, pre_state, sm_obj):
+    info = _extract_inventory_entry_info(entry, sr_node=sr_node)
+    if info is None:
+        return None
+    cat_id = info["category_id"]
+    if cat_id in (6, 9) or info["is_container"]:
+        return None
+    sess = getattr(__builtin__, "session", None)
+    in_space = bool(
+        sess is not None
+        and _coerce_optional_int(getattr(sess, "solarsystemid", None))
+        and not _coerce_optional_int(getattr(sess, "stationid", None))
+        and not _coerce_optional_int(getattr(sess, "structureid", None))
+    )
+    if cat_id == 65 and in_space:
+        return None
+    post_state = _capture_dbl_click_ui_state(sm_obj)
+    state_unchanged = (
+        post_state["wins"] == pre_state["wins"]
+        and post_state["modal_count"] == pre_state["modal_count"]
+        and post_state["ship_id"] == pre_state["ship_id"]
+        and post_state["view_sig"] == pre_state["view_sig"]
+        and post_state["is_deploying"] == pre_state["is_deploying"]
+        and post_state["flight_seq"] == pre_state["flight_seq"]
+        and post_state["scatter_seq"] == pre_state["scatter_seq"]
+    )
+    if not state_unchanged:
+        return None
+    # Require a window registry to prove no window opened unless this is a docked
+    # structure whose InvItem.OnDblClick hits StructureDeployment.Deploy's early return (#1303).
+    if not post_state["has_registry"] and not (cat_id == 65 and not in_space):
+        return None
+    if sm_obj is None:
+        return None
+    svcs = getattr(sm_obj, "services", None)
+    info_svc = svcs.get("info") if isinstance(svcs, dict) else None
+    if info_svc is None and hasattr(sm_obj, "GetService"):
+        try:
+            info_svc = sm_obj.GetService("info")
+        except Exception:
+            info_svc = None
+    if info_svc is None or not hasattr(info_svc, "ShowInfo"):
+        return None
+    try:
+        if info["item_id"] is not None:
+            info_svc.ShowInfo(info["type_id"], itemID=info["item_id"])
+        else:
+            info_svc.ShowInfo(info["type_id"])
+    except Exception as exc:
+        if exc.__class__.__name__ == "UserError":
+            _notify_user_error(exc, async_uthread=True)
+            return _format_user_error(exc)
+        raise
+    after_state = _capture_dbl_click_ui_state(sm_obj)
+    if after_state["has_registry"] and after_state["wins"] == post_state["wins"]:
+        H._sleep_ms(150)
+    return "ShowInfo"
+
+
+def _run_double_click_action(entry, sr_node, dbl_attr, dbl_fn):
+    sm_obj = getattr(__builtin__, "sm", None)
+    pre_state = _capture_dbl_click_ui_state(sm_obj)
+    ok, err_str = _invoke_dbl_callable(dbl_fn)
+    if not ok:
+        return err_str
+    fallback = _maybe_showinfo_after_silent_item_dblclick(entry, sr_node, pre_state, sm_obj)
+    if fallback:
+        if fallback.startswith("UserError("):
+            return fallback
+        return "%s->%s" % (dbl_attr, fallback)
+    return dbl_attr
+
+
 def _invoke_widget_click(node, right_click=False, double_click=False, click_x=None, click_y=None):
     _close_neocom_panels_if_outside(node)
     _close_utilmenu_if_outside(node)
@@ -2685,12 +2890,15 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                     for dbl_attr in ("OnDblClick", "on_double_click", "DoubleClick"):
                         dbl_fn = getattr(cur_entry, dbl_attr, None)
                         if callable(dbl_fn):
-                            dbl_fn()
-                            return dbl_attr
+                            return _run_double_click_action(cur_entry, sr_node, dbl_attr, dbl_fn)
                     ctrl_entry = getattr(cur_entry, "controller", None)
                     if ctrl_entry is not None and callable(getattr(ctrl_entry, "on_double_click", None)):
-                        ctrl_entry.on_double_click()
-                        return "controller.on_double_click"
+                        return _run_double_click_action(
+                            cur_entry,
+                            sr_node,
+                            "controller.on_double_click",
+                            ctrl_entry.on_double_click,
+                        )
                 break
             cur_entry = getattr(cur_entry, "parent", None)
 
@@ -2702,24 +2910,15 @@ def _invoke_widget_click(node, right_click=False, double_click=False, click_x=No
                 for dbl_attr in ("OnDblClick", "on_double_click", "DoubleClick"):
                     dbl_fn = getattr(cur_dbl, dbl_attr, None)
                     if callable(dbl_fn):
-                        try:
-                            dbl_fn()
-                            return dbl_attr
-                        except Exception as exc:
-                            if exc.__class__.__name__ == "UserError":
-                                _notify_user_error(exc, async_uthread=True)
-                                return _format_user_error(exc)
-                            raise
+                        return _run_double_click_action(cur_dbl, None, dbl_attr, dbl_fn)
                 ctrl_dbl = getattr(cur_dbl, "controller", None)
                 if ctrl_dbl is not None and callable(getattr(ctrl_dbl, "on_double_click", None)):
-                    try:
-                        ctrl_dbl.on_double_click()
-                        return "controller.on_double_click"
-                    except Exception as exc:
-                        if exc.__class__.__name__ == "UserError":
-                            _notify_user_error(exc, async_uthread=True)
-                            return _format_user_error(exc)
-                        raise
+                    return _run_double_click_action(
+                        cur_dbl,
+                        None,
+                        "controller.on_double_click",
+                        ctrl_dbl.on_double_click,
+                    )
                 cur_dbl = getattr(cur_dbl, "parent", None)
 
         icon_btn = getattr(node, "iconBtn", None)

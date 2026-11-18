@@ -1901,6 +1901,50 @@ class TestSpeedupOptimizations(unittest.TestCase):
                 f"Expected benign marker match for {msg}",
             )
 
+    def test_benign_user_error_markers_target_too_far_warp_gone_and_window_blocked(self):
+        oracle = playtester.PlaytesterBugOracle
+        for marker in ("targettoofar", "warpdestinationgone", "windowblockedfromopening"):
+            self.assertIn(marker, oracle.BENIGN_USER_ERROR_MARKERS)
+
+        cases = (
+            (
+                "TargetTooFar",
+                {"error": "UserError('CustomInfo', {'info': 'TargetTooFar: Target is out of range'})"},
+                "UserError: TargetTooFar",
+                (
+                    "  File \"eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.py\", line 1580, in ActivateEffect\n"
+                    "UserError: User error, msg=CustomInfo, dict={'info': 'TargetTooFar'}\n"
+                ),
+            ),
+            (
+                "WarpDestinationGone",
+                {"error": "UserError('WarpDestinationGone', {})"},
+                "NotifyOnWarpCancelled",
+                (
+                    "  File \"eve/client/script/ui/services/menuSvc.py\", line 1120, in WarpToItem\n"
+                    "UserError: User error, msg=WarpDestinationGone, dict={}\n"
+                ),
+            ),
+            (
+                "WindowBlockedFromOpening",
+                {"error": "UserError('WindowBlockedFromOpening', {'window_name': u'Inventory'})"},
+                "Window.Open",
+                (
+                    "  File \"carbonui/control/window.py\", line 410, in Open\n"
+                    "UserError: User error, msg=WindowBlockedFromOpening, dict={'window_name': u'Inventory'}\n"
+                ),
+            ),
+        )
+        for label, err_obj, headline, trace in cases:
+            self.assertTrue(
+                oracle.is_expected_user_error(err_obj, ""),
+                f"Expected is_expected_user_error=True for {label}",
+            )
+            self.assertTrue(
+                oracle.is_ignorable_client_traceback(headline, trace),
+                f"Expected is_ignorable_client_traceback=True for {label}",
+            )
+
     def test_load_pending_verifications_accepts_pending_verification_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             td = Path(tmpdir)
