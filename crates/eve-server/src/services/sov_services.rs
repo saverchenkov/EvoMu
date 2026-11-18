@@ -872,15 +872,16 @@ pub async fn handle(
                     .iter()
                     .filter_map(|(&sys_id, st)| {
                         st.sov_alliance_id.map(|aid| {
-                            let hub_id = snap
-                                .structures
-                                .values()
-                                .find(|s| {
-                                    s.solar_system_id == sys_id
-                                        && (s.type_id == TYPE_SOVEREIGNTY_HUB || s.type_id == 32226)
-                                        && !s.state.eq_ignore_ascii_case("destroyed")
-                                })
-                                .map(|s| s.structure_id);
+                            let hub_id = find_live_sov_hub_in_system(snap, sys_id).or_else(|| {
+                                snap.structures
+                                    .values()
+                                    .find(|s| {
+                                        s.solar_system_id == sys_id
+                                            && s.type_id == 32226
+                                            && !s.state.eq_ignore_ascii_case("destroyed")
+                                    })
+                                    .map(|s| s.structure_id)
+                            });
                             let corp_id = snap
                                 .alliances
                                 .get(&aid)
