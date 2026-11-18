@@ -95,21 +95,41 @@ pub fn check_structure_clone_bay_access(
     check_structure_clone_bay_access_at(snap, structure_id, char_id, None).map(|_| ())
 }
 
-/// Computes clone jump fee at an Upwell structure, owner-set per standing (minimum 1 ISK).
+/// Computes clone jump fee at an Upwell structure (`SETTING_CLONINGBAY_TAX` flat ISK
+/// setting, legacy `35894` override, or standing tier fallback).
 pub fn compute_structure_clone_fee(
     snap: &WorldStateSnapshot,
     structure_id: i64,
     standing: f64,
 ) -> IskCents {
+    compute_structure_clone_fee_at(snap, structure_id, standing, None)
+}
+
+/// Computes clone jump fee at an Upwell structure at `now_unix_opt` so due delayed
+/// `ChangeProfiles` transitions are honored alongside active profiles.
+pub fn compute_structure_clone_fee_at(
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    standing: f64,
+    now_unix_opt: Option<u64>,
+) -> IskCents {
     let ext = structure_upwell_ops::load_ext_state(snap);
-    let configured_fee = ext
-        .access_profiles
-        .get(&structure_id)
-        .and_then(|p| p.service_settings.get(&35894).copied()); // 35894 = Standup Cloning Center
-    if let Some(bps) = configured_fee {
-        let val = (bps as i64) * 100;
-        IskCents(val.max(100))
-    } else if standing >= 5.0 {
+    if let Some(prof) = crate::services::structure_profile_services::effective_profile_for_structure(
+        &ext,
+        structure_id,
+        now_unix_opt,
+    ) {
+        if let Some(&bps) = prof
+            .service_settings
+            .get(&crate::services::structure_profile_services::SETTING_CLONINGBAY_TAX)
+        {
+            return IskCents((bps / 100).max(0));
+        }
+        if let Some(&legacy_isk) = prof.service_settings.get(&35_894) {
+            return IskCents((legacy_isk.saturating_mul(100)).max(100));
+        }
+    }
+    if standing >= 5.0 {
         IskCents(100) // 1 ISK minimum
     } else if standing >= 0.0 {
         IskCents(500) // 5 ISK
@@ -559,7 +579,7 @@ pub fn handle_clone_jump(
                         .get(&char_id)
                         .and_then(|c| c.standings.get(&owner_corp).copied())
                         .unwrap_or(0.0);
-                    compute_structure_clone_fee(snap, departure_loc_id, standing)
+                    compute_structure_clone_fee_at(snap, departure_loc_id, standing, Some(now_unix))
                 }
             } else {
                 IskCents(NPC_LEAVE_BEHIND_FEE_CENTS)

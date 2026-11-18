@@ -5895,7 +5895,9 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     assert!(st_low.fuel_blocks < hourly_fuel as u32);
     assert!(matches!(rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStructure", &[]).await.expect_err("offline jc").code.as_str(), "NoCloneBayService" | "CloneBayServiceOffline"));
     assert_eq!(rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(st_id)]).await.expect_err("offline home").code, "CloneBayServiceOffline");
-    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.expect("svc off"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.expect("clone bay svc off"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(6)]).await.expect("medical bay svc off"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.expect("built-in cored fitting stays on"), PyRep::Bool(true));
 
     rpc(&ctx, &mut sess, "ship", "LeaveShip", &[]).await.expect("LeaveShip for offline pod test");
     ctx.advance_secs(12);

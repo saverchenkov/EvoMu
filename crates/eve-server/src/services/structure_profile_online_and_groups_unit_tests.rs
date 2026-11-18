@@ -115,9 +115,17 @@ fn v24_service_online_matrix_candidate_settings_market_and_industry_checks() {
                 Some(420)
             );
         }
-        assert!(!is_v24_or_legacy_service_online(&ctx, snap, fort_id, SERVICE_DOCKING));
-        assert!(!is_v24_or_legacy_service_online(&ctx, snap, fort_id, SERVICE_FITTING));
-        assert!(!is_v24_or_legacy_service_online(&ctx, snap, fort_id, SERVICE_OFFICES));
+        for svc in [
+            SERVICE_DOCKING,
+            SERVICE_FITTING,
+            SERVICE_OFFICES,
+            SERVICE_REPAIR,
+        ] {
+            assert!(
+                is_v24_or_legacy_service_online(&ctx, snap, fort_id, svc),
+                "cored operational Fortizar must expose built-in service {svc}"
+            );
+        }
         assert!(!is_v24_or_legacy_service_online(&ctx, snap, fort_id, 999_999));
     });
 

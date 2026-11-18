@@ -869,6 +869,201 @@ async fn owner_group_get_groups_many_handles_public_zero_dedup_and_visibility() 
     assert_eq!(gm_gids, vec![g_corp, g_other]);
 }
 
+#[test]
+fn character_get_services_includes_builtin_upwell_services_and_agrees_with_single_checks() {
+    use crate::services::structure_profile_services as prof_svc;
+
+    let ctx = test_ctx();
+    let owner_corp = 98_750_i64;
+    let owner_id = 75_001_i64;
+    let outsider_corp = 98_751_i64;
+    let outsider_id = 75_002_i64;
+    seed_char_and_corp(&ctx, owner_id, owner_corp, 30_000_142, true);
+    seed_char_and_corp(&ctx, outsider_id, outsider_corp, 30_000_142, true);
+
+    let astra_id = 1_075_001_001_i64;
+    let uncored_id = 1_075_001_002_i64;
+    let destroyed_id = 1_075_001_003_i64;
+    let nocore_id = 1_075_001_004_i64;
+    let jb_flex_id = 1_075_001_005_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mk_struct = |id: i64, type_id: u32, state: &str, cored: bool| UpwellStructureRecord {
+            structure_id: id,
+            type_id,
+            owner_corp_id: owner_corp,
+            solar_system_id: 30_000_142,
+            name: format!("AclSvc_{id}"),
+            state: state.into(),
+            quantum_core_installed: cored,
+            fuel_blocks: 100,
+            ..Default::default()
+        };
+        snap.structures.insert(astra_id, mk_struct(astra_id, 35_832, "ShieldVulnerable", true));
+        snap.structures.insert(uncored_id, mk_struct(uncored_id, 35_832, "ShieldVulnerable", false));
+        snap.structures.insert(destroyed_id, mk_struct(destroyed_id, 35_832, "Destroyed", true));
+        snap.structures.insert(nocore_id, mk_struct(nocore_id, 35_832, "NoCore", false));
+        snap.structures.insert(jb_flex_id, mk_struct(jb_flex_id, 35_841, "ShieldVulnerable", true));
+    });
+
+    let get_services_map = |ctx: &ServerContext, sess: &mut SessionState, sid: i64| -> HashMap<i64, f64> {
+        let rep = handle_character_get_services(ctx, sess, &[PyRep::Integer(sid)])
+            .expect("CharacterGetServices ok");
+        match rep {
+            PyRep::Dict(entries) => entries
+                .into_iter()
+                .filter_map(|(k, v)| match (k.as_i64(), v) {
+                    (Some(id), PyRep::Real(tax)) => Some((id, tax)),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected Dict from CharacterGetServices, got {other:?}"),
+        }
+    };
+
+    let assert_all_rpcs_agree = |ctx: &ServerContext, sess: &mut SessionState, sid: i64, svcs: &[i64]| {
+        let map = get_services_map(ctx, sess, sid);
+        for &svc_id in svcs {
+            let expected_tax = map.get(&svc_id).copied();
+            assert_eq!(
+                handle_character_has_service(ctx, sess, &[PyRep::Integer(sid), PyRep::Integer(svc_id)])
+                    .expect("CharacterHasService"),
+                PyRep::Bool(expected_tax.is_some()),
+                "HasService disagreement on structure {sid} svc {svc_id}"
+            );
+            let check_res = handle_character_check_service(ctx, sess, &[PyRep::Integer(sid), PyRep::Integer(svc_id)]);
+            if expected_tax.is_some() {
+                assert_eq!(check_res.expect("CheckService allow"), PyRep::None);
+            } else {
+                assert_eq!(check_res.unwrap_err().code, "StructureServiceAccessDenied");
+            }
+            let get_res = handle_character_get_service(ctx, sess, &[PyRep::Integer(sid), PyRep::Integer(svc_id)])
+                .expect("CharacterGetService");
+            match expected_tax {
+                Some(t) => assert_eq!(get_res, PyRep::Real(t)),
+                None => assert_eq!(get_res, PyRep::None),
+            }
+        }
+        map
+    };
+
+    let mut owner_sess = make_session(owner_id, owner_corp, 30_000_142, Some(astra_id), 1);
+    let mut outsider_sess = make_session(outsider_id, outsider_corp, 30_000_142, None, 0);
+
+    // 1. Operational cored Astrahus with zero fitted modules exposes built-ins 1, 2, 3, 8 when no profile blocks them.
+    let probe_svcs = [
+        prof_svc::SERVICE_DOCKING,
+        prof_svc::SERVICE_FITTING,
+        prof_svc::SERVICE_OFFICES,
+        prof_svc::SERVICE_REPAIR,
+        prof_svc::SERVICE_MARKET,
+        prof_svc::SERVICE_JUMP_BRIDGE,
+    ];
+    let map = assert_all_rpcs_agree(&ctx, &mut owner_sess, astra_id, &probe_svcs);
+    assert!(map.contains_key(&prof_svc::SERVICE_DOCKING));
+    assert!(map.contains_key(&prof_svc::SERVICE_FITTING));
+    assert!(map.contains_key(&prof_svc::SERVICE_OFFICES));
+    assert!(map.contains_key(&prof_svc::SERVICE_REPAIR));
+    assert!(!map.contains_key(&prof_svc::SERVICE_MARKET));
+    assert!(!map.contains_key(&prof_svc::SERVICE_JUMP_BRIDGE));
+
+    // Also verify fallback to session.structure_id when arg 0 is omitted.
+    let session_map = handle_character_get_services(&ctx, &mut owner_sess, &[]).expect("session structure");
+    assert!(matches!(session_map, PyRep::Dict(entries) if entries.len() == map.len()));
+
+    // 2. Attached profile with domain 20 unconfigured denies SERVICE_OFFICES (3) while 1/2/8 stay accessible.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 750_001,
+            owner_corp_id: owner_corp,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.general_settings.insert(prof_svc::SETTING_HOUSING_CAN_DOCK, true);
+        ext.profiles_by_id.insert(750_001, prof.clone());
+        ext.access_profiles.insert(astra_id, prof);
+        save_ext_state(snap, &ext);
+    });
+    let attached_unconfigured = assert_all_rpcs_agree(&ctx, &mut outsider_sess, astra_id, &probe_svcs);
+    assert!(attached_unconfigured.contains_key(&prof_svc::SERVICE_DOCKING));
+    assert!(attached_unconfigured.contains_key(&prof_svc::SERVICE_FITTING));
+    assert!(attached_unconfigured.contains_key(&prof_svc::SERVICE_REPAIR));
+    assert!(!attached_unconfigured.contains_key(&prof_svc::SERVICE_OFFICES));
+
+    // Configuring domain 20 enables SERVICE_OFFICES (3); setting domain 20 = false denies it.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&astra_id).unwrap();
+        prof.general_settings.insert(prof_svc::SETTING_CORP_RENT_OFFICE, true);
+        save_ext_state(snap, &ext);
+    });
+    let offices_enabled = assert_all_rpcs_agree(&ctx, &mut outsider_sess, astra_id, &probe_svcs);
+    assert!(offices_enabled.contains_key(&prof_svc::SERVICE_OFFICES));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&astra_id).unwrap();
+        prof.general_settings.insert(prof_svc::SETTING_CORP_RENT_OFFICE, false);
+        save_ext_state(snap, &ext);
+    });
+    let offices_disabled = assert_all_rpcs_agree(&ctx, &mut outsider_sess, astra_id, &probe_svcs);
+    assert!(!offices_disabled.contains_key(&prof_svc::SERVICE_OFFICES));
+
+    // 3. Online fitted Standup Market Hub I (35892) appears alongside built-ins.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mid = 750_901_i64;
+        snap.items.insert(
+            mid,
+            InventoryItemRecord {
+                item_id: mid,
+                type_id: 35_892,
+                owner_id: owner_corp,
+                location_id: astra_id,
+                flag: InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mid, true);
+    });
+    let with_market = assert_all_rpcs_agree(&ctx, &mut outsider_sess, astra_id, &probe_svcs);
+    assert!(with_market.contains_key(&prof_svc::SERVICE_MARKET));
+
+    // 4. Un-cored operational Astrahus exposes SERVICE_DOCKING (1) only; 2/3/8 remain offline/denied.
+    let uncored_map = assert_all_rpcs_agree(&ctx, &mut owner_sess, uncored_id, &probe_svcs);
+    assert_eq!(uncored_map.keys().copied().collect::<Vec<_>>(), vec![prof_svc::SERVICE_DOCKING]);
+
+    // 5. Destroyed / NoCore Astrahus structures expose empty service dicts and deny all built-ins.
+    for dead_id in [destroyed_id, nocore_id] {
+        let dead_map = assert_all_rpcs_agree(&ctx, &mut owner_sess, dead_id, &probe_svcs);
+        assert!(dead_map.is_empty(), "non-operational structure {dead_id} must expose no services");
+    }
+
+    // 6. FLEX Ansiblex (35841) with allow-all profile exposes SERVICE_JUMP_BRIDGE (15) only.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 750_002,
+            owner_corp_id: owner_corp,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.general_settings.insert(prof_svc::SETTING_HOUSING_CAN_DOCK, true);
+        prof.general_settings.insert(prof_svc::SETTING_JUMP_BRIDGE_ACTIVATION, true);
+        ext.profiles_by_id.insert(750_002, prof.clone());
+        ext.access_profiles.insert(jb_flex_id, prof);
+        save_ext_state(snap, &ext);
+    });
+    let flex_map = assert_all_rpcs_agree(&ctx, &mut outsider_sess, jb_flex_id, &probe_svcs);
+    assert_eq!(
+        flex_map.keys().copied().collect::<Vec<_>>(),
+        vec![prof_svc::SERVICE_JUMP_BRIDGE]
+    );
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

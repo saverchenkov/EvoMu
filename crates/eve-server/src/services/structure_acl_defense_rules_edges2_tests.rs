@@ -420,8 +420,15 @@ fn fuel_bay_edge_branches_disposal_and_character_service_auth_guards() {
     );
     assert_eq!(
         handle_character_has_service(&ctx, &mut sess_mut, &[PyRep::Integer(1)]).unwrap(),
-        PyRep::Bool(false)
+        PyRep::Bool(true)
     );
+    for offline_svc in [2_i64, 3, 5] {
+        assert_eq!(
+            handle_character_has_service(&ctx, &mut sess_mut, &[PyRep::Integer(offline_svc)]).unwrap(),
+            PyRep::Bool(false),
+            "un-cored operational Astrahus must deny service {offline_svc}"
+        );
+    }
     let no_st_sess = sess_for(owner, 98_970, None, 0, false);
     let mut no_st_mut = no_st_sess.clone();
     assert_eq!(

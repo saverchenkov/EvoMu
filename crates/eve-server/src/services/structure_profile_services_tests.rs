@@ -1093,27 +1093,7 @@ fn test_require_structure_service_access_market_industry_jump_bridge_and_control
 
 #[test]
 fn evaluate_character_service_bps_isolates_service_id_from_setting_id() {
-    use crate::services::station_structure::structure_lifecycle::{
-        ATTR_SERVICE_FUEL_ONLINE, ATTR_SERVICE_FUEL_PER_HOUR,
-    };
-
-    let mut ctx = test_ctx_with_clock(1_800_000_000);
-    // Register a synthetic Standup service type with type_id = SERVICE_OFFICES (3) so
-    // `is_v24_or_legacy_service_online(..., SERVICE_OFFICES)` returns true via `online_service_type_ids`.
-    {
-        let reg = std::sync::Arc::make_mut(&mut ctx.sde);
-        let mut svc_type = reg
-            .types
-            .get(&35_878)
-            .cloned()
-            .expect("Standup Manufacturing Plant I");
-        svc_type.type_id = SERVICE_OFFICES as u32;
-        svc_type.name = "Synthetic Office Service".into();
-        svc_type.default_attributes.insert(ATTR_SERVICE_FUEL_PER_HOUR, 5.0);
-        svc_type.default_attributes.insert(ATTR_SERVICE_FUEL_ONLINE, 10.0);
-        reg.types.insert(SERVICE_OFFICES as u32, svc_type);
-    }
-
+    let ctx = test_ctx_with_clock(1_800_000_000);
     let owner_corp = 98_601_001_i64;
     let pilot_id = 90_601_001_i64;
     let struct_id = 1_060_601_001_i64;
@@ -1139,24 +1119,24 @@ fn evaluate_character_service_bps_isolates_service_id_from_setting_id() {
                 ..Default::default()
             },
         );
-        for (idx, mod_tid) in [35_878_u32, SERVICE_OFFICES as u32].into_iter().enumerate() {
-            let mid = 960_100 + (idx as i64);
-            snap.items.insert(
-                mid,
-                eve_db::InventoryItemRecord {
-                    item_id: mid,
-                    type_id: mod_tid,
-                    owner_id: owner_corp,
-                    location_id: struct_id,
-                    flag: eve_db::InventoryFlag::ServiceSlot0,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
-            snap.module_online_states.insert(mid, true);
-        }
+        // Only fit a real SDE Standup Manufacturing Plant I (`35_878`): `SERVICE_OFFICES` (`3`)
+        // is a built-in cored Upwell structure service with no fitted module in the SDE.
+        let mid = 960_100_i64;
+        snap.items.insert(
+            mid,
+            eve_db::InventoryItemRecord {
+                item_id: mid,
+                type_id: 35_878,
+                owner_id: owner_corp,
+                location_id: struct_id,
+                flag: eve_db::InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mid, true);
 
         let mut ext = load_ext_state(snap);
         let mut prof = StructureAccessProfile {
@@ -1176,6 +1156,10 @@ fn evaluate_character_service_bps_isolates_service_id_from_setting_id() {
     });
 
     ctx.db.with_snapshot(|snap| {
+        assert!(
+            is_v24_or_legacy_service_online(&ctx, snap, struct_id, SERVICE_OFFICES),
+            "cored Fortizar built-in SERVICE_OFFICES must be online against unmodified SDE"
+        );
         assert_eq!(
             evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
             Some(420),
@@ -1212,15 +1196,306 @@ fn evaluate_character_service_bps_isolates_service_id_from_setting_id() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.service_settings.remove(&SETTING_CORP_RENT_OFFICE);
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_OFFICES, 777),
+            None,
+            "attached profile with domain 20 unconfigured must deny SERVICE_OFFICES (3)"
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
+            Some(420),
+            "unconfigured domain 20 must not affect SERVICE_INDUSTRY (20)"
+        );
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.general_settings.insert(SETTING_CORP_RENT_OFFICE, true);
         prof.general_settings.insert(SETTING_INDUSTRY_TAX, false);
         save_ext_state(snap, &ext);
     });
 
     ctx.db.with_snapshot(|snap| {
         assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_OFFICES, 777),
+            Some(777),
+            "SETTING_CORP_RENT_OFFICE (20) = true restores default OFFICE rate"
+        );
+        assert_eq!(
             evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
             None,
             "SETTING_INDUSTRY_TAX (24) = false disables SERVICE_INDUSTRY (20)"
+        );
+    });
+}
+
+#[test]
+fn upwell_builtin_services_and_clone_bay_setting_23_regressions() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let owner_corp = 98_602_001_i64;
+    let owner_id = 90_602_001_i64;
+    let outsider_corp = 98_602_002_i64;
+    let outsider_id = 90_602_002_i64;
+    let astra_id = 1_060_602_001_i64;
+    let uncored_id = 1_060_602_002_i64;
+    let destroyed_id = 1_060_602_003_i64;
+    let cyno_flex_id = 1_060_602_004_i64;
+    let jb_flex_id = 1_060_602_005_i64;
+    let jammer_flex_id = 1_060_602_006_i64;
+    let metenox_flex_id = 1_060_602_007_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            owner_id,
+            clone_char_with(snap, owner_id, "BuiltinOwner", owner_corp, 30_000_142, 0),
+        );
+        snap.characters.insert(
+            outsider_id,
+            clone_char_with(snap, outsider_id, "BuiltinOutsider", outsider_corp, 30_000_142, 0),
+        );
+        snap.corporations.insert(
+            owner_corp,
+            CorporationRecord::new(owner_corp, "Builtin Corp", "BLTN", owner_id),
+        );
+        snap.corporations.insert(
+            outsider_corp,
+            CorporationRecord::new(outsider_corp, "Outsider Corp", "OUTS", outsider_id),
+        );
+
+        let make_st = |id, type_id, state: &str, cored: bool| UpwellStructureRecord {
+            structure_id: id,
+            type_id,
+            owner_corp_id: owner_corp,
+            solar_system_id: 30_000_142,
+            name: format!("Struct_{id}"),
+            state: state.into(),
+            quantum_core_installed: cored,
+            fuel_blocks: 100,
+            ..Default::default()
+        };
+        snap.structures.insert(astra_id, make_st(astra_id, 35_832, "ShieldVulnerable", true));
+        snap.structures.insert(uncored_id, make_st(uncored_id, 35_832, "ShieldVulnerable", false));
+        snap.structures.insert(destroyed_id, make_st(destroyed_id, 35_832, "Destroyed", true));
+        snap.structures.insert(cyno_flex_id, make_st(cyno_flex_id, 35_840, "ShieldVulnerable", true));
+        snap.structures.insert(jb_flex_id, make_st(jb_flex_id, 35_841, "ShieldVulnerable", true));
+        snap.structures.insert(jammer_flex_id, make_st(jammer_flex_id, 37_534, "ShieldVulnerable", true));
+        snap.structures.insert(metenox_flex_id, make_st(metenox_flex_id, 81_826, "ShieldVulnerable", true));
+
+        let clone_mod_id = 960_201_i64;
+        snap.items.insert(
+            clone_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: clone_mod_id,
+                type_id: 35_894,
+                owner_id: owner_corp,
+                location_id: astra_id,
+                flag: eve_db::InventoryFlag::ServiceSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(clone_mod_id, true);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        for svc in [SERVICE_DOCKING, SERVICE_FITTING, SERVICE_OFFICES, SERVICE_REPAIR, 13] {
+            assert!(
+                is_v24_or_legacy_service_online(&ctx, snap, astra_id, svc),
+                "cored operational Astrahus must expose built-in service {svc}"
+            );
+            assert_eq!(
+                evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, svc, 500),
+                Some(500),
+                "unprofiled cored Astrahus must allow owner corp built-in service {svc}"
+            );
+        }
+
+        // Un-cored operational dockable hull retains docking only.
+        assert!(is_v24_or_legacy_service_online(&ctx, snap, uncored_id, SERVICE_DOCKING));
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, uncored_id, owner_id, SERVICE_DOCKING, 500),
+            Some(500)
+        );
+        for svc in [SERVICE_FITTING, SERVICE_OFFICES, SERVICE_REPAIR, 13] {
+            assert!(!is_v24_or_legacy_service_online(&ctx, snap, uncored_id, svc));
+            assert_eq!(evaluate_character_service_bps(&ctx, snap, uncored_id, owner_id, svc, 500), None);
+        }
+
+        // Destroyed hull and FLEX hulls must never expose dockable built-ins.
+        for sid in [destroyed_id, cyno_flex_id, jb_flex_id, jammer_flex_id, metenox_flex_id] {
+            for svc in [SERVICE_DOCKING, SERVICE_FITTING, SERVICE_OFFICES, SERVICE_REPAIR, 13] {
+                assert!(!is_v24_or_legacy_service_online(&ctx, snap, sid, svc));
+                assert_eq!(evaluate_character_service_bps(&ctx, snap, sid, owner_id, svc, 500), None);
+            }
+        }
+        assert!(is_v24_or_legacy_service_online(&ctx, snap, jb_flex_id, SERVICE_JUMP_BRIDGE));
+        assert!(is_v24_or_legacy_service_online(&ctx, snap, cyno_flex_id, SERVICE_CYNO_BEACON));
+        assert!(is_v24_or_legacy_service_online(&ctx, snap, metenox_flex_id, SERVICE_AUTOMOONMINING));
+    });
+
+    // Attach an empty profile (`domain 20` unconfigured, docking allow-all so outsider has base access).
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 802,
+            owner_corp_id: owner_corp,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+        ext.structure_profile_id.insert(astra_id, 802);
+        ext.profiles_by_id.insert(802, prof.clone());
+        ext.access_profiles.insert(astra_id, prof);
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, SERVICE_OFFICES, 500),
+            None,
+            "attached profile with unconfigured domain 20 denies SERVICE_OFFICES (3)"
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_DOCKING, 500),
+            Some(500)
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_FITTING, 500),
+            Some(500)
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_REPAIR, 500),
+            Some(500)
+        );
+    });
+
+    // SaveProfileSettings isolation for CloneBay: setting 2 = false must NOT disable CloneBay,
+    // while setting 23 (SETTING_CLONINGBAY_TAX) = false MUST disable CloneBay.
+    let mut owner_sess = eve_machonet::SessionState::new(802);
+    owner_sess.user_id = Some(owner_id as u64);
+    owner_sess.character_id = Some(owner_id);
+    owner_sess.corporation_id = Some(owner_corp);
+    owner_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+
+    crate::services::station_structure::structure_profiles_rpc::handle_save_profile_settings(
+        &ctx,
+        &owner_sess,
+        &[
+            eve_proto::PyRep::Integer(802),
+            eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::Integer(SERVICE_FITTING),
+                eve_proto::PyRep::Bool(false),
+            ])]),
+        ],
+    )
+    .expect("save setting 2 = false");
+
+    // Seed bogus ACL/tax rules on settings 2, 6, 10 to prove CloneBay never consults them.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut denied_members = std::collections::HashMap::new();
+        denied_members.insert(
+            outsider_id,
+            crate::services::structure_acl_defense_rules::ACL_ROLE_BLOCKED,
+        );
+        ext.owner_groups.insert(
+            802_999,
+            crate::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                group_id: 802_999,
+                creator_id: owner_id,
+                owner_corp_id: owner_corp,
+                name: "WrongDomainBlocker".into(),
+                description: String::new(),
+                members: denied_members,
+            },
+        );
+        for prof in [
+            ext.access_profiles.get_mut(&astra_id).unwrap(),
+            ext.profiles_by_id.get_mut(&802).unwrap(),
+        ] {
+            for wrong_sid in [2_i64, 6, 10] {
+                prof.service_acl_rules.insert(wrong_sid, vec![(802_999, 999)]);
+            }
+        }
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                astra_id,
+                outsider_id,
+                StructureServiceKind::CloneBay,
+                1_800_000_000,
+            )
+            .expect("setting 2=false and ACLs on 2/6/10 must not block or price CloneBay"),
+            None
+        );
+    });
+
+    crate::services::station_structure::structure_profiles_rpc::handle_save_profile_settings(
+        &ctx,
+        &owner_sess,
+        &[
+            eve_proto::PyRep::Integer(802),
+            eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                eve_proto::PyRep::Bool(false),
+            ])]),
+        ],
+    )
+    .expect("save setting 23 = false");
+
+    ctx.db.with_snapshot(|snap| {
+        let err = require_structure_service_access_in_snap(
+            Some(&ctx),
+            snap,
+            astra_id,
+            outsider_id,
+            StructureServiceKind::CloneBay,
+            1_800_000_000,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "StructureAccessDenied");
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_JUMP_CLONE, 100),
+            None
+        );
+    });
+
+    crate::services::station_structure::structure_profiles_rpc::handle_save_profile_settings(
+        &ctx,
+        &owner_sess,
+        &[
+            eve_proto::PyRep::Integer(802),
+            eve_proto::PyRep::List(vec![
+                eve_proto::PyRep::Tuple(vec![
+                    eve_proto::PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                    eve_proto::PyRep::Bool(true),
+                ]),
+                eve_proto::PyRep::Tuple(vec![
+                    eve_proto::PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                    eve_proto::PyRep::Real(250_000.0),
+                ]),
+            ]),
+        ],
+    )
+    .expect("re-enable setting 23 with flat scalar fee");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_JUMP_CLONE, 100),
+            Some(2_500_000_000)
         );
     });
 }
