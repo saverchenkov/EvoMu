@@ -288,14 +288,14 @@ fn macho_notifications_contacts_combat_heat_modules_inventory_and_targets() {
     assert_eq!(eff3[1], PyRep::Integer(16));
     assert_eq!(eff3[3], PyRep::Integer(1));
 
-    // OnHeatAdded / OnHeatRemoved
+    // OnHeatAdded / OnHeatRemoved pass through [heatID, moduleID]
     assert_eq!(
-        normalize_macho_notification("OnHeatAdded", vec![PyRep::Real(0.2)]),
-        vec![PyRep::Integer(1211), PyRep::Real(0.2)]
+        normalize_macho_notification("OnHeatAdded", vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]),
+        vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]
     );
     assert_eq!(
-        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1), PyRep::Real(0.0)]),
-        vec![PyRep::Integer(1), PyRep::Real(0.0)]
+        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1177), PyRep::Integer(100_000_021)]),
+        vec![PyRep::Integer(1177), PyRep::Integer(100_000_021)]
     );
 
     // OnModuleAttributeChanges: Tuple(8), Tuple(7), scalar, Tuple(list), multi-args

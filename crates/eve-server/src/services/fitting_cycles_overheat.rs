@@ -31,6 +31,40 @@ pub fn compute_overload_multiplier(
     }
 }
 
+/// Maps a ship module slot `flag_id` to its thermodynamic rack index (`0 = high`, `1 = med`, `2 = low`).
+pub fn rack_index_for_flag(flag_id: u16) -> Option<usize> {
+    match flag_id {
+        27..=34 => Some(0),
+        19..=26 => Some(1),
+        11..=18 => Some(2),
+        _ => None,
+    }
+}
+
+/// Maps a thermodynamic rack index (`0 = high`, `1 = med`, `2 = low`) to its ship rack heat attribute ID (`1175`/`1176`/`1177`).
+pub fn rack_heat_attr_id_for_rack(rack_idx: usize) -> i64 {
+    let attrs = crate::services::tactical_module_mechanics::RACK_HEAT_ATTR_IDS;
+    i64::from(attrs.get(rack_idx).copied().unwrap_or(attrs[2]))
+}
+
+/// Maps a ship module slot `flag_id` to its ship rack heat attribute ID (`1175`/`1176`/`1177`).
+pub fn rack_heat_attr_id_for_flag(flag_id: u16) -> i64 {
+    rack_heat_attr_id_for_rack(rack_index_for_flag(flag_id).unwrap_or(2))
+}
+
+/// Resolves a fitted module's ship rack heat attribute ID (`1175`/`1176`/`1177`) from `fit` with DB snapshot fallback.
+pub fn resolve_module_heat_id(
+    ctx: &ServerContext,
+    fit: &ShipFittingEngine,
+    module_id: i64,
+) -> i64 {
+    let flag_id = fit.modules.get(&module_id).map(|fm| fm.flag_id).unwrap_or_else(|| {
+        ctx.db
+            .with_snapshot(|s| s.items.get(&module_id).map_or(0, |i| i.flag as u16))
+    });
+    rack_heat_attr_id_for_flag(flag_id)
+}
+
 pub struct AncillaryRepairPrep {
     pub is_asb: bool,
     pub asb_fallback_cap_need: f64,
@@ -237,12 +271,10 @@ pub async fn handle_active_overload_toggle(
         ctx.invalidate_and_push_fit(ship_id);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+    let heat_id = resolve_module_heat_id(ctx, &fit, module_id);
     ctx.emit_typed(
         crate::router::NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnHeatAdded {
-            module_or_heat_id: module_id,
-            module_id: None,
-        },
+        crate::router::notify_registry::OnHeatAdded { heat_id, module_id },
     );
     PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

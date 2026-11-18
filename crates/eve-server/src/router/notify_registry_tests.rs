@@ -209,39 +209,19 @@ fn typed_notification_into_args_preserves_registered_arity() {
     assert_eq!(OnGodmaFlushLocation { location_id: 100_000_010 }.into_args().len(), 1);
     assert_eq!(
         OnHeatAdded {
-            module_or_heat_id: 100_000_020,
-            module_id: None,
+            heat_id: 1175,
+            module_id: 100_000_020,
         }
-        .into_args()
-        .len(),
-        1
-    );
-    assert_eq!(
-        OnHeatAdded {
-            module_or_heat_id: 1211,
-            module_id: Some(100_000_020),
-        }
-        .into_args()
-        .len(),
-        2
+        .into_args(),
+        vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]
     );
     assert_eq!(
         OnHeatRemoved {
-            module_or_heat_id: 100_000_020,
-            module_id: None,
+            heat_id: 1176,
+            module_id: 100_000_021,
         }
-        .into_args()
-        .len(),
-        1
-    );
-    assert_eq!(
-        OnHeatRemoved {
-            module_or_heat_id: 1211,
-            module_id: Some(100_000_020),
-        }
-        .into_args()
-        .len(),
-        2
+        .into_args(),
+        vec![PyRep::Integer(1176), PyRep::Integer(100_000_021)]
     );
     assert_eq!(
         OnMultiModuleRepairStarted {

@@ -49,8 +49,8 @@ fn normalize_macho_notification_covers_all_event_shapes() {
     assert_eq!(effect.len(), 11);
     assert_eq!(effect[0], PyRep::Integer(100));
     assert_eq!(
-        normalize_macho_notification("OnHeatAdded", vec![PyRep::Real(0.5)]),
-        vec![PyRep::Integer(1211), PyRep::Real(0.5)]
+        normalize_macho_notification("OnHeatAdded", vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]),
+        vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]
     );
     let mod_attr = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::Integer(7)]);
     assert!(matches!(

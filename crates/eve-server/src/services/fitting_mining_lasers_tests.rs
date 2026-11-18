@@ -210,7 +210,8 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     assert_eq!(deact.dict_get("moduleID").and_then(|v| v.as_i64()), Some(mod_id));
     assert!(ctx.is_module_in_reactivation_delay(ship_id, mod_id));
 
-    // 2. OverloadRack (rack 1 = med slots) & StopOverloadRack & StopOverload
+    // 2. OverloadRack (rack 1 = med slots) & StopOverload
+    let _ = ctx.drain_notifications_for_char(char_id);
     let over_rack = handle_mining_and_deactivate(
         &ctx,
         &mut sess,
@@ -223,8 +224,15 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     .await
     .unwrap()
     .expect("OverloadRack");
-    assert_eq!(over_rack.dict_get("rackIndex").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(over_rack.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(over_rack, PyRep::List(vec![PyRep::Integer(mod_id)]));
+    let ov_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        ov_notes.iter().any(|n| {
+            n.event == "OnHeatAdded"
+                && n.args == vec![PyRep::Integer(1176), PyRep::Integer(mod_id)]
+        }),
+        "expected OnHeatAdded([1176, mod_id]), got: {ov_notes:?}"
+    );
 
     let stop_over = handle_mining_and_deactivate(
         &ctx,
@@ -239,6 +247,14 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
     .unwrap()
     .expect("StopOverload");
     assert_eq!(stop_over.dict_get("overloaded").and_then(|v| v.as_bool()), Some(false));
+    let stop_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        stop_notes.iter().any(|n| {
+            n.event == "OnHeatRemoved"
+                && n.args == vec![PyRep::Integer(1176), PyRep::Integer(mod_id)]
+        }),
+        "expected OnHeatRemoved([1176, mod_id]), got: {stop_notes:?}"
+    );
 
     // 3. RepairModule (in space, deducts 1 initial paste) & StopRepairModule
     let rep_start = handle_mining_and_deactivate(

@@ -98,14 +98,10 @@ fn normalize_macho_notification_exhaustive_edge_cases() {
         eleven
     );
 
-    // OnHeatRemoved with 1 arg vs 2 args
+    // OnHeatRemoved passes through [heatID, moduleID] untouched
     assert_eq!(
-        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Real(0.0)]),
-        vec![PyRep::Integer(1211), PyRep::Real(0.0)]
-    );
-    assert_eq!(
-        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1), PyRep::Real(0.0)]),
-        vec![PyRep::Integer(1), PyRep::Real(0.0)]
+        normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1176), PyRep::Integer(100_000_020)]),
+        vec![PyRep::Integer(1176), PyRep::Integer(100_000_020)]
     );
 
     // OnModuleUnfitted preserves args

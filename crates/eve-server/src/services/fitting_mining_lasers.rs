@@ -441,13 +441,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+            let heat_id = crate::services::fitting_cycles_overheat::resolve_module_heat_id(ctx, &fit, module_id);
 
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnHeatRemoved {
-                    module_or_heat_id: module_id,
-                    module_id: None,
-                },
+                crate::router::notify_registry::OnHeatRemoved { heat_id, module_id },
             );
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -493,17 +491,16 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             let target_rack_idx: usize = if let Some(fm) = fit.modules.get(&arg_val) {
-                match fm.flag_id {
-                    27..=34 => 0,
-                    19..=26 => 1,
-                    _ => 2,
-                }
+                crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id).unwrap_or(2)
             } else {
-                match arg_val as u16 {
-                    27..=34 | 0 => 0,
-                    19..=26 | 1 => 1,
-                    _ => 2,
-                }
+                u16::try_from(arg_val)
+                    .ok()
+                    .and_then(crate::services::fitting_cycles_overheat::rack_index_for_flag)
+                    .unwrap_or_else(|| match arg_val {
+                        0 => 0,
+                        1 => 1,
+                        _ => 2,
+                    })
             };
             let overloaded = method == "OverloadRack";
             if overloaded
@@ -520,11 +517,8 @@ pub(crate) async fn handle_mining_and_deactivate(
             let mut notified_modules = Vec::new();
             let mut cycling_modules = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
-                let r_idx = match fm.flag_id {
-                    27..=34 => 0,
-                    19..=26 => 1,
-                    11..=18 => 2,
-                    _ => continue,
+                let Some(r_idx) = crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id) else {
+                    continue;
                 };
                 if r_idx != target_rack_idx || fm.state == eve_dogma::ModuleState::Offline {
                     continue;
@@ -542,6 +536,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     notified_modules.push(mid);
                 }
             }
+            notified_modules.sort_unstable();
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for &mid in &cycling_modules {
@@ -566,34 +561,30 @@ pub(crate) async fn handle_mining_and_deactivate(
             fit.recalculate_stats(&ctx.sde);
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
+            let heat_id = crate::services::fitting_cycles_overheat::rack_heat_attr_id_for_rack(target_rack_idx);
             for &mid in &notified_modules {
                 if overloaded {
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnHeatAdded {
-                            module_or_heat_id: mid,
-                            module_id: None,
+                            heat_id,
+                            module_id: mid,
                         },
                     );
                 } else {
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnHeatRemoved {
-                            module_or_heat_id: mid,
-                            module_id: None,
+                            heat_id,
+                            module_id: mid,
                         },
                     );
                 }
             }
 
-            Some(Ok(PyRep::keyval([
-                ("rackIndex", PyRep::Integer(target_rack_idx as i64)),
-                ("overloaded", PyRep::Bool(overloaded)),
-                (
-                    "moduleIDs",
-                    PyRep::List(notified_modules.into_iter().map(PyRep::Integer).collect()),
-                ),
-            ])))
+            Some(Ok(PyRep::List(
+                notified_modules.into_iter().map(PyRep::Integer).collect(),
+            )))
         }
 
         ("dogmaIM", "RepairModule") | ("dogmaIM", "InitiateModuleRepair") => {

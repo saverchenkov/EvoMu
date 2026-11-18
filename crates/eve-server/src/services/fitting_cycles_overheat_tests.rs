@@ -3,6 +3,7 @@
 use super::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, VirtualServerClock, WorldRepository};
 use eve_dogma::{FittedModule, ModuleState, ShipFittingEngine};
+use eve_proto::PyRep;
 use eve_sde::{InvType, SdeRegistry};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -355,10 +356,14 @@ async fn handle_active_overload_toggle_and_nanite_lockout_check() {
     let rep_pre = handle_active_overload_toggle(&ctx, &sys, char_id, ship_id, mod_id, fit.clone(), false).await;
     assert_eq!(rep_pre.dict_get("moduleID").and_then(|v| v.as_i64()), Some(mod_id));
     assert_eq!(rep_pre.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
-    assert!(ctx
-        .drain_notifications_for_char(char_id)
-        .iter()
-        .any(|n| n.event == "OnHeatAdded"));
+    let overheat_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        overheat_notes.iter().any(|n| {
+            n.event == "OnHeatAdded"
+                && n.args == vec![PyRep::Integer(1176), PyRep::Integer(mod_id)]
+        }),
+        "expected OnHeatAdded([1176, mod_id]), got: {overheat_notes:?}"
+    );
     assert_eq!(
         ctx.fit(char_id, ship_id).unwrap().modules[&mod_id].state,
         ModuleState::Overloaded
@@ -366,6 +371,63 @@ async fn handle_active_overload_toggle_and_nanite_lockout_check() {
 
     let rep_active = handle_active_overload_toggle(&ctx, &sys, char_id, ship_id, mod_id, fit, true).await;
     assert_eq!(rep_active.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn rack_heat_mapping_covers_hi_med_low_slots_and_db_fallback() {
+    assert_eq!(rack_index_for_flag(InventoryFlag::HiSlot0 as u16), Some(0));
+    assert_eq!(rack_index_for_flag(InventoryFlag::HiSlot7 as u16), Some(0));
+    assert_eq!(rack_index_for_flag(InventoryFlag::MedSlot0 as u16), Some(1));
+    assert_eq!(rack_index_for_flag(InventoryFlag::MedSlot7 as u16), Some(1));
+    assert_eq!(rack_index_for_flag(InventoryFlag::LoSlot0 as u16), Some(2));
+    assert_eq!(rack_index_for_flag(InventoryFlag::LoSlot7 as u16), Some(2));
+    assert_eq!(rack_index_for_flag(InventoryFlag::Cargo as u16), None);
+
+    assert_eq!(rack_heat_attr_id_for_rack(0), 1175);
+    assert_eq!(rack_heat_attr_id_for_rack(1), 1176);
+    assert_eq!(rack_heat_attr_id_for_rack(2), 1177);
+    assert_eq!(rack_heat_attr_id_for_flag(InventoryFlag::HiSlot2 as u16), 1175);
+    assert_eq!(rack_heat_attr_id_for_flag(InventoryFlag::MedSlot3 as u16), 1176);
+    assert_eq!(rack_heat_attr_id_for_flag(InventoryFlag::LoSlot4 as u16), 1177);
+
+    let ctx = test_ctx_with_custom(|_| {});
+    let ship_id = 1_000_956_001i64;
+    let mod_hi_fit = 1_000_956_002i64;
+    let mod_med_db_only = 1_000_956_003i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_med_db_only,
+            InventoryItemRecord {
+                item_id: mod_med_db_only,
+                type_id: 439,
+                owner_id: 95_600_001,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    fit.modules.insert(
+        mod_hi_fit,
+        FittedModule {
+            item_id: mod_hi_fit,
+            type_id: 3041,
+            flag_id: InventoryFlag::HiSlot0 as u16,
+            state: ModuleState::Online,
+            charge_type_id: None,
+            charge_quantity: 0,
+            damage_hp: 0.0,
+            max_hp: 40.0,
+            dynamic_attribute_overrides: HashMap::new(),
+        },
+    );
+    assert_eq!(resolve_module_heat_id(&ctx, &fit, mod_hi_fit), 1175);
+    assert_eq!(resolve_module_heat_id(&ctx, &fit, mod_med_db_only), 1176);
 }
 
 #[tokio::test]

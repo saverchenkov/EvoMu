@@ -348,8 +348,8 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
             995_020,
             custom_inv_type(sde, 995_020, 46, 7, "Prop", &[(40, 40.0), (1267, 10.0), (1277, 0.5)], &[]),
         );
-        sde.types.insert(995_021, custom_inv_type(sde, 995_021, 60, 7, "Custom EHE", &[(40, 40.0)], &[6484]));
-        sde.types.insert(995_022, custom_inv_type(sde, 995_022, 49, 7, "Scanner", &[(197, 10_000.0)], &[]));
+        sde.types.insert(995_021, custom_inv_type(sde, 995_021, 60, 7, "Custom EHE", &[(40, 40.0)], &[11, 6484]));
+        sde.types.insert(995_022, custom_inv_type(sde, 995_022, 49, 7, "Scanner", &[(197, 10_000.0)], &[12]));
     });
 
     let char_id = 95_500_020i64;
@@ -361,10 +361,10 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
     let undamaged_mod = 1_000_955_024i64;
     let repairable_mod = 1_000_955_025i64;
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let uid = ctx.db.with_mut_snapshot(|snap| {
         let mut ch = snap.characters.values().next().cloned().expect("seed char");
         ch.character_id = char_id;
-        ch.user_id = char_id as u64;
+        let uid = ch.user_id;
         ch.solar_system_id = sys_id;
         ch.active_ship_id = ship_id;
         snap.characters.insert(char_id, ch);
@@ -406,7 +406,12 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
                 },
             );
         }
+        uid
     });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, char_id as u64, Some(char_id), true, ctx.now_unix_secs())
+        .unwrap();
 
     let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
     for (mid, tid, flag, state) in [
@@ -436,19 +441,29 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
     ctx.store_ship_fitting(ship_id, fit);
 
     let mut sess = SessionState {
-        user_id: Some(char_id as u64),
+        user_id: Some(uid),
         character_id: Some(char_id),
         solar_system_id: Some(sys_id),
         ship_id: Some(ship_id),
         ..Default::default()
     };
 
+    let _ = ctx.drain_notifications_for_char(char_id);
     let r0 = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(0)]).await.unwrap();
-    assert_eq!(r0.dict_get("rackIndex").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(r0, PyRep::List(vec![PyRep::Integer(hi_mod)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatAdded" && n.args == vec![PyRep::Integer(1175), PyRep::Integer(hi_mod)]
+    }));
     let r2 = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(2)]).await.unwrap();
-    assert_eq!(r2.dict_get("rackIndex").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(r2, PyRep::List(vec![PyRep::Integer(low_ehe)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatAdded" && n.args == vec![PyRep::Integer(1177), PyRep::Integer(low_ehe)]
+    }));
     let sr2 = call_dogma(&ctx, &mut sess, "StopOverloadRack", &[PyRep::Integer(low_ehe)]).await.unwrap();
-    assert_eq!(sr2.dict_get("overloaded").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(sr2, PyRep::List(vec![PyRep::Integer(low_ehe)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatRemoved" && n.args == vec![PyRep::Integer(1177), PyRep::Integer(low_ehe)]
+    }));
 
     sess.station_id = Some(60_003_760);
     let e = call_dogma(&ctx, &mut sess, "RepairModule", &[PyRep::Integer(repairable_mod)]).await.unwrap_err();
@@ -863,13 +878,19 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
         ModuleState::Online
     );
     let notes = ctx.drain_notifications_for_char(char_id);
-    assert!(notes.iter().any(|n| n.event == "OnHeatRemoved"));
+    assert!(notes.iter().any(|n| {
+        n.event == "OnHeatRemoved" && n.args == vec![PyRep::Integer(1175), PyRep::Integer(hi_mod)]
+    }));
     assert!(notes.iter().any(|n| n.event == "OnModuleAttributeChanges"));
 
     // StopOverloadRack with solar_system_id = None clears MedSlot0 Overloaded
-    let _ = call_dogma(&ctx, &mut sess_no_sys, "StopOverloadRack", &[PyRep::Integer(med_mod)])
+    let r_stop_med = call_dogma(&ctx, &mut sess_no_sys, "StopOverloadRack", &[PyRep::Integer(med_mod)])
         .await
         .unwrap();
+    assert_eq!(r_stop_med, PyRep::List(vec![PyRep::Integer(med_mod)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatRemoved" && n.args == vec![PyRep::Integer(1176), PyRep::Integer(med_mod)]
+    }));
     assert_eq!(
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&med_mod].state,
         ModuleState::Online
@@ -883,13 +904,18 @@ async fn stop_overload_and_rack_edges_and_nanite_repair_conflict_refund_done() {
         ship_id: Some(ship_id),
         ..Default::default()
     };
+    let _ = ctx.drain_notifications_for_char(char_id);
     let r_med = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(1)]).await.unwrap();
-    assert_eq!(r_med.dict_get("rackIndex").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(r_med, PyRep::List(vec![PyRep::Integer(med_mod)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatAdded" && n.args == vec![PyRep::Integer(1176), PyRep::Integer(med_mod)]
+    }));
     assert_eq!(
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&med_mod].state,
         ModuleState::Overloaded
     );
-    let _ = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(2)]).await.unwrap();
+    let r_low = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(2)]).await.unwrap();
+    assert_eq!(r_low, PyRep::List(Vec::new()));
     assert_eq!(
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&offline_low_mod].state,
         ModuleState::Offline
@@ -1349,7 +1375,7 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
     let ov_rack_rep = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(overload_id)])
         .await
         .unwrap();
-    assert_eq!(ov_rack_rep.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert_eq!(ov_rack_rep, PyRep::List(vec![PyRep::Integer(overload_id)]));
     assert_eq!(
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&overload_id].state,
         ModuleState::Overloaded
@@ -1362,15 +1388,23 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
     assert!(ctx
         .drain_notifications_for_char(char_id)
         .iter()
-        .any(|n| n.event == "OnHeatRemoved"));
+        .any(|n| {
+            n.event == "OnHeatRemoved"
+                && n.args == vec![PyRep::Integer(1175), PyRep::Integer(overload_id)]
+        }));
 
     let _ = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(overload_id)])
         .await
         .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
     let stop_rack_rep = call_dogma(&ctx, &mut sess, "StopOverloadRack", &[PyRep::Integer(overload_id)])
         .await
         .unwrap();
-    assert_eq!(stop_rack_rep.dict_get("overloaded"), Some(&PyRep::Bool(false)));
+    assert_eq!(stop_rack_rep, PyRep::List(vec![PyRep::Integer(overload_id)]));
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+        n.event == "OnHeatRemoved"
+            && n.args == vec![PyRep::Integer(1175), PyRep::Integer(overload_id)]
+    }));
     assert_eq!(
         ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&overload_id].state,
         ModuleState::Online
@@ -1448,5 +1482,130 @@ async fn mutants_cov_tp_sig_mult_fallback_effects_and_overload() {
             }),
             "expected '{eff_name}' -> {expected_eid}, got {notes:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn overload_rack_and_stop_overload_rack_return_flat_ids_and_emit_rack_heat_attrs() {
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.types.insert(
+            995_101,
+            custom_inv_type(sde, 995_101, 53, 7, "RackTestHiMod", &[(40, 40.0)], &[12]),
+        );
+        sde.types.insert(
+            995_102,
+            custom_inv_type(sde, 995_102, 53, 7, "RackTestMedMod", &[(40, 40.0)], &[13]),
+        );
+        sde.types.insert(
+            995_103,
+            custom_inv_type(sde, 995_103, 53, 7, "RackTestLowMod", &[(40, 40.0)], &[11]),
+        );
+    });
+    let char_id = 95_500_099i64;
+    let sys_id = 30_002_507u32;
+    let ship_id = 1_000_955_900i64;
+    let hi_1 = 1_000_955_901i64;
+    let hi_2 = 1_000_955_902i64;
+    let med_1 = 1_000_955_903i64;
+    let low_1 = 1_000_955_904i64;
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        let uid = ch.user_id;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 0.0),
+        );
+        for (mid, tid, flag) in [
+            (hi_1, 995_101, InventoryFlag::HiSlot0),
+            (hi_2, 995_101, InventoryFlag::HiSlot1),
+            (med_1, 995_102, InventoryFlag::MedSlot0),
+            (low_1, 995_103, InventoryFlag::LoSlot0),
+        ] {
+            snap.items
+                .insert(mid, make_item(mid, tid, char_id, ship_id, flag, 0.0));
+        }
+        uid
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, char_id as u64, Some(char_id), true, ctx.now_unix_secs())
+        .unwrap();
+
+    let mut fit = ShipFittingEngine::from_sde(ship_id, 587, &ctx.sde);
+    for (mid, tid, flag) in [
+        (hi_1, 995_101, InventoryFlag::HiSlot0 as u16),
+        (hi_2, 995_101, InventoryFlag::HiSlot1 as u16),
+        (med_1, 995_102, InventoryFlag::MedSlot0 as u16),
+        (low_1, 995_103, InventoryFlag::LoSlot0 as u16),
+    ] {
+        fit.modules.insert(
+            mid,
+            FittedModule {
+                item_id: mid,
+                type_id: tid,
+                flag_id: flag,
+                state: ModuleState::Online,
+                charge_type_id: None,
+                charge_quantity: 0,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+    }
+    fit.recalculate_stats(&ctx.sde);
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+    ctx.store_ship_fitting(ship_id, fit);
+
+    let mut sess = SessionState {
+        user_id: Some(uid),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    for (trigger_add, trigger_stop, expected_mids, expected_heat_attr) in [
+        (hi_1, hi_2, vec![hi_1, hi_2], 1175i64),
+        (med_1, med_1, vec![med_1], 1176i64),
+        (low_1, low_1, vec![low_1], 1177i64),
+    ] {
+        let expected_rep = PyRep::List(expected_mids.iter().copied().map(PyRep::Integer).collect());
+
+        let _ = ctx.drain_notifications_for_char(char_id);
+        let add_rep = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(trigger_add)])
+            .await
+            .unwrap();
+        assert_eq!(add_rep, expected_rep);
+        let add_notes = ctx.drain_notifications_for_char(char_id);
+        for &mid in &expected_mids {
+            assert!(
+                add_notes.iter().any(|n| {
+                    n.event == "OnHeatAdded"
+                        && n.args == vec![PyRep::Integer(expected_heat_attr), PyRep::Integer(mid)]
+                }),
+                "missing OnHeatAdded([{expected_heat_attr}, {mid}]) in {add_notes:?}"
+            );
+        }
+
+        let stop_rep = call_dogma(&ctx, &mut sess, "StopOverloadRack", &[PyRep::Integer(trigger_stop)])
+            .await
+            .unwrap();
+        assert_eq!(stop_rep, expected_rep);
+        let stop_notes = ctx.drain_notifications_for_char(char_id);
+        for &mid in &expected_mids {
+            assert!(
+                stop_notes.iter().any(|n| {
+                    n.event == "OnHeatRemoved"
+                        && n.args == vec![PyRep::Integer(expected_heat_attr), PyRep::Integer(mid)]
+                }),
+                "missing OnHeatRemoved([{expected_heat_attr}, {mid}]) in {stop_notes:?}"
+            );
+        }
     }
 }

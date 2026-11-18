@@ -1183,9 +1183,8 @@ fn w4_mutant_killers_all_remaining_notifications() {
     assert_eq!(normalize_macho_notification("OnTargetClear", Vec::new()), vec![PyRep::List(Vec::new())]);
     assert_eq!(normalize_macho_notification("OnTargetClear", vec![PyRep::List(vec![PyRep::Integer(1)])]), vec![PyRep::List(vec![PyRep::Integer(1)])]);
 
-    assert_eq!(normalize_macho_notification("OnHeatAdded", vec![PyRep::Integer(55)]), vec![PyRep::Integer(1211), PyRep::Integer(55)]);
-    assert_eq!(normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(55)]), vec![PyRep::Integer(1211), PyRep::Integer(55)]);
-    assert_eq!(normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(99), PyRep::Integer(55)]), vec![PyRep::Integer(99), PyRep::Integer(55)]);
+    assert_eq!(normalize_macho_notification("OnHeatAdded", vec![PyRep::Integer(1175), PyRep::Integer(55)]), vec![PyRep::Integer(1175), PyRep::Integer(55)]);
+    assert_eq!(normalize_macho_notification("OnHeatRemoved", vec![PyRep::Integer(1176), PyRep::Integer(55)]), vec![PyRep::Integer(1176), PyRep::Integer(55)]);
 
     assert_eq!(
         normalize_macho_notification("OnRemoteMessage", vec![PyRep::String("k".into()), PyRep::Dict(Vec::new())]),

@@ -4074,20 +4074,12 @@ define_notifications! {
         samples: || vec![vec![PyRep::Integer(100_000_010)]],
     },
     OnHeatAdded => "OnHeatAdded" ("charid") {
-        fields: { module_or_heat_id: i64 },
-        optional: { module_id: Option<i64> },
-        samples: || vec![
-            vec![PyRep::Integer(100_000_020)],
-            vec![PyRep::Integer(1211), PyRep::Integer(100_000_020)],
-        ],
+        fields: { heat_id: i64, module_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]],
     },
     OnHeatRemoved => "OnHeatRemoved" ("charid") {
-        fields: { module_or_heat_id: i64 },
-        optional: { module_id: Option<i64> },
-        samples: || vec![
-            vec![PyRep::Integer(100_000_020)],
-            vec![PyRep::Integer(1211), PyRep::Integer(100_000_020)],
-        ],
+        fields: { heat_id: i64, module_id: i64 },
+        samples: || vec![vec![PyRep::Integer(1175), PyRep::Integer(100_000_020)]],
     },
     OnMultiModuleRepairStarted => "OnMultiModuleRepairStarted" ("charid") {
         fields: { module_ids: Vec<PyRep> },

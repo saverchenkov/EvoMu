@@ -1158,7 +1158,12 @@ async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility(
     .await
     .expect("Overload laser_1_id");
     let notes_ovl = sess.drain_notifications();
-    assert!(notes_ovl.iter().any(|(n, _)| n == "OnHeatAdded"));
+    assert!(
+        notes_ovl.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+        }),
+        "expected OnHeatAdded([1175, laser_1_id]), got: {notes_ovl:?}"
+    );
 
     // Step 20s of overloaded weapon cycles -> high rack heat (1175) stays above 0.85,
     // laser_1_id takes more probabilistic heat hits than attenuated adjacent laser_2_id,
@@ -1218,17 +1223,44 @@ async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility(
     );
 
     // Verify OverloadRack, StopOverloadRack, and StopOverload RPCs
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "OverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
+    let _ = sess.drain_notifications();
+    let ov_rack = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "OverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("OverloadRack");
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
+    assert_eq!(ov_rack, PyRep::List(vec![PyRep::Integer(laser_2_id)]));
+    let ov_rack_notes = sess.drain_notifications();
+    assert!(
+        ov_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_2_id)]
+        }),
+        "expected OnHeatAdded([1175, laser_2_id]), got: {ov_rack_notes:?}"
+    );
+
+    let stop_rack = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("StopOverloadRack");
-    let _ = sess.drain_notifications();
+    assert_eq!(
+        stop_rack,
+        PyRep::List(vec![PyRep::Integer(laser_1_id), PyRep::Integer(laser_2_id)])
+    );
+    let stop_rack_notes = sess.drain_notifications();
+    assert!(
+        stop_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+        }) && stop_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_2_id)]
+        }),
+        "expected OnHeatRemoved([1175, laser_1_id/laser_2_id]), got: {stop_rack_notes:?}"
+    );
+
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverload", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("StopOverload");
-    assert!(sess.drain_notifications().iter().any(|(n, _)| n == "OnHeatRemoved"));
+    assert!(sess.drain_notifications().iter().any(|(n, args)| {
+        n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+    }));
 
     // Step 5s with no overloaded modules -> high rack heat (1175) dissipates exponentially!
     for _ in 0..5 {
