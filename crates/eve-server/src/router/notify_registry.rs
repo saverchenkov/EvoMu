@@ -153,6 +153,25 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         self.notify(target, N::EVENT, id_type, notif.into_args())
     }
+
+    /// Emits a registered notification by event name to a single character after verifying
+    /// that `event` is registered in [`all_registered_notifications`] and `args.len()`
+    /// satisfies its registered arity bounds.
+    pub fn emit_registered_to_char(
+        &self,
+        char_id: i64,
+        event: &str,
+        id_type: &str,
+        args: Vec<PyRep>,
+    ) -> Option<Vec<PendingMachoNotification>> {
+        let entry = find_registered_notification_checked(event, args.len())?;
+        Some(self.notify(
+            NotificationTarget::Character(char_id),
+            entry.event,
+            id_type,
+            args,
+        ))
+    }
 }
 
 /// Emits a typed character notification directly to `pending_notifications` and `notify_tx`
@@ -359,6 +378,83 @@ pub fn push_pending_session_notification(
     session.push_notification(notif.event, notif.args);
 }
 
+fn find_registered_notification_checked(
+    event: &str,
+    arg_len: usize,
+) -> Option<&'static NotificationRegistryEntry> {
+    let entry = all_registered_notifications()
+        .iter()
+        .find(|e| e.event == event)?;
+    if arg_len < entry.min_arity || arg_len > entry.max_arity {
+        return None;
+    }
+    Some(entry)
+}
+
+fn build_pending_notification_for_event(
+    recipient_char_id: i64,
+    user_id_opt: Option<u64>,
+    event: &str,
+    id_type: &str,
+    args: Vec<PyRep>,
+    created_filetime: i64,
+) -> PendingMachoNotification {
+    let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+        recipient_char_id,
+        user_id_opt,
+        event,
+        id_type,
+        args.clone(),
+    );
+    PendingMachoNotification {
+        seq_id: next_notification_seq_id(),
+        recipient_char_id,
+        event: event.to_string(),
+        id_type: id_type.to_string(),
+        args,
+        packet,
+        marshaled_packet,
+        created_filetime,
+    }
+}
+
+/// Encodes a strongly typed notification into a wire-ready [`PendingMachoNotification`]
+/// without pushing it to any queue (used by callers applying custom queue coalescing).
+pub fn build_pending_typed_notification<N: TypedNotification>(
+    recipient_char_id: i64,
+    user_id_opt: Option<u64>,
+    id_type: &str,
+    created_filetime: i64,
+    notif: N,
+) -> PendingMachoNotification {
+    build_pending_notification_for_event(
+        recipient_char_id,
+        user_id_opt,
+        N::EVENT,
+        id_type,
+        notif.into_args(),
+        created_filetime,
+    )
+}
+
+/// Pushes a prebuilt notification into `pend` with a 256-entry FIFO bound and broadcasts on `notify_tx`.
+pub fn push_pending_char_notification_256(
+    pend: &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
+    char_id: i64,
+    notif: PendingMachoNotification,
+) {
+    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+    let q = queues.entry(char_id).or_default();
+    if q.len() >= 256 {
+        q.remove(0);
+    }
+    q.push(notif.clone());
+    if let Some(tx) = notify_tx {
+        let _ = tx.send((char_id, notif));
+    }
+}
+
 /// Encodes a registered notification by event name into a wire-ready [`PendingMachoNotification`]
 /// after verifying that `event` is registered in [`all_registered_notifications`] and `args.len()`
 /// satisfies its registered arity bounds.
@@ -370,26 +466,13 @@ pub fn build_pending_registered_notification(
     args: Vec<PyRep>,
     created_filetime: i64,
 ) -> Option<PendingMachoNotification> {
-    let entry = all_registered_notifications()
-        .iter()
-        .find(|e| e.event == event)?;
-    if args.len() < entry.min_arity || args.len() > entry.max_arity {
-        return None;
-    }
-    let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+    let entry = find_registered_notification_checked(event, args.len())?;
+    Some(build_pending_notification_for_event(
         recipient_char_id,
         user_id_opt,
         entry.event,
         id_type,
-        args.clone(),
-    );
-    Some(PendingMachoNotification::new(
-        recipient_char_id,
-        entry.event,
-        id_type,
         args,
-        packet,
-        marshaled_packet,
         created_filetime,
     ))
 }
@@ -408,24 +491,13 @@ fn build_and_push_typed_notification<N: TypedNotification>(
     if char_id <= 0 {
         return;
     }
-    let args = notif.into_args();
-    let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+    let pending = build_pending_typed_notification(
         char_id,
         user_id_opt,
-        N::EVENT,
         id_type,
-        args.clone(),
-    );
-    let pending = PendingMachoNotification {
-        seq_id: next_notification_seq_id(),
-        recipient_char_id: char_id,
-        event: N::EVENT.to_string(),
-        id_type: id_type.to_string(),
-        args,
-        packet,
-        marshaled_packet,
         created_filetime,
-    };
+        notif,
+    );
     push_or_stage_pending_notification(
         pending_notifications,
         notify_tx,
@@ -2949,9 +3021,29 @@ define_notifications! {
             )]),
         ]],
     },
+    OnNewNotificationReceived => "OnNewNotificationReceived" ("charid") {
+        fields: { notification: PyRep },
+        samples: || vec![vec![PyRep::Dict(Vec::new())]],
+    },
     OnNotificationDeleted => "OnNotificationDeleted" ("charid") {
         fields: { notification_ids: Vec<i64> },
         samples: || vec![vec![PyRep::List(vec![PyRep::Integer(1)])]],
+    },
+    OnNotificationReceived => "OnNotificationReceived" ("charid") {
+        fields: {
+            notification_id: i64,
+            type_id: i64,
+            sender_id: Option<i64>,
+            created: i64,
+            data: PyRep,
+        },
+        samples: || vec![vec![
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(90_000_001),
+            PyRep::Integer(1_335_000_000_000_000_00),
+            PyRep::String("{}".into()),
+        ]],
     },
     OnOwnOrdersChanged => "OnOwnOrdersChanged" ("charid") {
         fields: { orders: PyRep, reason: PyRep, is_corp: PyRep },
@@ -3206,6 +3298,14 @@ define_notifications! {
             PyRep::Integer(30_000_142),
             PyRep::Integer(100_000_020),
             PyRep::Bool(true),
+        ]],
+    },
+    OnCapacitorChange => "OnCapacitorChange" ("charid") {
+        fields: { ship_id: i64, new_cap: f64, max_cap: f64 },
+        samples: || vec![vec![
+            PyRep::Integer(100_000_010),
+            PyRep::Real(250.0),
+            PyRep::Real(500.0),
         ]],
     },
     OnCaptureChanged => "OnCaptureChanged" ("solarsystemid") {
@@ -4190,6 +4290,14 @@ define_notification_item!(OnDungeonTriggerAmbientSoundStr => "OnDungeonTriggerAm
         PyRep::Integer(100_000_011),
     ]],
 });
+define_notification_item!(OnDungeonTriggerAmbientSound3Str => "OnDungeonTriggerAmbientSound" ("charid") {
+    fields: { dungeon_id: i64, sound_id: String, entity_item_id: i64 },
+    samples: || vec![vec![
+        PyRep::Integer(42),
+        PyRep::String("amb".into()),
+        PyRep::Integer(100_000_010),
+    ]],
+});
 define_notification_item!(OnDungeonTriggerMessageStr => "OnDungeonTriggerMessage" ("charid") {
     fields: { message_type: String, message_id: i64 },
     samples: || vec![vec![PyRep::String("warn".into()), PyRep::Integer(5001)]],
@@ -4251,4 +4359,8 @@ define_notification_item!(PlanetExtractorFinished => "PlanetExtractorFinished" (
 define_notification_item!(PlanetStorageFull => "PlanetStorageFull" ("charid") {
     fields: { planet_id: i64, pin_id: i64 },
     samples: || vec![vec![PyRep::Integer(40_000_001), PyRep::Integer(501)]],
+});
+define_notification_item!(FailLockTarget => "FailLockTarget" ("service:target") {
+    fields: { target_id: i64 },
+    samples: || vec![vec![PyRep::Integer(100_000_010)]],
 });

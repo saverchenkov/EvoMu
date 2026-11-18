@@ -20,44 +20,6 @@ use eve_proto::PyRep;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-pub fn push_char_notification_with_db(
-    db: &eve_db::WorldRepository,
-    pending_notifications: Option<&dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
-    notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
-    char_id: i64,
-    event: &str,
-    args: Vec<PyRep>,
-) {
-    if char_id <= 0 {
-        return;
-    }
-    let Some(pend) = pending_notifications else {
-        return;
-    };
-    let uid_opt = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(char_id, uid_opt, event, "charid", args.clone());
-    let notif = PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id: char_id,
-        event: event.to_string(),
-        id_type: "charid".to_string(),
-        args,
-        packet,
-        marshaled_packet,
-        created_filetime: db.clock().now_blueos_filetime_ticks(),
-    };
-    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
-    let q = queues.entry(char_id).or_default();
-    if q.len() >= 256 {
-        q.remove(0);
-    }
-    q.push(notif.clone());
-    if let Some(tx) = notify_tx {
-        let _ = tx.send((char_id, notif));
-    }
-}
-
 /// Emits `OnProgressionAdvanced(objective_id, last_completed_task_id)` (`id_type = "charid"`).
 /// Matches `progression/client/progressionSvc.pyj:ProgressionService.OnProgressionAdvanced`.
 pub fn emit_progression_advanced(

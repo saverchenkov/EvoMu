@@ -27,21 +27,14 @@ fn push_char_notification_with_db_and_progression_combat_emitters() {
     let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
     let (tx, mut rx) = broadcast::channel(300);
 
-    push_char_notification_with_db(&ctx.db, Some(&pend), Some(&tx), 0, "OnStep", vec![]);
-    push_char_notification_with_db(&ctx.db, Some(&pend), Some(&tx), -10, "OnStep", vec![]);
-    push_char_notification_with_db(&ctx.db, None, Some(&tx), char_id, "OnStep", vec![]);
+    emit_progression_task_completed_with_db(&ctx.db, Some(&pend), Some(&tx), 0, 1);
+    emit_progression_task_completed_with_db(&ctx.db, Some(&pend), Some(&tx), -10, 1);
+    emit_progression_task_completed_with_db(&ctx.db, None, Some(&tx), char_id, 1);
     assert!(pend.read().unwrap().is_empty());
     assert!(rx.try_recv().is_err());
 
     for i in 0..257_i64 {
-        push_char_notification_with_db(
-            &ctx.db,
-            Some(&pend),
-            Some(&tx),
-            char_id,
-            "OnStep",
-            vec![PyRep::Integer(i)],
-        );
+        emit_progression_task_completed_with_db(&ctx.db, Some(&pend), Some(&tx), char_id, i);
     }
     assert_eq!(pend.read().unwrap().get(&char_id).unwrap().len(), 256);
     assert_eq!(
@@ -218,20 +211,14 @@ fn broadcast_delivery_station_alliance_faction_fields_negative_guards_and_empty_
         .acquire_online_lock(2, 502, Some(other_char), true, 1_775_400_000)
         .expect("online lock 2");
 
-    // 1. push_char_notification_with_db broadcast delivery & unknown char_id (uid_opt = None)
+    // 1. Typed DB-backed progression emitter broadcast delivery & unknown char_id (uid_opt = None)
     let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
     let (tx, mut rx) = broadcast::channel(16);
-    push_char_notification_with_db(
-        &ctx.db,
-        Some(&pend),
-        Some(&tx),
-        999_888_777,
-        "BroadcastTest",
-        vec![PyRep::Integer(7)],
-    );
+    emit_progression_task_completed_with_db(&ctx.db, Some(&pend), Some(&tx), 999_888_777, 7);
     let (bc_cid, bc_notif) = rx.try_recv().expect("broadcast received");
     assert_eq!(bc_cid, 999_888_777);
-    assert_eq!(bc_notif.event, "BroadcastTest");
+    assert_eq!(bc_notif.event, "OnProgressionTaskCompleted");
+    assert_eq!(bc_notif.args, vec![PyRep::Integer(7)]);
     assert_eq!(pend.read().unwrap()[&999_888_777].len(), 1);
 
     // 2. Station notification includes alliance_id & war_faction_id and delivers to both pilots in station

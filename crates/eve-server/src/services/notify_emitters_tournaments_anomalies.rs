@@ -9,14 +9,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::notify_registry::{
-    emit_typed_target_to_char_with_id_type, DoSimClockRebase, OnAnalysisKreditsChange,
-    OnComponentRemovedSystemEnvironment, OnCosmicAnomalyAdded, OnDeathzoneStateUpdate,
-    OnDungeonInstanceAdded, OnDungeonInstanceRemoved, OnEnterTournamentSystem,
-    OnInfluenceUpdate, OnLeaveTournamentSystem, OnMatchMakingFailure, OnOreMinedByOther,
-    OnProbeWarpEnd, OnProgressionLeft, OnProvingGroundsMatchFound, OnSignalTrackerFullState,
-    OnSpaceWhiteOutStart, OnSystemActivityUpdated, OnSystemEffectStarted,
-    OnSystemWideEffectStart, OnSystemWideEffectStop, OnTaleData, OnTaleRemove,
-    OnTournamentMatchStateChange, OnUpdateSystemWideEffectsInfo,
+    build_pending_typed_notification, emit_typed_target_to_char_capped,
+    emit_typed_target_to_char_with_id_type, push_pending_char_notification_256,
+    DoSimClockRebase, OnAnalysisKreditsChange, OnComponentRemovedSystemEnvironment,
+    OnCosmicAnomalyAdded, OnDeathzoneStateUpdate, OnDungeonCameraInterest,
+    OnDungeonInstanceAdded, OnDungeonInstanceRemoved, OnDungeonTriggerAmbientSound3Str,
+    OnDungeonTriggerAudio, OnDungeonTriggerMessageStr, OnDungeonTriggerMusic,
+    OnEnterTournamentSystem, OnInfluenceUpdate, OnLeaveTournamentSystem, OnMatchMakingFailure,
+    OnOreMinedByOther, OnProbeWarpEnd, OnProgressionLeft, OnProvingGroundsMatchFound,
+    OnSignalTrackerFullState, OnSpaceWhiteOutStart, OnSystemActivityUpdated,
+    OnSystemEffectStarted, OnSystemWideEffectStart, OnSystemWideEffectStop, OnTaleData,
+    OnTaleRemove, OnTournamentMatchStateChange, OnUpdateSystemWideEffectsInfo, TypedNotification,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
@@ -369,16 +372,14 @@ pub fn emit_signal_tracker_full_state_for_system(
 // 3. Dungeon Room Trigger Notifications
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-pub fn push_dungeon_room_trigger_notify(
+pub fn push_dungeon_room_trigger_notify_typed<N: TypedNotification>(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
         &dyn AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
     >,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
     recipient_char_id: i64,
-    event: &str,
-    args: Vec<PyRep>,
+    notif: N,
 ) {
     if recipient_char_id <= 0 {
         return;
@@ -386,25 +387,14 @@ pub fn push_dungeon_room_trigger_notify(
     let (Some(pend), Some(tx)) = (pending_notifications, notify_tx) else {
         return;
     };
-    let (pkt, mpkt) =
-        ServerContext::build_macho_notification_packet(recipient_char_id, None, event, "charid", args.clone());
-    let notif = PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
+    let notif = build_pending_typed_notification(
         recipient_char_id,
-        event: event.to_string(),
-        id_type: "charid".to_string(),
-        args,
-        packet: pkt,
-        marshaled_packet: mpkt,
-        created_filetime: db.clock().now_blueos_filetime_ticks(),
-    };
-    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
-    let q = queues.entry(recipient_char_id).or_default();
-    if q.len() >= 256 {
-        q.remove(0);
-    }
-    q.push(notif.clone());
-    let _ = tx.send((recipient_char_id, notif));
+        None,
+        N::DEFAULT_ID_TYPE,
+        db.clock().now_blueos_filetime_ticks(),
+        notif,
+    );
+    push_pending_char_notification_256(pend, Some(tx), recipient_char_id, notif);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -419,17 +409,16 @@ pub fn emit_dungeon_camera_interest_core(
     speed: f64,
     duration: f64,
 ) {
-    push_dungeon_room_trigger_notify(
+    push_dungeon_room_trigger_notify_typed(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnDungeonCameraInterest",
-        vec![
-            PyRep::Integer(item_id),
-            PyRep::Real(speed),
-            PyRep::Real(duration),
-        ],
+        OnDungeonCameraInterest {
+            item_id,
+            speed,
+            duration,
+        },
     );
 }
 
@@ -445,17 +434,16 @@ pub fn emit_dungeon_trigger_ambient_sound_core(
     sound_id: &str,
     entity_item_id: i64,
 ) {
-    push_dungeon_room_trigger_notify(
+    push_dungeon_room_trigger_notify_typed(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnDungeonTriggerAmbientSound",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::String(sound_id.to_string()),
-            PyRep::Integer(entity_item_id),
-        ],
+        OnDungeonTriggerAmbientSound3Str {
+            dungeon_id,
+            sound_id: sound_id.to_string(),
+            entity_item_id,
+        },
     );
 }
 
@@ -469,16 +457,15 @@ pub fn emit_dungeon_trigger_audio_core(
     dungeon_id: i64,
     audio_url: &str,
 ) {
-    push_dungeon_room_trigger_notify(
+    push_dungeon_room_trigger_notify_typed(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnDungeonTriggerAudio",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::String(audio_url.to_string()),
-        ],
+        OnDungeonTriggerAudio {
+            dungeon_id,
+            audio_url: audio_url.to_string(),
+        },
     );
 }
 
@@ -492,16 +479,15 @@ pub fn emit_dungeon_trigger_message_core(
     message_type: &str,
     message_id: i64,
 ) {
-    push_dungeon_room_trigger_notify(
+    push_dungeon_room_trigger_notify_typed(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnDungeonTriggerMessage",
-        vec![
-            PyRep::String(message_type.to_string()),
-            PyRep::Integer(message_id),
-        ],
+        OnDungeonTriggerMessageStr {
+            message_type: message_type.to_string(),
+            message_id,
+        },
     );
 }
 
@@ -515,16 +501,15 @@ pub fn emit_dungeon_trigger_music_core(
     dungeon_id: i64,
     music_trigger_id: i64,
 ) {
-    push_dungeon_room_trigger_notify(
+    push_dungeon_room_trigger_notify_typed(
         db,
         pending_notifications,
         notify_tx,
         char_id,
-        "OnDungeonTriggerMusic",
-        vec![
-            PyRep::Integer(dungeon_id),
-            PyRep::Integer(music_trigger_id),
-        ],
+        OnDungeonTriggerMusic {
+            dungeon_id,
+            music_trigger_id,
+        },
     );
 }
 
@@ -1022,6 +1007,41 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
     }
 }
 
+fn push_expedition_sys_notif<N: TypedNotification + Clone>(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &dyn AnyRwLock<
+        std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    sys_id: u32,
+    notif: N,
+) {
+    let recipients: Vec<i64> = db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
+            .map(|c| c.character_id)
+            .collect()
+    });
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    for cid in recipients {
+        let uid_opt = db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id));
+        emit_typed_target_to_char_capped(
+            Some(pending_notifications),
+            Some(notify_tx),
+            cid,
+            uid_opt,
+            "charid",
+            now_ft,
+            256,
+            notif.clone(),
+        );
+    }
+}
+
 pub fn emit_expedition_combat_notifications(
     db: &eve_db::WorldRepository,
     pending_notifications: &dyn AnyRwLock<
@@ -1035,25 +1055,6 @@ pub fn emit_expedition_combat_notifications(
     new_escalation: Option<&crate::services::pve_expeditions::EscalatingPathEntry>,
     advanced_step: Option<&crate::services::pve_expeditions::EscalatingPathEntry>,
 ) {
-    let push_sys = |sys_id: u32, event: &str, args: Vec<PyRep>| {
-        let recipients: Vec<i64> = db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
-                .map(|c| c.character_id)
-                .collect()
-        });
-        for cid in recipients {
-            crate::services::notify_emitters_ess_bounties::push_char_notification_with_db(
-                db,
-                Some(pending_notifications),
-                Some(notify_tx),
-                cid,
-                event,
-                args.clone(),
-            );
-        }
-    };
 
     if let Some(site_id) = cleared_site_id {
         if let Some(rest) = site_id.strip_prefix("EXP-") {
@@ -1084,15 +1085,17 @@ pub fn emit_expedition_combat_notifications(
                         found
                     });
                     if let Some((sys_id, did)) = site_info {
-                        push_sys(
+                        push_expedition_sys_notif(
+                            db,
+                            pending_notifications,
+                            notify_tx,
                             sys_id,
-                            "OnDungeonInstanceRemoved",
-                            vec![
-                                PyRep::Integer(i64::from(sys_id)),
-                                PyRep::Integer(inst_id),
-                                PyRep::String(old_sig_id),
-                                PyRep::Integer(i64::from(did)),
-                            ],
+                            OnDungeonInstanceRemoved {
+                                solar_system_id: i64::from(sys_id),
+                                instance_id: inst_id,
+                                signature_id: old_sig_id,
+                                dungeon_id: i64::from(did),
+                            },
                         );
                     }
                 }
@@ -1139,10 +1142,15 @@ pub fn emit_expedition_combat_notifications(
             ("signatureID", PyRep::String(sig_id)),
             ("scanStrengthValue", PyRep::Real(0.5)),
         ]);
-        push_sys(
+        push_expedition_sys_notif(
+            db,
+            pending_notifications,
+            notify_tx,
             sys_id,
-            "OnDungeonInstanceAdded",
-            vec![PyRep::Integer(i64::from(sys_id)), instance],
+            OnDungeonInstanceAdded {
+                solar_system_id: i64::from(sys_id),
+                instance,
+            },
         );
     }
 }

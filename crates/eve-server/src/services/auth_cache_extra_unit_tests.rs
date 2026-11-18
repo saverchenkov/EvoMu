@@ -197,8 +197,27 @@ async fn machonet_cache_login_multilogin_and_clone_grade_edge_branches() {
         "InvalidArgument"
     );
     for args in [
-        vec![PyRep::Integer(cid), PyRep::String("Ev1".into()), PyRep::Tuple(vec![PyRep::Integer(7)])],
-        vec![PyRep::Integer(cid), PyRep::String("Ev2".into()), PyRep::Integer(9)],
+        vec![
+            PyRep::Integer(cid),
+            PyRep::String("OnNewNotificationReceived".into()),
+            PyRep::Tuple(vec![PyRep::Integer(7)]),
+        ],
+        vec![
+            PyRep::Integer(cid),
+            PyRep::String("OnNewNotificationReceived".into()),
+            PyRep::Integer(9),
+        ],
+        vec![
+            PyRep::Integer(cid),
+            PyRep::String("OnNotificationReceived".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(2),
+                PyRep::None,
+                PyRep::Integer(3),
+                PyRep::String("ok".into()),
+            ]),
+        ],
         vec![PyRep::Integer(cid)],
     ] {
         assert_eq!(
@@ -209,6 +228,21 @@ async fn machonet_cache_login_multilogin_and_clone_grade_edge_branches() {
             PyRep::Bool(true)
         );
     }
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "machoNet",
+            "ForwardCharacterNotification",
+            &[PyRep::Integer(cid), PyRep::String("Ev1".into()), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
 
     // 3. SetGlobalConfigValue via kwargs & empty key error
     assert_eq!(
