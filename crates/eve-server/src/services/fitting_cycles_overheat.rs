@@ -261,6 +261,29 @@ pub fn pilot_thermodynamics_level(ctx: &ServerContext, char_id: i64) -> u32 {
     })
 }
 
+fn is_snapshot_item_burned_out(
+    ctx: &ServerContext,
+    item_id: i64,
+    fallback_type_id: Option<u32>,
+) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&item_id);
+        let dmg = it
+            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
+            .unwrap_or(0.0);
+        let type_id = fallback_type_id.or_else(|| it.map(|i| i.type_id));
+        let hp = it
+            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+            .or_else(|| {
+                type_id
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+            })
+            .unwrap_or(40.0);
+        dmg >= hp - 1e-6
+    })
+}
+
 /// Returns true if the fitted module is burned out (`damage >= max_hp - 1e-6`).
 pub fn is_module_burned_out(
     ctx: &ServerContext,
@@ -268,22 +291,50 @@ pub fn is_module_burned_out(
     module_id: i64,
 ) -> bool {
     fm.damage_hp >= fm.max_hp - 1e-6
-        || ctx.db.with_snapshot(|snap| {
-            let it = snap.items.get(&module_id);
-            let dmg = it
-                .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
-                .unwrap_or(0.0);
-            let hp = it
-                .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-                .or_else(|| {
-                    ctx.sde
-                        .types
-                        .get(&fm.type_id)
-                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-                })
-                .unwrap_or(40.0);
-            dmg >= hp - 1e-6
-        })
+        || is_snapshot_item_burned_out(ctx, module_id, Some(fm.type_id))
+}
+
+/// Rejects activation or overload if the module or any member of its weapon bank is burned out.
+pub fn check_module_or_bank_not_burned_out(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+    fm: &eve_dogma::FittedModule,
+) -> Result<(), eve_proto::BridgeRpcError> {
+    if is_module_burned_out(ctx, fm, module_id) {
+        return Err(eve_proto::BridgeRpcError {
+            code: "ModuleBurnedOut".into(),
+            message: format!("Module {module_id} is burned out and cannot be activated"),
+            client_error: None,
+        });
+    }
+    let bank_ids = ctx.db.with_snapshot(|snap| {
+        snap.weapon_banks
+            .get(&ship_id)
+            .and_then(|b| b.get(&module_id))
+            .cloned()
+            .unwrap_or_default()
+    });
+    for tid in bank_ids {
+        if tid != module_id && is_snapshot_item_burned_out(ctx, tid, None) {
+            return Err(eve_proto::BridgeRpcError {
+                code: "ModuleBurnedOut".into(),
+                message: format!(
+                    "Module group contains burned-out module {tid} and is disabled until repaired or ungrouped"
+                ),
+                client_error: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn required_thermodynamics_level(mod_type: &InvType) -> u32 {
+    mod_type
+        .default_attributes
+        .get(&1212)
+        .copied()
+        .map_or(1u32, |v| v.ceil().max(1.0) as u32)
 }
 
 /// Checks whether `mod_type_id` has an SDE `effect_category == 5` overload effect and
@@ -292,15 +343,42 @@ pub fn can_overload_module(ctx: &ServerContext, mod_type_id: u32, thermo_lvl: u3
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
         return false;
     };
+    has_category5_overload(mod_type, &ctx.sde)
+        && thermo_lvl >= required_thermodynamics_level(mod_type)
+}
+
+/// Enforces Category-5 overload capability and pilot Thermodynamics level for `dogmaIM.Overload`.
+pub fn check_can_overload_module(
+    ctx: &ServerContext,
+    char_id: i64,
+    mod_type_id: u32,
+) -> Result<(), eve_proto::BridgeRpcError> {
+    let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
+        return Err(eve_proto::BridgeRpcError {
+            code: "ModuleNotFound".into(),
+            message: format!("Module type {mod_type_id} not found in SDE"),
+            client_error: None,
+        });
+    };
     if !has_category5_overload(mod_type, &ctx.sde) {
-        return false;
+        return Err(eve_proto::BridgeRpcError {
+            code: "CannotOverloadModule".into(),
+            message: format!("Module type {mod_type_id} cannot be overloaded"),
+            client_error: None,
+        });
     }
-    let req_thermo = mod_type
-        .default_attributes
-        .get(&1212)
-        .copied()
-        .map_or(1u32, |v| v.ceil().max(1.0) as u32);
-    thermo_lvl >= req_thermo
+    let req_thermo = required_thermodynamics_level(mod_type);
+    let thermo_lvl = pilot_thermodynamics_level(ctx, char_id);
+    if thermo_lvl < req_thermo {
+        return Err(eve_proto::BridgeRpcError {
+            code: "DontHaveThermoDynamicsSkillz".into(),
+            message: format!(
+                "Thermodynamics level {req_thermo} required to overload module type {mod_type_id} (current level {thermo_lvl})"
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
 }
 
 /// Emits `OnHeatAdded { heat_id, module_id }` for a fitted module's thermodynamic rack.

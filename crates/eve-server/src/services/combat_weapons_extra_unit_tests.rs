@@ -448,6 +448,12 @@ async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks(
         10_050,
         make_fighter_type(10_050, 550, 11, 1_000.0, vec![]),
     );
+    crate::services::combat_crimewatch::combat_weapons::combat_weapons_tests::enable_test_overload(
+        &mut sde,
+        &ctx,
+        char_id,
+        &[53_002],
+    );
     ctx.sde = Arc::new(sde);
 
     let laser_id = 850_001_i64;
@@ -515,6 +521,7 @@ async fn t1_and_stacked_crystal_volatility_vorton_arc_and_already_active_checks(
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&crystal_id).unwrap().type_id = 86_011;
     });
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let shatter_stack = handle_weapons(
         &ctx,
         &mut session,

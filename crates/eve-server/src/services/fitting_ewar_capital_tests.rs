@@ -487,6 +487,14 @@ async fn combat_charge_depletion_corp_wallet_balance_and_role_authority_invarian
             },
         );
         snap.module_online_states.insert(gun_id, true);
+        snap.skills.entry(ceo_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
     });
     ctx.invalidate_ship_fitting(ship_id);
 

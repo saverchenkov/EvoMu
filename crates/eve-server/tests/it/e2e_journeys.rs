@@ -164,6 +164,16 @@ async fn test_e2e_01_to_18_integration_journeys() {
     )
     .await
     .expect("MoveItem");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
     let ov_res = ctx
         .dispatch_rpc(
             &mut sess,

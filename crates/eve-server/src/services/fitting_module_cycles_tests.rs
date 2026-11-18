@@ -143,19 +143,33 @@ async fn spawn_ship(ctx: &ServerContext, sys_id: u32, ship_id: i64, type_id: u32
 #[tokio::test]
 async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
     let ctx = test_ctx_with_custom(|sde| {
-        sde.types.insert(
+        let cat5_eid = sde
+            .effects
+            .values()
+            .find(|e| e.effect_category == 5)
+            .map(|e| e.effect_id)
+            .unwrap_or_else(|| {
+                let mut eff = sde.effects.values().next().cloned().expect("seed effects");
+                eff.effect_id = 998;
+                eff.name = "testOverloadEffect".into();
+                eff.effect_category = 5;
+                sde.effects.insert(998, eff);
+                998
+            });
+        let mut ab_type = custom_inv_type(
+            sde,
             999_501,
-            custom_inv_type(
-                sde,
-                999_501,
-                46,
-                7,
-                5.0,
-                0.0,
-                "1MN Test Afterburner I",
-                &[(6, 10.0), (73, 10_000.0), (20, 100.0), (1211, 2.0)],
-            ),
+            46,
+            7,
+            5.0,
+            0.0,
+            "1MN Test Afterburner I",
+            &[(6, 10.0), (73, 10_000.0), (20, 100.0), (1211, 2.0)],
         );
+        if !ab_type.effect_ids.contains(&cat5_eid) {
+            ab_type.effect_ids.push(cat5_eid);
+        }
+        sde.types.insert(999_501, ab_type);
     });
 
     let char_id = 97_000_001;
@@ -170,6 +184,14 @@ async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
     insert_item(&ctx, offline_mod_id, 999_501, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(offline_mod_id, false);
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
     });
     spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 500.0).await;
 
@@ -2683,6 +2705,200 @@ async fn cycle0_unguided_missile_surface_distance_and_eff_range_1247() {
             .iter()
             .any(|n| n.event == "OnDamageMessage" || n.event == "OnDamageMessages"),
         "cancelled OOR missile cycle must not emit hit or miss logs"
+    );
+}
+
+#[tokio::test]
+async fn handle_module_cycles_overload_thermo_cat5_delay_and_preoverload_guards() {
+    let ctx = seeded_cycles_ctx(|sde| {
+        let mut eff = sde.effects.values().next().expect("seed effect").clone();
+        eff.effect_id = 65_001;
+        eff.name = "overloadTestEffect".into();
+        eff.effect_category = 5;
+        sde.effects.insert(65_001, eff);
+
+        let mut ship_t = custom_inv_type(
+            sde,
+            999_600,
+            25,
+            6,
+            1_000.0,
+            100.0,
+            "Test Frig",
+            &[
+                (11, 10_000.0),
+                (12, 4.0),
+                (13, 4.0),
+                (14, 4.0),
+                (48, 10_000.0),
+                (55, 1_000.0),
+                (482, 500.0),
+            ],
+        );
+        ship_t.effect_ids = vec![16];
+        sde.types.insert(999_600, ship_t);
+
+        let mut cat5_ab = custom_inv_type(
+            sde,
+            999_601,
+            46,
+            7,
+            5.0,
+            0.0,
+            "1MN Overloadable AB",
+            &[(6, 50.0), (9, 40.0), (73, 5_000.0), (1212, 1.0)],
+        );
+        cat5_ab.effect_ids = vec![13, 65_001];
+        sde.types.insert(999_601, cat5_ab);
+
+        let mut plain_ab = custom_inv_type(
+            sde,
+            999_602,
+            60,
+            7,
+            5.0,
+            0.0,
+            "Plain Damage Control",
+            &[(6, 10.0), (9, 40.0), (73, 5_000.0)],
+        );
+        plain_ab.effect_ids = vec![11];
+        sde.types.insert(999_602, plain_ab);
+    });
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 880_100_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ab_cat5 = 880_100_010_i64;
+    let ab_plain = 880_100_011_i64;
+
+    insert_item(&ctx, ship_id, 999_600, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, ab_cat5, 999_601, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, ab_plain, 999_602, char_id, ship_id, InventoryFlag::LoSlot0, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.module_online_states.insert(ab_cat5, true);
+        snap.module_online_states.insert(ab_plain, true);
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&28_164);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    spawn_ship(&ctx, sys_id, ship_id, 999_600, char_id, 500.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let mut sess = SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // 1. Non-Cat5 module rejects Overload with CannotOverloadModule
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Overload", &[PyRep::Integer(ab_plain)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotOverloadModule"
+    );
+
+    // 2. Cat5 module without Thermodynamics rejects Overload cleanly without cap/state mutation
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Overload", &[PyRep::Integer(ab_cat5)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+    assert!((sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 500.0).abs() < 1e-6);
+    assert!(!ctx.db.with_snapshot(|s| {
+        s.module_active_states.contains(&ab_cat5)
+            || s.ship_fit_inputs
+                .get(&ship_id)
+                .is_some_and(|fi| fi.overloaded_modules.contains(&ab_cat5))
+    }));
+
+    // Grant Thermodynamics L1
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+
+    // 3. Pre-overloaded idle module preserves ModuleState::Overloaded across failed Activate
+    let fit_before = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let _ = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+        &ctx, &sys, char_id, ship_id, ab_cat5, fit_before, false,
+    )
+    .await;
+    sys.set_capacitor(ship_id, 5.0).await.unwrap();
+    let cap_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(ab_cat5)], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&ab_cat5].state,
+        eve_dogma::ModuleState::Overloaded,
+        "Failed Activate in handle_module_cycles must preserve ModuleState::Overloaded"
+    );
+    assert!(ctx.db.with_snapshot(|s| {
+        s.ship_fit_inputs
+            .get(&ship_id)
+            .is_some_and(|fi| fi.overloaded_modules.contains(&ab_cat5))
+    }));
+
+    // 4. In reactivation delay (!in_cycle): Activate -> ModuleReactivationDelay, Overload -> ModuleAlreadyActive
+    sys.set_capacitor(ship_id, 500.0).await.unwrap();
+    ctx.record_module_reactivation_delay(ship_id, ab_cat5, 10.0);
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(ab_cat5)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ModuleReactivationDelay"
+    );
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Overload", &[PyRep::Integer(ab_cat5)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ModuleAlreadyActive"
+    );
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+
+    // 5. Burned-out module returns ModuleBurnedOut before ModuleOffline
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(ab_cat5, false);
+        snap.items
+            .get_mut(&ab_cat5)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 40.0);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert_eq!(
+        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Overload", &[PyRep::Integer(ab_cat5)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ModuleBurnedOut"
     );
 }
 

@@ -111,6 +111,120 @@ fn compute_ewar_effective_range(
     }
 }
 
+fn reconcile_weapon_active_state_before_activation(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+    in_cycle: bool,
+    m: &mut eve_dogma::FittedModule,
+    fit: &mut eve_dogma::ShipFittingEngine,
+) -> (bool, bool) {
+    let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
+    if !in_delay && !in_cycle {
+        ctx.db.with_mut_snapshot(|s| {
+            s.module_active_states.remove(&module_id);
+        });
+        // Why: Only clear stale Active state; pre-overloaded idle modules must retain Overloaded across failed activations.
+        if m.state == eve_dogma::ModuleState::Active {
+            m.state = eve_dogma::ModuleState::Online;
+            if let Some(fm) = fit.modules.get_mut(&module_id) {
+                fm.state = eve_dogma::ModuleState::Online;
+            }
+            fit.recalculate_stats(&ctx.sde);
+            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+            ctx.invalidate_and_push_fit(ship_id);
+        }
+    }
+    let already_active = m.state == eve_dogma::ModuleState::Active
+        || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
+        || in_cycle
+        || in_delay;
+    (in_delay, already_active)
+}
+
+fn check_overload_cycle_or_delay(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    in_cycle: bool,
+    is_entropic: bool,
+    m: &mut eve_dogma::FittedModule,
+    fit: &mut eve_dogma::ShipFittingEngine,
+) -> Result<bool, BridgeRpcError> {
+    crate::services::fitting_cycles_overheat::check_can_overload_module(ctx, char_id, m.type_id)?;
+    let (in_delay, already_active) = reconcile_weapon_active_state_before_activation(
+        ctx, ship_id, module_id, in_cycle, m, fit,
+    );
+    if !is_entropic && in_cycle {
+        return Ok(true);
+    }
+    if in_delay || already_active {
+        return Err(
+            crate::services::inventory_fitting::fitting_module_cycles::module_already_active_rpc_error(
+                ctx,
+                Some(m.type_id),
+                format!("Module {module_id} cannot overload while active or in reactivation delay"),
+            ),
+        );
+    }
+    Ok(false)
+}
+
+fn finalize_weapon_activation_overload_and_delay(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    fit: &mut eve_dogma::ShipFittingEngine,
+    is_overloaded: bool,
+    mark_db_active: bool,
+    record_delay_secs: Option<f64>,
+) {
+    if mark_db_active {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.insert(module_id);
+        });
+    }
+    let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+    if is_overloaded {
+        crate::services::fitting_cycles_overheat::emit_module_heat_added(
+            ctx, char_id, fit, module_id,
+        );
+    }
+    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+    ctx.invalidate_and_push_fit(ship_id);
+    if let Some(delay_secs) = record_delay_secs {
+        ctx.record_module_reactivation_delay(ship_id, module_id, delay_secs);
+    }
+}
+
+fn sync_remaining_weapon_charge_in_fit(
+    ctx: &ServerContext,
+    module_id: i64,
+    charge_item_id_opt: Option<i64>,
+    charge_type_id_opt: Option<u32>,
+    fit: &mut eve_dogma::ShipFittingEngine,
+) {
+    let remaining_charge_qty = ctx.db.with_mut_snapshot(|snap| {
+        let rem_qty = charge_item_id_opt
+            .and_then(|cid| snap.items.get(&cid).map(|i| i.quantity))
+            .unwrap_or(0);
+        if let (Some(charge_type_id), true) = (charge_type_id_opt, rem_qty > 0) {
+            snap.module_active_charges.insert(module_id, charge_type_id);
+        } else {
+            snap.module_active_charges.remove(&module_id);
+        }
+        rem_qty
+    });
+    if let Some(fm) = fit.modules.get_mut(&module_id) {
+        fm.charge_quantity = remaining_charge_qty.max(0) as u32;
+        if remaining_charge_qty <= 0 {
+            fm.charge_type_id = None;
+        }
+    }
+}
+
 pub async fn handle_weapons(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -219,17 +333,33 @@ pub async fn handle_weapons(
                     client_error: None,
                 }));
             };
-            if m.state == eve_dogma::ModuleState::Offline {
+            if let Err(e) =
+                crate::services::inventory_fitting::check_module_reloading(ctx, ship_id, module_id)
+            {
+                return Some(Err(e));
+            }
+            if sys_handle.has_active_nanite_repair_sync(ship_id, module_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleBeingRepaired".into(),
+                    message: format!(
+                        "Module {module_id} cannot be activated or overloaded while undergoing nanite repair"
+                    ),
+                    client_error: None,
+                }));
+            }
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_module_or_bank_not_burned_out(
+                ctx, ship_id, module_id, &m,
+            ) {
+                return Some(Err(e));
+            }
+            if m.state == eve_dogma::ModuleState::Offline
+                || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
+            {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleOffline".into(),
                     message: format!("Module {module_id} is offline"),
                     client_error: None,
                 }));
-            }
-            if let Err(e) =
-                crate::services::inventory_fitting::check_module_reloading(ctx, ship_id, module_id)
-            {
-                return Some(Err(e));
             }
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -288,8 +418,6 @@ pub async fn handle_weapons(
                     client_error: None,
                 }));
             }
-            let mod_state =
-                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
             let now_unix = ctx.now_unix();
             let sys_sec = with_combat_runtime(ctx, |rt| {
                 rt.modified_system_securities.get(&sys_id).copied()
@@ -301,6 +429,39 @@ pub async fn handle_weapons(
                     .map(|s| s.security_status)
                     .unwrap_or(1.0)
             });
+
+            if method == "Overload"
+                && target_id_opt.is_none()
+                && matches!(
+                    mod_type.group_id,
+                    52 | 65 | 201 | 208 | 291 | 379 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
+                )
+            {
+                let in_cycle = sys_handle.has_module_cycle(ship_id, module_id).await;
+                match check_overload_cycle_or_delay(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    in_cycle,
+                    mod_type.group_id == 1986,
+                    &mut m,
+                    &mut fit,
+                ) {
+                    Ok(active_toggle) => {
+                        let rep = crate::router::box_fut(|| {
+                            crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                                ctx, &sys_handle, char_id, ship_id, module_id, fit, active_toggle,
+                            )
+                        })
+                        .await;
+                        return Some(Ok(rep));
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            let mod_state =
+                fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
 
             // 1. EWAR / Tackle 0-damage modules (`feat:combat.killmail-assist-timeout-ewar`):
             // Warp Disruptor (52), Stasis Webifier (65),
@@ -398,6 +559,28 @@ pub async fn handle_weapons(
                         pvp_precheck = Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct));
                     }
                 }
+                let ewar_in_cycle = sys_handle.has_module_cycle(ship_id, module_id).await;
+                if method == "Overload" {
+                    match check_overload_cycle_or_delay(
+                        ctx, char_id, ship_id, module_id, ewar_in_cycle, false, &mut m, &mut fit,
+                    ) {
+                        Ok(true) => {
+                            let rep = crate::router::box_fut(|| {
+                                crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                                    ctx, &sys_handle, char_id, ship_id, module_id, fit, true,
+                                )
+                            })
+                            .await;
+                            return Some(Ok(rep));
+                        }
+                        Ok(false) => {}
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else {
+                    let _ = reconcile_weapon_active_state_before_activation(
+                        ctx, ship_id, module_id, ewar_in_cycle, &mut m, &mut fit,
+                    );
+                }
                 // Why: Reject out-of-range EWAR (including special-target convoys/containers) before mutating CrimeWatch, assists, or projected EWAR (#1247).
                 let ewar_dist = attacker_ball.surface_distance(&target_ball);
                 let eff_max_range = compute_ewar_effective_range(
@@ -491,8 +674,8 @@ pub async fn handle_weapons(
                     crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
                 if is_overloaded {
-                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
-                        ctx, char_id, &fit, module_id,
+                    finalize_weapon_activation_overload_and_delay(
+                        ctx, char_id, ship_id, module_id, &mut fit, true, false, None,
                     );
                 }
                 return Some(Ok(PyRep::keyval([
@@ -507,6 +690,13 @@ pub async fn handle_weapons(
 
             // 1b. Salvager (`group_id == 1122`) and Tractor Beam (`group_id == 650`) (`C-7`)
             if matches!(mod_type.group_id, 1122 | 650) {
+                if method == "Overload" {
+                    if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(
+                        ctx, char_id, m.type_id,
+                    ) {
+                        return Some(Err(e));
+                    }
+                }
                 return crate::router::box_fut(|| {
                     activate_salvager_or_tractor_module(
                         ctx,
@@ -525,7 +715,15 @@ pub async fn handle_weapons(
             }
 
             // 2-4. Smartbomb (`72`), Bomb Launcher (`862`), and Defender Launcher (`512`)
-            if matches!(mod_type.group_id, 862 | 512) {
+            if matches!(mod_type.group_id, 72 | 862 | 512) {
+                if mod_type.group_id == 72 {
+                    let safety = with_combat_runtime(ctx, |rt| {
+                        rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
+                    });
+                    if sys_sec > 0.0 && safety != SafetyLevel::Red {
+                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                    }
+                }
                 if mod_type.group_id == 862 {
                     if let Err(e) = super::combat_missiles_aoe::check_bomb_launcher_preconditions(
                         ctx, char_id, sys_id, sys_sec,
@@ -533,65 +731,93 @@ pub async fn handle_weapons(
                         return Some(Err(e));
                     }
                 }
-                let allowed_groups: &[u32] = if mod_type.group_id == 862 {
-                    &[90, 863, 864]
-                } else {
-                    &[88]
-                };
-                if let Some((_cid, ctid)) =
-                    super::combat_missiles_aoe::find_loaded_aoe_launcher_charge(
-                        ctx,
-                        ship_id,
-                        module_id,
-                        m.flag_id,
-                        allowed_groups,
-                    )
-                {
-                    if let Err(e) = ctx.db.with_snapshot(|snap| {
-                        ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)
-                    }) {
-                        return Some(Err(e));
-                    }
-                } else {
-                    match crate::services::inventory_fitting::fitting_ewar_capital::plan_weapon_autoload(
-                        ctx, char_id, ship_id, module_id, mod_type,
+                let ewar_in_cycle = sys_handle.has_module_cycle(ship_id, module_id).await;
+                if method == "Overload" {
+                    match check_overload_cycle_or_delay(
+                        ctx, char_id, ship_id, module_id, ewar_in_cycle, false, &mut m, &mut fit,
                     ) {
-                        Ok(Some(plan)) => {
-                            if let Err(e) = crate::services::inventory_fitting::fitting_ewar_capital::commit_and_emit_weapon_autoload(
-                                ctx, char_id, ship_id, mod_type, &plan,
-                            ) {
-                                return Some(Err(e));
-                            }
+                        Ok(true) => {
+                            let rep = crate::router::box_fut(|| {
+                                crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                                    ctx, &sys_handle, char_id, ship_id, module_id, fit, true,
+                                )
+                            })
+                            .await;
+                            return Some(Ok(rep));
                         }
-                        Ok(None) => {}
+                        Ok(false) => {}
                         Err(e) => return Some(Err(e)),
                     }
-                }
-            }
-            if let Some(aoe_res) = crate::router::box_fut(|| {
-                activate_aoe_or_defender_module(
-                    ctx,
-                    char_id,
-                    ship_id,
-                    sys_id,
-                    sys_sec,
-                    now_unix,
-                    module_id,
-                    &m,
-                    mod_type,
-                    &attacker_ball,
-                    target_id_opt,
-                    kwargs,
-                )
-            })
-            .await
-            {
-                if is_overloaded && aoe_res.is_ok() {
-                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
-                        ctx, char_id, &fit, module_id,
+                } else {
+                    let _ = reconcile_weapon_active_state_before_activation(
+                        ctx, ship_id, module_id, ewar_in_cycle, &mut m, &mut fit,
                     );
                 }
-                return Some(aoe_res);
+                if matches!(mod_type.group_id, 862 | 512) {
+                    let allowed_groups: &[u32] = if mod_type.group_id == 862 {
+                        &[90, 863, 864]
+                    } else {
+                        &[88]
+                    };
+                    if let Some((_cid, ctid)) =
+                        super::combat_missiles_aoe::find_loaded_aoe_launcher_charge(
+                            ctx,
+                            ship_id,
+                            module_id,
+                            m.flag_id,
+                            allowed_groups,
+                        )
+                    {
+                        if let Err(e) = ctx.db.with_snapshot(|snap| {
+                            ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, ctid)
+                        }) {
+                            return Some(Err(e));
+                        }
+                    } else {
+                        match crate::services::inventory_fitting::fitting_ewar_capital::plan_weapon_autoload(
+                            ctx, char_id, ship_id, module_id, mod_type,
+                        ) {
+                            Ok(Some(plan)) => {
+                                if let Err(e) = crate::services::inventory_fitting::fitting_ewar_capital::commit_and_emit_weapon_autoload(
+                                    ctx, char_id, ship_id, mod_type, &plan,
+                                ) {
+                                    return Some(Err(e));
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                }
+                let mut eff_m = m.clone();
+                if is_overloaded {
+                    eff_m.state = eve_dogma::ModuleState::Overloaded;
+                }
+                if let Some(aoe_res) = crate::router::box_fut(|| {
+                    activate_aoe_or_defender_module(
+                        ctx,
+                        char_id,
+                        ship_id,
+                        sys_id,
+                        sys_sec,
+                        now_unix,
+                        module_id,
+                        &eff_m,
+                        mod_type,
+                        &attacker_ball,
+                        target_id_opt,
+                        kwargs,
+                    )
+                })
+                .await
+                {
+                    if is_overloaded && aoe_res.is_ok() {
+                        finalize_weapon_activation_overload_and_delay(
+                            ctx, char_id, ship_id, module_id, &mut fit, true, false, None,
+                        );
+                    }
+                    return Some(aoe_res);
+                }
             }
             // 5. Turrets (Hybrid 74, Projectile 55, Energy Laser 53, Entropic Disintegrator 1986, Vorton Projector 4060)
             //    and Missile Launchers (506..=511, 524, 1674, 4500, 4805, 4807)
@@ -823,6 +1049,14 @@ pub async fn handle_weapons(
                 }
             }
 
+            if method == "Overload" {
+                if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(
+                    ctx, char_id, m.type_id,
+                ) {
+                    return Some(Err(e));
+                }
+            }
+
             let is_upwell_target = match crate::services::station_structure::structure_lifecycle_rpc::validate_upwell_structure_attack_precheck(
                 ctx, sys_id, char_id, target_ball_id, now_unix,
             ) {
@@ -929,20 +1163,10 @@ pub async fn handle_weapons(
                 )));
             }
 
-            let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
             let in_cycle = sys_handle.has_module_cycle(ship_id, module_id).await;
-            if !in_delay && !in_cycle {
-                ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&module_id); });
-                if matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded) {
-                    m.state = eve_dogma::ModuleState::Online;
-                    if let Some(fm) = fit.modules.get_mut(&module_id) {
-                        fm.state = eve_dogma::ModuleState::Online;
-                    }
-                    fit.recalculate_stats(&ctx.sde);
-                    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
-                    ctx.invalidate_and_push_fit(ship_id);
-                }
-            }
+            let (in_delay, already_active) = reconcile_weapon_active_state_before_activation(
+                ctx, ship_id, module_id, in_cycle, &mut m, &mut fit,
+            );
             if is_entropic {
                 let is_already_active = ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&module_id))
                     && with_combat_runtime(ctx, |rt| rt.entropic_spools.get(&(ship_id, module_id)).is_some_and(|entry| entry.target_id == target_ball_id));
@@ -950,15 +1174,25 @@ pub async fn handle_weapons(
                     return Some(Err(BridgeRpcError { code: "AlreadyActive".into(), message: format!("Module {module_id} is already active"), client_error: None }));
                 }
             }
-            let already_active = matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
-                || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
-                || in_cycle || in_delay;
-            if method == "Overload" && !is_entropic && in_cycle {
-                let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                    ctx, &sys_handle, char_id, ship_id, module_id, fit, true,
-                )
-                .await;
-                return Some(Ok(rep));
+            if method == "Overload" {
+                if !is_entropic && in_cycle {
+                    let rep = crate::router::box_fut(|| {
+                        crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                            ctx, &sys_handle, char_id, ship_id, module_id, fit, true,
+                        )
+                    })
+                    .await;
+                    return Some(Ok(rep));
+                }
+                if in_delay || already_active {
+                    return Some(Err(
+                        crate::services::inventory_fitting::fitting_module_cycles::module_already_active_rpc_error(
+                            ctx,
+                            Some(m.type_id),
+                            format!("Module {module_id} cannot overload while active or in reactivation delay"),
+                        ),
+                    ));
+                }
             }
             if method == "Activate" && (in_delay || already_active) {
                 return Some(Err(
@@ -1181,6 +1415,15 @@ pub async fn handle_weapons(
                 target_ball.radius.max(35.0)
             };
             let target_sig = ctx.effective_target_signature_radius(target_ball_id, raw_sig);
+            let mod_attr_pos = |aid: u16, fallback: f64| -> f64 {
+                let v = mod_state.get_attribute(aid, &ctx.sde);
+                if v > 0.0 {
+                    v
+                } else {
+                    mod_type.default_attributes.get(&aid).copied().unwrap_or(fallback)
+                }
+            };
+            let cycle_secs = (mod_attr_pos(51, 3_000.0) / 1000.0).max(0.1);
 
             // Handle Missile Launcher / Breacher Pod in-flight physics (`feat:modules.missile-launchers`, `feat:combat.missile-flight-physics-destruction`)
             if is_missile_launcher {
@@ -1192,27 +1435,50 @@ pub async fn handle_weapons(
                     }));
                 };
 
-                return Some(
-                    activate_missile_or_breacher_launcher(
+                let launcher_res = activate_missile_or_breacher_launcher(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    now_unix,
+                    module_id,
+                    &m,
+                    &fit,
+                    charge_type_id,
+                    charge_type,
+                    &attacker_ball,
+                    target_ball_id,
+                    base_dmg,
+                    is_fof_missile,
+                    is_breacher_pod,
+                    target_id_opt.is_some(),
+                )
+                .await;
+                if launcher_res.is_ok() {
+                    sync_remaining_weapon_charge_in_fit(
                         ctx,
-                        char_id,
-                        ship_id,
-                        sys_id,
-                        now_unix,
                         module_id,
-                        &m,
-                        &fit,
-                        charge_type_id,
-                        charge_type,
-                        &attacker_ball,
-                        target_ball_id,
-                        base_dmg,
-                        is_fof_missile,
-                        is_breacher_pod,
-                        target_id_opt.is_some(),
-                    )
-                    .await,
-                );
+                        charge_item_id_opt,
+                        charge_type_id_opt,
+                        &mut fit,
+                    );
+                    if is_overloaded {
+                        finalize_weapon_activation_overload_and_delay(
+                            ctx,
+                            char_id,
+                            ship_id,
+                            module_id,
+                            &mut fit,
+                            true,
+                            false,
+                            None,
+                        );
+                    } else {
+                        ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                        ctx.invalidate_and_push_fit(ship_id);
+                    }
+                }
+                return Some(launcher_res);
             }
             // Turret tracking, hit chance, Entropic spooling, and Vorton arc chaining
             let tracking_mult = charge_type_opt
@@ -1239,14 +1505,6 @@ pub async fn handle_weapons(
             } else {
                 base_tracking * tracking_mult
             }) * attacker_pylon_mult;
-            let mod_attr_pos = |aid: u16, fallback: f64| -> f64 {
-                let v = mod_state.get_attribute(aid, &ctx.sde);
-                if v > 0.0 {
-                    v
-                } else {
-                    mod_type.default_attributes.get(&aid).copied().unwrap_or(fallback)
-                }
-            };
             let turret_sig_res = mod_attr_pos(620, 40_000.0);
 
             let (p_hit, shot_dmg, is_wrecking) = if is_vorton {
@@ -1284,8 +1542,6 @@ pub async fn handle_weapons(
             } else {
                 (0u32, 1.0)
             };
-
-            let cycle_secs = (mod_attr_pos(51, 3_000.0) / 1000.0).max(0.1);
 
             // Vorton Projector arc chaining (`feat:modules.vorton-projector`)
             let mut vorton_secondary_targets = Vec::new();
@@ -1731,35 +1987,28 @@ pub async fn handle_weapons(
                 });
                 let _ = fit.deactivate_module(module_id, &ctx.sde);
                 combat_weapons_spool::reset_entropic_spool(ctx, ship_id, module_id);
+                ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+                ctx.invalidate_and_push_fit(ship_id);
+                ctx.record_module_reactivation_delay(ship_id, module_id, cycle_secs);
             } else {
-                let remaining_charge_qty = ctx.db.with_mut_snapshot(|snap| {
-                    snap.module_active_states.insert(module_id);
-                    let rem_qty = charge_item_id_opt
-                        .and_then(|cid| snap.items.get(&cid).map(|i| i.quantity))
-                        .unwrap_or(0);
-                    if let (Some(charge_type_id), true) = (charge_type_id_opt, rem_qty > 0) {
-                        snap.module_active_charges.insert(module_id, charge_type_id);
-                    } else {
-                        snap.module_active_charges.remove(&module_id);
-                    }
-                    rem_qty
-                });
-                if let Some(fm) = fit.modules.get_mut(&module_id) {
-                    fm.charge_quantity = remaining_charge_qty.max(0) as u32;
-                    if remaining_charge_qty <= 0 {
-                        fm.charge_type_id = None;
-                    }
-                }
-                let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
-                if is_overloaded {
-                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
-                        ctx, char_id, &fit, module_id,
-                    );
-                }
+                sync_remaining_weapon_charge_in_fit(
+                    ctx,
+                    module_id,
+                    charge_item_id_opt,
+                    charge_type_id_opt,
+                    &mut fit,
+                );
+                finalize_weapon_activation_overload_and_delay(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    &mut fit,
+                    is_overloaded,
+                    true,
+                    Some(cycle_secs),
+                );
             }
-            ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
-            ctx.invalidate_and_push_fit(ship_id);
-            ctx.record_module_reactivation_delay(ship_id, module_id, cycle_secs);
 
             let st_state = if is_upwell_target {
                 ctx.db.with_snapshot(|snap| snap.structures.get(&target_ball_id).map(|s| s.state.clone()))
@@ -1790,7 +2039,7 @@ pub async fn handle_weapons(
 pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_multiplier, handle_link_all_weapons, reset_entropic_spool};
 
 #[cfg(test)]
-#[path = "combat_weapons_tests.rs"] mod combat_weapons_tests;
+#[path = "combat_weapons_tests.rs"] pub(in crate::services) mod combat_weapons_tests;
 
 #[cfg(test)]
 #[path = "combat_weapons_edges2_tests.rs"]

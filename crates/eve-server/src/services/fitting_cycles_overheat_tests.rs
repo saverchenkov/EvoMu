@@ -844,3 +844,138 @@ fn can_overload_module_and_burnout_guards_enforce_cat5_thermo_and_damage() {
     });
     assert!(is_module_burned_out(&ctx, &fm_ok, mod_id));
 }
+
+#[test]
+fn check_can_overload_module_and_bank_burnout_guards() {
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut eff = sde.effects.values().next().expect("seed effect").clone();
+        eff.effect_id = 65_001;
+        eff.name = "overloadTestEffect".into();
+        eff.effect_category = 5;
+        sde.effects.insert(65_001, eff);
+
+        let plain = custom_inv_type(sde, 990_911, 62, 7, "Plain Mod", &[(9, 40.0)], &[11]);
+        let cat5_l1 = custom_inv_type(
+            sde,
+            990_912,
+            55,
+            7,
+            "Cat5 Turret L1",
+            &[(9, 40.0), (1212, 1.0)],
+            &[11, 65_001],
+        );
+        let cat5_l3 = custom_inv_type(
+            sde,
+            990_913,
+            55,
+            7,
+            "Cat5 Turret L3",
+            &[(9, 40.0), (1212, 3.0)],
+            &[11, 65_001],
+        );
+        sde.types.insert(990_911, plain);
+        sde.types.insert(990_912, cat5_l1);
+        sde.types.insert(990_913, cat5_l3);
+    });
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&28_164);
+        }
+    });
+
+    assert_eq!(
+        super::check_can_overload_module(&ctx, char_id, 990_999).unwrap_err().code,
+        "ModuleNotFound"
+    );
+    assert_eq!(
+        super::check_can_overload_module(&ctx, char_id, 990_911).unwrap_err().code,
+        "CannotOverloadModule"
+    );
+    assert_eq!(
+        super::check_can_overload_module(&ctx, char_id, 990_912).unwrap_err().code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+    assert!(super::check_can_overload_module(&ctx, char_id, 990_912).is_ok());
+    assert_eq!(
+        super::check_can_overload_module(&ctx, char_id, 990_913).unwrap_err().code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.get_mut(&char_id).unwrap().get_mut(&28_164).unwrap().level = 3;
+    });
+    assert!(super::check_can_overload_module(&ctx, char_id, 990_913).is_ok());
+
+    let mod_a = 91_234_601_i64;
+    let mod_b = 91_234_602_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, flag) in [(mod_a, InventoryFlag::HiSlot0), (mod_b, InventoryFlag::HiSlot1)] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: 990_912,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(mod_a, vec![mod_a, mod_b]);
+    });
+    let fm_ok = FittedModule {
+        item_id: mod_a,
+        type_id: 990_912,
+        flag_id: 27,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: None,
+        charge_quantity: 0,
+        damage_hp: 0.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    assert!(super::check_module_or_bank_not_burned_out(&ctx, ship_id, mod_a, &fm_ok).is_ok());
+
+    let mut fm_burned = fm_ok.clone();
+    fm_burned.damage_hp = 40.0;
+    assert_eq!(
+        super::check_module_or_bank_not_burned_out(&ctx, ship_id, mod_a, &fm_burned)
+            .unwrap_err()
+            .code,
+        "ModuleBurnedOut"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&mod_b)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 40.0);
+    });
+    assert_eq!(
+        super::check_module_or_bank_not_burned_out(&ctx, ship_id, mod_a, &fm_ok)
+            .unwrap_err()
+            .code,
+        "ModuleBurnedOut"
+    );
+}
