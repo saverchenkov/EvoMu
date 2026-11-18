@@ -147,34 +147,22 @@ pub fn handle(
             let offer_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("offer_id").or_else(|| kwargs.get("offerID")).and_then(|v| v.as_i64()))
+                .or_else(|| {
+                    kwargs
+                        .get("offer_id")
+                        .or_else(|| kwargs.get("offerID"))
+                        .and_then(|v| v.as_i64())
+                })
                 .unwrap_or(0);
-            let handle_weekly_free_sp = offer_id == 1005
-                && ctx.db.with_snapshot(|snap| {
-                    let cat =
-                        crate::services::quasar_payment_store_types::read_store_catalog(snap);
-                    match cat.offers.iter().find(|o| (o.id as i64) == offer_id) {
-                        None => true,
-                        Some(o) => {
-                            o.price_plex == 0
-                                && crate::services::quasar_payment_store_types::read_store_offer_tags(
-                                    snap,
-                                )
-                                .get(&o.id)
-                                .is_some_and(|tags| {
-                                    tags.iter().any(|t| {
-                                        let lc = t.to_ascii_lowercase();
-                                        lc == "omega-weekly-free-sp" || lc == "omega-weekly"
-                                    })
-                                })
-                        }
-                    }
-                });
-            if handle_weekly_free_sp {
-                Some(handle_omega_weekly_free_sp_offer(ctx, session, 1005, 15_000, method == "buy_offer"))
-            } else {
-                None
-            }
+            let sp_grant = ctx.db.with_snapshot(|snap| {
+                crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(
+                    snap,
+                    offer_id,
+                )
+            });
+            sp_grant.map(|sp| {
+                handle_omega_weekly_free_sp_offer(ctx, session, offer_id, sp, method == "buy_offer")
+            })
         }
 
         ("skillMgr2", "AbortTraining") => Some(handle_abort_training(ctx, session)),

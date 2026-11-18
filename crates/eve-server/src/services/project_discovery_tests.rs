@@ -267,3 +267,104 @@ fn test_project_discovery_tasks_tutorials_classifications_and_slash() {
         PyRep::None
     );
 }
+
+#[test]
+fn project_discovery_organic_flow_starts_at_zero_and_emits_ak_change() {
+    let ctx = test_ctx();
+    let uid = ctx.db.provision_player_account("pd_organic", "pw");
+    let cid = ctx
+        .db
+        .create_character(uid, "Analyst Zero", 1, 1, 11, 17, &ctx.sde)
+        .expect("create char")
+        .character_id;
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(cid), false, ctx.now_unix());
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+
+    // Fresh analyst starts at score 0.0 (INITIAL_PLAYER_SCORE) and accuracy 0.0 without fake boosts
+    let stats = handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[], &kw)
+        .unwrap()
+        .expect("get_player_statistics");
+    assert_eq!(stats.dict_get("score").and_then(|v| v.as_f64()), Some(0.0));
+    assert_eq!(stats.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.0));
+
+    // Skip tutorial, fetch a new task organically (NO /pd config or /pd consensus seeding)
+    assert_eq!(
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "skip_tutorial", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    let task_rep = handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[], &kw)
+        .unwrap()
+        .expect("get_new_task");
+    let task_id = task_rep
+        .dict_get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("task_id")
+        .to_string();
+    let url = task_rep
+        .dict_get("url")
+        .and_then(|v| v.as_str())
+        .expect("url")
+        .to_string();
+
+    let payload_str = match handle_project_discovery(
+        &ctx,
+        &mut sess,
+        "ProjectDiscovery",
+        "get_data_from_url",
+        &[PyRep::String(url)],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_data_from_url")
+    {
+        PyRep::String(s) => s,
+        other => panic!("expected String payload, got {other:?}"),
+    };
+    let payload: serde_json::Value = serde_json::from_str(&payload_str).expect("valid task JSON");
+    let center = payload["clusters"][0]["center"]
+        .as_array()
+        .expect("clusters[0].center array");
+    let cx = center[0].as_f64().unwrap() / 512.0;
+    let cy = center[1].as_f64().unwrap() / 512.0;
+    let polygon = PyRep::List(vec![
+        PyRep::List(vec![PyRep::Real(cx - 0.05), PyRep::Real(cy - 0.05)]),
+        PyRep::List(vec![PyRep::Real(cx + 0.05), PyRep::Real(cy - 0.05)]),
+        PyRep::List(vec![PyRep::Real(cx + 0.05), PyRep::Real(cy + 0.05)]),
+        PyRep::List(vec![PyRep::Real(cx - 0.05), PyRep::Real(cy + 0.05)]),
+    ]);
+    let classification = PyRep::Dict(vec![(
+        PyRep::String("polygons".into()),
+        PyRep::List(vec![polygon]),
+    )]);
+
+    let _ = ctx.drain_notifications_for_char(cid);
+    let res = handle_project_discovery(
+        &ctx,
+        &mut sess,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String(task_id), classification],
+        &kw,
+    )
+    .unwrap()
+    .expect("post_classification");
+    assert_eq!(res.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(20));
+    assert!(res.dict_get("XP_Reward").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert!(res.dict_get("ISK_Reward").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert_eq!(
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(20)
+    );
+    let notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnAnalysisKreditsChange"),
+        "accurate classification must emit OnAnalysisKreditsChange organically without test injection"
+    );
+}

@@ -1107,3 +1107,224 @@ fn fast_checkout_tutorial_activity_mgr_and_mining_edge_branches() {
         "StructureNotFound"
     );
 }
+
+#[test]
+fn fast_checkout_no_free_pack_fallback_in_paid_mode_emits_item_change_and_readonly_mining() {
+    use crate::services::quasar_payment_store_types::{save_store_catalog, StoreCatalog, StoreOffer, StoreProduct};
+    use eve_db::TargetedOfferAdminRecord;
+
+    let ctx = test_ctx();
+    let uid = ctx.db.provision_player_account("fc_paid_bundle", "fc_pw");
+    let cid = ctx
+        .db
+        .create_character(uid, "Paid Bundle", 1, 1, 11, 17, &ctx.sde)
+        .expect("create char")
+        .character_id;
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, 1, Some(cid), false, ctx.now_unix());
+    let sess = SessionState {
+        station_id: Some(60_003_760),
+        ..auth_session(uid, cid, 98_000_001, 30_000_142)
+    };
+    set_user_fast_checkout_enabled(&ctx, uid, true);
+    let kw = HashMap::new();
+
+    // 1. Paid mode with empty catalog does NOT fabricate free packs 1..=4
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
+    ctx.db.with_mut_snapshot(|snap| {
+        save_store_catalog(snap, &StoreCatalog::default());
+    });
+    let empty_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        empty_offers
+            .dict_get("offers")
+            .and_then(|v| v.as_list())
+            .map(<[PyRep]>::len),
+        Some(0)
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("fc_pw".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
+    );
+
+    // 2. Switching free_fast_checkout_plex true -> false invalidates cached synthetic packs automatically
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = true;
+    let free_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(free_offers
+        .dict_get("offers")
+        .and_then(|v| v.as_list())
+        .is_some_and(|l| !l.is_empty()));
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
+    let invalidated_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        invalidated_offers
+            .dict_get("offers")
+            .and_then(|v| v.as_list())
+            .map(<[PyRep]>::len),
+        Some(0)
+    );
+
+    // 3. BuyOffer enforces targeted eligibility, activates non-cat-1 Omega bundle, AND emits OnItemChange
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.clone_grade = 1;
+        }
+        snap.account_plex_vault.insert(uid, 500);
+        let cat = StoreCatalog {
+            categories: Vec::new(),
+            products: vec![
+                StoreProduct {
+                    id: 8101,
+                    name: "30d Omega Pass".into(),
+                    description: "Omega time".into(),
+                    type_id: 0,
+                    quantity: 1,
+                },
+                StoreProduct {
+                    id: 8102,
+                    name: "Bundle SKIN".into(),
+                    description: "Physical SKIN".into(),
+                    type_id: 34_599,
+                    quantity: 1,
+                },
+            ],
+            offers: vec![
+                StoreOffer {
+                    id: 8101,
+                    name: "Omega Pilot Bundle".into(),
+                    description: "Non-cat-1 Omega + physical item".into(),
+                    category_id: 3,
+                    price_plex: 120,
+                    product_ids: vec![8101, 8102],
+                    targeted: false,
+                    price_cents: None,
+                    currency: None,
+                },
+                StoreOffer {
+                    id: 8102,
+                    name: "Targeted Exclusive".into(),
+                    description: "Restricted to another user".into(),
+                    category_id: 2,
+                    price_plex: 50,
+                    product_ids: vec![8102],
+                    targeted: true,
+                    price_cents: None,
+                    currency: None,
+                },
+            ],
+        };
+        save_store_catalog(snap, &cat);
+        snap.quasar_commerce.targeted_offers.insert(
+            "9999:8102".into(),
+            TargetedOfferAdminRecord {
+                user_id: 9999,
+                catalogue_entry_name: "8102".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    let _ = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "ClearFastCheckoutCacheForUser",
+        &[],
+        &kw,
+    );
+    let visible_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let visible_list = visible_offers.dict_get("offers").and_then(|v| v.as_list()).unwrap();
+    assert!(visible_list
+        .iter()
+        .any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8101)));
+    assert!(!visible_list
+        .iter()
+        .any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8102)));
+
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(8102), PyRep::Integer(1), PyRep::String("fc_pw".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
+    );
+
+    let _ = ctx.drain_notifications_for_char(cid);
+    let res = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(8101), PyRep::Integer(1), PyRep::String("fc_pw".into())],
+        &kw,
+    )
+    .unwrap()
+    .expect("BuyOffer non-cat-1 Omega bundle ok");
+    assert_eq!(res.dict_get("status").and_then(|v| v.as_str()), Some("CONFIRMED"));
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(cid)), 380);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.clone_grade)), Some(2));
+    assert!(ctx.db.with_snapshot(|s| {
+        s.items.values().any(|it| it.owner_id == cid && it.type_id == 34_599)
+    }));
+    let notifs = ctx.drain_notifications_for_char(cid);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnItemChange"),
+        "FastCheckout BuyOffer delivering inventory items must emit OnItemChange"
+    );
+
+    // 4. RequestMiningDetails leaves WorldStateSnapshot untouched
+    let (next_eid_before, ledger_before, structs_before) = ctx.db.with_snapshot(|s| {
+        (
+            s.next_entity_id,
+            s.mining_ledger.len(),
+            s.structures.len(),
+        )
+    });
+    let _ = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "RequestMiningDetails",
+        &[PyRep::Integer(777_666_555)],
+        &kw,
+    );
+    let (next_eid_after, ledger_after, structs_after) = ctx.db.with_snapshot(|s| {
+        (
+            s.next_entity_id,
+            s.mining_ledger.len(),
+            s.structures.len(),
+        )
+    });
+    assert_eq!(
+        (next_eid_before, ledger_before, structs_before),
+        (next_eid_after, ledger_after, structs_after)
+    );
+}

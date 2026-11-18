@@ -4,7 +4,7 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
-use eve_db::WorldRepository;
+use eve_db::{WorldRepository, WorldStateSnapshot};
 use eve_proto::pb;
 use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
@@ -394,6 +394,196 @@ pub(crate) fn offer_matches_catalog(offer: &StoreOffer, catalog: u32) -> bool {
     }
 }
 
+pub fn is_omega_license_product(product: &StoreProduct) -> bool {
+    if product.type_id != 0 {
+        return false;
+    }
+    if product.id == 101 {
+        return true;
+    }
+    let lower = product.name.to_ascii_lowercase();
+    lower.contains("omega") && !lower.contains("skill point") && !lower.contains(" sp")
+}
+
+pub fn is_omega_weekly_sp_offer(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+) -> bool {
+    if offer.price_plex != 0 {
+        return false;
+    }
+    if !offer_tags.is_empty() {
+        return offer_tags.iter().any(|t| {
+            let lc = t.to_ascii_lowercase();
+            lc == "omega-weekly-free-sp" || lc == "omega-weekly"
+        });
+    }
+    let offer_lc = offer.name.to_ascii_lowercase();
+    if offer_lc.contains("weekly") && (offer_lc.contains("skill point") || offer_lc.contains(" sp")) {
+        return true;
+    }
+    catalog.products.iter().any(|p| {
+        offer.product_ids.contains(&p.id)
+            && p.type_id == 0
+            && p.quantity > 1
+            && {
+                let plc = p.name.to_ascii_lowercase();
+                plc.contains("skill point") || plc.contains(" sp") || plc.contains("weekly")
+            }
+    })
+}
+
+pub fn resolve_omega_weekly_free_sp_grant(
+    snap: &WorldStateSnapshot,
+    offer_id: i64,
+) -> Option<i64> {
+    let catalog = read_store_catalog(snap);
+    let offer = catalog.offers.iter().find(|o| i64::from(o.id) == offer_id)?;
+    let offer_tags = read_store_offer_tags(snap);
+    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+    if !is_omega_weekly_sp_offer(offer, &catalog, tags) {
+        return None;
+    }
+    let sp_from_products: i64 = catalog
+        .products
+        .iter()
+        .filter(|p| offer.product_ids.contains(&p.id) && p.type_id == 0 && p.quantity > 1)
+        .map(|p| i64::from(p.quantity))
+        .sum();
+    Some(if sp_from_products > 0 { sp_from_products } else { 15_000 })
+}
+
+pub fn is_omega_store_offer(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+) -> bool {
+    if is_omega_weekly_sp_offer(offer, catalog, offer_tags) {
+        return false;
+    }
+    if offer_tags.iter().any(|t| {
+        let lc = t.to_ascii_lowercase();
+        lc == "omega" || lc == "upsellstarterpack"
+    }) {
+        return true;
+    }
+    if catalog.products.iter().any(|p| {
+        offer.product_ids.contains(&p.id)
+            && (is_omega_license_product(p) || {
+                let lc = p.name.to_ascii_lowercase();
+                lc.contains("omega") && !lc.contains("skill point") && !lc.contains(" sp")
+            })
+    }) {
+        return true;
+    }
+    let offer_lc = offer.name.to_ascii_lowercase();
+    if offer_lc.contains("omega") && !offer_lc.contains("skill point") && !offer_lc.contains(" sp") {
+        return true;
+    }
+    offer.category_id == 1
+        && offer.product_ids.is_empty()
+        && !offer_lc.contains("skin")
+        && !offer_lc.contains("plex")
+        && !offer_lc.contains("skill")
+}
+
+fn find_targeted_offer_record_for_user<'a>(
+    snap: &'a WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+) -> Option<&'a eve_db::TargetedOfferAdminRecord> {
+    let id_str = offer.id.to_string();
+    let direct_key = format!("{uid}:{id_str}");
+    snap.quasar_commerce
+        .targeted_offers
+        .get(&direct_key)
+        .or_else(|| {
+            snap.quasar_commerce.targeted_offers.values().find(|r| {
+                r.user_id == uid
+                    && (r.catalogue_entry_name == id_str || r.catalogue_entry_name == offer.name)
+            })
+        })
+}
+
+fn has_any_targeted_offer_records(snap: &WorldStateSnapshot, offer: &StoreOffer) -> bool {
+    let id_str = offer.id.to_string();
+    snap.quasar_commerce
+        .targeted_offers
+        .values()
+        .any(|r| r.catalogue_entry_name == id_str || r.catalogue_entry_name == offer.name)
+}
+
+pub fn is_user_eligible_for_targeted_offer(
+    snap: &WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+    now_unix: u64,
+) -> bool {
+    if !offer.targeted {
+        return true;
+    }
+    if uid == 0 {
+        return false;
+    }
+    if let Some(rec) = find_targeted_offer_record_for_user(snap, offer, uid) {
+        return rec.promoted
+            && !rec.retracted
+            && (rec.earliest_reissue_unix <= 0 || now_unix >= rec.earliest_reissue_unix as u64);
+    }
+    !has_any_targeted_offer_records(snap, offer)
+}
+
+pub fn is_user_eligible_for_target_audience_offer(
+    snap: &WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+    now_unix: u64,
+) -> bool {
+    if uid == 0 {
+        return false;
+    }
+    if offer.targeted {
+        return is_user_eligible_for_targeted_offer(snap, offer, uid, now_unix);
+    }
+    find_targeted_offer_record_for_user(snap, offer, uid).is_some_and(|rec| {
+        rec.promoted
+            && !rec.retracted
+            && (rec.earliest_reissue_unix <= 0 || now_unix >= rec.earliest_reissue_unix as u64)
+    })
+}
+
+pub fn encode_eligible_targeted_offer_list_response(
+    snap: &WorldStateSnapshot,
+    uid: u64,
+    dyn_msg: &DynamicQuasarMessage,
+    now_unix: u64,
+) -> Vec<u8> {
+    let cat = read_store_catalog(snap);
+    let eligible: Vec<StoreOffer> = cat
+        .offers
+        .into_iter()
+        .filter(|o| is_user_eligible_for_target_audience_offer(snap, o, uid, now_unix))
+        .collect();
+    let (page_size, offset) = parse_page_request(dyn_msg, 1, 50);
+    let (slice, next_tok) = paginate_slice(&eligible, offset, page_size);
+    let mut out = pb::message("eve_public.store.targetaudience.offer.api.ListResponse");
+    for off in slice {
+        out = out.add_with("offer_ids", |entry| {
+            entry
+                .set("user_id.sequential", uid as i32)
+                .set("catalogue_entry.name", off.id.to_string())
+        });
+    }
+    if let Some(tok) = next_tok {
+        out = out.set("next_page.token", tok);
+    }
+    out.encode().unwrap_or_else(|e| {
+        tracing::warn!("failed to encode targetaudience ListResponse: {e}");
+        Vec::new()
+    })
+}
+
 pub fn encode_targeted_offer_list_response(
     offers: &[StoreOffer],
     uid: u64,
@@ -762,12 +952,16 @@ pub fn register_plex_vault_extra_handlers(
                         }
                     }
                     let catalog = read_store_catalog(snap);
+                    let offer_tags = read_store_offer_tags(snap);
                     let offer = catalog
                         .offers
                         .iter()
                         .find(|o| o.id == offer_id)
                         .cloned()
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
+                    if offer.targeted && !is_user_eligible_for_targeted_offer(snap, &offer, uid, now_unix) {
+                        return Err(format!("{STATUS_FORBIDDEN}:User {uid} is not eligible for targeted offer {offer_id}"));
+                    }
                     if offer.price_plex < 0 {
                         return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid negative PLEX price"));
                     }
@@ -846,7 +1040,8 @@ pub fn register_plex_vault_extra_handlers(
                             );
                         }
                     }
-                    let omega_notice = if offer.category_id == 1 {
+                    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+                    let omega_notice = if is_omega_store_offer(&offer, &catalog, tags) {
                         let omega_target_uid = recipient_cid
                             .and_then(|cid| snap.characters.get(&cid).map(|c| c.user_id))
                             .unwrap_or(uid);

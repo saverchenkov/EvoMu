@@ -897,16 +897,80 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         PyRep::Bool(true)
     );
 
-    // 4) When offer 1005 is absent from `cat.offers` (`None => true`), `storeManager` still handles default 1005
+    // 4) When offer 1005 is absent from `cat.offers`, `character_skill_ops` returns `None` (no hardcoded 1005 fallback)
     ctx.db.with_mut_snapshot(|snap| {
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
         cat.offers.retain(|o| o.id != 1005);
         crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
     });
+    assert!(
+        handle(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(1005)],
+            &kw,
+        )
+        .is_none(),
+        "missing catalog offer 1005 must not be synthesized by hardcoded offer_id branch"
+    );
+
+    // 5) Custom non-1005 catalog offer tagged `omega-weekly-free-sp` routes dynamically and grants product quantity
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9005,
+                name: "Omega Weekly Free 25k Skill Points".into(),
+                description: "Catalog-driven weekly SP gift".into(),
+                type_id: 0,
+                quantity: 25_000,
+            });
+        cat.offers
+            .push(eve_db::service_domains::quasar_and_social::StoreOffer {
+                id: 9005,
+                name: "Custom Weekly SP Gift".into(),
+                description: "25,000 SP for Omega".into(),
+                category_id: 2,
+                price_plex: 0,
+                product_ids: vec![9005],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(9005, vec!["omega-weekly-free-sp".into()]);
+    });
     assert_eq!(
-        handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw)
-            .unwrap()
-            .unwrap(),
+        handle(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(9005)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
         PyRep::Bool(true)
+    );
+    let custom_claim = handle(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(9005)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        custom_claim
+            .dict_get("freeSkillPoints")
+            .and_then(|v| v.as_f64()),
+        Some(56_000.0)
     );
 }

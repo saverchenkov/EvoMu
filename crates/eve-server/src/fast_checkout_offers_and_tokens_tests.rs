@@ -32,6 +32,83 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
     sess_paid.user_id = Some(uid_paid);
     sess_paid.character_id = Some(cid_paid);
 
+    let paid_offers_before = ctx_paid
+        .dispatch_rpc(
+            &mut sess_paid,
+            "FastCheckoutService",
+            None,
+            "GetOffersForUser",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("ok");
+    let PyRep::List(paid_before_list) = dict_get(&paid_offers_before, "offers").expect("offers list") else {
+        panic!("expected offers list");
+    };
+    assert!(
+        !paid_before_list.iter().any(|r| {
+            matches!(
+                dict_get(r, "offerID").and_then(|v| v.as_i64()),
+                Some(1..=4)
+            )
+        }),
+        "paid mode must not expose synthetic free PLEX packs 1..=4 without explicit catalog offers"
+    );
+    let err_missing_offer = ctx_paid
+        .dispatch_rpc(
+            &mut sess_paid,
+            "FastCheckoutService",
+            None,
+            "BuyOffer",
+            &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("secret123".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("synthetic pack 1 must not resolve in paid mode without a catalog entry");
+    assert_eq!(err_missing_offer.code, "OfferNotFound");
+
+    // Seed an explicit real-money catalog PLEX offer `1` ($4.99 for 110 PLEX)
+    ctx_paid.db.with_mut_snapshot(|snap| {
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9101,
+                name: "110 PLEX".into(),
+                description: "110 PLEX Vault Pack".into(),
+                type_id: crate::services::market_contracts::PLEX_TYPE_ID,
+                quantity: 110,
+            });
+        cat.offers
+            .push(eve_db::service_domains::quasar_and_social::StoreOffer {
+                id: 1,
+                name: "110 PLEX".into(),
+                description: "110 PLEX Pack".into(),
+                category_id: 2,
+                price_plex: 0,
+                product_ids: vec![9101],
+                targeted: false,
+                price_cents: Some(499),
+                currency: Some("USD".into()),
+            });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+    });
+
+    ctx_paid
+        .dispatch_rpc(
+            &mut sess_paid,
+            "FastCheckoutService",
+            None,
+            "ClearFastCheckoutCacheForUser",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("clear cache ok");
+
     let paid_offers = ctx_paid
         .dispatch_rpc(
             &mut sess_paid,
@@ -47,7 +124,11 @@ async fn fast_checkout_default_paid_vs_free_one_click_behavior() {
     let PyRep::List(paid_list) = dict_get(&paid_offers, "offers").expect("offers list") else {
         panic!("expected offers list");
     };
-    let first_paid_price = match dict_get(&paid_list[0], "price") {
+    let offer_1 = paid_list
+        .iter()
+        .find(|r| dict_get(r, "offerID").and_then(|v| v.as_i64()) == Some(1))
+        .expect("explicit catalog USD PLEX offer 1 must appear");
+    let first_paid_price = match dict_get(offer_1, "price") {
         Some(PyRep::Real(v)) => *v,
         _ => panic!("expected float price"),
     };
@@ -272,6 +353,25 @@ async fn fast_checkout_consumes_tokens_blocks_negative_vault_and_rejects_unprice
         snap.account_plex_vault.insert(uid, 600);
         crate::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9902,
+                name: "110 PLEX".into(),
+                description: "110 PLEX Pack".into(),
+                type_id: crate::services::market_contracts::PLEX_TYPE_ID,
+                quantity: 110,
+            });
+        cat.offers.push(crate::services::quasar_payment_store_types::StoreOffer {
+            id: 1,
+            name: "110 PLEX".into(),
+            description: "110 PLEX Pack".into(),
+            category_id: 2,
+            price_plex: 0,
+            product_ids: vec![9902],
+            targeted: false,
+            price_cents: Some(499),
+            currency: Some("USD".into()),
+        });
         cat.offers.push(crate::services::quasar_payment_store_types::StoreOffer {
             id: 9901,
             name: "Unpriced Zero Offer".into(),

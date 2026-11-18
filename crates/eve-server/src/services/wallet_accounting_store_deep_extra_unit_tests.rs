@@ -446,6 +446,33 @@ async fn fast_checkout_activity_mgr_and_bounties_taxes_kill_mutations() {
     let paid_uid = ctx.db.provision_player_account("fc_paid_user", "secret123");
     set_user_fast_checkout_enabled(&ctx, paid_uid, true);
     let paid_sess = auth_session(paid_uid, char1, corp1, 30_000_142);
+    assert_eq!(handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap_err().code, "OfferNotFound");
+
+    // Seed an explicit real-money catalog PLEX offer for paid-mode checkout validation
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9_801,
+                name: format!("{fc_plex_qty} PLEX"),
+                description: format!("{fc_plex_qty} PLEX Vault Pack"),
+                type_id: 44_992,
+                quantity: fc_plex_qty as u32,
+            });
+        cat.offers
+            .push(eve_db::service_domains::quasar_and_social::StoreOffer {
+                id: fc_offer_id as u32,
+                name: format!("{fc_plex_qty} PLEX"),
+                description: format!("{fc_plex_qty} PLEX Vault Pack"),
+                category_id: 2,
+                price_plex: 0,
+                product_ids: vec![9_801],
+                targeted: false,
+                price_cents: Some(499),
+                currency: Some("USD".into()),
+            });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+    });
     assert_eq!(handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1)], &kw).unwrap().unwrap_err().code, "InvalidPassword");
     assert_eq!(handle_fc_act(&ctx, &paid_sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(fc_offer_id), PyRep::Integer(1), PyRep::String("secret123".into())], &kw).unwrap().unwrap_err().code, "PaymentTokenRequired");
 

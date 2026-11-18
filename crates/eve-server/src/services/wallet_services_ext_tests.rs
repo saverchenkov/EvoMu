@@ -785,3 +785,173 @@ fn station_direct_trade_rejects_offline_duplicate_and_blocked_and_cleans_bounds(
     .unwrap();
     assert!(next_trade.is_ok());
 }
+
+#[test]
+fn store_manager_enforces_targeted_audience_and_product_omega_without_cat_1() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+    use eve_db::TargetedOfferAdminRecord;
+
+    const ERR_TARGETED_NOT_ELIGIBLE: &str = "TargetedOfferNotEligible";
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 1;
+        }
+        snap.account_plex_vault.insert(1, 2_000);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 7001,
+            name: "30 Days Omega Time".into(),
+            description: "Omega license via non-cat-1 offer".into(),
+            type_id: 0,
+            quantity: 1,
+        });
+        cat.products.push(StoreProduct {
+            id: 7002,
+            name: "Promo Ship SKIN".into(),
+            description: "Bonus SKIN item".into(),
+            type_id: 34_599,
+            quantity: 1,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7001,
+            name: "Pilot Bundle".into(),
+            description: "Non-cat-1 Omega + SKIN".into(),
+            category_id: 3,
+            price_plex: 250,
+            product_ids: vec![7001, 7002],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7002,
+            name: "Targeted Promo SKIN".into(),
+            description: "Audience-restricted SKIN".into(),
+            category_id: 2,
+            price_plex: 100,
+            product_ids: vec![7002],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce.targeted_offers.insert(
+            "999:7002".into(),
+            TargetedOfferAdminRecord {
+                user_id: 999,
+                catalogue_entry_name: "7002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+
+    // 1. Targeted offer owned by another user is denied cleanly
+    let denied = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "can_purchase_offer",
+        &[PyRep::Integer(7002)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied.code, ERR_TARGETED_NOT_ELIGIBLE);
+
+    // Promote for user 1 -> allowed; then retract -> denied again
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:7002".into(),
+            TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "7002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(7002)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce
+            .targeted_offers
+            .get_mut("1:7002")
+            .unwrap()
+            .retracted = true;
+    });
+    let retracted_err = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(7002)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(retracted_err.code, ERR_TARGETED_NOT_ELIGIBLE);
+
+    // 2. Non-category-1 Omega + SKIN bundle activates Omega (`ActivatedNotice`) AND delivers SKIN
+    let _ = ctx
+        .quasar_gateway
+        .pending_notices
+        .write()
+        .unwrap()
+        .drain(..)
+        .count();
+    let buy_omega = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(7001)],
+        &kw,
+    )
+    .unwrap()
+    .expect("non-cat-1 Omega bundle purchase must succeed");
+    assert_eq!(
+        buy_omega.dict_get("plexRemaining").and_then(|v| v.as_i64()),
+        Some(1_750)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters.get(&char_id).map(|c| c.clone_grade), Some(2));
+        assert!(snap
+            .items
+            .values()
+            .any(|it| it.owner_id == char_id && it.type_id == 34_599));
+    });
+    assert!(
+        ctx.quasar_gateway
+            .pending_notices
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(scope, any)| {
+                matches!(scope, crate::quasar_gateway::NoticeScope::User(1))
+                    && any.type_url.contains("ActivatedNotice")
+            }),
+        "storeManager non-cat-1 Omega bundle must queue ActivatedNotice"
+    );
+}

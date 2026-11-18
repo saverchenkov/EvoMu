@@ -1527,7 +1527,68 @@ async fn fast_checkout_mining_details_and_plex_conservation_lifecycle() {
         &[],
     )
     .await;
-    assert!(offers_rep.dict_get("offers").is_some());
+    let PyRep::List(ref offers_before) = offers_rep
+        .dict_get("offers")
+        .cloned()
+        .expect("offers list")
+    else {
+        panic!("expected offers list from GetOffersForUser");
+    };
+    assert!(
+        !offers_before.iter().any(|o| matches!(
+            o.dict_get("offerID").and_then(PyRep::as_i64),
+            Some(1..=4)
+        )),
+        "production paid mode must not expose synthetic free PLEX packs 1..=4 before explicit catalog entry"
+    );
+    let unseeded_offer_err = rpc_err(
+        &prod_ctx,
+        &mut sess_prod,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[
+            PyRep::Integer(4),
+            PyRep::Integer(1),
+            PyRep::String("fc_miner1-secret".into()),
+        ],
+    )
+    .await;
+    assert_eq!(unseeded_offer_err.code, "OfferNotFound");
+
+    // Seed an explicit catalog real-money PLEX offer `4` ($49.99 for 1100 PLEX) to test paid token/password gates
+    prod_ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = eve_server::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9404,
+                name: "1100 PLEX".into(),
+                description: "1100 PLEX Vault Pack".into(),
+                type_id: 44_992,
+                quantity: 1100,
+            });
+        cat.offers
+            .push(eve_db::service_domains::quasar_and_social::StoreOffer {
+                id: 4,
+                name: "1100 PLEX".into(),
+                description: "1100 PLEX Pack".into(),
+                category_id: 2,
+                price_plex: 0,
+                product_ids: vec![9404],
+                targeted: false,
+                price_cents: Some(4999),
+                currency: Some("USD".into()),
+            });
+        eve_server::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+    });
+
+    rpc_ok(
+        &prod_ctx,
+        &mut sess_prod,
+        "FastCheckoutService",
+        "ClearFastCheckoutCacheForUser",
+        &[],
+    )
+    .await;
 
     // Wrong password -> InvalidPassword
     let bad_pw = rpc_err(
