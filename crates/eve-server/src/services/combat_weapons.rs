@@ -256,7 +256,12 @@ pub async fn handle_weapons(
                 }
             }
 
-            let is_overloaded = method == "Overload";
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
+                &sys_handle, ship_id, module_id, method, m.state,
+            ) {
+                return Some(Err(e));
+            }
+            let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
             if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
                 if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
                     ctx,
@@ -485,6 +490,11 @@ pub async fn handle_weapons(
                 } else {
                     crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
+                if is_overloaded {
+                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
+                        ctx, char_id, &fit, module_id,
+                    );
+                }
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("targetID", PyRep::Integer(tid)),
@@ -576,6 +586,11 @@ pub async fn handle_weapons(
             })
             .await
             {
+                if is_overloaded && aoe_res.is_ok() {
+                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
+                        ctx, char_id, &fit, module_id,
+                    );
+                }
                 return Some(aoe_res);
             }
             // 5. Turrets (Hybrid 74, Projectile 55, Energy Laser 53, Entropic Disintegrator 1986, Vorton Projector 4060)
@@ -938,6 +953,13 @@ pub async fn handle_weapons(
             let already_active = matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
                 || ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id))
                 || in_cycle || in_delay;
+            if method == "Overload" && !is_entropic && in_cycle {
+                let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                    ctx, &sys_handle, char_id, ship_id, module_id, fit, true,
+                )
+                .await;
+                return Some(Ok(rep));
+            }
             if method == "Activate" && (in_delay || already_active) {
                 return Some(Err(
                     crate::services::inventory_fitting::fitting_module_cycles::module_already_active_rpc_error(
@@ -1729,6 +1751,11 @@ pub async fn handle_weapons(
                     }
                 }
                 let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+                if is_overloaded {
+                    crate::services::fitting_cycles_overheat::emit_module_heat_added(
+                        ctx, char_id, &fit, module_id,
+                    );
+                }
             }
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);

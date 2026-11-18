@@ -179,6 +179,14 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
             ch.standings.insert(AGENT_ID, 5.0);
             ch.standings.insert(OTHER_CHAR_ID, 2.0);
         }
+        snap.skills.entry(CHAR_ID).or_default().insert(
+            28164,
+            TrainedSkillRecord {
+                type_id: 28164,
+                level: 5,
+                skill_points: 1_280_000.0,
+            },
+        );
         if let Some(corp) = snap.corporations.get_mut(&CORP_ID) {
             corp.alliance_id = Some(ALLIANCE_ID);
             corp.hq_station_id = Some(STATION_ID);

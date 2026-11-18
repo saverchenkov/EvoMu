@@ -770,3 +770,77 @@ async fn ancillary_overload_lockout_and_rack_heat_mutants() {
     // Mid-rack and low-rack modules must NOT take high-rack overflow heat damage
     assert!(ctx.db.with_snapshot(|s| !s.items[&mod_clamp_aar].dynamic_attributes.contains_key(&attr_ids::DAMAGE)));
 }
+
+#[test]
+fn can_overload_module_and_burnout_guards_enforce_cat5_thermo_and_damage() {
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut eff = sde.effects.values().next().expect("seed effect").clone();
+        eff.effect_id = 65_002;
+        eff.name = "overloadTestEffect".into();
+        eff.effect_category = 5;
+        sde.effects.insert(65_002, eff);
+        sde.types.insert(
+            990_901,
+            custom_inv_type(sde, 990_901, 55, 7, "Cat5 Autocannon", &[(40, 40.0), (1212, 1.0)], &[12, 65_002]),
+        );
+        sde.types.insert(
+            990_902,
+            custom_inv_type(sde, 990_902, 60, 7, "Passive DCU", &[(40, 40.0)], &[11]),
+        );
+    });
+    let char_id = 91_234_500i64;
+    // Cat5 + requiredThermoDynamicsSkill (1212) = 1.0
+    assert!(!can_overload_module(&ctx, 990_901, 0), "thermo L0 must reject overload");
+    assert!(can_overload_module(&ctx, 990_901, 1), "thermo L1 must allow cat5 module");
+    // Passive module lacking cat5 effects fails even at Thermo V
+    assert!(!can_overload_module(&ctx, 990_902, 5), "passive module must not be overloadable");
+    assert!(!can_overload_module(&ctx, 999_999_999, 5), "unknown type must return false");
+
+    assert_eq!(pilot_thermodynamics_level(&ctx, char_id), 0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.entry(char_id).or_default().insert(
+            28164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28164,
+                level: 3,
+                skill_points: 64_000.0,
+            },
+        );
+    });
+    assert_eq!(pilot_thermodynamics_level(&ctx, char_id), 3);
+
+    let mod_id = 91_234_501i64;
+    let fm_ok = FittedModule {
+        item_id: mod_id,
+        type_id: 990_901,
+        flag_id: 27,
+        state: eve_dogma::ModuleState::Online,
+        charge_type_id: None,
+        charge_quantity: 0,
+        damage_hp: 10.0,
+        max_hp: 40.0,
+        dynamic_attribute_overrides: HashMap::new(),
+    };
+    assert!(!is_module_burned_out(&ctx, &fm_ok, mod_id));
+    let mut fm_burned = fm_ok.clone();
+    fm_burned.damage_hp = 40.0;
+    assert!(is_module_burned_out(&ctx, &fm_burned, mod_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut rec = InventoryItemRecord {
+            item_id: mod_id,
+            type_id: 990_901,
+            owner_id: char_id,
+            location_id: 1,
+            flag: InventoryFlag::HiSlot0,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        };
+        rec.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, 40.0);
+        snap.items.insert(mod_id, rec);
+    });
+    assert!(is_module_burned_out(&ctx, &fm_ok, mod_id));
+}

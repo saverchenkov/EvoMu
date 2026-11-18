@@ -76,10 +76,14 @@ fn compute_nanite_repair_params_scales_with_nanite_operation_and_interfacing_ski
 #[tokio::test]
 async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() {
     let ctx = test_ctx_with_custom(|sde| {
-        sde.types.insert(
-            994_010,
-            custom_inv_type(sde, 994_010, 49, 7, "Survey Scanner I", &[(40, 40.0), (197, 20_000.0), (669, 5_000.0)]),
-        );
+        let mut eff = sde.effects.values().next().expect("seed effect").clone();
+        eff.effect_id = 65_001;
+        eff.name = "overloadTestEffect".into();
+        eff.effect_category = 5;
+        sde.effects.insert(65_001, eff);
+        let mut t = custom_inv_type(sde, 994_010, 49, 7, "Survey Scanner I", &[(40, 40.0), (197, 20_000.0), (669, 5_000.0), (1212, 1.0)]);
+        t.effect_ids.push(65_001);
+        sde.types.insert(994_010, t);
     });
 
     let char_id = 95_400_001;
@@ -135,6 +139,14 @@ async fn deactivate_stop_overload_overload_rack_nanite_repair_and_mining_scan() 
         mod_rec.dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
         mod_rec.dynamic_attributes.insert(attr_ids::HP_STRUCT, 40.0);
         snap.items.insert(mod_id, mod_rec);
+        snap.skills.entry(char_id).or_default().insert(
+            28164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28164,
+                level: 4,
+                skill_points: 100_000.0,
+            },
+        );
         snap.items.insert(
             paste_id,
             InventoryItemRecord {

@@ -948,6 +948,45 @@ fn is_int_subscript_segment(seg: &str) -> bool {
         .is_some()
 }
 
+/// Returns true when `path` is a `GetSubLocation` tuple-subscript child (`[][0]` / `[][1]`)
+/// of a polymorphic item/SubLocation union collection (`[]` / `[*]`) whose parent ops guard
+/// on `passed_to:type#0` / `isinstance:` and whose runtime parent elements are non-empty
+/// scalar `PyRep::Integer` itemIDs (#1323).
+fn is_polymorphic_scalar_sublocation_branch(
+    root: &PyRep,
+    path: &str,
+    ops: &[&str],
+    reply_shape: &serde_json::Map<String, Value>,
+    preserve_cached: bool,
+) -> bool {
+    if ops.is_empty() || !ops.iter().all(|o| o.starts_with("passed_to:self.GetSubLocation#")) {
+        return false;
+    }
+    let segs = parse_path_segments(path);
+    if segs.len() < 2 || !segs.last().is_some_and(|last| is_int_subscript_segment(last)) {
+        return false;
+    }
+    let parent_path: String = segs[..segs.len() - 1].concat();
+    if !parent_path.contains("[]") && !parent_path.contains("[*]") {
+        return false;
+    }
+    let Some(parent_ops) = reply_shape.get(&parent_path).and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let has_type_guard = parent_ops
+        .iter()
+        .filter_map(|v| v.as_str())
+        .any(|o| o == "passed_to:type#0" || o.starts_with("isinstance:"));
+    if !has_type_guard {
+        return false;
+    }
+    let parent_vals = resolve_path_with_shape(root, &parent_path, reply_shape);
+    !parent_vals.is_empty()
+        && parent_vals
+            .iter()
+            .all(|v| matches!(unwrap_envelope(v, preserve_cached), PyRep::Integer(_)))
+}
+
 fn resolve_path_with_shape(
     root: &PyRep,
     path: &str,
@@ -1301,8 +1340,14 @@ pub fn validate_reply_shape_with_metrics(
             .collect();
         let has_null_guard = ops_have_null_guard(&ops) || (path != "$" && root_has_null_guard);
 
-        // Track vacuity when collection element paths (`[]` or `[*]`) resolve to 0 items
-        if (path.contains("[]") || path.contains("[*]")) && values.is_empty() && !matches!(root, PyRep::None) {
+        // Track vacuity when collection element paths (`[]` or `[*]`) resolve to 0 items,
+        // except conditional tuple-subscript branches on polymorphic item/SubLocation unions
+        // where the parent collection IS non-empty and returned scalar integer itemIDs (#1323).
+        if (path.contains("[]") || path.contains("[*]"))
+            && values.is_empty()
+            && !matches!(root, PyRep::None)
+            && !is_polymorphic_scalar_sublocation_branch(&root, path, &ops, reply_shape, preserve_cached)
+        {
             outcome.had_unexercised_collection_elements = true;
         }
 
@@ -2749,5 +2794,64 @@ mod tests {
             !keys_outcome.had_unexercised_collection_elements,
             "DBRow.keys()[][0] should exercise string char subscript non-vacuously"
         );
+    }
+
+    #[test]
+    fn polymorphic_sublocation_union_allows_non_empty_int_list_and_keeps_empty_list_vacuous() {
+        let overload_shape = serde_json::json!({
+            "$": ["discard", "iter"],
+            "[]": ["passed_to:self.GetItem#0", "passed_to:self.IsModuleOverloaded#0", "passed_to:type#0", "subscript[0]", "subscript[1]"],
+            "[][0]": ["passed_to:self.GetSubLocation#0"],
+            "[][1]": ["passed_to:self.GetSubLocation#1"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let int_reply = PyRep::List(vec![PyRep::Integer(100_000_005)]);
+        let int_outcome = validate_reply_shape_with_metrics(
+            None,
+            "dogmaIM.OverloadRack",
+            &int_reply,
+            &overload_shape,
+        );
+        assert!(
+            int_outcome.violations.is_empty(),
+            "flat moduleID list must pass shape validation: {:?}",
+            int_outcome.violations
+        );
+        assert!(
+            !int_outcome.had_unexercised_collection_elements,
+            "non-empty scalar moduleID list must NOT be marked vacuous due to SubLocation union branches"
+        );
+        assert!(matches!(
+            int_outcome.classification(),
+            RpcValidationClass::Validated { .. }
+        ));
+
+        let empty_reply = PyRep::List(vec![]);
+        let empty_outcome = validate_reply_shape_with_metrics(
+            None,
+            "dogmaIM.OverloadRack",
+            &empty_reply,
+            &overload_shape,
+        );
+        assert!(
+            empty_outcome.had_unexercised_collection_elements,
+            "empty list OverloadRack([]) must still be classified as Vacuous"
+        );
+
+        let subloc_reply = PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(27),
+        ])]);
+        let subloc_outcome = validate_reply_shape_with_metrics(
+            None,
+            "dogmaIM.OverloadRack",
+            &subloc_reply,
+            &overload_shape,
+        );
+        assert!(subloc_outcome.violations.is_empty());
+        assert!(!subloc_outcome.had_unexercised_collection_elements);
     }
 }
