@@ -1473,6 +1473,7 @@ async fn self_destruct_and_abort_validate_optional_pickid() {
         .unwrap()
         .unwrap_err();
         assert_eq!(err.code, "InvalidShip", "{svc}.{meth} mismatch error");
+        assert!(err.client_error.is_some(), "{svc}.{meth} typed ClientError");
     }
 
     // Malformed / non-positive pickid rejects with InvalidArgument.
