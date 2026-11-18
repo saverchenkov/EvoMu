@@ -576,6 +576,8 @@ pub async fn handle(
             }
 
             let now_unix = ctx.now_unix();
+            let pending: super::quasar_sov_hub::PendingNotices =
+                std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let targets: Vec<(i64, String, f64, f64, f64, u64)> = snap
@@ -607,9 +609,9 @@ pub async fn handle(
                             client_error: None,
                         });
                     }
-                    let damaged_hp = (*shield_hp > 0.0 && *shield_hp < 4_999.0)
-                        || (*armor_hp > 0.0 && *armor_hp < 4_999.0)
-                        || (*hull_hp > 0.0 && *hull_hp < 4_999.0);
+                    let damaged_hp = *shield_hp < crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP
+                        || *armor_hp < crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP
+                        || *hull_hp < crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP;
                     if matches!(
                         state.as_str(),
                         "Reinforced"
@@ -631,37 +633,47 @@ pub async fn handle(
                         });
                     }
                 }
-                let mut skyhook_ids = Vec::with_capacity(targets.len());
-                let mut removed_den_ids = Vec::new();
-                for (sid, _, _, _, _, _) in targets {
-                    snap.structures.remove(&sid);
-                    snap.sov_runtime.skyhook_planets.remove(&sid);
-                    snap.sov_runtime.skyhook_reagent_bays.remove(&sid);
-                    snap.sov_runtime.skyhook_reagents.remove(&sid);
-                    snap.sov_runtime.skyhook_active.remove(&sid);
-                    snap.sov_runtime.skyhook_theft_windows.remove(&sid);
-                    snap.sov_runtime.skyhook_maturity_rem.remove(&sid);
-                    snap.sov_runtime.skyhook_last_harvest_unix.remove(&sid);
-                    snap.sov_runtime.skyhook_hackable.remove(&sid);
-                    let den_ids: Vec<i64> = snap
-                        .sov_runtime
-                        .mercenary_dens
-                        .values()
-                        .filter(|md| md.skyhook_id == sid)
-                        .map(|md| md.den_id)
-                        .collect();
-                    for did in den_ids {
-                        snap.sov_runtime.mercenary_dens.remove(&did);
-                        snap.sov_runtime.mercenary_den_reinforcement.remove(&did);
-                        snap.sov_runtime.mercenary_den_tax_pct.remove(&did);
-                        snap.sov_runtime.mercenary_den_evo_rem.remove(&did);
-                        removed_den_ids.push(did);
-                    }
-                    skyhook_ids.push(sid);
-                }
-                Ok::<_, BridgeRpcError>((skyhook_ids, removed_den_ids))
+                let (skyhook_ids, removed_den_ids, removed_mto_balls) = if targets.is_empty() {
+                    (Vec::new(), Vec::new(), Vec::new())
+                } else {
+                    super::quasar_sov_workforce::with_system_hub_network_reconcile::<_, BridgeRpcError>(
+                        snap,
+                        &ctx.sde,
+                        &pending,
+                        sys_id,
+                        now_unix,
+                        |snap| {
+                            let mut skyhook_ids = Vec::with_capacity(targets.len());
+                            let mut removed_den_ids = Vec::new();
+                            let mut removed_mto_balls = Vec::new();
+                            for (sid, _, _, _, _, _) in targets {
+                                snap.structures.remove(&sid);
+                                crate::services::sov_gameplay::cleanup_destroyed_skyhook_in_snap(snap, sid);
+                                snap.sov_runtime.mercenary_den_tax_pct.remove(&sid);
+                                let den_ids: Vec<i64> = snap
+                                    .sov_runtime
+                                    .mercenary_dens
+                                    .values()
+                                    .filter(|md| md.skyhook_id == sid)
+                                    .map(|md| md.den_id)
+                                    .collect();
+                                for did in den_ids {
+                                    let (_, mut balls) =
+                                        super::quasar_sov_mercden::cleanup_destroyed_mercenary_den_in_snap(
+                                            snap, did,
+                                        );
+                                    removed_den_ids.push(did);
+                                    removed_mto_balls.append(&mut balls);
+                                }
+                                skyhook_ids.push(sid);
+                            }
+                            Ok((skyhook_ids, removed_den_ids, removed_mto_balls))
+                        },
+                    )?
+                };
+                Ok::<_, BridgeRpcError>((skyhook_ids, removed_den_ids, removed_mto_balls))
             });
-            let (destroyed_ids, removed_den_ids) = match destroy_res {
+            let (destroyed_ids, removed_den_ids, removed_mto_balls) = match destroy_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -673,9 +685,13 @@ pub async fn handle(
                 for &did in &removed_den_ids {
                     let _ = sys_handle.remove_ball(did).await;
                 }
+                for &bid in &removed_mto_balls {
+                    let _ = sys_handle.remove_ball(bid).await;
+                }
             }
 
             emit_sov_structures_updated(ctx, sys_id, &destroyed_ids);
+            crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now_unix);
             Some(Ok(PyRep::Integer(destroyed_ids.len() as i64)))
         }
 

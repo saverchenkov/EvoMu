@@ -347,7 +347,7 @@ async fn r6_t2_04_issue_373_destroy_skyhooks_guards_and_cleanup() {
     ctx.db.with_mut_snapshot(|snap| {
         seed_corp(snap, corp_id, char_id, None);
         seed_char(snap, char_id, corp_id, None, sys_id);
-        snap.structures.insert(skyhook_id, UpwellStructureRecord { structure_id: skyhook_id, type_id: TYPE_ORBITAL_SKYHOOK, owner_corp_id: corp_id, solar_system_id: sys_id, state: "ShieldVulnerable".into(), shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0, ..Default::default() });
+        snap.structures.insert(skyhook_id, UpwellStructureRecord { structure_id: skyhook_id, type_id: TYPE_ORBITAL_SKYHOOK, owner_corp_id: corp_id, solar_system_id: sys_id, state: "ShieldVulnerable".into(), shield_hp: crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP, armor_hp: crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP, hull_hp: crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP, ..Default::default() });
         snap.sov_runtime.skyhook_silo_links.insert(skyhook_id, (90_000_002, 98_000_002, 100, 1.0));
         snap.sov_runtime.skyhook_planets.insert(skyhook_id, 40_009_080);
         snap.sov_runtime.skyhook_reagents.insert(skyhook_id, (81143, 500));

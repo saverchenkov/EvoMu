@@ -256,6 +256,9 @@ async fn record_hub_hack_claim_system_sovereignty_and_sov_mgr_rpcs() {
                 name: "Null Skyhook".to_string(),
                 position: [10_000.0, 0.0, 0.0],
                 state: "ShieldVulnerable".to_string(),
+                shield_hp: crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP,
                 ..Default::default()
             },
         );
@@ -523,9 +526,9 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
                 solar_system_id: sys_id,
                 name: "Skyhook".into(),
                 state: "Online".into(),
-                shield_hp: 5_000.0,
-                armor_hp: 5_000.0,
-                hull_hp: 5_000.0,
+                shield_hp: crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP,
                 ..Default::default()
             },
         );
@@ -749,4 +752,292 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
             Some((false, 0))
         );
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroy_skyhooks_rejects_zero_or_damaged_hp_prunes_mto_and_reconciles_workforce() {
+    use crate::services::quasar_sov_hub::star_power_for_system;
+    use crate::services::quasar_sov_workforce::{
+        exported_amount, imports, systems_within_jumps, WORKFORCE_TRANSFER_MAX_JUMPS,
+    };
+    use crate::services::sov_gameplay::{
+        SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP, TYPE_MERCENARY_DEN,
+    };
+    use eve_db::{
+        PersistedHubUpgrade, PersistedMercenaryActivity, PersistedMercenaryDen,
+        PersistedSovHubData, PersistedWorkforceMode,
+    };
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let sys_a = 30_000_142_u32;
+    let sys_b = *systems_within_jumps(&ctx.sde, sys_a, WORKFORCE_TRANSFER_MAX_JUMPS)
+        .keys()
+        .find(|&&s| s != sys_a && star_power_for_system(&ctx.sde, s) >= 200)
+        .expect("neighbor system with >= 200 star power within jump range");
+    let temp_planet = ctx
+        .sde
+        .celestials_in_system(sys_a)
+        .into_iter()
+        .find(|c| c.type_id == 11)
+        .map(|c| c.celestial_id)
+        .expect("Temperate planet in Jita");
+
+    let hub_a = 1_090_000_001_i64;
+    let hub_b = 1_090_000_002_i64;
+    let skyhook_id = 1_090_000_010_i64;
+    let den_id = 1_090_000_020_i64;
+    let mto_ball_id = 1_090_000_030_i64;
+    let act_uuid = vec![0xD9_u8; 16];
+    let act_key: String = act_uuid.iter().map(|b| format!("{b:02x}")).collect();
+    let now = ctx.now_unix();
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let corp = s.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+
+        for (hid, sys) in [(hub_a, sys_a), (hub_b, sys_b)] {
+            s.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("Hub {hid}"),
+                    state: "Online".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        s.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Skyhook A".into(),
+                state: "Online".into(),
+                shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: SKYHOOK_BASE_HULL_HP,
+                ..Default::default()
+            },
+        );
+        s.structures.insert(
+            den_id,
+            UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Merc Den".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        s.sov_runtime.skyhook_planets.insert(skyhook_id, temp_planet);
+        s.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        s.sov_runtime.mercenary_den_tax_pct.insert(skyhook_id, 15);
+        s.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                owner_char_id: char_id,
+                skyhook_id,
+                solar_system_id: sys_a,
+                planet_id: temp_planet,
+                type_id: TYPE_MERCENARY_DEN,
+                enabled: true,
+                cargo_extraction_enabled: true,
+                development_level: 10,
+                anarchy_level: 0,
+                infomorphs: 50,
+                simulated_at_unix: now,
+                next_activity_generation_unix: now + 86_400,
+            },
+        );
+        s.sov_runtime.mercenary_activities.insert(
+            act_key.clone(),
+            PersistedMercenaryActivity {
+                uuid: act_uuid.clone(),
+                den_id,
+                solar_system_id: sys_a,
+                dungeon_id: 12_367,
+                started: true,
+                started_by: char_id,
+                expiry_unix: now + 1_800,
+                development_impact: 5,
+                anarchy_impact: -5,
+                infomorph_bonus: 0,
+            },
+        );
+        s.sov_runtime.mto_site_balls.insert(mto_ball_id, act_key.clone());
+        s.items.insert(
+            mto_ball_id,
+            InventoryItemRecord {
+                item_id: mto_ball_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: i64::from(sys_a),
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        s.item_positions.insert(mto_ball_id, [1_000.0, 2_000.0, 3_000.0]);
+        s.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: 4_500,
+                },
+                last_updated_unix: now,
+                ..Default::default()
+            },
+        );
+        s.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import { sources: vec![sys_a] },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 82_499, // 200p, 1_800w
+                    online: true,
+                    low_power: false,
+                }],
+                last_updated_unix: now,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_a);
+    for (bid, type_id) in [
+        (skyhook_id, TYPE_ORBITAL_SKYHOOK),
+        (den_id, TYPE_MERCENARY_DEN),
+        (mto_ball_id, 34_u32),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    let mut sess = sov_session(char_id, corp_id, sys_a, None);
+    sess.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR;
+    let mut rx = ctx.quasar_gateway.subscribe_session(
+        &sess,
+        vec![
+            "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice".into(),
+            "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice".into(),
+        ],
+        now,
+    );
+
+    // 1. Any damage below full SKYHOOK_BASE_{SHIELD,ARMOR,HULL}_HP (including 0.0 and 5_000..9_999) rejects.
+    for (shield_hp, armor_hp, hull_hp, label) in [
+        (0.0, SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, "zero shield"),
+        (7_500.0, SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, "partial shield"),
+        (SKYHOOK_BASE_SHIELD_HP, 9_999.0, SKYHOOK_BASE_HULL_HP, "damaged armor"),
+        (SKYHOOK_BASE_SHIELD_HP, SKYHOOK_BASE_ARMOR_HP, 9_999.0, "damaged hull"),
+    ] {
+        ctx.db.with_mut_snapshot(|s| {
+            let sh = s.structures.get_mut(&skyhook_id).unwrap();
+            sh.shield_hp = shield_hp;
+            sh.armor_hp = armor_hp;
+            sh.hull_hp = hull_hp;
+        });
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "sovMgr",
+            "DestroySkyhooks",
+            &[PyRep::Integer(i64::from(sys_a))],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "StructureReinforcedOrDamaged", "failed case: {label}");
+    }
+
+    // 2. Restore full HP -> DestroySkyhooks succeeds, cleans up Skyhook + Den + MTO + balls + tax,
+    //    reconciles workforce (Export -> 0, Hub B -> low_power), and flushes Quasar notices.
+    ctx.db.with_mut_snapshot(|s| {
+        let sh = s.structures.get_mut(&skyhook_id).unwrap();
+        sh.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+        sh.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+        sh.hull_hp = SKYHOOK_BASE_HULL_HP;
+    });
+    let res = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "DestroySkyhooks",
+        &[PyRep::Integer(i64::from(sys_a))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res, PyRep::Integer(1));
+
+    ctx.db.with_snapshot(|s| {
+        assert!(!s.structures.contains_key(&skyhook_id));
+        assert_eq!(s.structures[&den_id].state, "Destroyed");
+        assert!(!s.sov_runtime.mercenary_dens.contains_key(&den_id));
+        assert!(!s.sov_runtime.mercenary_activities.contains_key(&act_key));
+        assert!(!s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id));
+        assert!(!s.sov_runtime.mercenary_den_tax_pct.contains_key(&skyhook_id));
+        assert!(!s.items.contains_key(&mto_ball_id));
+        assert!(!s.item_positions.contains_key(&mto_ball_id));
+        assert_eq!(exported_amount(s, hub_a), 0);
+        assert_eq!(imports(s, &ctx.sde, hub_b), vec![(sys_a, 0)]);
+        assert!(s.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+    });
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert!(!bp.balls.contains_key(&skyhook_id));
+        assert!(!bp.balls.contains_key(&den_id));
+        assert!(!bp.balls.contains_key(&mto_ball_id));
+    }
+
+    let mut notice_urls = Vec::new();
+    while let Ok(notice) = rx.try_recv() {
+        if let Some(payload) = notice.payload {
+            notice_urls.push(payload.type_url);
+        }
+    }
+    assert!(
+        notice_urls
+            .iter()
+            .any(|u| u.ends_with("eve_public.sovereignty.hub.api.ResourcesSimulatedNotice")),
+        "expected flushed ResourcesSimulatedNotice, got {notice_urls:?}"
+    );
+    assert!(
+        notice_urls
+            .iter()
+            .any(|u| u.ends_with("eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice")),
+        "expected flushed workforce StateChangedNotice, got {notice_urls:?}"
+    );
 }

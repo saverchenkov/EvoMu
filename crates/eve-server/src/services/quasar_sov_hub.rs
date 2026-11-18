@@ -500,11 +500,20 @@ pub fn is_planet_harvested_by_active_skyhook(
     })
 }
 
-fn hub_local_and_base_pool(
+struct HubWorkforcePool {
+    power_local: u64,
+    workforce_local: u64,
+    base_power: u64,
+    base_workforce: u64,
+    unexported_pool_w: u64,
+    excess_export_w: u64,
+}
+
+fn hub_workforce_pool(
     snap: &WorldStateSnapshot,
     sde: &SdeRegistry,
     hub_id: i64,
-) -> Option<(u64, u64, u64, u64)> {
+) -> Option<HubWorkforcePool> {
     let st = snap.structures.get(&hub_id)?;
     let sys_id = st.solar_system_id;
     let mut star_p = 0u64;
@@ -541,22 +550,65 @@ fn hub_local_and_base_pool(
     }
     let power_local = star_p + harvested_p;
     let workforce_local = harvested_w;
-    let imported: u64 = super::quasar_sov_workforce::imports(snap, sde, hub_id)
-        .iter()
-        .map(|s| s.1)
-        .sum();
+    // Only Import hubs call `imports()`: Export hubs have imported == 0, preventing mutual recursion
+    // when `imports()` validates each exporter's `max_exportable_workforce`.
+    let imported: u64 = if matches!(
+        super::quasar_sov_workforce::mode(snap, hub_id),
+        eve_db::PersistedWorkforceMode::Import { .. }
+    ) {
+        super::quasar_sov_workforce::imports(snap, sde, hub_id)
+            .iter()
+            .map(|s| s.1)
+            .sum()
+    } else {
+        0
+    };
     let exported = super::quasar_sov_workforce::exported_amount(snap, hub_id);
-    let base_workforce = (workforce_local + imported).saturating_sub(exported);
-    Some((power_local, workforce_local, power_local, base_workforce))
+    let unexported_pool_w = workforce_local + imported;
+    let base_workforce = unexported_pool_w.saturating_sub(exported);
+    let excess_export_w = exported.saturating_sub(unexported_pool_w);
+    Some(HubWorkforcePool {
+        power_local,
+        workforce_local,
+        base_power: power_local,
+        base_workforce,
+        unexported_pool_w,
+        excess_export_w,
+    })
+}
+
+/// Returns the maximum workforce that `hub_id` can export without exporting `Workforce Mecha-Tooling`
+/// output (`produced_w`, restricted per `Sovereignty.md:124` to lower-priority local upgrades)
+/// or starving currently active local upgrades.
+pub(crate) fn max_exportable_workforce(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    hub_id: i64,
+) -> Option<u64> {
+    let pool = hub_workforce_pool(snap, sde, hub_id)?;
+    let mut max_export = pool.unexported_pool_w;
+    if let Some(h) = snap.sov_runtime.sov_hubs.get(&hub_id) {
+        let (mut cum_req, mut cum_prod) = (0u64, 0u64);
+        for d in h
+            .upgrades
+            .iter()
+            .filter(|u| is_active(u))
+            .filter_map(|u| upgrade_definition(sde, u.type_id))
+        {
+            cum_req += d.workforce_required;
+            max_export = max_export.min((pool.unexported_pool_w + cum_prod).saturating_sub(cum_req));
+            cum_prod += d.workforce_produced;
+        }
+    }
+    Some(max_export)
 }
 
 /// Computes hub resources from SDE star power, Orbital Skyhook planetary harvest, active upgrades, and workforce transfers.
 pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<HubResources> {
-    let (power_local, workforce_local, base_p, base_w) =
-        hub_local_and_base_pool(snap, sde, hub_id)?;
+    let pool = hub_workforce_pool(snap, sde, hub_id)?;
     let mut r = HubResources {
-        power_local,
-        workforce_local,
+        power_local: pool.power_local,
+        workforce_local: pool.workforce_local,
         ..Default::default()
     };
     let (mut produced_p, mut produced_w) = (0u64, 0u64);
@@ -573,8 +625,10 @@ pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_i
             produced_w += d.workforce_produced;
         }
     }
-    r.power_available = base_p + produced_p;
-    r.workforce_available = base_w + produced_w;
+    r.power_available = pool.base_power + produced_p;
+    // Deduct any uncompensated exported excess above local+imported workforce from generated
+    // upgrade output so Workforce Mecha-Tooling cannot be simultaneously exported and spent locally.
+    r.workforce_available = pool.base_workforce + produced_w.saturating_sub(pool.excess_export_w);
     Some(r)
 }
 
@@ -582,10 +636,11 @@ pub fn compute_hub_resources(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_i
 /// slot whose power/workforce demand exceeds the base pool plus output of strictly higher-priority
 /// slots into `low_power = true` (`Sovereignty.md:124`).
 pub fn enforce_hub_power_overload(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> bool {
-    let Some((_, _, mut running_p, mut running_w)) = hub_local_and_base_pool(snap, sde, hub_id)
-    else {
+    let Some(pool) = hub_workforce_pool(snap, sde, hub_id) else {
         return false;
     };
+    let (mut running_p, mut running_w, mut excess_left) =
+        (pool.base_power, pool.base_workforce, pool.excess_export_w);
     let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) else {
         return false;
     };
@@ -599,7 +654,9 @@ pub fn enforce_hub_power_overload(snap: &mut WorldStateSnapshot, sde: &SdeRegist
         };
         if d.power_required <= running_p && d.workforce_required <= running_w {
             running_p = running_p - d.power_required + d.power_produced;
-            running_w = running_w - d.workforce_required + d.workforce_produced;
+            let absorbed = d.workforce_produced.min(excess_left);
+            excess_left -= absorbed;
+            running_w = running_w - d.workforce_required + (d.workforce_produced - absorbed);
         } else {
             u.low_power = true;
             changed = true;
@@ -719,7 +776,8 @@ pub fn simulate_fuel(sde: &SdeRegistry, hub: &mut PersistedSovHubData, now: u64)
 /// `HubUpgradesSimulatedNotice` plus resource diffs.
 pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, pending: &PendingNotices, hub_id: i64, now: u64) {
     let Some(sys) = snap.structures.get(&hub_id).map(|s| s.solar_system_id) else { return };
-    let before = hub_views(snap, sde, &[hub_id]);
+    let extra = super::quasar_sov_workforce::collect_connected_hub_ids(snap, sde, &[hub_id]);
+    let before = hub_views(snap, sde, &extra);
     let hub = snap
         .sov_runtime
         .sov_hubs
@@ -728,7 +786,13 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
     if !simulate_fuel(sde, hub, now) {
         return;
     }
-    enforce_hub_power_overload(snap, sde, hub_id);
+    super::quasar_sov_workforce::reconcile_hub_workforce_network_and_emit(
+        snap,
+        sde,
+        pending,
+        &before,
+        &extra,
+    );
     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
         "quasar_sov_hub.run_simulation",
         pb::message("eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice")
@@ -738,8 +802,6 @@ pub(crate) fn run_simulation(snap: &mut WorldStateSnapshot, sde: &SdeRegistry, p
     ) {
         push_notice(pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
     }
-    let after = hub_views(snap, sde, &[hub_id]);
-    emit_hub_diffs(pending, &before, &after);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -942,11 +1004,42 @@ fn process_configuration(
         hub.last_updated_unix = now;
     }
     snap.sov_runtime.sov_hubs.insert(hub_id, hub);
+    clamp_hub_export_to_max(snap, sde, hub_id);
     enforce_hub_power_overload(snap, sde, hub_id);
     for item_id in consumed {
         consume_items(snap, item_id, 1);
     }
     Ok(sys)
+}
+
+/// Clamps a hub's `PersistedWorkforceMode::Export { amount }` down to `max_exportable_workforce`
+/// (returning `true` when modified) so overload evaluation never sacrifices active local upgrades
+/// to sustain an unbacked export after workforce capacity drops.
+pub(crate) fn clamp_hub_export_to_max(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    hub_id: i64,
+) -> bool {
+    let Some(hub) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) else {
+        return false;
+    };
+    if !matches!(hub.workforce, eve_db::PersistedWorkforceMode::Export { .. }) {
+        return false;
+    }
+    let orig = std::mem::replace(&mut hub.workforce, eve_db::PersistedWorkforceMode::Inactive);
+    let cap = max_exportable_workforce(snap, sde, hub_id);
+    if let Some(hub) = snap.sov_runtime.sov_hubs.get_mut(&hub_id) {
+        hub.workforce = orig;
+        if let (Some(cap), eve_db::PersistedWorkforceMode::Export { amount, .. }) =
+            (cap, &mut hub.workforce)
+        {
+            if *amount > cap {
+                *amount = cap;
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `true` when an item may be consumed by a hub operation: it sits inside the hub itself, or in
@@ -1133,61 +1226,68 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     if i64::from(it.quantity) < amount {
                         return Err((STATUS_BAD_REQUEST, format!("Insufficient fuel: have {}, requested {amount}", it.quantity)));
                     }
-                    run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
-                    let before = hub_views(snap, &sde, &[hub_id]);
-                    let mut hub = snap.clone_sov_hub(hub_id);
-                    let total = hub
-                        .fuel
-                        .get(&fuel_type)
-                        .copied()
-                        .unwrap_or(0)
-                        .checked_add(amount as u32)
-                        .ok_or((STATUS_BAD_REQUEST, "Hub fuel bay capacity exceeded".to_string()))?;
-                    hub.fuel.insert(fuel_type, total);
-                    consume_items(snap, item_id, amount as i32);
-                    let now_ts = ctx.now_unix();
-                    let is_hacked = snap
-                        .sov_runtime
-                        .hacked_hubs
-                        .get(&hub_id)
-                        .copied()
-                        .is_some_and(|until| now_ts < until);
-                    let prev_upgrades = hub.upgrades.clone();
-                    if !is_hacked {
-                        for u in hub.upgrades.iter_mut().filter(|u| u.online && u.low_power) {
-                            if upgrade_definition(&sde, u.type_id).is_some_and(|d| {
-                                d.fuel_type == 0
-                                    || d.fuel_per_hour == 0
-                                    || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
-                            }) {
-                                u.low_power = false;
+                    super::quasar_sov_workforce::with_system_hub_network_reconcile(
+                        snap,
+                        &sde,
+                        &pending,
+                        sys,
+                        ctx.now_unix(),
+                        |snap| {
+                            let mut hub = snap.clone_sov_hub(hub_id);
+                            let total = hub
+                                .fuel
+                                .get(&fuel_type)
+                                .copied()
+                                .unwrap_or(0)
+                                .checked_add(amount as u32)
+                                .ok_or((STATUS_BAD_REQUEST, "Hub fuel bay capacity exceeded".to_string()))?;
+                            hub.fuel.insert(fuel_type, total);
+                            consume_items(snap, item_id, amount as i32);
+                            let now_ts = ctx.now_unix();
+                            let is_hacked = snap
+                                .sov_runtime
+                                .hacked_hubs
+                                .get(&hub_id)
+                                .copied()
+                                .is_some_and(|until| now_ts < until);
+                            let prev_upgrades = hub.upgrades.clone();
+                            if !is_hacked {
+                                for u in hub.upgrades.iter_mut().filter(|u| u.online && u.low_power) {
+                                    if upgrade_definition(&sde, u.type_id).is_some_and(|d| {
+                                        d.fuel_type == 0
+                                            || d.fuel_per_hour == 0
+                                            || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+                                    }) {
+                                        u.low_power = false;
+                                    }
+                                }
                             }
-                        }
-                    }
-                    if hub.last_updated_unix == 0 {
-                        hub.last_updated_unix = now_ts;
-                    }
-                    snap.sov_runtime.sov_hubs.insert(hub_id, hub);
-                    let _ = enforce_hub_power_overload(snap, &sde, hub_id);
-                    let restored = snap
-                        .sov_runtime
-                        .sov_hubs
-                        .get(&hub_id)
-                        .is_some_and(|h| h.upgrades != prev_upgrades);
-                    if restored {
-                        if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                            "quasar_sov_hub.fuel_add.upgrades_simulated",
-                            pb::message(
-                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                            )
-                            .set_with("hub_upgrades", |b| {
-                                fill_hub_upgrades(b, &sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
-                            }),
-                        ) {
-                            push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
-                        }
-                    }
-                    emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
+                            if hub.last_updated_unix == 0 {
+                                hub.last_updated_unix = now_ts;
+                            }
+                            snap.sov_runtime.sov_hubs.insert(hub_id, hub);
+                            let _ = enforce_hub_power_overload(snap, &sde, hub_id);
+                            let restored = snap
+                                .sov_runtime
+                                .sov_hubs
+                                .get(&hub_id)
+                                .is_some_and(|h| h.upgrades != prev_upgrades);
+                            if restored {
+                                if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                                    "quasar_sov_hub.fuel_add.upgrades_simulated",
+                                    pb::message(
+                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                    )
+                                    .set_with("hub_upgrades", |b| {
+                                        fill_hub_upgrades(b, &sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id))
+                                    }),
+                                ) {
+                                    push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice", n);
+                                }
+                            }
+                            Ok::<_, RpcError>(())
+                        },
+                    )?;
                     Ok(())
                 })?;
                 pb::message("eve_public.sovereignty.hub.fuel.api.AddResponse").to_any_or_internal_err()
@@ -1270,10 +1370,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 let hub_upgrades = transact(&db, |snap| {
                     let c = caller(ctx, snap)?;
                     require_caller_roles(&c, HUB_MANAGER_ROLES, "configure sovereignty hub upgrades")?;
-                    corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
-                    let before = hub_views(snap, &sde, &[hub_id]);
-                    let sys = process_configuration(snap, &sde, &c, hub_id, &new_items, &config, ctx.now_unix())?;
+                    let sys = corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?.solar_system_id;
+                    super::quasar_sov_workforce::with_system_hub_network_reconcile(
+                        snap,
+                        &sde,
+                        &pending,
+                        sys,
+                        ctx.now_unix(),
+                        |snap| {
+                            process_configuration(snap, &sde, &c, hub_id, &new_items, &config, ctx.now_unix())?;
+                            Ok::<_, RpcError>(())
+                        },
+                    )?;
                     let encoded = encode_hub_upgrades(&sde, hub_id, snap.sov_runtime.sov_hubs.get(&hub_id));
                     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
                         "quasar_sov_hub.process_configuration.configured",
@@ -1284,7 +1392,6 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     ) {
                         push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice", n);
                     }
-                    emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
                     Ok::<_, RpcError>(encoded)
                 })?;
                 pb::message("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationResponse")
@@ -1306,89 +1413,97 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     require_caller_roles(&c, HUB_MANAGER_ROLES, "uninstall sovereignty hub upgrades")?;
                     let st = corp_owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     let sys = st.solar_system_id;
-                    run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
-                    let before = hub_views(snap, &sde, &[hub_id]);
-                    let prev_states: Vec<(u32, u64)> = snap
-                        .sov_runtime
-                        .sov_hubs
-                        .get(&hub_id)
-                        .map(|h| {
-                            h.upgrades
+                    super::quasar_sov_workforce::with_system_hub_network_reconcile(
+                        snap,
+                        &sde,
+                        &pending,
+                        sys,
+                        ctx.now_unix(),
+                        |snap| {
+                            let prev_states: Vec<(u32, u64)> = snap
+                                .sov_runtime
+                                .sov_hubs
+                                .get(&hub_id)
+                                .map(|h| {
+                                    h.upgrades
+                                        .iter()
+                                        .filter(|u| u.type_id != type_id)
+                                        .map(|u| (u.type_id, power_state(u)))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let mut hub = snap.clone_sov_hub(hub_id);
+                            let pos = hub
+                                .upgrades
                                 .iter()
-                                .filter(|u| u.type_id != type_id)
-                                .map(|u| (u.type_id, power_state(u)))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let mut hub = snap.clone_sov_hub(hub_id);
-                    let pos = hub
-                        .upgrades
-                        .iter()
-                        .position(|u| u.type_id == type_id)
-                        .ok_or((STATUS_NOT_FOUND, format!("Upgrade {type_id} is not installed in hub {hub_id}")))?;
-                    // Per `Sovereignty.md:37`, decommissioning destroys the installed upgrade without returning an item.
-                    hub.upgrades.remove(pos);
-                    let is_hacked = snap
-                        .sov_runtime
-                        .hacked_hubs
-                        .get(&hub_id)
-                        .copied()
-                        .is_some_and(|until| ctx.now_unix() < until);
-                    if !is_hacked {
-                        for u in &mut hub.upgrades {
-                            if u.online && u.low_power {
-                                if let Some(d) = upgrade_definition(&sde, u.type_id) {
-                                    if d.fuel_type == 0
-                                        || d.fuel_per_hour == 0
-                                        || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
-                                    {
-                                        u.low_power = false;
+                                .position(|u| u.type_id == type_id)
+                                .ok_or((STATUS_NOT_FOUND, format!("Upgrade {type_id} is not installed in hub {hub_id}")))?;
+                            // Per `Sovereignty.md:37`, decommissioning destroys the installed upgrade without returning an item.
+                            hub.upgrades.remove(pos);
+                            let is_hacked = snap
+                                .sov_runtime
+                                .hacked_hubs
+                                .get(&hub_id)
+                                .copied()
+                                .is_some_and(|until| ctx.now_unix() < until);
+                            if !is_hacked {
+                                for u in &mut hub.upgrades {
+                                    if u.online && u.low_power {
+                                        if let Some(d) = upgrade_definition(&sde, u.type_id) {
+                                            if d.fuel_type == 0
+                                                || d.fuel_per_hour == 0
+                                                || hub.fuel.get(&d.fuel_type).copied().unwrap_or(0) >= d.fuel_per_hour
+                                            {
+                                                u.low_power = false;
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
-                    snap.sov_runtime.sov_hubs.insert(hub_id, hub);
-                    enforce_hub_power_overload(snap, &sde, hub_id);
-                    let next_states: Vec<(u32, u64)> = snap
-                        .sov_runtime
-                        .sov_hubs
-                        .get(&hub_id)
-                        .map(|h| h.upgrades.iter().map(|u| (u.type_id, power_state(u))).collect())
-                        .unwrap_or_default();
-                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                        "quasar_sov_hub.uninstall.uninstalled",
-                        pb::message("eve_public.sovereignty.hub.upgrade.api.UninstalledNotice")
-                            .set_with("upgrade", |id| fill_upgrade_identifier(id, hub_id, type_id))
-                            .set("upgrade_type.sequential", type_id)
-                            .set("hub.sequential", hub_id as u64),
-                    ) {
-                        push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
-                    }
-                    if prev_states != next_states {
-                        if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
-                            "quasar_sov_hub.uninstall.upgrades_simulated",
-                            pb::message(
-                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                            )
-                            .set_with("hub_upgrades", |b| {
-                                fill_hub_upgrades(
-                                    b,
-                                    &sde,
-                                    hub_id,
-                                    snap.sov_runtime.sov_hubs.get(&hub_id),
-                                )
-                            }),
-                        ) {
-                            push_notice(
-                                &pending,
-                                sys,
-                                "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
-                                sim_n,
-                            );
-                        }
-                    }
-                    emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &[hub_id]));
+                            snap.sov_runtime.sov_hubs.insert(hub_id, hub);
+                            clamp_hub_export_to_max(snap, &sde, hub_id);
+                            enforce_hub_power_overload(snap, &sde, hub_id);
+                            let next_states: Vec<(u32, u64)> = snap
+                                .sov_runtime
+                                .sov_hubs
+                                .get(&hub_id)
+                                .map(|h| h.upgrades.iter().map(|u| (u.type_id, power_state(u))).collect())
+                                .unwrap_or_default();
+                            if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
+                                "quasar_sov_hub.uninstall.uninstalled",
+                                pb::message("eve_public.sovereignty.hub.upgrade.api.UninstalledNotice")
+                                    .set_with("upgrade", |id| fill_upgrade_identifier(id, hub_id, type_id))
+                                    .set("upgrade_type.sequential", type_id)
+                                    .set("hub.sequential", hub_id as u64),
+                            ) {
+                                push_notice(&pending, sys, "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice", n);
+                            }
+                            if prev_states != next_states {
+                                if let Some(sim_n) = crate::quasar_gateway::pb_encode_or_log(
+                                    "quasar_sov_hub.uninstall.upgrades_simulated",
+                                    pb::message(
+                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                    )
+                                    .set_with("hub_upgrades", |b| {
+                                        fill_hub_upgrades(
+                                            b,
+                                            &sde,
+                                            hub_id,
+                                            snap.sov_runtime.sov_hubs.get(&hub_id),
+                                        )
+                                    }),
+                                ) {
+                                    push_notice(
+                                        &pending,
+                                        sys,
+                                        "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                        sim_n,
+                                    );
+                                }
+                            }
+                            Ok::<_, RpcError>(())
+                        },
+                    )?;
                     Ok(())
                 })?;
                 pb::message("eve_public.sovereignty.hub.upgrade.api.UninstallResponse")

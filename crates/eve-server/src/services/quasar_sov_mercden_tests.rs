@@ -441,3 +441,284 @@ async fn tick_sov_gameplay_transitions_mercenary_den_reinforcement_and_shield_re
         assert_eq!(s.reinforced_until_unix, 0);
     });
 }
+
+#[test]
+fn mercenary_den_anarchy_evolution_admin_modify_and_complete_reconcile_workforce() {
+    use crate::services::quasar_sov_hub::{
+        compute_hub_resources, planet_yield_for_planet, star_power_for_system,
+    };
+    use crate::services::quasar_sov_workforce::{
+        exported_amount, imports, systems_within_jumps, WORKFORCE_TRANSFER_MAX_JUMPS,
+    };
+    use crate::services::sov_gameplay::TYPE_MERCENARY_DEN;
+    use crate::services::sov_services::{
+        TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
+    };
+    use eve_db::{
+        corp_roles, PersistedHubUpgrade, PersistedMercenaryActivity, PersistedMercenaryDen,
+        PersistedSovHubData, PersistedWorkforceMode, UpwellStructureRecord,
+    };
+    use eve_machonet::service_roles;
+    use eve_proto::quasar::GoogleTimestamp;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db));
+
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = *systems_within_jumps(&sde, sys_a, WORKFORCE_TRANSFER_MAX_JUMPS)
+        .keys()
+        .find(|&&s| s != sys_a && star_power_for_system(&sde, s) >= 400)
+        .expect("neighbor system with >= 400 star power within jump range");
+    let temp_cel = sde
+        .celestials_in_system(sys_a)
+        .into_iter()
+        .find(|c| c.type_id == 11)
+        .expect("Temperate planet in Jita");
+    let wf_base = planet_yield_for_planet(temp_cel.type_id, temp_cel.radius).1;
+    assert!(wf_base >= 5_100, "expected >= 5_100 base Temperate workforce, got {wf_base}");
+
+    let hub_a = 78_700_001_i64;
+    let hub_b = 78_700_002_i64;
+    let skyhook_a = 78_700_010_i64;
+    let den_id = 78_700_020_i64;
+    let t0 = 1_800_000_000_u64;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_a;
+        }
+        snap.corporations.insert(corp_id, {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.ceo_id = cid;
+            corp
+        });
+        snap.structures.insert(
+            hub_a,
+            UpwellStructureRecord {
+                structure_id: hub_a,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Hub A".into(),
+                state: "anchor_vulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            hub_b,
+            UpwellStructureRecord {
+                structure_id: hub_b,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_b,
+                name: "Hub B".into(),
+                state: "anchor_vulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            skyhook_a,
+            UpwellStructureRecord {
+                structure_id: skyhook_a,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Temperate Skyhook".into(),
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            den_id,
+            UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Mercenary Den".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(skyhook_a, temp_cel.celestial_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_a, true);
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                owner_char_id: cid,
+                skyhook_id: skyhook_a,
+                solar_system_id: sys_a,
+                planet_id: temp_cel.celestial_id,
+                type_id: TYPE_MERCENARY_DEN,
+                enabled: true,
+                cargo_extraction_enabled: true,
+                development_level: 20,
+                anarchy_level: 35, // Stage 2 (0% disruption)
+                infomorphs: 100,
+                simulated_at_unix: t0,
+                next_activity_generation_unix: t0 + ACTIVITY_GENERATION_SECS,
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: 5_000,
+                },
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import { sources: vec![sys_a] },
+                upgrades: vec![
+                    PersistedHubUpgrade {
+                        type_id: 82_499, // 200p, 1_800w
+                        online: true,
+                        low_power: false,
+                    },
+                    PersistedHubUpgrade {
+                        type_id: 87_815, // 200p, 2_700w, 7/hr Magmatic Gas
+                        online: true,
+                        low_power: false,
+                    },
+                ],
+                fuel: [(TYPE_MAGMATIC_GAS, 200)].into_iter().collect(),
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+    });
+
+    let take_notice_urls = || -> Vec<String> {
+        let mut guard = router.pending_notices.write().unwrap();
+        guard.drain(..).map(|(_, a)| a.type_url).collect()
+    };
+
+    // 1. tick_den_with_sde advances 1 day (+86_400s): Anarchy 35 -> 40 (Stage 2 -> Stage 3, -10% disruption).
+    let expected_stage3_wf = wf_base - (wf_base * anarchy_workforce_disruption_pct(3)) / 100;
+    assert_eq!(anarchy_workforce_disruption_pct(3), 10);
+    assert!(expected_stage3_wf < 5_000 && expected_stage3_wf >= 4_500);
+    let _ = take_notice_urls();
+    db.with_mut_snapshot(|snap| {
+        tick_den_with_sde(snap, Some(&sde), &router.pending_notices, den_id, t0 + EVOLUTION_UNIT_SECS);
+        assert_eq!(stage_for_level(snap.sov_runtime.mercenary_dens[&den_id].anarchy_level), 3);
+        assert_eq!(
+            compute_hub_resources(snap, &sde, hub_a).unwrap().workforce_local,
+            expected_stage3_wf
+        );
+        assert_eq!(exported_amount(snap, hub_a), expected_stage3_wf);
+        assert_eq!(imports(snap, &sde, hub_b), vec![(sys_a, expected_stage3_wf)]);
+        assert!(!snap.sov_runtime.sov_hubs[&hub_b].upgrades[1].low_power);
+    });
+    let tick_notices = take_notice_urls();
+    assert!(tick_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(tick_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    // 2. GM ModifyAnarchyLevelRequest setting Stage 5 (level 100, -40% disruption) clamps Hub A export
+    //    and starves Hub B's slot-1 upgrade (87_815) into low_power = true.
+    let expected_stage5_wf = wf_base - (wf_base * anarchy_workforce_disruption_pct(5)) / 100;
+    assert_eq!(anarchy_workforce_disruption_pct(5), 40);
+    assert!(expected_stage5_wf >= 1_800 && expected_stage5_wf < 4_500);
+
+    let handlers = router.handlers.read().unwrap();
+    let any = GoogleAny::default();
+    let mut gm_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+    gm_ctx.service_role_mask |= service_roles::ROLE_ADMIN;
+    gm_ctx.received = Some(GoogleTimestamp::from_unix((t0 + EVOLUTION_UNIT_SECS) as i64, 0));
+
+    let mut inner = DynamicQuasarMessage::new("Identifier");
+    inner.fields.insert(1, DynamicValue::Int64(den_id));
+    let mut modify_req = DynamicQuasarMessage::new("ModifyAnarchyLevelRequest");
+    modify_req.fields.insert(1, DynamicValue::Message(Box::new(inner)));
+    modify_req.fields.insert(2, DynamicValue::Int64(100));
+
+    handlers["eve_public.sovereignty.mercenaryden.api.admin.ModifyAnarchyLevelRequest"](
+        &gm_ctx,
+        &any,
+        &modify_req,
+    )
+    .expect("admin ModifyAnarchyLevelRequest -> Stage 5");
+
+    let mod_notices = take_notice_urls();
+    assert!(mod_notices
+        .iter()
+        .any(|u| u.ends_with("mercenaryden.api.EvolutionStateChangedNotice")));
+    assert!(mod_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(mod_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+    db.with_snapshot(|snap| {
+        assert_eq!(
+            compute_hub_resources(snap, &sde, hub_a).unwrap().workforce_local,
+            expected_stage5_wf
+        );
+        assert_eq!(exported_amount(snap, hub_a), expected_stage5_wf);
+        assert_eq!(imports(snap, &sde, hub_b), vec![(sys_a, expected_stage5_wf)]);
+        assert!(!snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[1].low_power);
+    });
+
+    // 3. complete_mercenary_activity_in_snap lowering Anarchy 100 -> 40 (Stage 5 -> Stage 3) restores
+    //    Hub A local workforce and emits ResourcesSimulatedNotice.
+    let act = PersistedMercenaryActivity {
+        uuid: vec![0xA1; 16],
+        den_id,
+        solar_system_id: sys_a,
+        dungeon_id: 12_367,
+        started: true,
+        started_by: cid,
+        expiry_unix: t0 + EVOLUTION_UNIT_SECS + 3_600,
+        development_impact: 5,
+        anarchy_impact: -60,
+        infomorph_bonus: 0,
+    };
+    db.with_mut_snapshot(|snap| {
+        complete_mercenary_activity_in_snap(
+            snap,
+            &router.pending_notices,
+            Some(&sde),
+            &act,
+            den_id,
+            sys_a,
+        );
+        assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].anarchy_level, 40);
+        assert_eq!(
+            compute_hub_resources(snap, &sde, hub_a).unwrap().workforce_local,
+            expected_stage3_wf
+        );
+    });
+    let mto_notices = take_notice_urls();
+    assert!(mto_notices
+        .iter()
+        .any(|u| u.ends_with("mercenaryden.api.EvolutionStateChangedNotice")));
+    assert!(mto_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+}

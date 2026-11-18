@@ -1050,3 +1050,931 @@ async fn skyhook_live_combat_destruction_lifecycle_and_hub_reconciliation() {
         "StructureAlreadyDestroyed"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_workforce_mecha_tooling_anti_duplication_and_export_cascade() {
+    use eve_db::{
+        CharacterRecord, InventoryFlag, InventoryItemRecord, PersistedMercenaryActivity,
+        PersistedMercenaryDen, PersistedSovHubData, PersistedWorkforceMode,
+    };
+    use eve_destiny::{Ball, MovementMode};
+    use eve_machonet::service_roles;
+    use eve_server::services::quasar_sov_hub::{
+        compute_hub_resources, planet_yield_for_planet,
+    };
+    use eve_server::services::quasar_sov_workforce::{
+        encode_configuration, exported_amount, imports,
+    };
+    use eve_server::services::sov_gameplay::sov_gameplay_skyhook::{
+        SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP,
+    };
+    use eve_server::services::sov_gameplay::{
+        apply_mercenary_den_shield_repair, apply_mercenary_den_weapon_damage, MERC_DEN_BASE_HP,
+    };
+    use eve_server::services::sov_services::TYPE_SUPERIONIC_ICE;
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let t0 = ctx.now_unix();
+
+    let temp_cel = ctx
+        .sde
+        .celestials_in_system(SYS_A)
+        .into_iter()
+        .find(|c| c.type_id == 11)
+        .expect("N3-JBX Temperate planet");
+    let gas_cel_a = ctx
+        .sde
+        .celestials_in_system(SYS_A)
+        .into_iter()
+        .filter(|c| c.type_id == 13)
+        .max_by_key(|c| planet_yield_for_planet(c.type_id, c.radius).0)
+        .expect("N3-JBX Gas planet");
+    let gas_cel_b = ctx
+        .sde
+        .celestials_in_system(SYS_B)
+        .into_iter()
+        .filter(|c| c.type_id == 13)
+        .max_by_key(|c| planet_yield_for_planet(c.type_id, c.radius).0)
+        .expect("GN-PDU Gas planet");
+
+    let wf_base = planet_yield_for_planet(temp_cel.type_id, temp_cel.radius).1;
+    assert!(wf_base >= 5_500, "expected >= 5_500 N3-JBX Temperate workforce, got {wf_base}");
+
+    let skyhook_temp = 1_000_950_001_i64;
+    let skyhook_gas_a = 1_000_950_002_i64;
+    let skyhook_gas_b = 1_000_950_003_i64;
+    let den_id = 1_000_950_010_i64;
+    let mto_ball_id = 1_000_950_020_i64;
+    let act_uuid = vec![0xE2_u8; 16];
+    let act_key: String = act_uuid.iter().map(|b| format!("{b:02x}")).collect();
+
+    let item_tooling = 995_001_i64;
+    let item_stab400 = 995_002_i64;
+    let item_threat2_b = 995_003_i64;
+    let item_ice = 995_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "e2e_wf_dir".into(),
+            eve_db::AccountRecord {
+                user_id: PILOT_ID as u64,
+                username: "e2e_wf_dir".into(),
+                password_token: "hash".into(),
+                role: service_roles::ROLE_PLAYER_DEFAULT | service_roles::ROLE_ADMIN,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.characters.insert(
+            PILOT_ID,
+            CharacterRecord {
+                character_id: PILOT_ID,
+                user_id: PILOT_ID as u64,
+                name: "EquinoxWorkforceDir".into(),
+                corporation_id: CORP_ID,
+                solar_system_id: SYS_A,
+                active_ship_id: PILOT_SHIP,
+                security_status: 5.0,
+                ..Default::default()
+            },
+        );
+        let corp = snap.corporations.entry(CORP_ID).or_default();
+        corp.corporation_id = CORP_ID;
+        corp.ceo_id = PILOT_ID;
+        corp.members.insert(PILOT_ID);
+        corp.member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
+
+        for (hid, sys) in [(HUB_A, SYS_A), (HUB_B, SYS_B)] {
+            snap.structures.insert(hid, structure(hid, CORP_ID, sys, TYPE_SOV_HUB));
+            snap.sov_runtime.sov_hubs.insert(
+                hid,
+                PersistedSovHubData {
+                    hub_id: hid,
+                    last_updated_unix: t0,
+                    ..Default::default()
+                },
+            );
+        }
+        for (sh_id, sys, cel_id) in [
+            (skyhook_temp, SYS_A, temp_cel.celestial_id),
+            (skyhook_gas_a, SYS_A, gas_cel_a.celestial_id),
+            (skyhook_gas_b, SYS_B, gas_cel_b.celestial_id),
+        ] {
+            let mut sh = structure(sh_id, CORP_ID, sys, TYPE_SKYHOOK);
+            sh.state = "Online".into();
+            sh.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+            sh.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+            sh.hull_hp = SKYHOOK_BASE_HULL_HP;
+            snap.structures.insert(sh_id, sh);
+            snap.sov_runtime.skyhook_planets.insert(sh_id, cel_id);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
+
+        let mut den_st = structure(den_id, CORP_ID, SYS_A, TYPE_MERC_DEN);
+        den_st.state = "ShieldVulnerable".into();
+        den_st.shield_hp = MERC_DEN_BASE_HP;
+        den_st.armor_hp = MERC_DEN_BASE_HP;
+        den_st.hull_hp = MERC_DEN_BASE_HP;
+        snap.structures.insert(den_id, den_st);
+        snap.sov_runtime.mercenary_den_tax_pct.insert(skyhook_temp, 10);
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                owner_char_id: PILOT_ID,
+                skyhook_id: skyhook_temp,
+                solar_system_id: SYS_A,
+                planet_id: temp_cel.celestial_id,
+                type_id: TYPE_MERC_DEN,
+                enabled: true,
+                cargo_extraction_enabled: true,
+                development_level: 10,
+                anarchy_level: 0,
+                infomorphs: 50,
+                simulated_at_unix: t0,
+                next_activity_generation_unix: t0 + 86_400,
+            },
+        );
+        snap.sov_runtime.mercenary_activities.insert(
+            act_key.clone(),
+            PersistedMercenaryActivity {
+                uuid: act_uuid.clone(),
+                den_id,
+                solar_system_id: SYS_A,
+                dungeon_id: 12_367,
+                started: true,
+                started_by: PILOT_ID,
+                expiry_unix: t0 + 86_400,
+                development_impact: 5,
+                anarchy_impact: -5,
+                infomorph_bonus: 0,
+            },
+        );
+        snap.sov_runtime.mto_site_balls.insert(mto_ball_id, act_key.clone());
+        snap.items.insert(
+            mto_ball_id,
+            InventoryItemRecord {
+                item_id: mto_ball_id,
+                type_id: 34,
+                owner_id: PILOT_ID,
+                location_id: i64::from(SYS_A),
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(mto_ball_id, [100.0, 0.0, 0.0]);
+
+        for (id, ty, qty, loc) in [
+            (item_tooling, 87_710_u32, 1_i32, HUB_A), // Mecha-Tooling 1: 200p, +5_000w, 8 Ice/hr
+            (item_stab400, 87_948_u32, 1_i32, HUB_A), // Electric Stability 1: 400p, -4_000w, unfueled
+            (item_threat2_b, 82_500_u32, 1_i32, HUB_B), // Minor Threat 2: 500p, -3_800w, unfueled
+            (item_ice, TYPE_SUPERIONIC_ICE, 5_000_i32, HUB_A),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: ty,
+                    owner_id: PILOT_ID,
+                    location_id: loc,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(SYS_A);
+    for (bid, ty) in [
+        (PILOT_SHIP, 670_u32),
+        (skyhook_temp, TYPE_SKYHOOK),
+        (skyhook_gas_a, TYPE_SKYHOOK),
+        (den_id, TYPE_MERC_DEN),
+        (mto_ball_id, 34_u32),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: ty,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    let mut dir = sess(31, PILOT_ID, CORP_ID, SYS_A, corp_roles::ROLE_DIRECTOR);
+    dir.role |= service_roles::ROLE_ADMIN;
+    let mut rx = subscribe(&ctx, &mut dir).await;
+
+    let encode_cfg_req = |hub_id: i64, mode: &PersistedWorkforceMode| {
+        let mut req = id_req(1, hub_id as u64);
+        encode_bytes_field(2, &encode_configuration(mode), &mut req);
+        req
+    };
+    let encode_proc_req = |hub_id: i64, new_items: &[i64], cfgs: &[(u32, bool)]| {
+        let mut req = Vec::new();
+        for &item_id in new_items {
+            let mut nu = Vec::new();
+            encode_varint_field(1, item_id as u64, &mut nu);
+            encode_bytes_field(1, &nu, &mut req);
+        }
+        for &(type_id, online) in cfgs {
+            let mut ce = id_req(1, u64::from(type_id));
+            if online {
+                encode_varint_field(2, 1, &mut ce);
+            }
+            encode_bytes_field(2, &ce, &mut req);
+        }
+        encode_bytes_field(3, &idm(hub_id as u64), &mut req);
+        req
+    };
+
+    // 1. Add Superionic Ice and install/online [87_710 (+5_000w), 87_948 (-4_000w)] on HUB_A.
+    let mut fuel_req = id_req(1, item_ice as u64);
+    encode_varint_field(2, 4_000, &mut fuel_req);
+    encode_bytes_field(3, &idm(HUB_A as u64), &mut fuel_req);
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_req)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_A, &[item_tooling, item_stab400], &[(87_710, true), (87_948, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    // 2. Anti-duplication check: exporting above wf_base (trying to export 87_710 output) must fail!
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_A,
+                &PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: wf_base + 500,
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // 3. Configure valid Export 5_000 HUB_A -> HUB_B (running 82_500 requiring 3_800w).
+    let expected_stage5_wf = wf_base - (wf_base * 40) / 100;
+    let expected_no_tooling_wf = wf_base - 4_000;
+    assert!(wf_base >= 5_000);
+    assert!(expected_stage5_wf < 3_800, "Stage 5 -40% {expected_stage5_wf} must starve HUB_B 82_500");
+    assert!(
+        expected_no_tooling_wf < 3_800,
+        "offlining 87_710 leaves {expected_no_tooling_wf} < 3_800 on HUB_B"
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_A,
+                &PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: 5_000,
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_B,
+                &PersistedWorkforceMode::Import {
+                    sources: vec![SYS_A],
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_B, &[item_threat2_b], &[(82_500, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    // 4. ProcessConfigurationRequest offlining 87_710 on HUB_A clamps Export -> wf_base - 4_000 & drops HUB_B.
+    let _ = drain_notices(&mut rx);
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_A, &[], &[(87_710, false)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(exported_amount(snap, HUB_A), expected_no_tooling_wf);
+        assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, expected_no_tooling_wf)]);
+        assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
+    });
+    let offline_notices = drain_notices(&mut rx);
+    assert!(offline_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(offline_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    // Restore 87_710 online, Export 5_000, HUB_B 82_500 online.
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_A, &[], &[(87_710, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_A,
+                &PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: 5_000,
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_B, &[], &[(82_500, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    // 5. GM ModifyAnarchyLevelRequest -> Stage 5 (-40%): HUB_A clamps Export -> expected_stage5_wf & HUB_B drops.
+    let _ = drain_notices(&mut rx);
+    let mut mod_req = id_req(1, den_id as u64);
+    encode_varint_field(2, 100, &mut mod_req);
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.mercenaryden.api.admin.ModifyAnarchyLevelRequest",
+            mod_req,
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            compute_hub_resources(snap, &ctx.sde, HUB_A).unwrap().workforce_local,
+            expected_stage5_wf
+        );
+        assert_eq!(exported_amount(snap, HUB_A), expected_stage5_wf);
+        assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
+    });
+    let mod_notices = drain_notices(&mut rx);
+    assert!(mod_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(mod_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    // 6. Live Mercenary Den shield depletion disables Den (disruption 40% -> 0%), restoring wf_base;
+    //    then restoring Export 5_000 + HUB_B, shield repair >=50% re-enables Stage 5 disruption & cascades!
+    let _ = drain_notices(&mut rx);
+    apply_mercenary_den_weapon_damage(&ctx, den_id, MERC_DEN_BASE_HP + 100.0)
+        .await
+        .expect("deplete Den shields to disable it");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.mercenary_dens[&den_id].enabled);
+        assert_eq!(
+            compute_hub_resources(snap, &ctx.sde, HUB_A).unwrap().workforce_local,
+            wf_base
+        );
+    });
+    assert!(drain_notices(&mut rx)
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_A,
+                &PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: 5_000,
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_B, &[], &[(82_500, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    let den_reinf_until = ctx.db.with_snapshot(|snap| {
+        snap.sov_runtime
+            .mercenary_den_reinforcement
+            .get(&den_id)
+            .map(|r| r.0)
+            .unwrap_or(0)
+    });
+    if den_reinf_until > ctx.now_unix() {
+        ctx.advance_secs(den_reinf_until - ctx.now_unix() + 1);
+    }
+    let _ = drain_notices(&mut rx);
+    let (_pct, re_enabled) =
+        apply_mercenary_den_shield_repair(&ctx, SYS_A, PILOT_SHIP, den_id, MERC_DEN_BASE_HP)
+            .await
+            .expect("repair Den >= 50% re-enables Stage 5 disruption");
+    assert!(re_enabled);
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.sov_runtime.mercenary_dens[&den_id].enabled);
+        assert_eq!(exported_amount(snap, HUB_A), expected_stage5_wf);
+        assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
+    });
+    let rep_notices = drain_notices(&mut rx);
+    assert!(rep_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(rep_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    // 7. Re-enable 0% Anarchy via Disable/Modify, restore Export 5_000 + HUB_B, then sovMgr.DestroySkyhooks
+    //    via dispatch_rpc destroys both Skyhooks + Den + MTO ball, clamps Export -> 0, drops HUB_B, & flushes notices!
+    let mut mod_zero = id_req(1, den_id as u64);
+    encode_varint_field(2, 0, &mut mod_zero);
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.mercenaryden.api.admin.ModifyAnarchyLevelRequest",
+            mod_zero,
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.workforce.api.ConfigureRequest",
+            encode_cfg_req(
+                HUB_A,
+                &PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: 5_000,
+                },
+            ),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        qrpc(
+            &ctx,
+            &mut dir,
+            "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest",
+            encode_proc_req(HUB_B, &[], &[(82_500, true)]),
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+
+    let _ = drain_notices(&mut rx);
+    let destroyed = ctx
+        .dispatch_rpc(
+            &mut dir,
+            "sovMgr",
+            None,
+            "DestroySkyhooks",
+            &[PyRep::Integer(i64::from(SYS_A))],
+            &Default::default(),
+            None,
+        )
+        .await
+        .expect("DestroySkyhooks E2E");
+    assert_eq!(destroyed, PyRep::Integer(2));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&skyhook_temp));
+        assert!(!snap.structures.contains_key(&skyhook_gas_a));
+        assert_eq!(snap.structures[&den_id].state, "Destroyed");
+        assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_id));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&act_key));
+        assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_id));
+        assert!(!snap.sov_runtime.mercenary_den_tax_pct.contains_key(&skyhook_temp));
+        assert_eq!(exported_amount(snap, HUB_A), 0);
+        assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, 0)]);
+        assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
+    });
+    {
+        let bp = sys_h.ballpark.read().unwrap();
+        assert!(!bp.balls.contains_key(&skyhook_temp));
+        assert!(!bp.balls.contains_key(&den_id));
+        assert!(!bp.balls.contains_key(&mto_ball_id));
+    }
+    let destroy_notices = drain_notices(&mut rx);
+    assert!(destroy_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(destroy_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_skyhook_zero_shield_in_theft_window_reinforces_and_destructs_or_repairs() {
+    use eve_db::{
+        CharacterRecord, PersistedHubUpgrade, PersistedSovHubData, PersistedWorkforceMode,
+    };
+    use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
+    use eve_server::services::quasar_sov_hub::planet_yield_for_planet;
+    use eve_server::services::quasar_sov_workforce::{exported_amount, imports};
+    use eve_server::services::sov_gameplay::sov_gameplay_skyhook::{
+        tick_skyhooks, SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP,
+    };
+    use eve_server::services::station_structure::structure_lifecycle::{
+        REPAIR_HULL_SECS, REPAIR_SHIELD_ARMOR_SECS,
+    };
+    use eve_server::services::station_structure::structure_lifecycle_rpc::apply_live_combat_damage_to_upwell_structure;
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let t0 = ctx.now_unix();
+
+    let temp_cel = ctx
+        .sde
+        .celestials_in_system(SYS_A)
+        .into_iter()
+        .find(|c| c.type_id == 11)
+        .expect("N3-JBX Temperate planet");
+    let lava_cel = ctx
+        .sde
+        .celestials_in_system(SYS_A)
+        .into_iter()
+        .find(|c| c.type_id == 2015)
+        .expect("N3-JBX Lava planet");
+    let gas_cel_b = ctx
+        .sde
+        .celestials_in_system(SYS_B)
+        .into_iter()
+        .filter(|c| c.type_id == 13)
+        .max_by_key(|c| planet_yield_for_planet(c.type_id, c.radius).0)
+        .expect("GN-PDU Gas planet");
+
+    let skyhook_a = 1_000_960_001_i64;
+    let skyhook_b = 1_000_960_002_i64;
+    let skyhook_gas_b = 1_000_960_003_i64;
+    let attacker_id = 2_115_399_001_i64;
+    let attacker_ship = 2_115_399_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            PILOT_ID,
+            CharacterRecord {
+                character_id: PILOT_ID,
+                user_id: PILOT_ID as u64,
+                name: "SkyhookOwner".into(),
+                corporation_id: CORP_ID,
+                solar_system_id: SYS_A,
+                active_ship_id: PILOT_SHIP,
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            attacker_id,
+            CharacterRecord {
+                character_id: attacker_id,
+                user_id: attacker_id as u64,
+                name: "SkyhookAttacker".into(),
+                corporation_id: OTHER_CORP,
+                solar_system_id: SYS_A,
+                active_ship_id: attacker_ship,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(HUB_A, structure(HUB_A, CORP_ID, SYS_A, TYPE_SOV_HUB));
+        snap.structures.insert(HUB_B, structure(HUB_B, CORP_ID, SYS_B, TYPE_SOV_HUB));
+
+        let mut sh_a = structure(skyhook_a, CORP_ID, SYS_A, TYPE_SKYHOOK);
+        sh_a.state = "ShieldVulnerable".into();
+        sh_a.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+        sh_a.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+        sh_a.hull_hp = SKYHOOK_BASE_HULL_HP;
+        snap.structures.insert(skyhook_a, sh_a);
+        snap.sov_runtime.skyhook_planets.insert(skyhook_a, temp_cel.celestial_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_a, true);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_a, (t0, t0 + 3_600));
+
+        let mut sh_gb = structure(skyhook_gas_b, CORP_ID, SYS_B, TYPE_SKYHOOK);
+        sh_gb.state = "Online".into();
+        sh_gb.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+        sh_gb.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+        sh_gb.hull_hp = SKYHOOK_BASE_HULL_HP;
+        snap.structures.insert(skyhook_gas_b, sh_gb);
+        snap.sov_runtime
+            .skyhook_planets
+            .insert(skyhook_gas_b, gas_cel_b.celestial_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_gas_b, true);
+
+        snap.sov_runtime.sov_hubs.insert(
+            HUB_A,
+            PersistedSovHubData {
+                hub_id: HUB_A,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(SYS_B),
+                    amount: 5_000,
+                },
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            HUB_B,
+            PersistedSovHubData {
+                hub_id: HUB_B,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![SYS_A],
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 82_500, // 500p, 3_800w
+                    online: true,
+                    low_power: false,
+                }],
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(SYS_A);
+    for (bid, ty) in [
+        (attacker_ship, 670_u32),
+        (skyhook_a, TYPE_SKYHOOK),
+        (skyhook_b, TYPE_SKYHOOK),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: ty,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    let mut owner_sess = sess(41, PILOT_ID, CORP_ID, SYS_A, corp_roles::ROLE_DIRECTOR);
+    let mut rx = subscribe(&ctx, &mut owner_sess).await;
+
+    let heavy = DamageVector {
+        em: 50_000.0,
+        thermal: 50_000.0,
+        kinetic: 50_000.0,
+        explosive: 50_000.0,
+    };
+
+    // 1. Deplete shield to 0.0 inside open theft window -> remains ShieldVulnerable.
+    ctx.advance_secs(3_500);
+    let hit1 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        SYS_A,
+        attacker_id,
+        skyhook_a,
+        heavy,
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("hit during theft window")
+    .expect("outcome");
+    assert!(!hit1.became_invulnerable);
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&skyhook_a];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.shield_hp, 0.0);
+        assert_eq!(s.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+    });
+
+    // 2. Window closes (+101s, only 101s < 900s repair) -> live attack on 0.0-shield skyhook
+    //    MUST transition to ArmorReinforced (never permanently invulnerable!).
+    ctx.advance_secs(101);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    let hit2 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        SYS_A,
+        attacker_id,
+        skyhook_a,
+        heavy,
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("post-window hit on zero-shield skyhook")
+    .expect("outcome");
+    assert!(hit2.became_invulnerable);
+    let reinf_until = ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&skyhook_a];
+        assert_eq!(s.state, "ArmorReinforced");
+        assert!(s.reinforced_until_unix > ctx.now_unix());
+        s.reinforced_until_unix
+    });
+
+    // Negative guard during reinforcement rejects damage.
+    assert_eq!(
+        apply_live_combat_damage_to_upwell_structure(
+            &ctx,
+            &sys_h,
+            SYS_A,
+            attacker_id,
+            skyhook_a,
+            heavy,
+            1.0,
+            ctx.now_unix(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "StructureInvulnerable"
+    );
+
+    // 3. Exit ArmorReinforced -> deplete armor -> HullVulnerable -> deplete hull -> Destroyed + reconcile hub.
+    ctx.advance_secs(reinf_until - ctx.now_unix() + 1);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    let _ = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        SYS_A,
+        attacker_id,
+        skyhook_a,
+        heavy,
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("deplete armor")
+    .expect("outcome");
+    let _ = drain_notices(&mut rx);
+    let kill = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        SYS_A,
+        attacker_id,
+        skyhook_a,
+        heavy,
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("deplete hull")
+    .expect("outcome");
+    assert!(kill.destroyed);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_a].state, "Destroyed");
+        assert_eq!(exported_amount(snap, HUB_A), 0);
+        assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, 0)]);
+        assert!(snap.sov_runtime.sov_hubs[&HUB_B].upgrades[0].low_power);
+    });
+    let dest_notices = drain_notices(&mut rx);
+    assert!(dest_notices
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(dest_notices
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    // 4. Unattacked Skyhook in HullVulnerable requires REPAIR_HULL_SECS (1_800s), does NOT repair
+    //    at 900s, then restores full ShieldVulnerable HP & syncs Ballpark CombatState at 1_800s.
+    let t_b = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut sh_b = structure(skyhook_b, CORP_ID, SYS_A, TYPE_SKYHOOK);
+        sh_b.state = "HullVulnerable".into();
+        sh_b.shield_hp = 0.0;
+        sh_b.armor_hp = 0.0;
+        sh_b.hull_hp = 4_000.0;
+        sh_b.last_damage_unix = t_b;
+        snap.structures.insert(skyhook_b, sh_b);
+        snap.sov_runtime.skyhook_planets.insert(skyhook_b, lava_cel.celestial_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_b, true);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_b, (t_b + 5_000, t_b + 12_200));
+    });
+    if let Ok(mut bp) = sys_h.ballpark.write() {
+        bp.combat_states.insert(
+            skyhook_b,
+            CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: 0.0,
+                max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                structure_hp: 4_000.0,
+                max_structure_hp: SKYHOOK_BASE_HULL_HP,
+                ..Default::default()
+            },
+        );
+    }
+
+    ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_b].state, "HullVulnerable");
+        assert_eq!(snap.structures[&skyhook_b].hull_hp, 4_000.0);
+    });
+
+    ctx.advance_secs(REPAIR_HULL_SECS - REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&skyhook_b];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.shield_hp, SKYHOOK_BASE_SHIELD_HP);
+        assert_eq!(s.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+        assert_eq!(s.hull_hp, SKYHOOK_BASE_HULL_HP);
+        assert_eq!(s.last_damage_unix, 0);
+    });
+    let bp = sys_h.ballpark.read().unwrap();
+    let cs = &bp.combat_states[&skyhook_b];
+    assert_eq!(cs.shield_hp, SKYHOOK_BASE_SHIELD_HP);
+    assert_eq!(cs.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+    assert_eq!(cs.structure_hp, SKYHOOK_BASE_HULL_HP);
+}

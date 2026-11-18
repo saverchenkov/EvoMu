@@ -1138,3 +1138,272 @@ fn reagent_bay_capacity_cap_and_bidirectional_overflow_spill() {
         assert_eq!((sec3, insec3), (SKYHOOK_REAGENT_BAY_CAPACITY, SKYHOOK_REAGENT_BAY_CAPACITY));
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skyhook_zero_shield_during_theft_window_reinforces_after_window_and_repairs_when_unattacked() {
+    use crate::services::station_structure::structure_lifecycle::{
+        REPAIR_HULL_SECS, REPAIR_SHIELD_ARMOR_SECS,
+    };
+    use eve_db::CharacterRecord;
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    let (sys_id, planet_id, _) = find_null_system_with_ice_planet(&ctx);
+    let corp_id = 98_444_001_i64;
+    let attacker_id = 90_444_001_i64;
+    let attacker_ship = 90_444_002_i64;
+    let sh_a = 1_075_000_001_i64;
+    let sh_b = 1_075_000_002_i64;
+    let sh_c = 1_075_000_003_i64;
+    let t0 = ctx.now_unix();
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for sh_id in [sh_a, sh_b, sh_c] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id: sh_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    // Sub-scenario A: zeroed shields inside open theft window -> post-window hit must enter
+    // ArmorReinforced instead of staying permanently invulnerable -> exits -> HullVulnerable -> Destroyed.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            attacker_id,
+            CharacterRecord {
+                character_id: attacker_id,
+                name: "SkyhookRaider".into(),
+                corporation_id: 98_444_002,
+                solar_system_id: sys_id,
+                active_ship_id: attacker_ship,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            sh_a,
+            UpwellStructureRecord {
+                structure_id: sh_a,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Theft Window Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: SKYHOOK_BASE_HULL_HP,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(sh_a, planet_id);
+        snap.sov_runtime.skyhook_active.insert(sh_a, true);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(sh_a, (t0, t0 + 3_600));
+    });
+
+    // Hit inside open window zeroes shield without entering ArmorReinforced.
+    ctx.advance_secs(3_500);
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 50_000.0, 50_000.0, 50_000.0, attacker_id)
+        .expect("shield hit during theft window");
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_a];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.shield_hp, 0.0);
+        assert_eq!(s.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+        assert_eq!(s.reinforced_until_unix, 0);
+        assert_eq!(s.last_damage_unix, t0 + 3_500);
+    });
+
+    // Second hit STILL inside open window while shield_hp == 0.0 leaves it ShieldVulnerable.
+    ctx.advance_secs(30);
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 50_000.0, 50_000.0, 50_000.0, attacker_id)
+        .expect("repeat zero-shield hit during open theft window");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sh_a].state, "ShieldVulnerable");
+        assert_eq!(snap.structures[&sh_a].shield_hp, 0.0);
+    });
+
+    // Theft window closes at t0 + 3_600 (only 71s after last hit < 900s repair threshold).
+    ctx.advance_secs(71);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    // Attacking post-window when shield_hp == 0.0 MUST enter ArmorReinforced (never stuck invulnerable!).
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 50_000.0, 50_000.0, 50_000.0, attacker_id)
+        .expect("post-window hit on zero-shield skyhook transitions to ArmorReinforced");
+    let reinf_until = ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_a];
+        assert_eq!(s.state, "ArmorReinforced");
+        assert!(s.reinforced_until_unix > ctx.now_unix());
+        s.reinforced_until_unix
+    });
+
+    // Negative guard: hits during ArmorReinforced are rejected and do not damage armor/hull.
+    let err = apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 0.0, 0.0, 0.0, attacker_id)
+        .unwrap_err();
+    assert_eq!(err.code, "StructureInvulnerable");
+
+    // Advance past reinforcement expiry -> tick_skyhooks exits to ArmorVulnerable with bumped last_damage_unix.
+    ctx.advance_secs(reinf_until - ctx.now_unix() + 1);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_a];
+        assert_eq!(s.state, "ArmorVulnerable");
+        assert_eq!(s.reinforced_until_unix, 0);
+        assert!(s.last_damage_unix >= reinf_until);
+    });
+
+    // Deplete armor -> HullVulnerable, then deplete hull -> Destroyed.
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 50_000.0, 50_000.0, 50_000.0, attacker_id)
+        .expect("deplete armor -> HullVulnerable");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sh_a].state, "HullVulnerable");
+        assert_eq!(snap.structures[&sh_a].armor_hp, 0.0);
+    });
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_a, 50_000.0, 50_000.0, 50_000.0, 50_000.0, attacker_id)
+        .expect("deplete hull -> Destroyed");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sh_a].state, "Destroyed");
+        assert_eq!(snap.structures[&sh_a].hull_hp, 0.0);
+    });
+
+    // Sub-scenario B: unattacked Skyhook skips repair during open theft window / active silo link,
+    // then repairs shield/armor after REPAIR_SHIELD_ARMOR_SECS (900s).
+    let t_b = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sh_b,
+            UpwellStructureRecord {
+                structure_id: sh_b,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Unattacked Repair Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                shield_hp: 0.0,
+                armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: SKYHOOK_BASE_HULL_HP,
+                last_damage_unix: t_b,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(sh_b, planet_id);
+        snap.sov_runtime.skyhook_active.insert(sh_b, true);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(sh_b, (t_b, t_b + 3_600));
+    });
+
+    // Still inside open theft window after 900s -> must NOT auto-repair.
+    ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sh_b].shield_hp, 0.0);
+        assert_eq!(snap.structures[&sh_b].last_damage_unix, t_b);
+    });
+
+    // Window closes at t_b + 3_600 -> unattacked >= 900s outside window -> repairs back to full shield.
+    ctx.advance_secs(3_600 - REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_b];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.shield_hp, SKYHOOK_BASE_SHIELD_HP);
+        assert_eq!(s.last_damage_unix, 0);
+    });
+
+    // Active silo link blocks repair at +900s; once link expires, repairs at +1_200s.
+    let t_dmg = ctx.now_unix();
+    apply_skyhook_weapon_damage_with_attacker(&ctx, sh_b, 500.0, 500.0, 500.0, 500.0, attacker_id)
+        .expect("partial shield hit");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(sh_b, (attacker_ship, attacker_id, t_dmg + 1_200, 100.0));
+    });
+    ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.structures[&sh_b].shield_hp < SKYHOOK_BASE_SHIELD_HP);
+    });
+    ctx.advance_secs(300);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&sh_b].shield_hp, SKYHOOK_BASE_SHIELD_HP);
+        assert_eq!(snap.structures[&sh_b].last_damage_unix, 0);
+    });
+
+    // Sub-scenario C: HullVulnerable requires REPAIR_HULL_SECS (1_800s), does NOT repair at 900s,
+    // and syncs repaired shield/armor/hull HP into bp.combat_states.
+    let t_c = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sh_c,
+            UpwellStructureRecord {
+                structure_id: sh_c,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Hull Repair Skyhook".into(),
+                state: "HullVulnerable".into(),
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 4_000.0,
+                last_damage_unix: t_c,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(sh_c, planet_id);
+        snap.sov_runtime.skyhook_active.insert(sh_c, true);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(sh_c, (t_c + 5_000, t_c + 12_200));
+    });
+    if let Ok(mut bp) = sys_h.ballpark.write() {
+        bp.combat_states.insert(
+            sh_c,
+            CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: 0.0,
+                max_armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                structure_hp: 4_000.0,
+                max_structure_hp: SKYHOOK_BASE_HULL_HP,
+                ..Default::default()
+            },
+        );
+    }
+
+    ctx.advance_secs(REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_c];
+        assert_eq!(s.state, "HullVulnerable");
+        assert_eq!(s.hull_hp, 4_000.0);
+    });
+
+    ctx.advance_secs(REPAIR_HULL_SECS - REPAIR_SHIELD_ARMOR_SECS);
+    tick_skyhooks(&ctx, ctx.now_unix()).await;
+    ctx.db.with_snapshot(|snap| {
+        let s = &snap.structures[&sh_c];
+        assert_eq!(s.state, "ShieldVulnerable");
+        assert_eq!(s.shield_hp, SKYHOOK_BASE_SHIELD_HP);
+        assert_eq!(s.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+        assert_eq!(s.hull_hp, SKYHOOK_BASE_HULL_HP);
+        assert_eq!(s.last_damage_unix, 0);
+    });
+    let bp = sys_h.ballpark.read().unwrap();
+    let cs = &bp.combat_states[&sh_c];
+    assert_eq!(cs.shield_hp, SKYHOOK_BASE_SHIELD_HP);
+    assert_eq!(cs.armor_hp, SKYHOOK_BASE_ARMOR_HP);
+    assert_eq!(cs.structure_hp, SKYHOOK_BASE_HULL_HP);
+}
