@@ -972,12 +972,15 @@ async fn test_quasar_accounting_loyalty_contracts() {
     // 2. Accounting Entry Types
     let entry_types_rsp = quasar_ok(&ctx, &mut sess, "eve.accounting.entrytype.GetAllRequest", Vec::new(), b"acc-03", "entrytype.GetAllResponse").await;
     let et_list = dyn_list(&entry_types_rsp, "entry_types");
-    assert_eq!(et_list.len(), 4);
+    assert!(et_list.len() >= 18);
     assert!(et_list.iter().any(|et| {
         dyn_u64(et, "id.sequential") == Some(1) && dyn_str(et, "attributes.name") == Some("Player Trading")
     }));
     assert!(et_list.iter().any(|et| {
-        dyn_u64(et, "id.sequential") == Some(42) && dyn_str(et, "attributes.name") == Some("Industry Job Fee")
+        dyn_u64(et, "id.sequential") == Some(42) && dyn_str(et, "attributes.name") == Some("Market Escrow")
+    }));
+    assert!(et_list.iter().any(|et| {
+        dyn_u64(et, "id.sequential") == Some(56) && dyn_str(et, "attributes.name") == Some("Manufacturing")
     }));
 
     // 3. Loyalty Points Wallet assetholding operations (Deposit & Withdraw + unauth 403)
@@ -1147,21 +1150,93 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     assert_eq!(p_list.len(), 8);
     assert_eq!(dyn_u64(p_list[0], "sequential"), Some(40_009_077));
 
+    let skyhook_id = 900_800_001_i64;
+    let skyhook_alt_id = 900_800_002_i64;
+    let target_corp_id = 98_000_881_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut alt_corp = snap.corporations[&98_000_001].clone();
+        alt_corp.corporation_id = target_corp_id;
+        alt_corp.name = "Skyhook Successor Corp".to_string();
+        alt_corp.ticker = "SKY2".to_string();
+        snap.corporations.insert(target_corp_id, alt_corp);
+        snap.corp_governance.entry(98_000_001).or_default().reinforce_hour = 18;
+        snap.corp_governance.entry(target_corp_id).or_default().reinforce_hour = 18;
+        snap.structures.insert(
+            skyhook_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Skyhook".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            skyhook_alt_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_alt_id,
+                type_id: eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Skyhook Reinforced".to_string(),
+                state: "ArmorReinforced".to_string(),
+                quantum_core_installed: true,
+                reinforced_until_unix: ctx.now_unix() + 7_200,
+                ..Default::default()
+            },
+        );
+        snap.structure_vulnerability_windows.insert(skyhook_alt_id, (7, 3));
+    });
+    let mut skyhook_req = Vec::new();
+    encode_id_field(1, skyhook_id as u64, &mut skyhook_req);
+    let mut change_owner_req = Vec::new();
+    encode_id_field(2, skyhook_id as u64, &mut change_owner_req);
+    encode_id_field(3, 30_000_142, &mut change_owner_req);
+    encode_id_field(4, target_corp_id as u64, &mut change_owner_req);
+
     assert_eq!(
-        quasar_send(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new(), b"pln-03-deny").await.status_code,
+        quasar_send(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", change_owner_req.clone(), b"pln-03-deny").await.status_code,
         STATUS_FORBIDDEN,
         "non-GM ChangeOwnerRequest must fail with 403"
     );
     let saved_role = sess.role;
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new(), b"pln-03", "ChangeOwnerResponse").await;
+    quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", change_owner_req, b"pln-03", "ChangeOwnerResponse").await;
     sess.role = saved_role;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].owner_corp_id, target_corp_id);
+    });
 
-    let reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", planet_payload.clone(), b"pln-04", "GetReinforcementExitHourResponse").await;
+    let reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", skyhook_req.clone(), b"pln-04", "GetReinforcementExitHourResponse").await;
     assert_eq!(dyn_u64(&reinf, "reinforcement_exit_hour"), Some(18));
 
-    let sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", planet_payload.clone(), b"pln-05", "GetStateResponse").await;
+    let mut alt_skyhook_req = Vec::new();
+    encode_id_field(1, skyhook_alt_id as u64, &mut alt_skyhook_req);
+    let alt_reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", alt_skyhook_req.clone(), b"pln-04b", "GetReinforcementExitHourResponse").await;
+    assert_eq!(dyn_u64(&alt_reinf, "reinforcement_exit_hour"), Some(7));
+
+    let sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", skyhook_req, b"pln-05", "GetStateResponse").await;
     assert_eq!(dyn_bool(&sky_state, "no_timer"), Some(true));
+    let alt_sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", alt_skyhook_req, b"pln-05b", "GetStateResponse").await;
+    assert!(dyn_u64(&alt_sky_state, "timer_end.seconds").is_some_and(|s| s > ctx.now_unix()));
+
+    let mut missing_sky_req = Vec::new();
+    encode_id_field(1, 999_888_777, &mut missing_sky_req);
+    for (rpc, payload) in [
+        ("eve.planet.skyhook.api.GetReinforcementExitHourRequest", Vec::new()),
+        ("eve.planet.skyhook.api.GetReinforcementExitHourRequest", missing_sky_req.clone()),
+        ("eve.planet.skyhook.api.GetStateRequest", Vec::new()),
+        ("eve.planet.skyhook.api.GetStateRequest", missing_sky_req),
+    ] {
+        assert_eq!(
+            quasar_send(&ctx, &mut sess, rpc, payload, b"pln-nf").await.status_code,
+            404,
+            "{rpc} must return 404 on empty/unknown skyhook ID"
+        );
+    }
 
     // 3. Planet Interaction (collector, factory, schematic, storage) backed by real colony pins
     ctx.db.with_mut_snapshot(|snap| {

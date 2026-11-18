@@ -882,17 +882,43 @@ fn handle_job_initiate(
         (uuid, shex, job, req_binders)
     };
 
-    // Atomically validate sequence binders (via ConsumeExactOptions inventory invariants) + PLEX before consuming either.
+    // Atomically validate sequence binders (via ConsumeExactOptions inventory invariants bound to
+    // the pilot's current dock hangar / co-located active ship cargo) + PLEX before consuming either.
     let debit_res = state.db.with_mut_snapshot(
         |s| -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), &'static str> {
-            let mut binder_opts = eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
-            binder_opts.required_flag = Some(InventoryFlag::Hangar);
-            binder_opts.active_ship_id = s
+            let (current_dock, current_ship) = s
                 .characters
                 .get(&(cid as i64))
-                .and_then(|ch| (ch.active_ship_id > 0).then_some(ch.active_ship_id));
+                .map(|ch| {
+                    let dock = ch.station_id.or(ch.structure_id).filter(|&id| id > 0);
+                    let ship = (ch.active_ship_id > 0).then_some(ch.active_ship_id);
+                    (dock, ship)
+                })
+                .unwrap_or((None, None));
+            let mut location_opts: Vec<eve_db::ConsumeExactOptions> = Vec::with_capacity(2);
+            if let Some(dock_id) = current_dock {
+                let mut hangar_opts =
+                    eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
+                hangar_opts.required_location_id = Some(dock_id);
+                hangar_opts.required_flag = Some(InventoryFlag::Hangar);
+                hangar_opts.active_ship_id = current_ship;
+                location_opts.push(hangar_opts);
+            }
+            if let Some(ship_id) = current_ship.filter(|&sid| {
+                !s.is_item_locked_in_contract_or_job(sid)
+                    && !s.is_item_or_ancestor_locked_or_impounded(sid)
+                    && s.is_ship_colocated_with_character(cid as i64, sid, current_dock)
+            }) {
+                let mut cargo_opts =
+                    eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
+                cargo_opts.required_location_id = Some(ship_id);
+                cargo_opts.required_flag = Some(InventoryFlag::Cargo);
+                cargo_opts.active_ship_id = current_ship;
+                location_opts.push(cargo_opts);
+            }
 
-            let mut binder_needs: Vec<(u32, i32)> = Vec::with_capacity(required_binders.len());
+            let mut binder_plan: Vec<(u32, eve_db::ConsumeExactOptions, i32)> =
+                Vec::with_capacity(required_binders.len() * 2);
             for (&btid, &need) in &required_binders {
                 if need == 0 {
                     continue;
@@ -900,20 +926,30 @@ fn handle_job_initiate(
                 let Ok(need_i32) = i32::try_from(need) else {
                     return Err("Insufficient sequence binders for unlimited SKINR component license");
                 };
-                let avail: i64 = s
-                    .items
-                    .values()
-                    .filter(|it| {
-                        it.owner_id == cid as i64
-                            && it.type_id == btid
-                            && s.validate_item_for_consumption(it, &binder_opts).is_ok()
-                    })
-                    .map(|it| i64::from(it.quantity))
-                    .sum();
-                if avail < i64::from(need_i32) {
+                let mut remaining = i64::from(need_i32);
+                for opts in &location_opts {
+                    if remaining <= 0 {
+                        break;
+                    }
+                    let avail_loc: i64 = s
+                        .items
+                        .values()
+                        .filter(|it| {
+                            it.owner_id == cid as i64
+                                && it.type_id == btid
+                                && s.validate_item_for_consumption(it, opts).is_ok()
+                        })
+                        .map(|it| i64::from(it.quantity))
+                        .sum();
+                    let take = avail_loc.min(remaining) as i32;
+                    if take > 0 {
+                        binder_plan.push((btid, *opts, take));
+                        remaining -= i64::from(take);
+                    }
+                }
+                if remaining > 0 {
                     return Err("Insufficient sequence binders for unlimited SKINR component license");
                 }
-                binder_needs.push((btid, need_i32));
             }
             let Some(uid) = s.account_of_character(cid as i64) else {
                 return Err("Insufficient PLEX for SKINR sequencing");
@@ -922,7 +958,7 @@ fn handle_job_initiate(
                 return Err("Insufficient PLEX for SKINR sequencing");
             };
             let mut item_events = Vec::new();
-            for (btid, need_i32) in binder_needs {
+            for (btid, opts, take_i32) in binder_plan {
                 let pre_stacks: std::collections::HashMap<i64, (eve_db::InventoryItemRecord, String)> = s
                     .items
                     .iter()
@@ -932,8 +968,8 @@ fn handle_job_initiate(
                         (iid, (it.clone(), cname))
                     })
                     .collect();
-                let Ok(touched_ids) = s.consume_owner_items(btid, need_i32, binder_opts.clone()) else {
-                    // Refund PLEX if consumption validation fails unexpectedly; no prior binder type mutated.
+                let Ok(touched_ids) = s.consume_owner_items(btid, take_i32, opts) else {
+                    // Refund PLEX if consumption validation fails unexpectedly; all quantities were preflight-validated above.
                     let _ = s.adjust_unified_plex(cid as i64, total_plex_cost);
                     return Err("Insufficient sequence binders for unlimited SKINR component license");
                 };

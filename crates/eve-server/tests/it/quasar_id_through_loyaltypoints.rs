@@ -254,14 +254,16 @@ async fn test_quasar_id_implant_and_login() {
     assert_eq!(rsp.status_code, STATUS_OK, "eve.id.api.GetRequest: {}", rsp.status_message);
     assert!(rsp.payload.as_ref().unwrap().type_url.ends_with("eve.id.api.GetResponse"));
 
-    let mut by_user_req = Vec::new();
-    encode_id_field(1, 1, &mut by_user_req);
+    let by_user_req = eve_proto::pb::message("eve.id.api.GetByUserRequest")
+        .set("user.sequential", 1i32)
+        .must_encode();
     let rsp = quasar_rpc(&ctx, &mut sess, "eve.id.api.GetByUserRequest", by_user_req).await;
     assert_eq!(rsp.status_code, STATUS_OK, "eve.id.api.GetByUserRequest: {}", rsp.status_message);
     assert!(rsp.payload.as_ref().unwrap().type_url.ends_with("eve.id.api.GetByUserResponse"));
 
-    let mut legacy_req = Vec::new();
-    encode_id_field(1, 1, &mut legacy_req);
+    let legacy_req = eve_proto::pb::message("eve.id.legacy.api.GetUserRequest")
+        .set("user.sequential", 1i32)
+        .must_encode();
     let rsp = quasar_rpc(&ctx, &mut sess, "eve.id.legacy.api.GetUserRequest", legacy_req).await;
     assert_eq!(rsp.status_code, STATUS_OK, "eve.id.legacy.api.GetUserRequest: {}", rsp.status_message);
     assert!(rsp.payload.as_ref().unwrap().type_url.ends_with("eve.id.legacy.api.GetUserResponse"));
@@ -455,15 +457,12 @@ async fn test_quasar_isk_and_killmail() {
     subscribe_to_notices(&ctx, &mut sess, &["eve.isk.wallet.api.GrantCommanded"]).await;
 
     // Dispatch TransferByOwnerRequest
-    let mut xfer_req = Vec::new();
-    encode_varint_field(1, 1, &mut xfer_req); // from_wallet_owner (bool)
-    encode_id_field(2, 90_000_001, &mut xfer_req); // acting character
-    let mut to_owner = Vec::new();
-    encode_id_field(1, 90_000_002, &mut to_owner); // character owner
-    encode_bytes_field(4, &to_owner, &mut xfer_req); // transfer_to
-    let mut curr_bytes = Vec::new();
-    encode_varint_field(1, 50_000, &mut curr_bytes); // 50,000 ISK units
-    encode_bytes_field(5, &curr_bytes, &mut xfer_req); // amount
+    let xfer_req = eve_proto::pb::message("eve.isk.wallet.api.TransferByOwnerRequest")
+        .set("from_wallet_owner", true)
+        .set("acting_character.sequential", 90_000_001u32)
+        .set("transfer_to.character.sequential", 90_000_002u32)
+        .set("amount.units", 50_000i64)
+        .must_encode();
 
     let rsp = quasar_rpc(&ctx, &mut sess, "eve.isk.wallet.api.TransferByOwnerRequest", xfer_req).await;
     assert_eq!(rsp.status_code, STATUS_OK, "TransferByOwnerRequest: {}", rsp.status_message);
@@ -564,16 +563,44 @@ async fn test_quasar_legal_localization_and_loyaltypoints() {
     assert!(reg.files_by_proto_name.contains_key("eve_public/localization/localization.proto"));
     assert!(reg.files_by_proto_name.contains_key("eve_public/localization/message.proto"));
 
-    // Dispatch localization requests
+    // Dispatch localization requests against real SDE FSD localization IDs (+ 404/400 negative checks)
     let mut loc_req = Vec::new();
-    encode_id_field(1, 1001, &mut loc_req);
+    encode_id_field(1, 93841, &mut loc_req);
     let rsp = quasar_rpc(&ctx, &mut sess, "eve.localization.message.api.GetLocalizedTextRequest", loc_req).await;
-    assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(rsp.payload.as_ref().unwrap().type_url.ends_with("eve.localization.message.api.GetLocalizedTextResponse"));
+    assert_eq!(rsp.status_code, STATUS_OK, "message localization 93841: {}", rsp.status_message);
+    let expected_rifter_loc = ctx
+        .sde
+        .localized_message_en_us(93841)
+        .expect("FSD message 93841 in SharedCache");
+    let loc_text = eve_proto::quasar::WireMessage::decode(&rsp.payload.as_ref().unwrap().value)
+        .ok()
+        .and_then(|wm| wm.fields.into_iter().find(|f| f.field_number == 1))
+        .and_then(|f| match f.value {
+            eve_proto::quasar::WireValue::LengthDelimited(b) => String::from_utf8(b).ok(),
+            _ => None,
+        });
+    assert_eq!(loc_text.as_deref(), Some(expected_rifter_loc.as_str()));
 
-    let rsp = quasar_rpc(&ctx, &mut sess, "eve.localization.cerberus.api.GetLocalizedTextRequest", Vec::new()).await;
-    assert_eq!(rsp.status_code, STATUS_OK);
+    let mut missing_loc_req = Vec::new();
+    encode_id_field(1, 999_999_999, &mut missing_loc_req);
+    assert_eq!(
+        quasar_rpc(&ctx, &mut sess, "eve.localization.message.api.GetLocalizedTextRequest", missing_loc_req).await.status_code,
+        404
+    );
+
+    let mut cerb_msg = Vec::new();
+    let mut cerb_id = Vec::new();
+    encode_varint_field(1, 93841, &mut cerb_id);
+    encode_bytes_field(1, &cerb_id, &mut cerb_msg);
+    let mut cerb_req = Vec::new();
+    encode_bytes_field(1, &cerb_msg, &mut cerb_req);
+    let rsp = quasar_rpc(&ctx, &mut sess, "eve.localization.cerberus.api.GetLocalizedTextRequest", cerb_req).await;
+    assert_eq!(rsp.status_code, STATUS_OK, "cerberus localization 93841: {}", rsp.status_message);
     assert!(rsp.payload.as_ref().unwrap().type_url.ends_with("eve.localization.cerberus.api.GetLocalizedTextResponse"));
+    assert_eq!(
+        quasar_rpc(&ctx, &mut sess, "eve.localization.cerberus.api.GetLocalizedTextRequest", Vec::new()).await.status_code,
+        400
+    );
 
     // Dynamic decode eve_public.localization.message.Identifier
     let mut loc_id_bytes = Vec::new();

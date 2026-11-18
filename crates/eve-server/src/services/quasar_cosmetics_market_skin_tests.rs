@@ -526,6 +526,103 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
 }
 
 #[test]
+fn skin_get_sweeps_expired_listing_and_releases_escrow() {
+    let (router, db, skinr, state) = new_market_harness();
+    let now = 1_700_000_000u64;
+    let seller = 2_112_100_992i64;
+    let buyer = 2_112_100_993i64;
+    let corp = 98_000_992i64;
+    make_char(&db, seller, corp, None, 50_000_000_00, 100, 0);
+    make_char(&db, buyer, corp, None, 50_000_000_00, 100, 0);
+
+    let skin_hex = "11223344556677889900aabbccddeeff".to_string();
+    let lic_key = SkinrCosmeticsState::skin_lic_key(seller as u32, &skin_hex);
+    {
+        let mut sd = skinr.data.write().unwrap();
+        sd.skins.insert(
+            skin_hex.clone(),
+            SkinDesignRecord {
+                skin_hex: skin_hex.clone(),
+                name: "ExpiringGetSkin".into(),
+                line_name: "Line".into(),
+                creator_id: seller as u32,
+                ship_type_id: 587,
+                pattern_blend_mode: 0,
+                slots: Vec::new(),
+                tier_level: 1,
+                first_sequenced_unix: None,
+            },
+        );
+        sd.skin_licenses.insert(
+            lic_key.clone(),
+            ThirdPartySkinLicense {
+                character_id: seller as u32,
+                skin_hex: skin_hex.clone(),
+                activated: false,
+                unactivated: 2,
+                escrowed: 0,
+                first_acquired_unix: now,
+            },
+        );
+    }
+
+    let seller_sess = make_sess(seller, corp, None, 0);
+    let buyer_sess = make_sess(buyer, corp, None, 0);
+    let create_req = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest")
+        .set("price_isk.units", 1_000_000i64)
+        .set("price_isk.nanos", 0i32)
+        .set("skin.character.sequential", seller as u32)
+        .set("skin.skin.hex", skin_hex.as_str())
+        .set("duration", GoogleDuration { seconds: 60, nanos: 0 })
+        .set("quantity", 1u32)
+        .must_encode();
+    let create_rsp = call(
+        &router,
+        &seller_sess,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        create_req,
+        now,
+    );
+    assert_eq!(create_rsp.status_code, STATUS_OK);
+    let listing_uuid = {
+        let data = state.data.read().unwrap();
+        data.skin_listings.values().find(|l| l.skin_hex == skin_hex).unwrap().uuid
+    };
+    assert_eq!(skinr.data.read().unwrap().skin_licenses[&lic_key].escrowed, 1);
+
+    let get_req = pb::message("eve_public.cosmetic.market.skin.listing.api.GetRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &buyer_sess,
+            "eve_public.cosmetic.market.skin.listing.api.GetRequest",
+            get_req.clone(),
+            now + 10,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    // Once expired at now + 60, skin_get must sweep the listing, return 404, and release escrow.
+    assert_eq!(
+        call(
+            &router,
+            &buyer_sess,
+            "eve_public.cosmetic.market.skin.listing.api.GetRequest",
+            get_req,
+            now + 60,
+        )
+        .status_code,
+        STATUS_NOT_FOUND
+    );
+    let lic_after = skinr.data.read().unwrap().skin_licenses[&lic_key].clone();
+    assert_eq!(lic_after.escrowed, 0);
+    assert_eq!(lic_after.unactivated, 2);
+    assert!(state.data.read().unwrap().skin_listings.is_empty());
+}
+
+#[test]
 fn issue_545_initiate_create_listing_settles_matured_sequencing_job() {
     let (router, db, skinr, _state) = new_market_harness();
     let now = 1_700_000_000u64;

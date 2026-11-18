@@ -2825,12 +2825,15 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         .sde
         .types
         .values()
-        .find(|t| {
+        .filter(|t| {
             t.group_id == 1027
+                && t.published
+                && t.market_group_id.is_some()
                 && t.default_attributes
                     .get(&1632)
                     .is_some_and(|&v| v as u32 == jita_iv_type_id)
         })
+        .min_by_key(|t| t.type_id)
         .map(|t| t.type_id)
         .expect("Matching Command Center type for Jita IV in SDE");
     ensure_skills_for_types(&ctx, &mut sess, char_id, JITA_STATION, &[648]).await;

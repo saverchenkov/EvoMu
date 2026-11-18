@@ -666,6 +666,94 @@ fn hypernet_v24_raffle_creation_data_and_created_participated_counts() {
     assert_eq!(buyer_stats.dict_get("raffles_won"), Some(&PyRep::Integer(2)));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_raffle_consumes_split_hypercore_stacks_in_station_hangar() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = 98_000_001_i64;
+    let station_id = 60_003_760_i64;
+    let item_id = 88_100_921_i64;
+    let core_a = 88_100_922_i64;
+    let core_b = 88_100_923_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+            ch.balance = IskCents::from_f64_isk(500_000_000.0);
+        }
+        snap.items.insert(
+            item_id,
+            eve_db::InventoryItemRecord {
+                item_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Two split HyperCore piles (2 + 2 = 4 < required 5 for 40M total value at 3.5M PLEX) -> rejected cleanly.
+        for (id, qty) in [(core_a, 2), (core_b, 2)] {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: HYPERCORE_TYPE_ID,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = auth_session(1, char_id, corp_id, 30_000_142);
+    sess.station_id = Some(station_id);
+    let kw = HashMap::new();
+    let args = [
+        PyRep::Integer(item_id),
+        PyRep::Integer(8),
+        PyRep::Real(5_000_000.0), // 40,000,000 ISK total -> requires floor((40M / 350k) * 0.05) = 5 HyperCores
+    ];
+    let err = handle(&ctx, &mut sess, "raffleProxy", "CreateRaffle", &args, &kw)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, "InsufficientHyperCores");
+
+    // Top up second pile to 4 (2 + 4 = 6 >= 5) -> consumes across both stacks, leaving 1 HyperCore.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&core_b).unwrap().quantity = 4;
+    });
+    let created = handle(&ctx, &mut sess, "raffleProxy", "CreateRaffle", &args, &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::Integer(raffle_id) = created else {
+        panic!("CreateRaffle must return integer raffle_id, got {created:?}");
+    };
+    assert!(raffle_id > 0);
+    let remaining_cores: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| {
+                i.owner_id == char_id
+                    && i.location_id == station_id
+                    && i.flag == InventoryFlag::Hangar
+                    && i.type_id == HYPERCORE_TYPE_ID
+            })
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert_eq!(remaining_cores, 1);
+}
+
 #[cfg(test)]
 #[path = "hypernet_raffle_ops_extra_unit_tests.rs"]
 mod extra_unit_tests;

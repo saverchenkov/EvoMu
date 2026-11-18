@@ -727,6 +727,165 @@ fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change(
     }
 }
 
+#[test]
+fn sequencing_binder_location_blocks_remote_hangar_and_allows_in_space_cargo() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        shared_sde(),
+    );
+    let skinr = SkinrCosmeticsState::load(Arc::clone(&db), shared_sde());
+    crate::services::quasar_cosmetics_skinr::register(&router, Arc::clone(&skinr));
+    register(&router, Arc::clone(&skinr));
+
+    let now = 1_760_000_000u64;
+    let cid = 90_000_001i64;
+    let remote_station = 60_003_761i64;
+    let player = sess(Some(1), Some(cid), service_roles::ROLE_PLAYER_DEFAULT);
+    let slot1_allowed = skinr.catalog.slot_allowed_categories.get(&1);
+    let coat = skinr
+        .catalog
+        .components
+        .values()
+        .find(|c| {
+            !c.is_pattern()
+                && !c.disallowed_slots.contains(&1)
+                && slot1_allowed.is_none_or(|cats| cats.is_empty() || cats.contains(&c.category))
+                && c.binder_type_id > 0
+                && c.binder_count > 0
+        })
+        .expect("coating component with binder requirement");
+    let btid = coat.binder_type_id;
+    let bcnt = coat.binder_count as i32;
+
+    let (home_station, active_ship_id, plex_before) = db.with_mut_snapshot(|s| {
+        s.adjust_unified_plex(cid, 5_000);
+        let ch = &s.characters[&cid];
+        let home_station = ch.station_id.unwrap_or(60_003_760);
+        let active_ship_id = ch.active_ship_id;
+        assert_ne!(home_station, remote_station);
+        // Seed binders ONLY at a remote station hangar.
+        let remote_id = s.alloc_entity_id();
+        s.items.insert(
+            remote_id,
+            eve_db::InventoryItemRecord {
+                item_id: remote_id,
+                type_id: btid,
+                owner_id: cid,
+                location_id: remote_station,
+                flag: InventoryFlag::Hangar,
+                quantity: bcnt * 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (home_station, active_ship_id, s.unified_plex_balance(cid))
+    });
+    skinr.data.write().unwrap().infinite_licenses.insert(
+        SkinrCosmeticsState::comp_key(cid as u32, false, coat.component_id),
+        crate::services::quasar_cosmetics_skinr::InfiniteComponentLicense {
+            character_id: cid as u32,
+            component_id: coat.component_id,
+            is_pattern: false,
+            first_acquired_unix: now,
+            is_free: false,
+        },
+    );
+    let slot = SkinLayoutSlot {
+        slot_id: 1,
+        component_id: coat.component_id,
+        is_pattern: false,
+        primary_coating_id: None,
+        secondary_coating_id: None,
+    };
+    let init_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest")
+        .set("name", "Location Guard SKIN")
+        .set("line_name", "Loc Line")
+        .set_with("layout", |l| {
+            l.add("slots", build_layout_slot("eve_public", &slot))
+                .set("ship_type.sequential", 587u64)
+                .set("pattern_blend_mode", 1i32)
+        })
+        .set("licenses", 1u32)
+        .must_encode();
+
+    // 1. Docked at home_station: remote-station binders MUST NOT be consumed (400 + PLEX unchanged).
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+            init_req.clone(),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.unified_plex_balance(cid), plex_before);
+    });
+
+    // 2. Undocked in space: home-station hangar binders remain ignored; active-ship Cargo binders work.
+    let cargo_id = db.with_mut_snapshot(|s| {
+        let sys_id = s.characters[&cid].solar_system_id;
+        let ch = s.characters.get_mut(&cid).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        if let Some(ship) = s.items.get_mut(&active_ship_id) {
+            ship.location_id = i64::from(sys_id);
+        }
+        let home_hangar_id = s.alloc_entity_id();
+        s.items.insert(
+            home_hangar_id,
+            eve_db::InventoryItemRecord {
+                item_id: home_hangar_id,
+                type_id: btid,
+                owner_id: cid,
+                location_id: home_station,
+                flag: InventoryFlag::Hangar,
+                quantity: bcnt * 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let cargo_id = s.alloc_entity_id();
+        s.items.insert(
+            cargo_id,
+            eve_db::InventoryItemRecord {
+                item_id: cargo_id,
+                type_id: btid,
+                owner_id: cid,
+                location_id: active_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: bcnt + 3,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        cargo_id
+    });
+
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+            init_req,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.items[&cargo_id].quantity, 3, "in-space Cargo binders must be consumed");
+        assert!(s.unified_plex_balance(cid) < plex_before);
+    });
+}
+
 #[cfg(test)]
 #[path = "quasar_cosmetics_skinr_seq_extra_unit_tests.rs"]
 mod quasar_cosmetics_skinr_seq_extra_unit_tests;

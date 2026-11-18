@@ -1,8 +1,7 @@
-//! `quasar_economy_planetary_industry` — Quasar V24.01 Accounting, LP, Contracts, Industry, Planets & PI (`Q-6`).
+//! `quasar_economy_planetary_industry` — Quasar V24.01 Accounting, Contracts, Industry, Planets, PI, Skyhooks, Localization & Identity (`Q-6`).
 //!
 //! Implements backend handlers for:
 //! - `eve.accounting.*` (`GetCharacterEntriesRequest`, `GetCorporationEntriesRequest`, `GetAllRequest`);
-//! - `eve.loyaltypoints.*` (`WithdrawRequest`, `DepositRequest`);
 //! - `eve.contract.item_exchange.*` (`GetRequest`);
 //! - `eve.industry.*` (`GetRequest` for facilities, `GetCostIndicesRequest`);
 //! - `eve.planet.*` (`GetRequest`, `GetPlanetsInSolarSystemRequest`);
@@ -10,7 +9,8 @@
 //! - `eve.planetinteraction.*` (`collector.GetRequest`, `factory.GetRequest`, `schematic.GetRequest`, `storage.GetRequest`);
 //! - `eve.moon.*` (`GetRequest`, `GetMoonsOfPlanetRequest`);
 //! - `eve.asteroidbelt.*` (`GetRequest`, `GetBeltsOfPlanetRequest`);
-//! - `eve.bloodline.*` (`GetAllRequest`).
+//! - `eve.bloodline.*` (`GetAllRequest`);
+//! - `eve.isk.wallet.api.TransferByOwnerRequest`, `eve.localization.*`, `eve.id.*`.
 
 #![forbid(unsafe_code)]
 
@@ -18,25 +18,17 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
+use crate::router::NotificationTarget;
 use crate::services::industry_pi::{ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE};
-use eve_db::WorldRepository;
-use eve_proto::pb;
+use eve_db::ledger::{ref_types, JournalEntryInput, JournalMeta};
+use eve_db::{IskCents, WorldRepository};
+use eve_proto::{pb, PyRep};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
 };
 use eve_sde::{CelestialInfo, SdeRegistry};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-fn caller_solar_system(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
-    ctx.effective_character_id()
-        .and_then(|cid| {
-            db.with_snapshot(|s| {
-                s.characters.get(&(cid as i64)).map(|c| c.solar_system_id as u64)
-            })
-        })
-        .unwrap_or(0)
-}
 
 fn caller_station_and_solar_system(
     ctx: &AuthoritativeContext,
@@ -203,28 +195,182 @@ fn children_of_planet_in_sde(
     Ok(Some(children.into_iter().map(|c| c.celestial_id).collect()))
 }
 
+fn parse_dynamic_u64(v: &DynamicValue) -> Option<u64> {
+    match v {
+        DynamicValue::Uint64(n) | DynamicValue::Fixed64(n) => Some(*n),
+        DynamicValue::Uint32(n) | DynamicValue::Fixed32(n) => Some(u64::from(*n)),
+        DynamicValue::Int64(n) | DynamicValue::Sint64(n) | DynamicValue::Sfixed64(n) => {
+            u64::try_from(*n).ok()
+        }
+        DynamicValue::Int32(n) | DynamicValue::Sint32(n) | DynamicValue::Sfixed32(n) => {
+            u64::try_from(*n).ok()
+        }
+        _ => None,
+    }
+}
+
+fn parse_dynamic_i64(v: &DynamicValue) -> Option<i64> {
+    match v {
+        DynamicValue::Int64(n) | DynamicValue::Sint64(n) | DynamicValue::Sfixed64(n) => Some(*n),
+        DynamicValue::Int32(n) | DynamicValue::Sint32(n) | DynamicValue::Sfixed32(n) => {
+            Some(i64::from(*n))
+        }
+        DynamicValue::Uint32(n) | DynamicValue::Fixed32(n) => Some(i64::from(*n)),
+        DynamicValue::Uint64(n) | DynamicValue::Fixed64(n) => i64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
 fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
     match dyn_msg.get(field_num) {
         Some(DynamicValue::Message(sub)) => match sub.get(1) {
-            Some(DynamicValue::Message(inner)) => match inner.get(1) {
-                Some(DynamicValue::Uint64(n)) => *n,
-                Some(DynamicValue::Uint32(n)) => *n as u64,
-                Some(DynamicValue::Int64(n)) => *n as u64,
-                Some(DynamicValue::Int32(n)) => *n as u64,
-                _ => 0,
-            },
-            Some(DynamicValue::Uint64(n)) => *n,
-            Some(DynamicValue::Uint32(n)) => *n as u64,
-            Some(DynamicValue::Int64(n)) => *n as u64,
-            Some(DynamicValue::Int32(n)) => *n as u64,
-            _ => 0,
+            Some(DynamicValue::Message(inner)) => {
+                inner.get(1).and_then(parse_dynamic_u64).unwrap_or(0)
+            }
+            Some(val) => parse_dynamic_u64(val).unwrap_or(0),
+            None => 0,
         },
-        Some(DynamicValue::Uint64(n)) => *n,
-        Some(DynamicValue::Uint32(n)) => *n as u64,
-        Some(DynamicValue::Int64(n)) => *n as u64,
-        Some(DynamicValue::Int32(n)) => *n as u64,
-        _ => 0,
+        Some(val) => parse_dynamic_u64(val).unwrap_or(0),
+        None => 0,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletOwnerId {
+    Character(i64),
+    Corporation(i64),
+}
+
+impl WalletOwnerId {
+    fn raw_id(self) -> i64 {
+        match self {
+            Self::Character(id) | Self::Corporation(id) => id,
+        }
+    }
+}
+
+fn parse_wallet_owner_field(
+    dyn_msg: &DynamicQuasarMessage,
+    field_num: u32,
+) -> Result<Option<WalletOwnerId>, (u32, String)> {
+    let Some(val) = dyn_msg.get(field_num) else {
+        return Ok(None);
+    };
+    let DynamicValue::Message(owner_msg) = val else {
+        return Err((STATUS_BAD_REQUEST, "Invalid wallet owner field".into()));
+    };
+    if let Some(ch_val) = owner_msg.get(1) {
+        let cid = match ch_val {
+            DynamicValue::Message(m) => m.get(1).and_then(parse_dynamic_u64).unwrap_or(0),
+            other => parse_dynamic_u64(other).unwrap_or(0),
+        };
+        if cid == 0 {
+            return Err((STATUS_BAD_REQUEST, "Invalid character wallet owner ID".into()));
+        }
+        return Ok(Some(WalletOwnerId::Character(cid as i64)));
+    }
+    if let Some(corp_val) = owner_msg.get(2) {
+        let corp_id = match corp_val {
+            DynamicValue::Message(m) => m.get(1).and_then(parse_dynamic_u64).unwrap_or(0),
+            other => parse_dynamic_u64(other).unwrap_or(0),
+        };
+        if corp_id == 0 {
+            return Err((STATUS_BAD_REQUEST, "Invalid corporation wallet owner ID".into()));
+        }
+        return Ok(Some(WalletOwnerId::Corporation(corp_id as i64)));
+    }
+    Err((STATUS_BAD_REQUEST, "Missing wallet owner character or corporation ID".into()))
+}
+
+fn parse_positive_isk_currency(
+    dyn_msg: &DynamicQuasarMessage,
+    field_num: u32,
+) -> Result<(i64, i32, IskCents), (u32, String)> {
+    let Some(DynamicValue::Message(curr_msg)) = dyn_msg.get(field_num) else {
+        return Err((STATUS_BAD_REQUEST, "Missing ISK amount".into()));
+    };
+    let units = match curr_msg.get(1) {
+        Some(v) => parse_dynamic_i64(v)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid ISK currency units".into()))?,
+        None => 0,
+    };
+    let nanos_i64 = match curr_msg.get(2) {
+        Some(v) => parse_dynamic_i64(v)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid ISK currency nanos".into()))?,
+        None => 0,
+    };
+    if units < 0 || !(0..1_000_000_000).contains(&nanos_i64) {
+        return Err((STATUS_BAD_REQUEST, "ISK amount must be non-negative".into()));
+    }
+    let nanos = nanos_i64 as i32;
+    let unit_cents = units
+        .checked_mul(100)
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK amount overflows cents".into()))?;
+    let nano_cents = i64::from(nanos / 10_000_000);
+    let total_cents = unit_cents
+        .checked_add(nano_cents)
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "ISK amount overflows cents".into()))?;
+    if total_cents <= 0 {
+        return Err((STATUS_BAD_REQUEST, "Transfer ISK amount must be positive".into()));
+    }
+    Ok((units, nanos, IskCents(total_cents)))
+}
+
+fn resolve_skyhook_exit_hour(
+    snap: &eve_db::WorldStateSnapshot,
+    skyhook_id: i64,
+    owner_corp_id: i64,
+) -> Option<u32> {
+    if let Some(&(start_or_hour, day_or_end)) = snap.structure_vulnerability_windows.get(&skyhook_id)
+    {
+        if start_or_hour < 24 && day_or_end < 7 {
+            return Some(start_or_hour as u32);
+        }
+        return Some(((start_or_hour / 3_600) % 24) as u32);
+    }
+    if let Some(gov) = snap.corp_governance.get(&owner_corp_id) {
+        return Some(u32::from(gov.reinforce_hour % 24));
+    }
+    snap.sov_runtime
+        .skyhook_theft_windows
+        .get(&skyhook_id)
+        .map(|&(start_unix, _)| ((start_unix / 3_600) % 24) as u32)
+}
+
+fn map_skyhook_state_enum(state: &str) -> &'static str {
+    match state {
+        "ShieldVulnerable" | "Anchoring" | "OnliningVulnerable" => "STATE_SHIELD_VULNERABLE",
+        "ArmorReinforced" => "STATE_ARMOR_REINFORCE",
+        "ArmorVulnerable" => "STATE_ARMOR_VULNERABLE",
+        "HullReinforced" => "STATE_HULL_REINFORCE",
+        "HullVulnerable" => "STATE_HULL_VULNERABLE",
+        _ => "STATE_UNSPECIFIED",
+    }
+}
+
+fn parse_cerberus_parameter_value(param: &DynamicQuasarMessage) -> Option<(String, String)> {
+    let key = match param.get(1) {
+        Some(DynamicValue::String(k)) if !k.is_empty() => k.clone(),
+        _ => return None,
+    };
+    let val = if let Some(DynamicValue::String(s)) = param.get(2) {
+        s.clone()
+    } else if let Some(u) = param.get(3).and_then(parse_dynamic_u64) {
+        u.to_string()
+    } else if let Some(i) = param.get(4).and_then(parse_dynamic_i64) {
+        i.to_string()
+    } else if let Some(DynamicValue::Double(d)) = param.get(5) {
+        d.to_string()
+    } else if let Some(DynamicValue::Float(f)) = param.get(5) {
+        f.to_string()
+    } else if let Some(DynamicValue::Message(ts)) = param.get(6) {
+        ts.get(1).and_then(parse_dynamic_i64)?.to_string()
+    } else if let Some(DynamicValue::Message(dur)) = param.get(7) {
+        dur.get(1).and_then(parse_dynamic_i64)?.to_string()
+    } else {
+        return None;
+    };
+    Some((key, val))
 }
 
 fn resolve_caller_corp_id(
@@ -340,24 +486,41 @@ pub fn register_economy_planetary_industry_handlers(
             }
             let target_cid = effective_cid;
 
-            let entries = db_clone.with_snapshot(|snap| {
-                snap.wallet_journal
+            let (entries, timestamps) = db_clone.with_snapshot(|snap| {
+                let list: Vec<_> = snap
+                    .wallet_journal
                     .iter()
                     .filter(|e| e.character_id == target_cid)
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect();
+                let ts: BTreeMap<i64, u64> = list
+                    .iter()
+                    .take(200)
+                    .map(|e| {
+                        let date = snap
+                            .wallet_journal_meta
+                            .get(&e.entry_id)
+                            .map(|m| m.date_unix)
+                            .filter(|&d| d > 0)
+                            .or_else(|| snap.wallet_journal_timestamps.get(&e.entry_id).copied())
+                            .unwrap_or(0);
+                        (e.entry_id, date)
+                    })
+                    .collect();
+                (list, ts)
             });
 
             let mut resp = pb::message(
                 "eve.accounting.character.journal.GetCharacterEntriesResponse",
             );
             for e in entries.iter().take(200) {
+                let date_unix = timestamps.get(&e.entry_id).copied().unwrap_or(0) as i64;
                 resp = resp.add_with("entries", |entry| {
                     entry
                         .set("id.transaction", e.entry_id as u64)
                         .set_with("attributes", |attrs| {
                             attrs
-                                .set("date.seconds", 1_760_000_000i64)
+                                .set("date.seconds", date_unix)
                                 .set_with("amount", |c| set_isk_currency(c, e.amount.0))
                                 .set_with("account_balance", |c| {
                                     set_isk_currency(c, e.balance_after.0)
@@ -377,37 +540,53 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.accounting.corporation.journal.GetCorporationEntriesRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let entries = db_clone.with_snapshot(|snap| {
+            let (entries, timestamps) = db_clone.with_snapshot(|snap| {
                 let target_corp = authorize_corp_financial_access(ctx, snap, req_corp_id)?;
-                Ok::<_, (u32, String)>(
-                    snap.wallet_journal
-                        .iter()
-                        .filter(|e| {
-                            e.character_id == target_corp
-                                || snap.wallet_journal_meta.get(&e.entry_id).is_some_and(|m| {
-                                    m.first_party_id == target_corp
-                                        || m.second_party_id == target_corp
-                                })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
+                let list: Vec<_> = snap
+                    .wallet_journal
+                    .iter()
+                    .filter(|e| {
+                        e.character_id == target_corp
+                            || snap.wallet_journal_meta.get(&e.entry_id).is_some_and(|m| {
+                                m.first_party_id == target_corp
+                                    || m.second_party_id == target_corp
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                let ts: BTreeMap<i64, u64> = list
+                    .iter()
+                    .take(200)
+                    .map(|e| {
+                        let date = snap
+                            .wallet_journal_meta
+                            .get(&e.entry_id)
+                            .map(|m| m.date_unix)
+                            .filter(|&d| d > 0)
+                            .or_else(|| snap.wallet_journal_timestamps.get(&e.entry_id).copied())
+                            .unwrap_or(0);
+                        (e.entry_id, date)
+                    })
+                    .collect();
+                Ok::<_, (u32, String)>((list, ts))
             })?;
 
             let mut resp = pb::message(
                 "eve.accounting.corporation.journal.GetCorporationEntriesResponse",
             );
             for e in entries.iter().take(200) {
+                let date_unix = timestamps.get(&e.entry_id).copied().unwrap_or(0) as i64;
                 resp = resp.add_with("entries", |entry| {
                     entry
                         .set("id.transaction", e.entry_id as u64)
                         .set_with("attributes", |attrs| {
                             attrs
-                                .set("date.seconds", 1_760_000_000i64)
+                                .set("date.seconds", date_unix)
                                 .set_with("amount", |c| set_isk_currency(c, e.amount.0))
                                 .set_with("account_balance", |c| {
                                     set_isk_currency(c, e.balance_after.0)
                                 })
+                                .set("description", &e.reason)
                         })
                 });
             }
@@ -416,59 +595,20 @@ pub fn register_economy_planetary_industry_handlers(
         }),
     );
 
-    // 3. eve.accounting.entrytype.GetAllRequest
+    // 3. eve.accounting.entrytype.GetAllRequest (shared canonical table with Macho account.GetEntryTypes)
     router.register_handler(
         "eve.accounting.entrytype.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let sample_types = [
-                (1u32, "Player Trading"),
-                (2u32, "Market Transaction"),
-                (10u32, "Bounty Prize"),
-                (42u32, "Industry Job Fee"),
-            ];
             let mut resp = pb::message("eve.accounting.entrytype.GetAllResponse");
-            for (id, name) in sample_types {
+            for &(id, name, _desc) in crate::services::wallet_ledger::JOURNAL_ENTRY_TYPES {
+                let Ok(seq_id) = u32::try_from(id) else {
+                    continue;
+                };
                 resp = resp.add_with("entry_types", |et| {
-                    et.set("id.sequential", id).set("attributes.name", name)
+                    et.set("id.sequential", seq_id).set("attributes.name", name)
                 });
             }
             resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
-        }),
-    );
-
-    // 4. eve.loyaltypoints.assetholding.operation.api.WithdrawRequest
-    router.register_handler(
-        "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            if ctx.effective_character_id().is_none()
-                && crate::quasar_gateway::require_admin_role(ctx).is_err()
-            {
-                return Err((
-                    crate::quasar_gateway::STATUS_FORBIDDEN,
-                    "Authentication required for loyaltypoints assetholding WithdrawRequest".into(),
-                ));
-            }
-            pb::message("eve.loyaltypoints.assetholding.operation.api.WithdrawResponse")
-                .to_any()
-                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
-        }),
-    );
-
-    // 5. eve.loyaltypoints.assetholding.operation.api.DepositRequest
-    router.register_handler(
-        "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            if ctx.effective_character_id().is_none()
-                && crate::quasar_gateway::require_admin_role(ctx).is_err()
-            {
-                return Err((
-                    crate::quasar_gateway::STATUS_FORBIDDEN,
-                    "Authentication required for loyaltypoints assetholding DepositRequest".into(),
-                ));
-            }
-            pb::message("eve.loyaltypoints.assetholding.operation.api.DepositResponse")
-                .to_any()
-                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -533,7 +673,7 @@ pub fn register_economy_planetary_industry_handlers(
                                 || contract.availability.eq_ignore_ascii_case("Public"))
                                 && contract.assignee_id == 0,
                         )
-                        .set("issued_time.seconds", 1_760_000_000i64)
+                        .set("issued_time.seconds", contract.date_issued_unix as i64)
                         .set("expiry_time.seconds", contract.expiration_unix as i64)
                         .set_with("price", |p| set_isk_currency(p, contract.price.0))
                         .set_with("reward", |r| set_isk_currency(r, contract.reward.0))
@@ -749,8 +889,7 @@ pub fn register_economy_planetary_industry_handlers(
     let sde_cost = Arc::clone(&sde);
     router.register_handler(
         "eve.industry.system.GetCostIndicesRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            let caller_sys = caller_solar_system(ctx, &db_cost) as u32;
+        Arc::new(move |_ctx, _any, _dyn_msg| {
             let entries: BTreeMap<u32, BTreeMap<i32, f32>> = db_cost.with_snapshot(|snap| {
                 let max_start = snap
                     .industry_jobs
@@ -790,19 +929,19 @@ pub fn register_economy_planetary_industry_handlers(
                 }
                 let mut out: BTreeMap<u32, BTreeMap<i32, f32>> = BTreeMap::new();
                 for (sid, acts) in sys_work {
-                    let map = out.entry(sid).or_default();
+                    let mut map = BTreeMap::new();
                     for (act, sw) in acts {
                         let uw = univ_work.get(&act).copied().unwrap_or(0);
-                        let sci = if uw > 0 && sw > 0 {
-                            ((sw as f64) / (uw as f64)).sqrt().clamp(0.001, 0.50) as f32
-                        } else {
-                            0.01f32
-                        };
+                        if uw == 0 || sw == 0 {
+                            continue;
+                        }
+                        let sci = ((sw as f64) / (uw as f64)).sqrt().clamp(0.001, 0.50) as f32;
                         map.insert(act, sci);
                     }
+                    if !map.is_empty() {
+                        out.insert(sid, map);
+                    }
                 }
-                out.entry(caller_sys)
-                    .or_insert_with(|| BTreeMap::from([(1i32, 0.01f32)]));
                 out
             });
 
@@ -873,10 +1012,60 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 11. eve.planet.skyhook.admin.api.ChangeOwnerRequest
+    let db_sky_owner = Arc::clone(&db);
+    let sky_owner_notices = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve.planet.skyhook.admin.api.ChangeOwnerRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let skyhook_id = extract_u64_from_field(dyn_msg, 2) as i64;
+            let req_sys = extract_u64_from_field(dyn_msg, 3) as u32;
+            let new_corp_id = extract_u64_from_field(dyn_msg, 4) as i64;
+            if skyhook_id <= 0 {
+                return Err((STATUS_NOT_FOUND, "Skyhook not found".into()));
+            }
+            if new_corp_id <= 0 {
+                return Err((STATUS_BAD_REQUEST, "Target corporation ID required".into()));
+            }
+            let (sys_id, planet_id, old_corp_id) = db_sky_owner.try_with_mut_snapshot(|snap| {
+                if !snap.corporations.contains_key(&new_corp_id) {
+                    return Err((
+                        STATUS_NOT_FOUND,
+                        format!("Corporation {new_corp_id} not found"),
+                    ));
+                }
+                let planet = snap
+                    .sov_runtime
+                    .skyhook_planets
+                    .get(&skyhook_id)
+                    .copied()
+                    .unwrap_or(0);
+                let st = snap
+                    .structures
+                    .get_mut(&skyhook_id)
+                    .filter(|s| {
+                        s.type_id == super::sov_services::TYPE_ORBITAL_SKYHOOK
+                            && (req_sys == 0 || s.solar_system_id == req_sys)
+                    })
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Skyhook {skyhook_id} not found")))?;
+                let old_corp = st.owner_corp_id;
+                let sys = st.solar_system_id;
+                st.owner_corp_id = new_corp_id;
+                Ok((sys, planet, old_corp))
+            })?;
+            let mut ev = pb::message("eve.planet.skyhook.api.OwnerChanged")
+                .set("skyhook.sequential", skyhook_id as u64)
+                .set("corporation.sequential", new_corp_id as u32)
+                .set("old_corporation.sequential", old_corp_id as u32);
+            if planet_id > 0 {
+                ev = ev.set("planet.sequential", planet_id as u64);
+            }
+            if let Ok(notice) = ev.to_any() {
+                sky_owner_notices
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::SolarSystem(sys_id), notice));
+            }
             pb::message("eve.planet.skyhook.admin.api.ChangeOwnerResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -884,24 +1073,63 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 12. eve.planet.skyhook.api.GetReinforcementExitHourRequest
+    let db_sky_exit = Arc::clone(&db);
     router.register_handler(
         "eve.planet.skyhook.api.GetReinforcementExitHourRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let skyhook_id = extract_u64_from_field(dyn_msg, 1) as i64;
+            let req_sys = extract_u64_from_field(dyn_msg, 2) as u32;
+            if skyhook_id <= 0 {
+                return Err((STATUS_NOT_FOUND, "Skyhook not found".into()));
+            }
+            let exit_hour = db_sky_exit.with_snapshot(|snap| {
+                let st = snap
+                    .structures
+                    .get(&skyhook_id)
+                    .filter(|s| {
+                        s.type_id == super::sov_services::TYPE_ORBITAL_SKYHOOK
+                            && (req_sys == 0 || s.solar_system_id == req_sys)
+                    })
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Skyhook {skyhook_id} not found")))?;
+                resolve_skyhook_exit_hour(snap, skyhook_id, st.owner_corp_id).ok_or_else(|| {
+                    (
+                        STATUS_NOT_FOUND,
+                        format!("Skyhook {skyhook_id} reinforcement exit hour not configured"),
+                    )
+                })
+            })?;
             pb::message("eve.planet.skyhook.api.GetReinforcementExitHourResponse")
-                .set("reinforcement_exit_hour", 18u32) // 18:00 UTC
+                .set("reinforcement_exit_hour", exit_hour)
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     // 13. eve.planet.skyhook.api.GetStateRequest
+    let db_sky_state = Arc::clone(&db);
     router.register_handler(
         "eve.planet.skyhook.api.GetStateRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            pb::message("eve.planet.skyhook.api.GetStateResponse")
-                .set("state", pb::enum_name("STATE_SHIELD_VULNERABLE"))
-                .set("no_timer", true)
-                .to_any()
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let skyhook_id = extract_u64_from_field(dyn_msg, 1) as i64;
+            if skyhook_id <= 0 {
+                return Err((STATUS_NOT_FOUND, "Skyhook not found".into()));
+            }
+            let (state_name, reinforced_until) = db_sky_state.with_snapshot(|snap| {
+                let st = snap
+                    .structures
+                    .get(&skyhook_id)
+                    .filter(|s| s.type_id == super::sov_services::TYPE_ORBITAL_SKYHOOK)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Skyhook {skyhook_id} not found")))?;
+                Ok::<_, (u32, String)>((st.state.clone(), st.reinforced_until_unix))
+            })?;
+            let mut resp = pb::message("eve.planet.skyhook.api.GetStateResponse")
+                .set("state", pb::enum_name(map_skyhook_state_enum(&state_name)));
+            if reinforced_until > ctx.now_unix() {
+                resp = resp.set("timer_end.seconds", reinforced_until as i64);
+            } else {
+                resp = resp.set("no_timer", true);
+            }
+            resp.to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
@@ -1169,48 +1397,186 @@ pub fn register_economy_planetary_industry_handlers(
         }),
     );
 
-    // 23. eve.isk.wallet.api.TransferByOwnerRequest
+    // 23. eve.isk.wallet.api.TransferByOwnerRequest (admin-only authoritative transfer)
     let db_isk_xfer = Arc::clone(&db);
     let isk_notices = Arc::clone(&router.pending_notices);
+    let isk_macho_sink = Arc::clone(&router.macho_notify_sink);
     router.register_handler(
         "eve.isk.wallet.api.TransferByOwnerRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(caller_u32) = ctx.effective_character_id().filter(|&v| v > 0) else {
-                return Err((STATUS_UNAUTHORIZED, "Active character session required".into()));
-            };
-            let caller = caller_u32 as i64;
-            let amount = match dyn_msg.get(5) {
-                Some(DynamicValue::Message(m)) => match m.get(1) {
-                    Some(DynamicValue::Int64(i)) => *i,
-                    Some(DynamicValue::Uint64(u)) => *u as i64,
-                    _ => 10_000,
-                },
-                _ => 10_000,
-            };
-            let amount_cents = amount.max(0) * 100;
-            db_isk_xfer.try_with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&caller) {
-                    if ch.balance.0 < amount_cents {
-                        return Err((STATUS_BAD_REQUEST, "Insufficient ISK".into()));
+            require_admin_role(ctx)?;
+            let (units, nanos, amt) = parse_positive_isk_currency(dyn_msg, 5)?;
+            let src_owner = match parse_wallet_owner_field(dyn_msg, 3)? {
+                Some(owner) => owner,
+                None => {
+                    let acting = extract_u64_from_field(dyn_msg, 2) as i64;
+                    let cid = if acting > 0 {
+                        acting
+                    } else {
+                        ctx.effective_character_id()
+                            .filter(|&v| v > 0)
+                            .map(i64::from)
+                            .unwrap_or(0)
+                    };
+                    if cid <= 0 {
+                        return Err((
+                            STATUS_UNAUTHORIZED,
+                            "Active character session or transfer_from required".into(),
+                        ));
                     }
-                    ch.balance.0 -= amount_cents;
+                    WalletOwnerId::Character(cid)
                 }
-                Ok(())
+            };
+            let dst_owner = parse_wallet_owner_field(dyn_msg, 4)?
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Recipient transfer_to required".into()))?;
+            if src_owner == dst_owner {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Source and recipient wallet owners must differ".into(),
+                ));
+            }
+            let ref_type_id = match dyn_msg.get(6) {
+                Some(DynamicValue::Message(m)) => m
+                    .get(1)
+                    .and_then(parse_dynamic_i64)
+                    .and_then(|v| i32::try_from(v).ok())
+                    .filter(|&v| v > 0)
+                    .unwrap_or(ref_types::PLAYER_DONATION),
+                _ => ref_types::PLAYER_DONATION,
+            };
+            let now_unix = ctx.now_unix();
+
+            let (src_bal, dst_bal) = db_isk_xfer.try_with_mut_snapshot(|snap| {
+                // Preflight recipient capacity before mutating source balance.
+                let dst_next = match dst_owner {
+                    WalletOwnerId::Character(id) => {
+                        let ch = snap.characters.get(&id).ok_or_else(|| {
+                            (STATUS_NOT_FOUND, format!("Recipient character {id} not found"))
+                        })?;
+                        ch.balance
+                            .checked_add(amt)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Recipient ISK balance overflow".into()))?
+                    }
+                    WalletOwnerId::Corporation(id) => {
+                        let corp = snap.corporations.get(&id).ok_or_else(|| {
+                            (STATUS_NOT_FOUND, format!("Recipient corporation {id} not found"))
+                        })?;
+                        corp.division_balance(1)
+                            .checked_add(amt)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Recipient ISK balance overflow".into()))?
+                    }
+                };
+                let src_next = match src_owner {
+                    WalletOwnerId::Character(id) => {
+                        let ch = snap.characters.get_mut(&id).ok_or_else(|| {
+                            (STATUS_NOT_FOUND, format!("Source character {id} not found"))
+                        })?;
+                        let next = ch
+                            .balance
+                            .checked_sub(amt)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Insufficient ISK".into()))?;
+                        ch.balance = next;
+                        next
+                    }
+                    WalletOwnerId::Corporation(id) => {
+                        let corp = snap.corporations.get_mut(&id).ok_or_else(|| {
+                            (STATUS_NOT_FOUND, format!("Source corporation {id} not found"))
+                        })?;
+                        corp.debit_division(1, amt)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Insufficient ISK".into()))?
+                    }
+                };
+                match dst_owner {
+                    WalletOwnerId::Character(id) => {
+                        snap.characters.get_mut(&id).expect("verified").balance = dst_next;
+                    }
+                    WalletOwnerId::Corporation(id) => {
+                        snap.corporations
+                            .get_mut(&id)
+                            .expect("verified")
+                            .set_division_balance(1, dst_next);
+                    }
+                }
+                let mut meta =
+                    JournalMeta::new(ref_type_id, src_owner.raw_id(), dst_owner.raw_id(), now_unix);
+                meta.account_key = 1000;
+                snap.append_journal_entry(JournalEntryInput {
+                    owner_id: src_owner.raw_id(),
+                    entry_type: "TransferByOwner",
+                    amount: IskCents(-amt.0),
+                    balance_after: src_next,
+                    reason: format!("Quasar TransferByOwner to {}", dst_owner.raw_id()),
+                    meta: meta.clone(),
+                });
+                snap.append_journal_entry(JournalEntryInput {
+                    owner_id: dst_owner.raw_id(),
+                    entry_type: "TransferByOwner",
+                    amount: amt,
+                    balance_after: dst_next,
+                    reason: format!("Quasar TransferByOwner from {}", src_owner.raw_id()),
+                    meta,
+                });
+                Ok((src_next, dst_next))
             })?;
+
+            let set_owner = |b: pb::ProtoBuilder, owner: WalletOwnerId| match owner {
+                WalletOwnerId::Character(id) => b.set("character.sequential", id as u32),
+                WalletOwnerId::Corporation(id) => b.set("corporation.sequential", id as u32),
+            };
             match pb::message("eve.isk.wallet.api.GrantCommanded")
                 .set("from_wallet_owner", true)
-                .set_with("amount", |a| a.set("units", amount.max(0)).set("nanos", 0i32))
+                .set_with("transfer_from", |o| set_owner(o, src_owner))
+                .set_with("transfer_to", |o| set_owner(o, dst_owner))
+                .set_with("amount", |a| a.set("units", units).set("nanos", nanos))
+                .set("entry_type.sequential", ref_type_id as u32)
                 .to_any()
             {
-                Ok(notice) => isk_notices
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((NoticeScope::Character(caller as u32), notice)),
+                Ok(notice) => {
+                    let mut guard = isk_notices.write().unwrap_or_else(|e| e.into_inner());
+                    let scope_of = |owner: WalletOwnerId| match owner {
+                        WalletOwnerId::Character(id) => NoticeScope::Character(id as u32),
+                        WalletOwnerId::Corporation(id) => NoticeScope::Corporation(id as u32),
+                    };
+                    guard.push((scope_of(src_owner), notice.clone()));
+                    guard.push((scope_of(dst_owner), notice));
+                }
                 Err(e) => tracing::warn!(
-                    character_id = caller,
+                    src = src_owner.raw_id(),
+                    dst = dst_owner.raw_id(),
                     error = %e,
                     "failed to encode GrantCommanded notice"
                 ),
+            }
+            let sink = isk_macho_sink
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .cloned();
+            if let Some(sink) = sink {
+                let emit_acct = |owner: WalletOwnerId, bal: IskCents| match owner {
+                    WalletOwnerId::Character(id) => sink(
+                        NotificationTarget::Character(id),
+                        "OnAccountChange",
+                        "charid",
+                        vec![
+                            PyRep::String("cash".into()),
+                            PyRep::Integer(id),
+                            PyRep::Real(bal.to_wire_f64()),
+                        ],
+                    ),
+                    WalletOwnerId::Corporation(id) => sink(
+                        NotificationTarget::Corporation(id),
+                        "OnAccountChange",
+                        "corpid",
+                        vec![
+                            PyRep::String("cash".into()),
+                            PyRep::Integer(id),
+                            PyRep::Real(bal.to_wire_f64()),
+                        ],
+                    ),
+                };
+                emit_acct(src_owner, src_bal);
+                emit_acct(dst_owner, dst_bal);
             }
             pb::message("eve.isk.wallet.api.TransferByOwnerResponse")
                 .to_any()
@@ -1219,30 +1585,74 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 24. eve.localization.message.api.GetLocalizedTextRequest
+    let sde_loc_msg = Arc::clone(&sde);
     router.register_handler(
         "eve.localization.message.api.GetLocalizedTextRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let seq = match dyn_msg.get(1) {
-                Some(DynamicValue::Message(m)) => match m.get(1) {
-                    Some(DynamicValue::Uint32(n)) => *n as u64,
-                    Some(DynamicValue::Uint64(n)) => *n,
-                    _ => 1,
-                },
-                _ => 1,
+            let seq = extract_u64_from_field(dyn_msg, 1);
+            let Some(msg_id) = u32::try_from(seq).ok().filter(|&v| v > 0) else {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Missing or invalid localization message ID".into(),
+                ));
             };
+            let text = sde_loc_msg
+                .localized_message_en_us(msg_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("Localization message {msg_id} not found")))?;
             pb::message("eve.localization.message.api.GetLocalizedTextResponse")
-                .set("text", format!("LocalizedText#{seq}"))
+                .set("text", &text)
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     // 25. eve.localization.cerberus.api.GetLocalizedTextRequest
+    let sde_loc_cerb = Arc::clone(&sde);
     router.register_handler(
         "eve.localization.cerberus.api.GetLocalizedTextRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let Some(DynamicValue::Message(fmt_msg)) = dyn_msg.get(1) else {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Missing Cerberus FormattedMessage payload".into(),
+                ));
+            };
+            let msg_id = fmt_msg
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::Message(id_msg) => id_msg.get(1).and_then(parse_dynamic_u64),
+                    other => parse_dynamic_u64(other),
+                })
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
+                .ok_or_else(|| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        "Missing or invalid Cerberus message identifier".into(),
+                    )
+                })?;
+            let mut text = sde_loc_cerb
+                .localized_message_en_us(msg_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("Localization message {msg_id} not found")))?;
+            match fmt_msg.get(2) {
+                Some(DynamicValue::Repeated(items)) => {
+                    for item in items {
+                        if let DynamicValue::Message(param) = item {
+                            if let Some((key, val)) = parse_cerberus_parameter_value(param) {
+                                text = text.replace(&format!("{{{key}}}"), &val);
+                            }
+                        }
+                    }
+                }
+                Some(DynamicValue::Message(param)) => {
+                    if let Some((key, val)) = parse_cerberus_parameter_value(param) {
+                        text = text.replace(&format!("{{{key}}}"), &val);
+                    }
+                }
+                _ => {}
+            }
             pb::message("eve.localization.cerberus.api.GetLocalizedTextResponse")
-                .set("text", "CerberusLocalizedText")
+                .set("text", &text)
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
@@ -1259,29 +1669,73 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 27. eve.id.api.GetRequest & GetByUserRequest
+    let db_id_api = Arc::clone(&db);
     router.register_handler(
         "eve.id.api.GetRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as i32;
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_uid = ctx
+                .effective_user_id()
+                .filter(|&v| v > 0)
+                .map(|v| v as u64)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authenticated user session required".into()))?;
+            let target_uid = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(id_msg)) => match id_msg.get(1) {
+                    Some(DynamicValue::Bytes(raw)) if !raw.is_empty() => std::str::from_utf8(raw)
+                        .ok()
+                        .and_then(|s| s.strip_prefix("usr-"))
+                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                        .filter(|&u| u > 0)
+                        .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid EVE ID UUID".into()))?,
+                    _ => caller_uid,
+                },
+                _ => caller_uid,
+            };
+            if target_uid != caller_uid && require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Not authorized to read another account's EVE ID".into()));
+            }
+            let exists = db_id_api.with_snapshot(|snap| {
+                snap.accounts.values().any(|a| a.user_id == target_uid)
+            });
+            if !exists {
+                return Err((STATUS_NOT_FOUND, format!("Account for user {target_uid} not found")));
+            }
             pb::message("eve.id.api.GetResponse")
-                .set_with("id", |attrs| attrs.add_with("users", |u| u.set("sequential", uid)))
+                .set_with("id", |attrs| {
+                    attrs.add_with("users", |u| u.set("sequential", target_uid as i32))
+                })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
+    let db_id_by_user = Arc::clone(&db);
     router.register_handler(
         "eve.id.api.GetByUserRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = match dyn_msg.get(1) {
-                Some(DynamicValue::Message(m)) => match m.get(1) {
-                    Some(DynamicValue::Uint32(n)) => *n as u64,
-                    Some(DynamicValue::Uint64(n)) => *n,
-                    _ => ctx.effective_user_id().unwrap_or(1) as u64,
-                },
-                _ => ctx.effective_user_id().unwrap_or(1) as u64,
+            let caller_uid = ctx.effective_user_id().filter(|&v| v > 0).map(|v| v as u64);
+            let is_admin = require_admin_role(ctx).is_ok();
+            let Some(default_uid) = caller_uid else {
+                return Err((STATUS_UNAUTHORIZED, "Authenticated user session required".into()));
             };
-            let uuid_str = format!("usr-{:016x}", uid);
+            let uid = if dyn_msg.get(1).is_some() {
+                let parsed = extract_u64_from_field(dyn_msg, 1);
+                if parsed == 0 {
+                    return Err((STATUS_BAD_REQUEST, "Invalid user ID".into()));
+                }
+                parsed
+            } else {
+                default_uid
+            };
+            if uid != default_uid && !is_admin {
+                return Err((STATUS_FORBIDDEN, "Not authorized to query another user's EVE ID".into()));
+            }
+            let exists = db_id_by_user.with_snapshot(|snap| {
+                snap.accounts.values().any(|a| a.user_id == uid)
+            });
+            if !exists {
+                return Err((STATUS_NOT_FOUND, format!("User {uid} not found")));
+            }
+            let uuid_str = format!("usr-{uid:016x}");
             pb::message("eve.id.api.GetByUserResponse")
                 .set("id.uuid", uuid_str.into_bytes())
                 .to_any()
@@ -1294,25 +1748,40 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.id.legacy.api.GetUserRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = match dyn_msg.get(1) {
-                Some(DynamicValue::Message(m)) => match m.get(1) {
-                    Some(DynamicValue::Uint32(n)) => *n as u64,
-                    Some(DynamicValue::Uint64(n)) => *n,
-                    _ => ctx.effective_user_id().unwrap_or(1) as u64,
-                },
-                _ => ctx.effective_user_id().unwrap_or(1) as u64,
+            let caller_uid = ctx.effective_user_id().filter(|&v| v > 0).map(|v| v as u64);
+            let is_admin = require_admin_role(ctx).is_ok();
+            if caller_uid.is_none() && !is_admin {
+                return Err((STATUS_UNAUTHORIZED, "Authenticated user session required".into()));
+            }
+            let uid = if dyn_msg.get(1).is_some() {
+                let parsed = extract_u64_from_field(dyn_msg, 1);
+                if parsed == 0 {
+                    return Err((STATUS_BAD_REQUEST, "Invalid user ID".into()));
+                }
+                parsed
+            } else {
+                caller_uid.ok_or_else(|| (STATUS_BAD_REQUEST, "Missing user ID".into()))?
             };
-            let username = db_id_legacy.with_snapshot(|snap| {
-                snap.accounts.values().find(|a| a.user_id == uid).map(|a| a.username.clone())
-            }).unwrap_or_else(|| format!("pilot_{uid}"));
+            if caller_uid != Some(uid) && !is_admin {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    "Not authorized to inspect another user's legacy account".into(),
+                ));
+            }
+            let username = db_id_legacy
+                .with_snapshot(|snap| {
+                    snap.accounts
+                        .values()
+                        .find(|a| a.user_id == uid)
+                        .map(|a| a.username.clone())
+                })
+                .ok_or_else(|| (STATUS_NOT_FOUND, format!("User {uid} not found")))?;
             pb::message("eve.id.legacy.api.GetUserResponse")
                 .set("username", &username)
-                .set_with("email", |email| {
-                    email
-                        .set("address", format!("{username}@ccpgames.test"))
-                        .set("verified", true)
-                })
+                .set("no_email", true)
                 .set("eula_agreed", true)
+                .set("no_full_name", true)
+                .set("no_birthdate", true)
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),

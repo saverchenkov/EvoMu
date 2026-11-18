@@ -705,29 +705,18 @@ pub fn handle(
                         "Raffle item must be a single unstacked, unlocked, empty item in NPC station hangar (not active ship)",
                     ));
                 }
-                let core_item_id = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == station_id
-                            && i.flag == InventoryFlag::Hangar
-                            && i.type_id == HYPERCORE_TYPE_ID
-                            && i.quantity >= required_cores
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    })
-                    .map(|i| i.item_id)
-                    .ok_or_else(|| {
-                        rpc_err(
-                            "InsufficientHyperCores",
-                            format!("Need {required_cores} HyperCores (type 52568) in station hangar"),
-                        )
-                    })?;
                 let mut core_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                 core_opts.required_location_id = Some(station_id);
                 core_opts.required_flag = Some(InventoryFlag::Hangar);
-                snap.consume_exact_item_quantity(core_item_id, required_cores, core_opts)
-                    .map_err(|e| rpc_err("InsufficientHyperCores", e.to_string()))?;
+                snap.consume_owner_items(HYPERCORE_TYPE_ID, required_cores, core_opts)
+                    .map_err(|e| {
+                        rpc_err(
+                            "InsufficientHyperCores",
+                            format!(
+                                "Need {required_cores} HyperCores (type 52568) in station hangar: {e}"
+                            ),
+                        )
+                    })?;
                 // Validate and transfer item into HyperNet escrow (-52_568), then seal with Locked flag
                 let mut escrow_spec = eve_db::TransferItemSpec::move_whole(
                     Some(char_id),

@@ -130,29 +130,31 @@ fn handle_get_journal(
     get_journal(ctx, session, args)
 }
 
-fn handle_get_entry_types() -> Result<PyRep, BridgeRpcError> {
-    use eve_db::ledger::ref_types;
-    use eve_proto::{DBRowDescriptor, DbColumnType};
+/// Canonical wallet journal entry types exposed to both Macho (`account.GetEntryTypes`)
+/// and Quasar (`eve.accounting.entrytype.GetAllRequest`).
+pub(crate) const JOURNAL_ENTRY_TYPES: &[(i32, &str, &str)] = &[
+    (0, "Undefined", "Undefined"),
+    (1, "Player Trading", "Direct trade between players"),
+    (eve_db::ledger::ref_types::MARKET_TRANSACTION, "Market Transaction", "Market buy or sell transaction"),
+    (eve_db::ledger::ref_types::PLAYER_DONATION, "Player Donation", "Direct ISK transfer between players"),
+    (17, "Bounty Prize", "NPC bounty payout"),
+    (eve_db::ledger::ref_types::INSURANCE, "Insurance", "Insurance payout"),
+    (33, "Agent Mission Reward", "Agent mission reward"),
+    (34, "Agent Mission Time Bonus Reward", "Agent mission time bonus reward"),
+    (eve_db::ledger::ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, "Corporation Account Withdrawal", "Corporation wallet transfer"),
+    (eve_db::ledger::ref_types::MARKET_ESCROW, "Market Escrow", "Market order buy escrow"),
+    (eve_db::ledger::ref_types::BROKER_FEE, "Brokers Fee", "Market broker fee"),
+    (eve_db::ledger::ref_types::TRANSACTION_TAX, "Transaction Tax", "Market sales tax"),
+    (56, "Manufacturing", "Industry job installation and facility fee"),
+    (eve_db::ledger::ref_types::CONTRACT_COLLATERAL, "Contract Collateral", "Contract courier collateral"),
+    (eve_db::ledger::ref_types::CONTRACT_REWARD, "Contract Reward", "Contract courier reward"),
+    (eve_db::ledger::ref_types::CONTRACT_PRICE, "Contract Price", "Contract item exchange price"),
+    (eve_db::ledger::ref_types::CONTRACT_BROKERS_FEE, "Contract Brokers Fee", "Contract broker fee"),
+    (85, "Bounty Prizes", "Solar system bounty prize payout"),
+];
 
-    const ENTRY_TYPES: &[(i32, &str, &str)] = &[
-        (0, "Undefined", "Undefined"),
-        (1, "Player Trading", "Direct trade between players"),
-        (ref_types::MARKET_TRANSACTION, "Market Transaction", "Market buy or sell transaction"),
-        (ref_types::PLAYER_DONATION, "Player Donation", "Direct ISK transfer between players"),
-        (17, "Bounty Prize", "NPC bounty payout"),
-        (ref_types::INSURANCE, "Insurance", "Insurance payout"),
-        (33, "Agent Mission Reward", "Agent mission reward"),
-        (34, "Agent Mission Time Bonus Reward", "Agent mission time bonus reward"),
-        (ref_types::CORPORATION_ACCOUNT_WITHDRAWAL, "Corporation Account Withdrawal", "Corporation wallet transfer"),
-        (ref_types::MARKET_ESCROW, "Market Escrow", "Market order buy escrow"),
-        (ref_types::BROKER_FEE, "Brokers Fee", "Market broker fee"),
-        (ref_types::TRANSACTION_TAX, "Transaction Tax", "Market sales tax"),
-        (ref_types::CONTRACT_COLLATERAL, "Contract Collateral", "Contract courier collateral"),
-        (ref_types::CONTRACT_REWARD, "Contract Reward", "Contract courier reward"),
-        (ref_types::CONTRACT_PRICE, "Contract Price", "Contract item exchange price"),
-        (ref_types::CONTRACT_BROKERS_FEE, "Contract Brokers Fee", "Contract broker fee"),
-        (85, "Bounty Prizes", "Solar system bounty prize payout"),
-    ];
+fn handle_get_entry_types() -> Result<PyRep, BridgeRpcError> {
+    use eve_proto::{DBRowDescriptor, DbColumnType};
 
     let descriptor = DBRowDescriptor::new([
         ("entryTypeID", DbColumnType::I4),
@@ -160,7 +162,7 @@ fn handle_get_entry_types() -> Result<PyRep, BridgeRpcError> {
         ("entryTypeNameID", DbColumnType::I4),
         ("description", DbColumnType::WStr),
     ]);
-    let rows = ENTRY_TYPES
+    let rows = JOURNAL_ENTRY_TYPES
         .iter()
         .map(|&(id, name, desc)| {
             vec![

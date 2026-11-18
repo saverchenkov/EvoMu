@@ -927,6 +927,7 @@ fn skin_get(
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    sweep_expired_skin_listings(st, ctx.now_unix());
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
     let rec = st
