@@ -5007,6 +5007,8 @@ class PlaytesterBugOracle:
         "cantfittomany",
         "shipoutofboardingrange",
         "lancefiringlockactive",
+        "weaponstimeractive",
+        "notenoughspecialbayspace",
         "modulealreadyactive",
         "moduleinreactivationdelay",
         "cantdockwhilemoduleactive",

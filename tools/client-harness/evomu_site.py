@@ -1120,6 +1120,7 @@ def _make_hangar_clear_scene_guard(orig_fn):
     def _wrapped_clear_scene(self, *args, **kwargs):
         _install_modular_hangar_teardown_guard()
         _install_modular_capital_hangar_guard()
+        _install_modular_hangar_camera_guard()
         _install_base_hangar_behaviour_guard()
         try:
             return orig_fn(self, *args, **kwargs)
@@ -1129,6 +1130,8 @@ def _make_hangar_clear_scene_guard(orig_fn):
             raise
         finally:
             self._evomu_hangar_gen = getattr(self, "_evomu_hangar_gen", 0) + 1
+            self._evomu_ship_retry_pending = False
+            self._evomu_ship_retry_count = 0
 
     _wrapped_clear_scene._evomu_camera_guard = True
     return _wrapped_clear_scene
@@ -1371,10 +1374,13 @@ def _install_hangar_view_teardown_guard():
     for method_name, abort_replace, check_after in _HANGAR_VIEW_TEARDOWN_METHODS:
         orig_fn = getattr(hangar_cls, method_name, None)
         if callable(orig_fn) and not getattr(orig_fn, "_evomu_camera_guard", False):
+            wrapped_fn = orig_fn
+            if method_name == "_ReplaceExistingShipModelModular":
+                wrapped_fn = _make_modular_replace_guard(wrapped_fn)
             setattr(
                 hangar_cls,
                 method_name,
-                _make_hangar_teardown_guard(orig_fn, abort_replace=abort_replace, check_after=check_after),
+                _make_hangar_teardown_guard(wrapped_fn, abort_replace=abort_replace, check_after=check_after),
             )
 
     for method_name in _HANGAR_VIEW_UNDOCK_METHODS:
@@ -1382,16 +1388,148 @@ def _install_hangar_view_teardown_guard():
 
     _wrap_cls_method_if_present(hangar_cls, "OnActiveShipSkinChange", _make_hangar_skin_change_guard)
     _wrap_cls_method_if_present(hangar_cls, "ReloadView", _make_hangar_reload_guard)
+    _install_modular_hangar_camera_guard()
 
     _HOOKED_CAMERA_GUARD_TARGETS.add("hangarView")
     return True
 
 
 class _NullHangarCamera(object):
-    """Minimal stand-in when ModularHangarShipBehaviour.GetCamera() returns None during teardown (#1218)."""
+    """Minimal stand-in when hangar GetCamera() returns None during teardown or placement (#1218, #1318)."""
 
     def ClearRefs(self):
         return None
+
+    def AnimEnterHangar(self, *args, **kwargs):
+        return None
+
+    def SetShip(self, *args, **kwargs):
+        return None
+
+    def SetCurrentShipSizeClass(self, *args, **kwargs):
+        return None
+
+    def SetIsChangingSkin(self, *args, **kwargs):
+        return None
+
+    def IsPointWithinViewAngle(self, *args, **kwargs):
+        return True
+
+
+def _begin_null_camera_override(obj):
+    get_cam = getattr(obj, "GetCamera", None)
+    cam_val = None
+    override_cam = False
+    if callable(get_cam):
+        try:
+            cam_val = get_cam()
+        except Exception:
+            cam_val = None
+        if cam_val is None:
+            obj.GetCamera = lambda: _NullHangarCamera()
+            override_cam = True
+    return override_cam, cam_val
+
+
+def _end_null_camera_override(obj, override_cam):
+    if override_cam and isinstance(getattr(obj, "__dict__", None), dict):
+        obj.__dict__.pop("GetCamera", None)
+
+
+def _maybe_populate_empty_modular_docks(view):
+    """Ensure docks exist after scene application when background LoadView deferred them (#1318)."""
+    sb = getattr(view, "shipBehaviour", None)
+    if sb is None:
+        return
+    small_docks = getattr(sb, "smallDocks", None)
+    big_docks = getattr(sb, "bigDocks", None)
+    if small_docks is None or big_docks is None or small_docks or big_docks:
+        return
+    hangar_model = getattr(view, "activeHangarModel", None)
+    hangar_scene = getattr(view, "activeHangarScene", None)
+    set_anchor = getattr(sb, "SetAnchorPoint", None)
+    if hangar_model is not None and hangar_scene is not None and callable(set_anchor):
+        set_anchor(hangar_model, hangar_scene)
+
+
+def _ensure_hangar_faded_in(view):
+    if getattr(view, "_starting_boarding_moment", False):
+        return
+    if getattr(view, "_retriggerableFadeFromBlackTasklet", None) is not None:
+        return
+    fade_fn = getattr(view, "_FadeFromBlackHandler", None)
+    if callable(fade_fn):
+        fade_fn(0.5, False)
+
+
+def _schedule_modular_ship_retry(view, event_type, item_id, type_id):
+    """Schedule a bounded one-shot retry if modular PlaceShip left activeShipModel as None (#1318)."""
+    if not item_id or not type_id:
+        return
+    if getattr(view, "_evomu_ship_retry_count", 0) >= 2 or getattr(view, "_evomu_ship_retry_pending", False):
+        return
+    hangar_mod = sys.modules.get("eve.client.script.ui.view.hangarView")
+    replace_update = getattr(hangar_mod, "REPLACE_UPDATE", None) if hangar_mod is not None else None
+    replace_switch = getattr(hangar_mod, "REPLACE_SWITCHSHIPS", None) if hangar_mod is not None else None
+    allowed = tuple(val for val in (replace_update, replace_switch) if val is not None)
+    if allowed and event_type not in allowed:
+        return
+    uthread2 = sys.modules.get("uthread2")
+    delay_fn = getattr(uthread2, "call_after_simtime_delay", None) if uthread2 is not None else None
+    if not callable(delay_fn):
+        return
+
+    def _retry_place_ship():
+        view._evomu_ship_retry_pending = False
+        if _is_hangar_view_stale(view) or _is_hangar_session_undocked():
+            return None
+        if getattr(view, "activeShipModel", None) is not None:
+            view._evomu_ship_retry_count = 0
+            return None
+        get_item = getattr(view, "GetActiveShipItemID", None)
+        curr_item = get_item() if callable(get_item) else item_id
+        if not curr_item or curr_item != item_id:
+            return None
+        view._evomu_ship_retry_count = getattr(view, "_evomu_ship_retry_count", 0) + 1
+        replace_fn = getattr(view, "ReplaceExistingShipModel", None)
+        if callable(replace_fn):
+            return replace_fn(event_type, fade=False, skipAnimation=True)
+        return None
+
+    view._evomu_ship_retry_pending = True
+    try:
+        delay_fn(_retry_place_ship, 0.5)
+    except Exception:
+        view._evomu_ship_retry_pending = False
+
+
+def _make_modular_replace_guard(orig_fn):
+    """Guard HangarView._ReplaceExistingShipModelModular against unready docks/camera and fade-black hangs (#1318)."""
+    def _wrapped_modular_replace(self, *args, **kwargs):
+        _install_modular_hangar_camera_guard()
+        _maybe_populate_empty_modular_docks(self)
+        override_cam, _ = _begin_null_camera_override(self)
+        try:
+            res = orig_fn(self, *args, **kwargs)
+        finally:
+            _end_null_camera_override(self, override_cam)
+        if not _is_hangar_view_stale(self) and not _is_hangar_session_undocked():
+            if getattr(self, "activeShipModel", None) is not None:
+                self._evomu_ship_retry_count = 0
+            else:
+                _ensure_hangar_faded_in(self)
+                event_type = args[0] if args else kwargs.get("eventType")
+                item_id = args[1] if len(args) > 1 else kwargs.get("itemID")
+                type_id = args[2] if len(args) > 2 else kwargs.get("typeID")
+                if not item_id and callable(getattr(self, "GetActiveShipItemID", None)):
+                    item_id = self.GetActiveShipItemID()
+                if not type_id and callable(getattr(self, "GetActiveShipTypeID", None)):
+                    type_id = self.GetActiveShipTypeID()
+                _schedule_modular_ship_retry(self, event_type, item_id, type_id)
+        return res
+
+    _wrapped_modular_replace._evomu_camera_guard = True
+    return _wrapped_modular_replace
 
 
 _CONTAINER_INACCESSIBLE_ERROR_KEYS = (
@@ -1772,18 +1910,26 @@ def _wrap_cls_method_if_present(cls, method_name, wrapper_factory):
     return False
 
 
-def _install_cls_method_guard(target_key, mod_name, cls_name, method_name, wrapper_factory):
-    """Wrap ``mod.cls.method_name`` once per session using ``wrapper_factory``."""
+def _wrap_cls_methods_table(target_key, mod_name, cls_name, method_specs):
+    """Wrap each listed ``method_name`` on ``mod.cls`` once per session."""
     if target_key in _HOOKED_CAMERA_GUARD_TARGETS:
         return False
     mod = sys.modules.get(mod_name)
     cls = getattr(mod, cls_name, None) if mod is not None else None
     if cls is None or not (isinstance(cls, type) or hasattr(cls, "__bases__")):
         return False
-    if _wrap_cls_method_if_present(cls, method_name, wrapper_factory):
+    hooked = False
+    for method_name, wrapper_factory in method_specs:
+        if _wrap_cls_method_if_present(cls, method_name, wrapper_factory):
+            hooked = True
+    if hooked:
         _HOOKED_CAMERA_GUARD_TARGETS.add(target_key)
-        return True
-    return False
+    return hooked
+
+
+def _install_cls_method_guard(target_key, mod_name, cls_name, method_name, wrapper_factory):
+    """Wrap ``mod.cls.method_name`` once per session using ``wrapper_factory``."""
+    return _wrap_cls_methods_table(target_key, mod_name, cls_name, ((method_name, wrapper_factory),))
 
 
 def _install_base_hangar_behaviour_guard():
@@ -1828,17 +1974,7 @@ def _install_modular_hangar_teardown_guard():
                         self.smallDocks = []
                     if getattr(self, "bigDocks", None) is None:
                         self.bigDocks = []
-                    override_cam = False
-                    get_cam = getattr(self, "GetCamera", None)
-                    cam_val = None
-                    if callable(get_cam):
-                        try:
-                            cam_val = get_cam()
-                        except Exception:
-                            cam_val = None
-                        if cam_val is None:
-                            self.GetCamera = lambda: _NullHangarCamera()
-                            override_cam = True
+                    override_cam, cam_val = _begin_null_camera_override(self)
                     try:
                         return orig_fn(self)
                     except AttributeError as exc:
@@ -1846,8 +1982,7 @@ def _install_modular_hangar_teardown_guard():
                             return None
                         raise
                     finally:
-                        if override_cam and isinstance(getattr(self, "__dict__", None), dict):
-                            self.__dict__.pop("GetCamera", None)
+                        _end_null_camera_override(self, override_cam)
 
                 _wrapped_clean_scene._evomu_camera_guard = True
                 return _wrapped_clean_scene
@@ -2060,14 +2195,183 @@ def _install_sensor_suite_gfx_guard():
     return hooked
 
 
+def _noop_camera_method(self, *args, **kwargs):
+    return None
+
+
+def _make_none_model_guard(orig_fn, fallback_fn):
+    """Return ``fallback_fn`` when ``self.model is None``, otherwise run ``orig_fn`` unmasked (#1318)."""
+    def _wrapped_none_model_method(self, *args, **kwargs):
+        if getattr(self, "model", None) is None:
+            return fallback_fn(self, *args, **kwargs)
+        return orig_fn(self, *args, **kwargs)
+
+    _wrapped_none_model_method._evomu_camera_guard = True
+    return _wrapped_none_model_method
+
+
+def _safe_modular_zoom_point(cam):
+    get_zoom_pt = getattr(cam, "GetZoomToPoint", None)
+    if callable(get_zoom_pt):
+        try:
+            zoom_pt = get_zoom_pt()
+            if _is_finite_safe_vec3(zoom_pt):
+                return _vec3_tuple(zoom_pt, (0.0, 0.0, 0.0))
+        except Exception:
+            pass
+    at_pos = getattr(cam, "_atPosition", getattr(cam, "atPosition", None))
+    return _vec3_tuple(at_pos, (0.0, 0.0, 0.0)) if _is_finite_safe_vec3(at_pos) else (0.0, 0.0, 0.0)
+
+
+def _safe_modular_target_point(cam, *args, **kwargs):
+    zoom_pt = _safe_modular_zoom_point(cam)
+    eye_pos = None
+    get_eye_pos = getattr(cam, "GetEyePosition", None)
+    if callable(get_eye_pos):
+        try:
+            eye_pos = get_eye_pos()
+        except Exception:
+            eye_pos = None
+    if eye_pos is None:
+        eye_pos = getattr(cam, "_eyePosition", None)
+    if _is_finite_safe_vec3(eye_pos):
+        eye_tuple = _vec3_tuple(eye_pos, (0.0, 500.0, 1000.0))
+        dist_sq = (
+            (eye_tuple[0] - zoom_pt[0]) ** 2
+            + (eye_tuple[1] - zoom_pt[1]) ** 2
+            + (eye_tuple[2] - zoom_pt[2]) ** 2
+        )
+        if dist_sq > 1e-3:
+            return eye_tuple
+    return (zoom_pt[0], zoom_pt[1] + 500.0, zoom_pt[2] + 1000.0)
+
+
+def _safe_modular_zoom_constants(cam, *args, **kwargs):
+    if getattr(cam, "currentShipSizeClass", 0) == 2:
+        return (1450.0, 250.0, 500.0)
+    return (385.0, 10.0, 120.0)
+
+
+def _make_modular_anim_enter_guard(orig_fn):
+    """Handle ModularHangarCamera.AnimEnterHangar(None, ...) without crashing or scheduling None AllignCamera (#1318)."""
+    def _wrapped_anim_enter_hangar(self, *args, **kwargs):
+        model = args[0] if args else kwargs.get("model")
+        if model is None:
+            gametime_mod = sys.modules.get("gametime")
+            get_sim_time = getattr(gametime_mod, "GetSimTime", None) if gametime_mod is not None else None
+            if callable(get_sim_time):
+                self.hangarEntryTime = get_sim_time()
+            self.model = None
+            calc_focal = getattr(self, "_CalculateFocalPoint", None)
+            self.atPosition = calc_focal(None) if callable(calc_focal) else (0.0, 0.0, 0.0)
+            self.changingShip = False
+            target = (
+                self.CalculateTargetPoint()
+                if callable(getattr(self, "CalculateTargetPoint", None))
+                else _safe_modular_target_point(self)
+            )
+            set_eye = getattr(self, "SetEyePosition", None)
+            if callable(set_eye):
+                set_eye(target)
+            self.yaw = 0
+            self.pitch = 0
+            return None
+        return orig_fn(self, *args, **kwargs)
+
+    _wrapped_anim_enter_hangar._evomu_camera_guard = True
+    return _wrapped_anim_enter_hangar
+
+
+def _safe_capital_orbit_target(cam, *args, **kwargs):
+    orbit_target = getattr(cam, "orbitTarget", None)
+    if _is_finite_safe_vec3(orbit_target):
+        return _vec3_tuple(orbit_target, (3150.0, 2220.0, 16500.0))
+    return (3150.0, 2220.0, 16500.0)
+
+
+def _make_capital_anim_enter_guard(orig_fn):
+    """Guard ModularHangarCapitalCamera.AnimEnterHangar against None ship models (#1318)."""
+    def _wrapped_capital_anim_enter(self, *args, **kwargs):
+        model = args[0] if args else kwargs.get("model")
+        if model is None or getattr(self, "model", None) is None:
+            target = _safe_capital_orbit_target(self)
+            self.orbitTarget = target
+            set_eye = getattr(self, "SetEyePosition", None)
+            if callable(set_eye):
+                set_eye(target)
+            return None
+        return orig_fn(self, *args, **kwargs)
+
+    _wrapped_capital_anim_enter._evomu_camera_guard = True
+    return _wrapped_capital_anim_enter
+
+
+def _make_capital_start_locations_guard(orig_fn):
+    """Downgrade wasOrbiting when model is None so _configureCameraStartLocations skips modelWorldPosition (#1318)."""
+    def _wrapped_configure_start_locations(self, typeID, wasOrbiting=False, *args, **kwargs):
+        if getattr(self, "model", None) is None and (wasOrbiting or kwargs.get("wasOrbiting")):
+            return orig_fn(self, typeID, False)
+        return orig_fn(self, typeID, wasOrbiting, *args, **kwargs)
+
+    _wrapped_configure_start_locations._evomu_camera_guard = True
+    return _wrapped_configure_start_locations
+
+
+def _make_capital_orbit_thread_guard(orig_fn):
+    """Exit CapitalOrbitUpdateThread cleanly if self.model is None while not lerping (#1318)."""
+    def _wrapped_capital_orbit_thread(self, *args, **kwargs):
+        if getattr(self, "model", None) is None and not getattr(self, "lerpingIntoPosition", True):
+            self.orbitUpdateThread = None
+            return None
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except AttributeError:
+            if getattr(self, "model", None) is None:
+                self.orbitUpdateThread = None
+                return None
+            raise
+
+    _wrapped_capital_orbit_thread._evomu_camera_guard = True
+    return _wrapped_capital_orbit_thread
+
+
+def _install_modular_hangar_camera_guard():
+    """Guard ModularHangarCamera and ModularHangarCapitalCamera against None ship models (#1318)."""
+    hooked_std = _wrap_cls_methods_table(
+        "modularHangarCamera",
+        "eve.client.script.ui.camera.modularHangarCamera",
+        "ModularHangarCamera",
+        (
+            ("AnimEnterHangar", _make_modular_anim_enter_guard),
+            ("CalculateTargetPoint", lambda fn: _make_none_model_guard(fn, _safe_modular_target_point)),
+            ("GetSizeDependantZoomConstants", lambda fn: _make_none_model_guard(fn, _safe_modular_zoom_constants)),
+            ("_updateShipChangeLocations", lambda fn: _make_none_model_guard(fn, _noop_camera_method)),
+        ),
+    )
+    hooked_cap = _wrap_cls_methods_table(
+        "modularHangarCapitalCamera",
+        "eve.client.script.ui.camera.modularHangarCapitalCamera",
+        "ModularHangarCapitalCamera",
+        (
+            ("AnimEnterHangar", _make_capital_anim_enter_guard),
+            ("CalculateOrbitTarget", lambda fn: _make_none_model_guard(fn, _safe_capital_orbit_target)),
+            ("Orbit", lambda fn: _make_none_model_guard(fn, _noop_camera_method)),
+            ("_configureCameraStartLocations", _make_capital_start_locations_guard),
+            ("CapitalOrbitUpdateThread", _make_capital_orbit_thread_guard),
+        ),
+    )
+    return hooked_std or hooked_cap
+
+
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318)."""
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
     _install_hangar_view_teardown_guard()
     _install_base_hangar_behaviour_guard()
     _install_modular_hangar_teardown_guard()
     _install_modular_capital_hangar_guard()
+    _install_modular_hangar_camera_guard()
     _install_wreck_rotation_guard()
     _install_slots_container_sync_guard()
     _install_sensor_suite_gfx_guard()
