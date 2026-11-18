@@ -31,6 +31,7 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         evomu_site._HOOKED_CAMERA_GUARD_TARGETS.difference_update({
             "invWindow",
             "invContainer",
+            "invCacheContainer",
             "fittingSvc",
             "fittingWarnings",
             "warningIconCont",
@@ -45,6 +46,7 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "slotsContainer",
             "sensorGfxHandler",
             "skillPlanPanel",
+            "probeTracker",
             "viewStateSvc",
         })
 
@@ -1999,6 +2001,153 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         for sig in fx2.all_signals:
             self.assertEqual(len(sig), 0)
             self.assertNotIn(pre_live_2, sig._methods)
+
+    def test_1333_inv_cache_container_list_handles_none_moniker_and_late_meta_hook(self):
+        inv_cache_mod = types.ModuleType("eve.client.script.environment.invCache")
+
+        class invCacheContainer(object):
+            def __init__(self, moniker=None):
+                self.moniker = moniker
+
+            def List(self, flag=None):
+                return self.moniker.List(flag=flag)
+
+        inv_cache_mod.invCacheContainer = invCacheContainer
+
+        # Late import hook: _EvomuMetaHook schedules _install_inventory_transition_guard when invCache imports.
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        evomu_site._EvomuMetaHook().find_module("eve.client.script.environment.invCache")
+        self.assertEqual(scheduled, [evomu_site._install_inventory_transition_guard])
+
+        sys.modules["eve.client.script.environment.invCache"] = inv_cache_mod
+        # Even if invWindow/invContainer were already marked hooked, invCacheContainer installs independently.
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS.update({"invWindow", "invContainer"})
+        self.assertTrue(scheduled[0]())
+        self.assertIn("invCacheContainer", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertTrue(getattr(invCacheContainer.List, "_evomu_camera_guard", False))
+
+        # moniker is None (docking teardown) -> returns [] safely without AttributeError.
+        torn_down = invCacheContainer(moniker=None)
+        self.assertEqual(torn_down.List(flag=5), [])
+        self.assertEqual(torn_down.List(), [])
+
+        # Live moniker delegates cleanly with positional/keyword args.
+        seen_flags = []
+
+        class _FakeMoniker(object):
+            def List(self, flag=None):
+                seen_flags.append(flag)
+                return ["cargo_item"]
+
+        live = invCacheContainer(moniker=_FakeMoniker())
+        self.assertEqual(live.List(flag=5), ["cargo_item"])
+        self.assertEqual(seen_flags, [5])
+
+        # Concurrent teardown mid-call that nulls self.moniker before AttributeError also returns [].
+        class _RacyMoniker(object):
+            def __init__(self, owner):
+                self._owner = owner
+
+            def List(self, flag=None):
+                self._owner.moniker = None
+                return getattr(self._owner.moniker, "List")(flag=flag)
+
+        racy = invCacheContainer()
+        racy.moniker = _RacyMoniker(racy)
+        self.assertEqual(racy.List(flag=5), [])
+
+        # Negative assertion: unrelated AttributeError with non-None moniker is NOT swallowed.
+        class _BrokenMoniker(object):
+            def List(self, flag=None):
+                raise AttributeError("unexpected_moniker_attr")
+
+        broken = invCacheContainer(moniker=_BrokenMoniker())
+        with self.assertRaises(AttributeError):
+            broken.List(flag=5)
+
+    def test_1334_probe_tracker_guards_unknown_probe_ids_and_late_meta_hook(self):
+        pt_mod = types.ModuleType("probescanning.probeTracker")
+        raise_internal_keyerror = [False]
+        idle_calls = []
+
+        class ProbeTracker(object):
+            def __init__(self):
+                self.probeData = {}
+
+            def SetProbeDestination(self, probeID, location):
+                if raise_internal_keyerror[0]:
+                    raise KeyError("missing_internal_field")
+                self.probeData[probeID]["destination"] = location
+
+            def UpdateProbeState(self, probeID, state, *args, **kwargs):
+                if raise_internal_keyerror[0]:
+                    raise KeyError("missing_internal_field")
+                self.probeData[probeID]["state"] = state
+
+            def OnProbesIdle(self, probes):
+                idle_calls.append([getattr(p, "probeID", p.get("probeID") if isinstance(p, dict) else p) for p in probes])
+                for p in probes:
+                    pid = p["probeID"] if isinstance(p, dict) else p.probeID
+                    dest = p["destination"] if isinstance(p, dict) else p.destination
+                    self.SetProbeDestination(pid, dest)
+
+        pt_mod.ProbeTracker = ProbeTracker
+
+        # Late import via _EvomuMetaHook schedules _install_probe_tracker_guard.
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        evomu_site._EvomuMetaHook().find_module("probescanning.probeTracker")
+        self.assertEqual(scheduled, [evomu_site._install_probe_tracker_guard])
+
+        sys.modules["probescanning.probeTracker"] = pt_mod
+        self.assertTrue(scheduled[0]())
+        self.assertIn("probeTracker", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertFalse(evomu_site._install_probe_tracker_guard())
+
+        tracker = ProbeTracker()
+        tracker.probeData[101] = {"destination": (0.0, 0.0, 0.0), "state": 4}
+
+        # Unknown probeIDs are safely skipped in SetProbeDestination / UpdateProbeState / OnProbesIdle.
+        self.assertIsNone(tracker.SetProbeDestination(1897707828, (1.0, 2.0, 3.0)))
+        self.assertIsNone(tracker.SetProbeDestination(probeID=1897707828, location=(1.0, 2.0, 3.0)))
+        self.assertIsNone(tracker.UpdateProbeState(1897707828, 1))
+        self.assertIsNone(tracker.UpdateProbeState(probeID=1897707828, state=1))
+        self.assertNotIn(1897707828, tracker.probeData)
+
+        # Mixed OnProbesIdle filters out unknown probeID while delivering known probe 101.
+        tracker.OnProbesIdle([
+            types.SimpleNamespace(probeID=1897707828, destination=(9.0, 9.0, 9.0)),
+            types.SimpleNamespace(probeID=101, destination=(10.0, 20.0, 30.0)),
+            {"probeID": 999999, "destination": (4.0, 5.0, 6.0)},
+        ])
+        self.assertEqual(tracker.probeData[101]["destination"], (10.0, 20.0, 30.0))
+        self.assertEqual(idle_calls[-1], [101])
+
+        # Known probeID still updates normally via UpdateProbeState & SetProbeDestination.
+        tracker.UpdateProbeState(101, 1)
+        self.assertEqual(tracker.probeData[101]["state"], 1)
+        tracker.SetProbeDestination(101, (11.0, 22.0, 33.0))
+        self.assertEqual(tracker.probeData[101]["destination"], (11.0, 22.0, 33.0))
+
+        # Empty/all-unknown tuple and probeData=None do not crash.
+        tracker.OnProbesIdle((types.SimpleNamespace(probeID=777, destination=(0.0, 0.0, 0.0)),))
+        self.assertEqual(idle_calls[-1], [])
+        tracker.probeData = None
+        self.assertIsNone(tracker.SetProbeDestination(101, (0.0, 0.0, 0.0)))
+        self.assertIsNone(tracker.UpdateProbeState(101, 1))
+        tracker.OnProbesIdle([types.SimpleNamespace(probeID=101, destination=(0.0, 0.0, 0.0))])
+        self.assertEqual(idle_calls[-1], [])
+
+        # Negative assertions: real internal KeyError on a known probe is NOT masked.
+        tracker.probeData = {101: {"destination": (0.0, 0.0, 0.0), "state": 1}}
+        raise_internal_keyerror[0] = True
+        with self.assertRaises(KeyError):
+            tracker.SetProbeDestination(101, (1.0, 1.0, 1.0))
+        with self.assertRaises(KeyError):
+            tracker.UpdateProbeState(101, 2)
+        with self.assertRaises(KeyError):
+            tracker.OnProbesIdle([types.SimpleNamespace(probeID=101, destination=(1.0, 1.0, 1.0))])
 
 
 if __name__ == "__main__":
