@@ -7,9 +7,11 @@ import importlib.util
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -119,6 +121,13 @@ class _FakeWorldState:
         self.fleet_leaves = 0
         self.board_history = []
         self.calls = []
+        self.sim_now = 1000.0
+        self.session_change_until = 0.0
+        self.in_dock_range_station = sess.stationid
+        self.structures = {}
+        self.unassembled_ships = set()
+        self.space_ships = set()
+        self.slash_cmds = []
 
     def _alloc(self):
         self.next_id += 1
@@ -150,6 +159,11 @@ class _FakeWorldState:
         if full in self.fail_methods:
             raise self.fail_methods[full]
 
+        if method_name == "ClearSessionTimer":
+            self.session_change_until = self.sim_now
+            self.sess.nextSessionChange = None
+            return True
+
         if method_name == "MachoBindObject":
             obj_id = args[0]
             call = args[1] if len(args) > 1 else None
@@ -175,6 +189,7 @@ class _FakeWorldState:
 
         if svc_name == "slash" and method_name == "SlashCmd":
             cmd = str(args[0])
+            self.slash_cmds.append(cmd)
             parts = cmd.split()
             if parts[0] == "/createitem":
                 tid = int(parts[1])
@@ -185,7 +200,9 @@ class _FakeWorldState:
             if parts[0] == "/spawnnpc":
                 return {"npcID": self._alloc()}
             if parts[0] == "/spawn":
-                return {"spawnedID": self._alloc()}
+                sid = self._alloc()
+                self.space_ships.add(sid)
+                return {"spawnedID": sid}
             if parts[0] == "/fit":
                 return {"itemID": self._alloc()}
             if parts[0] == "/load":
@@ -194,18 +211,66 @@ class _FakeWorldState:
                 dest = int(parts[1])
                 self.sess.stationid = None
                 self.sess.structureid = None
-                self.sess.solarsystemid = dest
-                self.sess.solarsystemid2 = dest
-                return {"solarSystemID": dest}
+                if 60000000 <= dest < 61000000:
+                    self.sess.solarsystemid = 30000142
+                    self.sess.solarsystemid2 = 30000142
+                    self.in_dock_range_station = dest
+                else:
+                    self.sess.solarsystemid = dest
+                    self.sess.solarsystemid2 = dest
+                    self.in_dock_range_station = None
+                return {"solarSystemID": self.sess.solarsystemid}
+            if parts[0] == "/structure" and len(parts) >= 4 and parts[1] == "state":
+                st_id = int(parts[2])
+                state_id = int(parts[3])
+                state_map = {
+                    1: "Unanchored",
+                    101: "Anchoring",
+                    110: "ShieldVulnerable",
+                    111: "ShieldReinforced",
+                    115: "Unanchoring",
+                }
+                if st_id in self.structures:
+                    self.structures[st_id]["state"] = state_map.get(state_id, "ShieldVulnerable")
+                return {"ok": True}
+            if parts[0] == "/upwelltimer":
+                targets = [int(parts[1])] if len(parts) > 1 else list(self.structures.keys())
+                for st_id in targets:
+                    st = self.structures.get(st_id)
+                    if not st:
+                        continue
+                    if st["state"] == "Unanchoring":
+                        self.structures.pop(st_id, None)
+                    elif st["state"] == "Anchoring":
+                        st["state"] = "ShieldVulnerable"
+                return {"ok": True}
+            if parts[0] == "/sessiontimer":
+                self.session_change_until = self.sim_now
+                self.sess.nextSessionChange = None
+                return {"ok": True}
             return {"ok": True}
 
         if svc_name == "ship":
             if method_name == "Undock":
+                prev_st = self.sess.stationid
                 self.sess.stationid = None
                 self.sess.solarsystemid = self.sess.solarsystemid2
+                self.in_dock_range_station = prev_st or 60003760
+                return True
+            if method_name == "AssembleShip":
+                raw = args[0] if args else []
+                ids = raw if isinstance(raw, (list, tuple, set)) else [raw]
+                for x in ids:
+                    self.unassembled_ships.discard(int(x))
                 return True
             if method_name == "Board":
                 sid = int(args[0])
+                if self.sess.stationid is None and sid not in self.space_ships:
+                    raise RuntimeError("MustBeDocked")
+                if self.sim_now < self.session_change_until:
+                    raise RuntimeError("SessionChangeInProgress")
+                if sid in self.unassembled_ships:
+                    raise RuntimeError("ShipNotAssembled")
                 self.sess.shipid = sid
                 self.board_history.append(sid)
                 return True
@@ -218,8 +283,12 @@ class _FakeWorldState:
 
         if svc_name == "stationSvc" and method_name == "Dock":
             sid = int(args[0])
+            if self.sess.stationid != sid and self.in_dock_range_station != sid:
+                raise RuntimeError("DockOutOfRange")
             self.sess.stationid = sid
+            self.sess.structureid = None
             self.sess.solarsystemid = None
+            self.in_dock_range_station = sid
             return True
 
         if svc_name == "beyonce" and method_name == "CmdStargateJump":
@@ -234,18 +303,32 @@ class _FakeWorldState:
             dest = gate_to_sys.get(int(args[0]), 30000142)
             self.sess.solarsystemid = dest
             self.sess.solarsystemid2 = dest
+            self.in_dock_range_station = None
             return True
 
         if svc_name == "corpRegistry":
             if method_name == "AddCorporation":
                 cid = 98000000 + (self._alloc() % 1000)
                 self.sess.corpid = cid
+                self.session_change_until = self.sim_now + 10.0
                 return {"corporationID": cid}
             if method_name == "CreateAlliance":
                 aid = 99000000 + (self._alloc() % 1000)
                 self.sess.allianceid = aid
+                self.session_change_until = self.sim_now + 10.0
                 return {"allianceID": aid}
             if method_name == "ResignFromCorp":
+                if self.sim_now < self.session_change_until:
+                    raise RuntimeError("SessionChangeInProgress")
+                if self.sess.stationid is None:
+                    raise RuntimeError("MustBeDocked")
+                active = [
+                    sid
+                    for sid, st in self.structures.items()
+                    if st["ownerCorpID"] == self.sess.corpid and st["state"] != "Destroyed"
+                ]
+                if active:
+                    raise RuntimeError("ActiveStructuresPreventClosure")
                 self.resigned_corps.append(self.sess.corpid)
                 self.sess.corpid = 1000167
                 self.sess.allianceid = None
@@ -263,18 +346,39 @@ class _FakeWorldState:
                 self.sess.fleetid = None
                 return True
 
+        if svc_name == "structureDirectory":
+            if method_name == "GetMyCorporationStructures":
+                return {
+                    sid: dict(st)
+                    for sid, st in self.structures.items()
+                    if st["ownerCorpID"] == self.sess.corpid and st["state"] != "Destroyed"
+                }
+
         if svc_name == "structureDeployment":
             if method_name == "Anchor":
                 st_id = int(args[0])
+                self.structures[st_id] = {
+                    "structureID": st_id,
+                    "corporationID": self.sess.corpid,
+                    "ownerCorpID": self.sess.corpid,
+                    "state": "Anchoring",
+                }
                 return {"structureID": st_id}
             if method_name == "Unanchor":
-                self.unanchored_structs.append(int(args[0]))
+                st_id = int(args[0])
+                st = self.structures.get(st_id)
+                if st is not None:
+                    if st["state"] not in ("ShieldVulnerable", "Anchored"):
+                        raise RuntimeError("WrongStructureState: %s" % st["state"])
+                    st["state"] = "Unanchoring"
+                self.unanchored_structs.append(st_id)
                 return True
 
         if svc_name == "structureDocking":
             if method_name == "Dock":
                 self.sess.structureid = int(args[0])
                 self.sess.solarsystemid = None
+                self.in_dock_range_station = None
                 return True
             if method_name == "Undock":
                 self.sess.structureid = None
@@ -287,12 +391,14 @@ class _FakeWorldState:
             if method_name == "AbyssalEntranceGateActivation":
                 self.sess.solarsystemid = 32000001
                 self.sess.solarsystemid2 = 32000001
+                self.in_dock_range_station = None
                 return {"pocketID": 1, "solarSystemID": 32000001, "npcBallIDs": []}
             if method_name == "AbyssalGateActivation":
                 return {"npcBallIDs": []}
             if method_name == "AbyssalEndGateActivation":
                 self.sess.solarsystemid = 30000142
                 self.sess.solarsystemid2 = 30000142
+                self.in_dock_range_station = None
                 return True
             return True
 
@@ -303,6 +409,7 @@ class _FakeWorldState:
         if svc_name == "randomJumpMgr" and method_name == "ActivateRandomJumpFilament":
             self.sess.solarsystemid = 30002000
             self.sess.solarsystemid2 = 30002000
+            self.in_dock_range_station = None
             return {"solarSystemID": 30002000}
 
         if svc_name == "charMgr" and method_name == "GetRecentShipKillsAndLosses":
@@ -442,8 +549,9 @@ class _FakeSM:
 
 
 class _FakeIPC:
-    def __init__(self):
+    def __init__(self, state=None):
         self.messages = []
+        self.state = state
 
     def request(self, payload):
         self.messages.append(payload)
@@ -451,6 +559,10 @@ class _FakeIPC:
         if cmd == "ensure_client2_ready":
             return {"ok": True, "char2_id": 90000002}
         if cmd == "advance_clock":
+            if self.state is not None:
+                self.state.sim_now += float(payload.get("secs", 0))
+                if self.state.sim_now >= self.state.session_change_until:
+                    self.state.sess.nextSessionChange = None
             return {"ok": True, "time": True}
         if cmd == "c2_check_ball_and_dock":
             return {"ok": True, "saw_ship": True, "updates": 2}
@@ -488,7 +600,7 @@ class RunJourneysIsolationTests(unittest.TestCase):
             },
         )
         sm = _FakeSM(state)
-        ipc = _FakeIPC()
+        ipc = _FakeIPC(state)
 
         # Keep test fast and deterministic by avoiding real HTTP/sleep delays.
         mock_http_resp = mock.MagicMock()
@@ -564,7 +676,7 @@ class RunJourneysIsolationTests(unittest.TestCase):
         sess = _FakeSession()
         state = _FakeWorldState(sess)
         sm = _FakeSM(state)
-        ipc = _FakeIPC()
+        ipc = _FakeIPC(state)
 
         with (
             mock.patch.object(drv.__builtin__, "sm", sm, create=True),
@@ -767,6 +879,294 @@ class RunJourneysIsolationTests(unittest.TestCase):
         self.assertNotIn("/silent", captured_cmds[0])
         self.assertIn("/silent", captured_cmds[1])
         rj._SPAWNED.clear()
+
+    def test_server_log_append_preserves_interleaved_subprocess_markers(self):
+        rj = _load_run_journeys()
+        server_log = os.path.join(self.tmp, "server.log")
+        with open(server_log, "w", encoding="utf-8") as stale_f:
+            stale_f.write("STALE_RUN_LINE\n")
+
+        # Mirror run_journeys' truncate-then-append pattern around Popen
+        with open(server_log, "w", encoding="utf-8"):
+            pass
+        child_script = (
+            "import sys, time\n"
+            "for i in range(25):\n"
+            "    sys.stdout.write('srv_tick_%02d\\n' % i)\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.005)\n"
+        )
+        with open(server_log, "a", encoding="utf-8") as slog:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", child_script],
+                stdout=slog,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                for k in range(3):
+                    rj._append_log_line(server_log, "[harness] [EVOMU_JOURNEY_START] id=j%d" % k)
+                    rj._append_log_line(server_log, "[harness] [EVOMU_JOURNEY_END] id=j%d passed=True" % k)
+                proc.wait(timeout=10)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+        self.assertEqual(proc.returncode, 0)
+        with open(server_log, "r", encoding="utf-8") as rf:
+            content = rf.read()
+        self.assertNotIn("STALE_RUN_LINE", content)
+        for i in range(25):
+            self.assertIn("srv_tick_%02d" % i, content)
+        for k in range(3):
+            self.assertIn("[EVOMU_JOURNEY_START] id=j%d" % k, content)
+            self.assertIn("[EVOMU_JOURNEY_END] id=j%d" % k, content)
+
+    def test_ipc_coordinator_emits_markers_and_byte_offsets_for_client_logs(self):
+        import evomu_inclient_driver as drv
+
+        rj = _load_run_journeys()
+        out_dir = os.path.join(self.tmp, "ipc_out")
+        client_logs_dir = os.path.join(out_dir, "client_logs")
+        os.makedirs(client_logs_dir, exist_ok=True)
+        c1_ext = os.path.join(client_logs_dir, "20261118_1.log")
+        c2_log = os.path.join(out_dir, "client_2.log")
+        tb_log = os.path.join(out_dir, "client_tracebacks.log")
+        srv_log = os.path.join(out_dir, "server.log")
+        for p in (c1_ext, tb_log, srv_log):
+            with open(p, "w", encoding="utf-8"):
+                pass
+
+        ipc = rj.IpcCoordinator(
+            "127.0.0.1",
+            1,
+            c2_log,
+            {},
+            server_log_path=srv_log,
+            out_dir=out_dir,
+            client_logs_dir=client_logs_dir,
+        )
+        try:
+            ipc._handle_cmd({"cmd": "journey_start", "id": "launch_login"})
+            with open(c1_ext, "a", encoding="utf-8") as ef:
+                ef.write("notice clean login packet\n")
+            ipc._handle_cmd({"cmd": "journey_end", "id": "launch_login", "passed": True})
+
+            ipc._handle_cmd({"cmd": "journey_start", "id": "undock_navigate"})
+            with open(c1_ext, "a", encoding="utf-8") as ef:
+                ef.write("Traceback (most recent call last): client_logs external navigation fault\n")
+            ipc.log2.info("EXCEPTION c2 ball sync mismatch")
+            ipc._handle_cmd({"cmd": "journey_end", "id": "undock_navigate", "passed": True})
+
+            ipc._handle_cmd({"cmd": "journey_start", "id": "station_ui"})
+            with open(c1_ext, "a", encoding="utf-8") as ef:
+                ef.write("notice station panel loaded\n")
+            ipc._handle_cmd({"cmd": "journey_end", "id": "station_ui", "passed": True})
+            byte_spans = dict(ipc.journey_byte_spans)
+        finally:
+            ipc.close()
+
+        for path in (srv_log, c2_log, tb_log):
+            with open(path, "r", encoding="utf-8") as rf:
+                txt = rf.read()
+            self.assertIn("[EVOMU_JOURNEY_START] id=undock_navigate", txt, msg=path)
+            self.assertIn("[EVOMU_JOURNEY_END] id=undock_navigate", txt, msg=path)
+
+        journeys = [
+            {"id": "launch_login", "title": "Launch"},
+            {"id": "undock_navigate", "title": "Undock"},
+            {"id": "station_ui", "title": "Station"},
+        ]
+        real_outcomes = {
+            j["id"]: {
+                "passed": True,
+                "real_client_verified": True,
+                "bridge_verified": True,
+                "rpcs_sent": [{"service": "machoNet", "method": "GetTime", "status": "ok"}],
+                "metrics": {"ok": True},
+                "evidence": "rpcs=1",
+            }
+            for j in journeys
+        }
+        result, exit_code = rj.finalize_journey_run(
+            out_dir=out_dir,
+            journey_list=journeys,
+            server_log_path=srv_log,
+            client_logs=[c1_ext, c2_log, tb_log],
+            client_app_path=self.tmp,
+            build_info={"build": "1234567", "version": "24.09"},
+            concurrent_clients_tested=1,
+            should_launch_real_client=True,
+            real_outcomes=real_outcomes,
+            bridge_outcomes={},
+            journey_byte_spans=byte_spans,
+        )
+        self.assertEqual(exit_code, 2)
+        self.assertTrue(result["journeys"]["launch_login"]["passed"])
+        self.assertEqual(result["journeys"]["launch_login"]["log_errors"], [])
+        self.assertTrue(result["journeys"]["station_ui"]["passed"])
+        self.assertEqual(result["journeys"]["station_ui"]["log_errors"], [])
+
+        undock = result["journeys"]["undock_navigate"]
+        self.assertFalse(undock["passed"])
+        joined_errs = "\n".join(undock["log_errors"])
+        self.assertIn("Traceback (most recent call last): client_logs external navigation fault", joined_errs)
+        self.assertIn("EXCEPTION c2 ball sync mismatch", joined_errs)
+
+        # Verify _emit_client_marker invokes logmodule.general.Log cleanly (2-arg and 1-arg fallback)
+        recorded_logs = []
+
+        def _two_arg_log(msg, lvl):
+            recorded_logs.append((msg, lvl))
+
+        fake_lm_2 = types.SimpleNamespace(general=types.SimpleNamespace(Log=_two_arg_log), INFO=1)
+        with mock.patch.dict(sys.modules, {"logmodule": fake_lm_2}):
+            drv._emit_client_marker({"out_dir": out_dir}, "EVOMU_JOURNEY_START", "launch_login")
+        self.assertTrue(any("[EVOMU_JOURNEY_START] id=launch_login" in m for m, _ in recorded_logs))
+
+        recorded_1 = []
+
+        def _one_arg_only(msg):
+            recorded_1.append(msg)
+
+        fake_lm_1 = types.SimpleNamespace(general=types.SimpleNamespace(Log=_one_arg_only), INFO=1)
+        with mock.patch.dict(sys.modules, {"logmodule": fake_lm_1}):
+            drv._emit_client_marker({"out_dir": out_dir}, "EVOMU_JOURNEY_END", "launch_login", extra="passed=True")
+        self.assertTrue(any("[EVOMU_JOURNEY_END] id=launch_login passed=True" in m for m in recorded_1))
+
+    def test_structures_and_corp_cleanup_enforce_server_invariants_and_board_fallback(self):
+        import evomu_inclient_helpers as hlp
+
+        sess = _FakeSession()
+        state = _FakeWorldState(sess)
+        sm = _FakeSM(state)
+        ipc = _FakeIPC(state)
+
+        with (
+            mock.patch.object(hlp.__builtin__, "sm", sm, create=True),
+            mock.patch.object(hlp.__builtin__, "session", sess, create=True),
+            mock.patch.object(hlp, "_sleep_ms", return_value=None),
+            mock.patch.object(hlp, "_sleep_sim_ms", return_value=None),
+        ):
+            # 1. Structure anchored in Anchoring state + active 10s corp timer:
+            #    ResignFromCorp must fail unless _resign_player_corp flips state -> Unanchor -> /upwelltimer -> advance_clock.
+            sm.RemoteSvc("corpRegistry").AddCorporation()
+            self.assertNotEqual(sess.corpid, 1000167)
+            st_id = 1090000123
+            sm.RemoteSvc("structureDeployment").Anchor(st_id)
+            sm.RemoteSvc("structureDocking").Dock(st_id)
+            with self.assertRaises(RuntimeError):
+                sm.RemoteSvc("corpRegistry").ResignFromCorp()
+
+            hlp._resign_player_corp(sm, baseline_corp_id=1000167, ipc=ipc, structure_ids=[st_id])
+            self.assertEqual(sess.corpid, 1000167)
+            self.assertEqual(state.structures, {})
+            self.assertIn(st_id, state.unanchored_structs)
+            self.assertEqual(sess.stationid, 60003760)
+            self.assertTrue(any(c.startswith("/structure state %d 110" % st_id) for c in state.slash_cmds))
+
+            # 2. _ensure_docked_jita falls back to /tr <station_id> (never system_id) when DockOutOfRange hits
+            state.slash_cmds.clear()
+            sm.RemoteSvc("slash").SlashCmd("/tr 30000142")
+            with self.assertRaises(RuntimeError):
+                sm.RemoteSvc("stationSvc").Dock(60003760)
+            hlp._ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142)
+            self.assertEqual(sess.stationid, 60003760)
+            self.assertIn("/tr 60003760", state.slash_cmds)
+            self.assertEqual(state.slash_cmds[-1], "/tr 60003760")
+
+            # 3. _ensure_home_ship handles ShipNotAssembled via AssembleShip + Board retry (no unimplemented RPCs)
+            sess.shipid = 200999
+            state.unassembled_ships.add(100001)
+            hlp._ensure_home_ship(sm, 100001, ipc=ipc)
+            self.assertEqual(sess.shipid, 100001)
+            called_methods = ["%s.%s" % (s, m) for s, m, _ in state.calls]
+            self.assertIn("ship.AssembleShip", called_methods)
+            self.assertNotIn("dogmaIM.ShipAccess", called_methods)
+            self.assertNotIn("station.TryActivateShip", called_methods)
+
+    def test_helpers_python3_extract_id_ipc_and_recorded_proxy(self):
+        import evomu_inclient_helpers as hlp
+
+        # 1. Python 3 _extract_id on tuple/int/dict/None without NameError on `long`
+        self.assertEqual(hlp._extract_id((42,)), 42)
+        self.assertEqual(hlp._extract_id(42), 42)
+        self.assertEqual(hlp._extract_id({"structureID": 777}), 777)
+        self.assertIsNone(hlp._extract_id(None))
+
+        # 2. Real loopback TCP socket UTF-8 bytes encode/decode in IpcClient.request
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        received = []
+
+        def _serve_one():
+            conn, _ = srv.accept()
+            try:
+                raw = b""
+                while not raw.endswith(b"\n"):
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    raw += chunk
+                req = json.loads(raw.decode("utf-8").strip())
+                received.append(req)
+                resp = json.dumps({"ok": True, "echo": req.get("cmd")}) + "\n"
+                conn.sendall(resp.encode("utf-8"))
+            finally:
+                conn.close()
+
+        t = threading.Thread(target=_serve_one, daemon=True)
+        t.start()
+        try:
+            client = hlp.IpcClient(port)
+            try:
+                reply = client.request({"cmd": "ping_py3", "val": 123})
+            finally:
+                client.close()
+            t.join(timeout=5)
+        finally:
+            srv.close()
+
+        self.assertEqual(received, [{"cmd": "ping_py3", "val": 123}])
+        self.assertEqual(reply, {"ok": True, "echo": "ping_py3"})
+
+        # 3. _RecordedBoundProxy attribute/setattr/dunder handling + _get_beyonce wrapping
+        class _FakeRemotePark:
+            def __init__(self):
+                self.boundObject = True
+                self._internal = "keep_private"
+                self.warps = []
+
+            def CmdWarpToStuff(self, *args):
+                self.warps.append(args)
+                return "warped"
+
+        def _fail_bind(*_a, **_kw):
+            raise RuntimeError("no bound park")
+
+        park = _FakeRemotePark()
+        sink = []
+        fake_michelle = types.SimpleNamespace(
+            _Michelle__bp=types.SimpleNamespace(solarsystemID=30000142),
+            GetRemotePark=lambda: park,
+        )
+        fake_sm = types.SimpleNamespace(
+            _evomu_rpc_sink=sink,
+            RemoteSvc=lambda name: types.SimpleNamespace(MachoBindObject=_fail_bind),
+            GetService=lambda name: fake_michelle,
+        )
+        proxy = hlp._get_beyonce(fake_sm, 30000142)
+        self.assertEqual(proxy._internal, "keep_private")
+        proxy.custom_flag = 99
+        self.assertEqual(park.custom_flag, 99)
+        self.assertEqual(proxy.CmdWarpToStuff("bookmark", 12345), "warped")
+        self.assertEqual(park.warps, [("bookmark", 12345)])
+        self.assertEqual(len(sink), 1)
+        self.assertEqual(sink[0]["service"], "beyonce.bound")
+        self.assertEqual(sink[0]["method"], "CmdWarpToStuff")
+        self.assertEqual(sink[0]["status"], "ok")
 
 
 if __name__ == "__main__":

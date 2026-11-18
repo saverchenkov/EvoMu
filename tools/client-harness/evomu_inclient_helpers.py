@@ -74,14 +74,19 @@ class IpcClient(object):
         self.sock = socket.create_connection(("127.0.0.1", int(port)), 15.0) if port else None
         if self.sock is not None:
             self.sock.settimeout(30.0)
-        self.rfile = self.sock.makefile("r") if self.sock is not None else None
+        self.rfile = self.sock.makefile("rb") if self.sock is not None else None
 
     def request(self, payload):
         if self.sock is None:
             return {"ok": False, "error": "no ipc socket"}
-        self.sock.sendall(json.dumps(payload) + "\n")
+        wire = (json.dumps(payload) + "\n").encode("utf-8")
+        self.sock.sendall(wire)
         resp = self.rfile.readline()
-        return json.loads(resp) if resp else {"ok": False, "error": "ipc eof"}
+        if not resp:
+            return {"ok": False, "error": "ipc eof"}
+        if isinstance(resp, bytes):
+            resp = resp.decode("utf-8", "replace")
+        return json.loads(resp)
 
     def notify(self, payload):
         try:
@@ -120,7 +125,7 @@ def _extract_id(res, keys=("itemID", "contractID", "fleetID", "jobID", "mailID",
             return int(v)
     if isinstance(res, (tuple, list)) and len(res) > 0:
         first = res[0]
-        if isinstance(first, (int, long)):
+        if isinstance(first, _INT_TYPES):
             return int(first)
         if hasattr(first, "GetMachoObjectBoundId"):
             return first
@@ -509,6 +514,9 @@ def _get_beyonce(sm, sys_id):
             and bp is not None
             and int(getattr(bp, "solarsystemID", 0) or 0) == int(sys_id)
         ):
+            sink = getattr(sm, "_evomu_rpc_sink", None)
+            if sink is not None and not isinstance(rp, _RecordedBoundProxy):
+                return _RecordedBoundProxy("beyonce.bound", rp, sink)
             return rp
     except Exception:
         pass
@@ -956,7 +964,7 @@ def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
     try:
         sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
-        _try_slash(sm, "/tr %d" % target_system)
+        _try_slash(sm, "/tr %d" % target_station)
         _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0)
         _wait_view_settled(sm)
         _advance_clock(sm, ipc, 12)
@@ -990,11 +998,69 @@ def _leave_active_fleet(sm):
         pass
 
 
-def _resign_player_corp(sm, baseline_corp_id=0):
+def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
+    """Best-effort unanchor + package of active structures owned by the current player corp."""
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp < 98000000:
+        return
+    ids = []
+    for sid in (structure_ids or ()):
+        try:
+            if sid and int(sid) not in ids:
+                ids.append(int(sid))
+        except Exception:
+            pass
+    try:
+        corp_structs = sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+        if isinstance(corp_structs, dict):
+            for k in corp_structs.keys():
+                if int(k) not in ids:
+                    ids.append(int(k))
+        elif isinstance(corp_structs, (list, tuple)):
+            for row in corp_structs:
+                sid = int(_get_field(row, "structureID", _get_field(row, "itemID", 0)) or 0)
+                if sid and sid not in ids:
+                    ids.append(sid)
+    except Exception:
+        pass
+    for sid in ids:
+        if _live_session_attr("structureid", None) == sid:
+            try:
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("structureDocking").Undock(sid)
+                _wait_session_attr("structureid", None, timeout_sec=3.0)
+            except Exception:
+                pass
+        try:
+            sm.RemoteSvc("structureDeployment").Unanchor(sid)
+        except Exception:
+            _try_slash(sm, "/structure state %d 110" % sid)
+            try:
+                sm.RemoteSvc("structureDeployment").Unanchor(sid)
+            except Exception:
+                pass
+        _try_slash(sm, "/upwelltimer %d" % sid)
+        try:
+            _advance_clock(sm, ipc, 5)
+        except Exception:
+            pass
+    if ids:
+        try:
+            sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+        except Exception:
+            pass
+
+
+def _resign_player_corp(sm, baseline_corp_id=0, ipc=None, structure_ids=None):
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not baseline_corp_id or cur_corp != int(baseline_corp_id)):
+        _cleanup_corp_structures(sm, ipc=ipc, structure_ids=structure_ids)
         try:
             sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+        try:
+            _advance_clock(sm, ipc, 12)
         except Exception:
             pass
         try:
@@ -1009,7 +1075,7 @@ def _resign_player_corp(sm, baseline_corp_id=0):
             pass
 
 
-def _ensure_home_ship(sm, target_ship_id):
+def _ensure_home_ship(sm, target_ship_id, ipc=None):
     if not target_ship_id:
         return int(_live_session_attr("shipid", 0) or 0)
     target_sid = int(target_ship_id)
@@ -1020,7 +1086,22 @@ def _ensure_home_ship(sm, target_ship_id):
         sm.RemoteSvc("timeControl").ClearSessionTimer()
     except Exception:
         pass
-    sm.RemoteSvc("ship").Board(target_sid)
+    try:
+        sm.RemoteSvc("ship").Board(target_sid)
+    except Exception:
+        try:
+            _advance_clock(sm, ipc, 12)
+        except Exception:
+            pass
+        try:
+            sm.RemoteSvc("ship").AssembleShip([target_sid])
+        except Exception:
+            pass
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+        sm.RemoteSvc("ship").Board(target_sid)
     _wait_session_attr("shipid", target_sid, timeout_sec=3.0)
     _sleep_ms(100)
     _wait_view_settled(sm)
@@ -1058,6 +1139,10 @@ def _reset_baseline_state(sm, ipc, baseline, char_id=None):
         except Exception:
             pass
 
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
+        _cleanup_corp_structures(sm, ipc=ipc)
+
     cur_station = _live_session_attr("stationid", None)
     cur_struct = _live_session_attr("structureid", None)
     cur_sys = int(_live_session_attr("solarsystemid2", home_system) or home_system)
@@ -1066,13 +1151,13 @@ def _reset_baseline_state(sm, ipc, baseline, char_id=None):
 
     if home_ship and int(_live_session_attr("shipid", 0) or 0) != home_ship:
         try:
-            _ensure_home_ship(sm, home_ship)
+            _ensure_home_ship(sm, home_ship, ipc=ipc)
         except Exception:
             pass
 
     cur_corp = int(_live_session_attr("corpid", 0) or 0)
     if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
-        _resign_player_corp(sm, home_corp)
+        _resign_player_corp(sm, home_corp, ipc=ipc)
 
     if target_char:
         _sync_quasar_gateway(sm, target_char)
@@ -1084,9 +1169,12 @@ class _RecordedBoundProxy(object):
         self.__dict__["_target"] = target
         self.__dict__["_active_sink"] = active_sink
 
+    def __setattr__(self, name, value):
+        return setattr(self._target, name, value)
+
     def __getattr__(self, method_name):
         attr = getattr(self._target, method_name)
-        if not callable(attr):
+        if str(method_name).startswith("_") or not callable(attr):
             return attr
         svc_name = self._svc_name
         active_sink = self._active_sink
@@ -1109,7 +1197,14 @@ class _RecordedBoundProxy(object):
                 status = "error"
                 raise
             finally:
-                sink = active_sink[0] if active_sink else None
+                if (
+                    isinstance(active_sink, list)
+                    and len(active_sink) == 1
+                    and (active_sink[0] is None or isinstance(active_sink[0], list))
+                ):
+                    sink = active_sink[0]
+                else:
+                    sink = active_sink
                 if sink is not None:
                     try:
                         sink.append({"service": svc_name, "method": method_name, "status": status})

@@ -30,6 +30,7 @@ from evomu_inclient_helpers import (
     _assert_ui_rendered,
     _atomic_write_json,
     _capture_inclient_screenshot,
+    _cleanup_corp_structures,
     _dock_station,
     _ensure_docked_jita,
     _ensure_home_ship,
@@ -78,6 +79,18 @@ def _emit_client_marker(cfg, tag, jid, extra=""):
     try:
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        import logmodule
+        general = getattr(logmodule, "general", None)
+        log_fn = getattr(general, "Log", None) if general is not None else None
+        if callable(log_fn):
+            lvl = getattr(logmodule, "LGNOTICE", getattr(logmodule, "LGINFO", 1))
+            try:
+                log_fn(line, lvl)
+            except TypeError:
+                log_fn(line)
     except Exception:
         pass
 
@@ -867,7 +880,7 @@ def _journey_wormholes_filaments(ctx):
         except Exception:
             pass
         if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
-            _try_slash(sm, "/tr 30000142")
+            _try_slash(sm, "/tr 60003760")
             _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
             _wait_view_settled(sm)
         if not _live_session_attr("stationid", None):
@@ -914,7 +927,7 @@ def _journey_ship_loss(ctx):
         _ensure_docked_jita(sm, ipc)
         if primary_ship_id and curr_ship != primary_ship_id:
             try:
-                reboarded_ship = _ensure_home_ship(sm, primary_ship_id)
+                reboarded_ship = _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
             except Exception:
                 reboarded_ship = 0
         if not reboarded_ship or reboarded_ship == pod_ship:
@@ -1074,7 +1087,7 @@ def _journey_corporation(ctx):
         ali_info = sm.RemoteSvc("allianceRegistry").GetAlliance(ali_id)
         wars_rep = sm.RemoteSvc("warsInfoMgr").GetWarsByOwners([corp_id, ali_id])
     finally:
-        _resign_player_corp(sm, baseline_corp_id)
+        _resign_player_corp(sm, baseline_corp_id, ipc=ctx.get("ipc"))
     passed = (
         corp_id > 0
         and ali_id > 0
@@ -1227,11 +1240,7 @@ def _journey_structures(ctx):
                         _wait_session_attr("structureid", None, timeout_sec=3.0)
                     except Exception:
                         pass
-            try:
-                sm.RemoteSvc("structureDeployment").Unanchor(struct_id)
-                _try_slash(sm, "/upwelltimer %d" % struct_id)
-            except Exception:
-                pass
+            _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,))
             _warp_full(sm, b_perim, 50002185)
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
@@ -1241,21 +1250,17 @@ def _journey_structures(ctx):
             _wait_view_settled(sm)
             _warp_full(sm, b_jita_back, 60003760)
     finally:
-        if struct_id:
-            try:
-                sm.RemoteSvc("structureDeployment").Unanchor(struct_id)
-                _try_slash(sm, "/upwelltimer %d" % struct_id)
-            except Exception:
-                pass
+        if struct_id or int(_live_session_attr("corpid", 0) or 0) >= 98000000:
+            _cleanup_corp_structures(sm, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
         if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
-            _try_slash(sm, "/tr 30000142")
+            _try_slash(sm, "/tr 60003760")
             _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
         _ensure_docked_jita(sm, ipc)
         try:
-            _ensure_home_ship(sm, primary_ship_id)
+            _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
         except Exception:
             pass
-        _resign_player_corp(sm, baseline_corp_id)
+        _resign_player_corp(sm, baseline_corp_id, ipc=ipc, structure_ids=(struct_id,) if struct_id else None)
     passed = struct_id is not None
     return passed, {
         "structure_id": struct_id,
@@ -1501,11 +1506,11 @@ def _journey_titans(ctx):
             sm.RemoteSvc("timeControl").ClearSessionTimer()
         except Exception:
             pass
-        _try_slash(sm, "/tr 30000142")
+        _try_slash(sm, "/tr 60003760")
         _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
         _ensure_docked_jita(sm, ipc)
         try:
-            _ensure_home_ship(sm, primary_ship_id)
+            _ensure_home_ship(sm, primary_ship_id, ipc=ipc)
         except Exception:
             pass
     passed = titan_id > 0 and dd_ok
@@ -1647,8 +1652,8 @@ def _execute_all_journeys(cfg, ipc):
             except Exception:
                 ctx["char2_id"] = ctx["char2_id"] or 90000002
 
-        _emit_client_marker(cfg, "EVOMU_JOURNEY_START", jid)
         ipc.notify({"cmd": "journey_start", "id": jid})
+        _emit_client_marker(cfg, "EVOMU_JOURNEY_START", jid)
 
         j_rpcs = []
         rpc_sink[0] = j_rpcs
