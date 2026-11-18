@@ -10,34 +10,15 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const UPDATE_STATE_COOLDOWN_TICKS: u64 = 5;
 const UPDATE_STATE_COOLDOWN_WALL: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
-struct ExplicitUpdateStateGuard {
-    sys_id: u32,
-    ship_id: i64,
-    last_push_tick: u64,
-    last_push_at: Instant,
-}
-
-fn explicit_update_state_guards(
-) -> &'static Mutex<HashMap<(usize, u64, i64), ExplicitUpdateStateGuard>> {
-    static GUARDS: OnceLock<Mutex<HashMap<(usize, u64, i64), ExplicitUpdateStateGuard>>> =
-        OnceLock::new();
-    GUARDS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Clears any per-session `beyonce.UpdateStateRequest` cooldown for `(session_id, char_id)` so a
 /// lag-resync or re-attachment immediately delivers a fresh `SetState` snapshot (`#1169`).
 pub(crate) fn reset_update_state_rate_limit(ctx: &ServerContext, session_id: u64, char_id: i64) {
-    let key = (Arc::as_ptr(&ctx.db) as usize, session_id, char_id);
-    if let Ok(mut map) = explicit_update_state_guards().lock() {
-        map.remove(&key);
-    }
+    ctx.systems.clear_explicit_update_state_guard(session_id, char_id);
 }
 
 pub use eve_db::EssReservePulseState;
@@ -1027,20 +1008,16 @@ async fn handle_update_state_request_inner(
     crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
     crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id).await;
     let was_bootstrapped = ctx.is_space_ballpark_bootstrapped(session.session_id, char_id, sys_id);
-    let current_tick = handle
-        .ballpark
-        .read()
-        .ok()
-        .map(|b| b.current_tick)
-        .unwrap_or(0);
-    let guard_key = (Arc::as_ptr(&ctx.db) as usize, session.session_id, char_id);
+    let current_tick = handle.query_current_tick().await.unwrap_or(0);
+    let guard_key = (session.session_id, char_id);
     let mut should_push_set_state = true;
     if !is_explicit_rpc {
-        if let Ok(mut map) = explicit_update_state_guards().lock() {
-            map.remove(&guard_key);
-        }
+        ctx.systems
+            .clear_explicit_update_state_guard(session.session_id, char_id);
     } else {
-        let mut map = explicit_update_state_guards()
+        let mut map = ctx
+            .systems
+            .explicit_update_state_guards
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let force_bypass =
@@ -1063,7 +1040,7 @@ async fn handle_update_state_request_inner(
             }
             map.insert(
                 guard_key,
-                ExplicitUpdateStateGuard {
+                crate::system_actor::ExplicitUpdateStateGuard {
                     sys_id,
                     ship_id,
                     last_push_tick: current_tick,

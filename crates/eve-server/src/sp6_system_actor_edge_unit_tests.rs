@@ -5339,3 +5339,62 @@ async fn tidi_10_percent_10s_wallclock_advances_1_tick_and_1s_travel_1169() {
         pos_1x_after.position.x
     );
 }
+
+#[tokio::test]
+async fn tidi_tenth_delivers_distinct_owner_goto_headings_within_single_dilated_tick() {
+    let ctx = test_ctx();
+    let sys_h = ctx.systems.get_or_spawn(30_000_142);
+    sys_h.set_tidi_factor_raw(0.10);
+
+    let ship_id = 91_009_011i64;
+    let peer_id = 91_009_012i64;
+    let mk_ship = |id, x| eve_destiny::Ball {
+        id,
+        type_id: 587,
+        position: DVec3::new(x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    };
+    let _ = sys_h.spawn_ball(mk_ship(ship_id, 0.0)).await;
+    let _ = sys_h.spawn_ball(mk_ship(peer_id, 500.0)).await;
+    let _ = sys_h.drain_observer_updates(ship_id).await;
+    let _ = sys_h.drain_observer_updates(peer_id).await;
+
+    let tick0 = sys_h.query_current_tick().await.unwrap();
+    // 1. First CmdGotoDirection (+Y), immediately drained (live macho_listener behavior).
+    sys_h
+        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: DVec3::Y })
+        .await
+        .unwrap();
+    let (d1_tick, d1_owner, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(d1_tick, tick0);
+    assert_eq!(d1_owner.len(), 1);
+
+    // Advance 2 wall seconds at tidi=0.10 -> sim_tick_accum=0.2, current_tick still tick0.
+    let _ = sys_h.step_manual(1.0).await.unwrap();
+    let _ = sys_h.step_manual(1.0).await.unwrap();
+    assert_eq!(sys_h.query_current_tick().await.unwrap(), tick0);
+
+    // 2. Second distinct CmdGotoDirection (+Z) during the SAME dilated tick must still reach owner!
+    sys_h
+        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: DVec3::Z })
+        .await
+        .unwrap();
+    let (d2_tick, d2_owner, _) = sys_h.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(d2_tick, tick0);
+    assert_eq!(
+        d2_owner.len(),
+        1,
+        "owner must receive distinct GotoDirection under 10% TiDi without 10s divergence"
+    );
+    assert!(matches!(
+        d2_owner[0],
+        eve_destiny::DestinyEvent::GotoDirection { ball_id, direction }
+            if ball_id == ship_id && (DVec3::from_array(direction) - DVec3::Z).length() < 1e-9
+    ));
+}

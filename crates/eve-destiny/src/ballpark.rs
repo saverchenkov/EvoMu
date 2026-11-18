@@ -52,6 +52,13 @@ fn is_capital_ship_ball(ship_type_id: u32, ship_group_id: u32) -> bool {
     cap_groups.contains(&grp)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerGotoDelivery {
+    Suppress,
+    Push,
+    Coalesce,
+}
+
 impl Ballpark {
     pub fn new(solar_system_id: u32) -> Self {
         Self::with_bubble_radius(solar_system_id, BUBBLE_RADIUS_METERS)
@@ -562,9 +569,84 @@ impl Ballpark {
         }
     }
 
-    /// Queues or coalesces a `GotoDirection` event for grid observers (`#1078`):
-    /// - The ship's owner (`obs_id == ball_id`) receives it only when `emit_to_owner` is `true`
-    ///   (at most once per tick, keeping the first heading).
+    /// Per-owner delivery action for a distinct `GotoDirection` steer in the same `current_tick`.
+    pub(crate) fn is_goto_coalesce_barrier(ev: &DestinyEvent, ball_id: BallId) -> bool {
+        match ev {
+            DestinyEvent::Stop { ball_id: id }
+            | DestinyEvent::Follow { ball_id: id, .. }
+            | DestinyEvent::Orbit { ball_id: id, .. }
+            | DestinyEvent::WarpTo { ball_id: id, .. }
+            | DestinyEvent::GotoPoint { ball_id: id, .. }
+            | DestinyEvent::SetSpeedFraction { ball_id: id, .. }
+            | DestinyEvent::SetBallPosition { ball_id: id, .. }
+            | DestinyEvent::SetBallVelocity { ball_id: id, .. }
+            | DestinyEvent::RemoveBall { ball_id: id }
+            | DestinyEvent::CloakBall { ball_id: id, .. }
+            | DestinyEvent::TerminalExplosion { ball_id: id, .. }
+                if *id == ball_id =>
+            {
+                true
+            }
+            DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ball_id) => true,
+            DestinyEvent::AddBall { ball } if ball.id == ball_id => true,
+            DestinyEvent::AddBalls { balls } | DestinyEvent::AddBalls2 { balls }
+                if balls.iter().any(|b| b.id == ball_id) =>
+            {
+                true
+            }
+            DestinyEvent::SetState { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn coalesce_or_push_goto(
+        queue: &mut Vec<DestinyEvent>,
+        ball_id: BallId,
+        event: &DestinyEvent,
+    ) {
+        for ev in queue.iter_mut().rev() {
+            match ev {
+                DestinyEvent::GotoDirection { ball_id: id, .. } if *id == ball_id => {
+                    *ev = event.clone();
+                    return;
+                }
+                other if Self::is_goto_coalesce_barrier(other, ball_id) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        queue.push(event.clone());
+    }
+
+    /// Returns `true` when `observer_id` currently has an un-drained `GotoDirection` event for
+    /// `ball_id` ahead of any movement/acquisition/teardown barrier (`BF-1169-03`).
+    pub(crate) fn has_undrained_goto_for_observer(
+        &self,
+        observer_id: BallId,
+        ball_id: BallId,
+    ) -> bool {
+        let Some(queue) = self.observer_events.get(&observer_id) else {
+            return false;
+        };
+        for ev in queue.iter().rev() {
+            match ev {
+                DestinyEvent::GotoDirection { ball_id: id, .. } if *id == ball_id => {
+                    return true;
+                }
+                other if Self::is_goto_coalesce_barrier(other, ball_id) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Queues or coalesces a `GotoDirection` event for grid observers (`#1078`, `#1169`):
+    /// - The ship's owner (`obs_id == ball_id`) honors [`OwnerGotoDelivery`] so un-drained
+    ///   1 Hz bursts keep the `#1078` first-echo invariant while already-drained or TiDi-substepped
+    ///   heading changes still reach the owner client (`BF-1169-03`).
     /// - Other observers replace any un-drained `GotoDirection` for `ball_id` in the current
     ///   queue with the latest heading, or append if none is pending.
     pub(crate) fn queue_or_coalesce_goto_for_grid_observers(
@@ -572,7 +654,7 @@ impl Ballpark {
         grid_id: u64,
         ball_id: BallId,
         event: &DestinyEvent,
-        emit_to_owner: bool,
+        owner_delivery: OwnerGotoDelivery,
     ) {
         let Some(grid) = self.grids.get(&grid_id) else {
             return;
@@ -587,58 +669,23 @@ impl Ballpark {
                 continue;
             }
             if obs_id == ball_id {
-                if emit_to_owner {
-                    observer_events
-                        .entry(obs_id)
-                        .or_default()
-                        .push(event.clone());
+                match owner_delivery {
+                    OwnerGotoDelivery::Suppress => {}
+                    OwnerGotoDelivery::Push => {
+                        observer_events
+                            .entry(obs_id)
+                            .or_default()
+                            .push(event.clone());
+                    }
+                    OwnerGotoDelivery::Coalesce => {
+                        let queue = observer_events.entry(obs_id).or_default();
+                        Self::coalesce_or_push_goto(queue, ball_id, event);
+                    }
                 }
                 continue;
             }
             let queue = observer_events.entry(obs_id).or_default();
-            let mut replaced = false;
-            for ev in queue.iter_mut().rev() {
-                match ev {
-                    DestinyEvent::GotoDirection { ball_id: id, .. } if *id == ball_id => {
-                        *ev = event.clone();
-                        replaced = true;
-                        break;
-                    }
-                    DestinyEvent::Stop { ball_id: id }
-                    | DestinyEvent::Follow { ball_id: id, .. }
-                    | DestinyEvent::Orbit { ball_id: id, .. }
-                    | DestinyEvent::WarpTo { ball_id: id, .. }
-                    | DestinyEvent::GotoPoint { ball_id: id, .. }
-                    | DestinyEvent::SetSpeedFraction { ball_id: id, .. }
-                    | DestinyEvent::SetBallPosition { ball_id: id, .. }
-                    | DestinyEvent::SetBallVelocity { ball_id: id, .. }
-                    | DestinyEvent::RemoveBall { ball_id: id }
-                    | DestinyEvent::CloakBall { ball_id: id, .. }
-                    | DestinyEvent::TerminalExplosion { ball_id: id, .. }
-                        if *id == ball_id =>
-                    {
-                        break;
-                    }
-                    DestinyEvent::RemoveBalls { ball_ids } if ball_ids.contains(&ball_id) => {
-                        break;
-                    }
-                    DestinyEvent::AddBall { ball } if ball.id == ball_id => {
-                        break;
-                    }
-                    DestinyEvent::AddBalls { balls } | DestinyEvent::AddBalls2 { balls }
-                        if balls.iter().any(|b| b.id == ball_id) =>
-                    {
-                        break;
-                    }
-                    DestinyEvent::SetState { .. } => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if !replaced {
-                queue.push(event.clone());
-            }
+            Self::coalesce_or_push_goto(queue, ball_id, event);
         }
     }
 
@@ -1768,5 +1815,71 @@ impl Ballpark {
         true
     }
 }
+#[cfg(test)]
+mod tidi_owner_goto_tests {
+    use super::*;
+
+    fn mk_ship(id: BallId, pos: DVec3) -> Ball {
+        Ball {
+            id,
+            type_id: 587,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        }
+    }
+
+    #[test]
+    fn owner_receives_distinct_headings_within_single_dilated_tidi_tick() {
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(mk_ship(101, DVec3::ZERO));
+        bp.add_ball(mk_ship(102, DVec3::new(1_000.0, 0.0, 0.0)));
+        let _ = bp.drain_observer_events(101);
+        let _ = bp.drain_observer_events(102);
+
+        let start_tick = bp.current_tick;
+        // 1. Live drain case (e.g. macho_listener post-RPC drain after first CmdGotoDirection):
+        bp.set_mode(101, MovementMode::GotoDirection { direction: DVec3::Y })
+            .unwrap();
+        let ev1 = bp.drain_observer_events(101);
+        assert_eq!(ev1.len(), 1);
+
+        // Simulate two 0.1s TiDi steps (still inside `start_tick`):
+        bp.step(0.1);
+        bp.step(0.1);
+        assert_eq!(bp.current_tick, start_tick);
+
+        // Second distinct heading after first was already drained must still reach owner:
+        bp.set_mode(101, MovementMode::GotoDirection { direction: DVec3::Z })
+            .unwrap();
+        let ev2 = bp.drain_observer_events(101);
+        assert_eq!(ev2.len(), 1);
+        assert!(matches!(
+            ev2[0],
+            DestinyEvent::GotoDirection { ball_id: 101, direction }
+                if (DVec3::from_array(direction) - DVec3::Z).length() < 1e-9
+        ));
+
+        // 2. Un-drained substepped TiDi case (`sim_tick_accum > 0`): two distinct steers before drain
+        // coalesce owner queue to latest heading instead of keeping stale heading:
+        bp.set_mode(101, MovementMode::GotoDirection { direction: DVec3::X })
+            .unwrap();
+        bp.set_mode(101, MovementMode::GotoDirection { direction: DVec3::NEG_Y })
+            .unwrap();
+        let ev3 = bp.drain_observer_events(101);
+        assert_eq!(ev3.len(), 1);
+        assert!(matches!(
+            ev3[0],
+            DestinyEvent::GotoDirection { ball_id: 101, direction }
+                if (DVec3::from_array(direction) - DVec3::NEG_Y).length() < 1e-9
+        ));
+    }
+}
+
 #[cfg(test)] #[path = "ballpark_unit_tests.rs"] mod ballpark_unit_tests;
 

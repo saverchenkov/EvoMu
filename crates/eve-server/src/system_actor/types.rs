@@ -638,6 +638,15 @@ pub struct WeaponVolleyOutput {
     pub actions: Vec<PendingCycleAction>,
 }
 
+/// Per-session `beyonce.UpdateStateRequest` cooldown state stored per `ServerContext` on `SystemRegistry` (`#1169`).
+#[derive(Debug, Clone, Copy)]
+pub struct ExplicitUpdateStateGuard {
+    pub sys_id: u32,
+    pub ship_id: i64,
+    pub last_push_tick: u64,
+    pub last_push_at: std::time::Instant,
+}
+
 /// Sim-clock state for an active module reload (`#1081`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModuleReloadSimEntry {
@@ -883,6 +892,9 @@ pub enum SystemCommand {
     GetSetState {
         observer_ball_id: BallId,
         reply: oneshot::Sender<Result<(u64, PyRep, PyRep), String>>,
+    },
+    CurrentTick {
+        reply: oneshot::Sender<u64>,
     },
     GetBubbleIdForBall {
         ball_id: BallId,

@@ -457,6 +457,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::ApplyFitProjection { .. } => "ApplyFitProjection",
             SystemCommand::TrackModuleReloadSim { .. } => "TrackModuleReloadSim",
             SystemCommand::RepairCombatState { .. } => "RepairCombatState",
+            SystemCommand::CurrentTick { .. } => "CurrentTick",
         }
     }
 
@@ -562,13 +563,15 @@ fn system_command_all_variants_construct_and_match() {
             shield_heal: 10.0,
             reply: oneshot::channel().0,
         },
+        SystemCommand::CurrentTick { reply: oneshot::channel().0 },
     ];
     let tags: Vec<&'static str> = cmds.into_iter().map(tag_of).collect();
-    assert_eq!(tags.len(), 72);
+    assert_eq!(tags.len(), 73);
     assert_eq!(tags[0], "SpawnBall");
     assert_eq!(tags[69], "FlushPeerObserverUpdates");
     assert_eq!(tags[70], "FlushConditionCheckpoint");
     assert_eq!(tags[71], "RepairCombatState");
+    assert_eq!(tags[72], "CurrentTick");
 }
 
 #[test]

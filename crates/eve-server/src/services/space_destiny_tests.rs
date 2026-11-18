@@ -1161,4 +1161,86 @@ async fn live_update_state_request_spam_does_not_bump_tick_or_jolt_peers_1169() 
             .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
         "lag reset must permit immediate resync SetState at current_tick"
     );
+
+    // Space exit via remove_ball and session cleanup purge context-scoped UpdateStateRequest guards (`BF-1169-04`).
+    assert!(!ctx.systems.explicit_update_state_guards.lock().unwrap().is_empty());
+    let _ = sys_h.remove_ball(ship_a).await;
+    assert!(
+        !ctx.systems
+            .explicit_update_state_guards
+            .lock()
+            .unwrap()
+            .contains_key(&(sess_a.session_id, char_a)),
+        "remove_ball must clear explicit_update_state_guards for exited ship"
+    );
+}
+
+#[tokio::test]
+async fn update_state_rate_limit_is_isolated_per_server_context_and_cleared_on_session_exit() {
+    let ctx_a = test_ctx();
+    let ctx_b = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 91_001_001_i64;
+    let ship_id = 91_002_001_i64;
+    let shared_session_id = 77_001_u64;
+
+    for ctx in [&ctx_a, &ctx_b] {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.values().next().cloned().expect("seed char");
+            ch.character_id = char_id;
+            ch.user_id = char_id as u64;
+            ch.name = format!("Pilot-{char_id}");
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+            put_item(
+                snap,
+                Some(ship_id),
+                588,
+                char_id,
+                i64::from(sys_id),
+                InventoryFlag::None,
+                1,
+                true,
+            );
+            snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        });
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_h.spawn_ball(test_ship_ball(ship_id, 588, DVec3::ZERO)).await;
+    }
+
+    let mut sess_a = make_session(char_id, 98_100_001, Some(sys_id), Some(ship_id), 0);
+    sess_a.session_id = shared_session_id;
+    let mut sess_b = make_session(char_id, 98_100_002, Some(sys_id), Some(ship_id), 0);
+    sess_b.session_id = shared_session_id;
+    let bound = bound_sys(sys_id);
+    let kw = HashMap::new();
+
+    for (ctx, sess) in [(&ctx_a, &mut sess_a), (&ctx_b, &mut sess_b)] {
+        handle(
+            ctx,
+            sess,
+            Some(&bound),
+            "beyonce",
+            "UpdateStateRequest",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, evs, _) = ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .drain_observer_updates(ship_id)
+            .await
+            .unwrap();
+        assert!(evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })));
+    }
+    // Same (session_id, char_id) across distinct ServerContexts must not collide, and clearing ctx_a leaves ctx_b intact.
+    ctx_a.systems.clear_explicit_update_state_guards_for_session(shared_session_id);
+    assert!(ctx_a.systems.explicit_update_state_guards.lock().unwrap().is_empty());
+    assert!(!ctx_b.systems.explicit_update_state_guards.lock().unwrap().is_empty());
 }

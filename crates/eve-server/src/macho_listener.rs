@@ -1348,6 +1348,10 @@ pub async fn execute_call_req_wire(
         if cross_sys_pre_ticks.is_empty() && cross_sys_pre_destiny.is_none() {
             wire.wire_state.leave_space();
         }
+        if !is_in_space || (was_in_space && session.solar_system_id != prev_session.solar_system_id) {
+            ctx.systems
+                .clear_explicit_update_state_guards_for_session(session.session_id);
+        }
         if let Some(new_sys) = session.solar_system_id {
             *wire.sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
         }
@@ -1704,6 +1708,8 @@ pub async fn execute_call_req_wire(
     }
     if !is_in_space && !docking_transition {
         wire.wire_state.leave_space();
+        ctx.systems
+            .clear_explicit_update_state_guards_for_session(session.session_id);
     }
 
     if let Some(cid) = session.character_id {
@@ -1918,6 +1924,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
     let mut session_guard = crate::router::SessionCleanupGuard::new(Arc::clone(&ctx), session_id);
+    struct ExplicitUpdateStateSessionCleanup(Arc<ServerContext>, u64);
+    impl Drop for ExplicitUpdateStateSessionCleanup {
+        fn drop(&mut self) {
+            self.0
+                .systems
+                .clear_explicit_update_state_guards_for_session(self.1);
+        }
+    }
+    let _explicit_update_state_cleanup =
+        ExplicitUpdateStateSessionCleanup(Arc::clone(&ctx), session_id);
 
     // Step 1: Server immediately sends `LowLevelVersionExchange` upon TCP connection accept.
     if let Err(e) = write_framed_pyrep(&mut stream, &handshake.server_hello()).await {
@@ -2281,6 +2297,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 }
                             }
                             wire_state.leave_space();
+                            ctx.systems
+                                .clear_explicit_update_state_guards_for_session(session_id);
                             ctx.flight_recorder.record_wire_state(&wire_state);
                             if sys_changed {
                                 if let Some(new_sys) = session.solar_system_id {
@@ -3026,6 +3044,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     reader_task.abort();
     ctx.flight_recorder.remove_wire_state(session_id);
+    ctx.systems
+        .clear_explicit_update_state_guards_for_session(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;
     crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
 
@@ -3433,6 +3453,8 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
         && session.solar_system_id.is_some();
     if was_in_space && (!is_in_space || prev_session.solar_system_id != session.solar_system_id) {
         wire.wire_state.leave_space();
+        ctx.systems
+            .clear_explicit_update_state_guards_for_session(session.session_id);
     }
     if is_in_space {
         let sys_id = session.solar_system_id.unwrap();

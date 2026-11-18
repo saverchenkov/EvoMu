@@ -1005,6 +1005,8 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     .await;
 
     reader_task.abort();
+    ctx.systems
+        .clear_explicit_update_state_guards_for_session(session.session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;
     res
 }

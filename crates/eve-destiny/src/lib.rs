@@ -227,6 +227,9 @@ pub struct CombatState {
     pub entropic_spool_cycles: u32,
     /// Active Breacher Pod DoT `(flat_dmg_per_sec, pct_max_hp_per_sec, remaining_ticks)`.
     pub active_breacher_dot: Option<(f64, f64, u32)>,
+    /// Fractional second accumulator for Breacher Pod DoT `remaining_ticks` decay under sub-second TiDi steps (`BF-1169-02`).
+    #[serde(default)]
+    pub breacher_dot_tick_accum: f64,
     /// Remaining ticks of gate cloak invulnerability (SP-5).
     #[serde(default)]
     pub gate_cloak_remaining_ticks: u32,
@@ -426,6 +429,7 @@ impl Default for CombatState {
             warp_core_strength: 1,
             entropic_spool_cycles: 0,
             active_breacher_dot: None,
+            breacher_dot_tick_accum: 0.0,
             gate_cloak_remaining_ticks: 0,
             undock_invulnerable_remaining_ticks: 0,
             warp_exit_invulnerable_remaining_ticks: 0,
@@ -1858,10 +1862,9 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return false;
         }
-        self.combat_states
-            .entry(ball_id)
-            .or_default()
-            .active_breacher_dot = if duration_ticks > 0 {
+        let cs = self.combat_states.entry(ball_id).or_default();
+        cs.breacher_dot_tick_accum = 0.0;
+        cs.active_breacher_dot = if duration_ticks > 0 {
             Some((flat_dps, pct_dps, duration_ticks))
         } else {
             None

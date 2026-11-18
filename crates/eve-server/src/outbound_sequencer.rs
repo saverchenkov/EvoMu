@@ -1293,6 +1293,47 @@ impl ServerDestinyNormalizer {
     }
 }
 
+fn restamp_damage_state_map(rep: &mut PyRep, new_stamp: u32) {
+    let stamp_rep = PyRep::Integer(i64::from(new_stamp));
+    let patch_entry = |val: &mut PyRep| {
+        if let PyRep::Tuple(outer) | PyRep::List(outer) = val {
+            if let Some(PyRep::Tuple(shield_tuple) | PyRep::List(shield_tuple)) =
+                outer.first_mut()
+            {
+                if shield_tuple.len() >= 3 && shield_tuple[2].as_i64().is_some() {
+                    shield_tuple[2] = stamp_rep.clone();
+                }
+            }
+        }
+    };
+    match rep {
+        PyRep::Dict(entries) => {
+            for (_, val) in entries.iter_mut() {
+                patch_entry(val);
+            }
+        }
+        PyRep::List(entries) | PyRep::Tuple(entries) => {
+            for item in entries.iter_mut() {
+                if let PyRep::Tuple(kv) | PyRep::List(kv) = item {
+                    if kv.len() >= 2 {
+                        patch_entry(&mut kv[1]);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn restamp_state_binary_header(rep: &mut PyRep, new_stamp: u32) {
+    match rep {
+        PyRep::Bytes(bytes) | PyRep::Buffer(bytes) if bytes.len() >= 5 => {
+            bytes[1..5].copy_from_slice(&new_stamp.to_le_bytes());
+        }
+        _ => {}
+    }
+}
+
 fn restamp_set_state_args(args: &mut PyRep, new_stamp: u32) {
     match args {
         PyRep::KeyVal(map) => {
@@ -1301,11 +1342,26 @@ fn restamp_set_state_args(args: &mut PyRep, new_stamp: u32) {
                     *v = PyRep::Integer(i64::from(new_stamp));
                 }
             }
+            if let Some(v) = map.get_mut("state") {
+                restamp_state_binary_header(v, new_stamp);
+            }
+            if let Some(v) = map.get_mut("damageState") {
+                restamp_damage_state_map(v, new_stamp);
+            }
         }
         PyRep::Dict(entries) => {
             for (k, v) in entries.iter_mut() {
-                if k.as_str() == Some("stamp") && v.as_i64().is_some() {
-                    *v = PyRep::Integer(i64::from(new_stamp));
+                match k.as_str() {
+                    Some("stamp") if v.as_i64().is_some() => {
+                        *v = PyRep::Integer(i64::from(new_stamp));
+                    }
+                    Some("state") => {
+                        restamp_state_binary_header(v, new_stamp);
+                    }
+                    Some("damageState") => {
+                        restamp_damage_state_map(v, new_stamp);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2761,19 +2817,81 @@ mod tests {
         assert!(sequence_tick(&mut wire, fx_delta).is_some());
 
         // Subsequent lag transition + SetState stamped at current_tick = 41 must clamp ONLY this session's
-        // SetState wire stamp up to 43 so INV_MONOTONIC_STAMP holds cleanly on the wire.
+        // SetState wire stamp (including KeyVal["stamp"], binary state header bytes[1..5], and damageState
+        // stamps) up to 43 so INV_MONOTONIC_STAMP and V24 ReadFullStateFromStream consistency hold.
         assert_eq!(wire.on_broadcast_lagged(), Some(ep));
+        let mut bp = eve_destiny::Ballpark::new(30_000_142);
+        bp.current_tick = 41;
+        bp.add_ball(eve_destiny::Ball {
+            id: 5001,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+        if let Some(cs) = bp.combat_states.get_mut(&5001) {
+            cs.shield_hp = 120.0;
+            cs.max_shield_hp = 200.0;
+        }
+        let set_state_payload = eve_destiny::wire::encode_set_state_payload(&bp, 5001);
         let lag_resync = DestinyBatch::new(
             ep,
             41,
             true,
-            named_update(41, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+            named_update(41, "SetState", vec![set_state_payload]),
         );
         let (resync_frame, _) = sequence_tick_with_events(&mut wire, lag_resync);
         match resync_frame.expect("lag resync SetState emitted") {
-            OutFrame::DoDestinyUpdate { stamp, has_set_state, .. } => {
+            OutFrame::DoDestinyUpdate { stamp, has_set_state, updates, .. } => {
                 assert!(has_set_state);
                 assert_eq!(stamp, 43);
+                let PyRep::List(entries) = updates else {
+                    panic!("expected List of updates");
+                };
+                let PyRep::Tuple(entry) = &entries[0] else {
+                    panic!("expected tuple entry");
+                };
+                assert_eq!(entry[0], PyRep::Integer(43));
+                let PyRep::Tuple(action_pair) = &entry[1] else {
+                    panic!("expected action pair");
+                };
+                assert_eq!(action_pair[0].as_str(), Some("SetState"));
+                let PyRep::Tuple(args) = &action_pair[1] else {
+                    panic!("expected args tuple");
+                };
+                let PyRep::KeyVal(kv) = &args[0] else {
+                    panic!("expected SetState KeyVal");
+                };
+                assert_eq!(kv.get("stamp"), Some(&PyRep::Integer(43)));
+                let Some(PyRep::Bytes(state_bytes)) = kv.get("state") else {
+                    panic!("expected binary state bytes");
+                };
+                let (_, header_stamp, decoded_balls) =
+                    eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState binary buffer");
+                assert_eq!(header_stamp, 43, "SetState binary bytes[1..5] must match clamped stamp");
+                assert_eq!(decoded_balls.len(), 1);
+                let Some(PyRep::Dict(damage_entries)) = kv.get("damageState") else {
+                    panic!("expected damageState Dict");
+                };
+                assert!(!damage_entries.is_empty());
+                for (_, dmg_val) in damage_entries {
+                    let PyRep::Tuple(outer) = dmg_val else {
+                        panic!("expected damage tuple");
+                    };
+                    let PyRep::Tuple(shield_tuple) = &outer[0] else {
+                        panic!("expected shield inner tuple");
+                    };
+                    assert_eq!(
+                        shield_tuple[2],
+                        PyRep::Integer(43),
+                        "damageState shield stamp must match clamped SetState wire stamp"
+                    );
+                }
             }
             other => panic!("expected DoDestinyUpdate, got {other:?}"),
         }
