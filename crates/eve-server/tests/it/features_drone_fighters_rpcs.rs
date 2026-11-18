@@ -502,7 +502,7 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     assert_eq!(rpc(&ctx, &mut s1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.unwrap().dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
     let raffle_id = rpc(&ctx, &mut s1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![
         (PyRep::String("item_id".into()), PyRep::Integer(910_009)), (PyRep::String("ticket_count".into()), PyRep::Integer(8)), (PyRep::String("ticket_price".into()), PyRep::Real(100_000.0)),
-    ])]).await.unwrap().dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    ])]).await.unwrap().as_i64().unwrap();
     let frac = rpc(&ctx, &mut s1, "moonExtractions", "FractureChunkWithStructure", &[PyRep::Integer(athanor_id)]).await.unwrap();
     let PyRep::List(ast_ids) = frac.dict_get("asteroidIDs").unwrap() else { panic!() };
     let first_ast_id = ast_ids[0].as_i64().unwrap();

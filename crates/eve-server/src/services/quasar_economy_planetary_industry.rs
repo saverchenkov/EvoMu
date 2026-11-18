@@ -479,9 +479,12 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let contract_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let contract = db_clone.with_snapshot(|snap| -> Result<Option<eve_db::ContractRecord>, (u32, String)> {
+            let contract = db_clone.with_snapshot(|snap| -> Result<eve_db::ContractRecord, (u32, String)> {
                 let Some(c) = snap.contracts.get(&contract_id).cloned() else {
-                    return Ok(None);
+                    return Err((
+                        STATUS_NOT_FOUND,
+                        format!("Contract {contract_id} not found"),
+                    ));
                 };
                 let is_public = (c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
                     && c.assignee_id == 0;
@@ -517,25 +520,23 @@ pub fn register_economy_planetary_industry_handlers(
                         ));
                     }
                 }
-                Ok(Some(c))
+                Ok(c)
             })?;
 
             pb::message("eve.contract.item_exchange.GetResponse")
                 .set_with("contract", |attrs| {
-                    if let Some(c) = contract {
-                        attrs
-                            .set("issuer.character.sequential", c.issuer_id as u32)
-                            .set("available_to_public", c.availability == "Public")
-                            .set("issued_time.seconds", 1_760_000_000i64)
-                            .set("expiry_time.seconds", c.expiration_unix as i64)
-                            .set_with("price", |p| set_isk_currency(p, c.price.0))
-                            .set_with("reward", |r| set_isk_currency(r, c.reward.0))
-                    } else {
-                        attrs
-                            .set("available_to_public", true)
-                            .set("issued_time.seconds", 1_760_000_000i64)
-                            .set_with("price", |p| set_isk_currency(p, 1_000_000))
-                    }
+                    attrs
+                        .set("issuer.character.sequential", contract.issuer_id as u32)
+                        .set(
+                            "available_to_public",
+                            (contract.availability.is_empty()
+                                || contract.availability.eq_ignore_ascii_case("Public"))
+                                && contract.assignee_id == 0,
+                        )
+                        .set("issued_time.seconds", 1_760_000_000i64)
+                        .set("expiry_time.seconds", contract.expiration_unix as i64)
+                        .set_with("price", |p| set_isk_currency(p, contract.price.0))
+                        .set_with("reward", |r| set_isk_currency(r, contract.reward.0))
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -680,36 +681,54 @@ pub fn register_economy_planetary_industry_handlers(
     router.register_handler(
         "eve.industry.facility.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let (station_id, caller_sys) = caller_station_and_solar_system(ctx, &db_fac);
-            let (corp_id, region_id, sys_id, facility_type_id) = if station_id > 0 {
+            let (station_id, _) = caller_station_and_solar_system(ctx, &db_fac);
+            let facility_opt = if station_id > 0 {
                 if let Some(st) = sde_fac.station(station_id as i64) {
-                    (
+                    Some((
                         st.owner_corporation_id as u32,
                         st.region_id as u64,
                         st.solar_system_id as u64,
                         Some(st.station_type_id),
-                    )
+                        true,
+                    ))
                 } else {
                     let st_info = db_fac.with_snapshot(|snap| {
-                        snap.structures
-                            .get(&(station_id as i64))
-                            .map(|s| (s.owner_corp_id, s.solar_system_id, s.type_id))
+                        snap.structures.get(&(station_id as i64)).map(|s| {
+                            (
+                                s.owner_corp_id,
+                                s.solar_system_id,
+                                s.type_id,
+                                !s.state.eq_ignore_ascii_case("Anchoring")
+                                    && !s.state.eq_ignore_ascii_case("Destroyed"),
+                            )
+                        })
                     });
-                    if let Some((owner_corp, s_sys, stype)) = st_info {
-                        let reg = sde_fac
-                            .solar_system(s_sys)
-                            .map(|ss| ss.region_id as u64)
-                            .unwrap_or(10_000_002);
-                        (owner_corp as u32, reg, s_sys as u64, Some(stype))
-                    } else {
-                        (1_000_002u32, 10_000_002u64, caller_sys, None)
-                    }
+                    let Some((owner_corp, s_sys, stype, online)) = st_info else {
+                        return Err((
+                            STATUS_NOT_FOUND,
+                            format!("Station or facility {station_id} not found"),
+                        ));
+                    };
+                    let Some(ss) = sde_fac.solar_system(s_sys) else {
+                        return Err((
+                            STATUS_NOT_FOUND,
+                            format!("Solar system {s_sys} for facility {station_id} not found"),
+                        ));
+                    };
+                    Some((
+                        owner_corp as u32,
+                        ss.region_id as u64,
+                        s_sys as u64,
+                        Some(stype),
+                        online,
+                    ))
                 }
             } else {
-                (1_000_002u32, 10_000_002u64, caller_sys, None)
+                None
             };
-            pb::message("eve.industry.facility.GetResponse")
-                .add_with("facilities", |fac| {
+            let mut resp = pb::message("eve.industry.facility.GetResponse");
+            if let Some((corp_id, region_id, sys_id, facility_type_id, online)) = facility_opt {
+                resp = resp.add_with("facilities", |fac| {
                     fac.set("id.sequential", station_id)
                         .set_with("attributes", |attrs| {
                             attrs
@@ -717,11 +736,11 @@ pub fn register_economy_planetary_industry_handlers(
                                 .set("region.sequential", region_id)
                                 .set("solar_system.sequential", sys_id)
                                 .set_opt("type.sequential", facility_type_id)
-                                .set("online", true)
+                                .set("online", online)
                         })
-                })
-                .to_any()
-                .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
+                });
+            }
+            resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
@@ -804,36 +823,26 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 9. eve.planet.GetRequest
-    let db_planet = Arc::clone(&db);
     let sde_planet = Arc::clone(&sde);
     router.register_handler(
         "eve.planet.GetRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            let sde_match =
-                lookup_sde_celestial_with_group(&sde_planet, planet_id as i64, 7, "Planet")?;
-            let fallback_sys = caller_solar_system(ctx, &db_planet);
+            let Some(c) =
+                lookup_sde_celestial_with_group(&sde_planet, planet_id as i64, 7, "Planet")?
+            else {
+                return Err((STATUS_NOT_FOUND, format!("Planet {planet_id} not found")));
+            };
             pb::message("eve.planet.GetResponse")
                 .set_with("planet", |attrs| {
-                    if let Some(c) = sde_match {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solarsystem.sequential",
-                            &c.name,
-                            c.solar_system_id as u64,
-                            Some([c.position.x, c.position.y, c.position.z]),
-                        )
-                        .set("type.sequential", c.type_id as u64)
-                    } else {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solarsystem.sequential",
-                            &format!("Planet #{planet_id}"),
-                            fallback_sys,
-                            None,
-                        )
-                        .set("type.sequential", 11u64)
-                    }
+                    encode_celestial_attributes(
+                        attrs,
+                        "solarsystem.sequential",
+                        &c.name,
+                        c.solar_system_id as u64,
+                        Some([c.position.x, c.position.y, c.position.z]),
+                    )
+                    .set("type.sequential", c.type_id as u64)
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -846,22 +855,18 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planet.GetPlanetsInSolarSystemRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let sys_id = extract_u64_from_field(dyn_msg, 1);
+            if sys_id == 0 || !sde_sys_planets.solar_systems.contains_key(&(sys_id as u32)) {
+                return Err((STATUS_NOT_FOUND, format!("Solar system {sys_id} not found")));
+            }
             let mut resp = pb::message("eve.planet.GetPlanetsInSolarSystemResponse");
-            if sys_id > 0 && sde_sys_planets.solar_systems.contains_key(&(sys_id as u32)) {
-                let mut planets: Vec<&CelestialInfo> = sde_sys_planets
-                    .celestials_in_system_slice(sys_id as u32)
-                    .iter()
-                    .filter(|c| c.group_id == 7)
-                    .collect();
-                planets.sort_by_key(|c| (c.celestial_index.unwrap_or(i32::MAX), c.celestial_id));
-                for p in planets {
-                    resp = resp.add_with("planets", |pl| pl.set("sequential", p.celestial_id as u64));
-                }
-            } else {
-                for i in 1..=8 {
-                    let planet_id = sys_id * 100 + i;
-                    resp = resp.add_with("planets", |p| p.set("sequential", planet_id));
-                }
+            let mut planets: Vec<&CelestialInfo> = sde_sys_planets
+                .celestials_in_system_slice(sys_id as u32)
+                .iter()
+                .filter(|c| c.group_id == 7)
+                .collect();
+            planets.sort_by_key(|c| (c.celestial_index.unwrap_or(i32::MAX), c.celestial_id));
+            for p in planets {
+                resp = resp.add_with("planets", |pl| pl.set("sequential", p.celestial_id as u64));
             }
             resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
@@ -901,17 +906,70 @@ pub fn register_economy_planetary_industry_handlers(
         }),
     );
 
+    fn lookup_pi_pin(
+        ctx: &AuthoritativeContext,
+        db: &WorldRepository,
+        sde: &SdeRegistry,
+        pin_id: u64,
+        allowed_groups: &[u32],
+        kind: &str,
+    ) -> Result<(u32, u64), (u32, String)> {
+        let caller = ctx.effective_character_id().unwrap_or(0) as i64;
+        let is_admin = require_admin_role(ctx).is_ok();
+        if caller <= 0 && !is_admin {
+            return Err((
+                STATUS_UNAUTHORIZED,
+                "Active character identity required".to_string(),
+            ));
+        }
+        if pin_id == 0 {
+            return Err((STATUS_NOT_FOUND, format!("PI {kind} {pin_id} not found")));
+        }
+        db.with_snapshot(|snap| {
+            let mut found_forbidden = false;
+            for (&(owner_cid, planet_id), layout) in &snap.planetary_colony_layouts {
+                let Some(pin) = layout.pins.iter().find(|p| p.pin_id == pin_id as i64) else {
+                    continue;
+                };
+                let group_ok = sde
+                    .types
+                    .get(&pin.type_id)
+                    .is_some_and(|t| allowed_groups.contains(&t.group_id));
+                if !group_ok {
+                    continue;
+                }
+                if owner_cid == caller || is_admin {
+                    return Ok((owner_cid as u32, planet_id as u64));
+                }
+                found_forbidden = true;
+            }
+            if found_forbidden {
+                Err((
+                    STATUS_FORBIDDEN,
+                    format!(
+                        "Character {caller} is not authorized to read PI {kind} {pin_id}"
+                    ),
+                ))
+            } else {
+                Err((STATUS_NOT_FOUND, format!("PI {kind} {pin_id} not found")))
+            }
+        })
+    }
+
     // 14. eve.planetinteraction.collector.GetRequest
+    let db_col = Arc::clone(&db);
+    let sde_col = Arc::clone(&sde);
     router.register_handler(
         "eve.planetinteraction.collector.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let col_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            let (cid, planet_id) =
+                lookup_pi_pin(ctx, &db_col, &sde_col, col_id, &[1026, 1063], "collector")?;
             pb::message("eve.planetinteraction.collector.GetResponse")
                 .set_with("collector", |attrs| {
                     attrs
                         .set("character.sequential", cid)
-                        .set("planet.sequential", col_id.max(1))
+                        .set("planet.sequential", planet_id)
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -919,16 +977,19 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 15. eve.planetinteraction.factory.GetRequest
+    let db_fact = Arc::clone(&db);
+    let sde_fact = Arc::clone(&sde);
     router.register_handler(
         "eve.planetinteraction.factory.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let fact_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            let (cid, planet_id) =
+                lookup_pi_pin(ctx, &db_fact, &sde_fact, fact_id, &[1028], "factory")?;
             pb::message("eve.planetinteraction.factory.GetResponse")
                 .set_with("factory", |attrs| {
                     attrs
                         .set("character.sequential", cid)
-                        .set("planet.sequential", fact_id.max(1))
+                        .set("planet.sequential", planet_id)
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -941,10 +1002,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.planetinteraction.schematic.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let sch_id = extract_u64_from_field(dyn_msg, 1);
-            let (cycle_time_sec, schematic_name) = sde_schematic
-                .planet_schematic(sch_id as u32)
-                .map(|s| (s.cycle_time.min(u32::MAX as u64) as u32, s.name.clone()))
-                .unwrap_or_else(|| (3600u32, format!("PI Schematic #{sch_id}")));
+            let Some(schem) = sde_schematic.planet_schematic(sch_id as u32) else {
+                return Err((
+                    STATUS_NOT_FOUND,
+                    format!("PI schematic {sch_id} not found"),
+                ));
+            };
+            let cycle_time_sec = schem.cycle_time.min(u32::MAX as u64) as u32;
+            let schematic_name = schem.name.clone();
             pb::message("eve.planetinteraction.schematic.GetResponse")
                 .set_with("schematic", |attrs| {
                     attrs
@@ -957,16 +1022,19 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 17. eve.planetinteraction.storage.GetRequest
+    let db_stor = Arc::clone(&db);
+    let sde_stor = Arc::clone(&sde);
     router.register_handler(
         "eve.planetinteraction.storage.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let store_id = extract_u64_from_field(dyn_msg, 1);
-            let cid = ctx.effective_character_id().unwrap_or(0) as u32;
+            let (cid, planet_id) =
+                lookup_pi_pin(ctx, &db_stor, &sde_stor, store_id, &[1029, 1030], "storage")?;
             pb::message("eve.planetinteraction.storage.GetResponse")
                 .set_with("storage", |attrs| {
                     attrs
                         .set("character.sequential", cid)
-                        .set("planet.sequential", store_id.max(1))
+                        .set("planet.sequential", planet_id)
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -974,34 +1042,25 @@ pub fn register_economy_planetary_industry_handlers(
     );
 
     // 18. eve.moon.GetRequest
-    let db_moon = Arc::clone(&db);
     let sde_moon = Arc::clone(&sde);
     router.register_handler(
         "eve.moon.GetRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let moon_id = extract_u64_from_field(dyn_msg, 1);
-            let sde_match =
-                lookup_sde_celestial_with_group(&sde_moon, moon_id as i64, 8, "Moon")?;
-            let fallback_sys = caller_solar_system(ctx, &db_moon);
+            let Some(c) =
+                lookup_sde_celestial_with_group(&sde_moon, moon_id as i64, 8, "Moon")?
+            else {
+                return Err((STATUS_NOT_FOUND, format!("Moon {moon_id} not found")));
+            };
             pb::message("eve.moon.GetResponse")
                 .set_with("attributes", |attrs| {
-                    if let Some(c) = sde_match {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solar_system.sequential",
-                            &c.name,
-                            c.solar_system_id as u64,
-                            Some([c.position.x, c.position.y, c.position.z]),
-                        )
-                    } else {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solar_system.sequential",
-                            &format!("Moon #{moon_id}"),
-                            fallback_sys,
-                            None,
-                        )
-                    }
+                    encode_celestial_attributes(
+                        attrs,
+                        "solar_system.sequential",
+                        &c.name,
+                        c.solar_system_id as u64,
+                        Some([c.position.x, c.position.y, c.position.z]),
+                    )
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -1014,53 +1073,45 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.moon.GetMoonsOfPlanetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let planet_id = extract_u64_from_field(dyn_msg, 1);
+            let Some(moons) = children_of_planet_in_sde(&sde_planet_moons, planet_id as i64, 8)?
+            else {
+                return Err((STATUS_NOT_FOUND, format!("Planet {planet_id} not found")));
+            };
             let mut resp = pb::message("eve.moon.GetMoonsOfPlanetResponse");
-            if let Some(moons) = children_of_planet_in_sde(&sde_planet_moons, planet_id as i64, 8)? {
-                for moon_id in moons {
-                    resp = resp.add_with("moons", |m| m.set("sequential", moon_id as u64));
-                }
-            } else {
-                for i in 1..=4 {
-                    resp = resp.add_with("moons", |m| m.set("sequential", planet_id * 10 + i));
-                }
+            for moon_id in moons {
+                resp = resp.add_with("moons", |m| m.set("sequential", moon_id as u64));
             }
             resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),
     );
 
     // 20. eve.asteroidbelt.GetRequest
-    let db_belt = Arc::clone(&db);
     let sde_belt = Arc::clone(&sde);
     router.register_handler(
         "eve.asteroidbelt.GetRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let belt_id = extract_u64_from_field(dyn_msg, 1);
-            let sde_match = lookup_sde_celestial_with_group(
+            let Some(c) = lookup_sde_celestial_with_group(
                 &sde_belt,
                 belt_id as i64,
                 9,
                 "Asteroid belt",
-            )?;
-            let fallback_sys = caller_solar_system(ctx, &db_belt);
+            )?
+            else {
+                return Err((
+                    STATUS_NOT_FOUND,
+                    format!("Asteroid belt {belt_id} not found"),
+                ));
+            };
             pb::message("eve.asteroidbelt.GetResponse")
                 .set_with("attributes", |attrs| {
-                    if let Some(c) = sde_match {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solar_system.sequential",
-                            &c.name,
-                            c.solar_system_id as u64,
-                            Some([c.position.x, c.position.y, c.position.z]),
-                        )
-                    } else {
-                        encode_celestial_attributes(
-                            attrs,
-                            "solar_system.sequential",
-                            &format!("Asteroid Belt #{belt_id}"),
-                            fallback_sys,
-                            None,
-                        )
-                    }
+                    encode_celestial_attributes(
+                        attrs,
+                        "solar_system.sequential",
+                        &c.name,
+                        c.solar_system_id as u64,
+                        Some([c.position.x, c.position.y, c.position.z]),
+                    )
                 })
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
@@ -1073,17 +1124,14 @@ pub fn register_economy_planetary_industry_handlers(
         "eve.asteroidbelt.GetBeltsOfPlanetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
             let planet_id = extract_u64_from_field(dyn_msg, 1);
-            let mut resp = pb::message("eve.asteroidbelt.GetBeltsOfPlanetResponse");
-            if let Some(belts) =
+            let Some(belts) =
                 children_of_planet_in_sde(&sde_planet_belts, planet_id as i64, 9)?
-            {
-                for belt_id in belts {
-                    resp = resp.add_with("belts", |b| b.set("sequential", belt_id as u64));
-                }
-            } else {
-                for i in 1..=2 {
-                    resp = resp.add_with("belts", |b| b.set("sequential", planet_id * 100 + i));
-                }
+            else {
+                return Err((STATUS_NOT_FOUND, format!("Planet {planet_id} not found")));
+            };
+            let mut resp = pb::message("eve.asteroidbelt.GetBeltsOfPlanetResponse");
+            for belt_id in belts {
+                resp = resp.add_with("belts", |b| b.set("sequential", belt_id as u64));
             }
             resp.to_any().map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
         }),

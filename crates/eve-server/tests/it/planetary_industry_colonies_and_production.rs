@@ -959,18 +959,50 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     );
 
     let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
+    let slot1_allowed = skinr_cat.slot_allowed_categories.get(&1);
     let coating_comp = skinr_cat
         .components
         .values()
-        .find(|c| !c.is_pattern() && !c.associated_types.is_empty() && !c.disallowed_slots.contains(&1))
+        .find(|c| {
+            !c.is_pattern()
+                && !c.disallowed_slots.contains(&1)
+                && slot1_allowed.is_none_or(|cats| cats.is_empty() || cats.contains(&c.category))
+                && c.associated_types.iter().any(|&(_, uses)| uses > 0)
+        })
+        .or_else(|| {
+            skinr_cat.components.values().find(|c| {
+                !c.is_pattern()
+                    && !c.associated_types.is_empty()
+                    && !c.disallowed_slots.contains(&1)
+                    && slot1_allowed.is_none_or(|cats| cats.is_empty() || cats.contains(&c.category))
+            })
+        })
         .expect("SDE SKINR coating");
-    let (coating_item_type_id, _) = coating_comp.associated_types[0];
+    let (coating_item_type_id, _) = coating_comp
+        .associated_types
+        .iter()
+        .copied()
+        .find(|&(_, uses)| uses > 0)
+        .unwrap_or(coating_comp.associated_types[0]);
     let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
         for sid in [81366u32, 81375] {
             snap.skills.entry(char_id).or_default().insert(
                 sid,
                 TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 },
             );
+        }
+        if coating_comp.binder_type_id > 0 && coating_comp.binder_count > 0 {
+            seed_item(
+                snap,
+                coating_comp.binder_type_id,
+                char_id,
+                60_015_169,
+                InventoryFlag::Hangar,
+                (coating_comp.binder_count as i32) * 11,
+            );
+        }
+        if snap.plex_vault_balance(char_id) < 5_000 {
+            snap.adjust_unified_plex(char_id, 10_000);
         }
         seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 11)
     });

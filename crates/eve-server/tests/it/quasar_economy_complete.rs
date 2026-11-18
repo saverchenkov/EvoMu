@@ -1163,14 +1163,41 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", planet_payload.clone(), b"pln-05", "GetStateResponse").await;
     assert_eq!(dyn_bool(&sky_state, "no_timer"), Some(true));
 
-    // 3. Planet Interaction (collector, factory, schematic, storage)
-    let mut pi_payload = Vec::new();
-    encode_id_field(1, 40_000_002, &mut pi_payload);
-    let col = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", pi_payload.clone(), b"pi-01", "collector.GetResponse").await;
+    // 3. Planet Interaction (collector, factory, schematic, storage) backed by real colony pins
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colony_layouts.insert(
+            (90_000_001, 40_000_002),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_001,
+                        type_id: 2848,
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_002,
+                        type_id: 2469,
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_003,
+                        type_id: 2541,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+    });
+    let mut col_payload = Vec::new();
+    encode_id_field(1, 80_001, &mut col_payload);
+    let col = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", col_payload, b"pi-01", "collector.GetResponse").await;
     assert_eq!(dyn_u64(&col, "collector.character.sequential"), Some(90_000_001));
     assert_eq!(dyn_u64(&col, "collector.planet.sequential"), Some(40_000_002));
 
-    let fact = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.factory.GetRequest", pi_payload.clone(), b"pi-02", "factory.GetResponse").await;
+    let mut fact_payload = Vec::new();
+    encode_id_field(1, 80_002, &mut fact_payload);
+    let fact = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.factory.GetRequest", fact_payload, b"pi-02", "factory.GetResponse").await;
     assert_eq!(dyn_u64(&fact, "factory.character.sequential"), Some(90_000_001));
     assert_eq!(dyn_u64(&fact, "factory.planet.sequential"), Some(40_000_002));
 
@@ -1180,9 +1207,18 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     assert_eq!(dyn_u64(&sch, "schematic.cycle_time_sec"), Some(3600));
     assert_eq!(dyn_str(&sch, "schematic.schematic_name"), Some("Superconductors"));
 
-    let stg = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.storage.GetRequest", pi_payload, b"pi-04", "storage.GetResponse").await;
+    let mut stg_payload = Vec::new();
+    encode_id_field(1, 80_003, &mut stg_payload);
+    let stg = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.storage.GetRequest", stg_payload, b"pi-04", "storage.GetResponse").await;
     assert_eq!(dyn_u64(&stg, "storage.character.sequential"), Some(90_000_001));
     assert_eq!(dyn_u64(&stg, "storage.planet.sequential"), Some(40_000_002));
+
+    let mut missing_pin_payload = Vec::new();
+    encode_id_field(1, 80_999, &mut missing_pin_payload);
+    assert_eq!(
+        quasar_send(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", missing_pin_payload, b"pi-404").await.status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // 4. Moon & Asteroid Belt
     let mut moon_payload = Vec::new();

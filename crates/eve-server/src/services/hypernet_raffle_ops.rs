@@ -431,6 +431,53 @@ fn handle_raffle_subscription(
     Some(Ok(PyRep::None))
 }
 
+fn collect_pyrep_fields<'a>(rep: &'a PyRep, out: &mut HashMap<&'a str, &'a PyRep>) -> bool {
+    match rep {
+        PyRep::KeyVal(kv) => {
+            for (k, v) in kv {
+                out.insert(k.as_str(), v);
+            }
+            true
+        }
+        PyRep::Dict(entries) => {
+            for (k, v) in entries {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks, v);
+                }
+            }
+            true
+        }
+        PyRep::Object { args, .. } => collect_pyrep_fields(args, out),
+        PyRep::ObjectEx { header, dict, .. } => {
+            let mut found = false;
+            if let PyRep::Tuple(items) = header.as_ref() {
+                for item in items {
+                    if collect_pyrep_fields(item, out) {
+                        found = true;
+                    }
+                }
+            }
+            for (k, v) in dict {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks, v);
+                }
+                found = true;
+            }
+            found
+        }
+        PyRep::Tuple(items) => {
+            let mut found = false;
+            for item in items {
+                if collect_pyrep_fields(item, out) {
+                    found = true;
+                }
+            }
+            found
+        }
+        _ => false,
+    }
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -488,53 +535,33 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let rpc = RpcArgs::new(args, kwargs);
-            let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) = match args.first() {
-                Some(PyRep::KeyVal(kv)) => {
-                    let item_id = match kv.get("item_id").or_else(|| kv.get("itemID")) {
+            let mut field_map: HashMap<&str, &PyRep> = HashMap::new();
+            let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) =
+                if args.first().is_some_and(|a0| collect_pyrep_fields(a0, &mut field_map)) {
+                    let fk = |k1: &str, k2: &str| field_map.get(k1).or_else(|| field_map.get(k2)).copied();
+                    let item_id = match fk("item_id", "itemID") {
                         Some(PyRep::Integer(id)) if *id > 0 => *id,
                         _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
                     };
-                    let ticket_count_opt = match kv.get("ticket_count").or_else(|| kv.get("ticketCount")) {
+                    let ticket_count_opt = match fk("ticket_count", "ticketCount") {
                         None | Some(PyRep::None) => None,
                         Some(PyRep::Integer(tc)) => Some(*tc),
                         Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
                     };
-                    let ticket_price_opt = match kv.get("ticket_price").or_else(|| kv.get("ticketPrice")) {
+                    let ticket_price_opt = match fk("ticket_price", "ticketPrice") {
                         Some(PyRep::Real(p)) => Some(*p),
                         Some(PyRep::Integer(p)) => Some(*p as f64),
                         _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
                     };
-                    let duration = match kv.get("duration").or_else(|| kv.get("duration_secs")).or_else(|| kv.get("durationSecs")) {
+                    let duration = match fk("duration", "duration_secs")
+                        .or_else(|| field_map.get("durationSecs").copied())
+                    {
                         None | Some(PyRep::None) => None,
                         Some(PyRep::Integer(d)) => Some(*d),
                         Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
                     };
                     (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-                Some(PyRep::Dict(kv)) => {
-                    let fk = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
-                    let item_id = match fk("item_id").or_else(|| fk("itemID")) {
-                        Some(PyRep::Integer(id)) if *id > 0 => *id,
-                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
-                    };
-                    let ticket_count_opt = match fk("ticket_count").or_else(|| fk("ticketCount")) {
-                        None | Some(PyRep::None) => None,
-                        Some(PyRep::Integer(tc)) => Some(*tc),
-                        Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
-                    };
-                    let ticket_price_opt = match fk("ticket_price").or_else(|| fk("ticketPrice")) {
-                        Some(PyRep::Real(p)) => Some(*p),
-                        Some(PyRep::Integer(p)) => Some(*p as f64),
-                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
-                    };
-                    let duration = match fk("duration").or_else(|| fk("duration_secs")).or_else(|| fk("durationSecs")) {
-                        None | Some(PyRep::None) => None,
-                        Some(PyRep::Integer(d)) => Some(*d),
-                        Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
-                    };
-                    (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-                _ => {
+                } else {
                     let item_id = match rpc.req_i64_any(0, &["itemID", "item_id"]) {
                         Ok(v) if v > 0 => v,
                         Ok(_) => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
@@ -555,8 +582,7 @@ pub fn handle(
                         Err(e) => return Some(Err(e)),
                     };
                     (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-            };
+                };
             let duration_secs = match custom_duration {
                 Some(d) if d <= 0 || d > (RAFFLE_DURATION_SECS as i64) => {
                     return Some(Err(rpc_err(
@@ -768,7 +794,7 @@ pub fn handle(
                             },
                         );
                     }
-                    Some(Ok(kv))
+                    Some(Ok(PyRep::Integer(rec.raffle_id)))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -1066,11 +1092,55 @@ pub fn handle(
                 PyRep::Integer(page_size as i64),
             ])))
         }
+        ("raffleProxy", "GetCreatedParticipated") => {
+            let char_id = session.character_id.unwrap_or(0);
+            let _ = sweep_expired_raffles(ctx);
+            let stats = ctx.db.with_snapshot(|snap| {
+                let mut created_running: i64 = 0;
+                let mut finished_delivered: i64 = 0;
+                let mut finished_expired: i64 = 0;
+                let mut finished_undelivered: i64 = 0;
+                let mut raffles_participated: i64 = 0;
+                let mut raffles_won: i64 = 0;
+                for n in snap.owner_notes.values().filter(|n| n.character_id == -74) {
+                    let Ok(r) = serde_json::from_str::<RaffleStateRecord>(&n.note) else {
+                        continue;
+                    };
+                    if r.creator_id == char_id {
+                        if r.winner_id.is_some() {
+                            if r.item_awarded {
+                                finished_delivered += 1;
+                            } else {
+                                finished_undelivered += 1;
+                            }
+                        } else if r.expired {
+                            finished_expired += 1;
+                        } else {
+                            created_running += 1;
+                        }
+                    }
+                    if r.sold_tickets.values().any(|&cid| cid == char_id) {
+                        raffles_participated += 1;
+                        if r.winner_id == Some(char_id) {
+                            raffles_won += 1;
+                        }
+                    }
+                }
+                vec![
+                    (PyRep::String("created_running".into()), PyRep::Integer(created_running)),
+                    (PyRep::String("finished_delivered".into()), PyRep::Integer(finished_delivered)),
+                    (PyRep::String("finished_expired".into()), PyRep::Integer(finished_expired)),
+                    (PyRep::String("finished_undelivered".into()), PyRep::Integer(finished_undelivered)),
+                    (PyRep::String("raffles_participated".into()), PyRep::Integer(raffles_participated)),
+                    (PyRep::String("raffles_won".into()), PyRep::Integer(raffles_won)),
+                ]
+            });
+            Some(Ok(PyRep::Dict(stats)))
+        }
         (
             "raffleProxy",
             "Grab"
             | "FilteredGrab"
-            | "GetCreatedParticipated"
             | "GetMyActiveTickets",
         ) => {
             let char_id = session.character_id.unwrap_or(0);
@@ -1145,7 +1215,7 @@ pub fn handle(
                                 true
                             }
                             "GetMyActiveTickets" => is_active && r.sold_tickets.values().any(|&cid| cid == char_id),
-                            "GetCreatedParticipated" | "GetMyRaffleHistory" => is_mine,
+                            "GetMyRaffleHistory" => is_mine,
                             _ => true,
                         }
                     })

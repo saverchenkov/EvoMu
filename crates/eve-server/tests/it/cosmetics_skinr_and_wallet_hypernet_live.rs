@@ -482,10 +482,10 @@ async fn test_live_hypernet_relay_node_sizing_and_72h_expiry_refund() {
         let cores_post = owned_qty(&ctx, PILOT_1, JITA_STATION, HYPERCORE_TYPE_ID);
         core_deltas.push(cores_pre - cores_post);
         if nodes == 16 {
-            expiry_raffle_id = int(&created, "raffleID");
+            expiry_raffle_id = created.as_i64().expect("raffleID");
             expiry_ship_id = sid;
         } else if nodes == 8 {
-            let rid_8 = int(&created, "raffleID");
+            let rid_8 = created.as_i64().expect("raffleID");
             let rifters_before = owned_qty(&ctx, PILOT_2, JITA_STATION, RIFTER_TYPE_ID);
             let tickets = rpc(
                 &ctx,

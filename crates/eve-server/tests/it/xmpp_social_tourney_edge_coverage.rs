@@ -2314,8 +2314,8 @@ async fn test_hypernet_raffle_validation_filters_and_expiry() {
     )
     .await
     .expect("CreateRaffle");
-    let rid = match field(&raffle_kv, "raffle_id") {
-        PyRep::Integer(id) => *id,
+    let rid = match raffle_kv {
+        PyRep::Integer(id) => id,
         other => panic!("expected raffle_id integer, got {other:?}"),
     };
 

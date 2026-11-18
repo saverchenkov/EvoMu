@@ -488,11 +488,36 @@ async fn test_quasar_contextualoffer_contract_csat_and_deadspace() {
     assert_eq!(get_str(&dyn_ca, 2), Some("WTS Raven Navy Issue"));
 
     // Route: eve.contract.item_exchange.GetRequest
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.contracts.insert(
+            55_001,
+            eve_db::ContractRecord {
+                contract_id: 55_001,
+                issuer_id: 90_000_003,
+                issuer_corp_id: 1_000_001,
+                contract_type: "ItemExchange".into(),
+                availability: "Public".into(),
+                status: "Outstanding".into(),
+                price: eve_db::IskCents::from_isk(1_500_000),
+                start_station_id: 60_003_760,
+                end_station_id: 60_003_760,
+                expiration_unix: 2_000_000_000,
+                ..Default::default()
+            },
+        );
+    });
     let contract_req = encode_seq_id(1, 55_001);
     let contract_rsp = quasar_call(&ctx, &sess, "eve.contract.item_exchange.GetRequest", contract_req);
     assert_eq!(contract_rsp.status_code, STATUS_OK);
     let crsp_p = contract_rsp.payload.expect("contract payload");
     assert_eq!(crsp_p.normalized_type_name(), "eve.contract.item_exchange.GetResponse");
+    let missing_contract_rsp = quasar_call(
+        &ctx,
+        &sess,
+        "eve.contract.item_exchange.GetRequest",
+        encode_seq_id(1, 55_999),
+    );
+    assert_eq!(missing_contract_rsp.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
 
     // 3. Quasar CSAT (feat:quasar.csat)
     // Descriptor registry verification (1 proto file, 2 messages)

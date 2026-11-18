@@ -295,3 +295,124 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
         );
     }
 }
+
+#[test]
+fn unlimited_component_immediate_activate_delivers_surplus_without_silent_loss() {
+    let (router, db, skinr, state) = new_market_harness();
+    let now = 1_700_000_000u64;
+    let cid = 2_112_000_202i64;
+    make_char(&db, cid, 98_000_001, Some(60_003_760), 10_000_000_00, 0, 0);
+    let sess = make_sess(cid, 98_000_001, Some(60_003_760), 0);
+
+    let captured: Arc<std::sync::Mutex<Vec<(i64, String, Vec<eve_proto::PyRep>)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let cap = Arc::clone(&captured);
+        *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _id, args| {
+            let crate::router::NotificationTarget::Character(c) = target else { return; };
+            cap.lock().unwrap().push((c, event.to_string(), args));
+        }));
+    }
+
+    let Some((&inf_tid, &(comp_id, _))) = skinr
+        .catalog
+        .item_type_to_component
+        .iter()
+        .find(|(_, &(_, uses))| uses <= 0)
+    else {
+        return;
+    };
+    let is_pat = skinr
+        .catalog
+        .components
+        .get(&comp_id)
+        .is_some_and(|c| c.is_pattern());
+
+    let listing_uuid = [0xABu8; 16];
+    let entity_before = db.with_snapshot(|s| s.next_entity_id);
+    {
+        let mut data = state.data.write().unwrap();
+        data.component_listings.insert(
+            hex(&listing_uuid),
+            ComponentListingRecord {
+                uuid: listing_uuid,
+                sale_end_unix: now + 3_600,
+                price_isk: Some(1_000),
+                price_plex_cents: None,
+                component_item_type_id: inf_tid,
+                bundle_size: 1,
+                discount_percent: 0,
+            },
+        );
+    }
+
+    // First purchase: quantity 2 with immediately_activate=true activates 1 infinite license AND delivers 1 surplus item via alloc_entity_id
+    let buy_2 = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("quantity", 2u32)
+        .set("immediately_activate", true)
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
+            buy_2,
+            now + 1,
+        )
+        .status_code,
+        STATUS_OK
+    );
+
+    let key = crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::comp_key(
+        cid as u32, is_pat, comp_id,
+    );
+    assert!(skinr.data.read().unwrap().infinite_licenses.contains_key(&key));
+    let (hangar_qty_after_first, entity_after_first) = db.with_snapshot(|s| {
+        let qty: i32 = s
+            .items
+            .values()
+            .filter(|it| it.owner_id == cid && it.type_id == inf_tid)
+            .map(|it| it.quantity)
+            .sum();
+        (qty, s.next_entity_id)
+    });
+    assert_eq!(hangar_qty_after_first, 1, "surplus item must be delivered to hangar");
+    assert!(
+        entity_after_first > entity_before,
+        "physical hangar item ID must advance s.next_entity_id via alloc_entity_id"
+    );
+
+    // Repeat purchase while already owning infinite license delivers full quantity (2) to hangar + emits OnItemChange
+    let buy_again = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
+        .set("listing.uuid", listing_uuid.to_vec())
+        .set("quantity", 2u32)
+        .set("immediately_activate", true)
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &sess,
+            "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
+            buy_again,
+            now + 2,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    let hangar_qty_after_second: i32 = db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|it| it.owner_id == cid && it.type_id == inf_tid)
+            .map(|it| it.quantity)
+            .sum()
+    });
+    assert_eq!(hangar_qty_after_second, 3, "already-owned unlimited purchase must deliver all items");
+    let item_notifs: usize = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(c, ev, _)| *c == cid && ev == "OnItemChange")
+        .count();
+    assert_eq!(item_notifs, 2, "each delivered item batch must emit OnItemChange");
+}

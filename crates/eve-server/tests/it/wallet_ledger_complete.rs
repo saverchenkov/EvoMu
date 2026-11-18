@@ -909,7 +909,7 @@ async fn test_hypernet_relay_and_hypercore_scaling_and_expiry() {
         (PyRep::String("ticketCount".into()), PyRep::Integer(16)),
         (PyRep::String("ticketPrice".into()), PyRep::Real(10_000.0)),
     ])]).await.expect("CreateRaffle");
-    let raffle_id = kv_i64(&c_raf, "raffle_id");
+    let raffle_id = c_raf.as_i64().expect("raffle_id");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&raffle_item].owner_id), -52_568);
 
     let p2_before = balance(&ctx, P2);

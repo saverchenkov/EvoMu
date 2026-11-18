@@ -2789,6 +2789,106 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
     let installed_job_id = job_res.dict_get("jobID").and_then(PyRep::as_i64).expect("jobID");
     assert!(installed_job_id > 0);
 
+    // Create a live ItemExchange contract via contractProxy.CreateContract (non-GM)
+    let mut gm = login_demo_gm(&ctx, 60_082).await;
+    let contract_item_id = buy_item_valid_tick(&ctx, &mut sess, char_id, JITA_STATION, 34, 10).await;
+    let created_contract = rpc_ok(
+        &ctx,
+        &mut sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("type", PyRep::String("ItemExchange".into())),
+            ("availability", PyRep::String("Public".into())),
+            ("startStationID", PyRep::Integer(JITA_STATION)),
+            ("price", PyRep::Real(1_250_000.0)),
+            ("itemList", PyRep::Integer(contract_item_id)),
+        ])],
+    )
+    .await;
+    let created_contract_id = match &created_contract {
+        PyRep::List(items) => items.first().and_then(PyRep::as_i64),
+        other => other.as_i64(),
+    }
+    .expect("created contractID");
+    assert!(created_contract_id > 0);
+
+    // Deploy a real PI colony + ECU collector pin on Jita IV via planetMgr.UserUpdateNetwork (non-GM)
+    let (jita_planet_iv, jita_iv_type_id) = ctx
+        .sde
+        .celestials_in_system(JITA_SYS)
+        .into_iter()
+        .find(|c| c.group_id == 7 && c.name == "Jita IV")
+        .map(|c| (c.celestial_id, c.type_id))
+        .expect("Jita IV celestial in SDE");
+    let cc_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| {
+            t.group_id == 1027
+                && t.default_attributes
+                    .get(&1632)
+                    .is_some_and(|&v| v as u32 == jita_iv_type_id)
+        })
+        .map(|t| t.type_id)
+        .expect("Matching Command Center type for Jita IV in SDE");
+    ensure_skills_for_types(&ctx, &mut sess, char_id, JITA_STATION, &[648]).await;
+    let badger_id = gm_supply_and_buy(&ctx, &mut gm, &mut sess, char_id, JITA_STATION, 648, 1).await;
+    ctx.advance_secs(11);
+    rpc_ok(&ctx, &mut sess, "ship", "AssembleShip", &[PyRep::List(vec![PyRep::Integer(badger_id)])]).await;
+    rpc_ok(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(badger_id)]).await;
+    ctx.advance_secs(11);
+    sess.ship_id = Some(badger_id);
+    let cc_item_id = gm_supply_and_buy(&ctx, &mut gm, &mut sess, char_id, JITA_STATION, cc_type_id, 1).await;
+    rpc_ok(
+        &ctx,
+        &mut sess,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(cc_item_id), PyRep::Integer(badger_id), PyRep::Integer(5)],
+    )
+    .await;
+    undock_from_station(&ctx, &mut sess, JITA_SYS).await;
+    let pi_res = rpc_ok(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(jita_planet_iv),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)]),
+                    PyRep::Integer(i64::from(cc_type_id)),
+                    PyRep::Real(0.25),
+                    PyRep::Real(-0.75),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]),
+                    PyRep::Integer(2848),
+                    PyRep::Real(0.26),
+                    PyRep::Real(-0.75),
+                ]),
+            ]),
+        ],
+    )
+    .await;
+    let ecu_pin_id = match &pi_res {
+        PyRep::KeyVal(kv) => match kv.get("pins") {
+            Some(PyRep::List(pins)) => pins
+                .iter()
+                .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(2848))
+                .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64())),
+            _ => None,
+        },
+        _ => None,
+    }
+    .expect("ECU pinID from UserUpdateNetwork");
+    warp_and_dock_at_station_fast(&ctx, &mut sess, badger_id, JITA_SYS, JITA_STATION).await;
+
     // 2. Start live HTTP/2 h2c Quasar gateway listener and issue bearer JWT
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -2882,8 +2982,8 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         ),
         (
             "eve.planetinteraction.collector.GetRequest",
-            id_payload(1, char_id),
-            false,
+            id_payload(1, ecu_pin_id),
+            true,
         ),
         ("eve.moon.GetMoonsOfPlanetRequest", id_payload(1, jita_planet_iv), true),
         (
@@ -2898,8 +2998,8 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         ),
         (
             "eve.contract.item_exchange.GetRequest",
-            id_payload(1, char_id),
-            false,
+            id_payload(1, created_contract_id),
+            true,
         ),
     ] {
         let (grpc_st, rsp_opt) =
@@ -2938,6 +3038,24 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
                 _ => {}
             }
         }
+    }
+
+    for missing_msg in [
+        "eve.planetinteraction.collector.GetRequest",
+        "eve.contract.item_exchange.GetRequest",
+    ] {
+        let (grpc_st, rsp_opt) = send_h2c_quasar_request(
+            addr,
+            Some(&token),
+            &make_pub_req(missing_msg, id_payload(1, 999_999_999)),
+        )
+        .await;
+        assert_eq!(grpc_st.as_deref(), Some("0"), "{missing_msg} missing gRPC status");
+        assert_eq!(
+            rsp_opt.expect("EvePublicResponse").status_code,
+            STATUS_NOT_FOUND,
+            "{missing_msg} missing ID must return STATUS_NOT_FOUND"
+        );
     }
 
     // Verify loyaltypoints assetholding DepositRequest & WithdrawRequest over h2c (non-GM forbidden, GM succeeds)

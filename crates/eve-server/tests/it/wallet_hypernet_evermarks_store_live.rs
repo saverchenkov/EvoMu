@@ -286,6 +286,14 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
         .expect("creator balance before")
         .as_f64()
         .unwrap();
+    let creator_cid = s1.character_id.unwrap();
+    let cores_before: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.owner_id == creator_cid && i.type_id == HYPERCORE_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
     let create_rep = rpc(
         &ctx,
         &mut s1,
@@ -302,17 +310,17 @@ async fn test_wallet_hypernet_relay_npc_station_enforcement_and_random_tickets_l
     )
     .await
     .expect("CreateRaffle valid 8-node");
-    let PyRep::KeyVal(r_kv) = create_rep else {
-        panic!("CreateRaffle must return KeyVal");
+    let PyRep::Integer(raffle_id) = create_rep else {
+        panic!("CreateRaffle must return integer raffle_id");
     };
-    let raffle_id = r_kv
-        .get("raffle_id")
-        .and_then(|v| v.as_i64())
-        .expect("raffle_id");
-    let cores_used = r_kv
-        .get("hypercores_used")
-        .and_then(|v| v.as_i64())
-        .expect("hypercores_used");
+    let cores_after: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.owner_id == creator_cid && i.type_id == HYPERCORE_TYPE_ID)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    let cores_used = cores_before - cores_after;
     assert_eq!(
         cores_used, 1,
         "800k total price -> max(1, floor(800_000 / 350_000 * 0.05)) == 1 HyperCore"

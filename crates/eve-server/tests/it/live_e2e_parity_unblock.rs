@@ -802,10 +802,9 @@ async fn test_live_e2e_hypernet_relay_sizing_expiry_and_payout() {
     )
     .await
     .expect("CreateRaffle 1");
-    let raffle1_id = create1.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let cores_used_1 = create1.dict_get("hypercores_used").and_then(|v| v.as_i64()).unwrap();
+    let raffle1_id = create1.as_i64().expect("CreateRaffle 1 integer raffle_id");
+    let cores_used_1 = cores_before_1 - hangar_qty(&ctx, &mut s1, HYPERCORE_TYPE_ID).await;
     assert!(cores_used_1 >= 1);
-    assert_eq!(hangar_qty(&ctx, &mut s1, HYPERCORE_TYPE_ID).await, cores_before_1 - cores_used_1);
     assert!(!hangar_has_item_id(&ctx, &mut s1, r1).await, "Escrowed item must leave creator hangar");
 
     let buy1 = rpc(&ctx, &mut s2, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raffle1_id), PyRep::Integer(8)])
@@ -837,10 +836,9 @@ async fn test_live_e2e_hypernet_relay_sizing_expiry_and_payout() {
     )
     .await
     .expect("CreateRaffle 2");
-    let raffle2_id = create2.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let cores_used_2 = create2.dict_get("hypercores_used").and_then(|v| v.as_i64()).unwrap();
+    let raffle2_id = create2.as_i64().expect("CreateRaffle 2 integer raffle_id");
     let cores_after_create2 = hangar_qty(&ctx, &mut s1, HYPERCORE_TYPE_ID).await;
-    assert_eq!(cores_after_create2, cores_before_2 - cores_used_2);
+    assert!(cores_after_create2 < cores_before_2, "HyperCores must be consumed");
 
     let buyer_cash_before_2 = cash_balance(&ctx, &mut s2).await;
     rpc(&ctx, &mut s2, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raffle2_id), PyRep::Integer(2)])

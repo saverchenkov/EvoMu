@@ -127,10 +127,10 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
     let p1 = sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
     let p2 = sess(Some(2), Some(90_000_002), service_roles::ROLE_PLAYER_DEFAULT);
 
-    // Save capacity: V24 Studio Management (81370) Lv 0 -> 0 saved draft slots, Save rejected
+    // Save capacity: base 5 saved draft slots even when unskilled (`5..=125` with Studio Mgmt skills).
     let cap0_rsp = call(
         &router,
-        &p1,
+        &p2,
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
         Vec::new(),
         now,
@@ -144,16 +144,26 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
             .find(|f| f.field_number == 1)
             .and_then(|f| f.value.as_varint())
             .unwrap_or(0),
-        0
+        5
     );
+    for i in 1..=5 {
+        let req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
+            .set("name", format!("Unskilled Draft {i}"))
+            .set("line_name", "Base Line")
+            .must_encode();
+        assert_eq!(
+            call(&router, &p2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", req, now).status_code,
+            STATUS_OK
+        );
+    }
     let blocked_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
-        .set("name", "Blocked At Lv0")
+        .set("name", "Blocked At 6th Unskilled")
         .set("line_name", "Blocked")
         .must_encode();
     assert_eq!(
         call(
             &router,
-            &p1,
+            &p2,
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
             blocked_req,
             now,
@@ -162,7 +172,7 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
         STATUS_BAD_REQUEST
     );
 
-    // Train Studio Management (81370) Lv 1 -> capacity 5
+    // Train Studio Management (81370) Lv 1 for p1 -> 5 base + 5 = 10 slots
     db.with_mut_snapshot(|s| {
         s.skills.entry(90_000_001).or_default().insert(
             81_370,
@@ -184,7 +194,7 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
     let cap_wm = WireMessage::decode(&cap_rsp.payload.unwrap().value).expect("decode cap1");
     assert_eq!(
         cap_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
-        Some(5)
+        Some(10)
     );
 
     // Save draft for p1

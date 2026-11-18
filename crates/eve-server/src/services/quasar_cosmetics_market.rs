@@ -242,6 +242,7 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
         let mut seq = 0u64;
         for (idx, type_id) in design_types.into_iter().enumerate() {
             let tier = rarity_by_type.get(&type_id).copied().unwrap_or(((idx % 5) + 1) as u64);
+            // DERIVED: Fallback rarity-scaled pricing (tier * 250,000 ISK or tier * 500 PLEX) for SDE components without explicit listing templates.
             let unit_isk = tier * 250_000;
             let unit_plex = tier * 500;
             let variants = [
@@ -677,7 +678,7 @@ fn component_initiate_purchase(
         .checked_mul(quantity_u64)
         .filter(|&q| q > 0)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Component bundle quantity overflow".to_string()))?;
-    let granted_qty = i32::try_from(granted_qty_u64)
+    let _granted_qty = i32::try_from(granted_qty_u64)
         .map_err(|_| (STATUS_BAD_REQUEST, "Component bundle quantity exceeds i32::MAX".to_string()))?;
     let checked_isk_total = match listing.price_isk {
         Some(isk_unit) => {
@@ -706,14 +707,18 @@ fn component_initiate_purchase(
     };
     st.save();
 
-    let activate_directly = immediately_activate
-        && st
-            .skinr
-            .catalog
-            .item_type_to_component
-            .contains_key(&listing.component_item_type_id);
+    let (activate_qty, deliver_qty_u64) = super::quasar_cosmetics_skinr::plan_component_activation(
+        &st.skinr,
+        cid,
+        listing.component_item_type_id,
+        granted_qty_u64,
+        immediately_activate,
+    );
+    let deliver_qty = i32::try_from(deliver_qty_u64)
+        .map_err(|_| (STATUS_BAD_REQUEST, "Component delivery quantity exceeds i32::MAX".to_string()))?;
     let mut debited_bal: Option<IskCents> = None;
     let mut plex_notice: Option<(u64, u64, i64, i64)> = None;
+    let mut delivered_item: Option<InventoryItemRecord> = None;
     let succeeded = st.db.with_mut_snapshot(|s| {
         let Some((ch_station, ch_struct, ch_home)) = s
             .characters
@@ -737,7 +742,7 @@ fn component_initiate_purchase(
         if let (Some(total_cost), Some(rem)) = (checked_isk_total, debited_bal) {
             s.append_journal(cid as i64, "ParagonHubComponentPurchase", IskCents(-total_cost.0), rem, format!("Paragon Hub component purchase ({quantity_u64}x)"));
         }
-        if !activate_directly {
+        if deliver_qty > 0 {
             let location_id = ch_station.or(ch_struct).unwrap_or_else(|| {
                 if st.skinr.sde.stations.contains_key(&ch_home) {
                     ch_home
@@ -745,38 +750,43 @@ fn component_initiate_purchase(
                     st.skinr.sde.stations.keys().copied().min().unwrap_or(ch_home)
                 }
             });
-            let item_id = s
-                .items
-                .keys()
-                .copied()
-                .max()
-                .unwrap_or(990_000_000)
-                .max(990_000_000)
-                + 1;
-            s.items.insert(
+            let item_id = s.alloc_entity_id();
+            let rec = InventoryItemRecord {
                 item_id,
-                InventoryItemRecord {
-                    item_id,
-                    type_id: listing.component_item_type_id,
-                    owner_id: cid as i64,
-                    location_id,
-                    flag: InventoryFlag::Hangar,
-                    quantity: granted_qty,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
-            );
+                type_id: listing.component_item_type_id,
+                owner_id: cid as i64,
+                location_id,
+                flag: InventoryFlag::Hangar,
+                quantity: deliver_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            };
+            s.items.insert(item_id, rec.clone());
+            delivered_item = Some(rec);
         }
         true
     });
-    if succeeded && activate_directly {
+    if succeeded && activate_qty > 0 {
         let _ = super::quasar_cosmetics_skinr::grant_component_license_from_item_type(
             &st.skinr,
             cid,
             listing.component_item_type_id,
-            granted_qty_u64,
+            activate_qty,
             now,
+        );
+    }
+    if let Some(rec) = delivered_item {
+        let sink = st.macho_notify_sink.read().unwrap_or_else(|e| e.into_inner()).clone();
+        super::quasar_cosmetics_skinr::emit_item_changes_with_sink(
+            sink.as_ref(),
+            &st.skinr.sde,
+            cid as i64,
+            &[super::quasar_cosmetics_skinr::ItemChangeEvent {
+                old: None,
+                new: Some(rec),
+                custom_name: String::new(),
+            }],
         );
     }
     if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }

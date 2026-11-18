@@ -2879,7 +2879,7 @@ async fn test_cosmetics_skinr_fast_checkout_and_char_lifecycle_edges() {
         STATUS_FORBIDDEN | STATUS_UNAUTHORIZED
     ));
 
-    // Train Studio Management (81370) Lv 4 -> 20 saved draft slots, then 21st hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
+    // Train Studio Management (81370) Lv 4 -> 5 base + 20 = 25 saved draft slots, then 26th hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
     ctx.db.with_mut_snapshot(|s| {
         s.skills.entry(CHAR_DEMO).or_default().insert(
             81_370,
@@ -2890,8 +2890,8 @@ async fn test_cosmetics_skinr_fast_checkout_and_char_lifecycle_edges() {
             },
         );
     });
-    // Save 20 drafts cleanly, then 21st hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
-    for i in 1..=20u32 {
+    // Save 25 drafts cleanly, then 26th hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
+    for i in 1..=25u32 {
         let mut save_bytes = Vec::new();
         encode_string_field(1, &format!("Draft {i}"), &mut save_bytes);
         let r = quasar_rpc(
@@ -2903,16 +2903,16 @@ async fn test_cosmetics_skinr_fast_checkout_and_char_lifecycle_edges() {
         .await;
         assert_eq!(r.status_code, STATUS_OK, "draft {i} should save");
     }
-    let mut save_21 = Vec::new();
-    encode_string_field(1, "Draft 21 OverCap", &mut save_21);
-    let r_21 = quasar_rpc(
+    let mut save_26 = Vec::new();
+    encode_string_field(1, "Draft 26 OverCap", &mut save_26);
+    let r_26 = quasar_rpc(
         &ctx,
         &mut s_demo,
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
-        save_21,
+        save_26,
     )
     .await;
-    assert_eq!(r_21.status_code, STATUS_BAD_REQUEST);
+    assert_eq!(r_26.status_code, STATUS_BAD_REQUEST);
 
     // Draft DeleteRequest not found -> STATUS_NOT_FOUND
     let mut del_nf = Vec::new();

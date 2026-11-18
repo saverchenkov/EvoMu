@@ -351,11 +351,24 @@ fn admin_lp_ops_structure_facility_isk_transfer_variants_and_id_handlers() {
     let (router, db) = make_router_and_db();
     let cid = 211200520i64;
     seed_char(&db, cid, 1000009, 100_000);
-    // Dock character in a structure (station_id = None, structure_id = Some)
+    // Dock character in a seeded Upwell structure (station_id = None, structure_id = Some)
     db.with_mut_snapshot(|s| {
+        let st_id = 1_030_000_000_777_i64;
+        s.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_832,
+                owner_corp_id: 1_000_009,
+                solar_system_id: 30_000_142,
+                name: "Test Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
         let ch = s.characters.get_mut(&cid).unwrap();
         ch.station_id = None;
-        ch.structure_id = Some(1_030_000_000_777);
+        ch.structure_id = Some(st_id);
     });
 
     let admin_no_char = make_ctx(Some(99), None, None, ROLE_PROGRAMMER);
@@ -370,11 +383,14 @@ fn admin_lp_ops_structure_facility_isk_transfer_variants_and_id_handlers() {
         assert!(dispatch_dyn(&router, &admin_no_char, rpc, &empty_d).is_ok());
     }
 
-    // 2. Facility & CostIndices for both structure-docked character and anonymous caller
+    // 2. Facility & CostIndices: seeded structure returns facility, anonymous caller gets empty facilities list
+    let user_fac = dispatch_dyn(&router, &user, "eve.industry.facility.GetRequest", &empty_d)
+        .expect("seeded structure facility");
+    assert!(!user_fac.value.is_empty());
+    let anon_fac = dispatch_dyn(&router, &admin_no_char, "eve.industry.facility.GetRequest", &empty_d)
+        .expect("anonymous facility.GetRequest");
+    assert!(anon_fac.value.is_empty());
     for ctx in [&user, &admin_no_char] {
-        assert!(
-            dispatch_dyn(&router, ctx, "eve.industry.facility.GetRequest", &empty_d).is_ok()
-        );
         assert!(dispatch_dyn(
             &router,
             ctx,

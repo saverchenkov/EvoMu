@@ -189,7 +189,7 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let mut player_sess = build_player_sess(10_103, 90_000_103, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // Seed char 90_000_101 (FK for character_skills) and train Studio Management (81370) Lv 4 -> 20 slots
+    // Seed char 90_000_101 (FK for character_skills) and train Studio Management (81370) Lv 4 -> 5 base + 20 = 25 slots
     ctx.db.with_mut_snapshot(|s| {
         if !s.characters.contains_key(&90_000_101) {
             let mut c = s.characters.get(&90_000_001).cloned().expect("demo char");
@@ -304,11 +304,11 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let unauth_del_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest", make_uuid_request(draft_uuid_bytes)).await;
     assert_eq!(unauth_del_rsp.status_code, STATUS_FORBIDDEN, "Other character cannot delete draft");
 
-    // 6. Capacity check: capacity is 20
+    // 6. Capacity check: capacity is 25 (5 base + 20 Studio Management Lv 4)
     let cap_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest", Vec::new()).await;
     assert_eq!(cap_rsp.status_code, STATUS_OK);
     let cap_wm = WireMessage::decode(&cap_rsp.payload.unwrap().value).unwrap();
-    assert_eq!(cap_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(20));
+    assert_eq!(cap_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(25));
 
     // Unauthenticated / no character requests must return 403 STATUS_FORBIDDEN
     let mut no_char_sess = SessionState::new(10_999);
@@ -317,15 +317,15 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let unauth_cap = quasar_rpc(&ctx, &mut no_char_sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest", Vec::new()).await;
     assert_eq!(unauth_cap.status_code, STATUS_FORBIDDEN, "GetSaveCapacityRequest without character must return 403");
 
-    // Save drafts up to capacity (currently 1 saved, save 19 more)
-    for i in 2..=20 {
+    // Save drafts up to capacity (currently 1 saved, save 24 more)
+    for i in 2..=25 {
         let mut req = Vec::new();
         encode_string_field(1, &format!("Draft #{i}"), &mut req);
         assert_eq!(quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", req).await.status_code, STATUS_OK);
     }
-    // 21st draft must be rejected with 400 Bad Request
+    // 26th draft must be rejected with 400 Bad Request
     let overflow_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new()).await;
-    assert_eq!(overflow_rsp.status_code, STATUS_BAD_REQUEST, "Exceeding 20 draft capacity must be rejected");
+    assert_eq!(overflow_rsp.status_code, STATUS_BAD_REQUEST, "Exceeding 25 draft capacity must be rejected");
 
     // Delete first draft -> frees a slot
     let del_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest", make_uuid_request(draft_uuid_bytes)).await;

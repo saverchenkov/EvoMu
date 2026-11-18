@@ -608,7 +608,15 @@ async fn test_raffle_proxy_create_raffle_hypercores_and_expiry_live() {
     .expect("Dock in Jita 4-4 NPC station");
 
     // 5. Valid 48-node raffle at 1.25M ISK/ticket (60M ISK total -> consumes >= 2 HyperCores)
-    let PyRep::KeyVal(r_kv) = rpc(
+    let creator_cid = creator_pilot.sess.character_id.unwrap();
+    let cores_before: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.owner_id == creator_cid && i.type_id == 52_568)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    let PyRep::Integer(raffle_id) = rpc(
         &ctx,
         &mut creator_pilot.sess,
         "raffleProxy",
@@ -622,10 +630,16 @@ async fn test_raffle_proxy_create_raffle_hypercores_and_expiry_live() {
     .await
     .expect("CreateRaffle 48-node")
     else {
-        panic!("expected KeyVal");
+        panic!("expected Integer raffle_id");
     };
-    let raffle_id = r_kv.get("raffle_id").and_then(PyRep::as_i64).expect("raffle_id");
-    let cores_used = r_kv.get("hypercores_used").and_then(PyRep::as_i64).expect("hypercores_used");
+    let cores_after: i32 = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .filter(|i| i.owner_id == creator_cid && i.type_id == 52_568)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    let cores_used = cores_before - cores_after;
     assert!(cores_used >= 2, "Expected >= 2 HyperCores consumed, got {cores_used}");
 
     // 6. Buyer buys 2 tickets (2.5M ISK); after 72h expiry buyer refunded, item returned, HyperCores NOT refunded

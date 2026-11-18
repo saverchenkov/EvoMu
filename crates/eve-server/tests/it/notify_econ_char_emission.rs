@@ -1035,10 +1035,7 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
     )
     .await
     .expect("CreateRaffle");
-    let raffle_id = create_rep
-        .dict_get("raffle_id")
-        .and_then(|v| v.as_i64())
-        .expect("raffle_id");
+    let raffle_id = create_rep.as_i64().expect("raffle_id");
     let create_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
     assert_eq!(created_args.len(), 2);
@@ -1152,7 +1149,7 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
     )
     .await
     .expect("CreateRaffle 2");
-    let raffle_2 = create_2.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let raffle_2 = create_2.as_i64().unwrap();
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     ctx.advance_secs(120);
     assert_eq!(sweep_expired_raffles(&ctx), 1);

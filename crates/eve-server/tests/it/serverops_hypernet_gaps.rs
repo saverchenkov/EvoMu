@@ -120,8 +120,7 @@ async fn test_hypernet_mechanic_rng_multi_buyer_distribution() {
         )
         .await
         .expect("CreateRaffle");
-        let PyRep::KeyVal(r_kv) = c_raf else { panic!("expected KeyVal"); };
-        let raffle_id = r_kv.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+        let raffle_id = c_raf.as_i64().expect("CreateRaffle must return integer raffle_id");
 
         // Distinct buyer 1 (P1) buys 4 random tickets
         let buy1 = rpc(
@@ -388,13 +387,10 @@ async fn test_hypernet_create_raffle_validation_and_hypercore_expiry() {
     )
     .await
     .expect("CreateRaffle 48-node");
-    let PyRep::KeyVal(r_kv) = created else { panic!("expected KeyVal"); };
-    let raffle_id = r_kv.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let cores_used = r_kv.get("hypercores_used").and_then(|v| v.as_i64()).unwrap();
-    assert!(cores_used >= 2, "Expected >=2 HyperCores consumed for 60M 48-node raffle, got {cores_used}");
-
+    let raffle_id = created.as_i64().expect("CreateRaffle must return integer raffle_id");
     let cores_after_create = ctx.db.with_snapshot(|snap| snap.items[&hypercore_item].quantity);
-    assert_eq!(cores_after_create, 20 - (cores_used as i32));
+    let cores_used = 20 - cores_after_create;
+    assert!(cores_used >= 2, "Expected >=2 HyperCores consumed for 60M 48-node raffle, got {cores_used}");
 
     // 6. P2 buys 2 tickets, then raffle expires after 72h: buyer refunded, item returned, HyperCores NOT refunded
     let p2_before_buy = get_balance(&ctx, P2);
@@ -507,8 +503,7 @@ async fn test_hypernet_active_historic_prices_and_random_tickets() {
     )
     .await
     .expect("CreateRaffle A");
-    let PyRep::KeyVal(kv_a) = r_a else { panic!("expected KeyVal"); };
-    let raf_a = kv_a.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let raf_a = r_a.as_i64().expect("CreateRaffle A must return integer raffle_id");
 
     let r_b = rpc(
         &ctx,
@@ -523,8 +518,7 @@ async fn test_hypernet_active_historic_prices_and_random_tickets() {
     )
     .await
     .expect("CreateRaffle B");
-    let PyRep::KeyVal(kv_b) = r_b else { panic!("expected KeyVal"); };
-    let raf_b = kv_b.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let raf_b = r_b.as_i64().expect("CreateRaffle B must return integer raffle_id");
 
     let mid = rpc(
         &ctx,

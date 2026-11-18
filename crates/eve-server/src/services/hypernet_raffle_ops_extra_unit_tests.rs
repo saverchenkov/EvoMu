@@ -371,7 +371,9 @@ fn create_raffle_validation_branches_dict_keyval_buy_errors_and_filtered_grab_ma
         &kw,
     )
     .expect("create bpo raffle");
-    let rid_bpo = created_bpo.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let rid_bpo = created_bpo
+        .as_i64()
+        .expect("CreateRaffle must return integer raffle_id");
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&core_id));
     });
@@ -421,7 +423,9 @@ fn create_raffle_validation_branches_dict_keyval_buy_errors_and_filtered_grab_ma
         &kw,
     )
     .expect("create bpc raffle");
-    let rid_bpc = created_bpc.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let rid_bpc = created_bpc
+        .as_i64()
+        .expect("CreateRaffle must return integer raffle_id");
 
     // 4. FilteredGrab with blueprint_type (1 = BPO only, 2 = BPC only), ticket_count, min/max price, solar_system_id, size
     let grab_bpo = call_raffle(
@@ -496,14 +500,10 @@ fn create_raffle_validation_branches_dict_keyval_buy_errors_and_filtered_grab_ma
             .len(),
         1
     );
-    assert_eq!(
-        call_raffle(&ctx, &mut buyer_sess, "GetCreatedParticipated", &[], &kw)
-            .unwrap()
-            .as_list()
-            .unwrap()
-            .len(),
-        1
-    );
+    let stats = call_raffle(&ctx, &mut buyer_sess, "GetCreatedParticipated", &[], &kw).unwrap();
+    assert_eq!(stats.dict_get("raffles_participated"), Some(&PyRep::Integer(1)));
+    assert_eq!(stats.dict_get("created_running"), Some(&PyRep::Integer(0)));
+    assert_eq!(stats.dict_get("raffles_won"), Some(&PyRep::Integer(0)));
 
     // Non-winner cannot AwardItem
     assert_eq!(

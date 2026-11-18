@@ -1049,8 +1049,7 @@ async fn pin_1187_raffle_history_wire_shape() {
     )
     .await;
     let raffle_id_a = created_a
-        .dict_get("raffle_id")
-        .and_then(PyRep::as_i64)
+        .as_i64()
         .expect("created raffle A id");
 
     let created_b = wire_session_call_ok(
@@ -1067,8 +1066,7 @@ async fn pin_1187_raffle_history_wire_shape() {
     )
     .await;
     let raffle_id_b = created_b
-        .dict_get("raffle_id")
-        .and_then(PyRep::as_i64)
+        .as_i64()
         .expect("created raffle B id");
 
     let hist_rep = wire_session_call_ok(

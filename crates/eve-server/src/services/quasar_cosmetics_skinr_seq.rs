@@ -8,11 +8,12 @@
 
 use super::quasar_cosmetics_skinr::{
     any_msg, as_u64, build_skin_attributes, build_skin_id, build_skin_license_attrs,
-    build_skin_license_id, parse_component_id, parse_skin_hex, parse_skin_license_id,
-    queue_ship_skin_set_notice, queue_skin_license_added_notice, queue_skin_license_deleted_notice,
-    queue_skin_license_updated_notice, register_live_skinr_state, require_char, seq_of, str_of,
-    sub, tier_base_duration_secs, tier_base_plex_cents, HandlerResult, SequencingJobRecord,
-    SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
+    build_skin_license_id, emit_item_changes, parse_component_id, parse_skin_hex,
+    parse_skin_license_id, queue_ship_skin_set_notice, queue_skin_license_added_notice,
+    queue_skin_license_deleted_notice, queue_skin_license_updated_notice,
+    register_live_skinr_state, require_char, seq_of, str_of, sub, tier_base_duration_secs,
+    tier_base_plex_cents, HandlerResult, ItemChangeEvent, SequencingJobRecord, SkinDesignRecord,
+    SkinLayoutSlot, SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
 };
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
@@ -881,53 +882,77 @@ fn handle_job_initiate(
         (uuid, shex, job, req_binders)
     };
 
-    // Atomically validate sequence binders (for unlimited licenses) + PLEX balance before consuming either.
-    let debit_res = state.db.with_mut_snapshot(|s| -> Result<(u64, u64, i64), &'static str> {
-        for (&btid, &need) in &required_binders {
-            let avail: u64 = s
-                .items
-                .values()
-                .filter(|it| it.owner_id == cid as i64 && it.flag == InventoryFlag::Hangar && it.type_id == btid)
-                .map(|it| u64::try_from(it.quantity).unwrap_or(0))
-                .sum();
-            if avail < need {
-                return Err("Insufficient sequence binders for unlimited SKINR component license");
-            }
-        }
-        let Some(uid) = s.account_of_character(cid as i64) else {
-            return Err("Insufficient PLEX for SKINR sequencing");
-        };
-        let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
-            return Err("Insufficient PLEX for SKINR sequencing");
-        };
-        for (&btid, &need) in &required_binders {
-            let mut rem_need = need;
-            let mut stack_ids: Vec<i64> = s
-                .items
-                .iter()
-                .filter(|(_, it)| it.owner_id == cid as i64 && it.flag == InventoryFlag::Hangar && it.type_id == btid && it.quantity > 0)
-                .map(|(&iid, _)| iid)
-                .collect();
-            stack_ids.sort_unstable();
-            for iid in stack_ids {
-                if rem_need == 0 {
-                    break;
+    // Atomically validate sequence binders (via ConsumeExactOptions inventory invariants) + PLEX before consuming either.
+    let debit_res = state.db.with_mut_snapshot(
+        |s| -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), &'static str> {
+            let mut binder_opts = eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
+            binder_opts.required_flag = Some(InventoryFlag::Hangar);
+            binder_opts.active_ship_id = s
+                .characters
+                .get(&(cid as i64))
+                .and_then(|ch| (ch.active_ship_id > 0).then_some(ch.active_ship_id));
+
+            let mut binder_needs: Vec<(u32, i32)> = Vec::with_capacity(required_binders.len());
+            for (&btid, &need) in &required_binders {
+                if need == 0 {
+                    continue;
                 }
-                if let Some(it) = s.items.get_mut(&iid) {
-                    let take = rem_need.min(u64::try_from(it.quantity).unwrap_or(0));
-                    it.quantity -= take as i32;
-                    it.version += 1;
-                    rem_need -= take;
-                    if it.quantity <= 0 {
-                        s.items.remove(&iid);
+                let Ok(need_i32) = i32::try_from(need) else {
+                    return Err("Insufficient sequence binders for unlimited SKINR component license");
+                };
+                let avail: i64 = s
+                    .items
+                    .values()
+                    .filter(|it| {
+                        it.owner_id == cid as i64
+                            && it.type_id == btid
+                            && s.validate_item_for_consumption(it, &binder_opts).is_ok()
+                    })
+                    .map(|it| i64::from(it.quantity))
+                    .sum();
+                if avail < i64::from(need_i32) {
+                    return Err("Insufficient sequence binders for unlimited SKINR component license");
+                }
+                binder_needs.push((btid, need_i32));
+            }
+            let Some(uid) = s.account_of_character(cid as i64) else {
+                return Err("Insufficient PLEX for SKINR sequencing");
+            };
+            let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
+                return Err("Insufficient PLEX for SKINR sequencing");
+            };
+            let mut item_events = Vec::new();
+            for (btid, need_i32) in binder_needs {
+                let pre_stacks: std::collections::HashMap<i64, (eve_db::InventoryItemRecord, String)> = s
+                    .items
+                    .iter()
+                    .filter(|(_, it)| it.owner_id == cid as i64 && it.type_id == btid)
+                    .map(|(&iid, it)| {
+                        let cname = s.item_custom_names.get(&iid).cloned().unwrap_or_default();
+                        (iid, (it.clone(), cname))
+                    })
+                    .collect();
+                let Ok(touched_ids) = s.consume_owner_items(btid, need_i32, binder_opts.clone()) else {
+                    // Refund PLEX if consumption validation fails unexpectedly; no prior binder type mutated.
+                    let _ = s.adjust_unified_plex(cid as i64, total_plex_cost);
+                    return Err("Insufficient sequence binders for unlimited SKINR component license");
+                };
+                for iid in touched_ids {
+                    if let Some((old_it, cname)) = pre_stacks.get(&iid) {
+                        item_events.push(ItemChangeEvent {
+                            old: Some(old_it.clone()),
+                            new: s.items.get(&iid).cloned(),
+                            custom_name: cname.clone(),
+                        });
                     }
                 }
             }
-        }
-        s.next_entity_id += 1;
-        Ok((uid, s.next_entity_id as u64, rem_plex))
-    });
-    if let Ok((uid, tx_id, rem_plex)) = debit_res {
+            s.next_entity_id += 1;
+            Ok((uid, s.next_entity_id as u64, rem_plex, item_events))
+        },
+    );
+    if let Ok((uid, tx_id, rem_plex, item_events)) = debit_res {
+        emit_item_changes(state.db.instance_id(), &state.sde, cid as i64, &item_events);
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(
             uid,
             tx_id,

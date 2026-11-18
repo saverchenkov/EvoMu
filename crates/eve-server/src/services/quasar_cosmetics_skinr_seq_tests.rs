@@ -548,6 +548,185 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
     }
 }
 
+#[test]
+fn sequencing_consume_binders_uses_consume_owner_items_and_emits_on_item_change() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        shared_sde(),
+    );
+    let skinr = SkinrCosmeticsState::load(Arc::clone(&db), shared_sde());
+    crate::services::quasar_cosmetics_skinr::register(&router, Arc::clone(&skinr));
+    register(&router, Arc::clone(&skinr));
+
+    let captured: Arc<std::sync::Mutex<Vec<(i64, String, Vec<eve_proto::PyRep>)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let cap = Arc::clone(&captured);
+        *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _id, args| {
+            let crate::router::NotificationTarget::Character(c) = target else { return; };
+            cap.lock().unwrap().push((c, event.to_string(), args));
+        }));
+    }
+
+    let now = 1_760_000_000u64;
+    let cid = 90_000_001i64;
+    let player = sess(Some(1), Some(cid), service_roles::ROLE_PLAYER_DEFAULT);
+    let slot1_allowed = skinr.catalog.slot_allowed_categories.get(&1);
+    let coat = skinr
+        .catalog
+        .components
+        .values()
+        .find(|c| {
+            !c.is_pattern()
+                && !c.disallowed_slots.contains(&1)
+                && slot1_allowed.is_none_or(|cats| cats.is_empty() || cats.contains(&c.category))
+                && c.binder_type_id > 0
+                && c.binder_count > 0
+        })
+        .expect("coating component with binder requirement");
+    let btid = coat.binder_type_id;
+    let bcnt = coat.binder_count as i32;
+
+    db.with_mut_snapshot(|s| {
+        s.adjust_unified_plex(cid, 5_000);
+        let station_id = s.characters[&cid].station_id.unwrap_or(60_003_760);
+        // Singleton binder stack must be rejected/skipped by ConsumeExactOptions::for_character_commodity.
+        let bad_id = s.alloc_entity_id();
+        s.items.insert(
+            bad_id,
+            eve_db::InventoryItemRecord {
+                item_id: bad_id,
+                type_id: btid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: bcnt * 5,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    skinr.data.write().unwrap().infinite_licenses.insert(
+        SkinrCosmeticsState::comp_key(cid as u32, false, coat.component_id),
+        crate::services::quasar_cosmetics_skinr::InfiniteComponentLicense {
+            character_id: cid as u32,
+            component_id: coat.component_id,
+            is_pattern: false,
+            first_acquired_unix: now,
+            is_free: false,
+        },
+    );
+
+    let slot = SkinLayoutSlot {
+        slot_id: 1,
+        component_id: coat.component_id,
+        is_pattern: false,
+        primary_coating_id: None,
+        secondary_coating_id: None,
+    };
+    let init_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest")
+        .set("name", "Binder Invariant SKIN")
+        .set("line_name", "Binder Line")
+        .set_with("layout", |l| {
+            l.add("slots", build_layout_slot("eve_public", &slot))
+                .set("ship_type.sequential", 587u64)
+                .set("pattern_blend_mode", 1i32)
+        })
+        .set("licenses", 1u32)
+        .must_encode();
+
+    // Only singleton stack present -> must fail cleanly without creating job or consuming PLEX
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+            init_req.clone(),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // Seed two valid non-singleton binder stacks: one exact-consumed (deleted) + one partially decremented
+    let (id1, id2) = db.with_mut_snapshot(|s| {
+        let station_id = s.characters[&cid].station_id.unwrap_or(60_003_760);
+        let first_qty = (bcnt - 1).max(1);
+        let id1 = s.alloc_entity_id();
+        s.items.insert(
+            id1,
+            eve_db::InventoryItemRecord {
+                item_id: id1,
+                type_id: btid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: first_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let id2 = s.alloc_entity_id();
+        s.items.insert(
+            id2,
+            eve_db::InventoryItemRecord {
+                item_id: id2,
+                type_id: btid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: bcnt + 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        (id1, id2)
+    });
+
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+            init_req,
+            now,
+        )
+        .status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        if bcnt > 1 {
+            assert!(!s.items.contains_key(&id1), "depleted binder stack should be removed");
+            assert_eq!(s.items[&id2].quantity, (bcnt + 5) - 1);
+        }
+    });
+    let item_changes: Vec<_> = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, ev, _)| ev == "OnItemChange")
+        .cloned()
+        .collect();
+    assert!(!item_changes.is_empty(), "binder consumption must emit OnItemChange");
+    for (_, _, args) in &item_changes {
+        if let eve_proto::PyRep::Dict(entries) = &args[1] {
+            assert!(
+                entries.iter().any(|(k, _)| matches!(k, eve_proto::PyRep::Integer(9))),
+                "OnItemChange must use ixStackSize=9, got {entries:?}"
+            );
+            assert!(
+                !entries.iter().any(|(k, _)| matches!(k, eve_proto::PyRep::Integer(5))),
+                "OnItemChange must never emit ixQuantity=5"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "quasar_cosmetics_skinr_seq_extra_unit_tests.rs"]
 mod quasar_cosmetics_skinr_seq_extra_unit_tests;

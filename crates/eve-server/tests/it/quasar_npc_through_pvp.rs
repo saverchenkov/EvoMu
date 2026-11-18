@@ -335,10 +335,29 @@ async fn test_quasar_planet_and_planetinteraction() {
     }
     assert_eq!(reg.files_by_domain.get("planetinteraction").map(|v| v.len()), Some(8));
 
+    // Seed real PI colony pins on Jita IV for this character
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colony_layouts.insert(
+            (sess.character_id.unwrap(), 40_009_082),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord { pin_id: 501, type_id: 2848, ..Default::default() },
+                    eve_db::PlanetaryPinRecord { pin_id: 502, type_id: 2469, ..Default::default() },
+                    eve_db::PlanetaryPinRecord { pin_id: 503, type_id: 2541, ..Default::default() },
+                ],
+                ..Default::default()
+            },
+        );
+    });
+
     // Call eve.planetinteraction.collector.GetRequest
     let col_rsp = quasar_call(&ctx, &sess, "eve.planetinteraction.collector.GetRequest", encode_id_msg(1, 501));
     assert_eq!(col_rsp.status_code, STATUS_OK);
     assert_eq!(col_rsp.payload.unwrap().normalized_type_name(), "eve.planetinteraction.collector.GetResponse");
+    assert_eq!(
+        quasar_call(&ctx, &sess, "eve.planetinteraction.collector.GetRequest", encode_id_msg(1, 999_501)).status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // Call eve.planetinteraction.factory.GetRequest
     let fact_rsp = quasar_call(&ctx, &sess, "eve.planetinteraction.factory.GetRequest", encode_id_msg(1, 502));

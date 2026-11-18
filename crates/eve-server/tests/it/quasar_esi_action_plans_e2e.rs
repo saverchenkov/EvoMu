@@ -281,7 +281,21 @@ async fn test_shard5_plan_q6_quasar_economy_industry_pi_end_to_end() {
         let sys_pln_rsp = quasar(&ctx, &p1, "eve.planet.GetPlanetsInSolarSystemRequest", id_payload(1, JITA_SYS as i64));
         assert_eq!(sys_pln_rsp.status_code, STATUS_OK);
         assert!(!sys_pln_rsp.payload.as_ref().unwrap().value.is_empty());
-        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.planetary_colony_layouts.insert(
+                (PILOT_1, JITA_PLANET_IV),
+                eve_db::PlanetaryColonyLayoutRecord {
+                    pins: vec![eve_db::PlanetaryPinRecord {
+                        pin_id: 910_001,
+                        type_id: 2848,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, 910_001)).status_code, STATUS_OK);
+        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, 910_999)).status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
         let moons_rsp = quasar(&ctx, &p1, "eve.moon.GetMoonsOfPlanetRequest", id_payload(1, JITA_PLANET_IV));
         assert_eq!(moons_rsp.status_code, STATUS_OK);
         assert!(!moons_rsp.payload.as_ref().unwrap().value.is_empty());

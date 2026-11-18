@@ -340,11 +340,14 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
     let assignee_ctx = make_ctx(Some(assignee as u32), 0);
     let stranger_ctx = make_ctx(Some(stranger as u32), 0);
 
-    // Public contract readable by anyone (even anon) and missing contract returns default public attrs
+    // Public contract readable by anyone (even anon); missing contract returns STATUS_NOT_FOUND
     let pub_req = encode_id_req("eve.contract.item_exchange.GetRequest", 1001);
     assert!(router.dispatch(&anon, &pub_req).is_ok());
     let missing_req = encode_id_req("eve.contract.item_exchange.GetRequest", 9999);
-    assert!(router.dispatch(&anon, &missing_req).is_ok());
+    assert_eq!(
+        router.dispatch(&anon, &missing_req).unwrap_err().0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // Private contract: anon -> UNAUTHORIZED, stranger -> FORBIDDEN, issuer/assignee -> OK
     let priv_req = encode_id_req("eve.contract.item_exchange.GetRequest", 1002);
@@ -445,6 +448,29 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 ..Default::default()
             },
         );
+        snap.planetary_colony_layouts.insert(
+            (cid, 40_000_002),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_001,
+                        type_id: 2848, // Extractor Control Unit
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_002,
+                        type_id: 2469, // Basic Industry Facility
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_003,
+                        type_id: 2541, // Storage Facility
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
         Ok::<(), String>(())
     })
     .unwrap();
@@ -494,6 +520,26 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
     let tanoo_belt = router.dispatch(&user, &encode_id_req("eve.asteroidbelt.GetRequest", 40_000_003)).expect("Tanoo I - Asteroid Belt 1");
     assert!(String::from_utf8_lossy(&tanoo_belt.value).contains("Tanoo I - Asteroid Belt 1"));
 
+    for (rpc, id) in [
+        ("eve.planet.GetRequest", 40_000_002_u64),
+        ("eve.planet.GetPlanetsInSolarSystemRequest", 30_000_142),
+        ("eve.planetinteraction.collector.GetRequest", 50_001),
+        ("eve.planetinteraction.factory.GetRequest", 50_002),
+        ("eve.planetinteraction.schematic.GetRequest", 65),
+        ("eve.planetinteraction.storage.GetRequest", 50_003),
+        ("eve.moon.GetRequest", 40_009_081),
+        ("eve.moon.GetMoonsOfPlanetRequest", 40_009_080),
+        ("eve.asteroidbelt.GetRequest", 40_000_003),
+        ("eve.asteroidbelt.GetBeltsOfPlanetRequest", 40_000_002),
+        ("eve.localization.message.api.GetLocalizedTextRequest", 77),
+        ("eve.id.api.GetByUserRequest", 77),
+        ("eve.id.legacy.api.GetUserRequest", 77),
+    ] {
+        let resp = router.dispatch(&user, &encode_id_req(rpc, id)).expect(rpc);
+        assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
+    }
+
+    // Missing/unknown IDs return STATUS_NOT_FOUND (no synthetic fallbacks)
     for rpc in [
         "eve.planet.GetRequest",
         "eve.planet.GetPlanetsInSolarSystemRequest",
@@ -505,13 +551,33 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
         "eve.moon.GetMoonsOfPlanetRequest",
         "eve.asteroidbelt.GetRequest",
         "eve.asteroidbelt.GetBeltsOfPlanetRequest",
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        "eve.id.api.GetByUserRequest",
-        "eve.id.legacy.api.GetUserRequest",
     ] {
-        let resp = router.dispatch(&user, &encode_id_req(rpc, 77)).expect(rpc);
-        assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
+        assert_eq!(
+            router.dispatch(&user, &encode_id_req(rpc, 999_999)).unwrap_err().0,
+            crate::quasar_gateway::STATUS_NOT_FOUND,
+            "{rpc} must return STATUS_NOT_FOUND on unknown id 999_999"
+        );
     }
+    let other_user = make_ctx(Some(211_200_199), 0);
+    assert_eq!(
+        router
+            .dispatch(&other_user, &encode_id_req("eve.planetinteraction.collector.GetRequest", 50_001))
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
+    // Undocked / anonymous facility.GetRequest returns empty facilities list
+    let anon = make_ctx(None, 0);
+    let anon_fac = router
+        .dispatch(
+            &anon,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.industry.facility.GetRequest"),
+                value: vec![],
+            },
+        )
+        .expect("anonymous facility.GetRequest");
+    assert!(anon_fac.value.is_empty(), "anonymous facility list must be empty");
 
     // Skyhook ChangeOwnerRequest requires admin
     let sky_req = GoogleAny {

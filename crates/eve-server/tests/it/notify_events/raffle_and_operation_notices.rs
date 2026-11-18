@@ -157,7 +157,7 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     )
     .await
     .expect("CreateRaffle");
-    let raffle_id = raffle_rep.dict_get("raffle_id").and_then(|v| v.as_i64()).expect("raffle_id");
+    let raffle_id = raffle_rep.as_i64().expect("raffle_id");
     let create_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
     assert_eq!(created_args[0], PyRep::Integer(raffle_id));
