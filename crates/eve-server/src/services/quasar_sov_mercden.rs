@@ -14,7 +14,11 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_sov_hub::{push_notice, required_id, transact, PendingNotices, RpcError};
+use super::quasar_sov_hub::{hub_views, push_notice, required_id, transact, PendingNotices, RpcError};
+use super::quasar_sov_workforce::{
+    begin_system_hub_network_reconcile, collect_connected_hub_ids,
+    reconcile_hub_workforce_network_and_emit,
+};
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_CONFLICT, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
@@ -366,7 +370,7 @@ fn encode_infomorphs_gen_definition_for_planet(
     .must_encode()
 }
 
-fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
+pub(crate) fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
         "quasar_sov_mercden.push_evolution_notice",
         pb::message(EVOLUTION_NOTICE)
@@ -445,19 +449,144 @@ pub fn push_activity_expiry_changed_notice(
     }
 }
 
-/// Simulates a den in place using planet SDE data and emits `EvolutionStateChangedNotice` on a stage change.
-fn tick_den_with_sde(
+fn den_effective_disruption_pct(den: &PersistedMercenaryDen) -> u64 {
+    if den.enabled {
+        anarchy_workforce_disruption_pct(stage_for_level(den.anarchy_level))
+    } else {
+        0
+    }
+}
+
+/// Executes `mutate` against a Mercenary Den and reconciles the system Sovereignty Hub workforce
+/// network whenever `sde` is provided and the den's effective Anarchy disruption percentage changes.
+pub(crate) fn with_mercenary_den_workforce_reconcile<R>(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
+    pending: &PendingNotices,
+    den_id: i64,
+    now: u64,
+    mutate: impl FnOnce(&mut WorldStateSnapshot) -> R,
+) -> R {
+    let Some(sde_ref) = sde else {
+        return mutate(snap);
+    };
+    let Some((sys_id, prev_pct)) = snap
+        .sov_runtime
+        .mercenary_dens
+        .get(&den_id)
+        .map(|d| (d.solar_system_id, den_effective_disruption_pct(d)))
+    else {
+        return mutate(snap);
+    };
+    let local_hub_ids: Vec<i64> = snap
+        .structures
+        .iter()
+        .filter(|(_, s)| {
+            s.solar_system_id == sys_id
+                && s.type_id == super::sov_services::TYPE_SOVEREIGNTY_HUB
+                && !s.state.eq_ignore_ascii_case("destroyed")
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if local_hub_ids.is_empty() {
+        return mutate(snap);
+    }
+    let (extra, before) = if now > 0 {
+        begin_system_hub_network_reconcile(snap, sde_ref, pending, sys_id, now)
+    } else {
+        let extra = collect_connected_hub_ids(snap, sde_ref, &local_hub_ids);
+        let before = hub_views(snap, sde_ref, &extra);
+        (extra, before)
+    };
+    let out = mutate(snap);
+    let new_pct = snap
+        .sov_runtime
+        .mercenary_dens
+        .get(&den_id)
+        .map_or(0, den_effective_disruption_pct);
+    if new_pct != prev_pct {
+        reconcile_hub_workforce_network_and_emit(snap, sde_ref, pending, &before, &extra);
+    }
+    out
+}
+
+/// Removes MTO site balls matching `hex_uuids` from `snap` and returns removed ball IDs so async callers can clear `Ballpark`.
+pub(crate) fn cleanup_mto_site_balls_for_uuids(
+    snap: &mut WorldStateSnapshot,
+    hex_uuids: &[String],
+) -> Vec<i64> {
+    if hex_uuids.is_empty() {
+        return Vec::new();
+    }
+    let mut removed_balls = Vec::new();
+    snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
+        if hex_uuids.iter().any(|k| k == v) {
+            snap.items.remove(&bid);
+            snap.item_positions.remove(&bid);
+            removed_balls.push(bid);
+            false
+        } else {
+            true
+        }
+    });
+    removed_balls
+}
+
+/// Removes a Mercenary Den's runtime records, MTO activities, and active MTO site balls from `snap`.
+pub(crate) fn cleanup_destroyed_mercenary_den_in_snap(
+    snap: &mut WorldStateSnapshot,
+    den_id: i64,
+) -> (Option<PersistedMercenaryDen>, Vec<i64>) {
+    if let Some(st) = snap.structures.get_mut(&den_id) {
+        st.state = "Destroyed".into();
+        st.shield_hp = 0.0;
+        st.armor_hp = 0.0;
+        st.hull_hp = 0.0;
+    }
+    let removed_den = snap.sov_runtime.mercenary_dens.remove(&den_id);
+    snap.sov_runtime.mercenary_den_reinforcement.remove(&den_id);
+    snap.sov_runtime.mercenary_den_evo_rem.remove(&den_id);
+    let mut activity_uuids = Vec::new();
+    snap.sov_runtime.mercenary_activities.retain(|_, a| {
+        if a.den_id == den_id {
+            activity_uuids.push(hex(&a.uuid));
+            false
+        } else {
+            true
+        }
+    });
+    let removed_mto_balls = cleanup_mto_site_balls_for_uuids(snap, &activity_uuids);
+    (removed_den, removed_mto_balls)
+}
+
+fn simulate_den_only_with_sde(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
+    pending: &PendingNotices,
+    den_id: i64,
+    now: u64,
+) -> bool {
+    let changed = simulate_den_in_snap_with_sde(&mut snap.sov_runtime, sde, den_id, now);
+    if changed {
+        if let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id) {
+            push_evolution_notice(pending, den);
+        }
+    }
+    changed
+}
+
+/// Simulates a den in place using planet SDE data, emitting `EvolutionStateChangedNotice`
+/// on a stage change and reconciling system Sov Hub workforce when Anarchy disruption shifts.
+pub(crate) fn tick_den_with_sde(
     snap: &mut WorldStateSnapshot,
     sde: Option<&eve_sde::SdeRegistry>,
     pending: &PendingNotices,
     den_id: i64,
     now: u64,
 ) {
-    if simulate_den_in_snap_with_sde(&mut snap.sov_runtime, sde, den_id, now) {
-        if let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id) {
-            push_evolution_notice(pending, den);
-        }
-    }
+    with_mercenary_den_workforce_reconcile(snap, sde, pending, den_id, now, |snap| {
+        let _ = simulate_den_only_with_sde(snap, sde, pending, den_id, now);
+    });
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -497,72 +626,65 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     den_id: i64,
     solar_system_id: u32,
 ) {
-    let mut applied_dev_impact = 0i32;
-    let mut applied_anarchy_impact = 0i32;
-    let mut applied_infomorph_bonus = 0u32;
-    let mut reward_char_id = a.started_by;
-    if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-        if reward_char_id <= 0 {
-            reward_char_id = den_mut.owner_char_id;
+    with_mercenary_den_workforce_reconcile(snap, sde, pending, den_id, 0, |snap| {
+        let mut applied_dev_impact = 0i32;
+        let mut applied_anarchy_impact = 0i32;
+        let mut applied_infomorph_bonus = 0u32;
+        let mut reward_char_id = a.started_by;
+        if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+            if reward_char_id <= 0 {
+                reward_char_id = den_mut.owner_char_id;
+            }
+            // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
+            // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo if already
+            // at max Development 100) and reduces Anarchy, awarding infomorph and ISK rewards.
+            let pre_dev = den_mut.development_level;
+            if pre_dev >= MAX_LEVEL {
+                applied_infomorph_bonus = a.infomorph_bonus.max(350);
+                let cap = den_cargo_capacity(sde);
+                den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
+            } else {
+                let raw_dev = if a.development_impact != 0 { a.development_impact } else { 10 };
+                den_mut.development_level = (pre_dev as i32 + raw_dev).clamp(0, MAX_LEVEL as i32) as u32;
+                applied_dev_impact = den_mut.development_level as i32 - pre_dev as i32;
+            }
+            let pre_anarchy = den_mut.anarchy_level;
+            let raw_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
+            den_mut.anarchy_level =
+                (pre_anarchy as i32 + raw_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
+            applied_anarchy_impact = den_mut.anarchy_level as i32 - pre_anarchy as i32;
+            push_evolution_notice(pending, den_mut);
         }
-        // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
-        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo if already
-        // at max Development 100) and reduces Anarchy, awarding infomorph and ISK rewards.
-        let pre_dev = den_mut.development_level;
-        if pre_dev >= MAX_LEVEL {
-            applied_infomorph_bonus = a.infomorph_bonus.max(350);
-            let cap = den_cargo_capacity(sde);
-            den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
-        } else {
-            let raw_dev = if a.development_impact != 0 { a.development_impact } else { 10 };
-            den_mut.development_level = (pre_dev as i32 + raw_dev).clamp(0, MAX_LEVEL as i32) as u32;
-            applied_dev_impact = den_mut.development_level as i32 - pre_dev as i32;
+        // Award MTO ISK reward to completing pilot
+        if reward_char_id > 0 {
+            // DERIVED: Calibrated MTO completion ISK payout (no static payout column in V24 SDE/FSD).
+            let isk_reward = 7_500_000_i64;
+            if let Some(ch) = snap.characters.get_mut(&reward_char_id) {
+                ch.balance = ch
+                    .balance
+                    .checked_add(eve_db::IskCents::from_isk(isk_reward))
+                    .unwrap_or(ch.balance);
+                let bal = ch.balance;
+                snap.append_journal(
+                    reward_char_id,
+                    "MercenaryDenReward",
+                    eve_db::IskCents::from_isk(isk_reward),
+                    bal,
+                    "Mercenary Tactical Operation Completion Reward".to_string(),
+                );
+            }
         }
-        let pre_anarchy = den_mut.anarchy_level;
-        let raw_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
-        den_mut.anarchy_level =
-            (pre_anarchy as i32 + raw_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
-        applied_anarchy_impact = den_mut.anarchy_level as i32 - pre_anarchy as i32;
-        push_evolution_notice(pending, den_mut);
-    }
-    // Award MTO ISK reward to completing pilot
-    if reward_char_id > 0 {
-        // DERIVED: Calibrated MTO completion ISK payout (no static payout column in V24 SDE/FSD).
-        let isk_reward = 7_500_000_i64;
-        if let Some(ch) = snap.characters.get_mut(&reward_char_id) {
-            ch.balance = ch
-                .balance
-                .checked_add(eve_db::IskCents::from_isk(isk_reward))
-                .unwrap_or(ch.balance);
-            let bal = ch.balance;
-            snap.append_journal(
-                reward_char_id,
-                "MercenaryDenReward",
-                eve_db::IskCents::from_isk(isk_reward),
-                bal,
-                "Mercenary Tactical Operation Completion Reward".to_string(),
-            );
-        }
-    }
-    let hex_key = hex(&a.uuid);
-    snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
-        if v == &hex_key {
-            snap.items.remove(&bid);
-            snap.item_positions.remove(&bid);
-            false
-        } else {
-            true
-        }
+        let _ = cleanup_mto_site_balls_for_uuids(snap, &[hex(&a.uuid)]);
+        push_activity_completed_notice(
+            pending,
+            solar_system_id,
+            den_id,
+            &a.uuid,
+            applied_dev_impact,
+            applied_anarchy_impact,
+            applied_infomorph_bonus,
+        );
     });
-    push_activity_completed_notice(
-        pending,
-        solar_system_id,
-        den_id,
-        &a.uuid,
-        applied_dev_impact,
-        applied_anarchy_impact,
-        applied_infomorph_bonus,
-    );
 }
 
 /// Expires stale operations (including timed-out started operations without completion rewards)
@@ -587,16 +709,7 @@ pub(crate) fn refresh_activities_with_sde(
     for key in expired {
         if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&key) {
             if a.started {
-                let hex_key = hex(&a.uuid);
-                snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
-                    if v == &hex_key {
-                        snap.items.remove(&bid);
-                        snap.item_positions.remove(&bid);
-                        false
-                    } else {
-                        true
-                    }
-                });
+                let _ = cleanup_mto_site_balls_for_uuids(snap, &[hex(&a.uuid)]);
             }
             if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
                 "quasar_sov_mercden.refresh_activities.removed",
@@ -693,20 +806,30 @@ fn modify_level_handler(
                 return Err((STATUS_BAD_REQUEST, format!("Level must be within 0..={MAX_LEVEL}")));
             }
             let sim = transact(&db, |snap| {
-                tick_den_with_sde(snap, Some(&sde), &pending, den_id, ctx.now_unix());
-                let den = snap
-                    .sov_runtime
-                    .mercenary_dens
-                    .get_mut(&den_id)
-                    .ok_or((STATUS_NOT_FOUND, format!("Mercenary den {den_id} not found")))?;
-                if development {
-                    den.development_level = level as u32;
-                } else {
-                    den.anarchy_level = level as u32;
-                }
-                push_evolution_notice(&pending, den);
-                push_definitions_updated_notice_with_sde(&pending, Some(&sde), den);
-                Ok::<_, RpcError>(encode_evolution_simulation(den))
+                let now_unix = ctx.now_unix();
+                with_mercenary_den_workforce_reconcile(
+                    snap,
+                    Some(&sde),
+                    &pending,
+                    den_id,
+                    now_unix,
+                    |snap| {
+                        let _ = simulate_den_only_with_sde(snap, Some(&sde), &pending, den_id, now_unix);
+                        let den = snap
+                            .sov_runtime
+                            .mercenary_dens
+                            .get_mut(&den_id)
+                            .ok_or((STATUS_NOT_FOUND, format!("Mercenary den {den_id} not found")))?;
+                        if development {
+                            den.development_level = level as u32;
+                        } else {
+                            den.anarchy_level = level as u32;
+                        }
+                        push_evolution_notice(&pending, den);
+                        push_definitions_updated_notice_with_sde(&pending, Some(&sde), den);
+                        Ok::<_, RpcError>(encode_evolution_simulation(den))
+                    },
+                )
             })?;
             pb::message(rsp).set_raw_message("simulation", sim).to_any_or_internal_err()
         }),

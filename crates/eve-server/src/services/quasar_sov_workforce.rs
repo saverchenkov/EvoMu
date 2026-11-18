@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_sov_hub::{
-    caller, compute_hub_resources, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
+    caller, corp_owned_structure, emit_hub_diffs, encode_hub_upgrades,
     enforce_hub_power_overload, hub_views, owned_structure, push_notice, required_id,
     require_caller_roles, run_simulation, same_owner, transact, Caller, HubView, PendingNotices,
     RpcError, HUB_MANAGER_ROLES,
@@ -40,7 +40,7 @@ fn hub_owner(snap: &WorldStateSnapshot, hub_id: i64) -> Option<i64> {
     snap.structures.get(&hub_id).map(|s| s.owner_corp_id)
 }
 
-fn mode(snap: &WorldStateSnapshot, hub_id: i64) -> PersistedWorkforceMode {
+pub(crate) fn mode(snap: &WorldStateSnapshot, hub_id: i64) -> PersistedWorkforceMode {
     snap.sov_runtime.sov_hubs.get(&hub_id).map(|h| h.workforce.clone()).unwrap_or_default()
 }
 
@@ -164,7 +164,9 @@ pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec
                     PersistedWorkforceMode::Export { destination: Some(d), amount }
                         if assigned_importer(snap, sde, *id, *d) == Some(hub_id) =>
                     {
-                        Some(*amount)
+                        let cap = super::quasar_sov_hub::max_exportable_workforce(snap, sde, *id)
+                            .unwrap_or(0);
+                        Some((*amount).min(cap))
                     }
                     _ => None,
                 })
@@ -407,12 +409,17 @@ fn apply_configuration(
     let old = std::mem::replace(&mut hub.workforce, PersistedWorkforceMode::Inactive);
     snap.sov_runtime.sov_hubs.insert(hub_id, hub.clone());
     if let PersistedWorkforceMode::Export { amount, .. } = &new_mode {
-        let r = compute_hub_resources(snap, sde, hub_id).ok_or((STATUS_NOT_FOUND, "hub".to_string()))?;
-        let spare = r.workforce_available.saturating_sub(r.workforce_allocated);
-        if *amount > spare {
+        let exportable = super::quasar_sov_hub::max_exportable_workforce(snap, sde, hub_id)
+            .ok_or((STATUS_NOT_FOUND, "hub".to_string()))?;
+        if *amount > exportable {
             hub.workforce = old;
             snap.sov_runtime.sov_hubs.insert(hub_id, hub);
-            return Err((STATUS_BAD_REQUEST, format!("Cannot export {amount} workforce: only {spare} unallocated")));
+            return Err((
+                STATUS_BAD_REQUEST,
+                format!(
+                    "Cannot export {amount} workforce: only {exportable} exportable (local upgrades and Workforce Mecha-Tooling output cannot be exported)"
+                ),
+            ));
         }
     }
     hub.workforce = new_mode;
@@ -452,30 +459,13 @@ pub(crate) fn reconcile_hub_workforce_network_and_emit(
     for _ in 0..all_hub_ids.len().saturating_add(1) {
         let mut changed_in_pass = false;
         for &id in &all_hub_ids {
-            if enforce_hub_power_overload(snap, sde, id) {
+            // Clamp excess export BEFORE overload evaluation so active local upgrades are not
+            // starved to sustain an export whose Skyhook/Mercenary-Den/Mecha-Tooling backing fell.
+            if super::quasar_sov_hub::clamp_hub_export_to_max(snap, sde, id) {
                 changed_in_pass = true;
             }
-            if let Some(exported) = snap.sov_runtime.sov_hubs.get(&id).and_then(|h| {
-                match h.workforce {
-                    PersistedWorkforceMode::Export { amount, .. } if amount > 0 => Some(amount),
-                    _ => None,
-                }
-            }) {
-                if let Some(r) = compute_hub_resources(snap, sde, id) {
-                    let imported_sum: u64 = imports(snap, sde, id).iter().map(|s| s.1).sum();
-                    let base_w = (r.workforce_local + imported_sum).saturating_sub(exported);
-                    let produced_w = r.workforce_available.saturating_sub(base_w);
-                    let max_exportable = (r.workforce_local + imported_sum + produced_w)
-                        .saturating_sub(r.workforce_allocated);
-                    if exported > max_exportable {
-                        if let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&id) {
-                            if let PersistedWorkforceMode::Export { amount, .. } = &mut h.workforce {
-                                *amount = max_exportable;
-                                changed_in_pass = true;
-                            }
-                        }
-                    }
-                }
+            if enforce_hub_power_overload(snap, sde, id) {
+                changed_in_pass = true;
             }
         }
         if !changed_in_pass {
@@ -513,6 +503,26 @@ pub(crate) fn reconcile_hub_workforce_network_and_emit(
     emit_hub_diffs(pending, before, &hub_views(snap, sde, extra));
 }
 
+/// Collects each seed hub ID together with all connected networkable hub IDs (deduplicated).
+pub(crate) fn collect_connected_hub_ids(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    seed_hub_ids: &[i64],
+) -> Vec<i64> {
+    let mut extra: Vec<i64> = Vec::new();
+    for &hid in seed_hub_ids {
+        if !extra.contains(&hid) {
+            extra.push(hid);
+        }
+        for (other_id, _) in networkable_hubs(snap, sde, hid) {
+            if !extra.contains(&other_id) {
+                extra.push(other_id);
+            }
+        }
+    }
+    extra
+}
+
 /// Syncs local system Sov Hubs and captures connected hub IDs plus pre-mutation `HubView`
 /// snapshots before a structure or resource change mutates `snap`.
 pub(crate) fn begin_system_hub_network_reconcile(
@@ -535,17 +545,7 @@ pub(crate) fn begin_system_hub_network_reconcile(
     for &hid in &local_hub_ids {
         run_simulation(snap, sde, pending, hid, now_unix);
     }
-    let mut extra: Vec<i64> = Vec::new();
-    for &hid in &local_hub_ids {
-        if !extra.contains(&hid) {
-            extra.push(hid);
-        }
-        for (other_id, _) in networkable_hubs(snap, sde, hid) {
-            if !extra.contains(&other_id) {
-                extra.push(other_id);
-            }
-        }
-    }
+    let extra = collect_connected_hub_ids(snap, sde, &local_hub_ids);
     let before = hub_views(snap, sde, &extra);
     (extra, before)
 }

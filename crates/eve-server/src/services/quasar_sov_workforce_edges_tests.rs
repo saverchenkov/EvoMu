@@ -127,6 +127,29 @@ fn relay_tiebreakers_destroyed_hubs_alliance_sharing_and_codecs() {
                 ..Default::default()
             },
         );
+        if let Some(temp_planet) = sde.celestials_in_system(sys_a).into_iter().find(|c| {
+            c.group_id == 7
+                && crate::services::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius).1
+                    >= 400
+        }) {
+            let sh_id = hub_a + 9_000;
+            snap.structures.insert(
+                sh_id,
+                eve_db::UpwellStructureRecord {
+                    structure_id: sh_id,
+                    type_id: crate::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: corp1,
+                    solar_system_id: sys_a,
+                    name: "EdgeTest Skyhook".into(),
+                    state: "Online".into(),
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime
+                .skyhook_planets
+                .insert(sh_id, temp_planet.celestial_id);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
     });
 
     db.with_snapshot(|snap| {

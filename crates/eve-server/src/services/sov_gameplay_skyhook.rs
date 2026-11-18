@@ -830,14 +830,14 @@ pub(crate) fn apply_skyhook_weapon_damage_with_attacker(
                     let prev_hp = st.shield_hp;
                     if st.shield_hp > 0.0 {
                         st.shield_hp = (st.shield_hp - eff_shield).max(0.0);
-                        // If inside the reagent theft window, keep the Skyhook in ShieldVulnerable
-                        // so ship-link theft remains possible; outside the window, 0 HP enters
-                        // a 24h ArmorReinforced timer before armor/hull siege (`Orbital_Skyhook.md`).
-                        if st.shield_hp <= 0.0 && !in_window {
-                            st.state = "ArmorReinforced".into();
-                            st.reinforced_until_unix = now + 86_400;
-                            state_changed = true;
-                        }
+                    }
+                    // Evaluate ArmorReinforced outside `st.shield_hp > 0.0`: a Skyhook dropped to
+                    // 0.0 shield during a theft window stays ShieldVulnerable while open, so any
+                    // positive post-window hit must still trigger the 24h ArmorReinforced timer.
+                    if st.shield_hp <= 0.0 && !in_window && eff_shield > 0.0 {
+                        st.state = "ArmorReinforced".into();
+                        st.reinforced_until_unix = now + 86_400;
+                        state_changed = true;
                     }
                     (prev_hp - st.shield_hp).max(0.0)
                 }
@@ -872,7 +872,7 @@ pub(crate) fn apply_skyhook_weapon_damage_with_attacker(
             )
         };
 
-        if attacker_char_id > 0 && applied > 0.0 {
+        if attacker_char_id > 0 && (applied > 0.0 || state_changed) {
             let mut ds =
                 crate::services::structure_acl_defense_rules::load_defense_settings(snap, skyhook_id);
             ds.record_attacker(attacker_char_id, now);
@@ -1269,7 +1269,7 @@ pub async fn handle_skyhook_component_call(
 }
 
 /// Advances all Orbital Skyhook reagent bays and resolves active 10-minute Reagent Silo links.
-pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
+pub async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
     let (skyhook_ids, links): (Vec<i64>, Vec<(i64, (i64, i64, u64, f64))>) =
         ctx.db.with_snapshot(|snap| {
             let mut ids: Vec<i64> = snap.sov_runtime.skyhook_reagent_bays.keys().copied().collect();
@@ -1281,7 +1281,8 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             for (&id, st) in &snap.structures {
                 if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
                     && (st.state == "ArmorReinforced"
-                        || st.state.eq_ignore_ascii_case("destroyed"))
+                        || st.state.eq_ignore_ascii_case("destroyed")
+                        || st.last_damage_unix > 0)
                     && !ids.contains(&id)
                 {
                     ids.push(id);
@@ -1303,9 +1304,10 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
 
     let pending: crate::services::quasar_sov_hub::PendingNotices =
         std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-    let (newly_hackable, reinf_expired): (Vec<(u32, i64)>, Vec<(u32, i64)>) = ctx.db.with_mut_snapshot(|snap| {
+    let (newly_hackable, reinf_expired, repaired): (Vec<(u32, i64)>, Vec<(u32, i64)>, Vec<(u32, i64)>) = ctx.db.with_mut_snapshot(|snap| {
         let mut opened = Vec::new();
         let mut expired_reinf = Vec::new();
+        let mut repaired = Vec::new();
         for id in skyhook_ids {
             if let Some(sys_id) = snap
                 .structures
@@ -1334,8 +1336,15 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                     && st.reinforced_until_unix > 0
                     && now_unix >= st.reinforced_until_unix
                 {
+                    let exit_unix = st.reinforced_until_unix;
                     st.state = "ArmorVulnerable".into();
                     st.reinforced_until_unix = 0;
+                    if st.last_damage_unix > 0 {
+                        // Start the unattacked armor repair timer from reinforcement exit
+                        // rather than the prior shield-drop hit; fixtures with `last_damage_unix == 0`
+                        // keep 0 so pre-seeded damaged states are preserved.
+                        st.last_damage_unix = exit_unix;
+                    }
                     expired_reinf.push((st.solar_system_id, id));
                 }
             }
@@ -1355,6 +1364,38 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
             let (start, end) = advance_skyhook_theft_window_in_snap(snap, id, now_unix)
                 .unwrap_or_else(|| next_skyhook_theft_window(id, now_unix, None, now_unix));
             let open_now = start <= now_unix && now_unix < end;
+            let has_active_link = snap.sov_runtime.skyhook_silo_links.contains_key(&id);
+            if !open_now && !has_active_link {
+                if let Some(st) = snap.structures.get_mut(&id) {
+                    let repair_delay = if st.state == "HullVulnerable" {
+                        crate::services::station_structure::structure_lifecycle::REPAIR_HULL_SECS
+                    } else {
+                        crate::services::station_structure::structure_lifecycle::REPAIR_SHIELD_ARMOR_SECS
+                    };
+                    let damaged = st.shield_hp < SKYHOOK_BASE_SHIELD_HP
+                        || st.armor_hp < SKYHOOK_BASE_ARMOR_HP
+                        || st.hull_hp < SKYHOOK_BASE_HULL_HP;
+                    if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                        && matches!(
+                            st.state.as_str(),
+                            "ShieldVulnerable" | "ArmorVulnerable" | "HullVulnerable" | "Online"
+                        )
+                        && st.last_damage_unix > 0
+                        && damaged
+                        && now_unix >= st.last_damage_unix.saturating_add(repair_delay)
+                    {
+                        st.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+                        st.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+                        st.hull_hp = SKYHOOK_BASE_HULL_HP;
+                        if matches!(st.state.as_str(), "ArmorVulnerable" | "HullVulnerable") {
+                            st.state = "ShieldVulnerable".into();
+                        }
+                        st.reinforced_until_unix = 0;
+                        st.last_damage_unix = 0;
+                        repaired.push((st.solar_system_id, id));
+                    }
+                }
+            }
             let shield_low = snap.structures.get(&id).is_some_and(|st| {
                 st.state != "Destroyed" && st.shield_hp <= SKYHOOK_BASE_SHIELD_HP * 0.10 + 1e-9
             });
@@ -1369,11 +1410,31 @@ pub(crate) async fn tick_skyhooks(ctx: &ServerContext, now_unix: u64) {
                 }
             }
         }
-        (opened, expired_reinf)
+        (opened, expired_reinf, repaired)
     });
     crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now_unix);
-    for (sys_id, sh_id) in reinf_expired {
+    let mut updated_structs = reinf_expired;
+    for item in &repaired {
+        if !updated_structs.contains(item) {
+            updated_structs.push(*item);
+        }
+    }
+    for (sys_id, sh_id) in updated_structs {
         crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[sh_id]);
+    }
+    for (sys_id, sh_id) in repaired {
+        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+            if let Ok(mut bp) = sys_h.ballpark.write() {
+                if let Some(cs) = bp.combat_states.get_mut(&sh_id) {
+                    cs.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+                    cs.max_shield_hp = SKYHOOK_BASE_SHIELD_HP;
+                    cs.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+                    cs.max_armor_hp = SKYHOOK_BASE_ARMOR_HP;
+                    cs.structure_hp = SKYHOOK_BASE_HULL_HP;
+                    cs.max_structure_hp = SKYHOOK_BASE_HULL_HP;
+                }
+            }
+        }
     }
     for (sys_id, sh_id) in newly_hackable {
         crate::services::sov_services::emit_skyhook_can_be_hacked(ctx, sys_id, sh_id);

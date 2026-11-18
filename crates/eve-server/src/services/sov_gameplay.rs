@@ -23,10 +23,11 @@ pub mod sov_gameplay_entosis;
 pub use sov_gameplay_entosis::*;
 
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::quasar_sov_hub::{push_notice, PendingNotices};
+use crate::services::quasar_sov_hub::PendingNotices;
 use crate::services::quasar_sov_mercden::{
-    encode_evolution_simulation, push_definitions_updated_notice_with_sde,
-    refresh_activities_with_sde, simulate_den_in_snap_with_sde, MERCENARY_DEN_ABSOLUTE_MAX,
+    cleanup_destroyed_mercenary_den_in_snap, push_definitions_updated_notice_with_sde,
+    push_evolution_notice, refresh_activities_with_sde, simulate_den_in_snap_with_sde,
+    tick_den_with_sde, with_mercenary_den_workforce_reconcile, MERCENARY_DEN_ABSOLUTE_MAX,
     TYPE_MERCENARY_DEN_MANAGEMENT,
 };
 use crate::services::sov_services::{
@@ -631,24 +632,7 @@ pub async fn handle_mercden_component_call(
             .unwrap_or(0.01)
             .max(1e-6);
         let max_owner_units = ((free_m3 + 1e-9) / unit_vol).floor() as u32;
-        if simulate_den_in_snap_with_sde(&mut snap.sov_runtime, Some(&ctx.sde), den_id, now) {
-            let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
-            if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                "sov_gameplay.mercenary_den.evolution_notice",
-                eve_proto::pb::message(
-                    "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                )
-                .set("mercenary_den.sequential", den_id as u64)
-                .set_raw_message("state", encode_evolution_simulation(den_mut)),
-            ) {
-                push_notice(
-                    &pending,
-                    den_mut.solar_system_id,
-                    "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                    n,
-                );
-            }
-        }
+        tick_den_with_sde(snap, Some(&ctx.sde), &pending, den_id, now);
         let den_mut = snap.sov_runtime.mercenary_dens.get(&den_id).expect("checked");
         let total = den_mut.infomorphs;
         if total == 0 {
@@ -780,7 +764,6 @@ pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
         if st.state == "Destroyed" {
             continue;
         }
-        let sys_id = st.solar_system_id;
         if vuln_end > 0 && now >= vuln_end {
             st.state = "ShieldVulnerable".into();
             st.shield_hp = MERC_DEN_BASE_HP;
@@ -792,21 +775,7 @@ pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
                 if !den_mut.enabled {
                     den_mut.enabled = true;
                     den_mut.simulated_at_unix = now;
-                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                        "sov_gameplay.mercenary_den.evolution_notice",
-                        eve_proto::pb::message(
-                            "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                        )
-                        .set("mercenary_den.sequential", den_id as u64)
-                        .set_raw_message("state", encode_evolution_simulation(den_mut)),
-                    ) {
-                        push_notice(
-                            pending,
-                            sys_id,
-                            "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                            n,
-                        );
-                    }
+                    push_evolution_notice(pending, den_mut);
                 }
             }
         } else if reinf_until > 0 && now >= reinf_until && st.state == "HullReinforced" {
@@ -835,7 +804,7 @@ pub async fn apply_mercenary_den_weapon_damage(
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     enum Outcome {
         Damaged { state: String, shield_hp: f64, hull_hp: f64, reinf_until: u64, vuln_end: u64 },
-        Destroyed { sys_id: u32, owner_cid: i64, wreck_id: i64, wreck_type: u32, wreck_pos: [f64; 3], dropped_stacks: usize, dropped_qty: u32 },
+        Destroyed { sys_id: u32, owner_cid: i64, wreck_id: i64, wreck_type: u32, wreck_pos: [f64; 3], dropped_stacks: usize, dropped_qty: u32, removed_mto_balls: Vec<i64> },
     }
     let wreck_type = ctx
         .sde
@@ -883,36 +852,27 @@ pub async fn apply_mercenary_den_weapon_damage(
         if reinf_until == 0 {
             st.shield_hp = (st.shield_hp - damage.max(0.0)).max(0.0);
             let mut shield_pct = ((st.shield_hp / MERC_DEN_BASE_HP) * 100.0).round().clamp(0.0, 100.0) as u8;
-            if st.shield_hp <= 0.0 {
+            let depleted = st.shield_hp <= 0.0;
+            if depleted {
                 reinf_until = now + MERC_DEN_REINFORCEMENT_SECS;
                 vuln_end = reinf_until + MERC_DEN_VULNERABILITY_WINDOW_SECS;
                 shield_pct = 0;
                 st.state = "HullReinforced".into();
                 st.reinforced_until_unix = reinf_until;
-                if snap.sov_runtime.mercenary_dens.contains_key(&den_id) {
-                    let _ = simulate_den_in_snap_with_sde(&mut snap.sov_runtime, Some(&ctx.sde), den_id, now);
-                    let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
-                    den_mut.enabled = false;
-                    if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                        "sov_gameplay.mercenary_den.evolution_notice",
-                        eve_proto::pb::message(
-                            "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                        )
-                        .set("mercenary_den.sequential", den_id as u64)
-                        .set_raw_message("state", encode_evolution_simulation(den_mut)),
-                    ) {
-                        push_notice(
-                            &pending,
-                            sys_id,
-                            "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                            n,
-                        );
-                    }
-                }
             }
             let st_s = st.state.clone();
             let s_hp = st.shield_hp;
             let h_hp = st.hull_hp;
+            if depleted {
+                with_mercenary_den_workforce_reconcile(snap, Some(&ctx.sde), &pending, den_id, now, |snap| {
+                    if snap.sov_runtime.mercenary_dens.contains_key(&den_id) {
+                        let _ = simulate_den_in_snap_with_sde(&mut snap.sov_runtime, Some(&ctx.sde), den_id, now);
+                        let den_mut = snap.sov_runtime.mercenary_dens.get_mut(&den_id).expect("checked");
+                        den_mut.enabled = false;
+                        push_evolution_notice(&pending, den_mut);
+                    }
+                });
+            }
             snap.sov_runtime
                 .mercenary_den_reinforcement
                 .insert(den_id, (reinf_until, vuln_end, shield_pct));
@@ -931,9 +891,14 @@ pub async fn apply_mercenary_den_weapon_damage(
 
         // Destroyed! Roll 50% drop chance independently for each stored Infomorph Decryption Key stack.
         st.state = "Destroyed".into();
-        let removed_den = snap.sov_runtime.mercenary_dens.remove(&den_id);
-        snap.sov_runtime.mercenary_den_reinforcement.remove(&den_id);
-        snap.sov_runtime.mercenary_activities.retain(|_, a| a.den_id != den_id);
+        let (removed_den, removed_mto_balls) = with_mercenary_den_workforce_reconcile(
+            snap,
+            Some(&ctx.sde),
+            &pending,
+            den_id,
+            now,
+            |snap| cleanup_destroyed_mercenary_den_in_snap(snap, den_id),
+        );
         let owner_cid = removed_den.as_ref().map(|d| d.owner_char_id).unwrap_or(0);
 
         let mut stack_sizes: Vec<u32> = Vec::new();
@@ -996,7 +961,7 @@ pub async fn apply_mercenary_den_weapon_damage(
                 );
             }
         }
-        Ok(Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos: pos_arr, dropped_stacks, dropped_qty })
+        Ok(Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos: pos_arr, dropped_stacks, dropped_qty, removed_mto_balls })
     })?;
 
     flush_pending_quasar(ctx, &pending, now);
@@ -1010,9 +975,12 @@ pub async fn apply_mercenary_den_weapon_damage(
             ("vulnerabilityEnds", PyRep::Integer(vuln_end as i64)),
             ("vulnerabilityEndsAt", PyRep::Integer(vuln_end as i64)),
         ])),
-        Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos, dropped_stacks, dropped_qty } => {
+        Outcome::Destroyed { sys_id, owner_cid, wreck_id, wreck_type, wreck_pos, dropped_stacks, dropped_qty, removed_mto_balls } => {
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let _ = sys_handle.remove_ball(den_id).await;
+            for bid in removed_mto_balls {
+                let _ = sys_handle.remove_ball(bid).await;
+            }
             let _ = sys_handle
                 .spawn_ball(Ball {
                     id: wreck_id,
@@ -1132,27 +1100,24 @@ pub async fn apply_mercenary_den_shield_repair(
         if pct >= 50 {
             st.state = "ShieldVulnerable".into();
             st.reinforced_until_unix = 0;
-            snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, pct));
-            if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-                den_mut.enabled = true;
-                den_mut.simulated_at_unix = now;
-                enabled_now = true;
-                if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
-                    "sov_gameplay.mercenary_den.evolution_notice",
-                    eve_proto::pb::message(
-                        "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                    )
-                    .set("mercenary_den.sequential", den_id as u64)
-                    .set_raw_message("state", encode_evolution_simulation(den_mut)),
-                ) {
-                    push_notice(
-                        &pending,
-                        sys_id,
-                        "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice",
-                        n,
-                    );
-                }
-            }
+            enabled_now = with_mercenary_den_workforce_reconcile(
+                snap,
+                Some(&ctx.sde),
+                &pending,
+                den_id,
+                now,
+                |snap| {
+                    snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, pct));
+                    if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+                        den_mut.enabled = true;
+                        den_mut.simulated_at_unix = now;
+                        push_evolution_notice(&pending, den_mut);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
         } else {
             snap.sov_runtime
                 .mercenary_den_reinforcement
