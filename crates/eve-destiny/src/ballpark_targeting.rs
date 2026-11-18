@@ -200,13 +200,14 @@ impl Ballpark {
         target_id: BallId,
         duration_s: f64,
     ) {
-        let Some((prev_rem, prev_by)) = self.combat_states.get_mut(&target_id).map(|cs| {
+        let (prev_rem, prev_by) = if let Some(cs) = self.combat_states.get_mut(&target_id) {
             cs.sync_action_breaks();
             if cs.is_cloaked || cs.is_invulnerable() {
-                return None;
+                return;
             }
-            Some((cs.ecm_jammed_remaining_s, cs.ecm_jammed_by.clone()))
-        }).flatten() else {
+            (cs.ecm_jammed_remaining_s, cs.ecm_jammed_by.clone())
+        } else {
+            self.clear_target_locks_except(target_id, &[]);
             return;
         };
 
