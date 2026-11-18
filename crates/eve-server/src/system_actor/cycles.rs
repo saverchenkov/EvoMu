@@ -1838,7 +1838,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             pending_destroyed_outbox,
                         );
                     }
-                    if matches!(mod_grp, 72 | 80 | 353 | 650) {
+                    if matches!(mod_grp, 72 | 80 | 201 | 353 | 650) {
                         if let Some(cid) = cycle.owner_char_id {
                             pending_cycle_actions.push(PendingCycleAction::RepeatCycleStart {
                                 char_id: cid,
@@ -2031,6 +2031,9 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
 
 pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
     let mut needs_recompute = false;
+    if removed.target_id.is_some() {
+        ballpark.remove_module_ecm_jam(removed.ship_id, removed.module_id, removed.target_id);
+    }
     if removed.effect_name.starts_with("cloaking") {
         if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
             cs.is_covert_cloak = false;

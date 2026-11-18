@@ -793,3 +793,49 @@ fn remove_target_lock_pending_is_silent_and_remove_ball_fails_pending_lock() {
     assert!(park.get_target_locks(1).is_empty());
     assert!(park.get_target_locks(3).is_empty());
 }
+
+#[test]
+fn apply_module_ecm_jam_tracks_per_module_and_external_jams_independently() {
+    let mut park = Ballpark::new(30_000_142);
+    park.add_ball(make_ship(1, DVec3::ZERO, DVec3::ZERO));
+    park.add_ball(make_ship(2, DVec3::new(3_000.0, 0.0, 0.0), DVec3::ZERO));
+    park.add_ball(make_ship(3, DVec3::new(5_000.0, 0.0, 0.0), DVec3::ZERO));
+    park.add_ball(make_ship(4, DVec3::new(7_000.0, 0.0, 0.0), DVec3::ZERO));
+
+    // Apply two targeted ECM modules from ship 2 (modules 201, 202), one from ship 3 (mod 301),
+    // and one external drone jammer (ball 4, no module_id).
+    park.apply_module_ecm_jam(2, 201, 1, 20.0);
+    park.apply_module_ecm_jam(2, 202, 1, 12.0);
+    park.apply_module_ecm_jam(3, 301, 1, 16.0);
+    park.apply_ecm_jam_from(Some(4), 1, 8.0);
+
+    park.step(4.0);
+    let cs = &park.combat_states[&1];
+    assert!((cs.ecm_jammed_remaining_s - 16.0).abs() < 1e-6);
+    assert_eq!(cs.ecm_jammed_by, vec![2, 3, 4]);
+
+    // Removing ship 2 mod 201 leaves ship 2 mod 202 (8s), ship 3 mod 301 (12s), and drone 4 (4s).
+    assert!(park.remove_module_ecm_jam(2, 201, Some(1)));
+    let cs = &park.combat_states[&1];
+    assert!((cs.ecm_jammed_remaining_s - 12.0).abs() < 1e-6);
+    assert_eq!(cs.ecm_jammed_by, vec![2, 3, 4]);
+
+    // Removing ship 2 mod 202 drops ship 2 from ecm_jammed_by while preserving ship 3 and drone 4.
+    assert!(park.remove_module_ecm_jam(2, 202, Some(1)));
+    let cs = &park.combat_states[&1];
+    assert!((cs.ecm_jammed_remaining_s - 12.0).abs() < 1e-6);
+    assert_eq!(cs.ecm_jammed_by, vec![3, 4]);
+
+    // Step 5s: drone 4 (4s) expires cleanly while ship 3 mod 301 (7s left) stays active.
+    park.step(5.0);
+    let cs = &park.combat_states[&1];
+    assert!((cs.ecm_jammed_remaining_s - 7.0).abs() < 1e-6);
+    assert_eq!(cs.ecm_jammed_by, vec![3]);
+
+    // Removing the last active ECM module immediately unjams ship 1.
+    assert!(park.remove_module_ecm_jam(3, 301, Some(1)));
+    let cs = &park.combat_states[&1];
+    assert_eq!(cs.ecm_jammed_remaining_s, 0.0);
+    assert!(cs.ecm_jammed_by.is_empty());
+    assert!(!park.remove_module_ecm_jam(3, 301, Some(1)));
+}

@@ -1599,8 +1599,8 @@ async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
     assert!(dur_s > 0.0);
     assert_eq!(prog_of("SofWebify"), 0, "t=0 activate must not credit SofWebify");
 
-    // 2. Immediate Deactivate at t = 0 queues cycle deactivation, keeps module active for cycle end,
-    //    blocks immediate re-Activate, and still grants 0 EWAR progress before cycle completion.
+    // 2. Immediate Deactivate at t = 0 stops the cycle cleanly with 0 EWAR progress,
+    //    and rapid Activate -> Deactivate toggle spam must still grant 0 EWAR seconds.
     crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
         &ctx,
         &mut atk_sess,
@@ -1614,9 +1614,9 @@ async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
     .unwrap()
     .expect("deactivate webifier");
     assert_eq!(prog_of("SofWebify"), 0, "immediate deactivate must not credit SofWebify");
-    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&web_mod_id)));
-    assert!(ctx.is_module_in_reactivation_delay(atk_ship_id, web_mod_id));
-    assert!(
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&web_mod_id)));
+
+    for _ in 0..3 {
         crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
             &ctx,
             &mut atk_sess,
@@ -1628,11 +1628,41 @@ async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
         )
         .await
         .unwrap()
-        .is_err(),
-        "re-Activate before natural cycle end must fail"
-    );
+        .expect("re-activate webifier");
+        crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
+            &ctx,
+            &mut atk_sess,
+            None,
+            "dogmaIM",
+            "Deactivate",
+            &[eve_proto::PyRep::Integer(web_mod_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("immediate deactivate webifier");
+    }
+    sys_h.step_manual(1.0).await.expect("step after toggle spam");
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
+        &ctx,
+        sys_id,
+    )
+    .await;
+    assert_eq!(prog_of("SofWebify"), 0, "rapid Activate/Deactivate toggling must grant 0 SofWebify");
 
-    // 3. Stepping across the full cycle credits EWAR seconds ONCE and cleans up active state.
+    // 3. Re-activating and stepping across a full cycle credits EWAR seconds ONCE.
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut atk_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[eve_proto::PyRep::Integer(web_mod_id), eve_proto::PyRep::Integer(def_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate webifier for full cycle");
     clock.advance_secs_and_read_offset((dur_s.ceil() as u64) + 1);
     sys_h.step_manual(dur_s + 0.2).await.expect("step full ewar cycle");
     crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
@@ -1642,9 +1672,8 @@ async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
     .await;
     let expected = dur_s.round() as u64;
     assert_eq!(prog_of("SofWebify"), expected);
-    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&web_mod_id)));
 
-    // 4. Subsequent steps must not double-count, and re-Activate works after cooldown clears.
+    // 4. Subsequent short steps must not double-count, and Deactivate cleans up active state.
     sys_h.step_manual(1.0).await.expect("extra step");
     crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
         &ctx,
@@ -1653,22 +1682,19 @@ async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
     .await;
     assert_eq!(prog_of("SofWebify"), expected);
 
-    clock.advance_secs_and_read_offset((dur_s.ceil() as u64) + 5);
-    assert!(!ctx.is_module_in_reactivation_delay(atk_ship_id, web_mod_id));
-    assert!(
-        crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
-            &ctx,
-            &mut atk_sess,
-            None,
-            "dogmaIM",
-            "Activate",
-            &[eve_proto::PyRep::Integer(web_mod_id), eve_proto::PyRep::Integer(def_ship_id)],
-            &kw,
-        )
-        .await
-        .unwrap()
-        .is_ok()
-    );
+    crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
+        &ctx,
+        &mut atk_sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[eve_proto::PyRep::Integer(web_mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate after full cycle");
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&web_mod_id)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

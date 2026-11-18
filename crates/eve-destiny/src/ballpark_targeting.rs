@@ -126,35 +126,213 @@ impl Ballpark {
     /// Applies an ECM jam to `target_id`, clearing all existing locked targets and preventing
     /// target locking for `duration_s` seconds (`feat:modules.ecm`, `DG-5`).
     pub fn apply_ecm_jam(&mut self, target_id: BallId, duration_s: f64) {
-        self.apply_ecm_jam_from(None, target_id, duration_s);
+        self.apply_ecm_jam_with_module(None, None, target_id, duration_s);
     }
 
     /// Applies an ECM jam to `target_id` optionally attributed to `source_id` (`#1082`).
     /// Active locks on jammers in `ecm_jammed_by` are retained; all other locks are cleared.
     pub fn apply_ecm_jam_from(&mut self, source_id: Option<BallId>, target_id: BallId, duration_s: f64) {
-        let retain_targets = if let Some(cs) = self.combat_states.get_mut(&target_id) {
+        self.apply_ecm_jam_with_module(source_id, None, target_id, duration_s);
+    }
+
+    /// Applies a targeted ECM module jam attributed to `(source_id, module_id)` (`#1310`).
+    pub fn apply_module_ecm_jam(
+        &mut self,
+        source_id: BallId,
+        module_id: i64,
+        target_id: BallId,
+        duration_s: f64,
+    ) {
+        self.apply_ecm_jam_with_module(Some(source_id), Some(module_id), target_id, duration_s);
+    }
+
+    /// Clears all ECM jam state and per-source tracking for `target_id` (`#1310`).
+    pub fn clear_ecm_jam(&mut self, target_id: BallId) {
+        if let Some(cs) = self.combat_states.get_mut(&target_id) {
+            cs.ecm_jammed_remaining_s = 0.0;
+            cs.ecm_jammed_by.clear();
+        }
+        self.ecm_jam_sources.remove(&target_id);
+    }
+
+    /// Recomputes aggregate `ecm_jammed_remaining_s` and `ecm_jammed_by` on `target_id`'s [`CombatState`].
+    pub(crate) fn recompute_ecm_jam_summary(&mut self, target_id: BallId) {
+        let (max_rem, sources) = match self.ecm_jam_sources.get(&target_id) {
+            Some(entry) => {
+                let mut max_rem = 0.0_f64;
+                let mut sources: Vec<BallId> = Vec::new();
+                for &(src, _, rem) in &entry.module_jams {
+                    if rem > 0.0 {
+                        max_rem = max_rem.max(rem);
+                        if !sources.contains(&src) {
+                            sources.push(src);
+                        }
+                    }
+                }
+                for &(src_opt, rem) in &entry.external_jams {
+                    if rem > 0.0 {
+                        max_rem = max_rem.max(rem);
+                        if let Some(src) = src_opt {
+                            if !sources.contains(&src) {
+                                sources.push(src);
+                            }
+                        }
+                    }
+                }
+                (max_rem, sources)
+            }
+            None => (0.0, Vec::new()),
+        };
+        if max_rem <= 0.0 {
+            self.ecm_jam_sources.remove(&target_id);
+        }
+        if let Some(cs) = self.combat_states.get_mut(&target_id) {
+            cs.ecm_jammed_remaining_s = max_rem;
+            cs.ecm_jammed_by = sources;
+        }
+    }
+
+    /// Shared ECM jam application helper for both non-module sources and targeted ECM modules.
+    pub fn apply_ecm_jam_with_module(
+        &mut self,
+        source_id: Option<BallId>,
+        module_id: Option<i64>,
+        target_id: BallId,
+        duration_s: f64,
+    ) {
+        let (prev_rem, prev_by) = if let Some(cs) = self.combat_states.get_mut(&target_id) {
             cs.sync_action_breaks();
             if cs.is_cloaked || cs.is_invulnerable() {
                 return;
             }
-            if cs.ecm_jammed_remaining_s <= 0.0 {
-                cs.ecm_jammed_by.clear();
-            }
-            cs.ecm_jammed_remaining_s = if duration_s > 0.0 {
-                cs.ecm_jammed_remaining_s.max(duration_s)
-            } else {
-                duration_s
-            };
-            if let Some(src) = source_id {
-                if !cs.ecm_jammed_by.contains(&src) {
-                    cs.ecm_jammed_by.push(src);
+            (cs.ecm_jammed_remaining_s, cs.ecm_jammed_by.clone())
+        } else {
+            self.clear_target_locks_except(target_id, &[]);
+            return;
+        };
+
+        {
+            let sources = self.ecm_jam_sources.entry(target_id).or_default();
+            if prev_rem <= 0.0 {
+                sources.module_jams.clear();
+                sources.external_jams.clear();
+            } else if sources.module_jams.is_empty() && sources.external_jams.is_empty() {
+                if prev_by.is_empty() {
+                    sources.external_jams.push((None, prev_rem));
+                } else {
+                    for src in prev_by {
+                        sources.external_jams.push((Some(src), prev_rem));
+                    }
                 }
             }
-            cs.ecm_jammed_by.clone()
-        } else {
-            Vec::new()
-        };
+            if duration_s > 0.0 {
+                match (source_id, module_id) {
+                    (Some(src), Some(mid)) => {
+                        if let Some(entry) = sources
+                            .module_jams
+                            .iter_mut()
+                            .find(|(s, m, _)| *s == src && *m == mid)
+                        {
+                            entry.2 = duration_s;
+                        } else {
+                            sources.module_jams.push((src, mid, duration_s));
+                        }
+                    }
+                    _ => {
+                        if let Some(entry) = sources
+                            .external_jams
+                            .iter_mut()
+                            .find(|(s, _)| *s == source_id)
+                        {
+                            entry.1 = entry.1.max(duration_s);
+                        } else {
+                            sources.external_jams.push((source_id, duration_s));
+                        }
+                    }
+                }
+            }
+        }
+        self.recompute_ecm_jam_summary(target_id);
+        let retain_targets = self
+            .combat_states
+            .get(&target_id)
+            .map(|cs| cs.ecm_jammed_by.clone())
+            .unwrap_or_default();
         self.clear_target_locks_except(target_id, &retain_targets);
+    }
+
+    /// Clears any active targeted ECM jam owned by `(source_id, module_id)` on `target_id_opt`
+    /// while preserving active jams from other ECM modules or external jam sources (`#1310`).
+    pub fn remove_module_ecm_jam(
+        &mut self,
+        source_id: BallId,
+        module_id: i64,
+        target_id_opt: Option<BallId>,
+    ) -> bool {
+        let targets: Vec<BallId> = if let Some(tid) = target_id_opt {
+            vec![tid]
+        } else {
+            self.ecm_jam_sources
+                .iter()
+                .filter(|(_, s)| {
+                    s.module_jams
+                        .iter()
+                        .any(|&(src, mid, _)| src == source_id && mid == module_id)
+                })
+                .map(|(&tid, _)| tid)
+                .collect()
+        };
+        let mut changed = false;
+        for tid in targets {
+            let removed = self
+                .ecm_jam_sources
+                .get_mut(&tid)
+                .is_some_and(|sources| {
+                    let before = sources.module_jams.len();
+                    sources
+                        .module_jams
+                        .retain(|&(src, mid, _)| !(src == source_id && mid == module_id));
+                    sources.module_jams.len() != before
+                });
+            if removed {
+                self.recompute_ecm_jam_summary(tid);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Advances combat action-break state, lance disruption timers, and per-source ECM jams (`#1310`).
+    pub fn tick_combat_and_ecm_timers(&mut self, dt: f64) {
+        let mut targets_to_recompute = Vec::new();
+        for (&target_id, cs) in &mut self.combat_states {
+            cs.sync_action_breaks();
+            if cs.lance_disrupted_remaining_s > 0.0 {
+                cs.lance_disrupted_remaining_s = (cs.lance_disrupted_remaining_s - dt).max(0.0);
+            }
+            if cs.ecm_jammed_remaining_s <= 0.0 && !self.ecm_jam_sources.contains_key(&target_id) {
+                continue;
+            }
+            if let Some(sources) = self.ecm_jam_sources.get_mut(&target_id) {
+                for (_, _, rem) in &mut sources.module_jams {
+                    *rem = (*rem - dt).max(0.0);
+                }
+                sources.module_jams.retain(|&(_, _, rem)| rem > 0.0);
+                for (_, rem) in &mut sources.external_jams {
+                    *rem = (*rem - dt).max(0.0);
+                }
+                sources.external_jams.retain(|&(_, rem)| rem > 0.0);
+                targets_to_recompute.push(target_id);
+            } else {
+                cs.ecm_jammed_remaining_s = (cs.ecm_jammed_remaining_s - dt).max(0.0);
+                if cs.ecm_jammed_remaining_s <= 0.0 {
+                    cs.ecm_jammed_by.clear();
+                }
+            }
+        }
+        for target_id in targets_to_recompute {
+            self.recompute_ecm_jam_summary(target_id);
+        }
     }
 
     pub fn clear_target_locks_except(&mut self, source_id: BallId, retain_targets: &[BallId]) {

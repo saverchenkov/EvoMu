@@ -49,15 +49,8 @@ pub(crate) fn is_cycle_gated_module_group(group_id: u32) -> bool {
             | 1122
             | 650
             | 80
-            | 353
-            | 52
-            | 65
             | 201
-            | 208
-            | 291
-            | 379
-            | 899
-            | 1672
+            | 353
     )
 }
 
@@ -894,6 +887,16 @@ pub(crate) async fn handle_module_cycles(
                         return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                     }
                 }
+                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
+                        return Some(Err(module_already_active_rpc_error(
+                            ctx,
+                            Some(m.type_id),
+                            format!("Module {module_id} cannot reactivate before delay expires"),
+                        )));
+                    }
+                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
+                }
                 let allow_mutadaptive_retarget = mod_type.group_id == 2018
                     && target_id_opt.is_some()
                     && actor_cycle_state.is_some_and(|(_, cur_t)| cur_t != target_id_opt);
@@ -915,16 +918,6 @@ pub(crate) async fn handle_module_cycles(
                         Some(m.type_id),
                         format!("Module {module_id} is already active in a cycle"),
                     )));
-                }
-                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
-                        return Some(Err(module_already_active_rpc_error(
-                            ctx,
-                            Some(m.type_id),
-                            format!("Module {module_id} cannot reactivate before delay expires"),
-                        )));
-                    }
-                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
                 if allow_smartbomb_retrigger && in_actor_cycle {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;

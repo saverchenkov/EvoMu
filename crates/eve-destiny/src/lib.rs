@@ -1454,6 +1454,18 @@ pub struct Ballpark {
     /// Tracks elapsed simulation ticks spent in `WarpPhase::Aligning` per ball (`#1159`).
     #[serde(skip, default)]
     pub(crate) warp_align_ticks: BTreeMap<BallId, u32>,
+    /// Per-target active ECM jam source ownership keyed by target `BallId` (`#1310`).
+    #[serde(default)]
+    pub ecm_jam_sources: BTreeMap<BallId, EcmJamSources>,
+}
+
+/// Per-target active ECM jam source ownership stored on [`Ballpark`] to avoid enlarging [`CombatState`] (`#1310`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EcmJamSources {
+    /// Active per-module targeted ECM jams `(source_ball_id, module_id, remaining_s)`.
+    pub module_jams: Vec<(BallId, i64, f64)>,
+    /// Active non-module ECM jams (drones, fighters, bursts, structures): `(source_ball_id, remaining_s)`.
+    pub external_jams: Vec<(Option<BallId>, f64)>,
 }
 
 /// Converts Unix epoch seconds to Windows FILETIME (`100ns` ticks since 1601-01-01 UTC).

@@ -2075,8 +2075,7 @@ impl SystemRegistry {
                                         .is_some_and(|t| {
                                             matches!(
                                                 t.group_id,
-                                                62 | 63 | 68 | 325 | 585 | 1199 | 1698 | 52 | 65 | 201 | 208
-                                                    | 291 | 379 | 899 | 1672
+                                                62 | 63 | 68 | 201 | 325 | 585 | 1199 | 1698
                                             )
                                         });
                                     if cycle.has_paid_end_of_cycle_effect() || is_sde_paid_group {
@@ -2368,31 +2367,25 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(ok);
                             }
-                            SystemCommand::ApplyEcmJam { target_id, duration_s, reply } => {
+                            cmd @ (SystemCommand::ApplyEcmJam { .. }
+                            | SystemCommand::ApplyEcmJamFrom { .. }
+                            | SystemCommand::ApplyEcmJamFromModule { .. }) => {
+                                let (source_id_opt, module_id_opt, target_id, duration_s, reply) = match cmd {
+                                    SystemCommand::ApplyEcmJam { target_id, duration_s, reply } => {
+                                        (None, None, target_id, duration_s, reply)
+                                    }
+                                    SystemCommand::ApplyEcmJamFrom { source_id, target_id, duration_s, reply } => {
+                                        (Some(source_id), None, target_id, duration_s, reply)
+                                    }
+                                    SystemCommand::ApplyEcmJamFromModule { source_id, module_id, target_id, duration_s, reply } => {
+                                        (Some(source_id), Some(module_id), target_id, duration_s, reply)
+                                    }
+                                    _ => unreachable!(),
+                                };
                                 let target_ewar_immune = active_module_cycles.iter().any(|c| c.ship_id == target_id && c.self_ewar_immune);
                                 let exists = ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
                                 if exists {
-                                    ballpark.apply_ecm_jam(target_id, duration_s);
-                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
-                                    on_target_unlocked_in_actor(
-                                        &mut ballpark,
-                                        active_module_cycles,
-                                        &base_scramble_strengths,
-                                        &base_core_strengths,
-                                        &db_opt,
-                                        target_id,
-                                        None,
-                                        deact_guard.as_ref(),
-                                    );
-                                    sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                }
-                                let _ = reply.send(exists);
-                            }
-                            SystemCommand::ApplyEcmJamFrom { source_id, target_id, duration_s, reply } => {
-                                let target_ewar_immune = active_module_cycles.iter().any(|c| c.ship_id == target_id && c.self_ewar_immune);
-                                let exists = ballpark.combat_states.contains_key(&target_id) && !target_ewar_immune;
-                                if exists {
-                                    ballpark.apply_ecm_jam_from(Some(source_id), target_id, duration_s);
+                                    ballpark.apply_ecm_jam_with_module(source_id_opt, module_id_opt, target_id, duration_s);
                                     let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     on_target_unlocked_in_actor(
                                         &mut ballpark,

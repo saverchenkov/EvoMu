@@ -529,13 +529,12 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             cs.warp_core_strength = base_core + mod_core;
             cs.is_mwd_mjd_disabled = mwd_disabled;
             cs.disallow_assistance = disallow_assist;
-            if ewar_immune {
-                cs.ecm_jammed_remaining_s = 0.0;
-                cs.ecm_jammed_by.clear();
-            }
             if nullified_by_mod || nullified_by_hull {
                 cs.is_interdiction_nullified = true;
             }
+        }
+        if ewar_immune {
+            ballpark.clear_ecm_jam(ball_id);
         }
     }
 

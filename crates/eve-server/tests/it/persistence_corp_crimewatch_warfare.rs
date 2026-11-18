@@ -327,7 +327,11 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         sess_other.solar_system_id = Some(duel_sys);
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
         rpc(&ctx, &mut sess_other, "crimewatch", "RespondToDuelChallenge", &[PyRep::Integer(PILOT), PyRep::Bool(true)]).await;
-        rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
+        let dup_duel_err = ctx
+            .dispatch_rpc(&mut sess, "crimewatch", None, "StartDuelChallenge", &[PyRep::Integer(OTHER)], &HashMap::new(), None)
+            .await
+            .expect_err("re-challenging during active Limited Engagement must reject");
+        assert_eq!(dup_duel_err.code, "DuelChallengeActiveEngagement");
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&PILOT) {
                 ch.station_id = orig_p_st;

@@ -1779,6 +1779,7 @@ async fn test_insurance_voiding_and_12_week_expiry() {
     );
 
     // 5. Active Platinum contract pays full contracted ISK immediately on live PvP loss + EVE-mail
+    ctx.advance_virtual_clock(360); // clear prior 300s Limited Engagement timer
     let ship_e = buy_and_assemble_rifter(&ctx, &mut s1).await;
     wire_ok(
         &ctx,

@@ -439,6 +439,7 @@ fn system_command_all_variants_construct_and_match() {
             SystemCommand::AddMobileWarpDisruptor { .. } => "AddMobileWarpDisruptor",
             SystemCommand::ApplyEcmJam { .. } => "ApplyEcmJam",
             SystemCommand::ApplyEcmJamFrom { .. } => "ApplyEcmJamFrom",
+            SystemCommand::ApplyEcmJamFromModule { .. } => "ApplyEcmJamFromModule",
             SystemCommand::ApplyEcmBurst { .. } => "ApplyEcmBurst",
             SystemCommand::ScheduleMobileWarpDisruptor { .. } => "ScheduleMobileWarpDisruptor",
             SystemCommand::UpdateModuleOverload { .. } => "UpdateModuleOverload",
