@@ -956,3 +956,294 @@ async fn self_destruct_rpc_cancel_concurrent_with_lifecycle_has_zero_post_cancel
         0
     );
 }
+
+#[tokio::test]
+async fn self_destruct_and_abort_emit_v24_remote_messages_to_pilot_and_observers() {
+    use eve_db::ServerClock;
+    const BLUETIME_TICKS_PER_SEC: i64 = 10_000_000;
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let vclock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_767_225_600));
+    ctx.set_clock(vclock.clone());
+    let now = ctx.now_unix();
+
+    let obs_char_id = 90_000_002_i64;
+    let obs_ship_id = 100_000_002_i64;
+    session.session_id = 92_101;
+    let (pilot_uid, obs_uid) = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            obs_ship_id,
+            make_fighter_item(
+                obs_ship_id,
+                23_915,
+                obs_char_id,
+                sys_id as i64,
+                InventoryFlag::None,
+                1,
+            ),
+        );
+        if let Some(ch) = snap.characters.get_mut(&obs_char_id) {
+            ch.active_ship_id = obs_ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(obs_ship_id, [5_000.0, 0.0, 0.0]);
+        (
+            snap.characters[&char_id].user_id,
+            snap.characters[&obs_char_id].user_id,
+        )
+    });
+    ctx.db
+        .acquire_online_lock(pilot_uid, session.session_id, Some(char_id), true, now)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(obs_uid, 92_102, Some(obs_char_id), true, now)
+        .unwrap();
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (bid, pos) in [
+        (ship_id, DVec3::ZERO),
+        (obs_ship_id, DVec3::new(5_000.0, 0.0, 0.0)),
+    ] {
+        sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: bid,
+                    type_id: 23_915,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 120.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let _ = ctx.drain_notifications_for_char(obs_char_id);
+
+    // 0. Idle abort and docked SelfDestruct emit no OnRemoteMessage notices.
+    let idle_abort =
+        handle_wrecks_killmails(&ctx, &mut session, "ship", "AbortSelfDestruct", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(idle_abort.dict_get("aborted"), Some(&PyRep::Bool(false)));
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+    assert!(ctx
+        .drain_notifications_for_char(obs_char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+
+    session.station_id = Some(60_003_760);
+    let docked_err = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(!docked_err.code.is_empty());
+    session.station_id = None;
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+    assert!(ctx
+        .drain_notifications_for_char(obs_char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+
+    // 1. Fresh ship.SelfDestruct emits SelfDestructInitiated (pilot) + SelfDestructInitiatedOther (observer).
+    let sd_start = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sd_start.dict_get("detonated"), Some(&PyRep::Bool(false)));
+    assert_eq!(
+        sd_start.dict_get("remainingSeconds"),
+        Some(&PyRep::Integer(SELF_DESTRUCT_COUNTDOWN_SECS as i64))
+    );
+
+    let pilot_start: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(pilot_start.len(), 1);
+    assert_eq!(pilot_start[0].id_type, "charid");
+    assert_eq!(pilot_start[0].args.len(), 2);
+    assert_eq!(
+        pilot_start[0].args[0],
+        PyRep::String("SelfDestructInitiated".into())
+    );
+    assert_eq!(
+        pilot_start[0].args[1].dict_get("what"),
+        Some(&PyRep::Tuple(vec![
+            PyRep::Integer(4),
+            PyRep::Integer(23_915),
+        ]))
+    );
+    assert_eq!(
+        pilot_start[0].args[1].dict_get("when"),
+        Some(&PyRep::Integer(SELF_DESTRUCT_COUNTDOWN_SECS as i64))
+    );
+
+    let obs_start: Vec<_> = ctx
+        .drain_notifications_for_char(obs_char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(obs_start.len(), 1);
+    assert_eq!(obs_start[0].id_type, "charid");
+    assert_eq!(obs_start[0].args.len(), 2);
+    assert_eq!(
+        obs_start[0].args[0],
+        PyRep::String("SelfDestructInitiatedOther".into())
+    );
+    assert_eq!(
+        obs_start[0].args[1].dict_get("charID"),
+        Some(&PyRep::Integer(char_id))
+    );
+    assert_eq!(
+        obs_start[0].args[1].dict_get("shipTypeID"),
+        Some(&PyRep::Integer(23_915))
+    );
+    assert_eq!(
+        obs_start[0].args[1].dict_get("timeRemaining"),
+        Some(&PyRep::Integer(
+            (SELF_DESTRUCT_COUNTDOWN_SECS as i64) * BLUETIME_TICKS_PER_SEC
+        ))
+    );
+
+    // 2. Repeat ship.SelfDestruct while active emits no duplicate initiation notices.
+    vclock.advance_secs(10);
+    let expected_rem_secs = (SELF_DESTRUCT_COUNTDOWN_SECS - 10) as i64;
+    let sd_repeat = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sd_repeat.dict_get("detonated"), Some(&PyRep::Bool(false)));
+    assert_eq!(
+        sd_repeat.dict_get("remainingSeconds"),
+        Some(&PyRep::Integer(expected_rem_secs))
+    );
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+    assert!(ctx
+        .drain_notifications_for_char(obs_char_id)
+        .iter()
+        .all(|n| n.event != "OnRemoteMessage"));
+
+    // 3. ship.AbortSelfDestruct emits SelfDestructAborted2 (pilot) + SelfDestructAbortedOther2 (observer).
+    let sd_abort =
+        handle_wrecks_killmails(&ctx, &mut session, "ship", "AbortSelfDestruct", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(sd_abort.dict_get("aborted"), Some(&PyRep::Bool(true)));
+
+    let pilot_abort: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(pilot_abort.len(), 1);
+    assert_eq!(
+        pilot_abort[0].args[0],
+        PyRep::String("SelfDestructAborted2".into())
+    );
+    assert_eq!(
+        pilot_abort[0].args[1].dict_get("timeLeft"),
+        Some(&PyRep::Integer(expected_rem_secs * BLUETIME_TICKS_PER_SEC))
+    );
+
+    let obs_abort: Vec<_> = ctx
+        .drain_notifications_for_char(obs_char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(obs_abort.len(), 1);
+    assert_eq!(
+        obs_abort[0].args[0],
+        PyRep::String("SelfDestructAbortedOther2".into())
+    );
+    assert_eq!(
+        obs_abort[0].args[1].dict_get("charID"),
+        Some(&PyRep::Integer(char_id))
+    );
+    assert_eq!(
+        obs_abort[0].args[1].dict_get("timeLeft"),
+        Some(&PyRep::Integer(expected_rem_secs * BLUETIME_TICKS_PER_SEC))
+    );
+
+    // 4. beyonce.CmdSelfDestruct start + expiry detonation emits SelfDestructImmediate / SelfDestructImmediateOther.
+    let cmd_start =
+        handle_wrecks_killmails(&ctx, &mut session, "beyonce", "CmdSelfDestruct", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(cmd_start.dict_get("detonated"), Some(&PyRep::Bool(false)));
+    assert!(ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnRemoteMessage"
+            && n.args.first() == Some(&PyRep::String("SelfDestructInitiated".into()))));
+    assert!(ctx
+        .drain_notifications_for_char(obs_char_id)
+        .iter()
+        .any(|n| n.event == "OnRemoteMessage"
+            && n.args.first() == Some(&PyRep::String("SelfDestructInitiatedOther".into()))));
+
+    vclock.advance_secs(SELF_DESTRUCT_COUNTDOWN_SECS);
+    let cmd_detonate =
+        handle_wrecks_killmails(&ctx, &mut session, "beyonce", "CmdSelfDestruct", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(cmd_detonate.dict_get("detonated"), Some(&PyRep::Bool(true)));
+
+    let pilot_det: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(pilot_det.len(), 1);
+    assert_eq!(
+        pilot_det[0].args[0],
+        PyRep::String("SelfDestructImmediate".into())
+    );
+    assert_eq!(
+        pilot_det[0].args[1].dict_get("shipTypeID"),
+        Some(&PyRep::Integer(23_915))
+    );
+
+    let obs_det: Vec<_> = ctx
+        .drain_notifications_for_char(obs_char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnRemoteMessage")
+        .collect();
+    assert_eq!(obs_det.len(), 1);
+    assert_eq!(
+        obs_det[0].args[0],
+        PyRep::String("SelfDestructImmediateOther".into())
+    );
+    assert_eq!(
+        obs_det[0].args[1].dict_get("charID"),
+        Some(&PyRep::Integer(char_id))
+    );
+    assert_eq!(
+        obs_det[0].args[1].dict_get("shipTypeID"),
+        Some(&PyRep::Integer(23_915))
+    );
+}
