@@ -948,3 +948,403 @@ fn destroy_skyhook_and_package_sov_hub_clean_runtime_reconcile_network_and_queue
         assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
     });
 }
+
+#[tokio::test]
+async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs_and_workforce() {
+    use crate::services::quasar_sov_hub::{all_upgrade_definitions, planet_yield_for_planet, system_yield};
+    use crate::services::quasar_sov_workforce::{exported_amount, imports};
+    use crate::services::sov_gameplay::TYPE_MERCENARY_DEN;
+    use crate::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
+    use crate::services::station_structure::structure_upwell_ops::load_ext_state;
+    use eve_db::durable_domain_types::{
+        PersistedHubUpgrade, PersistedMercenaryActivity, PersistedSovHubData,
+    };
+    use eve_db::{
+        CharacterRecord, OnlineSessionRecord, PersistedMercenaryDen, PersistedWorkforceMode,
+    };
+    use eve_destiny::{Ball, MovementMode};
+    use glam::DVec3;
+
+    let ctx = test_ctx();
+    let sys_a: u32 = 30_000_669; // N3-JBX
+    let sys_b: u32 = 30_000_671; // GN-PDU (1 jump)
+    let corp_a: i64 = 98_780_001;
+    let corp_raider: i64 = 98_780_002;
+    let observer_cid: i64 = 2_117_800_001;
+    let den_owner_cid: i64 = 2_117_800_002;
+
+    let hub_a: i64 = 1_097_800_001;
+    let hub_b: i64 = 1_097_800_002;
+    let skyhook_1: i64 = 1_097_800_010;
+    let skyhook_2: i64 = 1_097_800_011;
+    let den_1: i64 = 1_097_800_020;
+    let den_2: i64 = 1_097_800_021;
+    let mto_ball_1: i64 = 1_997_800_030;
+    let now = ctx.now_unix();
+
+    let (planet_1, wf_1) = ctx
+        .sde
+        .celestials_in_system_slice(sys_a)
+        .iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| (c.celestial_id, planet_yield_for_planet(c.type_id, c.radius).1))
+        .max_by_key(|&(_, wf)| wf)
+        .expect("SYS_A workforce planet");
+    assert!(wf_1 > 0);
+    let planet_2 = ctx
+        .sde
+        .celestials_in_system_slice(sys_a)
+        .iter()
+        .filter(|c| c.group_id == 7 && c.celestial_id != planet_1)
+        .map(|c| (c.celestial_id, planet_yield_for_planet(c.type_id, c.radius).1))
+        .min_by_key(|&(_, wf)| wf)
+        .map(|(id, _)| id)
+        .unwrap_or(planet_1 + 1);
+
+    let sys_b_power: u64 = {
+        let y = system_yield(&ctx.sde, sys_b);
+        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
+    };
+    let hub_b_upg = all_upgrade_definitions(&ctx.sde)
+        .into_iter()
+        .find(|d| {
+            d.workforce_produced == 0
+                && d.workforce_required > 0
+                && d.workforce_required <= wf_1
+                && d.power_required <= sys_b_power
+        })
+        .expect("SYS_B upgrade");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_a);
+    for (bid, tid) in [
+        (hub_a, TYPE_SOVEREIGNTY_HUB),
+        (skyhook_1, TYPE_ORBITAL_SKYHOOK),
+        (skyhook_2, TYPE_ORBITAL_SKYHOOK),
+        (den_1, TYPE_MERCENARY_DEN),
+        (den_2, TYPE_MERCENARY_DEN),
+        (mto_ball_1, 12_345),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::new(100_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1.0e8,
+                radius: 1_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            })
+            .await;
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, corp) in [(observer_cid, corp_a), (den_owner_cid, corp_raider)] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Char {cid}"),
+                    corporation_id: corp,
+                    solar_system_id: sys_a,
+                    ..Default::default()
+                },
+            );
+            snap.sessions.insert(
+                cid as u64,
+                OnlineSessionRecord {
+                    user_id: cid as u64,
+                    username: format!("user_{cid}"),
+                    session_id: cid as u64,
+                    character_id: Some(cid),
+                    connected_at_unix: now,
+                    computer_hash: None,
+                },
+            );
+        }
+        snap.corporations.insert(corp_a, CorporationRecord::new(corp_a, "Sov Corp", "SOV", observer_cid));
+        snap.corporations.insert(corp_raider, CorporationRecord::new(corp_raider, "Raider Corp", "RAD", den_owner_cid));
+
+        for (sid, hid, name) in [(sys_a, hub_a, "Hub A"), (sys_b, hub_b, "Hub B")] {
+            snap.system_states.entry(sid).or_default().sov_alliance_id = Some(99_780_001);
+            snap.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_a,
+                    solar_system_id: sid,
+                    name: name.into(),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sov_runtime.sov_claimed_since_unix.insert(sys_a, now.saturating_sub(1_000));
+        snap.sov_runtime.hacked_hubs.insert(hub_a, now + 600);
+        snap.sov_runtime.fuel_access_groups.insert(hub_a, 77);
+
+        for (sid, corp, name) in [
+            (skyhook_1, corp_a, "Skyhook 1"),
+            (skyhook_2, corp_a, "Skyhook 2"),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: corp,
+                    solar_system_id: sys_a,
+                    name: name.into(),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.skyhook_active.insert(sid, true);
+        }
+        snap.sov_runtime.skyhook_planets.insert(skyhook_1, planet_1);
+        snap.sov_runtime.skyhook_planets.insert(skyhook_2, planet_2);
+        snap.sov_runtime.mercenary_den_tax_pct.insert(skyhook_1, 25);
+        snap.sov_runtime.mercenary_den_tax_pct.insert(skyhook_2, 15);
+
+        let mut fuel_b = std::collections::BTreeMap::new();
+        if hub_b_upg.fuel_type > 0 {
+            fuel_b.insert(hub_b_upg.fuel_type, hub_b_upg.fuel_startup + hub_b_upg.fuel_per_hour * 100);
+        }
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: wf_1,
+                },
+                last_updated_unix: now,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: hub_b_upg.type_id,
+                    online: true,
+                    low_power: false,
+                }],
+                fuel: fuel_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                last_updated_unix: now,
+                ..Default::default()
+            },
+        );
+
+        for (did, sid, pid, anarchy) in [
+            (den_1, skyhook_1, planet_1, 10),
+            (den_2, skyhook_2, planet_2, 100),
+        ] {
+            snap.structures.insert(
+                did,
+                UpwellStructureRecord {
+                    structure_id: did,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_corp_id: corp_raider,
+                    solar_system_id: sys_a,
+                    name: format!("MercDen {did}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.mercenary_dens.insert(
+                did,
+                PersistedMercenaryDen {
+                    den_id: did,
+                    type_id: TYPE_MERCENARY_DEN,
+                    owner_char_id: den_owner_cid,
+                    skyhook_id: sid,
+                    solar_system_id: sys_a,
+                    planet_id: pid,
+                    enabled: true,
+                    cargo_extraction_enabled: true,
+                    development_level: 10,
+                    anarchy_level: anarchy,
+                    infomorphs: 50,
+                    simulated_at_unix: now,
+                    next_activity_generation_unix: now + 3_600,
+                },
+            );
+        }
+
+        let act_key = "c3".repeat(16);
+        snap.sov_runtime.mto_site_balls.insert(mto_ball_1, act_key.clone());
+        snap.sov_runtime.mercenary_activities.insert(
+            act_key,
+            PersistedMercenaryActivity {
+                uuid: vec![0xC3; 16],
+                den_id: den_1,
+                solar_system_id: sys_a,
+                dungeon_id: 12_367,
+                started: true,
+                started_by: den_owner_cid,
+                expiry_unix: now + 3_600,
+                development_impact: 5,
+                anarchy_impact: -10,
+                infomorph_bonus: 0,
+            },
+        );
+        snap.items.insert(
+            mto_ball_1,
+            InventoryItemRecord {
+                item_id: mto_ball_1,
+                type_id: 12_345,
+                owner_id: 1,
+                location_id: i64::from(sys_a),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(mto_ball_1, [100_000.0, 0.0, 0.0]);
+    });
+
+    // 1. Combat destruction of Skyhook 1 cleans tax, attached Den 1, MTO/balls, emits
+    //    OnMyMercenaryDenRemoved & OnSolarSystemSovStructuresUpdated, and reconciles workforce
+    //    (if planet_1 == planet_2, Skyhook 2 keeps planet_2 wf; else export drops to Skyhook 2 wf or 0).
+    let out_sky = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let out = destroy_structure(&ctx, snap, &mut ext, skyhook_1, observer_cid, now);
+        save_ext_state(snap, &ext);
+        out
+    });
+    let sky_urls: Vec<&str> = out_sky
+        .pending_quasar_notices
+        .iter()
+        .map(|(_, a)| a.type_url.as_str())
+        .collect();
+    assert!(sky_urls.iter().any(|u| u.ends_with("StateChangedNotice")));
+    assert!(sky_urls.iter().any(|u| u.ends_with("ResourcesSimulatedNotice")));
+    assert!(sky_urls.iter().any(|u| u.ends_with("HubUpgradesSimulatedNotice")));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_1].state, STATE_DESTROYED);
+        assert_eq!(snap.structures[&den_1].state, STATE_DESTROYED);
+        assert!(!snap.sov_runtime.mercenary_den_tax_pct.contains_key(&skyhook_1));
+        assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_1));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&"c3".repeat(16)));
+        assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_1));
+        assert!(!snap.items.contains_key(&mto_ball_1));
+        assert!(!snap.item_positions.contains_key(&mto_ball_1));
+        assert_eq!(exported_amount(snap, hub_a), 0);
+        assert_eq!(imports(snap, &ctx.sde, hub_b), vec![(sys_a, 0)]);
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+        // Third-party Den 2 & tax on Skyhook 2 remain intact.
+        assert_eq!(snap.sov_runtime.mercenary_den_tax_pct.get(&skyhook_2), Some(&15));
+        assert!(snap.sov_runtime.mercenary_dens.contains_key(&den_2));
+    });
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert!(!bp.balls.contains_key(&skyhook_1));
+        assert!(!bp.balls.contains_key(&den_1));
+        assert!(!bp.balls.contains_key(&mto_ball_1));
+        assert!(bp.balls.contains_key(&den_2));
+    }
+    {
+        let q = ctx.pending_notifications.read().unwrap();
+        assert!(
+            q.get(&den_owner_cid)
+                .into_iter()
+                .flatten()
+                .any(|n| n.event == "OnMyMercenaryDenRemoved"),
+            "expected OnMyMercenaryDenRemoved for attached den owner"
+        );
+        assert!(
+            q.get(&observer_cid)
+                .into_iter()
+                .flatten()
+                .any(|n| n.event == "OnSolarSystemSovStructuresUpdated"),
+            "expected OnSolarSystemSovStructuresUpdated on skyhook combat destruction"
+        );
+    }
+
+    // 2. Restore active export from Hub A -> Hub B (via an intact Skyhook on planet_1) while
+    //    Skyhook 2 + Anarchy Den 2 remain anchored, then destroy Sovereignty Hub A in combat.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime.skyhook_planets.insert(skyhook_2, planet_1);
+        if let Some(d2) = snap.sov_runtime.mercenary_dens.get_mut(&den_2) {
+            d2.planet_id = planet_1;
+            d2.anarchy_level = 10; // keep full wf_1 available until Hub A dies
+        }
+        if let Some(ha) = snap.sov_runtime.sov_hubs.get_mut(&hub_a) {
+            ha.workforce = PersistedWorkforceMode::Export {
+                destination: Some(sys_b),
+                amount: wf_1,
+            };
+        }
+        if let Some(hb) = snap.sov_runtime.sov_hubs.get_mut(&hub_b) {
+            hb.upgrades[0].low_power = false;
+        }
+    });
+    ctx.pending_notifications.write().unwrap().clear();
+    let out_hub = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let out = destroy_structure(&ctx, snap, &mut ext, hub_a, observer_cid, now);
+        save_ext_state(snap, &ext);
+        out
+    });
+    let hub_urls: Vec<&str> = out_hub
+        .pending_quasar_notices
+        .iter()
+        .map(|(_, a)| a.type_url.as_str())
+        .collect();
+    assert!(hub_urls.iter().any(|u| u.ends_with("StateChangedNotice")));
+    assert!(hub_urls.iter().any(|u| u.ends_with("ResourcesSimulatedNotice")));
+    assert!(hub_urls.iter().any(|u| u.ends_with("HubUpgradesSimulatedNotice")));
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&hub_a].state, STATE_DESTROYED);
+        assert!(!snap.sov_runtime.sov_hubs.contains_key(&hub_a));
+        assert!(!snap.sov_runtime.hacked_hubs.contains_key(&hub_a));
+        assert!(!snap.sov_runtime.fuel_access_groups.contains_key(&hub_a));
+        assert!(!snap.sov_runtime.sov_claimed_since_unix.contains_key(&sys_a));
+        assert_eq!(snap.system_states[&sys_a].sov_alliance_id, None);
+        assert_eq!(imports(snap, &ctx.sde, hub_b), vec![(sys_a, 0)]);
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+        assert!(snap.sov_runtime.mercenary_dens.contains_key(&den_2));
+    });
+    assert!(ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&observer_cid)
+        .into_iter()
+        .flatten()
+        .any(|n| n.event == "OnSovereigntyChanged"));
+
+    // 3. Direct packaging of Mercenary Den 2 cleans den runtime, Ballpark ball, and notifies owner.
+    ctx.pending_notifications.write().unwrap().clear();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let _ = package_structure(&ctx, snap, &mut ext, den_2, now);
+        save_ext_state(snap, &ext);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&den_2));
+        assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_2));
+    });
+    assert!(!sys_handle.ballpark.read().unwrap().balls.contains_key(&den_2));
+    assert!(ctx
+        .pending_notifications
+        .read()
+        .unwrap()
+        .get(&den_owner_cid)
+        .into_iter()
+        .flatten()
+        .any(|n| n.event == "OnMyMercenaryDenRemoved"));
+}

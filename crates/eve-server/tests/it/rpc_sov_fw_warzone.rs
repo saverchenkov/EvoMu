@@ -162,13 +162,18 @@ async fn setup_sov_fw_env(ctx: &ServerContext) -> SessionState {
         );
         snap.structures.insert(
             SKYHOOK_ID,
-            upwell_struct(
-                SKYHOOK_ID,
-                81143,
-                CORP_ID,
-                NULLSEC_SYS_ID,
-                "VFK-IV Skyhook",
-            ),
+            eve_db::UpwellStructureRecord {
+                shield_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_HULL_HP,
+                ..upwell_struct(
+                    SKYHOOK_ID,
+                    eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                    CORP_ID,
+                    NULLSEC_SYS_ID,
+                    "VFK-IV Skyhook",
+                )
+            },
         );
 
         let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -399,23 +404,20 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         .expect("remove_from_cache");
     assert_eq!(rfc, PyRep::None);
 
-    // 6. DestroySkyhooks
+    // 6. DestroySkyhooks (V24 skyhookIDs collection)
     let destroy_res = ctx
         .dispatch_rpc(
             &mut sess,
             "sovMgr",
             None,
             "DestroySkyhooks",
-            &[PyRep::Integer(NULLSEC_SYS_ID as i64)],
+            &[PyRep::List(vec![PyRep::Integer(SKYHOOK_ID)])],
             &kw,
             None,
         )
         .await
         .expect("DestroySkyhooks");
-    assert!(matches!(
-        destroy_res,
-        PyRep::List(_) | PyRep::Integer(_) | PyRep::None
-    ));
+    assert_eq!(destroy_res, PyRep::Integer(1));
 }
 
 #[tokio::test]

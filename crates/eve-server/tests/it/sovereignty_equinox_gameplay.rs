@@ -1785,14 +1785,33 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
         field(c, 1).and_then(|id| varint(&id, 1)) == Some(null_star_id) && varint(c, 2) == Some(expected_star_p)
     }));
 
+    let allowed_cid = 90_000_071i64;
+    let blocked_cid = 90_000_072i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let mut members = std::collections::HashMap::new();
+        members.insert(allowed_cid, 1i64);
+        members.insert(blocked_cid, -1i64);
+        ext.owner_groups.insert(
+            42_001,
+            eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                group_id: 42_001,
+                creator_id: PILOT,
+                owner_corp_id: CORP,
+                name: "Fuel Group".into(),
+                description: "Sov Hub Fuel ACL".into(),
+                members,
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_a), PyRep::Integer(42_001)])
             .await.expect("SetSovHubFuelAccessGroup"),
         PyRep::Integer(42_001)
     );
 
-    let allowed_cid = 90_000_071i64;
-    let blocked_cid = 90_000_072i64;
     let mut s_allowed = register_online_pilot(
         &ctx, 73_071, "allowed", "sec-1", allowed_cid, CORP, Some(ALLIANCE),
         null_sys, 100_000_071, 11_957, hub_pos + DVec3::new(40_000.0, 0.0, 0.0), 0,
@@ -1820,19 +1839,6 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
                 ..Default::default()
             },
         );
-        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-        let mut members = std::collections::HashMap::new();
-        members.insert(allowed_cid, 1i64);
-        members.insert(blocked_cid, -1i64);
-        ext.owner_groups.insert(42_001, eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
-            group_id: 42_001,
-            creator_id: PILOT,
-            owner_corp_id: CORP,
-            name: "Fuel Group".into(),
-            description: "Sov Hub Fuel ACL".into(),
-            members,
-        });
-        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
     });
 
     assert_eq!(
@@ -2821,6 +2827,21 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
     );
 
     // Fuel Access Group via SetSovHubFuelAccessGroup.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.owner_groups.insert(
+            55_001,
+            eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                group_id: 55_001,
+                creator_id: PILOT,
+                owner_corp_id: CORP,
+                name: "Equinox Fuel ACL".into(),
+                description: String::new(),
+                members: std::collections::HashMap::new(),
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(55_001)])
             .await

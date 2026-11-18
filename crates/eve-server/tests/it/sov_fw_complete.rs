@@ -677,6 +677,23 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
     .expect("UpdateReinforceTimesFromClient");
 
     let access_group_id: i64 = 77_889;
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(s);
+        let mut members = HashMap::new();
+        members.insert(PILOT, 1i64);
+        ext.owner_groups.insert(
+            access_group_id,
+            eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                group_id: access_group_id,
+                creator_id: PILOT,
+                owner_corp_id: corp_id,
+                name: "Sov FW Fuel ACL".into(),
+                description: String::new(),
+                members,
+            },
+        );
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(s, &ext);
+    });
     sov_call(&ctx, &mut sess, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(access_group_id)])
         .await
         .expect("SetSovHubFuelAccessGroup");
@@ -966,12 +983,12 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
         s.characters.get_mut(&OTHER).unwrap().corporation_id = corp_id;
     });
     select(&ctx, &mut line_sess, "other", "other-secret", OTHER).await;
-    let destroy_denied = sov_call(&ctx, &mut line_sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(sys_id as i64)])
+    let destroy_denied = sov_call(&ctx, &mut line_sess, "sovMgr", "DestroySkyhooks", &[PyRep::List(vec![PyRep::Integer(skyhook_id)])])
         .await
         .unwrap_err();
     assert_eq!(destroy_denied.code, "CorpRoleDenied");
 
-    let destroyed = sov_call(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(sys_id as i64)])
+    let destroyed = sov_call(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::List(vec![PyRep::Integer(skyhook_id)])])
         .await
         .expect("DestroySkyhooks");
     assert_eq!(destroyed.as_i64(), Some(1));

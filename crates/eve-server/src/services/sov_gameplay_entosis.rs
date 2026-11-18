@@ -5,7 +5,10 @@
 use super::flush_pending_quasar;
 use super::sov_gameplay_skyhook::tick_skyhooks;
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::quasar_sov_hub::{compute_hub_resources, enforce_hub_power_overload, PendingNotices};
+use crate::services::quasar_sov_hub::{
+    clamp_hub_export_to_max, compute_hub_resources, enforce_hub_power_overload, hub_views,
+    max_exportable_workforce, PendingNotices,
+};
 use crate::services::quasar_sov_mercden::{complete_mercenary_activity_in_snap, refresh_activities_with_sde};
 use crate::services::sov_services::{
     calculate_adm, is_hub_hacked,
@@ -440,12 +443,14 @@ pub fn on_space_entity_destroyed_ext(
                 let hub_ids: Vec<i64> = snap
                     .structures
                     .values()
-                    .filter(|s| s.solar_system_id == a.solar_system_id && s.type_id == TYPE_SOVEREIGNTY_HUB)
+                    .filter(|s| {
+                        s.solar_system_id == a.solar_system_id
+                            && s.type_id == TYPE_SOVEREIGNTY_HUB
+                            && !s.state.eq_ignore_ascii_case("destroyed")
+                    })
                     .map(|s| s.structure_id)
                     .collect();
-                for hid in hub_ids {
-                    let _ = enforce_hub_power_overload(snap, &ctx.sde, hid);
-                }
+                clamp_and_reconcile_hubs_in_snap(snap, &ctx.sde, &pending, &hub_ids);
             }
         }
     });
@@ -457,6 +462,51 @@ pub fn on_space_entity_destroyed_ext(
         target_type_id,
         was_mto_npc || was_tracked_npc || was_upg_npc,
     );
+}
+
+/// Clamps any over-exporting hubs before evaluating local overload, reconciling downstream hubs
+/// and queuing Quasar notices whenever any hub export exceeds `max_exportable_workforce`.
+fn clamp_and_reconcile_hubs_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    pending: &PendingNotices,
+    hub_ids: &[i64],
+) {
+    let over_export_seeds: Vec<i64> = hub_ids
+        .iter()
+        .copied()
+        .filter(|&hid| {
+            let amt = match snap.sov_runtime.sov_hubs.get(&hid).map(|h| &h.workforce) {
+                Some(eve_db::PersistedWorkforceMode::Export { amount, .. }) => *amount,
+                _ => return false,
+            };
+            let cap = max_exportable_workforce(snap, sde, hid).unwrap_or(0);
+            amt > cap
+        })
+        .collect();
+    let pre_reconcile = (!over_export_seeds.is_empty()).then(|| {
+        let extra = crate::services::quasar_sov_workforce::collect_connected_hub_ids(
+            snap,
+            sde,
+            &over_export_seeds,
+        );
+        let before = hub_views(snap, sde, &extra);
+        (extra, before)
+    });
+    for &hid in hub_ids {
+        let _ = compute_hub_resources(snap, sde, hid);
+        let _ = clamp_hub_export_to_max(snap, sde, hid);
+        let _ = enforce_hub_power_overload(snap, sde, hid);
+    }
+    if let Some((extra, before)) = pre_reconcile {
+        crate::services::quasar_sov_workforce::reconcile_hub_workforce_network_and_emit(
+            snap,
+            sde,
+            pending,
+            &before,
+            &extra,
+        );
+    }
 }
 
 /// Credits Sovereignty Military Index (`record_sov_system_activity`) only for genuine NPC entities
@@ -694,7 +744,12 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         if has_sov_snapshot_work {
             let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
             let res = ctx.db.with_mut_snapshot(|snap| {
-                super::tick_mercenary_den_reinforcements_in_snap(snap, &pending, now_unix);
+                super::tick_mercenary_den_reinforcements_in_snap_with_sde(
+                    snap,
+                    Some(&ctx.sde),
+                    &pending,
+                    now_unix,
+                );
         let mto_before: std::collections::HashMap<i64, u32> = snap
             .sov_runtime
             .mto_site_balls
@@ -723,13 +778,18 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             .sov_runtime
             .sov_hubs
             .keys()
-            .filter_map(|&hid| snap.structures.get(&hid).map(|s| (hid, s.solar_system_id)))
+            .filter_map(|&hid| {
+                snap.structures
+                    .get(&hid)
+                    .filter(|s| !s.state.eq_ignore_ascii_case("destroyed"))
+                    .map(|s| (hid, s.solar_system_id))
+            })
             .collect();
+        let just_hub_ids: Vec<i64> = hub_ids.iter().map(|&(hid, _)| hid).collect();
+        clamp_and_reconcile_hubs_in_snap(snap, &ctx.sde, &pending, &just_hub_ids);
         let mut upg_spawns: Vec<(u32, i64, &'static str, Vec<u32>, [f64; 3], usize, Vec<i64>)> = Vec::new();
         let mut upg_despawns: Vec<(u32, i64)> = Vec::new();
         for (hid, hsys) in hub_ids {
-            let _ = compute_hub_resources(snap, &ctx.sde, hid);
-            let _ = enforce_hub_power_overload(snap, &ctx.sde, hid);
             let hub_hacked = snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u);
             let upgrades = snap
                 .sov_runtime

@@ -72,6 +72,40 @@ pub(crate) fn flush_pending_quasar(ctx: &ServerContext, pending: &PendingNotices
     flush_quasar_notice_items(ctx, &items, now_unix);
 }
 
+/// Result of tearing down a Skyhook's runtime state together with its attached Mercenary Dens.
+#[derive(Debug, Default)]
+pub(crate) struct SkyhookAndDensCleanup {
+    pub removed_dens: Vec<(i64, i64)>,
+    pub removed_mto_balls: Vec<i64>,
+}
+
+/// Cleans up a destroyed or decommissioned Skyhook's runtime maps, its Mercenary Den tax rate,
+/// and all attached Mercenary Dens (`skyhook_id`), returning `(den_id, owner_char_id)` pairs
+/// and removed MTO site ball IDs for Ballpark and notification cleanup.
+pub(crate) fn cleanup_skyhook_and_attached_dens_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    skyhook_id: i64,
+) -> SkyhookAndDensCleanup {
+    cleanup_destroyed_skyhook_in_snap(snap, skyhook_id);
+    snap.sov_runtime.mercenary_den_tax_pct.remove(&skyhook_id);
+    let mut attached: Vec<(i64, i64)> = snap
+        .sov_runtime
+        .mercenary_dens
+        .values()
+        .filter(|md| md.skyhook_id == skyhook_id)
+        .map(|md| (md.den_id, md.owner_char_id))
+        .collect();
+    attached.sort_unstable_by_key(|(did, _)| *did);
+    let mut out = SkyhookAndDensCleanup::default();
+    for (did, owner_cid) in attached {
+        let (removed_den, mut balls) = cleanup_destroyed_mercenary_den_in_snap(snap, did);
+        let owner = removed_den.map(|d| d.owner_char_id).unwrap_or(owner_cid);
+        out.removed_dens.push((did, owner));
+        out.removed_mto_balls.append(&mut balls);
+    }
+    out
+}
+
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -733,8 +767,46 @@ pub async fn handle_mercden_component_call(
     ]))
 }
 
+/// Restores a Mercenary Den to `ShieldVulnerable` (`100%` shield) after its post-reinforcement
+/// vulnerability window expires, re-enabling the Den and reconciling Sovereignty Hub workforce.
+pub(crate) fn recover_mercenary_den_from_vuln_expiry(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
+    pending: &PendingNotices,
+    den_id: i64,
+    now: u64,
+) {
+    with_mercenary_den_workforce_reconcile(snap, sde, pending, den_id, now, |snap| {
+        if let Some(st) = snap.structures.get_mut(&den_id) {
+            st.state = "ShieldVulnerable".into();
+            st.shield_hp = MERC_DEN_BASE_HP;
+            st.reinforced_until_unix = 0;
+        }
+        snap.sov_runtime
+            .mercenary_den_reinforcement
+            .insert(den_id, (0, 0, 100));
+        if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+            if !den_mut.enabled {
+                den_mut.enabled = true;
+                den_mut.simulated_at_unix = now;
+                push_evolution_notice(pending, den_mut);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
 pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
+    pending: &PendingNotices,
+    now: u64,
+) {
+    tick_mercenary_den_reinforcements_in_snap_with_sde(snap, None, pending, now);
+}
+
+pub(crate) fn tick_mercenary_den_reinforcements_in_snap_with_sde(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
     pending: &PendingNotices,
     now: u64,
 ) {
@@ -758,34 +830,28 @@ pub(crate) fn tick_mercenary_den_reinforcements_in_snap(
         }
     }
     for (den_id, (reinf_until, vuln_end, _)) in entries {
-        let Some(st) = snap.structures.get_mut(&den_id) else {
+        let Some((is_destroyed, is_hull_reinf)) = snap
+            .structures
+            .get(&den_id)
+            .map(|st| (st.state.eq_ignore_ascii_case("destroyed"), st.state == "HullReinforced"))
+        else {
             continue;
         };
-        if st.state == "Destroyed" {
+        if is_destroyed {
             continue;
         }
         if vuln_end > 0 && now >= vuln_end {
-            st.state = "ShieldVulnerable".into();
-            st.shield_hp = MERC_DEN_BASE_HP;
-            st.reinforced_until_unix = 0;
-            snap.sov_runtime
-                .mercenary_den_reinforcement
-                .insert(den_id, (0, 0, 100));
-            if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-                if !den_mut.enabled {
-                    den_mut.enabled = true;
-                    den_mut.simulated_at_unix = now;
-                    push_evolution_notice(pending, den_mut);
+            recover_mercenary_den_from_vuln_expiry(snap, sde, pending, den_id, now);
+        } else if reinf_until > 0 && now >= reinf_until && is_hull_reinf {
+            if let Some(st) = snap.structures.get_mut(&den_id) {
+                st.state = "HullVulnerable".into();
+                if vuln_end == 0 {
+                    let next_vuln = reinf_until + 900;
+                    st.reinforced_until_unix = next_vuln;
+                    snap.sov_runtime
+                        .mercenary_den_reinforcement
+                        .insert(den_id, (reinf_until, next_vuln, 0));
                 }
-            }
-        } else if reinf_until > 0 && now >= reinf_until && st.state == "HullReinforced" {
-            st.state = "HullVulnerable".into();
-            if vuln_end == 0 {
-                let next_vuln = reinf_until + 900;
-                st.reinforced_until_unix = next_vuln;
-                snap.sov_runtime
-                    .mercenary_den_reinforcement
-                    .insert(den_id, (reinf_until, next_vuln, 0));
             }
         }
     }
@@ -824,12 +890,20 @@ pub async fn apply_mercenary_den_weapon_damage(
                 client_error: None,
             });
         }
-        let st = snap.structures.get_mut(&den_id).ok_or_else(|| BridgeRpcError {
-            code: "MercenaryDenNotFound".into(),
-            message: format!("Mercenary Den {den_id} not found"),
-            client_error: None,
-        })?;
-        if st.state == "Destroyed" {
+        let Some((sys_id, pos_arr, is_destroyed)) = snap.structures.get(&den_id).map(|st| {
+            (
+                st.solar_system_id,
+                st.position,
+                st.state.eq_ignore_ascii_case("destroyed"),
+            )
+        }) else {
+            return Err(BridgeRpcError {
+                code: "MercenaryDenNotFound".into(),
+                message: format!("Mercenary Den {den_id} not found"),
+                client_error: None,
+            });
+        };
+        if is_destroyed {
             return Err(BridgeRpcError {
                 code: "StructureDestroyed".into(),
                 message: format!("Mercenary Den {den_id} is already destroyed"),
@@ -839,14 +913,10 @@ pub async fn apply_mercenary_den_weapon_damage(
         if vuln_end > 0 && now >= vuln_end {
             reinf_until = 0;
             vuln_end = 0;
-            st.state = "ShieldVulnerable".into();
-            st.shield_hp = MERC_DEN_BASE_HP;
-            st.reinforced_until_unix = 0;
-            snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, 100));
+            recover_mercenary_den_from_vuln_expiry(snap, Some(&ctx.sde), &pending, den_id, now);
         }
+        let st = snap.structures.get_mut(&den_id).expect("checked");
         st.last_damage_unix = now;
-        let sys_id = st.solar_system_id;
-        let pos_arr = st.position;
 
         // Phase 1: Shield layer before reinforcement (or while awaiting >=50% repair outside active window).
         if reinf_until == 0 {
@@ -1076,7 +1146,7 @@ pub async fn apply_mercenary_den_shield_repair(
     let now = ctx.now_unix();
     let pending: PendingNotices = Arc::new(RwLock::new(Vec::new()));
     let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let (reinf_until, vuln_end, _) = snap
+        let (mut reinf_until, mut vuln_end, _) = snap
             .sov_runtime
             .mercenary_den_reinforcement
             .get(&den_id)
@@ -1089,35 +1159,72 @@ pub async fn apply_mercenary_den_shield_repair(
                 client_error: None,
             });
         }
-        let st = snap.structures.get_mut(&den_id).ok_or_else(|| BridgeRpcError {
-            code: "MercenaryDenNotFound".into(),
-            message: format!("Mercenary Den {den_id} not found"),
-            client_error: None,
-        })?;
+        let is_destroyed = match snap.structures.get(&den_id) {
+            Some(st) => st.state.eq_ignore_ascii_case("destroyed"),
+            None => {
+                return Err(BridgeRpcError {
+                    code: "MercenaryDenNotFound".into(),
+                    message: format!("Mercenary Den {den_id} not found"),
+                    client_error: None,
+                });
+            }
+        };
+        if is_destroyed {
+            return Err(BridgeRpcError {
+                code: "StructureDestroyed".into(),
+                message: format!("Mercenary Den {den_id} is already destroyed"),
+                client_error: None,
+            });
+        }
+        let was_enabled = snap
+            .sov_runtime
+            .mercenary_dens
+            .get(&den_id)
+            .is_some_and(|d| d.enabled);
+        let mut recovered_from_expiry = false;
+        if vuln_end > 0 && now >= vuln_end {
+            reinf_until = 0;
+            vuln_end = 0;
+            recovered_from_expiry = true;
+            recover_mercenary_den_from_vuln_expiry(snap, Some(&ctx.sde), &pending, den_id, now);
+        }
+        let st = snap.structures.get_mut(&den_id).expect("checked");
         st.shield_hp = (st.shield_hp + repair_hp.max(500.0)).min(MERC_DEN_BASE_HP);
         let pct = ((st.shield_hp / MERC_DEN_BASE_HP) * 100.0).round().clamp(0.0, 100.0) as u8;
-        let mut enabled_now = false;
+        let mut enabled_now = recovered_from_expiry
+            && !was_enabled
+            && snap
+                .sov_runtime
+                .mercenary_dens
+                .get(&den_id)
+                .is_some_and(|d| d.enabled);
         if pct >= 50 {
             st.state = "ShieldVulnerable".into();
             st.reinforced_until_unix = 0;
-            enabled_now = with_mercenary_den_workforce_reconcile(
-                snap,
-                Some(&ctx.sde),
-                &pending,
-                den_id,
-                now,
-                |snap| {
-                    snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, pct));
-                    if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-                        den_mut.enabled = true;
-                        den_mut.simulated_at_unix = now;
-                        push_evolution_notice(&pending, den_mut);
-                        true
-                    } else {
-                        false
-                    }
-                },
-            );
+            if recovered_from_expiry {
+                // `recover_mercenary_den_from_vuln_expiry` already reconciled workforce,
+                // cleared reinforcement timers, re-enabled the Den, and queued its notice.
+                snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, pct));
+            } else {
+                enabled_now = with_mercenary_den_workforce_reconcile(
+                    snap,
+                    Some(&ctx.sde),
+                    &pending,
+                    den_id,
+                    now,
+                    |snap| {
+                        snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, pct));
+                        if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+                            den_mut.enabled = true;
+                            den_mut.simulated_at_unix = now;
+                            push_evolution_notice(&pending, den_mut);
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                );
+            }
         } else {
             snap.sov_runtime
                 .mercenary_den_reinforcement

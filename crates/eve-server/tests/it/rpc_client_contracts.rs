@@ -100,6 +100,8 @@ const MODULE_ID: i64 = 100_000_005;
 const HANGAR_ITEM_ID: i64 = 100_000_003;
 const BPO_ITEM_ID: i64 = 100_000_007;
 const STRUCTURE_ID: i64 = 1_030_000_000_001;
+const SOV_HUB_ID: i64 = 1_030_000_000_002;
+const SKYHOOK_ID: i64 = 1_030_000_000_003;
 const PLANET_ID: i64 = 40_009_082;
 const FLEET_ID: i64 = 500_001;
 const WING_ID: i64 = 501_001;
@@ -577,6 +579,55 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 industrial_index: 2,
                 strategic_index: 3,
                 ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            SOV_HUB_ID,
+            UpwellStructureRecord {
+                structure_id: SOV_HUB_ID,
+                type_id: 32_458, // Sovereignty Hub
+                owner_corp_id: CORP_ID,
+                solar_system_id: SOV_SYSTEM_ID,
+                name: "Sov Test Hub".into(),
+                position: [150_000.0, 250_000.0, 350_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            SOV_HUB_ID,
+            eve_db::durable_domain_types::PersistedSovHubData {
+                hub_id: SOV_HUB_ID,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            SKYHOOK_ID,
+            UpwellStructureRecord {
+                structure_id: SKYHOOK_ID,
+                type_id: eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: CORP_ID,
+                solar_system_id: SOV_SYSTEM_ID,
+                name: "Sov Test Skyhook".into(),
+                position: [250_000.0, 250_000.0, 350_000.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: eve_server::services::sov_gameplay::SKYHOOK_BASE_HULL_HP,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
             },
         );
     });
@@ -1439,11 +1490,16 @@ fn build_candidate_arg_sets(
     if service == "miningScanMgr" && method == "perform_scan" {
         return vec![vec![PyRep::Integer(MODULE_ID)]];
     }
-    if service == "devIndexManager" && method == "GetDevelopmentIndicesForSystem" {
+    if (service == "devIndexManager" && method == "GetDevelopmentIndicesForSystem")
+        || (service == "sovMgr" && method == "GetSovHubFuelAccessGroup")
+    {
         return vec![
             vec![PyRep::Integer(SOV_SYSTEM_ID as i64)],
             vec![PyRep::Integer(SYSTEM_ID as i64)],
         ];
+    }
+    if service == "sovMgr" && method == "DestroySkyhooks" {
+        return vec![vec![PyRep::List(vec![PyRep::Integer(SKYHOOK_ID)])]];
     }
     let mut base = Vec::with_capacity(arity);
     for i in 0..arity {

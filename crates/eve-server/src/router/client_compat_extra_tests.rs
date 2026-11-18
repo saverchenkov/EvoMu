@@ -2043,3 +2043,92 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
         ])])),
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn map_get_current_sov_data_preserves_claim_structure_id_and_location_filter_over_wire() {
+    use eve_db::{AllianceRecord, SystemDynamicState};
+
+    // Real MachoNet dispatch_rpc path (`Some("machoNet:26000")`) with regionID / solarSystemID filter
+    // and raw dispatch check confirming both `claimStructureID` and `infrastructureHubID` are emitted.
+    let ctx = test_ctx();
+    let mut null_systems: Vec<(u32, u32)> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.security_status < 0.0 && s.solar_system_id < 31_000_000)
+        .map(|s| (s.solar_system_id, s.region_id))
+        .collect();
+    null_systems.sort_unstable();
+    let (sys_a, reg_a) = null_systems[0];
+    let (sys_b, _) = *null_systems.iter().find(|&&(_, r)| r != reg_a).unwrap();
+    let corp_id = 98_950_001_i64;
+    let ally_id = 99_950_001_i64;
+    let hub_a = 1_095_000_001_i64;
+    let hub_b = 1_095_000_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.alliances.insert(
+            ally_id,
+            AllianceRecord {
+                alliance_id: ally_id,
+                name: "Wire Sov".into(),
+                short_name: "WSOV".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+            },
+        );
+        for (sid, hid) in [(sys_a, hub_a), (sys_b, hub_b)] {
+            snap.system_states.insert(
+                sid,
+                SystemDynamicState {
+                    solar_system_id: sid,
+                    sov_alliance_id: Some(ally_id),
+                    ..Default::default()
+                },
+            );
+            snap.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: crate::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sid,
+                    name: format!("Wire Hub {sid}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = SessionState::new(26_001);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    let kw = HashMap::new();
+    let wire_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "map",
+            None,
+            "GetCurrentSovData",
+            &[PyRep::Integer(i64::from(reg_a))],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("dispatch map.GetCurrentSovData wire");
+    let PyRep::Rowset {
+        columns: w_hdr,
+        rows: w_lines,
+    } = wire_rep else {
+        panic!("expected wire Rowset from map.GetCurrentSovData");
+    };
+    assert_eq!(w_hdr[0], "locationID");
+    assert_eq!(w_hdr[4], "claimStructureID");
+    assert_eq!(w_lines.len(), 1);
+    assert_eq!(w_lines[0][0], PyRep::Integer(i64::from(sys_a)));
+    assert_eq!(w_lines[0][1], PyRep::Integer(i64::from(sys_a)));
+    assert_eq!(w_lines[0][2], PyRep::Integer(ally_id));
+    assert_eq!(w_lines[0][3], PyRep::Integer(corp_id));
+    assert_eq!(w_lines[0][4], PyRep::Integer(hub_a));
+}

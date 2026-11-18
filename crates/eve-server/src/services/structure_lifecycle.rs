@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 use super::structure_upwell_ops::{load_ext_state, save_ext_state, AssetSafetyWrapRecord, StructureExtendedState, StructureLifecycleState, ASSET_SAFETY_DELIVERY_DELAY_SECS};
 use crate::router::notify_registry::{
-    emit_typed_target_to_char_with_id_type, OnSessionChanged,
+    emit_typed_target_to_char_with_id_type, OnMyMercenaryDenRemoved, OnSessionChanged,
     OnSolarSystemSovStructuresUpdated, OnSovereigntyChanged, OnStructureHacked, OnStructureRemoved,
     OnStructureRemovedFromSpace, OnStructureTargetRemoved, TypedNotification,
 };
@@ -610,10 +610,22 @@ fn dispose_contents(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mu
 /// Removes the structure's ball, emits `OnStructureRemoved` / `OnStructureRemovedFromSpace` at
 /// completion, and spawns balls at the structure position for dropped core, fittings, and
 /// packaged structure item (`feat:lifecycle.structure-leave_space`).
-fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldStateSnapshot, st: &UpwellStructureRecord, out: &mut DisposalOutcome) {
+fn emit_structure_left_space_and_spawn_drops(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    st: &UpwellStructureRecord,
+    out: &mut DisposalOutcome,
+    sov_cleanup: &crate::services::sov_gameplay::SkyhookAndDensCleanup,
+) {
     let active_handle = ctx.systems.active_system_handles().into_iter().find(|(id, _)| *id == st.solar_system_id).map(|(_, h)| h);
     if let Some(handle) = active_handle {
         handle.try_remove_ball(st.structure_id);
+        for &(did, _) in &sov_cleanup.removed_dens {
+            handle.try_remove_ball(did);
+        }
+        for &bid in &sov_cleanup.removed_mto_balls {
+            handle.try_remove_ball(bid);
+        }
         let pos = glam::DVec3::from_array(st.position);
         let alliance_id = snap.corporations.get(&st.owner_corp_id).and_then(|c| c.alliance_id).unwrap_or(0);
         for iid in out.wreck_item_id.into_iter().chain(out.dropped_core_item_id).chain(out.packaged_item_id).chain(out.dropped_item_ids.iter().copied()) {
@@ -684,9 +696,59 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
             },
         );
     }
-    if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
+    for &(did, owner_cid) in &sov_cleanup.removed_dens {
+        if owner_cid <= 0 {
+            continue;
+        }
+        let owner_uid = snap
+            .characters
+            .get(&owner_cid)
+            .map(|c| c.user_id)
+            .or_else(|| {
+                snap.sessions
+                    .values()
+                    .find(|os| os.character_id == Some(owner_cid))
+                    .map(|os| os.user_id)
+            });
+        emit_typed_target_to_char_with_id_type(
+            Some(&ctx.pending_notifications),
+            Some(&ctx.notify_tx),
+            owner_cid,
+            owner_uid,
+            "charid",
+            now_ft,
+            OnMyMercenaryDenRemoved {
+                notify_msg: "MercenaryDenRemoved".to_string(),
+                notify_args: eve_proto::PyRep::Dict(vec![(
+                    eve_proto::PyRep::String("itemID".into()),
+                    eve_proto::PyRep::Integer(did),
+                )]),
+            },
+        );
+    }
+    let is_sov_hub = st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB;
+    let is_sov_orbital_or_den = st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+        || st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN;
+    if is_sov_hub || is_sov_orbital_or_den {
         let structs = crate::services::sov_services::collect_sov_structures_from_snap(snap, st.solar_system_id);
-        let changes = eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::Integer(st.structure_id), eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(0)]))]);
+        let mut changed_ids = Vec::with_capacity(1 + sov_cleanup.removed_dens.len());
+        changed_ids.push(st.structure_id);
+        for &(did, _) in &sov_cleanup.removed_dens {
+            if did != st.structure_id {
+                changed_ids.push(did);
+            }
+        }
+        let changes = eve_proto::PyRep::Dict(
+            changed_ids
+                .into_iter()
+                .map(|id| {
+                    (
+                        eve_proto::PyRep::Integer(id),
+                        eve_proto::PyRep::List(vec![eve_proto::PyRep::Integer(0)]),
+                    )
+                })
+                .collect(),
+        );
         let mut all_recips: Vec<(i64, Option<u64>)> = snap
             .sessions
             .values()
@@ -695,18 +757,20 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
         all_recips.sort_by_key(|(cid, _)| *cid);
         all_recips.dedup_by_key(|(cid, _)| *cid);
         for (cid, uid) in &all_recips {
-            emit_typed_target_to_char_with_id_type(
-                Some(&ctx.pending_notifications),
-                Some(&ctx.notify_tx),
-                *cid,
-                *uid,
-                "solarsystemid",
-                now_ft,
-                OnSovereigntyChanged {
-                    solar_system_id: i64::from(st.solar_system_id),
-                    alliance_id: None,
-                },
-            );
+            if is_sov_hub {
+                emit_typed_target_to_char_with_id_type(
+                    Some(&ctx.pending_notifications),
+                    Some(&ctx.notify_tx),
+                    *cid,
+                    *uid,
+                    "solarsystemid",
+                    now_ft,
+                    OnSovereigntyChanged {
+                        solar_system_id: i64::from(st.solar_system_id),
+                        alliance_id: None,
+                    },
+                );
+            }
             emit_typed_target_to_char_with_id_type(
                 Some(&ctx.pending_notifications),
                 Some(&ctx.notify_tx),
@@ -732,7 +796,7 @@ type PreLeaveWorkforce = (
 );
 
 /// Flushes buffered Equinox Hub/workforce Quasar notices recorded during structure disposal.
-pub(crate) fn flush_disposal_quasar_notices(
+pub fn flush_disposal_quasar_notices(
     ctx: &ServerContext,
     out: &DisposalOutcome,
     now_unix: u64,
@@ -752,6 +816,7 @@ fn prepare_sov_leave_space_workforce(
 ) -> Option<PreLeaveWorkforce> {
     if st.type_id != crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
         && st.type_id != crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+        && st.type_id != crate::services::sov_gameplay::TYPE_MERCENARY_DEN
     {
         return None;
     }
@@ -773,7 +838,8 @@ fn cleanup_sov_hub_on_leave_space(
     st: &UpwellStructureRecord,
     pre_workforce: Option<PreLeaveWorkforce>,
     out: &mut DisposalOutcome,
-) {
+) -> crate::services::sov_gameplay::SkyhookAndDensCleanup {
+    let mut cleanup = crate::services::sov_gameplay::SkyhookAndDensCleanup::default();
     if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
         snap.sov_runtime.sov_claimed_since_unix.remove(&st.solar_system_id);
         if let Some(sys_st) = snap.system_states.get_mut(&st.solar_system_id) {
@@ -781,12 +847,31 @@ fn cleanup_sov_hub_on_leave_space(
             sys_st.strategic_index = 0;
         }
         snap.sov_runtime.sov_hubs.remove(&st.structure_id);
+        snap.sov_runtime.hacked_hubs.remove(&st.structure_id);
+        snap.sov_runtime.fuel_access_groups.remove(&st.structure_id);
         ctx.invalidate_cached_method("stationSvc", "GetAllianceSystems");
     } else if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
-        crate::services::sov_gameplay::sov_gameplay_skyhook::cleanup_destroyed_skyhook_in_snap(
+        cleanup = crate::services::sov_gameplay::cleanup_skyhook_and_attached_dens_in_snap(
             snap,
             st.structure_id,
         );
+    } else if st.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN {
+        let (removed_den, mto_balls) =
+            crate::services::quasar_sov_mercden::cleanup_destroyed_mercenary_den_in_snap(
+                snap,
+                st.structure_id,
+            );
+        let owner = removed_den
+            .map(|d| d.owner_char_id)
+            .unwrap_or_else(|| {
+                snap.characters
+                    .values()
+                    .find(|c| c.corporation_id == st.owner_corp_id)
+                    .map(|c| c.character_id)
+                    .unwrap_or(0)
+            });
+        cleanup.removed_dens.push((st.structure_id, owner));
+        cleanup.removed_mto_balls = mto_balls;
     }
     if let Some((pending, extra, before)) = pre_workforce {
         crate::services::quasar_sov_workforce::reconcile_hub_workforce_network_and_emit(
@@ -799,6 +884,7 @@ fn cleanup_sov_hub_on_leave_space(
         let mut drained = pending.write().unwrap_or_else(|e| e.into_inner());
         out.pending_quasar_notices.extend(drained.drain(..));
     }
+    cleanup
 }
 
 /// Maximum tethering distance from the structure center in meters:
@@ -1191,10 +1277,10 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
+    let sov_cleanup = cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
-    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out, &sov_cleanup);
     out
 }
 
@@ -1268,10 +1354,10 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
+    let sov_cleanup = cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
-    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
+    emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out, &sov_cleanup);
     out
 }
 

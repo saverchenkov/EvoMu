@@ -655,6 +655,23 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         fw_services::award_fw_kill_lp(&ctx, PILOT, fw_sys, 100_000_000.0);
         fw_services::spawn_battlefield_site(&ctx, fw_sys, fw_services::FACTION_MINMATAR, "Amo Siege");
 
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            let mut members = std::collections::HashMap::new();
+            members.insert(PILOT, 1i64);
+            ext.owner_groups.insert(
+                42,
+                eve_server::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                    group_id: 42,
+                    creator_id: PILOT,
+                    owner_corp_id: corp_a,
+                    name: "Hub Fuel ACL".into(),
+                    description: String::new(),
+                    members,
+                },
+            );
+            eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        });
         rpc(&ctx, &mut sess_a, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(42)]).await;
         sov_services::set_skyhook_hackable(&ctx, sov_sys, skyhook_id, true);
         sov_services::record_hub_hack(&ctx, sov_sys, hub_id, 3_600);
