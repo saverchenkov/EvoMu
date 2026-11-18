@@ -1482,6 +1482,16 @@ pub async fn handle_weapons(
                 (app, dest, s_r, a_r, h_r, false)
             };
 
+            if !is_upwell_target && applied_dmg >= 1.0 {
+                crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                    ctx,
+                    sys_id,
+                    char_id,
+                    target_ball_id,
+                    applied_dmg,
+                );
+            }
+
             let victim_char_opt = player_target_info.map(|(vcid, _)| vcid);
             emit_combat_log_and_damage_state(
                 ctx,

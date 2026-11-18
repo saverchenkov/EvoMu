@@ -761,6 +761,22 @@ pub async fn handle_pve_hacking(
                         .or_insert(0);
                     *entry = entry.saturating_add(1);
                 });
+                if !crate::services::quasar_career_goals::is_career_starter_system(&ctx.sde, sys_id) {
+                    crate::quasar_gateway::isolate_side_effect("pve_hacking_sites.career_hacking", || {
+                        for kind in ["hacking", "advanced_hacking"] {
+                            ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+                                char_id as u32,
+                                crate::services::quasar_career_goals::solar_system_career_event(
+                                    &ctx.sde,
+                                    kind,
+                                    sys_id,
+                                ),
+                                1,
+                                &ctx.quasar_gateway,
+                            );
+                        }
+                    });
+                }
                 crate::services::pve_exploration_sites::materialize_spewed_cans_core(
                     &ctx.db, &ctx.systems, char_id, &spewed_cans,
                 ).await;

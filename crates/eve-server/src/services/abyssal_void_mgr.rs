@@ -735,6 +735,17 @@ async fn activate_inventory_filament(
     );
     crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
     emit_abyssal_entry_notifications(ctx, char_id, pocket_id, tier, 1_200);
+    if tier == 0 {
+        crate::quasar_gateway::isolate_side_effect("abyssal_void_mgr.career_enter_tier0", || {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "abyssal",
+                Some("enter_tier0"),
+                1,
+            );
+        });
+    }
     let gives_suspect =
         crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
             origin_sec, tier,

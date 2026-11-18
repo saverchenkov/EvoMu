@@ -995,6 +995,17 @@ pub fn enter_combat_anomaly_site(
         site.cleared,
         exp_ft,
     );
+    crate::quasar_gateway::isolate_side_effect("pve_expeditions.career_site_entry", || {
+        crate::services::quasar_career_goals::record_site_entry_career_goals(
+            ctx,
+            char_id,
+            sys_id,
+            &site.site_id,
+            Some(site.dungeon_id),
+            Some(&site.dungeon_name),
+            &site.site_category,
+        );
+    });
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::String(site.site_id)),

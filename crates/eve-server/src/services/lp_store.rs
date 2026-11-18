@@ -833,6 +833,14 @@ fn handle_take_offer(
                     },
                 );
             } else {
+                crate::quasar_gateway::isolate_side_effect("lp_store.career_spend_lp", || {
+                    crate::services::quasar_career_goals::record_lp_career_event(
+                        ctx,
+                        char_id,
+                        true,
+                        lp_before.saturating_sub(rem_lp),
+                    );
+                });
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
                     crate::router::notify_registry::OnLPChange {

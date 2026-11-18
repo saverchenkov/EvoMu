@@ -747,6 +747,13 @@ pub fn dispatch_character_mail_routes(
                         status_mask: 0,
                     };
                     crate::services::mail_notify::emit_mail_sent(ctx, &sent, &notify_targets);
+                    crate::services::quasar_career_goals::record_career_sub_kind(
+                        ctx,
+                        char_id,
+                        "social",
+                        Some("send_mail"),
+                        1,
+                    );
                     RouteExecutionResult::created_json(json!(out.mail_id))
                 }
                 Err(e) => super::domain_err_to_esi(e),

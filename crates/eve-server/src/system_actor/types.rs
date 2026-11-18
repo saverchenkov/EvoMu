@@ -289,6 +289,14 @@ pub enum PendingCycleAction {
         module_type_id: TypeId,
         notified: bool,
     },
+    CareerProgressEvent {
+        char_id: CharacterId,
+        source_ship_id: BallId,
+        target_id: BallId,
+        activity_kind: &'static str,
+        sub_kind: &'static str,
+        amount: f64,
+    },
 }
 
 /// Queued guided missile launch awaiting next-tick `AddBalls2` acquisition batching.

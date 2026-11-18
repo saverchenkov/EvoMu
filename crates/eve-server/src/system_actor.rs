@@ -2073,7 +2073,11 @@ impl SystemRegistry {
                                         .as_ref()
                                         .and_then(|s| s.types.get(&cycle.module_type_id))
                                         .is_some_and(|t| {
-                                            matches!(t.group_id, 62 | 63 | 68 | 325 | 585 | 1199 | 1698)
+                                            matches!(
+                                                t.group_id,
+                                                62 | 63 | 68 | 325 | 585 | 1199 | 1698 | 52 | 65 | 201 | 208
+                                                    | 291 | 379 | 899 | 1672
+                                            )
                                         });
                                     if cycle.has_paid_end_of_cycle_effect() || is_sde_paid_group {
                                         cycle.repeat = 0;

@@ -840,34 +840,59 @@ pub async fn apply_damage_structure_or_ball(
         }
     }
     if let Some((applied, _, _)) = hit {
-        if applied >= 1.0 && attacker_char_id > 0 {
-            let (is_ship, is_other_capsuleer_ship) = ctx.db.with_snapshot(|s| {
-                s.items.get(&target_ball_id).map_or((false, false), |i| {
-                    let ship_type =
-                        ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6);
-                    (ship_type, ship_type && i.owner_id != attacker_char_id)
-                })
-            });
-            if is_ship {
-                crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-                    ctx,
-                    attacker_char_id,
-                    &["DamageShips"],
-                    applied.round() as u64,
-                    Some(sys_id as i64),
-                );
-            }
-            if is_other_capsuleer_ship {
-                ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
-                    attacker_char_id as u32,
-                    7,
-                    applied.round() as u64,
-                    &ctx.quasar_gateway,
-                );
-            }
-        }
+        record_ship_damage_progression(ctx, sys_id, attacker_char_id, target_ball_id, applied);
     }
     Ok(hit)
+}
+
+/// Records server-observed ship damage toward corporation `DamageShips` projects and,
+/// when `target_ball_id` is another capsuleer's ship (`category_id == 6` piloted or owned
+/// by a real character in `s.characters` other than `attacker_char_id`), daily goal category `7`.
+pub(crate) fn record_ship_damage_progression(
+    ctx: &ServerContext,
+    sys_id: u32,
+    attacker_char_id: i64,
+    target_ball_id: i64,
+    applied_dmg: f64,
+) {
+    let dmg_units = applied_dmg.round() as u64;
+    if applied_dmg < 1.0 || dmg_units == 0 || attacker_char_id <= 0 {
+        return;
+    }
+    let (is_ship, is_other_capsuleer_ship) = ctx.db.with_snapshot(|s| {
+        if !s.characters.contains_key(&attacker_char_id) {
+            return (false, false);
+        }
+        s.items.get(&target_ball_id).map_or((false, false), |i| {
+            let ship_type = ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6);
+            let victim_char_opt = s
+                .characters
+                .values()
+                .find(|c| c.active_ship_id == target_ball_id)
+                .map(|c| c.character_id)
+                .or_else(|| s.characters.contains_key(&i.owner_id).then_some(i.owner_id));
+            let other_capsuleer =
+                ship_type && victim_char_opt.is_some_and(|vcid| vcid != attacker_char_id);
+            (ship_type, other_capsuleer)
+        })
+    });
+    if is_ship {
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            attacker_char_id,
+            &["DamageShips"],
+            dmg_units,
+            Some(sys_id as i64),
+        );
+    }
+    if is_other_capsuleer_ship {
+        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+            attacker_char_id as u32,
+            7,
+            dmg_units,
+            &ctx.quasar_gateway,
+        );
+    }
 }
 
 

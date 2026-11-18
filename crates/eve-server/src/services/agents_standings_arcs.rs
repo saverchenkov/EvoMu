@@ -1463,6 +1463,18 @@ pub fn notify_standing_changes(
             modifications: mods,
         },
     );
+    crate::quasar_gateway::isolate_side_effect("agents_standings_arcs.career_standings", || {
+        for &(from_id, new_val, delta) in changes {
+            if delta > 0.0 {
+                crate::services::quasar_career_goals::record_standing_career_event(
+                    ctx,
+                    char_id,
+                    from_id,
+                    new_val,
+                );
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

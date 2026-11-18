@@ -72,6 +72,62 @@ pub fn on_player_ship_destroyed_in_combat_detailed(
         victim_ship_type_id,
         net_loss_isk,
     );
+    let victim_is_capsule = victim_ship_type_id == 670
+        || ctx
+            .sde
+            .types
+            .get(&victim_ship_type_id)
+            .is_some_and(|t| t.group_id == 29);
+    if killer_char_id > 0 && killer_char_id != victim_char_id && !victim_is_capsule {
+        crate::services::quasar_career_goals::record_career_sub_kind(
+            ctx,
+            killer_char_id,
+            "pvp",
+            None,
+            1,
+        );
+        if let Ok(k_u32) = u32::try_from(killer_char_id) {
+            let ship_group_id =
+                crate::services::quasar_career_goals::character_active_ship_group_id(
+                    &ctx.db,
+                    &ctx.sde,
+                    killer_char_id,
+                );
+            ctx.quasar_gateway
+                .progression
+                .career_goals
+                .on_career_gameplay_event(
+                    k_u32,
+                    crate::services::quasar_career_goals::CareerGameplayEvent {
+                        activity_kind: "combat",
+                        ship_group_id,
+                        sub_kind: Some("pvp_kill"),
+                        ..Default::default()
+                    },
+                    1,
+                    &ctx.quasar_gateway,
+                );
+        }
+        let is_fw_kill = ctx.db.with_snapshot(|snap| {
+            let Some(v_fac) =
+                crate::services::fw_services::effective_char_militia_in_snap(snap, victim_char_id)
+            else {
+                return false;
+            };
+            let k_fac =
+                crate::services::fw_services::effective_char_militia_in_snap(snap, killer_char_id);
+            k_fac != Some(v_fac)
+        });
+        if is_fw_kill {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                killer_char_id,
+                "faction_warfare",
+                Some("kill_fw_capsuleer"),
+                1,
+            );
+        }
+    }
 }
 
 pub fn on_player_ship_destroyed_in_combat(
@@ -757,6 +813,17 @@ pub async fn handle(
                     )
                     .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    for &(member_cid, old_wf, new_wf, _, _, _) in &changes {
+                        if old_wf != Some(fac) && new_wf == Some(fac) {
+                            crate::services::quasar_career_goals::record_career_sub_kind(
+                                ctx,
+                                member_cid,
+                                "faction_warfare",
+                                Some("join_fw"),
+                                1,
+                            );
+                        }
+                    }
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -960,6 +1027,17 @@ pub async fn handle(
                     )
                     .await;
                     crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
+                    for &(member_cid, old_wf, new_wf, _, _, _) in &changes {
+                        if old_wf != Some(fac) && new_wf == Some(fac) {
+                            crate::services::quasar_career_goals::record_career_sub_kind(
+                                ctx,
+                                member_cid,
+                                "faction_warfare",
+                                Some("join_fw"),
+                                1,
+                            );
+                        }
+                    }
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),

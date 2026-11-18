@@ -204,13 +204,48 @@ pub fn emit_system_criminal_flag_updates(
     }
 }
 
-/// Emits `OnShipDeath()` (`0` args, `id_type = "charid"`).
-/// Emitter for notify:OnShipDeath
-pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
+/// Emits `OnShipDeath()` (`0` args, `id_type = "charid"`) and records AIR `destruction`
+/// when the destroyed hull is a non-capsule, non-corvette capsuleer ship (`group_id` not `29 | 237`).
+pub fn emit_ship_death_with_type(
+    ctx: &ServerContext,
+    char_id: i64,
+    destroyed_ship_type_id: Option<u32>,
+) {
     if char_id <= 0 {
         return;
     }
+    let resolved_ship_type_opt = destroyed_ship_type_id.or_else(|| {
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.detailed_killmails
+                .values()
+                .filter(|dkm| dkm.victim_character_id == char_id)
+                .max_by_key(|dkm| dkm.kill_id)
+                .map(|dkm| dkm.victim_ship_type_id)
+        })
+    });
+    if let Some(ship_type_id) = resolved_ship_type_opt {
+        let is_pod_or_corvette = ctx
+            .sde
+            .types
+            .get(&ship_type_id)
+            .is_some_and(|t| matches!(t.group_id, 29 | 237));
+        if ship_type_id != 670 && ship_type_id != 33_328 && !is_pod_or_corvette {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "destruction",
+                None,
+                1,
+            );
+        }
+    }
     ctx.emit_typed(NotificationTarget::Character(char_id), OnShipDeath {});
+}
+
+/// Emits `OnShipDeath()` (`0` args, `id_type = "charid"`).
+/// Emitter for notify:OnShipDeath
+pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
+    emit_ship_death_with_type(ctx, char_id, None);
 }
 
 fn parse_optional_password(rep: Option<&PyRep>, field: &str) -> Result<Option<String>, BridgeRpcError> {

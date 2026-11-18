@@ -666,6 +666,17 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
         crate::router::NotificationTarget::Character(char_id),
         crate::router::notify_registry::OnAbyssalLocationExited,
     );
+    if exited_pid > 0 && tier == 0 {
+        crate::quasar_gateway::isolate_side_effect("abyssal_void_gates.career_complete_tier0", || {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "abyssal",
+                Some("complete_tier0"),
+                1,
+            );
+        });
+    }
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(origin_sys as i64)),

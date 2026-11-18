@@ -357,3 +357,203 @@ async fn anchor_guards_palatine_zarzakh_thera_npc_corp_profile_and_stack_quantit
     assert!(handle_anchor(&ctx, &mut sess, &ok_args).await.is_ok());
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&55_901].quantity), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_ship_damage_progression_routes_capsuleer_damage_and_guards_npc_drone_and_self() {
+    let mut ctx = test_ctx();
+    let day0_ts = 1_735_732_800_u64;
+    ctx.db
+        .set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(day0_ts)));
+
+    let ship_tid = 918_501_u32;
+    let drone_tid = 918_502_u32;
+    clone_type_with(&mut ctx.sde, ship_tid, 25, 6, 2_500.0, 100.0, &[]);
+    clone_type_with(&mut ctx.sde, drone_tid, 100, 18, 5.0, 0.0, &[]);
+
+    let sys_id = 30_000_142_u32;
+    let attacker_char_id = 918_301_i64;
+    let victim_char_id = 918_302_i64;
+    let corp_id = 98_918_301_i64;
+    let attacker_ship_id = 918_401_i64;
+    let victim_ship_id = 918_402_i64;
+    let npc_ship_id = 918_403_i64;
+    let drone_id = 918_404_i64;
+    let project_id = 918_601_i64;
+
+    seed_char_corp_ship(&ctx, attacker_char_id, corp_id, sys_id, attacker_ship_id);
+    seed_char_corp_ship(&ctx, victim_char_id, corp_id + 1, sys_id, victim_ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&attacker_ship_id).unwrap().type_id = ship_tid;
+        snap.items.get_mut(&victim_ship_id).unwrap().type_id = ship_tid;
+        snap.items.insert(
+            npc_ship_id,
+            InventoryItemRecord {
+                item_id: npc_ship_id,
+                type_id: ship_tid,
+                owner_id: 500_999, // NPC faction/owner not in `snap.characters`
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            drone_id,
+            InventoryItemRecord {
+                item_id: drone_id,
+                type_id: drone_tid,
+                owner_id: victim_char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.corp_projects.insert(
+            project_id,
+            eve_db::CorpProjectRecord {
+                project_id,
+                corporation_id: corp_id,
+                name: "Damage Capsuleers".to_string(),
+                target_quantity: 10_000,
+                current_quantity: 0,
+                isk_per_unit: IskCents(0),
+                escrow_remaining: IskCents(0),
+            },
+        );
+        snap.alliance_war_state
+            .project_meta
+            .insert(project_id, ("DamageShips".to_string(), false, false));
+        let mut det = eve_db::PersistedProjectDetails::default();
+        det.status = "Active".to_string();
+        snap.alliance_war_state
+            .project_details
+            .insert(project_id, det);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (ball_id, tid, pos_x) in [
+        (attacker_ship_id, ship_tid, 0.0),
+        (victim_ship_id, ship_tid, 5_000.0),
+        (npc_ship_id, ship_tid, 6_000.0),
+        (drone_id, drone_tid, 7_000.0),
+    ] {
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: ball_id,
+                type_id: tid,
+                position: DVec3::new(pos_x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1.0e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::new(),
+            SlimItemMeta::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let daily_damage_prog = || {
+        ctx.quasar_gateway
+            .progression
+            .daily_goals
+            .get_or_init_goals_at(attacker_char_id as u32, day0_ts)
+            .into_iter()
+            .find(|g| g.template.category == 7)
+            .expect("DamageShip daily goal category 7")
+            .current_progress
+    };
+    let proj_prog = || ctx.db.with_snapshot(|s| s.corp_projects[&project_id].current_quantity);
+
+    assert_eq!(daily_damage_prog(), 0);
+    assert_eq!(proj_prog(), 0);
+
+    // 1. Direct helper: capsuleer ship increments both daily goal 7 & corp DamageShips
+    record_ship_damage_progression(&ctx, sys_id, attacker_char_id, victim_ship_id, 120.0);
+    assert_eq!(daily_damage_prog(), 120);
+    assert_eq!(proj_prog(), 120);
+
+    // 2. Guards: NPC ship only increments corp DamageShips (never daily goal 7);
+    //    drone (category != 6), self-ship, and non-character attacker increment neither daily goal 7 nor wrong counts.
+    record_ship_damage_progression(&ctx, sys_id, attacker_char_id, npc_ship_id, 300.0);
+    assert_eq!(daily_damage_prog(), 120);
+    assert_eq!(proj_prog(), 420);
+
+    record_ship_damage_progression(&ctx, sys_id, attacker_char_id, drone_id, 200.0);
+    record_ship_damage_progression(&ctx, sys_id, attacker_char_id, attacker_ship_id, 150.0);
+    record_ship_damage_progression(&ctx, sys_id, 9_000_000_001, victim_ship_id, 250.0);
+    assert_eq!(daily_damage_prog(), 120);
+    assert_eq!(proj_prog(), 570); // only self-ship added to DamageShips; drone and non-char attacker ignored
+
+    // 3. apply_damage_structure_or_ball routes capsuleer ship hits (+100) and guards NPC hits (+0 daily)
+    apply_damage_structure_or_ball(
+        &ctx,
+        &sys,
+        sys_id,
+        attacker_char_id,
+        victim_ship_id,
+        eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0),
+        5.0,
+        day0_ts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(daily_damage_prog(), 220);
+    assert_eq!(proj_prog(), 670);
+
+    apply_damage_structure_or_ball(
+        &ctx,
+        &sys,
+        sys_id,
+        attacker_char_id,
+        npc_ship_id,
+        eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0),
+        5.0,
+        day0_ts,
+    )
+    .await
+    .unwrap();
+    assert_eq!(daily_damage_prog(), 220);
+    assert_eq!(proj_prog(), 770);
+
+    // 4. execute_pending_cycle_actions: LanceBeamFired + pre-notified CycleWeaponDamage
+    {
+        let mut st = sys.actor_state.write().unwrap();
+        st.pending_cycle_actions
+            .push(crate::system_actor::PendingCycleAction::LanceBeamFired {
+                attacker_char_id,
+                attacker_ship_id,
+                attacker_ship_type_id: ship_tid,
+                module_id: 918_701,
+                module_type_id: 484,
+                hits: vec![(victim_ship_id, 50.0), (npc_ship_id, 60.0)],
+            });
+        st.pending_cycle_actions
+            .push(crate::system_actor::PendingCycleAction::CycleWeaponDamage {
+                attacker_char_id: Some(attacker_char_id),
+                attacker_ship_id,
+                attacker_ship_type_id: ship_tid,
+                target_id: victim_ship_id,
+                target_char_id: Some(victim_char_id),
+                module_type_id: 484,
+                applied_dmg: 75.0,
+                notified: true,
+            });
+    }
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
+        &ctx, sys_id,
+    )
+    .await;
+    assert_eq!(daily_damage_prog(), 345); // 220 + 50 (LanceBeam victim) + 75 (CycleWeaponDamage)
+    assert_eq!(proj_prog(), 955); // 770 + 50 + 60 + 75
+}

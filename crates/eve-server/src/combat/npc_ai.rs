@@ -1551,6 +1551,19 @@ fn finalize_destroyed_npc_side_effects(
                 1,
                 &ctx.quasar_gateway,
             );
+            if crate::services::combat_crimewatch::combat_npc_ai::derive_npc_archetype(
+                ctx,
+                entity.type_id,
+            ) == "Triglavian"
+            {
+                crate::services::quasar_career_goals::record_career_sub_kind(
+                    ctx,
+                    killer_char_id,
+                    "abyssal",
+                    Some("kill_triglavians"),
+                    1,
+                );
+            }
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
                 killer_char_id as u32,
                 &["destroyHostileNPC", "entityGroupDestroyed"],

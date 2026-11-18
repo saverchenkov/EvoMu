@@ -307,9 +307,11 @@ pub(crate) async fn handle_mining_and_deactivate(
             if let Some(m_entry) = fit.modules.get(&module_id) {
                 let mod_state = fit.build_effective_module_state(module_id, m_entry.type_id, false, &ctx.sde);
                 let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
-                let is_cycle_gated = ctx.sde.types.get(&m_entry.type_id).is_some_and(|t| {
-                    matches!(t.group_id, 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 72 | 1122 | 650 | 80 | 353)
-                });
+                let is_cycle_gated = ctx
+                    .sde
+                    .types
+                    .get(&m_entry.type_id)
+                    .is_some_and(|t| super::fitting_module_cycles::is_cycle_gated_module_group(t.group_id));
                 let delay_s = if is_cycle_gated {
                     removed_cycle_delay.unwrap_or(0.0).max(react_delay_ms / 1000.0)
                 } else if react_delay_ms > 0.0 {

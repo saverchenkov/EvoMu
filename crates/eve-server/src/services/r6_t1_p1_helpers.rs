@@ -244,6 +244,13 @@ pub(crate) async fn step_active_breacher_dots(
                 false,
                 now_unix,
             );
+            crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                ctx,
+                solar_system_id,
+                dot.source_char_id,
+                tid,
+                applied_dmg,
+            );
             super::combat_crimewatch::emit_combat_log_and_damage_state(
                 ctx,
                 dot.source_char_id,

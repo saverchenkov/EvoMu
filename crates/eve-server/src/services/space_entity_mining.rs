@@ -2207,9 +2207,14 @@ pub async fn handle(
 
                 // Phase 2: Commit validated input consumption, mineral minting, and tax deductions.
                 let mut batch_results = Vec::with_capacity(planned.len());
+                let mut reprocessed_inputs: Vec<(TypeId, u64)> = Vec::with_capacity(planned.len());
                 for p in planned {
                     let item_id = p.source_item.item_id;
                     let old_qty = p.source_item.quantity;
+                    let consumed_qty = u64::try_from(old_qty.saturating_sub(p.remainder)).unwrap_or(0);
+                    if consumed_qty > 0 {
+                        reprocessed_inputs.push((p.source_item.type_id, consumed_qty));
+                    }
                     if p.remainder > 0 {
                         if let Some(im) = snap.items.get_mut(&item_id) {
                             im.quantity = p.remainder;
@@ -2319,11 +2324,11 @@ pub async fn handle(
                     ]));
                 }
 
-                Ok(batch_results)
+                Ok((batch_results, reprocessed_inputs))
             });
 
             match res {
-                Ok(mut batch_results) => {
+                Ok((mut batch_results, reprocessed_inputs)) => {
                     if let Some(bal) = wallet_notify {
                         ctx.notify_account_change(char_id, "cash", char_id, bal);
                     }
@@ -2338,6 +2343,20 @@ pub async fn handle(
                         }
                     }
                     crate::quasar_gateway::isolate_side_effect("space_entity_mining.reprocess_achievements", || {
+                        for (tid, qty) in reprocessed_inputs {
+                            let group_id = ctx.sde.types.get(&tid).map(|t| t.group_id);
+                            ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+                                char_id as u32,
+                                crate::services::quasar_career_goals::CareerGameplayEvent {
+                                    activity_kind: "refining",
+                                    type_id: Some(tid),
+                                    group_id,
+                                    ..Default::default()
+                                },
+                                qty,
+                                &ctx.quasar_gateway,
+                            );
+                        }
                         ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(
                             char_id as u32,
                             &["refineOreCount", "finishedReprocessingCount", "reprocessingInput", "reprocessingOutput"],

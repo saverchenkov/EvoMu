@@ -16,6 +16,7 @@ pub(crate) struct ModifyCrossResult {
     pub acct_updates: Vec<(bool, i64, u8, IskCents)>,
     pub item_deliveries: Vec<(i64, InventoryItemRecord)>,
     pub matched_orders: Vec<(i64, i64)>,
+    pub career_fills: Vec<(i64, i64, u32, IskCents)>,
 }
 
 /// Executes crossed order fills when a market order price is modified via `ModifyCharOrder`.
@@ -41,6 +42,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             acct_updates: Vec::new(),
             item_deliveries: Vec::new(),
             matched_orders: Vec::new(),
+            career_fills: Vec::new(),
         }),
     };
 
@@ -49,6 +51,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
     let mut acct_updates: Vec<(bool, i64, u8, IskCents)> = Vec::new();
     let mut item_deliveries: Vec<(i64, InventoryItemRecord)> = Vec::new();
     let mut matched_orders: Vec<(i64, i64)> = Vec::new();
+    let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
 
     if order.is_bid {
         // Buy order modified upward: crosses resting ask orders within buy order range
@@ -180,6 +183,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 seller_balance_after: seller_bal, sales_tax: fill_tax, tax_collector_id: tax_collector,
                 region_id: Some(order.region_id),
             });
+            career_fills.push((buyer_owner_id, ask.owner_id, order.type_id, fill_cost));
 
             if let Some(a_mut) = snap.market_orders.get_mut(&ask_id) {
                 a_mut.vol_remaining -= fill_qty;
@@ -328,6 +332,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 seller_balance_after: seller_bal, sales_tax: fill_tax, tax_collector_id: tax_collector,
                 region_id: Some(order.region_id),
             });
+            career_fills.push((bid.owner_id, seller_owner_id, order.type_id, fill_cost));
 
             if let Some(b_mut) = snap.market_orders.get_mut(&bid_id) {
                 b_mut.vol_remaining -= fill_qty;
@@ -384,6 +389,7 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
         acct_updates,
         item_deliveries,
         matched_orders,
+        career_fills,
     })
 }
 

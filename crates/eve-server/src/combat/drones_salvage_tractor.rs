@@ -263,13 +263,7 @@ pub async fn attempt_salvage_wreck(
         // Remove physical wreck ball from Ballpark
         let _ = sys_handle.remove_ball(wreck_item_id).await;
 
-        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
-            ctx,
-            char_id,
-            &["SalvageWrecks", "SalvageMaterials"],
-            1,
-            Some(sys_id as i64),
-        );
+        record_wreck_salvage_progression(ctx, sys_id, char_id);
 
         let types = salvage_materials.iter().map(|&(t, _)| t).collect();
         let quantities = salvage_materials.iter().map(|&(_, q)| q).collect();
@@ -283,6 +277,25 @@ pub async fn attempt_salvage_wreck(
             reason: "Salvager cycle failed to extract materials",
         })
     }
+}
+
+fn record_wreck_salvage_progression(ctx: &ServerContext, sys_id: u32, char_id: i64) {
+    crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+        ctx,
+        char_id,
+        &["SalvageWrecks", "SalvageMaterials"],
+        1,
+        Some(sys_id as i64),
+    );
+    crate::quasar_gateway::isolate_side_effect("combat.drones_salvage_tractor.career_salvage", || {
+        crate::services::quasar_career_goals::record_career_sub_kind(
+            ctx,
+            char_id,
+            "salvage",
+            None,
+            1,
+        );
+    });
 }
 
 /// Validates that `wreck_id` is a salvageable wreck in `sys_id`, within jetcan loot capacity, and within salvager/drone range.
@@ -723,6 +736,8 @@ pub async fn execute_wreck_salvage_cycle(
         rt.container_lifetimes.remove(&wreck_id);
     });
     let _ = sys_handle.remove_ball(wreck_id).await;
+
+    record_wreck_salvage_progression(ctx, sys_id, char_id);
 
     Ok(PyRep::keyval([
         ("wreckID", PyRep::Integer(wreck_id)),

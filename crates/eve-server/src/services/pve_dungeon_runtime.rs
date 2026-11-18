@@ -371,6 +371,89 @@ pub fn on_warp_start_leave_dungeon_if_needed(
     }
 }
 
+fn resolve_site_entry_at_pos(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    landed_pos: [f64; 3],
+) -> Option<(String, Option<u32>, Option<String>, String)> {
+    if let Some(site) = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&sys_id).and_then(|sites| {
+            sites
+                .iter()
+                .find(|s| !s.cleared && dist3(landed_pos, s.position) <= 150_000.0)
+                .map(|s| {
+                    (
+                        s.site_id.clone(),
+                        Some(s.dungeon_id),
+                        Some(s.dungeon_name.clone()),
+                        s.site_category.clone(),
+                    )
+                })
+        })
+    }) {
+        return Some(site);
+    }
+    ctx.db.with_snapshot(|snap| {
+        if let Some(anoms) = snap.cosmic_anomalies.get(&sys_id) {
+            for a in anoms {
+                if !a.cleared && dist3(landed_pos, a.position) <= 150_000.0 {
+                    return Some((
+                        a.anomaly_id.clone(),
+                        None,
+                        Some(a.name.clone()),
+                        a.anomaly_type.clone(),
+                    ));
+                }
+            }
+        }
+        if let Some(sigs) = snap.cosmic_signatures.get(&sys_id) {
+            for s in sigs {
+                if s.collapsed {
+                    continue;
+                }
+                let sig_pos = crate::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(
+                    &ctx.sde, s,
+                )
+                .to_array();
+                if dist3(landed_pos, sig_pos) <= 150_000.0
+                    && ctx.effective_signature_signal_strength(char_id, sys_id, s) >= 1.0
+                {
+                    return Some((
+                        s.signature_id.clone(),
+                        None,
+                        Some(s.type_name.clone()),
+                        s.sig_group.clone(),
+                    ));
+                }
+            }
+        }
+        None
+    })
+}
+
+fn dispatch_site_entry_career_goals(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    site_id: &str,
+    dungeon_id: Option<u32>,
+    dungeon_name: Option<&str>,
+    site_category: &str,
+) {
+    crate::quasar_gateway::isolate_side_effect("pve_dungeon_runtime.warp_arrival.career_site_entry", || {
+        crate::services::quasar_career_goals::record_site_entry_career_goals(
+            ctx,
+            char_id,
+            sys_id,
+            site_id,
+            dungeon_id,
+            dungeon_name,
+            site_category,
+        );
+    });
+}
+
 /// Called upon warp landing (`OnWarpFinished`) to materialize room entities and emit
 /// `OnEnteringDungeonRoom` + `OnDistributionDungeonEntered` / `OnEscalatingPathDungeonEntered`.
 pub async fn on_warp_landed_at_dungeon_pocket_if_present(
@@ -440,6 +523,16 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
             false,
             expiry_ft,
         );
+        if !matches!(category.as_str(), "Mission" | "Homefront") {
+            let (site_id, did, dname, cat) = match resolve_site_entry_at_pos(ctx, char_id, sys_id, landed_pos) {
+                Some((sid, did_opt, name_opt, sig_cat)) => {
+                    let effective_cat = if category == "Deadspace" { sig_cat } else { category.clone() };
+                    (sid, Some(dungeon_id).or(did_opt), Some(dungeon_name.clone()).or(name_opt), effective_cat)
+                }
+                None => (format!("DNG-{inst_id}"), Some(dungeon_id), Some(dungeon_name.clone()), category.clone()),
+            };
+            dispatch_site_entry_career_goals(ctx, char_id, sys_id, &site_id, did, dname.as_deref(), &cat);
+        }
         return;
     }
 
@@ -451,6 +544,7 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
                 .find(|s| !s.cleared && dist3(landed_pos, s.position) <= 150_000.0)
                 .map(|s| {
                     (
+                        s.site_id.clone(),
                         s.dungeon_id,
                         s.site_category.clone(),
                         s.dungeon_name.clone(),
@@ -463,7 +557,7 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
                     )
                 })
         });
-        if let Some((did, _, _, _, _, _, _, _, exp_inst_opt)) = &found {
+        if let Some((_, did, _, _, _, _, _, _, _, exp_inst_opt)) = &found {
             if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
                 for esc in list.iter_mut() {
                     if (exp_inst_opt == &Some(esc.instance_id)
@@ -478,7 +572,7 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
         found
     });
 
-    if let Some((did, category, dungeon_name, site_pos, cur_wave, total_waves, created_unix, lifetime_sec, exp_inst_opt)) =
+    if let Some((site_id, did, category, dungeon_name, site_pos, cur_wave, total_waves, created_unix, lifetime_sec, exp_inst_opt)) =
         site_entry
     {
         let life = if lifetime_sec == 0 { 86_400 } else { lifetime_sec };
@@ -498,6 +592,28 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
             total_waves,
             false,
             expiry_ft,
+        );
+        dispatch_site_entry_career_goals(
+            ctx,
+            char_id,
+            sys_id,
+            &site_id,
+            Some(did),
+            Some(&dungeon_name),
+            &category,
+        );
+        return;
+    }
+
+    if let Some((site_id, did_opt, dname_opt, cat)) = resolve_site_entry_at_pos(ctx, char_id, sys_id, landed_pos) {
+        dispatch_site_entry_career_goals(
+            ctx,
+            char_id,
+            sys_id,
+            &site_id,
+            did_opt,
+            dname_opt.as_deref(),
+            &cat,
         );
     }
 }

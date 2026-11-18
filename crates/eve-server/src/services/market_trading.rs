@@ -1149,6 +1149,7 @@ pub fn handle(
                 let mut delivered_item_records: Vec<InventoryItemRecord> = Vec::new();
                 let mut buyer_acct_after: Option<(bool, i64, u8, IskCents)> = None;
                 let mut touched_seller_accts: Vec<(bool, i64, u8)> = Vec::new();
+                let mut career_fills: Vec<(i64, i64, u32, IskCents)> = Vec::new();
                 let resolve_seller_acct_updates =
                     |snap: &eve_db::snapshot_ext::WorldStateSnapshot,
                      accts: Vec<(bool, i64, u8)>,
@@ -1267,6 +1268,7 @@ pub fn handle(
                             tax_collector_id: tax_collector,
                             region_id: Some(resting.region_id),
                         });
+                        career_fills.push((order_owner_id, resting.owner_id, type_id, fill_gross));
                         // PLEX trades settle into the account-wide PLEX Vault for characters, or Deliveries for corporations.
                         let settled_to_vault = if type_id == PLEX_TYPE_ID && !use_corp {
                             snap.adjust_plex_vault(order_owner_id, fill_qty as i64).is_some()
@@ -1359,6 +1361,7 @@ pub fn handle(
                         delivered_item_records,
                         buyer_acct_after,
                         seller_acct_updates,
+                        career_fills,
                     ));
                 }
 
@@ -1508,11 +1511,16 @@ pub fn handle(
                     touched_seller_accts,
                     buyer_acct_after,
                 );
-                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates))
+                Ok((new_oid, order_owner_id, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates, career_fills))
             });
 
             match res {
-                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates)) => {
+                Ok((order_id, order_owner_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items, delivered_item_records, buyer_acct_after, seller_acct_updates, career_fills)) => {
+                    for (b_id, s_id, tid, gross) in career_fills {
+                        crate::services::quasar_career_goals::record_market_fill_career_goals(
+                            ctx, b_id, s_id, tid, gross,
+                        );
+                    }
                     for (matched_oid, seller_id) in matched_sellers {
                         notify_own_order_changed(ctx, seller_id, 0, matched_oid, "Change");
                     }

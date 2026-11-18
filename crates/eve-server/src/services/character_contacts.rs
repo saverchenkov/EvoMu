@@ -571,7 +571,8 @@ pub fn handle_contacts(
             };
             let list = guard.entry(char_id).or_default();
             let existing_pos = list.iter().position(|e| e.contact_id == contact_id);
-            if existing_pos.is_none() && list.len() >= 1_024 {
+            let is_new_contact = existing_pos.is_none();
+            if is_new_contact && list.len() >= 1_024 {
                 return Some(Err(BridgeRpcError { code: "MaxContactsExceeded".into(), message: "Character has reached the maximum of 1,024 contacts".into(), client_error: None }));
             }
             let (is_blocked, label_mask) = if let Some(idx) = existing_pos {
@@ -628,6 +629,15 @@ pub fn handle_contacts(
                     standing,
                 },
             );
+            if is_new_contact {
+                crate::services::quasar_career_goals::record_career_sub_kind(
+                    ctx,
+                    char_id,
+                    "social",
+                    Some("add_contact"),
+                    1,
+                );
+            }
 
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),

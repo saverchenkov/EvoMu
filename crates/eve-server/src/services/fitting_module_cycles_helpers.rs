@@ -2299,6 +2299,13 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                         false,
                         now_unix,
                     );
+                    crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                        ctx,
+                        sys_id,
+                        attacker_char_id,
+                        victim_id,
+                        applied_dmg,
+                    );
                     let dmg_dict = PyRep::Dict(vec![
                         (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
                         (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
@@ -2413,6 +2420,13 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                         applied_dmg,
                         false,
                         ctx.now_unix_secs(),
+                    );
+                    crate::services::station_structure::structure_lifecycle_rpc::record_ship_damage_progression(
+                        ctx,
+                        sys_id,
+                        acid,
+                        target_id,
+                        applied_dmg,
                     );
                 }
                 if !notified && applied_dmg > 0.0 {
@@ -2617,6 +2631,32 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                     );
                 }
             }
+            crate::system_actor::PendingCycleAction::CareerProgressEvent {
+                char_id,
+                source_ship_id,
+                target_id,
+                activity_kind,
+                sub_kind,
+                amount,
+            } => match activity_kind {
+                "ewar" => crate::services::quasar_career_goals::record_ewar_career_seconds(
+                    ctx, char_id, target_id, sub_kind, amount,
+                ),
+                "cap_warfare" => crate::services::quasar_career_goals::record_cap_warfare_career(
+                    ctx,
+                    char_id,
+                    source_ship_id,
+                    target_id,
+                    sub_kind,
+                    amount,
+                ),
+                "remote_repair" => {
+                    crate::services::quasar_career_goals::record_remote_repair_career(
+                        ctx, char_id, target_id, sub_kind, amount,
+                    );
+                }
+                _ => {}
+            },
         }
     }
 }

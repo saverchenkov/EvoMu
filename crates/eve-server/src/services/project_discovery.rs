@@ -743,6 +743,15 @@ pub fn handle_project_discovery(
                             lvl_notif,
                         );
                     }
+                    crate::quasar_gateway::isolate_side_effect("project_discovery.career_sample", || {
+                        crate::services::quasar_career_goals::record_career_sub_kind(
+                            ctx,
+                            char_id,
+                            "project_discovery",
+                            None,
+                            1,
+                        );
+                    });
                     Some(Ok(out.rep))
                 }
                 Err(e) => Some(Err(e)),

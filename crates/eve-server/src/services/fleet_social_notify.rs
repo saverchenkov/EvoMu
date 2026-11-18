@@ -67,16 +67,30 @@ pub(crate) fn options_keyval(free_move: bool, registered: bool, auto_join: Optio
 /// `FleetSvc.OnFleetJoin(member)` to every fleet member (including the joiner, whose client runs
 /// `InitFleet` when `member.charID == session.charid`).
 pub(crate) fn emit_join(ctx: &ServerContext, fleet_id: i64, char_id: i64) {
-    let member = ctx.db.with_snapshot(|snap| {
-        snap.fleets.get(&fleet_id).and_then(|f| f.member_details.get(&char_id).cloned())
+    let join_info = ctx.db.with_snapshot(|snap| {
+        snap.fleets.get(&fleet_id).and_then(|f| {
+            f.member_details
+                .get(&char_id)
+                .cloned()
+                .map(|m| (m, f.members.len() > 1))
+        })
     });
-    if let Some(m) = member {
+    if let Some((m, is_multi_member)) = join_info {
         ctx.emit_typed(
             NotificationTarget::Fleet(fleet_id),
             OnFleetJoin {
                 member: member_keyval(&m),
             },
         );
+        if is_multi_member {
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "social",
+                Some("join_fleet"),
+                1,
+            );
+        }
     }
 }
 

@@ -990,3 +990,953 @@ fn derived_wiki_career_points_and_objective_predicates() {
     );
     assert_eq!(prog_of("ExplorerVisitHisec"), 3, "rehydrated seen_regions must stay deduplicated");
 }
+
+#[test]
+fn career_dispatcher_helpers_cover_market_lp_standings_missions_combat_and_sites() {
+    let (ctx, _) = test_ctx_and_clock(1_700_000_000);
+    let buyer_id = 91_000_001_i64;
+    let seller_id = 91_000_002_i64;
+    let buyer_ship_id = 91_100_001_i64;
+    let seller_ship_id = 91_100_002_i64;
+    let pod_id = 91_100_003_i64;
+    let npc_ship_id = 91_100_004_i64;
+
+    let npc_corp_id = *ctx.sde.npc_corporations.keys().next().expect("SDE NPC corp");
+    let faction_id = *ctx.sde.factions.keys().next().expect("SDE faction") as i64;
+    let bpo_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 9)
+        .expect("SDE blueprint type")
+        .type_id;
+    let explorer_career_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 12 && a.division_id == 26)
+        .expect("Explorer career agent")
+        .agent_id;
+    let producer_career_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 12 && a.division_id == 27)
+        .expect("Producer career agent")
+        .agent_id;
+    let epic_arc_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 10)
+        .max_by_key(|a| (a.level, a.agent_id))
+        .expect("Epic Arc agent")
+        .agent_id;
+    let l1_sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.level == 1 && a.division_id == 24)
+        .expect("L1 security agent")
+        .agent_id;
+    let dist_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 22)
+        .expect("Distribution agent")
+        .agent_id;
+    let mining_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 23)
+        .expect("Mining agent")
+        .agent_id;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid) in [(buyer_id, buyer_ship_id), (seller_id, seller_ship_id)] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Pilot_{cid}"),
+                    corporation_id: 98_000_001,
+                    alliance_id: None,
+                    war_faction_id: None,
+                    station_id: None,
+                    structure_id: None,
+                    solar_system_id: 30_000_142,
+                    constellation_id: 20_000_020,
+                    region_id: 10_000_002,
+                    active_ship_id: sid,
+                    balance: eve_db::IskCents(1_000_000_00),
+                    plex_balance: 0,
+                    loyalty_points: HashMap::new(),
+                    standings: HashMap::new(),
+                    security_status: 5.0,
+                    clone_grade: 1,
+                    home_station_id: 60_003_760,
+                    race_id: 1,
+                    bloodline_id: 1,
+                    ancestry_id: 11,
+                    school_id: 17,
+                    neural: eve_db::NeuralAttributes::default(),
+                    skill_points: 0.0,
+                    activity_status: None,
+                    free_skill_points: 0.0,
+                    last_clone_jump_unix: 0,
+                    jump_fatigue_minutes: 0.0,
+                    jump_cooldown_until_unix: 0,
+                    jump_fatigue_until_unix: 0,
+                    description: String::new(),
+                    title: String::new(),
+                    gender: 0,
+                    create_date_unix: 1_700_000_000,
+                    fleet_id: None,
+                    autopilot_waypoints: Vec::new(),
+                    version: 1,
+                    system_epoch: 1,
+                },
+            );
+        }
+        snap.items.insert(
+            buyer_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: buyer_ship_id,
+                type_id: 587,
+                owner_id: buyer_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            seller_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: seller_ship_id,
+                type_id: 587,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: pod_id,
+                type_id: 670,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            npc_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: npc_ship_id,
+                type_id: 587,
+                owner_id: 1_000_001,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(0)), 0);
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(-500)), 0);
+    assert_eq!(isk_cents_to_whole_isk(eve_db::IskCents(5_000_050)), 50_001);
+    assert_eq!(parse_career_ordinal_from_title("Balancing the Books (2 of 10)"), Some((2, 10)));
+    assert_eq!(parse_career_ordinal_from_title("No parens"), None);
+    assert_eq!(career_division_key(26), Some("explorer"));
+    assert_eq!(career_division_key(29), Some("soldier_of_fortune"));
+    assert_eq!(ewar_sub_kind_from_jam_type("warpScramblerMWD"), Some("warp_scramble"));
+    assert_eq!(ewar_sub_kind_from_jam_type("ewEnergyNeut"), None);
+    assert!(is_combat_site_category("WormholeCombat"));
+    assert!(!is_combat_site_category("Relic"));
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // Market fills convert IskCents to whole ISK and record buyer Blueprint acquisitions.
+    record_market_fill_career_goals(&ctx, buyer_id, seller_id, bpo_tid, eve_db::IskCents(5_000_000));
+    assert_eq!(prog_of(buyer_id, "EnforcerSpendMarketIsk50k"), 50_000);
+    assert_eq!(prog_of(buyer_id, "IndustrialistBuyBlueprint"), 1);
+    assert_eq!(prog_of(seller_id, "IndustrialistEarnMarketIsk50k"), 50_000);
+
+    // LP & Bounties & Corporation-only Standings.
+    record_lp_career_event(&ctx, buyer_id, false, 150);
+    record_lp_career_event(&ctx, buyer_id, true, 300);
+    record_bounty_career_event(&ctx, buyer_id, 25_000);
+    record_standing_career_event(&ctx, buyer_id, faction_id, 5.0);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo025"), 0, "faction standing ignored");
+    record_standing_career_event(&ctx, buyer_id, npc_corp_id, 0.3);
+    assert_eq!(prog_of(buyer_id, "EnforcerEarnLp250"), 150);
+    assert_eq!(prog_of(buyer_id, "EnforcerSpendLp300"), 300);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo025"), 25);
+    assert_eq!(prog_of(buyer_id, "EnforcerGetStandingTo05"), 30);
+
+    // Missions: Career Agent (10-part + 5-part scaled), Epic Arc step + complete, Dist/Mining/Security.
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, explorer_career_agent, "Cash Flow (3 of 10)",
+        false, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, producer_career_agent, "Make It Work (2 of 5)",
+        false, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, epic_arc_agent, "Blood-Stained Stars",
+        false, false, true, false, true, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, dist_agent, "Haul Cargo", true, false, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, mining_agent, "Mine Plagioclase", false, true, false, false, false, 0,
+    );
+    record_mission_completion_career_goals(
+        &ctx, buyer_id, l1_sec_agent, "Pirates!", false, false, true, false, false, 200,
+    );
+    assert_eq!(prog_of(buyer_id, "ExplorerCareerAgentMission3"), 1);
+    assert_eq!(prog_of(buyer_id, "IndustrialistProducerCareerAgentMission4"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerEpicArcMissions1"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerEpicArcComplete"), 1);
+
+    // EWAR / Cap Warfare / Remote Repair capsuleer & self guards.
+    let genolution_pod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 29 && t.type_id != 670)
+        .expect("SDE non-default capsule type in group 29")
+        .type_id;
+    let genolution_pod_id = 91_100_005_i64;
+    let corp_ship_id = 91_100_006_i64;
+    let third_pilot_id = 91_000_003_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            genolution_pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: genolution_pod_id,
+                type_id: genolution_pod_tid,
+                owner_id: seller_id,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        // Corp-owned ship piloted by third_pilot_id via active_ship_id.
+        let mut ch3 = snap.characters[&seller_id].clone();
+        ch3.character_id = third_pilot_id;
+        ch3.user_id = third_pilot_id as u64;
+        ch3.name = "CorpShipPilot".into();
+        ch3.active_ship_id = corp_ship_id;
+        snap.characters.insert(third_pilot_id, ch3);
+        snap.items.insert(
+            corp_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: corp_ship_id,
+                type_id: 587,
+                owner_id: 98_000_001,
+                location_id: 30_000_142,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    assert!(is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, seller_ship_id, buyer_id));
+    assert!(is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, corp_ship_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, buyer_ship_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, pod_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, genolution_pod_id, buyer_id));
+    assert!(!is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, npc_ship_id, buyer_id));
+
+    record_ewar_career_seconds(&ctx, buyer_id, seller_ship_id, "webify", 10.0);
+    record_ewar_career_seconds(&ctx, buyer_id, npc_ship_id, "webify", 50.0);
+    record_ewar_career_seconds(&ctx, buyer_id, pod_id, "webify", 50.0);
+    record_ewar_career_seconds(&ctx, buyer_id, genolution_pod_id, "webify", 50.0);
+    assert_eq!(prog_of(buyer_id, "SofWebify"), 10);
+
+    // NPC, capsules (670 and variant), self, and zero GJ MUST NOT progress cap warfare.
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, npc_ship_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, npc_ship_id, "nosferatu", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, pod_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, genolution_pod_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, buyer_ship_id, "neutralizer", 90.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "neutralizer", 0.0);
+    assert_eq!(prog_of(buyer_id, "SofNeutralizeCapacitor100"), 0);
+    assert_eq!(prog_of(buyer_id, "SofDrainCapacitor50"), 0);
+
+    // Live capsuleer ship cap warfare (personal + corp-owned active ship) increments cleanly.
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "nosferatu", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, seller_ship_id, "neutralizer", 80.0);
+    record_cap_warfare_career(&ctx, buyer_id, buyer_ship_id, corp_ship_id, "neutralizer", 10.0);
+    assert_eq!(prog_of(buyer_id, "EnforcerEarnLp500"), 350);
+    assert_eq!(prog_of(buyer_id, "SofNeutralizeCapacitor100"), 90);
+
+    let all_buyer_goals = ctx
+        .quasar_gateway
+        .progression
+        .career_goals
+        .get_or_init_goals(buyer_id as u32);
+    let max_prog = |kind: &str| -> u64 {
+        all_buyer_goals
+            .iter()
+            .filter(|g| g.def.activity_kind == kind)
+            .map(|g| g.progress)
+            .max()
+            .unwrap_or(0)
+    };
+    assert_eq!(max_prog("bounties"), 25_000);
+    let ea = &ctx.sde.agents[&epic_arc_agent];
+    let ea_l1_dist = u64::from(ea.level == 1 && ea.division_id == 22);
+    let ea_l1_mine = u64::from(ea.level == 1 && ea.division_id == 23);
+    let ea_l1_comb = u64::from(ea.level == 1 && ea.division_id != 22 && ea.division_id != 23);
+    assert_eq!(max_prog("distribution_missions"), 1 + ea_l1_dist);
+    assert_eq!(max_prog("mining_missions"), 1 + ea_l1_mine);
+    assert_eq!(max_prog("combat_missions"), 1 + ea_l1_comb);
+    assert!(all_buyer_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofDrainCapacitor") && g.progress == 80));
+    assert!(all_buyer_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofNeutralizeCapacitor") && g.progress == 90));
+
+    record_remote_repair_career(&ctx, buyer_id, seller_ship_id, "armor_repair", 125.0);
+    record_remote_repair_career(&ctx, buyer_id, buyer_ship_id, "armor_repair", 200.0);
+    record_remote_repair_career(&ctx, buyer_id, npc_ship_id, "shield_boost", 200.0);
+    let rep_goals = ctx
+        .quasar_gateway
+        .progression
+        .career_goals
+        .get_or_init_goals(buyer_id as u32);
+    assert!(rep_goals
+        .iter()
+        .any(|g| g.def.goal_label.starts_with("SofRemoteRepArmorHp") && g.progress == 125));
+    assert!(rep_goals
+        .iter()
+        .filter(|g| g.def.goal_label.starts_with("SofRemoteBoostShieldHp"))
+        .all(|g| g.progress == 0));
+
+    // Site entry, deduplication, Gas Training Site & starter-system exclusions, and combat PvP/NPC hull split.
+    let starter_sys = ctx
+        .sde
+        .schools
+        .get(&11)
+        .expect("SDE school 11 starter system")
+        .solar_system_id;
+    let non_starter_sys = 30_000_142_u32; // Jita (school 23, not starter 11..=22)
+    assert!(is_career_starter_system(&ctx.sde, starter_sys));
+    assert!(!is_career_starter_system(&ctx.sde, non_starter_sys));
+
+    record_site_entry_career_goals(&ctx, buyer_id, starter_sys, "STARTER-ANOM", None, None, "CombatAnomaly");
+    record_combat_site_completion_in_system(&ctx.quasar_gateway, &ctx.sde, starter_sys, buyer_id, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-TRAIN-1", Some(4093), Some("Gas Training Site"), "Gas");
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterCombatSites1"), 0);
+    assert_eq!(prog_of(buyer_id, "EnforcerCompleteCombatSites5"), 0);
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterGasSites1"), 0);
+
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "ANOM-1", None, None, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "ANOM-1", None, None, "CombatAnomaly");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-1", None, Some("Ordinary Perimeter Reservoir"), "WormholeGas");
+    record_site_entry_career_goals(&ctx, buyer_id, non_starter_sys, "GAS-1", None, Some("Ordinary Perimeter Reservoir"), "WormholeGas");
+    record_combat_site_completion_in_system(&ctx.quasar_gateway, &ctx.sde, non_starter_sys, buyer_id, "WormholeCombat");
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterCombatSites1"), 1);
+    assert_eq!(prog_of(buyer_id, "ExplorerEnterGasSites1"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerCompleteCombatSites5"), 1);
+
+    let enforcer_before = prog_of(buyer_id, "EnforcerDestroyNpc100");
+    ctx.quasar_gateway.progression.career_goals.on_career_gameplay_event(
+        buyer_id as u32,
+        super::CareerGameplayEvent {
+            activity_kind: "combat",
+            ship_group_id: Some(25),
+            sub_kind: Some("pvp_kill"),
+            ..Default::default()
+        },
+        1,
+        &ctx.quasar_gateway,
+    );
+    assert_eq!(prog_of(buyer_id, "SofDestroyNpcInFrigate"), 1);
+    assert_eq!(prog_of(buyer_id, "EnforcerDestroyNpc100"), enforcer_before);
+
+    // Non-FW killer killing an FW pilot in a non-capsule ship credits SofKillFwCapsuleeer1 & Frigate hull kill (not capsule / Enforcer NPC).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&seller_id) {
+            ch.war_faction_id = Some(500_001);
+        }
+    });
+    crate::services::fw_gameplay::fw_gameplay_rpc::on_player_ship_destroyed_in_combat_detailed(
+        &ctx,
+        non_starter_sys,
+        buyer_id,
+        seller_id,
+        genolution_pod_tid,
+        0.0,
+        0,
+    );
+    assert_eq!(prog_of(buyer_id, "SofKillFwCapsuleeer1"), 0);
+    crate::services::fw_gameplay::fw_gameplay_rpc::on_player_ship_destroyed_in_combat_detailed(
+        &ctx,
+        non_starter_sys,
+        buyer_id,
+        seller_id,
+        587,
+        1_000_000.0,
+        0,
+    );
+    assert_eq!(prog_of(buyer_id, "SofKillFwCapsuleeer1"), 1);
+    assert_eq!(prog_of(buyer_id, "SofDestroyNpcInFrigate"), 2);
+    assert_eq!(prog_of(buyer_id, "EnforcerDestroyNpc100"), enforcer_before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ewar_cycle_completion_and_deactivate_toggle_anti_exploit() {
+    let (ctx, clock) = test_ctx_and_clock(1_800_000_000);
+    let sys_id = 30_000_142_u32;
+    let atk_cid = 92_100_001_i64;
+    let def_cid = 92_100_002_i64;
+    let atk_ship_id = 92_200_001_i64;
+    let def_ship_id = 92_200_002_i64;
+    let web_mod_id = 92_300_001_i64;
+
+    let web_tid = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.group_id == 65
+                && t.published
+                && t.default_attributes.get(&73).copied().unwrap_or(0.0) > 0.0
+        })
+        .min_by_key(|t| t.type_id)
+        .expect("SDE published Stasis Webifier")
+        .type_id;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut base = snap.characters.values().next().cloned().expect("seed char");
+        base.station_id = None;
+        base.structure_id = None;
+        base.solar_system_id = sys_id;
+        base.security_status = 5.0;
+        base.clone_grade = 1;
+        base.fleet_id = None;
+        for (cid, sid) in [(atk_cid, atk_ship_id), (def_cid, def_ship_id)] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("EwarPilot{cid}");
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            web_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: web_mod_id,
+                type_id: web_tid,
+                owner_id: atk_cid,
+                location_id: atk_ship_id,
+                flag: eve_db::InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(web_mod_id, true);
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(atk_cid as u64, 1, Some(atk_cid), false, ctx.now_unix_secs());
+    ctx.crimewatch
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_create(def_cid)
+        .suspect_flag_until_unix = ctx.now_unix_secs() + 600;
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    for (cid, sid, x) in [(atk_cid, atk_ship_id, 0.0), (def_cid, def_ship_id, 1_000.0)] {
+        sys_h
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: glam::DVec3::new(x, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_067_000.0,
+                    radius: 400.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(cid, sid, 587),
+                ctx.build_ship_slim_meta(cid, 587),
+            )
+            .await
+            .expect("spawn ewar ball");
+    }
+    sys_h
+        .add_target_lock(
+            atk_ship_id,
+            eve_destiny::TargetLock {
+                target_id: def_ship_id,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .expect("lock def ship");
+
+    let mut atk_sess = eve_machonet::SessionState::new(1);
+    atk_sess.user_id = Some(atk_cid as u64);
+    atk_sess.character_id = Some(atk_cid);
+    atk_sess.corporation_id = Some(98_000_001);
+    atk_sess.solar_system_id = Some(sys_id);
+    atk_sess.ship_id = Some(atk_ship_id);
+    let kw = HashMap::new();
+
+    let prog_of = |lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(atk_cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Activating webifier must NOT credit EWAR seconds upfront at t = 0.
+    let act_rep = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut atk_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[eve_proto::PyRep::Integer(web_mod_id), eve_proto::PyRep::Integer(def_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate webifier");
+    let dur_s = act_rep
+        .dict_get("duration")
+        .and_then(eve_proto::PyRep::as_f64)
+        .expect("webifier duration");
+    assert!(dur_s > 0.0);
+    assert_eq!(prog_of("SofWebify"), 0, "t=0 activate must not credit SofWebify");
+
+    // 2. Immediate Deactivate at t = 0 queues cycle deactivation, keeps module active for cycle end,
+    //    blocks immediate re-Activate, and still grants 0 EWAR progress before cycle completion.
+    crate::services::inventory_fitting::fitting_mining_lasers::handle_mining_and_deactivate(
+        &ctx,
+        &mut atk_sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[eve_proto::PyRep::Integer(web_mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("deactivate webifier");
+    assert_eq!(prog_of("SofWebify"), 0, "immediate deactivate must not credit SofWebify");
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&web_mod_id)));
+    assert!(ctx.is_module_in_reactivation_delay(atk_ship_id, web_mod_id));
+    assert!(
+        crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+            &ctx,
+            &mut atk_sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[eve_proto::PyRep::Integer(web_mod_id), eve_proto::PyRep::Integer(def_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "re-Activate before natural cycle end must fail"
+    );
+
+    // 3. Stepping across the full cycle credits EWAR seconds ONCE and cleans up active state.
+    clock.advance_secs_and_read_offset((dur_s.ceil() as u64) + 1);
+    sys_h.step_manual(dur_s + 0.2).await.expect("step full ewar cycle");
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
+        &ctx,
+        sys_id,
+    )
+    .await;
+    let expected = dur_s.round() as u64;
+    assert_eq!(prog_of("SofWebify"), expected);
+    assert!(ctx.db.with_snapshot(|s| !s.module_active_states.contains(&web_mod_id)));
+
+    // 4. Subsequent steps must not double-count, and re-Activate works after cooldown clears.
+    sys_h.step_manual(1.0).await.expect("extra step");
+    crate::services::inventory_fitting::fitting_module_cycles::execute_pending_cycle_actions(
+        &ctx,
+        sys_id,
+    )
+    .await;
+    assert_eq!(prog_of("SofWebify"), expected);
+
+    clock.advance_secs_and_read_offset((dur_s.ceil() as u64) + 5);
+    assert!(!ctx.is_module_in_reactivation_delay(atk_ship_id, web_mod_id));
+    assert!(
+        crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+            &ctx,
+            &mut atk_sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[eve_proto::PyRep::Integer(web_mod_id), eve_proto::PyRep::Integer(def_ship_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destruction_spool_excludes_npcs_corvettes_and_variant_pods_and_credits_player_ships() {
+    let (ctx, _) = test_ctx_and_clock(1_800_000_000);
+    let sys_id = 30_000_142_u32;
+    let atk_cid = 92_400_001_i64;
+    let victim_cid = 92_400_002_i64;
+    let atk_ship_id = 92_500_001_i64;
+    let victim_frigate_id = 92_500_002_i64;
+    let victim_variant_pod_id = 92_500_003_i64;
+    let npc_id = 1_895_400_001_i64;
+
+    let corvette_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 237 && t.published)
+        .expect("SDE corvette type")
+        .type_id;
+    let variant_pod_tid = 33_328_u32;
+    assert_eq!(ctx.sde.types.get(&variant_pod_tid).map(|t| t.group_id), Some(29));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut base = snap.characters.values().next().cloned().expect("seed char");
+        base.station_id = None;
+        base.structure_id = None;
+        base.solar_system_id = sys_id;
+        base.clone_grade = 1;
+        for (cid, sid) in [(atk_cid, atk_ship_id), (victim_cid, victim_frigate_id)] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = format!("DestrPilot{cid}");
+            ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+        }
+        for (item_id, tid, owner_id) in [
+            (atk_ship_id, 587_u32, atk_cid),
+            (victim_frigate_id, 587_u32, victim_cid),
+            (victim_variant_pod_id, variant_pod_tid, victim_cid),
+        ] {
+            snap.items.insert(
+                item_id,
+                eve_db::InventoryItemRecord {
+                    item_id,
+                    type_id: tid,
+                    owner_id,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let prog_of = |cid: i64, lbl: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .find(|g| g.def.goal_label == lbl)
+            .unwrap_or_else(|| panic!("missing goal {lbl}"))
+            .progress
+    };
+
+    // 1. Direct helper excludes pods (670 and variant 33328) and corvettes (group 237).
+    crate::services::notify_emitters_fleet_combat::emit_ship_death_with_type(&ctx, victim_cid, Some(670));
+    crate::services::notify_emitters_fleet_combat::emit_ship_death_with_type(
+        &ctx,
+        victim_cid,
+        Some(variant_pod_tid),
+    );
+    crate::services::notify_emitters_fleet_combat::emit_ship_death_with_type(
+        &ctx,
+        victim_cid,
+        Some(corvette_tid),
+    );
+    assert_eq!(prog_of(victim_cid, "SofLoseShip1"), 0);
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let make_ball = |id: i64, type_id: u32, x: f64| eve_destiny::Ball {
+        id,
+        type_id,
+        position: glam::DVec3::new(x, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_067_000.0,
+        radius: 100.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+    let npc_ball = make_ball(npc_id, 500_001, 500.0);
+    let pod_ball = make_ball(victim_variant_pod_id, variant_pod_tid, 1_000.0);
+    let frig_ball = make_ball(victim_frigate_id, 587, 1_500.0);
+    sys_h
+        .spawn_ball_with_meta(
+            make_ball(atk_ship_id, 587, 0.0),
+            ctx.build_ship_combat_state(atk_cid, atk_ship_id, 587),
+            ctx.build_ship_slim_meta(atk_cid, 587),
+        )
+        .await
+        .unwrap();
+    sys_h.spawn_ball(npc_ball.clone()).await.unwrap();
+    sys_h
+        .spawn_ball_with_meta(
+            pod_ball.clone(),
+            ctx.build_ship_combat_state(victim_cid, victim_variant_pod_id, variant_pod_tid),
+            ctx.build_ship_slim_meta(victim_cid, variant_pod_tid),
+        )
+        .await
+        .unwrap();
+    sys_h
+        .spawn_ball_with_meta(
+            frig_ball.clone(),
+            ctx.build_ship_combat_state(victim_cid, victim_frigate_id, 587),
+            ctx.build_ship_slim_meta(victim_cid, 587),
+        )
+        .await
+        .unwrap();
+
+    let now_unix = ctx.now_unix_secs();
+    // 2. NPC destruction does not credit player ship loss ("destruction").
+    crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_h,
+        atk_cid,
+        atk_ship_id,
+        587,
+        2873,
+        npc_id,
+        &npc_ball,
+        None,
+        sys_id,
+        500.0,
+        now_unix,
+    )
+    .await;
+    assert_eq!(prog_of(atk_cid, "SofLoseShip1"), 0);
+    assert_eq!(prog_of(victim_cid, "SofLoseShip1"), 0);
+
+    // 3. Variant Genolution pod (33328) destruction spawns corpse/killmail but does NOT credit SofLoseShip1.
+    let pod_res = crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_h,
+        atk_cid,
+        atk_ship_id,
+        587,
+        2873,
+        victim_variant_pod_id,
+        &pod_ball,
+        Some((victim_cid, victim_variant_pod_id)),
+        sys_id,
+        400.0,
+        now_unix,
+    )
+    .await;
+    assert!(pod_res.kill_id > 0 && pod_res.corpse_id > 0 && pod_res.wreck_id == 0);
+    assert_eq!(prog_of(victim_cid, "SofLoseShip1"), 0);
+
+    // 4. Non-corvette, non-pod player frigate destruction credits SofLoseShip1 on victim.
+    let ship_res = crate::services::combat_crimewatch::combat_weapons_spool::handle_ship_or_npc_destruction(
+        &ctx,
+        &sys_h,
+        atk_cid,
+        atk_ship_id,
+        587,
+        2873,
+        victim_frigate_id,
+        &frig_ball,
+        Some((victim_cid, victim_frigate_id)),
+        sys_id,
+        1_200.0,
+        now_unix,
+    )
+    .await;
+    assert!(ship_res.kill_id > 0 && ship_res.wreck_id > 0);
+    assert_eq!(prog_of(victim_cid, "SofLoseShip1"), 1);
+}
+
+#[test]
+fn epic_arc_level1_dual_credits_mission_division_goals() {
+    let (mut ctx, _) = test_ctx_and_clock(1_800_000_000);
+    let template = ctx.sde.agents.values().next().cloned().expect("SDE agent");
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        let mut l1_sec = template.clone();
+        l1_sec.agent_id = 9_910_001;
+        l1_sec.agent_type_id = 10;
+        l1_sec.level = 1;
+        l1_sec.division_id = 24;
+        sde_mut.agents.insert(l1_sec.agent_id, l1_sec);
+
+        let mut l1_dist = template.clone();
+        l1_dist.agent_id = 9_910_002;
+        l1_dist.agent_type_id = 10;
+        l1_dist.level = 1;
+        l1_dist.division_id = 22;
+        sde_mut.agents.insert(l1_dist.agent_id, l1_dist);
+
+        let mut l4_sec = template;
+        l4_sec.agent_id = 9_910_004;
+        l4_sec.agent_type_id = 10;
+        l4_sec.level = 4;
+        l4_sec.division_id = 24;
+        sde_mut.agents.insert(l4_sec.agent_id, l4_sec);
+    }
+
+    let cid = 92_600_001_i64;
+    let max_prog = |kind: &str| -> u64 {
+        ctx.quasar_gateway
+            .progression
+            .career_goals
+            .get_or_init_goals(cid as u32)
+            .into_iter()
+            .filter(|g| g.def.activity_kind == kind)
+            .map(|g| g.progress)
+            .max()
+            .unwrap_or(0)
+    };
+
+    record_mission_completion_career_goals(
+        &ctx,
+        cid,
+        9_910_001,
+        "Security",
+        false,
+        false,
+        true,
+        false,
+        false,
+        0,
+    );
+    assert_eq!(max_prog("epic_arc"), 1);
+    assert_eq!(max_prog("combat_missions"), 1);
+
+    record_mission_completion_career_goals(
+        &ctx,
+        cid,
+        9_910_002,
+        "Courier",
+        true,
+        false,
+        false,
+        false,
+        false,
+        0,
+    );
+    assert_eq!(max_prog("epic_arc"), 2);
+    assert_eq!(max_prog("distribution_missions"), 1);
+
+    record_mission_completion_career_goals(
+        &ctx,
+        cid,
+        9_910_004,
+        "Security",
+        false,
+        false,
+        true,
+        false,
+        false,
+        0,
+    );
+    assert_eq!(max_prog("epic_arc"), 3);
+    assert_eq!(max_prog("combat_missions"), 1);
+}

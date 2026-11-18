@@ -1612,6 +1612,13 @@ pub(super) fn handle_corps(
                             0,
                             "corp_change",
                         );
+                        crate::services::quasar_career_goals::record_career_sub_kind(
+                            ctx,
+                            applicant_id,
+                            "social",
+                            Some("join_corp"),
+                            1,
+                        );
                     }
                     let app_kv = PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)), ("corporationID", PyRep::Integer(corp_id)),

@@ -960,6 +960,13 @@ fn handle_chat_rpc(
                     );
                 }
             }
+            crate::services::quasar_career_goals::record_career_sub_kind(
+                ctx,
+                char_id,
+                "social",
+                Some("chat_message"),
+                1,
+            );
 
             Some(Ok(PyRep::keyval([
                 ("channelID", PyRep::String(chan_key)),

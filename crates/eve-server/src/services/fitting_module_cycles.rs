@@ -34,6 +34,33 @@ pub(crate) fn module_already_active_rpc_error(
     )
 }
 
+/// Active module groups that are gated on natural cycle end (`RequestCycleDeactivation`
+/// instead of immediate removal, plus reactivation delay on manual deactivate/offline).
+pub(crate) fn is_cycle_gated_module_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        40 | 1156
+            | 41
+            | 1697
+            | 67
+            | 71
+            | 76
+            | 72
+            | 1122
+            | 650
+            | 80
+            | 353
+            | 52
+            | 65
+            | 201
+            | 208
+            | 291
+            | 379
+            | 899
+            | 1672
+    )
+}
+
 /// Builds a `TargetNotLocked` error carrying V24 `UserError::TargetNotLocked` (`1627`).
 pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError::with_client_error(
@@ -867,16 +894,6 @@ pub(crate) async fn handle_module_cycles(
                         return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                     }
                 }
-                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
-                        return Some(Err(module_already_active_rpc_error(
-                            ctx,
-                            Some(m.type_id),
-                            format!("Module {module_id} cannot reactivate before delay expires"),
-                        )));
-                    }
-                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
-                }
                 let allow_mutadaptive_retarget = mod_type.group_id == 2018
                     && target_id_opt.is_some()
                     && actor_cycle_state.is_some_and(|(_, cur_t)| cur_t != target_id_opt);
@@ -898,6 +915,16 @@ pub(crate) async fn handle_module_cycles(
                         Some(m.type_id),
                         format!("Module {module_id} is already active in a cycle"),
                     )));
+                }
+                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                    if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
+                        return Some(Err(module_already_active_rpc_error(
+                            ctx,
+                            Some(m.type_id),
+                            format!("Module {module_id} cannot reactivate before delay expires"),
+                        )));
+                    }
+                    return Some(Err(BridgeRpcError { code: "ModuleReactivationDelay".into(), message: format!("Module {module_id} cannot reactivate before delay expires"), client_error: None }));
                 }
                 if allow_smartbomb_retrigger && in_actor_cycle {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
@@ -1877,6 +1904,16 @@ pub(crate) async fn handle_module_cycles(
                 started_at_unix: ctx.now_unix_secs(),
             };
 
+            let pre_target_combat_state = if cap_drain_target > 0.0 || remote_shield_amount > 0.0 {
+                if let Some(tid) = target_id_opt {
+                    sys.get_combat_state(tid).await.ok().flatten()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             if let Err(e) = sys.add_module_cycle(cycle).await {
                 ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 if e.contains("ModuleAlreadyActive") {
@@ -1964,11 +2001,11 @@ pub(crate) async fn handle_module_cycles(
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
-            let is_cycle_gated = matches!(
-                mod_type.group_id,
-                72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
-                    | 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
-            );
+            let is_cycle_gated = is_cycle_gated_module_group(mod_type.group_id)
+                || matches!(
+                    mod_type.group_id,
+                    53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
+                );
             if is_cycle_gated || (repeat == 0 && reactivation_delay_s > 0.0) {
                 let total_delay = if mod_type.group_id == 40 {
                     duration_s.max(reactivation_delay_s)
@@ -2087,6 +2124,35 @@ pub(crate) async fn handle_module_cycles(
                 ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
                 disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,
             );
+            if let Some(tid) = target_id_opt {
+                if let Some(pre_cs) = pre_target_combat_state {
+                    if let Ok(Some(post_cs)) = sys.get_combat_state(tid).await {
+                        if cap_drain_target > 0.0 {
+                            let drained = (pre_cs.capacitor - post_cs.capacitor).max(0.0);
+                            if drained > 0.0 {
+                                crate::services::quasar_career_goals::record_cap_warfare_career(
+                                    ctx,
+                                    char_id,
+                                    ship_id,
+                                    tid,
+                                    "neutralizer",
+                                    drained,
+                                );
+                            }
+                        }
+                        if remote_shield_amount > 0.0 {
+                            let boosted = (post_cs.shield_hp - pre_cs.shield_hp).max(0.0);
+                            crate::services::quasar_career_goals::record_remote_repair_career(
+                                ctx,
+                                char_id,
+                                tid,
+                                "shield_boost",
+                                boosted,
+                            );
+                        }
+                    }
+                }
+            }
 
             let mut volley_destroyed_target = false;
             if (is_turret_group || is_missile_group || is_vorton_group) && target_id_opt.is_some() {

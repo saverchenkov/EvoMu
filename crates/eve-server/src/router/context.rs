@@ -928,6 +928,13 @@ impl ServerContext {
                         if let Some(ref sid) = clr {
                             let (cat, did) = crate::services::pve_exploration::pve_site_category_and_dungeon_id(db, now_s, sys_id, sid);
                             ctx.quasar_gateway.progression.extra.on_system_tale_encounter_completed(sys_id, &cat, did, 1, now_s, &ctx.quasar_gateway);
+                            crate::services::quasar_career_goals::record_combat_site_completion_in_system(
+                                &ctx.quasar_gateway,
+                                sde,
+                                sys_id,
+                                kid,
+                                &cat,
+                            );
                         }
                     });
                     crate::services::pve_exploration::notify_pve_destruction_events(db, &*ctx.pending_notifications, tx, kid, clr, esc, step);
@@ -1322,7 +1329,7 @@ impl ServerContext {
         ctx
     }
 
-    pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) {
+    pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) -> bool {
         let inserted = self
             .scanned_signatures
             .write()
@@ -1345,6 +1352,7 @@ impl ServerContext {
                 crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(self, char_id, &["ScanSignatures"], 1, Some(solar_system_id as i64));
             });
         }
+        inserted
     }
 
     pub fn has_scanned_signature(
@@ -2452,9 +2460,19 @@ impl ServerContext {
         };
         let rev = self.current_fit_rev(ship_id);
         let fresh = self.build_ship_combat_state(char_id, ship_id, type_id);
-        let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
-        if let Some(proj) = self.build_fit_projection(char_id, ship_id, rev) {
-            let _ = handle.try_send_fit_projection(ship_id, proj);
+        let proj_opt = self.build_fit_projection(char_id, ship_id, rev);
+        if eve_db::lock_rank::held_lock_ranks().is_empty() {
+            let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
+            if let Some(proj) = proj_opt {
+                let _ = handle.try_send_fit_projection(ship_id, proj);
+            }
+        } else {
+            self.systems.enqueue_post_unlock_action(Box::new(move || {
+                let _ = handle.try_sync_ship_ballpark_stats(ship_id, &fresh);
+                if let Some(proj) = proj_opt {
+                    let _ = handle.try_send_fit_projection(ship_id, proj);
+                }
+            }));
         }
     }
 
@@ -2633,7 +2651,13 @@ impl ServerContext {
             if let Some(handle) = self.systems.get_handle(sys_id) {
                 let rev = self.bump_fit_rev(ship_id);
                 if let Some(projection) = self.build_fit_projection(char_id, ship_id, rev) {
-                    let _ = handle.try_send_fit_projection(ship_id, projection);
+                    if eve_db::lock_rank::held_lock_ranks().is_empty() {
+                        let _ = handle.try_send_fit_projection(ship_id, projection);
+                    } else {
+                        self.systems.enqueue_post_unlock_action(Box::new(move || {
+                            let _ = handle.try_send_fit_projection(ship_id, projection);
+                        }));
+                    }
                 }
                 return Some(rev);
             }
