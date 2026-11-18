@@ -2085,6 +2085,142 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
             hook._settle_after_action(fake_sm, 0, 0, min_settle_ms=0, max_ms=250)
         self.assertEqual(poll_sleeps, [25, 25, 25])
 
+    def test_quasar_async_response_channel_flight_and_settle_extends_past_default_cap(self):
+        import gc
+
+        hook = _load_hook_with_py2_stubs()
+        hook._FLIGHT_RECORDER = []
+        hook._FLIGHT_SEQ = 0
+        hook._QUASAR_IN_FLIGHT.clear()
+        hook._QUASAR_IN_FLIGHT_SEQ = 0
+        hook._MACHO_CALL_TASKLET_DEPTH.clear()
+
+        class FakeDeleteRequest:
+            pass
+
+        class FakeRespChannel:
+            def __init__(self, fail_status=None):
+                self._open = True
+                self._fail_status = fail_status
+
+            def receive(self):
+                self._open = False
+                if self._fail_status is not None:
+                    exc = RuntimeError("rpc error")
+                    exc.response_primitive = types.SimpleNamespace(status_code=self._fail_status)
+                    raise exc
+                return ("resp_prim", "resp_payload")
+
+        channels_in_flight = []
+
+        class FakePublicGatewaySvc:
+            def __init__(self):
+                self.publicGateway = types.SimpleNamespace(
+                    get_request_broker_details=lambda: {"pending_requests": 0, "pending_responses": 0}
+                )
+
+            def send_character_request(self, req_payload, expected_response_class=None, timeout_seconds=15):
+                ch = FakeRespChannel()
+                channels_in_flight.append(ch)
+                return ("req_prim", ch)
+
+            def send_user_request(self, req_payload, expected_response_class=None, timeout_seconds=15):
+                return ("req_prim", FakeRespChannel(fail_status=404))
+
+            def send_request(self, req_payload):
+                return ("req_prim", FakeRespChannel())
+
+            def send_blocking_character_request_and_receive_response(self, req_payload):
+                return ("resp_prim", "payload")
+
+        pgw = FakePublicGatewaySvc()
+        fake_sm = types.SimpleNamespace(
+            services={"publicGatewaySvc": pgw},
+            ScatterEventWithoutTheStars=lambda *a, **kw: None,
+            ScatterEvent=lambda *a, **kw: None,
+            RemoteSvc=lambda *a, **kw: None,
+            ProxySvc=lambda *a, **kw: None,
+        )
+
+        with mock.patch.object(hook, "_HOOKED_REMOTESVC", False), \
+             mock.patch.object(hook, "_HOOK_RELOAD_GEN", 1), \
+             mock.patch.object(hook, "_disable_background_focus_deferral"), \
+             mock.patch.object(hook, "_wrap_message_owner"):
+            hook._install_flight_recorder_hooks(fake_sm)
+
+        # Reloading bumps generation and cleanly re-wraps without nesting the previous wrapper.
+        first_wrapped = pgw.send_character_request
+        self.assertTrue(getattr(first_wrapped, "_evomu_pt_wrapped", False))
+        with mock.patch.object(hook, "_HOOKED_REMOTESVC", False), \
+             mock.patch.object(hook, "_HOOK_RELOAD_GEN", 2), \
+             mock.patch.object(hook, "_disable_background_focus_deferral"), \
+             mock.patch.object(hook, "_wrap_message_owner"):
+            hook._install_flight_recorder_hooks(fake_sm)
+        self.assertIsNot(pgw.send_character_request, first_wrapped)
+        self.assertIsNot(pgw.send_character_request._evomu_pt_orig, first_wrapped)
+
+        # 1) Async send_character_request queues immediately -> NOT logged OK yet, and marks Quasar in-flight!
+        _req_prim, rc = pgw.send_character_request(FakeDeleteRequest(), object, 15)
+        self.assertEqual(hook._FLIGHT_RECORDER, [])
+        self.assertTrue(hook._has_in_flight_quasar(fake_sm))
+
+        # 2) _settle_after_action waits past max_ms=250 (simulating 350ms WAL commit) until rc.receive() finishes
+        # AND waits one more 25ms tick after _FLIGHT_SEQ advances.
+        settle_sleeps = []
+
+        def fake_quasar_sleep(ms):
+            settle_sleeps.append(ms)
+            if sum(settle_sleeps) == 350:
+                rc.receive()
+
+        with mock.patch.object(hook, "_get_uicore", return_value=None), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True, side_effect=fake_quasar_sleep):
+            waited = hook._settle_after_action(fake_sm, 0, 0, min_settle_ms=0, max_ms=250)
+
+        self.assertEqual(waited, 375)
+        self.assertEqual(len(hook._FLIGHT_RECORDER), 1)
+        self.assertEqual(hook._FLIGHT_RECORDER[0]["kind"], "quasar")
+        self.assertEqual(hook._FLIGHT_RECORDER[0]["args"], "send_character_request")
+        self.assertEqual(hook._FLIGHT_RECORDER[0]["status"], "OK")
+        self.assertFalse(hook._has_in_flight_quasar(fake_sm))
+
+        # 3) Server non-200 failure during receive() records ERR with HTTP/gRPC status_code and clears in-flight.
+        _rp2, err_rc = pgw.send_user_request(FakeDeleteRequest(), object, 15)
+        self.assertTrue(hook._has_in_flight_quasar(fake_sm))
+        with self.assertRaises(RuntimeError):
+            err_rc.receive()
+        self.assertFalse(hook._has_in_flight_quasar(fake_sm))
+        self.assertEqual(hook._FLIGHT_RECORDER[-1]["status"], "ERR")
+        self.assertIn("status=404", hook._FLIGHT_RECORDER[-1]["error"])
+
+        # 4) Dropped / GC'd or expired channel never leaves _QUASAR_IN_FLIGHT stuck.
+        dropped = pgw.send_request(FakeDeleteRequest())[1]
+        self.assertTrue(hook._has_in_flight_quasar(fake_sm))
+        del dropped
+        gc.collect()
+        self.assertFalse(hook._has_in_flight_quasar(fake_sm))
+
+        blocking_res = pgw.send_blocking_character_request_and_receive_response(FakeDeleteRequest())
+        self.assertEqual(blocking_res, ("resp_prim", "payload"))
+        self.assertEqual(hook._FLIGHT_RECORDER[-1]["status"], "OK")
+        self.assertFalse(hook._has_in_flight_quasar(fake_sm))
+
+        # 5) native_broker pending_requests/pending_responses also prevents premature exit (while ignoring MagicMock).
+        pgw.publicGateway = types.SimpleNamespace(
+            get_request_broker_details=lambda: {"pending_requests": 1, "pending_responses": 0}
+        )
+        self.assertTrue(hook._has_in_flight_quasar(fake_sm))
+        pgw.publicGateway = types.SimpleNamespace(
+            get_request_broker_details=lambda: {"pending_requests": 0, "pending_responses": 0}
+        )
+        self.assertFalse(hook._has_in_flight_quasar(fake_sm))
+        self.assertFalse(hook._has_in_flight_quasar(mock.MagicMock()))
+
+        # Ensure _QUASAR_IN_FLIGHT globals exist and are listed in reload_hook _preserve_keys.
+        hook_src = (HARNESS_DIR / "evomu_playtester_hook.py").read_text(encoding="utf-8")
+        self.assertIn('"_QUASAR_IN_FLIGHT"', hook_src)
+        self.assertIn('"_QUASAR_IN_FLIGHT_SEQ"', hook_src)
+
     def test_condition_aware_wait_early_exit_and_cap(self):
         hook = _load_hook_with_py2_stubs()
         hook._LAST_SNAPSHOT = None

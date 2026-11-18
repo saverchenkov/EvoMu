@@ -38,6 +38,9 @@ _SCATTER_SEQ = 0
 _HOOKED_REMOTESVC = False
 _HOOK_RELOAD_GEN = 0
 _MACHO_CALL_TASKLET_DEPTH = {}
+_QUASAR_IN_FLIGHT = {}
+_QUASAR_IN_FLIGHT_SEQ = 0
+_PY_INT_TYPES = (int, type(1 << 65))
 _LAST_SNAPSHOT = None
 _LAST_SNAPSHOT_SM = None
 _LAST_SNAPSHOT_TS = 0.0
@@ -225,6 +228,139 @@ def _record_scatter_event(event_name, args):
         pass
 
 
+def _is_plain_int(val):
+    return isinstance(val, _PY_INT_TYPES) and not isinstance(val, bool)
+
+
+def _cleanup_quasar_in_flight(now=None):
+    if not _QUASAR_IN_FLIGHT:
+        return 0
+    cur_t = time.time() if now is None else float(now)
+    stale = []
+    for qid, info in list(_QUASAR_IN_FLIGHT.items()):
+        if not isinstance(info, dict):
+            stale.append(qid)
+            continue
+        deadline = float(info.get("deadline", 0.0) or 0.0)
+        if deadline > 0.0 and cur_t >= deadline:
+            stale.append(qid)
+            continue
+        chan_ref = info.get("chan_ref")
+        if chan_ref is not None:
+            try:
+                chan = chan_ref()
+            except Exception:
+                chan = None
+            if chan is None or getattr(chan, "_open", True) is False:
+                stale.append(qid)
+    for qid in stale:
+        _QUASAR_IN_FLIGHT.pop(qid, None)
+    return len(_QUASAR_IN_FLIGHT)
+
+
+def _has_in_flight_quasar(sm, now=None):
+    if _cleanup_quasar_in_flight(now) > 0:
+        return True
+    try:
+        sm_svcs = getattr(sm, "services", None) if sm is not None else None
+        pgw = sm_svcs.get("publicGatewaySvc") if isinstance(sm_svcs, dict) else None
+        gw = getattr(pgw, "publicGateway", None) if pgw is not None else None
+        if gw is not None and hasattr(gw, "get_request_broker_details"):
+            bd = gw.get_request_broker_details()
+            if isinstance(bd, dict):
+                pr = bd.get("pending_requests", 0)
+                ps = bd.get("pending_responses", 0)
+                if (_is_plain_int(pr) and pr > 0) or (_is_plain_int(ps) and ps > 0):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _has_in_flight_rpc(sm):
+    if sum(_MACHO_CALL_TASKLET_DEPTH.values()) > 0:
+        return True
+    return _has_in_flight_quasar(sm)
+
+
+def _alloc_quasar_flight_token(req_name, start_ts=None, timeout_sec=15.0, resp_chan=None):
+    global _QUASAR_IN_FLIGHT_SEQ
+    _QUASAR_IN_FLIGHT_SEQ += 1
+    qid = _QUASAR_IN_FLIGHT_SEQ
+    t0 = time.time() if start_ts is None else float(start_ts)
+    try:
+        tmo = float(timeout_sec) if timeout_sec is not None else 15.0
+    except Exception:
+        tmo = 15.0
+    deadline = t0 + min(max(tmo, 1.0), 15.0)
+    chan_ref = None
+    if resp_chan is not None:
+        try:
+            chan_ref = weakref.ref(resp_chan)
+        except TypeError:
+            chan_ref = None
+    _QUASAR_IN_FLIGHT[qid] = {
+        "ts": t0,
+        "deadline": deadline,
+        "chan_ref": chan_ref,
+        "method": req_name,
+    }
+    return qid, t0
+
+
+def _format_quasar_error(exc):
+    resp_prim = getattr(exc, "response_primitive", None)
+    status_code = getattr(resp_prim, "status_code", None)
+    if _is_plain_int(status_code):
+        return "status=%d %r" % (status_code, exc)
+    return repr(exc)
+
+
+def _wrap_quasar_response_channel(resp_chan, req_name, mname, start_ts, timeout_sec):
+    orig_recv = getattr(resp_chan, "receive", None)
+    if orig_recv is None or not callable(orig_recv):
+        return False
+    if getattr(orig_recv, "_evomu_pt_wrapped", False):
+        return True
+    qid, t0 = _alloc_quasar_flight_token(
+        req_name,
+        start_ts=start_ts,
+        timeout_sec=timeout_sec,
+        resp_chan=resp_chan,
+    )
+
+    def _wrapped_receive(*r_args, **r_kwargs):
+        try:
+            recv_res = orig_recv(*r_args, **r_kwargs)
+            dur_ms = (time.time() - t0) * 1000.0
+            _record_flight("quasar", "publicGateway", _safe_str(req_name, 64), mname, "OK", dur_ms)
+            return recv_res
+        except Exception as exc:
+            dur_ms = (time.time() - t0) * 1000.0
+            _record_flight(
+                "quasar",
+                "publicGateway",
+                _safe_str(req_name, 64),
+                mname,
+                "ERR",
+                dur_ms,
+                _format_quasar_error(exc),
+            )
+            raise
+        finally:
+            _QUASAR_IN_FLIGHT.pop(qid, None)
+
+    _wrapped_receive._evomu_pt_wrapped = True
+    _wrapped_receive._evomu_pt_orig = orig_recv
+    _wrapped_receive._evomu_pt_gen = _HOOK_RELOAD_GEN
+    try:
+        resp_chan.receive = _wrapped_receive
+        return True
+    except Exception:
+        _QUASAR_IN_FLIGHT.pop(qid, None)
+        return False
+
+
 def _install_flight_recorder_hooks(sm):
     global _HOOKED_REMOTESVC
     _disable_background_focus_deferral()
@@ -283,27 +419,85 @@ def _install_flight_recorder_hooks(sm):
         pass
 
     try:
-        pgw_svc = getattr(sm, "services", {}).get("publicGatewaySvc") if sm is not None else None
+        sm_svcs = getattr(sm, "services", None) if sm is not None else None
+        pgw_svc = sm_svcs.get("publicGatewaySvc") if isinstance(sm_svcs, dict) else None
         if pgw_svc is not None:
-            for pg_mname in ("send_request", "send_character_request"):
-                orig_pg_fn = getattr(pgw_svc, pg_mname, None)
-                if orig_pg_fn is not None and not getattr(orig_pg_fn, "_evomu_pt_wrapped", False):
+            _pg_methods = (
+                "send_request",
+                "send_character_request",
+                "send_user_request",
+                "send_blocking_character_request_and_receive_response",
+                "send_blocking_user_request_and_receive_response",
+            )
+            for pg_mname in _pg_methods:
+                cur_pg_fn = getattr(pgw_svc, pg_mname, None)
+                if cur_pg_fn is not None and _needs_pt_wrap(cur_pg_fn):
+                    orig_pg_fn = _unwrap_pt_wrapper(cur_pg_fn)
+
                     def _make_pg_wrapper(orig_fn, mname):
+                        is_blocking = mname.startswith("send_blocking_")
+
                         def _wrapped_pg(*args, **kwargs):
-                            req_obj = args[0] if args else kwargs.get("request")
+                            req_obj = (
+                                args[0]
+                                if args
+                                else (kwargs.get("request") or kwargs.get("request_payload"))
+                            )
                             r_name = type(req_obj).__name__ if req_obj is not None else mname
+                            timeout_sec = kwargs.get("timeout_seconds")
+                            if timeout_sec is None and len(args) >= 3:
+                                timeout_sec = args[2]
                             t0 = time.time()
+                            qid = None
+                            if is_blocking:
+                                qid, t0 = _alloc_quasar_flight_token(
+                                    r_name,
+                                    start_ts=t0,
+                                    timeout_sec=timeout_sec,
+                                )
                             try:
                                 res = orig_fn(*args, **kwargs)
+                                if (
+                                    not is_blocking
+                                    and isinstance(res, tuple)
+                                    and len(res) >= 2
+                                    and getattr(res[1], "receive", None) is not None
+                                    and _wrap_quasar_response_channel(
+                                        res[1], r_name, mname, t0, timeout_sec
+                                    )
+                                ):
+                                    return res
                                 dur_ms = (time.time() - t0) * 1000.0
-                                _record_flight("quasar", "publicGateway", _safe_str(r_name, 64), mname, "OK", dur_ms)
+                                _record_flight(
+                                    "quasar",
+                                    "publicGateway",
+                                    _safe_str(r_name, 64),
+                                    mname,
+                                    "OK",
+                                    dur_ms,
+                                )
                                 return res
                             except Exception as exc:
                                 dur_ms = (time.time() - t0) * 1000.0
-                                _record_flight("quasar", "publicGateway", _safe_str(r_name, 64), mname, "ERR", dur_ms, repr(exc))
+                                _record_flight(
+                                    "quasar",
+                                    "publicGateway",
+                                    _safe_str(r_name, 64),
+                                    mname,
+                                    "ERR",
+                                    dur_ms,
+                                    _format_quasar_error(exc),
+                                )
                                 raise
+                            finally:
+                                if qid is not None:
+                                    _QUASAR_IN_FLIGHT.pop(qid, None)
+
                         _wrapped_pg._evomu_pt_wrapped = True
+                        _wrapped_pg._evomu_pt_orig = orig_fn
+                        _wrapped_pg._evomu_pt_gen = _HOOK_RELOAD_GEN
                         return _wrapped_pg
+
                     setattr(pgw_svc, pg_mname, _make_pg_wrapper(orig_pg_fn, pg_mname))
     except Exception:
         pass
@@ -4835,12 +5029,17 @@ def _settle_after_action(sm, pre_flight_seq, pre_scatter_seq, min_settle_ms=0, m
     sleeper(25)
     waited += 25
     prev_sig = _ui_sig()
-    if prev_sig[1] > 0:
+    in_flight = _has_in_flight_rpc(sm)
+    if prev_sig[1] > 0 and not in_flight:
         return waited
     stable_ticks = 0
     cap = max(25, int(max_ms or 250))
-    while waited < cap:
-        in_flight = sum(_MACHO_CALL_TASKLET_DEPTH.values()) > 0
+    in_flight_cap = max(cap, min(max(cap * 4, 1500), 2500))
+    had_in_flight = bool(in_flight)
+    while waited < (in_flight_cap if had_in_flight else cap):
+        in_flight = _has_in_flight_rpc(sm)
+        if in_flight:
+            had_in_flight = True
         cur_sig = _ui_sig()
         if not in_flight and cur_sig == prev_sig:
             stable_ticks += 1
@@ -4849,7 +5048,8 @@ def _settle_after_action(sm, pre_flight_seq, pre_scatter_seq, min_settle_ms=0, m
         else:
             stable_ticks = 0
             prev_sig = cur_sig
-        step_ms = min(25, cap - waited)
+        limit = in_flight_cap if had_in_flight else cap
+        step_ms = min(25, limit - waited)
         if step_ms <= 0:
             break
         sleeper(step_ms)
@@ -7396,6 +7596,8 @@ class PlaytesterRpcServer(object):
                     "_RECENT_SCATTERS",
                     "_SCATTER_SEQ",
                     "_MACHO_CALL_TASKLET_DEPTH",
+                    "_QUASAR_IN_FLIGHT",
+                    "_QUASAR_IN_FLIGHT_SEQ",
                     "_WARP_TELEMETRY",
                     "_HOOK_RELOAD_GEN",
                 )

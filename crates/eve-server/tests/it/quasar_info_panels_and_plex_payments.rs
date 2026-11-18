@@ -513,3 +513,166 @@ async fn test_quasar_payment_and_plex_domains_e2e() {
         STATUS_NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn test_quasar_personal_skill_plan_delete_e2e() {
+    eve_testkit::attest(&["feat:quasar.character", "feat:quasar.progression"]);
+
+    let reg = QuasarDescriptorRegistry::open_default().expect("load descriptors");
+    assert!(
+        reg.get_message("eve_public.character.skill.plan.DeletedNotice").is_none(),
+        "V24.02 descriptors define no character.skill.plan.DeletedNotice"
+    );
+    assert!(
+        reg.get_message("eve_public.skill.plan.DeletedNotice").is_none(),
+        "V24.02 descriptors define no skill.plan.DeletedNotice"
+    );
+    assert!(reg.get_message("eve_public.character.skill.plan.DeleteResponse").is_some());
+    assert!(reg.get_message("eve_public.skill.plan.DeleteResponse").is_some());
+
+    let ctx = ServerContext::new();
+    let mut p1 = select_char(&ctx, 81_011, "demo", "demo-secret", P1).await;
+    let mut p2 = select_char(&ctx, 81_012, "other", "other-secret", P2).await;
+    let mut rx1 = ctx.quasar_gateway.subscribe_session(&p1, vec![], ctx.now_unix());
+
+    let encode_create = |name: &str| {
+        let mut attr_b = Vec::new();
+        let mut create_b = Vec::new();
+        encode_string_field(1, name, &mut attr_b);
+        encode_bytes_field(1, &attr_b, &mut create_b);
+        create_b
+    };
+    let encode_id_req = |uuid: &[u8; 16]| {
+        let mut id_inner = Vec::new();
+        let mut req_b = Vec::new();
+        encode_bytes_field(1, uuid, &mut id_inner);
+        encode_bytes_field(1, &id_inner, &mut req_b);
+        req_b
+    };
+    let extract_created_uuid = |bytes: &[u8]| -> [u8; 16] {
+        let wm = WireMessage::decode(bytes).expect("decode CreateResponse");
+        let id_b = wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .expect("skill_plan field")
+            .value
+            .as_bytes()
+            .expect("Identifier bytes");
+        let id_wm = WireMessage::decode(id_b).expect("decode Identifier");
+        id_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .expect("uuid field")
+            .value
+            .as_bytes()
+            .expect("uuid bytes")
+            .try_into()
+            .expect("16-byte uuid")
+    };
+    let extract_listed_uuids = |bytes: &[u8]| -> Vec<[u8; 16]> {
+        let wm = WireMessage::decode(bytes).expect("decode GetAllResponse");
+        wm.fields
+            .iter()
+            .filter(|f| f.field_number == 1)
+            .filter_map(|f| f.value.as_bytes())
+            .filter_map(|b| WireMessage::decode(b).ok())
+            .filter_map(|id_wm| {
+                id_wm
+                    .fields
+                    .iter()
+                    .find(|sf| sf.field_number == 1)
+                    .and_then(|sf| sf.value.as_bytes())
+                    .and_then(|u| <[u8; 16]>::try_from(u).ok())
+            })
+            .collect()
+    };
+
+    let c1 = quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.CreateRequest", encode_create("Test Plan")).await;
+    assert_eq!(c1.status_code, STATUS_OK);
+    let test_uuid = extract_created_uuid(&c1.payload.expect("create Test Plan").value);
+
+    let c2 = quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.CreateRequest", encode_create("Keep Plan")).await;
+    assert_eq!(c2.status_code, STATUS_OK);
+    let keep_uuid = extract_created_uuid(&c2.payload.expect("create Keep Plan").value);
+
+    assert_eq!(
+        quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.SetActiveRequest", encode_id_req(&test_uuid))
+            .await
+            .status_code,
+        STATUS_OK
+    );
+
+    // Other pilot cannot delete P1's skill plan.
+    assert_eq!(
+        quasar_rpc(&ctx, &mut p2, "eve_public.character.skill.plan.DeleteRequest", encode_id_req(&test_uuid))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+
+    // P1 deletes "Test Plan" over real character.skill.plan.DeleteRequest wire RPC.
+    let del_rsp = quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.DeleteRequest", encode_id_req(&test_uuid)).await;
+    assert_eq!(del_rsp.status_code, STATUS_OK);
+    assert_eq!(
+        del_rsp.payload.as_ref().expect("DeleteResponse payload").normalized_type_name(),
+        "eve_public.character.skill.plan.DeleteResponse"
+    );
+    let notices = drain_notices(&ctx, &mut rx1);
+    assert!(
+        notices.iter().all(|n| !n.payload.as_ref().is_some_and(|p| p.type_url.contains("skill.plan"))),
+        "Personal skill plan delete relies on DeleteResponse, not bogus notice types: {notices:?}"
+    );
+
+    // Deleted plan disappears from GetAll, Get returns 404, re-delete returns 404, GetActive clears to zero UUID.
+    let all_after = quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.GetAllRequest", vec![]).await;
+    assert_eq!(all_after.status_code, STATUS_OK);
+    let listed = extract_listed_uuids(&all_after.payload.expect("GetAllResponse").value);
+    assert_eq!(listed, vec![keep_uuid]);
+
+    assert_eq!(
+        quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.GetRequest", encode_id_req(&test_uuid))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.DeleteRequest", encode_id_req(&test_uuid))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    let active_after = quasar_rpc(&ctx, &mut p1, "eve_public.character.skill.plan.GetActiveRequest", vec![]).await;
+    assert_eq!(active_after.status_code, STATUS_OK);
+    let active_wm = WireMessage::decode(&active_after.payload.expect("GetActiveResponse").value).expect("decode active");
+    let active_id_wm = WireMessage::decode(active_wm.fields[0].value.as_bytes().expect("id")).expect("id wm");
+    assert_eq!(active_id_wm.fields[0].value.as_bytes().expect("uuid"), &[0u8; 16]);
+
+    // Legacy eve_public.skill.plan namespace shares deletion + active-plan clearing + DB persistence.
+    let c3 = quasar_rpc(&ctx, &mut p1, "eve_public.skill.plan.CreateRequest", encode_create("Legacy Delete")).await;
+    assert_eq!(c3.status_code, STATUS_OK);
+    let leg_uuid = extract_created_uuid(&c3.payload.expect("legacy create").value);
+    assert_eq!(
+        quasar_rpc(&ctx, &mut p1, "eve_public.skill.plan.SetActiveRequest", encode_id_req(&leg_uuid))
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let leg_del = quasar_rpc(&ctx, &mut p1, "eve_public.skill.plan.DeleteRequest", encode_id_req(&leg_uuid)).await;
+    assert_eq!(leg_del.status_code, STATUS_OK);
+    assert_eq!(
+        leg_del.payload.as_ref().expect("legacy DeleteResponse").normalized_type_name(),
+        "eve_public.skill.plan.DeleteResponse"
+    );
+
+    let ctx_re = persist_and_reopen_sqlite(&ctx, "quasar_sp_delete_re");
+    let mut p1_re = select_char(&ctx_re, 81_013, "demo", "demo-secret", P1).await;
+    let re_all = quasar_rpc(&ctx_re, &mut p1_re, "eve_public.character.skill.plan.GetAllRequest", vec![]).await;
+    assert_eq!(re_all.status_code, STATUS_OK);
+    assert_eq!(extract_listed_uuids(&re_all.payload.expect("reloaded GetAll").value), vec![keep_uuid]);
+    let re_active = quasar_rpc(&ctx_re, &mut p1_re, "eve_public.character.skill.plan.GetActiveRequest", vec![]).await;
+    let re_act_wm = WireMessage::decode(&re_active.payload.expect("reloaded active").value).expect("wm");
+    let re_act_id = WireMessage::decode(re_act_wm.fields[0].value.as_bytes().expect("id")).expect("id");
+    assert_eq!(re_act_id.fields[0].value.as_bytes().expect("uuid"), &[0u8; 16]);
+}
