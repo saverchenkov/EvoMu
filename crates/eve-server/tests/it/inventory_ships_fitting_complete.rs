@@ -1943,6 +1943,9 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
         .unwrap_or(26561);
     seed_item(&ctx, wreck_id, wreck_tid, 90_000_002, sys_id as i64, InventoryFlag::None, 1, true);
     seed_item(&ctx, wreck_loot_id, 34, 90_000_002, wreck_id, InventoryFlag::Cargo, 500, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(wreck_id, [1_000.0, 0.0, 0.0]);
+    });
     let loot_rep = ctx
         .dispatch_rpc(
             &mut sess,

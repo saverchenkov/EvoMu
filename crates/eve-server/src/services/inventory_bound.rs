@@ -194,11 +194,15 @@ pub fn handle(
                         (has_cap, auth)
                     });
                     if has_inv && live_ok {
-                        let sys_handle = ctx.systems.get_or_spawn(sys_id);
                         let ship_id = session.ship_id.unwrap_or(0);
-                        let ship_pos = sys_handle.get_ball_position_sync(ship_id);
-                        let unit_pos = sys_handle.get_ball_position_sync(item_id);
-                        ship_pos.zip(unit_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+                        ctx.systems
+                            .get_or_spawn_if_runtime(sys_id)
+                            .and_then(|sys_handle| {
+                                let ship_pos = sys_handle.get_ball_position_sync(ship_id)?;
+                                let unit_pos = sys_handle.get_ball_position_sync(item_id)?;
+                                Some(ship_pos.distance(unit_pos) <= 5_000.0)
+                            })
+                            .unwrap_or(false)
                     } else {
                         false
                     }
@@ -239,12 +243,18 @@ pub fn handle(
             let foreign_ship_pos_pair = if docked.is_none() {
                 session.solar_system_id.and_then(|sys_id| {
                     let caller_ship = session.ship_id.unwrap_or(0);
+                    let ball_target = ctx
+                        .db
+                        .with_snapshot(|snap| {
+                            resolve_foreign_ship_bay_ball_target_in_snap(ctx, snap, char_id, item_id)
+                        })
+                        .unwrap_or(item_id);
                     ctx.systems
                         .get_or_spawn_if_runtime(sys_id)
                         .and_then(|sys_handle| {
                             sys_handle
                                 .get_ball_position_sync(caller_ship)
-                                .zip(sys_handle.get_ball_position_sync(item_id))
+                                .zip(sys_handle.get_ball_position_sync(ball_target))
                         })
                 })
             } else {
@@ -271,63 +281,18 @@ pub fn handle(
                         if !has_inventory {
                             return false;
                         }
-                        let is_foreign_ship_bay_reachable = t_opt.is_some_and(|t| {
-                            if t.category_id != 6 || it.owner_id == char_id {
-                                return false;
-                            }
-                            let has_sma = t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
-                            let has_fh = t.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0;
-                            if !has_sma && !has_fh {
-                                return false;
-                            }
-                            let acl_ok = (has_sma
-                                && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                                    snap, char_id, it.item_id, it.owner_id, true, None,
-                                ))
-                                || (has_fh
-                                    && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                                        snap, char_id, it.item_id, it.owner_id, false, None,
-                                    ))
-                                || {
-                                    let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-                                    st.ship_configs.get(&it.item_id).is_some_and(|cfg| {
-                                        let in_same_fleet = snap.fleets.values().any(|fl| fl.members.contains(&char_id) && fl.members.contains(&it.owner_id));
-                                        let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
-                                        let c2 = snap.characters.get(&it.owner_id).map(|c| c.corporation_id);
-                                        let same_corp = c1.is_some_and(|cid| cid > 0 && (cid == it.owner_id || c2 == Some(cid)));
-                                        cfg.password.as_deref().is_some_and(|p| !p.is_empty())
-                                            && ((has_sma && ((in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)))
-                                                || (has_fh && ((in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar))))
-                                    })
-                                };
-                            if !acl_ok {
-                                return false;
-                            }
-                            if docked.is_some() {
-                                at_location && it.location_id == hangar_loc_id
-                            } else if let Some(sys_id) = session.solar_system_id {
-                                if !at_location || it.location_id != i64::from(sys_id) {
-                                    return false;
-                                }
-                                let caller_ship = session.ship_id.unwrap_or(0);
-                                let ship_r = t.radius.max(0.0);
-                                let caller_r = snap.items.get(&caller_ship)
-                                    .and_then(|s| ctx.sde.types.get(&s.type_id))
-                                    .map(|ct| ct.radius.max(0.0))
-                                    .unwrap_or(0.0);
-                                let pos_pair = foreign_ship_pos_pair.or_else(|| {
-                                    snap.item_positions.get(&caller_ship)
-                                        .zip(snap.item_positions.get(&it.item_id))
-                                        .map(|(&a, &b)| (glam::DVec3::from(a), glam::DVec3::from(b)))
-                                });
-                                pos_pair
-                                    .map(|(a, b)| (a.distance(b) - ship_r - caller_r).max(0.0) <= 2_500.0)
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            }
-                        });
-                        if is_foreign_ship_bay_reachable {
+                        if is_foreign_ship_bay_or_nested_container_reachable_in_snap(
+                            ctx,
+                            snap,
+                            session,
+                            char_id,
+                            it,
+                            docked,
+                            at_location,
+                            hangar_loc_id,
+                            foreign_ship_pos_pair,
+                            false,
+                        ) {
                             return true;
                         }
                         let is_corp_owned = session
@@ -430,6 +395,136 @@ pub fn handle(
     }
 }
 
+fn resolve_foreign_ship_bay_ball_target_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item_id: i64,
+) -> Option<i64> {
+    let it = snap.items.get(&item_id)?;
+    let t = ctx.sde.types.get(&it.type_id)?;
+    if t.category_id == 6 && it.owner_id != char_id {
+        return Some(it.item_id);
+    }
+    if crate::services::fitting_containers_ships::is_container_group(t.group_id, it.type_id) {
+        let (host, _) = find_ship_bay_ancestor_in_snap(ctx, snap, it.location_id, it.flag as u16)?;
+        if host.owner_id != char_id {
+            return Some(host.item_id);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_foreign_ship_bay_or_nested_container_reachable_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    it: &eve_db::InventoryItemRecord,
+    docked: Option<i64>,
+    at_location: bool,
+    hangar_loc_id: i64,
+    foreign_ship_pos_pair: Option<(glam::DVec3, glam::DVec3)>,
+    allow_departed_location: bool,
+) -> bool {
+    let Some(t) = ctx.sde.types.get(&it.type_id) else {
+        return false;
+    };
+    let (host_ship, host_type, check_sma, check_fh) = if t.category_id == 6 && it.owner_id != char_id {
+        let has_sma = t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
+        let has_fh = t.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0;
+        if !has_sma && !has_fh {
+            return false;
+        }
+        (it, t, has_sma, has_fh)
+    } else if crate::services::fitting_containers_ships::is_container_group(t.group_id, it.type_id) {
+        let Some((host, entry_flag)) =
+            find_ship_bay_ancestor_in_snap(ctx, snap, it.location_id, it.flag as u16)
+        else {
+            return false;
+        };
+        if host.owner_id == char_id {
+            return false;
+        }
+        let Some(ht) = ctx.sde.types.get(&host.type_id) else {
+            return false;
+        };
+        let is_sma = matches!(entry_flag, 90 | 138);
+        let is_fh = entry_flag == 155;
+        let has_sma = is_sma && ht.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
+        let has_fh = is_fh && ht.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0;
+        if !has_sma && !has_fh {
+            return false;
+        }
+        (host, ht, has_sma, has_fh)
+    } else {
+        return false;
+    };
+
+    let acl_ok = session.has_gm_role()
+        || (check_sma
+            && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                snap, char_id, host_ship.item_id, host_ship.owner_id, true, None,
+            ))
+        || (check_fh
+            && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                snap, char_id, host_ship.item_id, host_ship.owner_id, false, None,
+            ))
+        || (it.item_id == host_ship.item_id && {
+            let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
+            st.ship_configs.get(&host_ship.item_id).is_some_and(|cfg| {
+                let in_same_fleet = snap
+                    .fleets
+                    .values()
+                    .any(|fl| fl.members.contains(&char_id) && fl.members.contains(&host_ship.owner_id));
+                let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
+                let c2 = snap.characters.get(&host_ship.owner_id).map(|c| c.corporation_id).or_else(|| {
+                    snap.corporations
+                        .contains_key(&host_ship.owner_id)
+                        .then_some(host_ship.owner_id)
+                });
+                let same_corp = c1.is_some_and(|cid| cid > 0 && (cid == host_ship.owner_id || c2 == Some(cid)));
+                cfg.password.as_deref().is_some_and(|p| !p.is_empty())
+                    && ((check_sma && ((in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)))
+                        || (check_fh
+                            && ((in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar))))
+            })
+        });
+    if !acl_ok {
+        return false;
+    }
+    if allow_departed_location {
+        return true;
+    }
+    if docked.is_some() {
+        at_location && host_ship.location_id == hangar_loc_id
+    } else if let Some(sys_id) = session.solar_system_id {
+        if !at_location || host_ship.location_id != i64::from(sys_id) {
+            return false;
+        }
+        let caller_ship = session.ship_id.unwrap_or(0);
+        let ship_r = host_type.radius.max(0.0);
+        let caller_r = snap
+            .items
+            .get(&caller_ship)
+            .and_then(|s| ctx.sde.types.get(&s.type_id))
+            .map(|ct| ct.radius.max(0.0))
+            .unwrap_or(0.0);
+        let pos_pair = foreign_ship_pos_pair.or_else(|| {
+            snap.item_positions
+                .get(&caller_ship)
+                .zip(snap.item_positions.get(&host_ship.item_id))
+                .map(|(&a, &b)| (glam::DVec3::from(a), glam::DVec3::from(b)))
+        });
+        pos_pair
+            .map(|(a, b)| (a.distance(b) - ship_r - caller_r).max(0.0) <= 2_500.0)
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
 /// The inventory row of the bound inventory's own item, in the `invbroker.List` row layout
 /// (`DBRowDescriptor::inv_item_header`).
 fn self_inv_item(
@@ -451,6 +546,46 @@ fn self_inv_item(
                 .is_some_and(|cid| cid > 0 && i.owner_id == cid)
     }) {
         return Ok(header.build_dbrow(item_to_packed_cells(ctx, &item)));
+    }
+    let docked = session.station_id.or(session.structure_id);
+    let foreign_ship_pos_pair = if docked.is_none() {
+        session.solar_system_id.and_then(|sys_id| {
+            let caller_ship = session.ship_id.unwrap_or(0);
+            let ball_target = ctx
+                .db
+                .with_snapshot(|snap| {
+                    resolve_foreign_ship_bay_ball_target_in_snap(ctx, snap, char_id, object_id)
+                })
+                .unwrap_or(object_id);
+            ctx.systems
+                .get_or_spawn_if_runtime(sys_id)
+                .and_then(|sys_handle| {
+                    sys_handle
+                        .get_ball_position_sync(caller_ship)
+                        .zip(sys_handle.get_ball_position_sync(ball_target))
+                })
+        })
+    } else {
+        None
+    };
+    if let Some(row) = ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&object_id)?;
+        let hangar_loc_id = docked.unwrap_or(0);
+        is_foreign_ship_bay_or_nested_container_reachable_in_snap(
+            ctx,
+            snap,
+            session,
+            char_id,
+            it,
+            docked,
+            true,
+            hangar_loc_id,
+            foreign_ship_pos_pair,
+            allow_departed_location,
+        )
+        .then(|| header.build_dbrow(item_to_packed_cells(ctx, it)))
+    }) {
+        return Ok(row);
     }
     if object_id == char_id {
         if let Some(row) = ctx.db.with_snapshot(|snap| {
@@ -984,26 +1119,99 @@ pub(crate) fn check_foreign_ship_bay_ancestor_chain_in_snap(
     Ok(authorized_foreign_ship)
 }
 
-/// Returns the destination ship's `owner_id` when depositing/moving into a ship's shared bay (`90 | 138 | 155`).
+/// Walks up to 8 container hops from `(start_loc, start_flag)` until hitting a ship (`category_id == 6`).
+/// Returns `Some((ship_record, bay_entry_flag))` iff the chain enters that ship through a shared bay (`90 | 138 | 155`).
+pub(crate) fn find_ship_bay_ancestor_in_snap<'a>(
+    ctx: &ServerContext,
+    snap: &'a eve_db::WorldStateSnapshot,
+    start_loc: i64,
+    start_flag: u16,
+) -> Option<(&'a eve_db::InventoryItemRecord, u16)> {
+    let mut cur_loc = start_loc;
+    let mut cur_flag = start_flag;
+    for _ in 0..8 {
+        let node = snap.items.get(&cur_loc)?;
+        if ctx
+            .sde
+            .types
+            .get(&node.type_id)
+            .is_some_and(|t| t.category_id == 6)
+        {
+            return matches!(cur_flag, 90 | 138 | 155).then_some((node, cur_flag));
+        }
+        cur_flag = node.flag as u16;
+        cur_loc = node.location_id;
+    }
+    None
+}
+
+/// Rejects actively piloted ships (`active_ship_id` for any character or disconnected hulls)
+/// and bare in-space objects (`location_id` is a solar system and not an Upwell structure).
+pub(crate) fn validate_movable_item_not_piloted_or_bare_space_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    item: &eve_db::InventoryItemRecord,
+    dest_loc: i64,
+    flag_u16: u16,
+) -> Result<(), BridgeRpcError> {
+    let is_caller_own_same_dock_ship_noop = !snap.items.contains_key(&dest_loc)
+        && !(116..=122).contains(&flag_u16)
+        && dest_loc > 0
+        && item.location_id == dest_loc
+        && snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|c| c.active_ship_id == item.item_id)
+        && snap
+            .characters
+            .values()
+            .all(|c| c.character_id == char_id || c.active_ship_id != item.item_id);
+    if snap.is_structure_controller_saved_ship(item.item_id)
+        || (!is_caller_own_same_dock_ship_noop
+            && snap.characters.values().any(|c| c.active_ship_id == item.item_id))
+        || snap
+            .sp6_lifecycle
+            .disconnected_ships
+            .values()
+            .any(|d| d.ship_id == item.item_id)
+    {
+        return Err(BridgeRpcError {
+            code: "CannotMoveActiveShip".into(),
+            message: format!("Cannot move piloted or active ship {} into {}", item.item_id, dest_loc),
+            client_error: None,
+        });
+    }
+    if (30_000_000..=39_999_999).contains(&item.location_id)
+        && !snap.structures.contains_key(&item.location_id)
+    {
+        let _ = flag_u16;
+        return Err(BridgeRpcError {
+            code: "InvalidLocation".into(),
+            message: format!(
+                "In-space item {} cannot be moved directly via invbroker (use StoreVessel/Scoop)",
+                item.item_id
+            ),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+/// Returns the host ship's `owner_id` when depositing/moving into a ship's shared bay (`90 | 138 | 155`)
+/// or into a container nested inside a ship's shared bay.
 pub(crate) fn ship_bay_target_owner_in_snap(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     new_loc: i64,
     flag_u16: u16,
 ) -> Option<i64> {
-    if !matches!(flag_u16, 90 | 138 | 155) {
-        return None;
-    }
-    let dest = snap.items.get(&new_loc)?;
-    let is_ship = ctx
-        .sde
-        .types
-        .get(&dest.type_id)
-        .is_some_and(|t| t.category_id == 6);
-    is_ship.then_some(dest.owner_id).filter(|&o| o > 0)
+    find_ship_bay_ancestor_in_snap(ctx, snap, new_loc, flag_u16)
+        .map(|(ship, _)| ship.owner_id)
+        .filter(|&o| o > 0)
 }
 
-/// Returns a foreign ship owner ID (`!= char_id`) when interacting directly with a foreign ship's shared bay (`90 | 138 | 155`).
+/// Returns a foreign ship owner ID (`!= char_id`) when interacting with a foreign ship's shared bay
+/// (`90 | 138 | 155`) or a container nested inside a foreign ship's shared bay.
 pub(crate) fn foreign_ship_owner_at_loc_in_snap(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -1011,16 +1219,9 @@ pub(crate) fn foreign_ship_owner_at_loc_in_snap(
     flag_u16: u16,
     char_id: i64,
 ) -> Option<i64> {
-    if !matches!(flag_u16, 90 | 138 | 155) {
-        return None;
-    }
-    let ship = snap.items.get(&loc_id)?;
-    let is_ship = ctx
-        .sde
-        .types
-        .get(&ship.type_id)
-        .is_some_and(|t| t.category_id == 6);
-    (is_ship && ship.owner_id > 0 && ship.owner_id != char_id).then_some(ship.owner_id)
+    find_ship_bay_ancestor_in_snap(ctx, snap, loc_id, flag_u16)
+        .map(|(ship, _)| ship.owner_id)
+        .filter(|&o| o > 0 && o != char_id)
 }
 
 /// Re-verifies source ownership, corporation take roles, container locks/passwords, and destination
@@ -1050,6 +1251,13 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             });
         }
     }
+    validate_movable_item_not_piloted_or_bare_space_in_snap(
+        snap,
+        char_id,
+        orig_item,
+        new_loc,
+        flag as u16,
+    )?;
     let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
     if st.alsc_locked_items.contains(&orig_item.item_id) {
         return Err(BridgeRpcError {
@@ -1393,7 +1601,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                 || (crate::services::fitting_containers_ships::is_container_group(
                     d_grp,
                     dest.type_id,
-                ) && in_space_container)
+                ) && (in_space_container || dst_foreign_ship_opt.is_some()))
                 || d_grp == 186
                 || (d_cat == 6
                     && matches!(flag as u16, 90 | 138 | 155)
@@ -1420,6 +1628,41 @@ pub(crate) fn is_inventory_location_colocated(
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
     start_loc: i64,
 ) -> bool {
+    is_inventory_location_colocated_impl(None, snap, session, ch, pre_balls, start_loc, true)
+}
+
+/// Strict SDE-aware variant of [`is_inventory_location_colocated`] for `invbroker.Add` / `MultiAdd`:
+/// rejects bare system-root locations when `allow_system_root == false`, fails closed if positions
+/// are missing, and checks edge-to-edge proximity (`<= 2_500m` ships/containers, `<= 5_000m` POS/structures).
+pub(crate) fn is_inventory_location_colocated_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+    start_loc: i64,
+    allow_system_root: bool,
+) -> bool {
+    is_inventory_location_colocated_impl(
+        Some(sde),
+        snap,
+        session,
+        ch,
+        pre_balls,
+        start_loc,
+        allow_system_root,
+    )
+}
+
+fn is_inventory_location_colocated_impl(
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+    start_loc: i64,
+    allow_system_root: bool,
+) -> bool {
     let ch_dock = if session.station_id.is_none()
         && session.structure_id.is_none()
         && session.solar_system_id.is_some()
@@ -1434,8 +1677,31 @@ pub(crate) fn is_inventory_location_colocated(
         session.solar_system_id.map(|s| s as i64).unwrap_or(0)
     };
     let caller_ship_id = session.ship_id.filter(|&id| id > 0).unwrap_or(ch.active_ship_id);
+    let radius_for = |id: i64| -> f64 {
+        pre_balls
+            .get(&id)
+            .map(|p| p.1)
+            .filter(|&r| r > 0.0)
+            .or_else(|| {
+                sde_opt.and_then(|sde| {
+                    snap.items
+                        .get(&id)
+                        .and_then(|it| sde.types.get(&it.type_id))
+                        .map(|t| t.radius)
+                        .or_else(|| {
+                            snap.structures
+                                .get(&id)
+                                .and_then(|st| sde.types.get(&st.type_id))
+                                .map(|t| t.radius)
+                        })
+                })
+            })
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
+    let caller_r = radius_for(caller_ship_id);
     let mut cur = start_loc;
-    for _ in 0..4 {
+    for _ in 0..8 {
         if ch_dock > 0 {
             if cur == ch_dock {
                 return true;
@@ -1446,7 +1712,7 @@ pub(crate) fn is_inventory_location_colocated(
             cur = node.location_id;
         } else if ch_sys > 0 {
             if cur == ch_sys {
-                return true;
+                return allow_system_root;
             }
             if let Some(st) = snap.structures.get(&cur) {
                 if st.solar_system_id as i64 == ch_sys {
@@ -1459,9 +1725,10 @@ pub(crate) fn is_inventory_location_colocated(
                         .map(|p| p.0)
                         .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from))
                         .or(Some(glam::DVec3::from_array(st.position)));
+                    let target_r = radius_for(cur);
                     return match (caller_pos, target_pos) {
-                        (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
-                        _ => true,
+                        (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= 5_000.0,
+                        _ => false,
                     };
                 }
             }
@@ -1480,9 +1747,14 @@ pub(crate) fn is_inventory_location_colocated(
                     .get(&cur)
                     .map(|p| p.0)
                     .or_else(|| snap.item_positions.get(&cur).copied().map(glam::DVec3::from));
+                let target_r = radius_for(cur);
+                let is_starbase_unit = sde_opt.is_some_and(|sde| {
+                    sde.types.get(&node.type_id).is_some_and(|t| t.category_id == 22)
+                });
+                let max_range = if is_starbase_unit { 5_000.0 } else { 2_500.0 };
                 return match (caller_pos, target_pos) {
-                    (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
-                    _ => true,
+                    (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= max_range,
+                    _ => false,
                 };
             }
             cur = node.location_id;
@@ -1494,7 +1766,55 @@ pub(crate) fn is_inventory_location_colocated(
 }
 
 /// Upwell structure fuel bay & destination reachability authorization helper for `MultiAdd`.
+#[allow(dead_code)]
 pub(crate) fn validate_multiadd_destination(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    char_id: i64,
+    new_loc: i64,
+    dest_is_struct_fuel: bool,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+) -> Result<(), BridgeRpcError> {
+    validate_multiadd_destination_impl(
+        None,
+        snap,
+        session,
+        ch,
+        char_id,
+        new_loc,
+        dest_is_struct_fuel,
+        pre_balls,
+    )
+}
+
+/// SDE-aware variant of [`validate_multiadd_destination`] rejecting bare system roots and using SDE radii.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_multiadd_destination_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    ch: &eve_db::CharacterRecord,
+    char_id: i64,
+    new_loc: i64,
+    dest_is_struct_fuel: bool,
+    pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
+) -> Result<(), BridgeRpcError> {
+    validate_multiadd_destination_impl(
+        Some(sde),
+        snap,
+        session,
+        ch,
+        char_id,
+        new_loc,
+        dest_is_struct_fuel,
+        pre_balls,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_multiadd_destination_impl(
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
     ch: &eve_db::CharacterRecord,
@@ -1533,7 +1853,14 @@ pub(crate) fn validate_multiadd_destination(
             ch.station_id.or(ch.structure_id).unwrap_or(0)
         };
         let dest_item_opt = snap.items.get(&new_loc);
-        let dst_reachable = is_inventory_location_colocated(snap, session, ch, pre_balls, new_loc)
+        let colocated = if let Some(sde) = sde_opt {
+            is_inventory_location_colocated_with_sde(
+                sde, snap, session, ch, pre_balls, new_loc, false,
+            )
+        } else {
+            is_inventory_location_colocated(snap, session, ch, pre_balls, new_loc)
+        };
+        let dst_reachable = colocated
             && (ch_dock == new_loc
                 || dest_item_opt.is_some_and(|d| {
                     d.owner_id == char_id

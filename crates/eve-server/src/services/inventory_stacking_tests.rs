@@ -1207,7 +1207,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .code,
         "CapacityExceeded"
     );
-    // Fleet Hangar (155) CapacityExceeded (50 m3 > 20 m3) and SMA (90) CapacityExceeded (ship > 100 m3)
+    // Fleet Hangar (155) NotEnoughSpecialBaySpace (50 m3 > 20 m3) and SMA (90) NotEnoughSpecialBaySpace (ship > 100 m3)
     assert_eq!(
         handle_multi_add(
             &ctx,
@@ -1219,7 +1219,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
     assert_eq!(
         handle_multi_add(
@@ -1232,7 +1232,7 @@ async fn group_2b_multi_add_validation_autofit_locks_and_capacity_guards() {
         .await
         .unwrap_err()
         .code,
-        "CapacityExceeded"
+        "NotEnoughSpecialBaySpace"
     );
 
     // Auto-fit guards: CannotMoveActiveShip (self onto self), InvalidFittingTarget (foreign ship), ItemNotFittableModule (ore), CannotRefitDamagedModule (damaged EHE), InvalidLocation (already fitted)

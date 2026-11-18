@@ -1601,7 +1601,8 @@ def _install_inventory_transition_guard():
                 except Exception as exc:
                     if not _is_user_error_exception(exc):
                         raise
-                    _present_user_error_dialog(exc, inv_mod=inv_mod)
+                    if not _present_user_error_dialog(exc, inv_mod=inv_mod):
+                        raise
                     return None
 
             _wrapped_move_items._evomu_camera_guard = True

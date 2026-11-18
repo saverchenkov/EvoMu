@@ -1953,3 +1953,1432 @@ async fn venture_station_hangar_and_active_cargo_capacity_for_issue_1301() {
     assert!((sz_kv["volume"] - 1.6).abs() < 1e-6);
     assert!((sz_kv["available"] - 0.0).abs() < 1e-6);
 }
+
+fn dbrow_i64(row: &PyRep, col: &str) -> Option<i64> {
+    let PyRep::DBRow { columns, .. } = row else {
+        return None;
+    };
+    columns
+        .iter()
+        .find(|(name, _)| name == col)
+        .and_then(|(_, val)| val.as_i64())
+}
+
+fn list_row_ids(rep: &PyRep) -> Vec<i64> {
+    let PyRep::ObjectEx { list, .. } = rep else {
+        panic!("expected ObjectEx rowset, got {rep:?}");
+    };
+    list.iter().filter_map(|r| dbrow_i64(r, "itemID")).collect()
+}
+
+fn install_r2_synthetic_types(ctx: &mut ServerContext) -> (u32, u32, u32, u32, u32, u32, u32) {
+    let carrier_tid = 999_670u32;
+    let hull_tid = 999_671u32;
+    let mod_tid = 999_672u32;
+    let rig_tid = 999_673u32;
+    let drone_tid = 999_674u32;
+    let charge_tid = 999_675u32;
+    let box_tid = 999_676u32;
+
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    let mut carrier = sde_mut.types[&587].clone();
+    carrier.type_id = carrier_tid;
+    carrier.group_id = 30;
+    carrier.category_id = 6;
+    carrier.name = "Synthetic R2 Titan".into();
+    carrier.radius = 9_500.0;
+    carrier.capacity = 5_000.0;
+    carrier.volume = 100_000_000.0;
+    carrier.default_attributes.insert(908, 120_000.0);
+    carrier.default_attributes.insert(912, 1_000.0);
+    sde_mut.types.insert(carrier_tid, carrier);
+
+    let mut hull = sde_mut.types[&587].clone();
+    hull.type_id = hull_tid;
+    hull.group_id = 25;
+    hull.category_id = 6;
+    hull.name = "Synthetic R2 Frigate".into();
+    hull.radius = 50.0;
+    hull.capacity = 500.0;
+    hull.volume = 50_000.0;
+    sde_mut.types.insert(hull_tid, hull);
+
+    let mut module = sde_mut.types[&34].clone();
+    module.type_id = mod_tid;
+    module.group_id = 53;
+    module.category_id = 7;
+    module.name = "Synthetic High Module".into();
+    module.volume = 5.0;
+    sde_mut.types.insert(mod_tid, module);
+
+    let mut rig = sde_mut.types[&34].clone();
+    rig.type_id = rig_tid;
+    rig.group_id = 773;
+    rig.category_id = 7;
+    rig.name = "Synthetic Rig".into();
+    rig.volume = 10.0;
+    sde_mut.types.insert(rig_tid, rig);
+
+    let mut drone = sde_mut.types[&34].clone();
+    drone.type_id = drone_tid;
+    drone.group_id = 100;
+    drone.category_id = 18;
+    drone.name = "Synthetic Drone".into();
+    drone.volume = 5.0;
+    sde_mut.types.insert(drone_tid, drone);
+
+    let mut charge = sde_mut.types[&34].clone();
+    charge.type_id = charge_tid;
+    charge.group_id = 83;
+    charge.category_id = 8;
+    charge.name = "Synthetic Charge".into();
+    charge.volume = 0.01;
+    sde_mut.types.insert(charge_tid, charge);
+
+    let mut cbox = sde_mut.types[&34].clone();
+    cbox.type_id = box_tid;
+    cbox.group_id = 12;
+    cbox.category_id = 2;
+    cbox.name = "Synthetic Bay Box".into();
+    cbox.capacity = 1_000.0;
+    cbox.volume = 100.0;
+    cbox.radius = 20.0;
+    sde_mut.types.insert(box_tid, cbox);
+
+    (carrier_tid, hull_tid, mod_tid, rig_tid, drone_tid, charge_tid, box_tid)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1290_r2_01_blocks_bare_space_and_piloted_ship_teleport_and_fails_closed() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::{DisconnectedShipEntry, FleetRecord};
+
+    let (mut ctx, mut ceo_sess, ceo_id, corp_id, station_id, _ceo_default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, _, _, _, _, _) = install_r2_synthetic_types(&mut ctx);
+    let sys_id = 30_000_142_i64;
+    let mate_id = 96_670_002_i64;
+    let ceo_carrier = 96_670_100_i64;
+    let mate_active_ship = 96_670_101_i64;
+    let disc_ship = 96_670_102_i64;
+    let space_spare_ship = 96_670_103_i64;
+    let foreign_space_carrier = 96_670_104_i64;
+    let foreign_space_trit = 96_670_105_i64;
+    let space_jetcan = 96_670_106_i64;
+    let jetcan_trit = 96_670_107_i64;
+    let jetcan_pyerite = 96_670_108_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&corp_id).unwrap().ceo_id = ceo_id;
+        snap.corporations.get_mut(&corp_id).unwrap().members.insert(mate_id);
+        snap.characters.get_mut(&ceo_id).unwrap().active_ship_id = ceo_carrier;
+
+        let mut mate = snap.characters[&ceo_id].clone();
+        mate.character_id = mate_id;
+        mate.user_id = 702;
+        mate.name = "CorpMateR2".into();
+        mate.corporation_id = corp_id;
+        mate.station_id = Some(station_id);
+        mate.structure_id = None;
+        mate.solar_system_id = sys_id as u32;
+        mate.active_ship_id = mate_active_ship;
+        snap.characters.insert(mate_id, mate);
+
+        snap.fleets.insert(
+            777_670,
+            FleetRecord {
+                fleet_id: 777_670,
+                boss_id: mate_id,
+                members: vec![ceo_id, mate_id],
+                ..Default::default()
+            },
+        );
+
+        snap.items.insert(ceo_carrier, mk_item(ceo_carrier, carrier_tid, ceo_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_active_ship, mk_item(mate_active_ship, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(disc_ship, mk_item(disc_ship, hull_tid, ceo_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.sp6_lifecycle.disconnected_ships.insert(
+            mate_id,
+            DisconnectedShipEntry {
+                char_id: mate_id,
+                ship_id: disc_ship,
+                ship_type_id: hull_tid,
+                solar_system_id: sys_id as u32,
+                disconnected_at_unix: 1_700_000_000,
+                remove_at_unix: 1_700_000_900,
+                emergency_warp_dest: None,
+                last_position: [0.0, 0.0, 0.0],
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+                pre_warp_position: None,
+            },
+        );
+        // Spare owned ship floating in bare space near the system origin, NOT inside any structure or bay.
+        snap.items.insert(space_spare_ship, mk_item(space_spare_ship, hull_tid, ceo_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.item_positions.insert(space_spare_ship, [100.0, 0.0, 0.0]);
+
+        // Foreign carrier in space with NO Ballpark or item_positions -> must fail closed.
+        snap.items.insert(foreign_space_carrier, mk_item(foreign_space_carrier, carrier_tid, mate_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(foreign_space_trit, mk_item(foreign_space_trit, 34, mate_id, foreign_space_carrier, InventoryFlag::FleetHangar, 10, false));
+        // Space jetcan WITH item_positions within 2,500m -> must still loot cleanly.
+        snap.items.insert(space_jetcan, mk_item(space_jetcan, 23, mate_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(jetcan_trit, mk_item(jetcan_trit, 34, mate_id, space_jetcan, InventoryFlag::Cargo, 10, false));
+        snap.items.insert(jetcan_pyerite, mk_item(jetcan_pyerite, 35, mate_id, space_jetcan, InventoryFlag::Cargo, 12, false));
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            foreign_space_carrier,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: true,
+                password: None,
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    ceo_sess.ship_id = Some(ceo_carrier);
+    ceo_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    let kw = HashMap::new();
+
+    // 1. Bare in-space spare ship cannot be teleported into docked carrier SMA via Add or MultiAdd.
+    assert_eq!(
+        call_add(&ctx, &mut ceo_sess, &[PyRep::Integer(space_spare_ship), PyRep::Integer(ceo_carrier), PyRep::Integer(90)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidLocation"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut ceo_sess,
+            None,
+            "invbroker",
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(space_spare_ship)]), PyRep::Integer(ceo_carrier), PyRep::Integer(90)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidLocation"
+    );
+
+    // 2. CEO/Director cannot abduct corpmate's actively piloted ship or a disconnected ship via Add or MultiAdd.
+    for protected_ship in [mate_active_ship, disc_ship] {
+        assert_eq!(
+            call_add(&ctx, &mut ceo_sess, &[PyRep::Integer(protected_ship), PyRep::Integer(ceo_carrier), PyRep::Integer(90)])
+                .await
+                .unwrap_err()
+                .code,
+            "CannotMoveActiveShip"
+        );
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut ceo_sess,
+                None,
+                "invbroker",
+                "MultiAdd",
+                &[PyRep::List(vec![PyRep::Integer(protected_ship)]), PyRep::Integer(ceo_carrier), PyRep::Integer(90)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CannotMoveActiveShip"
+        );
+    }
+
+    // 3. Undocked caller: missing Ballpark / item_positions on foreign_space_carrier fails closed on all invbroker paths.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&ceo_id).unwrap().station_id = None;
+        snap.items.get_mut(&ceo_carrier).unwrap().location_id = sys_id;
+        snap.item_positions.insert(ceo_carrier, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(space_jetcan, [400.0, 0.0, 0.0]);
+    });
+    ceo_sess.station_id = None;
+    let space_bound = BoundObjectEntry {
+        bound_id: 970,
+        session_id: ceo_sess.session_id,
+        user_id: ceo_id as u64,
+        character_id: ceo_id,
+        service: "invbroker".into(),
+        object_id: sys_id,
+        oid_str: format!("N=970:{sys_id}"),
+        ref_id: 1,
+    };
+    let foreign_bound = BoundObjectEntry {
+        bound_id: 971,
+        session_id: ceo_sess.session_id,
+        user_id: ceo_id as u64,
+        character_id: ceo_id,
+        service: "invbroker".into(),
+        object_id: foreign_space_carrier,
+        oid_str: format!("N=971:{foreign_space_carrier}"),
+        ref_id: 1,
+    };
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut ceo_sess,
+        Some(&space_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(foreign_space_carrier), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_err());
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut ceo_sess,
+        Some(&foreign_bound),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .is_err());
+    assert!(handle(&ctx, &mut ceo_sess, Some(&foreign_bound), "invbroker", "List", &[], &kw)
+        .await
+        .unwrap()
+        .is_err());
+    assert!(call_add(&ctx, &mut ceo_sess, &[PyRep::Integer(foreign_space_trit), PyRep::Integer(ceo_carrier), PyRep::Integer(5)])
+        .await
+        .is_err());
+    assert!(handle(
+        &ctx,
+        &mut ceo_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(foreign_space_trit)]), PyRep::Integer(ceo_carrier), PyRep::Integer(5)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_err());
+
+    // 4. Jetcan WITH item_positions within 2,500m loots cleanly via both Add and MultiAdd.
+    call_add(&ctx, &mut ceo_sess, &[PyRep::Integer(jetcan_trit), PyRep::Integer(ceo_carrier), PyRep::Integer(5)])
+        .await
+        .expect("Add loot from nearby jetcan must succeed");
+    handle(
+        &ctx,
+        &mut ceo_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(jetcan_pyerite)]), PyRep::Integer(ceo_carrier), PyRep::Integer(5)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd loot from nearby jetcan must succeed");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&jetcan_trit].location_id, ceo_carrier);
+        assert_eq!(snap.items[&jetcan_pyerite].location_id, ceo_carrier);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1290_r2_02_recursive_sma_owner_transfer_and_nested_bay_containers() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, owner_sess, owner_id, _owner_corp, station_id, _default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, mod_tid, rig_tid, drone_tid, charge_tid, box_tid) =
+        install_r2_synthetic_types(&mut ctx);
+    let mate_id = 96_671_002_i64;
+    let stranger_id = 96_671_003_i64;
+    let owner_carrier = 96_671_100_i64;
+    let mate_ship = 96_671_101_i64;
+    let stored_hull = 96_671_102_i64;
+    let fitted_mod = 96_671_103_i64;
+    let fitted_rig = 96_671_104_i64;
+    let stored_drone = 96_671_105_i64;
+    let stored_charge = 96_671_106_i64;
+    let fh_box = 96_671_110_i64;
+    let fh_box_existing = 96_671_111_i64;
+    let mate_box_trit = 96_671_112_i64;
+    let mate_box_pyerite = 96_671_113_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().active_ship_id = owner_carrier;
+        for (cid, uid, name, active_ship) in [
+            (mate_id, 711_u64, "FleetMateA", mate_ship),
+            (stranger_id, 712_u64, "StrangerA", 96_671_199_i64),
+        ] {
+            let mut ch = snap.characters[&owner_id].clone();
+            ch.character_id = cid;
+            ch.user_id = uid;
+            ch.name = name.into();
+            ch.corporation_id = 98_671_000 + cid;
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.active_ship_id = active_ship;
+            snap.characters.insert(cid, ch);
+        }
+        snap.fleets.insert(
+            777_671,
+            FleetRecord {
+                fleet_id: 777_671,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(owner_carrier, mk_item(owner_carrier, carrier_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk_item(mate_ship, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(stored_hull, mk_item(stored_hull, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(fitted_mod, mk_item(fitted_mod, mod_tid, mate_id, stored_hull, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(fitted_rig, mk_item(fitted_rig, rig_tid, mate_id, stored_hull, InventoryFlag::RigSlot0, 1, true));
+        snap.items.insert(stored_drone, mk_item(stored_drone, drone_tid, mate_id, stored_hull, InventoryFlag::DroneBay, 2, false));
+        snap.items.insert(stored_charge, mk_item(stored_charge, charge_tid, mate_id, stored_hull, InventoryFlag::Cargo, 50, false));
+        snap.items.insert(fh_box, mk_item(fh_box, box_tid, owner_id, owner_carrier, InventoryFlag::FleetHangar, 1, true));
+        snap.items.insert(fh_box_existing, mk_item(fh_box_existing, charge_tid, owner_id, fh_box, InventoryFlag::Cargo, 7, false));
+        snap.items.insert(mate_box_trit, mk_item(mate_box_trit, 34, mate_id, station_id, InventoryFlag::Hangar, 9, false));
+        snap.items.insert(mate_box_pyerite, mk_item(mate_box_pyerite, 35, mate_id, station_id, InventoryFlag::Hangar, 11, false));
+    });
+    let now_ts = ctx.now_unix();
+    let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
+    let _ = ctx.db.acquire_online_lock(owner_uid, 2001, Some(owner_id), true, now_ts);
+    let _ = ctx.db.acquire_online_lock(711, 2002, Some(mate_id), true, now_ts);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_carrier,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-pw".into()),
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut owner_live_sess = owner_sess;
+    owner_live_sess.ship_id = Some(owner_carrier);
+    let mut mate_sess = SessionState::new(3);
+    mate_sess.user_id = Some(711);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(98_671_000 + mate_id);
+    mate_sess.station_id = Some(station_id);
+    mate_sess.solar_system_id = Some(30_000_142);
+    mate_sess.ship_id = Some(mate_ship);
+
+    let mut stranger_sess = SessionState::new(4);
+    stranger_sess.user_id = Some(712);
+    stranger_sess.character_id = Some(stranger_id);
+    stranger_sess.corporation_id = Some(98_671_000 + stranger_id);
+    stranger_sess.station_id = Some(station_id);
+    stranger_sess.solar_system_id = Some(30_000_142);
+    stranger_sess.ship_id = Some(96_671_199);
+
+    let kw = HashMap::new();
+    let mate_station_bound = BoundObjectEntry {
+        bound_id: 972,
+        session_id: mate_sess.session_id,
+        user_id: 711,
+        character_id: mate_id,
+        service: "invbroker".into(),
+        object_id: station_id,
+        oid_str: format!("N=972:{station_id}"),
+        ref_id: 1,
+    };
+    let mate_box_bound = BoundObjectEntry {
+        bound_id: 973,
+        session_id: mate_sess.session_id,
+        user_id: 711,
+        character_id: mate_id,
+        service: "invbroker".into(),
+        object_id: fh_box,
+        oid_str: format!("N=973:{fh_box}"),
+        ref_id: 1,
+    };
+    let owner_stored_ship_bound = BoundObjectEntry {
+        bound_id: 974,
+        session_id: owner_live_sess.session_id,
+        user_id: owner_uid,
+        character_id: owner_id,
+        service: "invbroker".into(),
+        object_id: stored_hull,
+        oid_str: format!("N=974:{stored_hull}"),
+        ref_id: 1,
+    };
+
+    // 1. Nested container inside locked foreign FleetHangar rejects BEFORE password unlock.
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut mate_sess,
+        Some(&mate_station_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(fh_box), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_err());
+    assert_eq!(
+        call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_box_trit), PyRep::Integer(fh_box), PyRep::Integer(5)])
+            .await
+            .unwrap_err()
+            .code,
+        "FleetHangarAccessDenied"
+    );
+
+    // 2. Positional password in Add unlocks the ancestor bay, moves into fh_box, sets owner_id = owner_id, and notifies owner_id.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    call_add(
+        &ctx,
+        &mut mate_sess,
+        &[PyRep::Integer(mate_box_trit), PyRep::Integer(fh_box), PyRep::Integer(5), PyRep::String("bay-pw".into())],
+    )
+    .await
+    .expect("Add into nested FleetHangar box with positional password");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mate_box_trit].location_id, fh_box);
+        assert_eq!(snap.items[&mate_box_trit].owner_id, owner_id);
+    });
+    assert!(ctx.drain_notifications_for_char(owner_id).iter().any(|n| {
+        n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(mate_box_trit)
+    }));
+
+    // 3. After unlock: GetInventoryFromId(fh_box), GetSelfInvItem(fh_box), and List(fh_box) succeed for mate_id; MultiAdd also transfers owner_id & notifies.
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut mate_sess,
+        Some(&mate_station_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(fh_box), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_ok());
+    let self_item = crate::services::inventory_bound::handle(
+        &ctx,
+        &mut mate_sess,
+        Some(&mate_box_bound),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .expect("GetSelfInvItem on nested box inside unlocked foreign FleetHangar");
+    assert_eq!(dbrow_i64(&self_item, "itemID"), Some(fh_box));
+    let listed = list_row_ids(
+        &handle(&ctx, &mut mate_sess, Some(&mate_box_bound), "invbroker", "List", &[], &kw)
+            .await
+            .unwrap()
+            .expect("List on nested box inside unlocked foreign FleetHangar"),
+    );
+    assert!(listed.contains(&fh_box_existing));
+    assert!(listed.contains(&mate_box_trit));
+
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(mate_box_pyerite)]),
+            PyRep::Integer(fh_box),
+            PyRep::Integer(5),
+            PyRep::String("bay-pw".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd into nested FleetHangar box");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&mate_box_pyerite].owner_id, owner_id);
+        assert_eq!(snap.items[&mate_box_pyerite].location_id, fh_box);
+    });
+    assert!(ctx.drain_notifications_for_char(owner_id).iter().any(|n| {
+        n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(mate_box_pyerite)
+    }));
+
+    // Stranger is always rejected on nested box even after fleetmate unlocked it.
+    let stranger_station_bound = BoundObjectEntry {
+        bound_id: 975,
+        session_id: stranger_sess.session_id,
+        user_id: 712,
+        character_id: stranger_id,
+        service: "invbroker".into(),
+        object_id: station_id,
+        oid_str: format!("N=975:{station_id}"),
+        ref_id: 1,
+    };
+    let stranger_box_bound = BoundObjectEntry {
+        bound_id: 976,
+        session_id: stranger_sess.session_id,
+        user_id: 712,
+        character_id: stranger_id,
+        service: "invbroker".into(),
+        object_id: fh_box,
+        oid_str: format!("N=976:{fh_box}"),
+        ref_id: 1,
+    };
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut stranger_sess,
+        Some(&stranger_station_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(fh_box), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_err());
+    assert!(handle(&ctx, &mut stranger_sess, Some(&stranger_box_bound), "invbroker", "List", &[], &kw)
+        .await
+        .unwrap()
+        .is_err());
+
+    // 4. Deposit fitted hull into foreign SMA (positional password): hull + fitted mod + rig + drone + charge ALL transfer to owner_id,
+    //    notify owner_id via OnItemChange, and appear in owner_id's List on stored_hull; extracting back transfers all to mate_id.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    call_add(
+        &ctx,
+        &mut mate_sess,
+        &[PyRep::Integer(stored_hull), PyRep::Integer(owner_carrier), PyRep::Integer(90), PyRep::String("bay-pw".into())],
+    )
+    .await
+    .expect("deposit fitted ship into foreign SMA with positional password");
+    ctx.db.with_snapshot(|snap| {
+        for &id in &[stored_hull, fitted_mod, fitted_rig, stored_drone, stored_charge] {
+            assert_eq!(snap.items[&id].owner_id, owner_id, "child {id} must transfer owner to ship owner");
+        }
+    });
+    let owner_notifs = ctx.drain_notifications_for_char(owner_id);
+    for &id in &[stored_hull, fitted_mod, fitted_rig, stored_drone, stored_charge] {
+        assert!(
+            owner_notifs
+                .iter()
+                .any(|n| n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(id)),
+            "expected OnItemChange for child item {id}"
+        );
+    }
+    let owner_ship_contents = list_row_ids(
+        &handle(&ctx, &mut owner_live_sess, Some(&owner_stored_ship_bound), "invbroker", "List", &[], &kw)
+            .await
+            .unwrap()
+            .expect("carrier owner List on SMA-stored ship"),
+    );
+    for &id in &[fitted_mod, fitted_rig, stored_drone, stored_charge] {
+        assert!(owner_ship_contents.contains(&id), "owner List missing {id}");
+    }
+
+    call_add(
+        &ctx,
+        &mut mate_sess,
+        &[PyRep::Integer(stored_hull), PyRep::Integer(station_id), PyRep::Integer(4)],
+    )
+    .await
+    .expect("extract fitted ship back from unlocked SMA");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&stored_hull].location_id, station_id);
+        for &id in &[stored_hull, fitted_mod, fitted_rig, stored_drone, stored_charge] {
+            assert_eq!(snap.items[&id].owner_id, mate_id, "extracted {id} must transfer owner back to mate");
+        }
+    });
+}
+
+#[test]
+fn bf_1290_r2_03_space_titan_surface_range_self_inv_item_and_no_tokio_panic() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, _owner_sess, owner_id, _owner_corp, _station_id, _default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, _, _, _, _, box_tid) = install_r2_synthetic_types(&mut ctx);
+    let sys_id = 30_000_142_i64;
+    let mate_id = 96_672_002_i64;
+    let owner_titan = 96_672_100_i64;
+    let mate_ship = 96_672_101_i64;
+    let titan_fh_box = 96_672_102_i64;
+    let titan_fh_trit = 96_672_103_i64;
+    let box_trit = 96_672_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().station_id = None;
+        snap.characters.get_mut(&owner_id).unwrap().active_ship_id = owner_titan;
+
+        let mut mate = snap.characters[&owner_id].clone();
+        mate.character_id = mate_id;
+        mate.user_id = 722;
+        mate.name = "SpaceMate".into();
+        mate.corporation_id = 98_672_002;
+        mate.station_id = None;
+        mate.structure_id = None;
+        mate.solar_system_id = sys_id as u32;
+        mate.active_ship_id = mate_ship;
+        snap.characters.insert(mate_id, mate);
+
+        snap.fleets.insert(
+            777_672,
+            FleetRecord {
+                fleet_id: 777_672,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+
+        snap.items.insert(owner_titan, mk_item(owner_titan, carrier_tid, owner_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk_item(mate_ship, hull_tid, mate_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(titan_fh_trit, mk_item(titan_fh_trit, 34, owner_id, owner_titan, InventoryFlag::FleetHangar, 15, false));
+        snap.items.insert(titan_fh_box, mk_item(titan_fh_box, box_tid, owner_id, owner_titan, InventoryFlag::FleetHangar, 1, true));
+        snap.items.insert(box_trit, mk_item(box_trit, 34, owner_id, titan_fh_box, InventoryFlag::Cargo, 18, false));
+
+        // Titan radius = 9,500m, mate frigate radius = 50m -> center dist 11,500m => surface dist 1,950m (<= 2,500m).
+        snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_titan,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: None,
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut mate_sess = SessionState::new(5);
+    mate_sess.user_id = Some(722);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(98_672_002);
+    mate_sess.solar_system_id = Some(sys_id as u32);
+    mate_sess.ship_id = Some(mate_ship);
+
+    let kw = HashMap::new();
+    let space_bound = BoundObjectEntry {
+        bound_id: 980,
+        session_id: mate_sess.session_id,
+        user_id: 722,
+        character_id: mate_id,
+        service: "invbroker".into(),
+        object_id: sys_id,
+        oid_str: format!("N=980:{sys_id}"),
+        ref_id: 1,
+    };
+    let titan_bound = BoundObjectEntry {
+        bound_id: 981,
+        session_id: mate_sess.session_id,
+        user_id: 722,
+        character_id: mate_id,
+        service: "invbroker".into(),
+        object_id: owner_titan,
+        oid_str: format!("N=981:{owner_titan}"),
+        ref_id: 1,
+    };
+    let box_bound = BoundObjectEntry {
+        bound_id: 982,
+        session_id: mate_sess.session_id,
+        user_id: 722,
+        character_id: mate_id,
+        service: "invbroker".into(),
+        object_id: titan_fh_box,
+        oid_str: format!("N=982:{titan_fh_box}"),
+        ref_id: 1,
+    };
+
+    // Synchronous test outside Tokio runtime: none of GetInventoryFromId / GetSelfInvItem / handle_list panic,
+    // and all succeed at 1,950m surface distance (11,500m center distance > 2,500m!).
+    for target in [owner_titan, titan_fh_box] {
+        assert!(
+            crate::services::inventory_bound::handle(
+                &ctx,
+                &mate_sess,
+                Some(&space_bound),
+                "invbroker",
+                "GetInventoryFromId",
+                &[PyRep::Integer(target), PyRep::Integer(0)],
+                None,
+            )
+            .unwrap()
+            .is_ok(),
+            "GetInventoryFromId({target}) must succeed at 1,950m surface range without Tokio runtime"
+        );
+    }
+    let titan_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&titan_bound), "invbroker", "GetSelfInvItem", &[], None)
+        .unwrap()
+        .expect("GetSelfInvItem on foreign Titan");
+    assert_eq!(dbrow_i64(&titan_row, "itemID"), Some(owner_titan));
+    let box_row = crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[], None)
+        .unwrap()
+        .expect("GetSelfInvItem on nested box inside foreign Titan");
+    assert_eq!(dbrow_i64(&box_row, "itemID"), Some(titan_fh_box));
+
+    assert!(list_row_ids(
+        &crate::services::inventory_stacking::handle_list(&ctx, &mate_sess, Some(&titan_bound), &[], &kw)
+            .expect("sync handle_list on in-space Titan")
+    )
+    .contains(&titan_fh_trit));
+    assert!(list_row_ids(
+        &crate::services::inventory_stacking::handle_list(&ctx, &mate_sess, Some(&box_bound), &[], &kw)
+            .expect("sync handle_list on nested box inside Titan")
+    )
+    .contains(&box_trit));
+
+    // Move Titan out to 12,100m center => 2,550m surface distance (> 2,500m) -> all reject cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_titan, [12_100.0, 0.0, 0.0]);
+    });
+    assert_eq!(
+        crate::services::inventory_bound::handle(
+            &ctx,
+            &mate_sess,
+            Some(&space_bound),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(owner_titan), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
+    assert!(
+        crate::services::inventory_bound::handle(&ctx, &mate_sess, Some(&box_bound), "invbroker", "GetSelfInvItem", &[], None)
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        crate::services::inventory_stacking::handle_list(&ctx, &mate_sess, Some(&titan_bound), &[], &kw)
+            .unwrap_err()
+            .code,
+        "OutOfRange"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1290_r2_03_space_titan_surface_range_add_and_multiadd() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, _owner_sess, owner_id, _owner_corp, _station_id, _default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, _, _, _, _, _) = install_r2_synthetic_types(&mut ctx);
+    let sys_id = 30_000_142_i64;
+    let mate_id = 96_672_202_i64;
+    let owner_titan = 96_672_210_i64;
+    let mate_ship = 96_672_211_i64;
+    let mate_trit_1 = 96_672_212_i64;
+    let mate_trit_2 = 96_672_213_i64;
+    let mate_trit_far = 96_672_214_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().station_id = None;
+        snap.characters.get_mut(&owner_id).unwrap().active_ship_id = owner_titan;
+        let mut mate = snap.characters[&owner_id].clone();
+        mate.character_id = mate_id;
+        mate.user_id = 723;
+        mate.name = "SpaceMover".into();
+        mate.corporation_id = 98_672_202;
+        mate.station_id = None;
+        mate.structure_id = None;
+        mate.solar_system_id = sys_id as u32;
+        mate.active_ship_id = mate_ship;
+        snap.characters.insert(mate_id, mate);
+        snap.fleets.insert(
+            777_673,
+            FleetRecord {
+                fleet_id: 777_673,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(owner_titan, mk_item(owner_titan, carrier_tid, owner_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk_item(mate_ship, hull_tid, mate_id, sys_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_trit_1, mk_item(mate_trit_1, 34, mate_id, mate_ship, InventoryFlag::Cargo, 5, false));
+        snap.items.insert(mate_trit_2, mk_item(mate_trit_2, 35, mate_id, mate_ship, InventoryFlag::Cargo, 5, false));
+        snap.items.insert(mate_trit_far, mk_item(mate_trit_far, 36, mate_id, mate_ship, InventoryFlag::Cargo, 5, false));
+        snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_titan,
+            ShipAccessConfig {
+                allow_fleet_smb: false,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: None,
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+    let mut mate_sess = SessionState::new(6);
+    mate_sess.user_id = Some(723);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(98_672_202);
+    mate_sess.solar_system_id = Some(sys_id as u32);
+    mate_sess.ship_id = Some(mate_ship);
+    let kw = HashMap::new();
+
+    // 1,950m surface distance succeeds on Add & MultiAdd into foreign Titan FleetHangar.
+    call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_trit_1), PyRep::Integer(owner_titan), PyRep::Integer(155)])
+        .await
+        .expect("Add within 2,500m Titan surface distance");
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(mate_trit_2)]), PyRep::Integer(owner_titan), PyRep::Integer(155)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd within 2,500m Titan surface distance");
+
+    // 2,550m surface distance rejects cleanly on both Add & MultiAdd.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_titan, [12_100.0, 0.0, 0.0]);
+    });
+    assert!(call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_trit_far), PyRep::Integer(owner_titan), PyRep::Integer(155)])
+        .await
+        .is_err());
+    assert!(handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(mate_trit_far)]), PyRep::Integer(owner_titan), PyRep::Integer(155)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1290_r2_04_multiadd_sma_rules_positional_pw_and_split_notify() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, _owner_sess, owner_id, _owner_corp, station_id, _default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, _, _, _, _, _) = install_r2_synthetic_types(&mut ctx);
+    let mate_id = 96_673_002_i64;
+    let owner_carrier = 96_673_100_i64;
+    let mate_ship = 96_673_101_i64;
+    let owner_fh_trit = 96_673_102_i64;
+    let mate_trit_pw = 96_673_103_i64;
+    let unpackaged_hull = 96_673_104_i64;
+    let loaded_hull = 96_673_105_i64;
+    let loaded_cargo = 96_673_106_i64;
+    let hull_a = 96_673_107_i64;
+    let hull_b = 96_673_108_i64;
+    let hull_c = 96_673_109_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().active_ship_id = owner_carrier;
+        let mut mate = snap.characters[&owner_id].clone();
+        mate.character_id = mate_id;
+        mate.user_id = 732;
+        mate.name = "MateR204".into();
+        mate.corporation_id = 98_673_002;
+        mate.station_id = Some(station_id);
+        mate.structure_id = None;
+        mate.active_ship_id = mate_ship;
+        snap.characters.insert(mate_id, mate);
+        snap.fleets.insert(
+            777_674,
+            FleetRecord {
+                fleet_id: 777_674,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(owner_carrier, mk_item(owner_carrier, carrier_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk_item(mate_ship, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(owner_fh_trit, mk_item(owner_fh_trit, 34, owner_id, owner_carrier, InventoryFlag::FleetHangar, 20, false));
+        snap.items.insert(mate_trit_pw, mk_item(mate_trit_pw, 34, mate_id, station_id, InventoryFlag::Hangar, 5, false));
+        snap.items.insert(unpackaged_hull, mk_item(unpackaged_hull, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, false));
+        snap.items.insert(loaded_hull, mk_item(loaded_hull, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(loaded_cargo, mk_item(loaded_cargo, 34, mate_id, loaded_hull, InventoryFlag::Cargo, 5, false));
+        // carrier SMA capacity is 120,000 m3 and hull_tid is 50,000 m3 -> 2 hulls fit (100k), 3 hulls overflow (150k > 120k)!
+        snap.items.insert(hull_a, mk_item(hull_a, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(hull_b, mk_item(hull_b, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(hull_c, mk_item(hull_c, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+    });
+    let now_ts = ctx.now_unix();
+    let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
+    let _ = ctx.db.acquire_online_lock(owner_uid, 2005, Some(owner_id), true, now_ts);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_carrier,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-pw".into()),
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut mate_sess = SessionState::new(7);
+    mate_sess.user_id = Some(732);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(98_673_002);
+    mate_sess.station_id = Some(station_id);
+    mate_sess.solar_system_id = Some(30_000_142);
+    mate_sess.ship_id = Some(mate_ship);
+    let kw = HashMap::new();
+
+    // 1. MultiAdd into SMA enforces non-ship, unpackaged, non-charge cargo, and batch capacity checks (positional pw accepted).
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(mate_trit_pw)]), PyRep::Integer(owner_carrier), PyRep::Integer(90), PyRep::String("bay-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotStoreCargoInSMA"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(unpackaged_hull)]), PyRep::Integer(owner_carrier), PyRep::Integer(90), PyRep::String("bay-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OnlyAssembledShipsInSMA"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "MultiAdd",
+            &[PyRep::List(vec![PyRep::Integer(loaded_hull)]), PyRep::Integer(owner_carrier), PyRep::Integer(90), PyRep::String("bay-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ShipHasNonChargeCargo"
+    );
+    let overflow_err = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(hull_a), PyRep::Integer(hull_b), PyRep::Integer(hull_c)]),
+            PyRep::Integer(owner_carrier),
+            PyRep::Integer(90),
+            PyRep::String("bay-pw".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let (ov_key, ov_kv) = decode_user_error(&overflow_err);
+    assert_eq!(ov_key, "NotEnoughSpecialBaySpace");
+    assert_eq!(ov_kv.get("volume").copied(), Some(150_000.0));
+    assert_eq!(ov_kv.get("available").copied(), Some(120_000.0));
+
+    // Positional password works on MultiAdd into SMA when batch fits (2 * 50,000 <= 120,000), setting custom flag 90 & owner_id.
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[
+            PyRep::List(vec![PyRep::Integer(hull_a), PyRep::Integer(hull_b)]),
+            PyRep::Integer(owner_carrier),
+            PyRep::Integer(90),
+            PyRep::String("bay-pw".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd batch into SMA with positional password");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&hull_a].flag, InventoryFlag::ShipHangar);
+        assert_eq!(snap.items[&hull_a].owner_id, owner_id);
+        assert_eq!(snap.items[&hull_b].flag, InventoryFlag::ShipHangar);
+        assert_eq!(snap.items[&hull_b].owner_id, owner_id);
+    });
+
+    // 2. Split-extraction from foreign FleetHangar notifies owner_id ONLY for orig (qty 20->14) and NEVER for mate's new station stack.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    let mut split_kw = HashMap::new();
+    split_kw.insert("qty".into(), PyRep::Integer(6));
+    let split_rep = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(owner_fh_trit), PyRep::Integer(station_id), PyRep::Integer(4)],
+        &split_kw,
+    )
+    .await
+    .unwrap()
+    .expect("split extraction from unlocked foreign FleetHangar");
+    let new_split_id = split_rep.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    assert_ne!(new_split_id, owner_fh_trit);
+
+    let owner_notifs = ctx.drain_notifications_for_char(owner_id);
+    assert!(
+        owner_notifs
+            .iter()
+            .any(|n| n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(owner_fh_trit)),
+        "ship owner must be notified when original FleetHangar stack quantity shrinks"
+    );
+    assert!(
+        !owner_notifs.iter().any(|n| {
+            (n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(new_split_id))
+                || (n.event == "ProcessInventoryChange" && n.args.first().and_then(|v| v.as_i64()) == Some(new_split_id))
+        }),
+        "ship owner must NOT receive OnItemChange or ProcessInventoryChange for mate's private extracted stack {new_split_id}: {owner_notifs:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bf_1290_r3_split_stack_and_multiadd_recursive_owner_invariants() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, _owner_sess, owner_id, _owner_corp, station_id, _default_ship) = setup_inv_ctx();
+    let (carrier_tid, hull_tid, mod_tid, rig_tid, drone_tid, charge_tid, box_tid) =
+        install_r2_synthetic_types(&mut ctx);
+    let sys_id = 30_000_142_i64;
+    let mate_id = 96_674_002_i64;
+    let owner_titan = 96_674_100_i64;
+    let mate_ship = 96_674_101_i64;
+    let docked_fh_trit = 96_674_102_i64;
+    let docked_cargo_trit = 96_674_103_i64;
+    let mate_hangar_trit = 96_674_104_i64;
+    let fitted_hull = 96_674_105_i64;
+    let hull_mod = 96_674_106_i64;
+    let hull_rig = 96_674_107_i64;
+    let hull_drone = 96_674_108_i64;
+    let hull_charge = 96_674_109_i64;
+    let packed_box = 96_674_110_i64;
+    let box_trit = 96_674_111_i64;
+    let bare_space_trit = 96_674_112_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&owner_id).unwrap().active_ship_id = owner_titan;
+        let mut mate = snap.characters[&owner_id].clone();
+        mate.character_id = mate_id;
+        mate.user_id = 742;
+        mate.name = "MateSplitR3".into();
+        mate.corporation_id = 98_674_002;
+        mate.station_id = Some(station_id);
+        mate.structure_id = None;
+        mate.solar_system_id = sys_id as u32;
+        mate.active_ship_id = mate_ship;
+        snap.characters.insert(mate_id, mate);
+        snap.fleets.insert(
+            777_675,
+            FleetRecord {
+                fleet_id: 777_675,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(owner_titan, mk_item(owner_titan, carrier_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_ship, mk_item(mate_ship, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(docked_fh_trit, mk_item(docked_fh_trit, 34, owner_id, owner_titan, InventoryFlag::FleetHangar, 30, false));
+        snap.items.insert(docked_cargo_trit, mk_item(docked_cargo_trit, 34, owner_id, owner_titan, InventoryFlag::Cargo, 30, false));
+        snap.items.insert(mate_hangar_trit, mk_item(mate_hangar_trit, 34, mate_id, station_id, InventoryFlag::Hangar, 20, false));
+        snap.items.insert(fitted_hull, mk_item(fitted_hull, hull_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(hull_mod, mk_item(hull_mod, mod_tid, mate_id, fitted_hull, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(hull_rig, mk_item(hull_rig, rig_tid, mate_id, fitted_hull, InventoryFlag::RigSlot0, 1, true));
+        snap.items.insert(hull_drone, mk_item(hull_drone, drone_tid, mate_id, fitted_hull, InventoryFlag::DroneBay, 2, false));
+        snap.items.insert(hull_charge, mk_item(hull_charge, charge_tid, mate_id, fitted_hull, InventoryFlag::Cargo, 25, false));
+        snap.items.insert(packed_box, mk_item(packed_box, box_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(box_trit, mk_item(box_trit, 34, mate_id, packed_box, InventoryFlag::Cargo, 15, false));
+        snap.items.insert(bare_space_trit, mk_item(bare_space_trit, 34, mate_id, sys_id, InventoryFlag::Hangar, 10, false));
+    });
+    let now_ts = ctx.now_unix();
+    let owner_uid = ctx.db.with_snapshot(|s| s.characters[&owner_id].user_id);
+    let _ = ctx.db.acquire_online_lock(owner_uid, 2010, Some(owner_id), true, now_ts);
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_titan,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-pw".into()),
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut mate_sess = SessionState::new(8);
+    mate_sess.user_id = Some(742);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(98_674_002);
+    mate_sess.station_id = Some(station_id);
+    mate_sess.solar_system_id = Some(sys_id as u32);
+    mate_sess.ship_id = Some(mate_ship);
+    let kw = HashMap::new();
+
+    // 1. Private station SplitStack emits caller-only notifications (never notifies owner_id).
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    let priv_split = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(station_id), PyRep::Integer(mate_hangar_trit), PyRep::Integer(5)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("private station SplitStack");
+    let priv_new_id = priv_split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap();
+    assert!(ctx.drain_notifications_for_char(owner_id).is_empty(), "private split must notify caller only");
+    assert_eq!(ctx.db.get_item(priv_new_id).unwrap().owner_id, mate_id);
+
+    // 2. Docked foreign FleetHangar SplitStack rejects without password and never touches foreign Cargo (flag 5).
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_titan), PyRep::Integer(docked_fh_trit), PyRep::Integer(8)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FleetHangarAccessDenied"
+    );
+    assert!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_titan), PyRep::Integer(docked_cargo_trit), PyRep::Integer(8), PyRep::String("bay-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+
+    // 3. MultiAdd with fitted hull (SMA 90) and non-empty container (FH 155) using positional pw recursively transfers children & emits OnItemChange.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(fitted_hull)]), PyRep::Integer(owner_titan), PyRep::Integer(90), PyRep::String("bay-pw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd fitted hull into SMA");
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "MultiAdd",
+        &[PyRep::List(vec![PyRep::Integer(packed_box)]), PyRep::Integer(owner_titan), PyRep::Integer(155)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MultiAdd non-empty container into unlocked FleetHangar");
+    ctx.db.with_snapshot(|snap| {
+        for &id in &[fitted_hull, hull_mod, hull_rig, hull_drone, hull_charge, packed_box, box_trit] {
+            assert_eq!(snap.items[&id].owner_id, owner_id, "MultiAdd child {id} must transfer owner to ship owner");
+        }
+    });
+    let owner_notifs = ctx.drain_notifications_for_char(owner_id);
+    for &id in &[fitted_hull, hull_mod, hull_rig, hull_drone, hull_charge, packed_box, box_trit] {
+        assert!(
+            owner_notifs
+                .iter()
+                .any(|n| n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(id)),
+            "expected MultiAdd recursive OnItemChange for {id}"
+        );
+    }
+
+    // 4. Docked FleetHangar SplitStack after unlock persists custom_item_flags[new]=155, keeps owner_id=owner_id, and notifies owner_id.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    let fh_split = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(owner_titan), PyRep::Integer(docked_fh_trit), PyRep::Integer(10)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("SplitStack inside unlocked docked FleetHangar");
+    let fh_split_id = fh_split.dict_get("newItemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&fh_split_id].owner_id, owner_id);
+        assert_eq!(snap.items[&fh_split_id].flag, InventoryFlag::FleetHangar);
+        assert_eq!(
+            crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap)
+                .custom_item_flags
+                .get(&fh_split_id)
+                .copied(),
+            Some(155)
+        );
+    });
+    assert!(ctx.drain_notifications_for_char(owner_id).iter().any(|n| {
+        n.event == "OnItemChange" && dbrow_i64(&n.args[0], "itemID") == Some(fh_split_id)
+    }));
+
+    // 5. In-space SplitStack rejects bare in-space items, fails closed when positions missing, allows Titan at <= 2,500m surface distance, and rejects > 2,500m.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&mate_id).unwrap().station_id = None;
+        snap.items.get_mut(&owner_titan).unwrap().location_id = sys_id;
+        snap.items.get_mut(&mate_ship).unwrap().location_id = sys_id;
+        snap.item_positions.insert(mate_ship, [0.0, 0.0, 0.0]);
+    });
+    mate_sess.station_id = None;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(sys_id), PyRep::Integer(bare_space_trit), PyRep::Integer(3)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidLocation"
+    );
+    assert!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_titan), PyRep::Integer(docked_fh_trit), PyRep::Integer(4)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "SplitStack on in-space ship with missing position must fail closed"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_titan, [11_500.0, 0.0, 0.0]);
+    });
+    handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "SplitStack",
+        &[PyRep::Integer(owner_titan), PyRep::Integer(docked_fh_trit), PyRep::Integer(4)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("in-space SplitStack at 1,950m Titan surface distance must succeed");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(owner_titan, [12_100.0, 0.0, 0.0]);
+    });
+    assert!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "SplitStack",
+            &[PyRep::Integer(owner_titan), PyRep::Integer(docked_fh_trit), PyRep::Integer(4)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_err(),
+        "in-space SplitStack at 2,550m Titan surface distance must reject"
+    );
+}
+
+

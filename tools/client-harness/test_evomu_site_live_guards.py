@@ -1150,6 +1150,14 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             ("logui", "NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0}),
         )
 
+        # When every dialog presenter fails/is unavailable, UserError must re-raise rather than silently drop.
+        log_mod.uiMessageFunc = failing_fsd_dialog
+        try:
+            with self.assertRaises(ExactUserError):
+                wnd._MoveItems(mk_entry("avatar_1290"), [object()])
+        finally:
+            log_mod.uiMessageFunc = orig_ui_msg
+
         # Genuine non-UserError exceptions must propagate unmasked.
         with self.assertRaises(RuntimeError):
             wnd._MoveItems(mk_entry("runtime_bug"), [object()])
