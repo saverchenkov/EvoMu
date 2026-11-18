@@ -738,6 +738,58 @@ async fn mutant_kill_anchor_orbital_and_upgrade_gantry_role_bitmasks_and_outputs
         .code,
         "NotOrbitalOwner"
     );
+
+    // 5. #1308: Ownership check precedes OrbitalAlreadyUpgraded, detects split-brain corp item owner,
+    //    and allows another corp Director to upgrade a legacy personal-owned gantry item in player_corp.
+    let dir_sess = mk_sess(dir_cid, player_corp, 0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gantry_id) {
+            st.type_id = 2_233;
+        }
+    });
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &ex_sm_stale_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "OrbitalOwnershipDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gantry_id) {
+            st.owner_corp_id = npc_corp;
+        }
+        if let Some(it) = snap.items.get_mut(&gantry_id) {
+            it.owner_id = player_corp;
+        }
+    });
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &dir_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "OrbitalOwnershipDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gantry_id) {
+            st.type_id = 3_962;
+            st.owner_corp_id = player_corp;
+        }
+        if let Some(it) = snap.items.get_mut(&gantry_id) {
+            it.owner_id = 98_999_777;
+        }
+    });
+    assert_eq!(
+        handle_upgrade_gantry(&ctx, &dir_sess, &[PyRep::Integer(gantry_id)])
+            .unwrap_err()
+            .code,
+        "OrbitalOwnershipDenied"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&gantry_id) {
+            it.owner_id = sm_cid;
+        }
+    });
+    let legacy_upg = handle_upgrade_gantry(&ctx, &dir_sess, &[PyRep::Integer(gantry_id)]).unwrap();
+    assert_eq!(legacy_upg.dict_get("typeID"), Some(&PyRep::Integer(2_233)));
+    assert_eq!(ctx.db.get_item(gantry_id).unwrap().owner_id, player_corp);
 }
 
 #[test]
