@@ -84,6 +84,16 @@ pub struct ReachedCategoryMilestone {
     pub reached_date: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AchievementUpdateOutcome {
+    pub achievement: CharacterAchievement,
+    pub just_completed: bool,
+    pub new_ach_milestones: Vec<u32>,
+    pub cat_score: u32,
+    pub cat_score_changed: bool,
+    pub new_cat_milestones: Vec<u32>,
+}
+
 pub fn achievement_reward_uuid(achievement_id: u32, milestone_id: u32) -> [u8; 16] {
     let mut uuid = [0u8; 16];
     uuid[0..4].copy_from_slice(b"ACHR");
@@ -723,6 +733,43 @@ impl AchievementManager {
         newly_reached
     }
 
+    fn prune_category_milestones_above(&self, character_id: u32, category_id: u32, new_score: u32) {
+        if category_id == 0 {
+            return;
+        }
+        let targets_by_id: HashMap<u32, u32> = {
+            let map = self
+                .category_milestone_defs
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            map.get(&category_id)
+                .map(|list| list.iter().map(|d| (d.id, d.target_score)).collect())
+                .unwrap_or_default()
+        };
+        let mut reached_map = self
+            .reached_category_milestones
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let should_remove = match reached_map.get_mut(&(character_id, category_id)) {
+            Some(list) => {
+                if new_score == 0 {
+                    list.clear();
+                } else if !targets_by_id.is_empty() {
+                    list.retain(|r| {
+                        targets_by_id
+                            .get(&r.milestone_id)
+                            .is_some_and(|&target| new_score >= target)
+                    });
+                }
+                list.is_empty()
+            }
+            None => false,
+        };
+        if should_remove {
+            reached_map.remove(&(character_id, category_id));
+        }
+    }
+
     fn sync_category_score_and_milestones(
         &self,
         character_id: u32,
@@ -730,31 +777,32 @@ impl AchievementManager {
         earned_score: u32,
         prior_cat_sum: u32,
         now_unix: u64,
-    ) -> (u32, Vec<u32>) {
+    ) -> (u32, bool, Vec<u32>) {
         if category_id == 0 {
-            return (0, Vec::new());
+            return (0, false, Vec::new());
         }
-        let cat_score = {
+        let (cat_score, cat_score_changed) = {
             let mut scores = self
                 .category_scores
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(existing) = scores.get_mut(&(character_id, category_id)) {
+                let old = *existing;
                 if earned_score > 0 {
-                    *existing = existing.saturating_add(earned_score);
+                    *existing = old.saturating_add(earned_score);
                 }
-                *existing
+                (*existing, *existing != old)
             } else {
                 let updated = prior_cat_sum.saturating_add(earned_score);
                 if earned_score > 0 {
                     scores.insert((character_id, category_id), updated);
                 }
-                updated
+                (updated, updated != prior_cat_sum)
             }
         };
         let new_cat_milestones =
             self.evaluate_category_milestones(character_id, category_id, cat_score, now_unix);
-        (cat_score, new_cat_milestones)
+        (cat_score, cat_score_changed, new_cat_milestones)
     }
 
     pub fn add_progress(
@@ -765,7 +813,7 @@ impl AchievementManager {
         now_unix: u64,
     ) -> Option<(CharacterAchievement, bool, Vec<u32>)> {
         self.add_progress_with_outcomes(character_id, achievement_id, delta, now_unix)
-            .map(|(a, just_completed, new_ach_ms, _, _)| (a, just_completed, new_ach_ms))
+            .map(|o| (o.achievement, o.just_completed, o.new_ach_milestones))
     }
 
     fn update_single_achievement_with_outcomes(
@@ -774,7 +822,7 @@ impl AchievementManager {
         achievement_id: u32,
         now_unix: u64,
         mut apply: impl FnMut(&mut CharacterAchievement),
-    ) -> Option<(CharacterAchievement, bool, Vec<u32>, u32, Vec<u32>)> {
+    ) -> Option<AchievementUpdateOutcome> {
         let outcome = {
             let mut map = self
                 .character_achievements
@@ -809,14 +857,21 @@ impl AchievementManager {
         };
         let (ach, just_completed, new_ach_ms, prior_cat_sum) = outcome?;
         let earned_score = if just_completed { ach.def.score } else { 0 };
-        let (cat_score, new_cat_ms) = self.sync_category_score_and_milestones(
+        let (cat_score, cat_score_changed, new_cat_ms) = self.sync_category_score_and_milestones(
             character_id,
             ach.def.category_id,
             earned_score,
             prior_cat_sum,
             now_unix,
         );
-        Some((ach, just_completed, new_ach_ms, cat_score, new_cat_ms))
+        Some(AchievementUpdateOutcome {
+            achievement: ach,
+            just_completed,
+            new_ach_milestones: new_ach_ms,
+            cat_score,
+            cat_score_changed,
+            new_cat_milestones: new_cat_ms,
+        })
     }
 
     pub(crate) fn add_progress_with_outcomes(
@@ -825,7 +880,7 @@ impl AchievementManager {
         achievement_id: u32,
         delta: u64,
         now_unix: u64,
-    ) -> Option<(CharacterAchievement, bool, Vec<u32>, u32, Vec<u32>)> {
+    ) -> Option<AchievementUpdateOutcome> {
         self.update_single_achievement_with_outcomes(character_id, achievement_id, now_unix, |a| {
             a.progress = a.progress.saturating_add(delta);
             let mut rem = a.progress;
@@ -864,7 +919,7 @@ impl AchievementManager {
             false,
         )
         .into_iter()
-        .map(|(a, just_completed, new_ach_ms, _, _)| (a, just_completed, new_ach_ms))
+        .map(|o| (o.achievement, o.just_completed, o.new_ach_milestones))
         .collect()
     }
 
@@ -875,7 +930,7 @@ impl AchievementManager {
         delta: u64,
         now_unix: u64,
         client_only: bool,
-    ) -> Vec<(CharacterAchievement, bool, Vec<u32>, u32, Vec<u32>)> {
+    ) -> Vec<AchievementUpdateOutcome> {
         let raw_updates = {
             let mut map = self
                 .character_achievements
@@ -937,14 +992,22 @@ impl AchievementManager {
             .into_iter()
             .map(|(a, just_completed, new_ach_ms, prior_sum)| {
                 let earned_score = if just_completed { a.def.score } else { 0 };
-                let (cat_score, new_cat_ms) = self.sync_category_score_and_milestones(
-                    character_id,
-                    a.def.category_id,
-                    earned_score,
-                    prior_sum,
-                    now_unix,
-                );
-                (a, just_completed, new_ach_ms, cat_score, new_cat_ms)
+                let (cat_score, cat_score_changed, new_cat_ms) = self
+                    .sync_category_score_and_milestones(
+                        character_id,
+                        a.def.category_id,
+                        earned_score,
+                        prior_sum,
+                        now_unix,
+                    );
+                AchievementUpdateOutcome {
+                    achievement: a,
+                    just_completed,
+                    new_ach_milestones: new_ach_ms,
+                    cat_score,
+                    cat_score_changed,
+                    new_cat_milestones: new_cat_ms,
+                }
             })
             .collect()
     }
@@ -1046,19 +1109,20 @@ impl AchievementManager {
                 let mut any_marked = false;
                 for &aid in client_ids {
                     if self.is_client_achievement_id(aid) {
-                        if let Ok((a, just_completed, new_ach_ms, cat_score, new_cat_ms)) =
+                        if let Ok(o) =
                             self.mark_completed_with_outcomes(char_id, aid, now_unix)
                         {
                             any_marked = true;
                             emit_achievement_notices(
                                 char_id,
-                                a.def.id,
-                                a.def.category_id,
-                                a.progress,
-                                cat_score,
-                                just_completed,
-                                &new_ach_ms,
-                                &new_cat_ms,
+                                o.achievement.def.id,
+                                o.achievement.def.category_id,
+                                o.achievement.progress,
+                                o.cat_score,
+                                o.cat_score_changed,
+                                o.just_completed,
+                                &o.new_ach_milestones,
+                                &o.new_cat_milestones,
                                 now_unix,
                             );
                         }
@@ -1100,17 +1164,18 @@ impl AchievementManager {
                 now_unix,
                 client_only,
             );
-            for (a, just_completed, new_ach_ms, cat_score, new_cat_ms) in updates {
+            for o in updates {
                 any_changed = true;
                 emit_achievement_notices(
                     character_id,
-                    a.def.id,
-                    a.def.category_id,
-                    a.progress,
-                    cat_score,
-                    just_completed,
-                    &new_ach_ms,
-                    &new_cat_ms,
+                    o.achievement.def.id,
+                    o.achievement.def.category_id,
+                    o.achievement.progress,
+                    o.cat_score,
+                    o.cat_score_changed,
+                    o.just_completed,
+                    &o.new_ach_milestones,
+                    &o.new_cat_milestones,
                     now_unix,
                 );
             }
@@ -1130,7 +1195,7 @@ impl AchievementManager {
 
     pub fn mark_completed(&self, character_id: u32, achievement_id: u32, now_unix: u64) -> Result<CharacterAchievement, (u32, String)> {
         self.mark_completed_with_outcomes(character_id, achievement_id, now_unix)
-            .map(|(ach, _, _, _, _)| ach)
+            .map(|o| o.achievement)
     }
 
     pub(crate) fn mark_completed_with_outcomes(
@@ -1138,7 +1203,7 @@ impl AchievementManager {
         character_id: u32,
         achievement_id: u32,
         now_unix: u64,
-    ) -> Result<(CharacterAchievement, bool, Vec<u32>, u32, Vec<u32>), (u32, String)> {
+    ) -> Result<AchievementUpdateOutcome, (u32, String)> {
         self.update_single_achievement_with_outcomes(character_id, achievement_id, now_unix, |a| {
             a.progress = a.def.target;
             for cond in &a.def.conditions {
@@ -1149,35 +1214,78 @@ impl AchievementManager {
     }
 
     pub fn reset_achievement(&self, character_id: u32, achievement_id: u32) -> Result<CharacterAchievement, (u32, String)> {
-        let mut removed_score = None;
-        let found = {
+        self.reset_achievement_with_category_score(character_id, achievement_id)
+            .map(|(ach, _)| ach)
+    }
+
+    pub(crate) fn reset_achievement_with_category_score(
+        &self,
+        character_id: u32,
+        achievement_id: u32,
+    ) -> Result<(CharacterAchievement, Option<(u32, u32)>), (u32, String)> {
+        let outcome = {
             let mut map = self.character_achievements.write().unwrap_or_else(|e| e.into_inner());
             let list = Self::init_list(&self.definitions, &mut map, character_id);
-            let mut res = None;
+            let mut target_info = None;
             for a in list.iter_mut() {
                 if a.def.id == achievement_id {
-                    if a.completed && a.def.category_id > 0 && a.def.score > 0 {
-                        removed_score = Some((a.def.category_id, a.def.score));
-                    }
+                    let was_completed = a.completed;
+                    let cat_id = a.def.category_id;
+                    let ach_score = a.def.score;
                     a.progress = 0;
                     a.condition_progress.clear();
                     a.completed = false;
                     a.completed_date = None;
                     a.reached_milestones.clear();
                     a.unclaimed_reward_count = 0;
-                    res = Some(a.clone());
+                    target_info = Some((a.clone(), was_completed, cat_id, ach_score));
                     break;
                 }
             }
-            res
+            target_info.map(|(ach, was_completed, cat_id, ach_score)| {
+                let recomputed_cat_sum: u32 = if cat_id > 0 {
+                    list.iter()
+                        .filter(|x| x.def.category_id == cat_id && x.completed)
+                        .map(|x| x.def.score)
+                        .sum()
+                } else {
+                    0
+                };
+                (ach, was_completed, cat_id, ach_score, recomputed_cat_sum)
+            })
         };
-        if let Some((cat_id, score)) = removed_score {
-            let mut scores = self.category_scores.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = scores.get_mut(&(character_id, cat_id)) {
-                *entry = entry.saturating_sub(score);
+        let (ach, was_completed, cat_id, ach_score, recomputed_cat_sum) =
+            outcome.ok_or_else(|| (STATUS_NOT_FOUND, "Achievement not found".into()))?;
+        let mut score_update = None;
+        if cat_id > 0 {
+            let (old_score, new_score) = {
+                let mut scores = self.category_scores.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = scores.get_mut(&(character_id, cat_id)) {
+                    let old = *entry;
+                    let updated = if was_completed && ach_score > 0 {
+                        old.saturating_sub(ach_score)
+                    } else {
+                        old
+                    };
+                    *entry = updated;
+                    (old, updated)
+                } else {
+                    let prior_sum = if was_completed {
+                        recomputed_cat_sum.saturating_add(ach_score)
+                    } else {
+                        recomputed_cat_sum
+                    };
+                    scores.insert((character_id, cat_id), recomputed_cat_sum);
+                    (prior_sum, recomputed_cat_sum)
+                }
+            };
+            self.prune_category_milestones_above(character_id, cat_id, new_score);
+            if new_score != old_score {
+                score_update = Some((cat_id, new_score));
             }
         }
-        found.ok_or_else(|| (STATUS_NOT_FOUND, "Achievement not found".into()))
+        self.save_to_db();
+        Ok((ach, score_update))
     }
 
     pub fn reset_category(&self, character_id: u32, category_id: u32) {
@@ -1210,6 +1318,7 @@ impl AchievementManager {
         now_unix: u64,
     ) -> Vec<u32> {
         self.category_scores.write().unwrap_or_else(|e| e.into_inner()).insert((character_id, category_id), score);
+        self.prune_category_milestones_above(character_id, category_id, score);
         let new_cat_ms = self.evaluate_category_milestones(character_id, category_id, score, now_unix);
         self.save_to_db();
         new_cat_ms
@@ -1426,6 +1535,7 @@ pub(crate) fn emit_achievement_notices(
     cat_id: u32,
     progress: u64,
     cat_score: u32,
+    cat_score_changed: bool,
     completed: bool,
     ach_milestones: &[u32],
     cat_milestones: &[u32],
@@ -1471,14 +1581,16 @@ pub(crate) fn emit_achievement_notices(
             );
         }
 
-        crate::quasar_gateway::queue_pb_notice(
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            "quasar_achievements.emit_achievement_notices.category_progressed",
-            pb::message("eve_public.achievement.category.api.ProgressedNotice")
-                .set("category.uuid", u32_to_uuid(cat_id))
-                .set("score", cat_score),
-            now,
-        );
+        if cat_score_changed {
+            crate::quasar_gateway::queue_pb_notice(
+                crate::quasar_gateway::NoticeScope::Character(cid),
+                "quasar_achievements.emit_achievement_notices.category_progressed",
+                pb::message("eve_public.achievement.category.api.ProgressedNotice")
+                    .set("category.uuid", u32_to_uuid(cat_id))
+                    .set("score", cat_score),
+                now,
+            );
+        }
     }
 }
 

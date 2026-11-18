@@ -470,6 +470,7 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
         eve_testkit::quasar_tap::tap_exchange(&reg, "eve_public.achievement.api.admin.AddProgressRequest", 200, Some(&rsp), &notices).is_empty()
     );
     assert!(!notices.iter().any(|n| n.normalized_type_name() == "eve_public.achievement.api.CompletedNotice"));
+    assert!(!notices.iter().any(|n| n.normalized_type_name() == "eve_public.achievement.category.api.ProgressedNotice"));
     assert!(!notices.iter().any(|n| n.normalized_type_name() == "eve_public.achievement.category.milestone.api.ReachedNotice"));
     assert_eq!(
         notices.iter().filter(|n| n.normalized_type_name() == "eve_public.achievement.milestone.api.ReachedNotice").count(),
@@ -604,7 +605,76 @@ fn complete_add_progress_and_category_get_reached_milestones_tap() {
     assert_eq!(dyn_eve_cat.get(1), Some(&DynamicValue::Uint32(50)));
     assert!(dyn_eve_cat.get(2).is_none());
 
-    // 7. Resetting category clears score and reached_milestones
+    // 7. ResetRequest(2) decrements score (50 -> 20), emits category.api.ProgressedNotice, prunes milestone 1002,
+    // and re-completing 2 re-emits category.milestone.api.ReachedNotice(1002)
+    let _ = crate::services::quasar_social_chat::drain_local_notices();
+    let rsp_reset_2 = handlers["eve_public.achievement.api.admin.ResetRequest"](&admin_ctx, &dummy_any, &id2).unwrap();
+    let notices_reset_2: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+        .into_iter()
+        .map(|(_, any, _)| any)
+        .collect();
+    assert!(
+        eve_testkit::quasar_tap::tap_exchange(&reg, "eve_public.achievement.api.admin.ResetRequest", 200, Some(&rsp_reset_2), &notices_reset_2).is_empty()
+    );
+    let reset_cat_scores: Vec<u32> = notices_reset_2
+        .iter()
+        .filter(|n| n.normalized_type_name() == "eve_public.achievement.category.api.ProgressedNotice")
+        .filter_map(|n| {
+            let d = reg.decode_dynamic("eve_public.achievement.category.api.ProgressedNotice", &n.value).ok()?;
+            match d.get(2) {
+                Some(DynamicValue::Uint32(s)) => Some(*s),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(reset_cat_scores, vec![20]);
+
+    let cat_rsp_after_reset_2 = handlers["eve_public.achievement.category.api.GetRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
+    let dyn_after_reset_2 = reg
+        .decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_rsp_after_reset_2.value)
+        .unwrap();
+    assert_eq!(dyn_after_reset_2.get(1), Some(&DynamicValue::Uint32(20)));
+    match dyn_after_reset_2.get(2) {
+        Some(DynamicValue::Repeated(items)) => {
+            assert_eq!(items.len(), 1);
+            let DynamicValue::Message(entry) = &items[0] else { panic!("expected entry") };
+            let ms_uuid = match entry.get(1) {
+                Some(DynamicValue::Message(id)) => match id.get(1) {
+                    Some(DynamicValue::Bytes(b)) => b.clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            assert_eq!(ms_uuid, u32_to_uuid(1001).to_vec());
+        }
+        other => panic!("expected 1 reached_milestone after reset, got {other:?}"),
+    }
+
+    let rsp2_re = handlers["eve_public.achievement.api.admin.CompleteRequest"](&admin_ctx, &dummy_any, &id2).unwrap();
+    let notices2_re: Vec<GoogleAny> = crate::services::quasar_social_chat::drain_local_notices()
+        .into_iter()
+        .map(|(_, any, _)| any)
+        .collect();
+    assert!(
+        eve_testkit::quasar_tap::tap_exchange(&reg, "eve_public.achievement.api.admin.CompleteRequest", 200, Some(&rsp2_re), &notices2_re).is_empty()
+    );
+    let re_cat_ms: Vec<[u8; 16]> = notices2_re
+        .iter()
+        .filter(|n| n.normalized_type_name() == "eve_public.achievement.category.milestone.api.ReachedNotice")
+        .filter_map(|n| {
+            let d = reg.decode_dynamic("eve_public.achievement.category.milestone.api.ReachedNotice", &n.value).ok()?;
+            match d.get(2) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Bytes(b)) => b.as_slice().try_into().ok(),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(re_cat_ms, vec![u32_to_uuid(1002)]);
+
+    // 8. Resetting category clears score and reached_milestones
     let _ = handlers["eve_public.achievement.category.api.admin.ResetRequest"](&admin_ctx, &dummy_any, &id1).unwrap();
     let _ = crate::services::quasar_social_chat::drain_local_notices();
     let cat_rsp_reset = handlers["eve_public.achievement.category.api.GetRequest"](&admin_ctx, &dummy_any, &id1).unwrap();

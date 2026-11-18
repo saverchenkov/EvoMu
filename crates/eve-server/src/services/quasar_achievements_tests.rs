@@ -390,7 +390,7 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
 
     // 6. emit_achievement_notices exact payloads & extract_u32_ident exact length-4 boundary
     let _ = crate::services::quasar_social_chat::drain_local_notices();
-    emit_achievement_notices(cid, 50, 0, 12, 0, false, &[1], &[99], 7_000);
+    emit_achievement_notices(cid, 50, 0, 12, 0, false, false, &[1], &[99], 7_000);
     let n_cat0 = crate::services::quasar_social_chat::drain_local_notices();
     assert_eq!(n_cat0.len(), 2);
     assert_eq!(n_cat0[0].0, NoticeScope::Character(cid));
@@ -399,7 +399,14 @@ fn achievements_mutant_killers_locks_rehydrate_partial_claims_and_notices() {
     let prog_wm = WireMessage::decode(&n_cat0[0].1.value).unwrap();
     assert_eq!(prog_wm.fields.iter().find(|f| f.field_number == 2).unwrap().value.as_varint(), Some(12));
 
-    emit_achievement_notices(cid, 50, 1, 30, 50, true, &[2, 3], &[101, 102], 7_001);
+    emit_achievement_notices(cid, 50, 1, 12, 0, false, false, &[1], &[], 7_000);
+    let n_cat1_unchanged = crate::services::quasar_social_chat::drain_local_notices();
+    assert_eq!(n_cat1_unchanged.len(), 2);
+    assert!(!n_cat1_unchanged
+        .iter()
+        .any(|(_, a, _)| a.type_url.ends_with("achievement.category.api.ProgressedNotice")));
+
+    emit_achievement_notices(cid, 50, 1, 30, 50, true, true, &[2, 3], &[101, 102], 7_001);
     let n_cat1 = crate::services::quasar_social_chat::drain_local_notices();
     assert_eq!(n_cat1.len(), 7);
     let ach_ms_uuids: Vec<[u8; 16]> = n_cat1
@@ -524,38 +531,38 @@ fn category_milestones_client_task_notices_and_completion_sync() {
     let cid = 90_000_077_u32;
 
     // 1. Partial add_progress reaches achievement milestone 1 only, zero category score yet
-    let (p_part, jc_part, ach_ms_part, cs_part, cat_ms_part) =
-        mgr.add_progress_with_outcomes(cid, 10, 5, 1_000).unwrap();
-    assert_eq!(p_part.progress, 5);
-    assert!(!jc_part);
-    assert_eq!(ach_ms_part, vec![1]);
-    assert_eq!(cs_part, 0);
-    assert!(cat_ms_part.is_empty());
+    let o_part = mgr.add_progress_with_outcomes(cid, 10, 5, 1_000).unwrap();
+    assert_eq!(o_part.achievement.progress, 5);
+    assert!(!o_part.just_completed);
+    assert_eq!(o_part.new_ach_milestones, vec![1]);
+    assert_eq!(o_part.cat_score, 0);
+    assert!(!o_part.cat_score_changed);
+    assert!(o_part.new_cat_milestones.is_empty());
 
     // 2. mark_completed_with_outcomes emits ONLY new achievement milestone 2, updates category score to 25,
     // and crosses category milestone 101 (20) without touching 102 (50).
-    let (p_comp, jc_comp, ach_ms_comp, cs_comp, cat_ms_comp) =
-        mgr.mark_completed_with_outcomes(cid, 10, 1_001).unwrap();
-    assert!(p_comp.completed);
-    assert!(jc_comp);
-    assert_eq!(ach_ms_comp, vec![2]);
-    assert_eq!(cs_comp, 25);
-    assert_eq!(cat_ms_comp, vec![101]);
+    let o_comp = mgr.mark_completed_with_outcomes(cid, 10, 1_001).unwrap();
+    assert!(o_comp.achievement.completed);
+    assert!(o_comp.just_completed);
+    assert_eq!(o_comp.new_ach_milestones, vec![2]);
+    assert_eq!(o_comp.cat_score, 25);
+    assert!(o_comp.cat_score_changed);
+    assert_eq!(o_comp.new_cat_milestones, vec![101]);
 
-    // Repeat completion is idempotent: no duplicate completion or milestones
-    let (_p_dup, jc_dup, ach_ms_dup, cs_dup, cat_ms_dup) =
-        mgr.mark_completed_with_outcomes(cid, 10, 1_002).unwrap();
-    assert!(!jc_dup);
-    assert!(ach_ms_dup.is_empty());
-    assert_eq!(cs_dup, 25);
-    assert!(cat_ms_dup.is_empty());
+    // Repeat completion is idempotent: no duplicate completion, score change, or milestones
+    let o_dup = mgr.mark_completed_with_outcomes(cid, 10, 1_002).unwrap();
+    assert!(!o_dup.just_completed);
+    assert!(o_dup.new_ach_milestones.is_empty());
+    assert_eq!(o_dup.cat_score, 25);
+    assert!(!o_dup.cat_score_changed);
+    assert!(o_dup.new_cat_milestones.is_empty());
 
     // Completing achievement 11 (+35 -> 60) crosses 102 (50) without re-triggering 101
-    let (_, jc_11, _, cs_11, cat_ms_11) =
-        mgr.mark_completed_with_outcomes(cid, 11, 1_003).unwrap();
-    assert!(jc_11);
-    assert_eq!(cs_11, 60);
-    assert_eq!(cat_ms_11, vec![102]);
+    let o_11 = mgr.mark_completed_with_outcomes(cid, 11, 1_003).unwrap();
+    assert!(o_11.just_completed);
+    assert_eq!(o_11.cat_score, 60);
+    assert!(o_11.cat_score_changed);
+    assert_eq!(o_11.new_cat_milestones, vec![102]);
     assert_eq!(
         mgr.reached_category_milestones(cid, 1),
         vec![
@@ -564,16 +571,57 @@ fn category_milestones_client_task_notices_and_completion_sync() {
         ]
     );
 
-    // 3. Persistence round-trip + reset_achievement score sync + reset_category cleanup
+    // 3. Persistence round-trip + reset_achievement pruning + re-completion + downward set_category_score + reset_category cleanup
     mgr.save_to_db();
     let mut reloaded = AchievementManager::new_with_sde(Some(Arc::clone(&ctx.db)), None);
     reloaded.definitions = mgr.definitions.clone();
+    reloaded.set_category_milestones(
+        1,
+        vec![
+            CategoryMilestoneDef { id: 101, target_score: 20 },
+            CategoryMilestoneDef { id: 102, target_score: 50 },
+        ],
+    );
     reloaded.rehydrate_from_db();
     assert_eq!(reloaded.category_score(cid, 1), 60);
     assert_eq!(reloaded.reached_category_milestones(cid, 1).len(), 2);
 
-    reloaded.reset_achievement(cid, 11).unwrap();
+    let (_, score_upd) = reloaded.reset_achievement_with_category_score(cid, 11).unwrap();
+    assert_eq!(score_upd, Some((1, 25)));
     assert_eq!(reloaded.category_score(cid, 1), 25);
+    assert_eq!(
+        reloaded.reached_category_milestones(cid, 1),
+        vec![ReachedCategoryMilestone { milestone_id: 101, reached_date: 1_001 }]
+    );
+
+    // Pruned milestone stays absent after rehydration from DB
+    let mut reloaded_after_reset = AchievementManager::new_with_sde(Some(Arc::clone(&ctx.db)), None);
+    reloaded_after_reset.definitions = mgr.definitions.clone();
+    reloaded_after_reset.rehydrate_from_db();
+    assert_eq!(reloaded_after_reset.category_score(cid, 1), 25);
+    assert_eq!(
+        reloaded_after_reset.reached_category_milestones(cid, 1),
+        vec![ReachedCategoryMilestone { milestone_id: 101, reached_date: 1_001 }]
+    );
+
+    // Re-completing achievement 11 re-triggers category milestone 102
+    let o_11_re = reloaded.mark_completed_with_outcomes(cid, 11, 1_004).unwrap();
+    assert_eq!(o_11_re.cat_score, 60);
+    assert!(o_11_re.cat_score_changed);
+    assert_eq!(o_11_re.new_cat_milestones, vec![102]);
+    assert_eq!(
+        reloaded.reached_category_milestones(cid, 1),
+        vec![
+            ReachedCategoryMilestone { milestone_id: 101, reached_date: 1_001 },
+            ReachedCategoryMilestone { milestone_id: 102, reached_date: 1_004 },
+        ]
+    );
+
+    // Downward set_category_score prunes milestones above the new score
+    reloaded.set_category_score(cid, 1, 10);
+    assert_eq!(reloaded.category_score(cid, 1), 10);
+    assert!(reloaded.reached_category_milestones(cid, 1).is_empty());
+
     reloaded.reset_category(cid, 1);
     assert_eq!(reloaded.category_score(cid, 1), 0);
     assert!(reloaded.reached_category_milestones(cid, 1).is_empty());

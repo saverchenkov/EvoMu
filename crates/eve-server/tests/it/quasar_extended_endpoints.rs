@@ -324,14 +324,14 @@ async fn quasar_skill_plan_extended_endpoints_and_definitions() {
 #[tokio::test]
 async fn quasar_achievement_category_endpoints_and_notices() {
     // parity: quasar:eveProto/generated/eve_public/achievement/category/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj
-    // DATA GAP (AGENTS.md:71): `quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj`
-    // stays open until CDN category-milestone checkpoints exist; client `achievements.static` ships none.
+    // DATA GAP (AGENTS.md:71): `quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj`
+    // and `quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj` stay open
+    // until CDN score weights and category-milestone checkpoints exist; client `achievements.static` ships
+    // `score: 0` and no milestone checkpoints (see docs/BLOCKERS.md #16).
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/achievement/category/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj",
     ]);
@@ -451,7 +451,7 @@ async fn quasar_achievement_category_endpoints_and_notices() {
             _ => {}
         }
     }
-    assert!(cat3_prog_count >= 3, "Expected >=3 category 3 ProgressedNotices during mining cycles, got {cat3_prog_count}");
+    assert_eq!(cat3_prog_count, 0, "Zero-score SDE achievements must not emit unchanged category ProgressedNotices");
     assert_eq!(ach2_values, vec![1, 2, 3]);
     assert!(ach2_completed, "Achievement 2 must complete on cycle 3");
 
@@ -523,7 +523,7 @@ async fn quasar_achievement_category_endpoints_and_notices() {
             }
         }
     }
-    assert!(saw_cat2_prog, "Expected decoded category 2 ProgressedNotice from AddProgressRequest");
+    assert!(!saw_cat2_prog, "Zero-score SDE AddProgressRequest must not emit unchanged category 2 ProgressedNotice");
     assert!(saw_cat3_reset_prog, "Expected decoded category 3 ProgressedNotice from ResetRequest");
 }
 
