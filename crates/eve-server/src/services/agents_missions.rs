@@ -185,7 +185,16 @@ fn build_mission_briefing_text(
                 .unwrap_or_else(|| fallback.to_string())
         };
 
-        if agent_opt.is_some_and(|a| a.agent_type_id == 4) && !ct.contains("Courier") {
+        let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+        let is_mining_brief = !is_kill
+            && (ct.contains("BasicMining")
+                || ct.contains("Mining")
+                || tmpl_opt.is_some_and(|t| t.title.to_lowercase().contains("mining"))
+                || agent_opt.is_some_and(|a| a.division_id == 23));
+
+        if agent_opt.is_some_and(|a| a.agent_type_id == 4)
+            && meta.is_none_or(|mt| mt.destination_station_id.is_none())
+        {
             let tid = meta.and_then(|mt| mt.required_delivery_type_id).unwrap_or(34);
             let qty = meta
                 .map(|mt| mt.required_delivery_qty)
@@ -195,7 +204,7 @@ fn build_mission_briefing_text(
             format!(
                 "Research assignment \"{title}\" for {issuer}: supply {qty}x {item} to {dropoff} in {sys_name} for active R&D work."
             )
-        } else if agent_opt.is_some_and(|a| a.agent_type_id == 8) {
+        } else if agent_opt.is_some_and(|a| a.agent_type_id == 5) {
             let tid = meta
                 .and_then(|mt| mt.required_delivery_type_id)
                 .unwrap_or(17202);
@@ -271,7 +280,7 @@ fn build_mission_briefing_text(
             format!(
                 "Courier contract \"{title}\" for {issuer}: transport {qty}x {cargo} from {dropoff} ({sys_name}) to {dest_station}."
             )
-        } else if ct.contains("Mining") {
+        } else if is_mining_brief {
             let derived = tmpl_opt.map(|t| resolve_mining_mission_details(ctx, t));
             let ore_tid = meta
                 .and_then(|mt| mt.required_delivery_type_id)
@@ -757,10 +766,25 @@ pub async fn handle_with_bound(
                 .as_ref().and_then(|mt| mt.required_delivery_type_id).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None);
             let req_qty = meta.as_ref().map_or(0_i64, |mt| mt.required_delivery_qty as i64);
             let ct = tmpl.and_then(|t| t.content_template.as_deref()).unwrap_or_default();
+            let is_heraldry = ct.contains("Heraldry");
             let is_trade = ct.contains("Trade");
-            let is_courier = !is_trade && (tmpl.is_some_and(|t| t.is_courier) || ct.contains("Courier") || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some());
-            let is_mining = !is_courier && !is_trade && (tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining")) || ct.contains("Mining"));
-            let objectives = if is_mining {
+            let is_courier = !is_trade
+                && !is_heraldry
+                && (tmpl.is_some_and(|t| t.is_courier)
+                    || ct.contains("Courier")
+                    || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some());
+            let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+            let is_mining = !is_kill
+                && !is_courier
+                && !is_trade
+                && !is_heraldry
+                && (tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining"))
+                    || ct.contains("BasicMining")
+                    || ct.contains("Mining")
+                    || ctx.sde.agents.get(&m.agent_id).is_some_and(|a| a.division_id == 23));
+            let objectives = if is_heraldry {
+                "Complete heraldry assignment and report back.".to_string()
+            } else if is_mining {
                 let ore_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(1230);
                 let ore_name = ctx.sde.types.get(&ore_tid).map(|t| t.name.as_str()).unwrap_or("ore");
                 let qty = if req_qty > 0 { req_qty } else { 500 };
@@ -1378,62 +1402,69 @@ pub async fn handle_with_bound(
                         let mission_id = tmpl.mission_id;
                         let title = tmpl.title.clone();
                         let ct = tmpl.content_template.as_deref().unwrap_or_default();
-                        let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
-                        let is_courier = !is_trade && (tmpl.is_courier || ct.contains("BasicCourier"));
-                        let is_data_center = agent_info.agent_type_id == 5;
                         let is_heraldry = ct.contains("Heraldry");
+                        let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
+                        let is_courier = !is_trade && !is_heraldry && (tmpl.is_courier || ct.contains("BasicCourier"));
+                        let is_data_center = agent_info.agent_type_id == 5;
                         let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
-                        let is_mining = !is_kill && !is_trade && !is_courier && (ct.contains("BasicMining")
+                        let is_mining = !is_kill && !is_trade && !is_courier && !is_heraldry && (ct.contains("BasicMining")
                             || tmpl.title.to_lowercase().contains("mining")
                             || agent_info.division_id == 23);
 
-                        let (req_tid, req_qty, origin_sid, dest_sid, npcs_remaining, objectives, briefing) = if is_rnd {
+                        let (req_tid, req_qty, origin_sid, dest_sid, npcs_remaining, objectives) = if is_rnd {
                             let qty = rnd_tritanium_required_qty(agent_info.level);
-                            (Some(34), qty, agent_info.station_id, None, 0, format!("Deliver {qty} units of Tritanium to agent station hangar."), format!("R&D Agent {agent_id} assignment: supply {qty} units of Tritanium for research."))
+                            (Some(34), qty, agent_info.station_id, None, 0, format!("Deliver {qty} units of Tritanium to agent station hangar."))
                         } else if is_data_center {
-                            (Some(17202), 1, agent_info.station_id, None, 0, "Deliver 1 Pirate Tag to agent station hangar.".to_string(), format!("Data Center Agent {agent_id} assignment: deliver 1 Pirate Tag."))
+                            (Some(17202), 1, agent_info.station_id, None, 0, "Deliver 1 Pirate Tag to agent station hangar.".to_string())
                         } else if is_courier {
                             let cd = resolve_courier_mission_details(ctx, tmpl, agent_info)?;
                             let cargo_name = ctx.sde.types.get(&cd.cargo_type_id).map(|t| t.name.as_str()).unwrap_or("cargo");
                             let dest_name = ctx.sde.stations.get(&cd.destination_station_id).map(|s| s.name.as_str()).unwrap_or("destination station");
-                            (Some(cd.cargo_type_id), cd.cargo_quantity, Some(cd.origin_station_id), Some(cd.destination_station_id), 0, format!("Transport {} units of {} to {}.", cd.cargo_quantity, cargo_name, dest_name), format!("Agent {} operation: Transport {} units of {} to {} and complete delivery.", agent_id, cd.cargo_quantity, cargo_name, dest_name))
+                            (Some(cd.cargo_type_id), cd.cargo_quantity, Some(cd.origin_station_id), Some(cd.destination_station_id), 0, format!("Transport {} units of {} to {}.", cd.cargo_quantity, cargo_name, dest_name))
                         } else if is_trade {
                             let td = resolve_trade_mission_details(ctx, tmpl);
                             let trade_name = ctx.sde.types.get(&td.trade_type_id).map(|t| t.name.as_str()).unwrap_or("goods");
-                            (Some(td.trade_type_id), td.trade_quantity, agent_info.station_id, None, 0, format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name), format!("Agent {} operation: Deliver {} units of {} to the agent station hangar.", agent_id, td.trade_quantity, trade_name))
+                            (Some(td.trade_type_id), td.trade_quantity, agent_info.station_id, None, 0, format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name))
                         } else if is_mining {
                             let md = resolve_mining_mission_details(ctx, tmpl);
-                            let mining_briefing = build_mission_briefing_text(
-                                ctx,
-                                agent_id,
-                                tmpl.mission_id,
-                                &tmpl.title,
-                                sys_id,
-                                None,
-                            );
-                            (Some(md.ore_type_id), md.required_units, agent_info.station_id, None, 0, md.objective_text, mining_briefing)
+                            (Some(md.ore_type_id), md.required_units, agent_info.station_id, None, 0, md.objective_text)
                         } else if is_heraldry {
-                            let heraldry_briefing = build_mission_briefing_text(
-                                ctx,
-                                agent_id,
-                                tmpl.mission_id,
-                                &tmpl.title,
-                                sys_id,
-                                None,
-                            );
-                            (None, 0, agent_info.station_id, None, 0, "Complete heraldry assignment and report back.".to_string(), heraldry_briefing)
+                            (None, 0, agent_info.station_id, None, 0, "Complete heraldry assignment and report back.".to_string())
                         } else {
                             let enc = resolve_security_mission_encounter(ctx, tmpl, agent_info, sys_id);
-                            (None, 0, agent_info.station_id, None, enc.wave_npc_count, enc.objective_text, enc.briefing_text)
+                            (None, 0, agent_info.station_id, None, enc.wave_npc_count, enc.objective_text)
                         };
 
                         let is_burner = title.contains("Anomic")
                             || (agent_info.level >= 4 && agent_info.division_id == 24);
-                        save_mission_meta(
-                            snap,
-                            char_id,
-                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, origin_station_id: origin_sid, offered_level: Some(agent_info.level), },
+                        let offer_meta = MissionTimingAndCargoMeta {
+                            mission_id,
+                            agent_id,
+                            offered_at_unix: now,
+                            offer_expiry_unix: now + offer_dur,
+                            accepted_at_unix: None,
+                            accept_expiry_unix: None,
+                            bonus_expiry_unix: None,
+                            completed_at_unix: None,
+                            required_delivery_type_id: req_tid,
+                            required_delivery_qty: req_qty,
+                            granted_courier_item_id: None,
+                            granted_courier_qty: 0,
+                            is_anomic_burner: is_burner,
+                            chosen_branch: None,
+                            destination_station_id: dest_sid,
+                            origin_station_id: origin_sid,
+                            offered_level: Some(agent_info.level),
+                        };
+                        let briefing = build_mission_briefing_text(
+                            ctx,
+                            agent_id,
+                            mission_id,
+                            &title,
+                            sys_id,
+                            Some(&offer_meta),
                         );
+                        save_mission_meta(snap, char_id, &offer_meta);
                         let target_sys = if is_fw_agent(agent_info) { resolve_fw_warzone_system(agent_info.corporation_id) } else { sys_id };
                         snap.active_missions.insert((char_id, mission_id), ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
                         Ok((mission_id, title, briefing, objectives, dest_sid))
