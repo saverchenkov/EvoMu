@@ -2650,7 +2650,22 @@ pub fn handle(
                 let cids: Vec<i64> = snap.contracts.keys().copied().collect();
                 for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
                 let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
-                    !matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                    // Exclude active (Outstanding / InProgress) and terminal deleted/cancelled/reversed
+                    // contracts from Requires Attention (#1328); keep Expired, Failed, Rejected,
+                    // unclaimed FinishedIssuer / FinishedContractor, and settled Completed / Finished rows.
+                    !matches!(
+                        c.status.as_str(),
+                        "Outstanding"
+                            | "outstanding"
+                            | "InProgress"
+                            | "in_progress"
+                            | "Deleted"
+                            | "deleted"
+                            | "Cancelled"
+                            | "cancelled"
+                            | "Reversed"
+                            | "reversed"
+                    )
                         && if for_corp {
                             caller_corp != 0
                                 && ((c.for_corp && (c.issuer_corp_id == caller_corp || c.issuer_id == caller_corp))

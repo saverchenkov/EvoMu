@@ -1648,3 +1648,304 @@ fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() 
     }
 }
 
+#[test]
+fn get_my_expired_contract_list_excludes_deleted_contracts_personal_and_corp_1328() {
+    let (ctx, mut issuer_sess, issuer_id, _acc_sess, _acc_id, station_id, _dest_id) =
+        setup_contracts_ctx();
+    let kwargs = HashMap::new();
+    let corp_id = 98_444_128_i64;
+
+    let item_out_del = 910_001_i64;
+    let item_exp_del = 910_002_i64;
+    let item_exp_keep = 910_003_i64;
+    let item_active = 910_004_i64;
+    let item_corp_exp_del = 910_005_i64;
+    let item_corp_exp_keep = 910_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&issuer_id) {
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations.insert(corp_id, {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "Expired Filter Corp".into();
+            corp.ticker = "EFCT".into();
+            corp.ceo_id = issuer_id;
+            corp.wallet_divisions = vec![eve_db::CorpWalletDivisionRecord {
+                division_id: 1,
+                name: "Master".into(),
+                balance: IskCents::from_isk(50_000_000),
+            }];
+            corp.members = [issuer_id].into_iter().collect();
+            corp.member_roles = [(
+                issuer_id,
+                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
+            )]
+            .into_iter()
+            .collect();
+            corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            corp
+        });
+
+        for iid in [item_out_del, item_exp_del, item_exp_keep, item_active] {
+            snap.items.insert(
+                iid,
+                make_fighter_item(iid, 34, issuer_id, station_id, InventoryFlag::Hangar, 10),
+            );
+        }
+        for iid in [item_corp_exp_del, item_corp_exp_keep] {
+            snap.items.insert(
+                iid,
+                make_fighter_item(iid, 34, corp_id, station_id, InventoryFlag::CorpSAG1, 10),
+            );
+        }
+    });
+    issuer_sess.corporation_id = Some(corp_id);
+    issuer_sess.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+
+    let make_ix = |item_id: i64, for_corp: bool| {
+        PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("forCorp", PyRep::Bool(for_corp)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(100_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(item_id)])),
+        ])
+    };
+
+    // 1. Outstanding contract deleted before expiry must never appear in Requires Attention.
+    let cid_out_del = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_out_del, false)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    handle(&ctx, &mut issuer_sess, "contractProxy", "DeleteContract", &[PyRep::Integer(cid_out_del)], &kwargs)
+        .unwrap()
+        .unwrap();
+
+    // 2. Expired personal contracts (one kept, one deleted) + one active Outstanding contract.
+    let cid_exp_del = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_exp_del, false)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let cid_exp_keep = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_exp_keep, false)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let cid_active = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_active, false)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+
+    // 3. Expired corp contracts (one kept, one deleted).
+    let cid_corp_exp_del = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_corp_exp_del, true)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let cid_corp_exp_keep = created_cid(
+        &handle(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &[make_ix(item_corp_exp_keep, true)], &kwargs)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [cid_exp_del, cid_exp_keep, cid_corp_exp_del, cid_corp_exp_keep] {
+            snap.contracts.get_mut(&cid).unwrap().expiration_unix = 1;
+        }
+    });
+
+    // Before deleting expired contracts, both personal and corp expired rows are returned.
+    let personal_before = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "GetMyExpiredContractList",
+        &[PyRep::Bool(false)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let personal_ids_before: Vec<i64> = contract_list_rows(&personal_before)
+        .iter()
+        .filter_map(|r| dict_i64(r, "contractID"))
+        .collect();
+    assert!(personal_ids_before.contains(&cid_exp_del));
+    assert!(personal_ids_before.contains(&cid_exp_keep));
+    assert!(!personal_ids_before.contains(&cid_out_del));
+    assert!(!personal_ids_before.contains(&cid_active));
+
+    let corp_before = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "GetMyExpiredContractList",
+        &[PyRep::Bool(true)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let corp_ids_before: Vec<i64> = contract_list_rows(&corp_before)
+        .iter()
+        .filter_map(|r| dict_i64(r, "contractID"))
+        .collect();
+    assert!(corp_ids_before.contains(&cid_corp_exp_del));
+    assert!(corp_ids_before.contains(&cid_corp_exp_keep));
+
+    // Delete one expired personal contract and one expired corp contract (#1328).
+    let del_personal = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "DeleteContract",
+        &[PyRep::Integer(cid_exp_del)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&del_personal, "status"), Some("Deleted"));
+
+    let del_corp = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "DeleteContract",
+        &[PyRep::Integer(cid_corp_exp_del)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&del_corp, "status"), Some("Deleted"));
+
+    // Deleting an already-Deleted contract fails with InvalidContractState; it must no longer
+    // appear in GetMyExpiredContractList(false) or GetMyExpiredContractList(true).
+    let repeat_del_err = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "DeleteContract",
+        &[PyRep::Integer(cid_exp_del)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(repeat_del_err.code, "InvalidContractState");
+
+    let personal_after = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "GetMyExpiredContractList",
+        &[PyRep::Bool(false)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let personal_ids_after: Vec<i64> = contract_list_rows(&personal_after)
+        .iter()
+        .filter_map(|r| dict_i64(r, "contractID"))
+        .collect();
+    assert!(!personal_ids_after.contains(&cid_exp_del));
+    assert!(!personal_ids_after.contains(&cid_corp_exp_del));
+    assert!(!personal_ids_after.contains(&cid_out_del));
+    assert!(!personal_ids_after.contains(&cid_active));
+    assert!(personal_ids_after.contains(&cid_exp_keep));
+
+    let corp_kw = HashMap::from([("forCorp".to_string(), PyRep::Bool(true))]);
+    let corp_after = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "GetMyExpiredContractList",
+        &[],
+        &corp_kw,
+    )
+    .unwrap()
+    .unwrap();
+    let corp_ids_after: Vec<i64> = contract_list_rows(&corp_after)
+        .iter()
+        .filter_map(|r| dict_i64(r, "contractID"))
+        .collect();
+    assert!(!corp_ids_after.contains(&cid_corp_exp_del));
+    assert!(corp_ids_after.contains(&cid_corp_exp_keep));
+}
+
+#[test]
+fn get_my_expired_contract_list_status_boundary_matrix_1328() {
+    let (ctx, mut issuer_sess, issuer_id, _acc_sess, _acc_id, station_id, _dest_id) =
+        setup_contracts_ctx();
+    let now = ctx.now_unix();
+    let kwargs = HashMap::new();
+
+    let cases: &[(i64, &str, bool)] = &[
+        (920_001, "Outstanding", false),
+        (920_002, "outstanding", false),
+        (920_003, "InProgress", false),
+        (920_004, "in_progress", false),
+        (920_005, "Deleted", false),
+        (920_006, "deleted", false),
+        (920_007, "Cancelled", false),
+        (920_008, "cancelled", false),
+        (920_009, "Reversed", false),
+        (920_010, "reversed", false),
+        (920_011, "Expired", true),
+        (920_012, "Failed", true),
+        (920_013, "Rejected", true),
+        (920_014, "FinishedIssuer", true),
+        (920_015, "FinishedContractor", true),
+        (920_016, "Completed", true),
+        (920_017, "Finished", true),
+    ];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for &(cid, status, _) in cases {
+            snap.contracts.insert(
+                cid,
+                eve_db::ContractRecord {
+                    contract_id: cid,
+                    issuer_id,
+                    contract_type: "ItemExchange".into(),
+                    status: status.into(),
+                    start_station_id: station_id,
+                    expiration_unix: now + 3_600,
+                    date_issued_unix: now,
+                    availability: "Public".into(),
+                    title: format!("Status {status}"),
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let rep = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "GetMyExpiredContractList",
+        &[PyRep::Bool(false)],
+        &kwargs,
+    )
+    .unwrap()
+    .unwrap();
+    let returned_ids: Vec<i64> = contract_list_rows(&rep)
+        .iter()
+        .filter_map(|r| dict_i64(r, "contractID"))
+        .collect();
+    let expected_ids: Vec<i64> = cases
+        .iter()
+        .filter_map(|&(cid, _, expected)| expected.then_some(cid))
+        .collect();
+    assert_eq!(returned_ids, expected_ids);
+}
+
