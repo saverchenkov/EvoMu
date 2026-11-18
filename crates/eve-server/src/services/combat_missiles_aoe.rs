@@ -14,35 +14,34 @@ pub(crate) fn is_combatant_ship_or_entity_ball(ctx: &ServerContext, ball_id: i64
 }
 
 /// Returns `Some(char_id)` if `ball_id` is a capsuleer ship (`category_id == 6`), resolving
-/// the active pilot, disconnected pilot, or hull owner (for unpiloted ships in space, `#835`).
-/// Non-ship balls (drones, wrecks, jetcans, corpses, NPCs) return `None`.
+/// the active pilot, disconnected pilot, or character hull owner (for unpiloted ships in space, `#835`).
+/// MTO site balls and non-capsuleer/non-ship balls (drones, wrecks, jetcans, corpses, NPCs) return `None`.
 pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> Option<i64> {
     if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id)) {
         return None;
     }
     ctx.db.with_snapshot(|snap| {
-        let item = snap.items.get(&ball_id)?;
-        let cat_id = ctx
-            .sde
-            .types
-            .get(&item.type_id)
-            .map(|t| t.category_id)
-            .unwrap_or(0);
-        if cat_id != 6 {
-            return None;
-        }
-        snap.characters
-            .values()
-            .find(|c| c.active_ship_id == ball_id)
-            .map(|c| c.character_id)
-            .or_else(|| {
-                snap.sp6_lifecycle
-                    .disconnected_ships
-                    .values()
-                    .find(|d| d.ship_id == ball_id)
-                    .map(|d| d.char_id)
-            })
-            .or(Some(item.owner_id))
+        crate::combat::death_pipeline::resolve_capsuleer_ship_char_in_snap(
+            snap,
+            &ctx.sde,
+            ball_id,
+        )
+    })
+}
+
+/// Returns `true` if `ball_id` is an unpiloted player-corporation ship (`category_id == 6`)
+/// tracked in `snap.items` and owned by a corporation in `snap.corporations`.
+pub(crate) fn is_corp_owned_ship_ball(ctx: &ServerContext, ball_id: i64) -> bool {
+    if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id)) {
+        return false;
+    }
+    ctx.db.with_snapshot(|snap| {
+        crate::combat::death_pipeline::resolve_corp_ship_owner_in_snap(
+            snap,
+            &ctx.sde,
+            ball_id,
+        )
+        .is_some()
     })
 }
 
@@ -61,13 +60,14 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     with_mut_combat_runtime(ctx, |rt| {
         rt.active_drone_miners.remove(&ball_id);
         rt.container_lifetimes.remove(&ball_id);
+        rt.record_destroyed_item_id(ball_id);
     });
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+        snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
         if snap.items.remove(&ball_id).is_some() {
             snap.item_positions.remove(&ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-            snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
             let mut to_visit = vec![ball_id];
             let mut all_descendants = Vec::new();
             while let Some(parent_id) = to_visit.pop() {
@@ -119,7 +119,7 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
     if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
         return;
     }
-    if active_ship_victim_char_id(ctx, ball_id).is_some() {
+    if active_ship_victim_char_id(ctx, ball_id).is_some() || is_corp_owned_ship_ball(ctx, ball_id) {
         let _ = crate::combat::death_pipeline::on_ball_destroyed(
             ctx,
             sys_id,
@@ -146,7 +146,18 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
         )
         .await;
     } else {
+        // Remove non-ship / MTO ball & item state BEFORE calling `on_space_entity_destroyed` so
+        // `record_rat_kill_military_index` sees no remaining `category_id == 6` item and credits
+        // the MTO kill.
         cleanup_destroyed_non_ship_ball(ctx, sys_id, ball_id).await;
+        let killer_opt = (attacker_char_id > 0).then_some(attacker_char_id);
+        crate::services::sov_gameplay::on_space_entity_destroyed(
+            ctx,
+            sys_id,
+            killer_opt,
+            ball_id,
+            ball_type_id,
+        );
     }
 }
 

@@ -514,3 +514,298 @@ async fn cleanup_destroyed_non_ship_ball_fails_courier_contracts_and_removes_nes
         assert_eq!(bal_after.0, balance_before.0 + 30_000);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mto_site_ball_excluded_from_capsuleer_death_and_completed_on_missile_or_aoe_kill() {
+    let (mut ctx, _, char_id, ship_id, sys_id) = make_missile_and_aoe_ctx();
+    let mut sde = (*ctx.sde).clone();
+    // Harbinger (`type_id == 24_690`, `category_id == 6`) used for MTO site balls (`#1304`).
+    sde.types.insert(
+        24_690,
+        make_fighter_type(
+            24_690,
+            419,
+            6,
+            15_000.0,
+            vec![(263, 3_500.0), (265, 4_000.0), (9, 3_200.0)],
+        ),
+    );
+    ctx.sde = Arc::new(sde);
+
+    let now = ctx.now_unix();
+    let den_id = 1_090_000_010i64;
+    let mto_ball_id = 1_990_000_901i64;
+    let npc_hull_id = 1_990_000_902i64;
+    let unpiloted_player_hull = 1_990_000_903i64;
+    let act_uuid = vec![0xAB; 16];
+    let act_hex = "ab".repeat(16);
+    let pos = DVec3::new(5_000.0, 0.0, 0.0);
+
+    let (bal_before, km_before, npc_kills_before) = ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mto_ball_id,
+            make_fighter_item(
+                mto_ball_id,
+                24_690,
+                500_010,
+                i64::from(sys_id),
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.item_positions.insert(mto_ball_id, [pos.x, pos.y, pos.z]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(mto_ball_id, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(mto_ball_id, eve_db::PersistedCombatHp::default());
+        snap.items.insert(
+            npc_hull_id,
+            make_fighter_item(
+                npc_hull_id,
+                24_690,
+                500_010,
+                i64::from(sys_id),
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.item_positions.insert(npc_hull_id, [pos.x, pos.y, pos.z]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(npc_hull_id, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(npc_hull_id, eve_db::PersistedCombatHp::default());
+        snap.items.insert(
+            unpiloted_player_hull,
+            make_fighter_item(
+                unpiloted_player_hull,
+                587,
+                char_id,
+                i64::from(sys_id),
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            eve_db::PersistedMercenaryDen {
+                den_id,
+                type_id: crate::services::sov_gameplay::TYPE_MERCENARY_DEN,
+                owner_char_id: char_id,
+                skyhook_id: 1_960_000_099,
+                solar_system_id: sys_id,
+                planet_id: 40_000_001,
+                enabled: true,
+                cargo_extraction_enabled: true,
+                development_level: 40,
+                anarchy_level: 40,
+                infomorphs: 10,
+                simulated_at_unix: now,
+                next_activity_generation_unix: now + 3_600,
+            },
+        );
+        snap.sov_runtime.mercenary_activities.insert(
+            act_hex.clone(),
+            eve_db::PersistedMercenaryActivity {
+                uuid: act_uuid,
+                den_id,
+                solar_system_id: sys_id,
+                dungeon_id: 1,
+                started: true,
+                started_by: char_id,
+                expiry_unix: now + 3_600,
+                development_impact: 10,
+                anarchy_impact: -10,
+                infomorph_bonus: 25,
+            },
+        );
+        snap.sov_runtime
+            .mto_site_balls
+            .insert(mto_ball_id, act_hex.clone());
+        let npc_kills_before: u32 = snap
+            .system_kill_events
+            .iter()
+            .filter(|e| e.solar_system_id == sys_id)
+            .map(|e| e.npc_kills)
+            .sum();
+        (snap.characters[&char_id].balance, snap.killmails.len(), npc_kills_before)
+    });
+
+    assert_eq!(active_ship_victim_char_id(&ctx, ship_id), Some(char_id));
+    assert_eq!(
+        active_ship_victim_char_id(&ctx, unpiloted_player_hull),
+        Some(char_id)
+    );
+    assert_eq!(active_ship_victim_char_id(&ctx, mto_ball_id), None);
+    assert_eq!(active_ship_victim_char_id(&ctx, npc_hull_id), None);
+
+    spawn_missile_target_ball(&ctx, sys_id, mto_ball_id, 24_690, pos, 100.0, 100.0, 100.0, 100.0)
+        .await;
+    spawn_missile_target_ball(&ctx, sys_id, npc_hull_id, 24_690, pos, 100.0, 100.0, 100.0, 100.0)
+        .await;
+
+    handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        sys_id,
+        char_id,
+        mto_ball_id,
+        24_690,
+        pos,
+        now,
+    )
+    .await;
+    handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        sys_id,
+        char_id,
+        npc_hull_id,
+        24_690,
+        pos,
+        now,
+    )
+    .await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.get_ball_snapshot(mto_ball_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(npc_hull_id).await.unwrap().is_none());
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_id));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&act_hex));
+        assert!(!snap.items.contains_key(&mto_ball_id));
+        assert!(!snap.item_positions.contains_key(&mto_ball_id));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&mto_ball_id));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&mto_ball_id));
+        assert!(!snap.items.contains_key(&npc_hull_id));
+        assert!(!snap.item_positions.contains_key(&npc_hull_id));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&npc_hull_id));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&npc_hull_id));
+        let den = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
+        assert_eq!(den.development_level, 50);
+        assert_eq!(den.anarchy_level, 30);
+        assert!(den.infomorphs > 10);
+        assert_eq!(
+            snap.characters[&char_id].balance,
+            bal_before
+                .checked_add(eve_db::types::IskCents::from_isk(7_500_000))
+                .unwrap()
+        );
+        assert_eq!(snap.killmails.len(), km_before);
+        let npc_kills_after: u32 = snap
+            .system_kill_events
+            .iter()
+            .filter(|e| e.solar_system_id == sys_id)
+            .map(|e| e.npc_kills)
+            .sum();
+        assert_eq!(npc_kills_after, npc_kills_before + 1);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpiloted_corp_ship_destroyed_by_missile_or_aoe_creates_corp_killmail_and_wreck() {
+    let (ctx, _, char_id, ship_id, sys_id) = make_missile_and_aoe_ctx();
+    let now = ctx.now_unix();
+    let corp_id = 98_000_077i64;
+    let ally_id = 99_000_077i64;
+    let corp_ship_id = 1_990_000_941i64;
+    let corp_cargo_id = 1_990_000_942i64;
+    let pos = DVec3::new(6_000.0, 0.0, 0.0);
+
+    let km_before = ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "AOE Victim Corp".to_string();
+        corp.ticker = "AOEV".to_string();
+        corp.alliance_id = Some(ally_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.items.insert(
+            corp_ship_id,
+            make_fighter_item(
+                corp_ship_id,
+                587,
+                corp_id,
+                i64::from(sys_id),
+                eve_db::InventoryFlag::None,
+                1,
+            ),
+        );
+        snap.item_positions
+            .insert(corp_ship_id, [pos.x, pos.y, pos.z]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(corp_ship_id, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(corp_ship_id, eve_db::PersistedCombatHp::default());
+        snap.items.insert(
+            corp_cargo_id,
+            make_fighter_item(
+                corp_cargo_id,
+                34,
+                corp_id,
+                corp_ship_id,
+                eve_db::InventoryFlag::Cargo,
+                50,
+            ),
+        );
+        snap.killmails.len()
+    });
+
+    assert_eq!(active_ship_victim_char_id(&ctx, corp_ship_id), None);
+    assert!(is_corp_owned_ship_ball(&ctx, corp_ship_id));
+
+    spawn_missile_target_ball(&ctx, sys_id, corp_ship_id, 587, pos, 100.0, 100.0, 100.0, 100.0)
+        .await;
+
+    handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        sys_id,
+        char_id,
+        corp_ship_id,
+        587,
+        pos,
+        now,
+    )
+    .await;
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(sys_handle.get_ball_snapshot(corp_ship_id).await.unwrap().is_none());
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&corp_ship_id));
+        assert!(!snap.item_positions.contains_key(&corp_ship_id));
+        assert!(
+            !snap
+                .sp6_lifecycle
+                .space_object_meta
+                .contains_key(&corp_ship_id)
+        );
+        assert!(
+            !snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .contains_key(&corp_ship_id)
+        );
+        assert_eq!(snap.killmails.len(), km_before + 1);
+        let km = snap
+            .killmails
+            .values()
+            .max_by_key(|k| k.kill_id)
+            .expect("corp ship killmail created");
+        assert_eq!(km.victim_character_id, 0);
+        assert_eq!(km.victim_corp_id, corp_id);
+        assert_eq!(km.victim_alliance_id, Some(ally_id));
+        assert_eq!(km.attacker_character_id, char_id);
+        assert_eq!(km.ship_type_id, 587);
+        assert_eq!(snap.characters[&char_id].active_ship_id, ship_id);
+        assert!(
+            snap.items
+                .values()
+                .any(|it| it.owner_id == corp_id && it.location_id == i64::from(sys_id)),
+            "corp wreck spawned in space owned by victim corp"
+        );
+    });
+}

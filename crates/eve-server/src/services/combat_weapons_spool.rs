@@ -329,8 +329,17 @@ pub async fn handle_ship_or_npc_destruction(
             ctx,
             target_ball_id,
         );
+    let is_corp_ship =
+        crate::services::combat_crimewatch::combat_missiles_aoe::is_corp_owned_ship_ball(
+            ctx,
+            target_ball_id,
+        );
     if target_item_cat_id_opt == Some(6) {
-        let victim_char_opt = active_ship_vcid.or_else(|| player_target_info.map(|(vcid, _)| vcid));
+        let victim_char_opt = if is_corp_ship {
+            Some(0)
+        } else {
+            active_ship_vcid.or_else(|| player_target_info.map(|(vcid, _)| vcid))
+        };
         if let Some(vcid) = victim_char_opt {
             let is_pod_target = target_ball.type_id == 670
                 || target_ball.type_id == 33328
