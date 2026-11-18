@@ -216,7 +216,7 @@ async fn office_manager_lifecycle_and_fleet_rpc_handlers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(empty_before.as_i64(), Some(16));
+    assert_eq!(empty_before.as_i64(), Some(24));
 
     let impounded_before = handle(&ctx, &mut session, "officeManager", "HasCorpImpoundedItems", &[PyRep::Integer(station_id)], &kw)
         .await
@@ -520,9 +520,24 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
                 solar_system_id: 30_000_142,
                 name: "Test Astrahus".into(),
                 state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
                 ..Default::default()
             },
         );
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let mut prof = crate::services::station_structure::structure_upwell_ops::StructureAccessProfile {
+            profile_id: 501,
+            name: "Open Offices Profile".into(),
+            owner_corp_id,
+            ..Default::default()
+        };
+        prof.general_settings.insert(
+            crate::services::structure_profile_services::SETTING_CORP_RENT_OFFICE,
+            true,
+        );
+        ext.profiles_by_id.insert(501, prof.clone());
+        ext.access_profiles.insert(struct_id, prof);
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         snap.station_office_rental_costs.insert(struct_id, 40_000.0);
     });
     ctx.db
@@ -575,4 +590,765 @@ async fn office_manager_uses_station_rental_cost_map_and_emits_account_and_item_
             PyRep::Real(540_000.0),
         ]]
     );
+
+    // A second corporation renting at the same Upwell structure pays the static owner fee
+    // (`40_000.0`), not an occupancy-scaled 1.5x NPC quote.
+    let corp2_id = 98_000_057_i64;
+    let char2_id = 90_000_057_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp2 =
+            eve_db::CorporationRecord::new(corp2_id, "Second Tenant", "TEN2", char2_id)
+                .with_master_wallet(IskCents::from_isk(100_000));
+        corp2.members.insert(char2_id);
+        corp2.member_roles.insert(char2_id, u64::MAX);
+        snap.corporations.insert(corp2_id, corp2);
+        let mut ch2 = snap.characters.get(&char_id).cloned().unwrap();
+        ch2.character_id = char2_id;
+        ch2.user_id = char2_id as u64;
+        ch2.name = "Tenant Two CEO".into();
+        ch2.corporation_id = corp2_id;
+        ch2.station_id = None;
+        ch2.structure_id = Some(struct_id);
+        snap.characters.insert(char2_id, ch2);
+    });
+    let mut sess2 = session.clone();
+    sess2.session_id = 9_057;
+    sess2.character_id = Some(char2_id);
+    sess2.user_id = Some(char2_id as u64);
+    sess2.corporation_id = Some(corp2_id);
+    sess2.corp_role = u64::MAX;
+    sess2.corp_account_key = 1000;
+    sess2.station_id = None;
+    sess2.structure_id = Some(struct_id);
+
+    let quote_upwell_2 = handle(
+        &ctx,
+        &mut sess2,
+        "officeManager",
+        "GetPriceQuote",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(quote_upwell_2, PyRep::Real(40_000.0));
+    let rent_upwell_2 = handle(
+        &ctx,
+        &mut sess2,
+        "officeManager",
+        "RentOffice",
+        &[PyRep::Integer(struct_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rent_upwell_2.dict_get("cost").and_then(|v| v.as_f64()), Some(40_000.0));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.corporations[&corp2_id].division_balance(1),
+            IskCents::from_isk(60_000)
+        );
+        assert_eq!(
+            snap.corporations[&owner_corp_id].division_balance(1),
+            IskCents::from_isk(580_000)
+        );
+    });
+}
+
+#[tokio::test]
+async fn upwell_office_acl_domain20_core_zero_fee_and_unlimited_slots_vs_npc_24_cap() {
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::{
+        encode_service_setting_bps, SETTING_CORP_RENT_OFFICE, SETTING_HOUSING_CAN_DOCK,
+    };
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let kw = HashMap::new();
+    let struct_id = 1_030_000_000_220_i64;
+    let flex_id = 1_030_000_000_221_i64;
+    let npc_station_id = 60_003_760_i64;
+
+    let owner_corp_id = 98_000_220_i64;
+    let owner_char_id = 90_000_220_i64;
+    let paid_corp_id = 98_000_221_i64;
+    let paid_char_id = 90_000_221_i64;
+    let free_corp_id = 98_000_222_i64;
+    let free_char_id = 90_000_222_i64;
+    let dock_only_corp_id = 98_000_223_i64;
+    let dock_only_char_id = 90_000_223_i64;
+
+    let seed_corp_and_ceo = |snap: &mut eve_db::WorldStateSnapshot,
+                             corp_id: i64,
+                             char_id: i64,
+                             name: &str,
+                             ticker: &str,
+                             balance_isk: i64| {
+        let mut corp = eve_db::CorporationRecord::new(corp_id, name, ticker, char_id)
+            .with_master_wallet(IskCents::from_isk(balance_isk));
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, u64::MAX);
+        snap.corporations.insert(corp_id, corp);
+        snap.characters.insert(
+            char_id,
+            eve_db::CharacterRecord {
+                character_id: char_id,
+                user_id: char_id as u64,
+                name: format!("{ticker} CEO"),
+                corporation_id: corp_id,
+                solar_system_id: 30_000_142,
+                structure_id: Some(struct_id),
+                balance: IskCents::from_isk(0),
+                ..Default::default()
+            },
+        );
+        let uname = format!("u{}", char_id);
+        snap.accounts.insert(
+            uname.clone(),
+            eve_db::AccountRecord {
+                user_id: char_id as u64,
+                username: uname,
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_corp_and_ceo(snap, owner_corp_id, owner_char_id, "Citadel Host", "HST", 0);
+        seed_corp_and_ceo(snap, paid_corp_id, paid_char_id, "Paid Tenant", "PAID", 100_000);
+        seed_corp_and_ceo(snap, free_corp_id, free_char_id, "Free Ally", "FREE", 0);
+        seed_corp_and_ceo(
+            snap,
+            dock_only_corp_id,
+            dock_only_char_id,
+            "Dock Only Corp",
+            "DOCK",
+            500_000,
+        );
+
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id,
+                solar_system_id: 30_000_142,
+                name: "ACL Astrahus".into(),
+                state: "NoCore".into(),
+                quantum_core_installed: false,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            flex_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: flex_id,
+                type_id: 35_841,
+                owner_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Flex Gate".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut owner_sess = make_session(owner_char_id, owner_corp_id, None);
+    owner_sess.structure_id = Some(struct_id);
+    let mut paid_sess = make_session(paid_char_id, paid_corp_id, None);
+    paid_sess.structure_id = Some(struct_id);
+    let mut free_sess = make_session(free_char_id, free_corp_id, None);
+    free_sess.structure_id = Some(struct_id);
+    let mut dock_only_sess = make_session(dock_only_char_id, dock_only_corp_id, None);
+    dock_only_sess.structure_id = Some(struct_id);
+
+    // 1. Un-cored / NoCore / Anchoring / FLEX structures reject RentOffice & GetPriceQuote with
+    // StructureNotOperational and report 0 empty office slots.
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureNotOperational"
+    );
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureNotOperational"
+    );
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "RentOffice", &[PyRep::Integer(flex_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "NotDockedAtStation"
+    );
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(flex_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureNotOperational"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get_mut(&struct_id).unwrap();
+        st.state = "ShieldVulnerable".into();
+        st.quantum_core_installed = false;
+    });
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureNotOperational"
+    );
+
+    // 2. Operational + cored structure with NO access profile rejects outsiders, and a profile
+    // that only grants docking (SETTING_HOUSING_CAN_DOCK=19 / legacy 1) without domain 20 STILL
+    // rejects RentOffice & GetPriceQuote and returns 0 empty offices.
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.structures.get_mut(&struct_id).unwrap();
+        st.quantum_core_installed = true;
+    });
+    assert_eq!(
+        handle(&ctx, &mut paid_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut paid_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            701,
+            AccessGroupRecord {
+                group_id: 701,
+                creator_id: owner_char_id,
+                owner_corp_id,
+                name: "Dock Only Group".into(),
+                description: String::new(),
+                members: HashMap::from([
+                    (dock_only_corp_id, 1),
+                    (paid_corp_id, 1),
+                    (free_corp_id, 1),
+                ]),
+            },
+        );
+        let mut dock_prof = StructureAccessProfile {
+            profile_id: 710,
+            owner_corp_id,
+            ..Default::default()
+        };
+        dock_prof.allowed_corporations =
+            HashSet::from([dock_only_corp_id, paid_corp_id, free_corp_id]);
+        dock_prof.general_settings.insert(1, true);
+        dock_prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+        dock_prof.service_acl_rules.insert(1, vec![(701, 0)]);
+        dock_prof
+            .service_acl_rules
+            .insert(SETTING_HOUSING_CAN_DOCK, vec![(701, 0)]);
+        ext.profiles_by_id.insert(710, dock_prof.clone());
+        ext.access_profiles.insert(struct_id, dock_prof);
+        save_ext_state(snap, &ext);
+    });
+    assert_eq!(
+        handle(&ctx, &mut dock_only_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut dock_only_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut dock_only_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+
+    // 3. Configure domain 20 (SETTING_CORP_RENT_OFFICE) ACL tiers:
+    // - paid_corp_id -> 25,000 ISK
+    // - free_corp_id & owner_corp_id -> 0 ISK
+    // - dock_only_corp_id -> NOT in domain 20 -> rejected!
+    let paid_bps = encode_service_setting_bps(SETTING_CORP_RENT_OFFICE, 25_000.0).unwrap();
+    let free_bps = encode_service_setting_bps(SETTING_CORP_RENT_OFFICE, 0.0).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            702,
+            AccessGroupRecord {
+                group_id: 702,
+                creator_id: owner_char_id,
+                owner_corp_id,
+                name: "Paid Office Group".into(),
+                description: String::new(),
+                members: HashMap::from([(paid_corp_id, 1)]),
+            },
+        );
+        ext.owner_groups.insert(
+            703,
+            AccessGroupRecord {
+                group_id: 703,
+                creator_id: owner_char_id,
+                owner_corp_id,
+                name: "Free Office Group".into(),
+                description: String::new(),
+                members: HashMap::from([(free_corp_id, 1), (owner_corp_id, 1)]),
+            },
+        );
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.service_acl_rules.insert(
+            SETTING_CORP_RENT_OFFICE,
+            vec![(702, paid_bps), (703, free_bps)],
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    assert_eq!(
+        handle(&ctx, &mut dock_only_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+
+    assert_eq!(
+        handle(&ctx, &mut paid_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Real(25_000.0)
+    );
+    assert!(
+        handle(&ctx, &mut paid_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_i64()
+            .unwrap()
+            > 24
+    );
+    let paid_rent = handle(&ctx, &mut paid_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paid_rent.dict_get("cost").and_then(|v| v.as_f64()), Some(25_000.0));
+
+    // Free (0 ISK) tier succeeds even with a 0 ISK wallet, emits OnItemChange & OnOfficeRentalChange,
+    // and skips bogus zero-value OnAccountChange / OnBillReceived / 0 ISK journals.
+    assert_eq!(
+        handle(&ctx, &mut free_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Real(0.0)
+    );
+    let _ = ctx.db.acquire_online_lock(free_char_id as u64, 9_222, Some(free_char_id), true, 1_700_000_000);
+    let _ = ctx.drain_notifications_for_char(free_char_id);
+    let free_rent = handle(&ctx, &mut free_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(free_rent.dict_get("cost").and_then(|v| v.as_f64()), Some(0.0));
+    let free_notifs = ctx.drain_notifications_for_char(free_char_id);
+    assert!(!free_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(!free_notifs.iter().any(|n| n.event == "OnBillReceived"));
+    assert!(free_notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(free_notifs.iter().any(|n| n.event == "OnOfficeRentalChange"));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.corporations[&free_corp_id].division_balance(1), IskCents::from_isk(0));
+        assert!(!snap.corp_wallet_journals.contains_key(&(free_corp_id, 1)));
+        assert!(snap.corp_governance[&free_corp_id].offices.contains_key(&struct_id));
+    });
+
+    // 4. Setting SETTING_CORP_RENT_OFFICE (20) = false disables office rental and zeroes empty count.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.access_profiles
+            .get_mut(&struct_id)
+            .unwrap()
+            .general_settings
+            .insert(SETTING_CORP_RENT_OFFICE, false);
+        save_ext_state(snap, &ext);
+    });
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+
+    // 5. Re-enable SETTING_CORP_RENT_OFFICE (20) = true with station_office_rental_costs = 0.0
+    // (no ACL rule fees) AND verify >24 offices succeed on Upwell Citadels while NPC stations cap at 24.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.service_acl_rules.remove(&SETTING_CORP_RENT_OFFICE);
+        prof.general_settings.insert(SETTING_CORP_RENT_OFFICE, true);
+        save_ext_state(snap, &ext);
+        snap.station_office_rental_costs.insert(struct_id, 0.0);
+
+        for i in 0..25_i64 {
+            let iid = 950_000 + i;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 27,
+                    owner_id: 98_950_000 + i,
+                    location_id: struct_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Real(0.0)
+    );
+    assert!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_i64()
+            .unwrap()
+            > 24
+    );
+    let owner_rent = handle(&ctx, &mut owner_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner_rent.dict_get("cost").and_then(|v| v.as_f64()), Some(0.0));
+
+    // Confirm NPC station allows 17th..24th offices and caps at 24.
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 0..20_i64 {
+            let iid = 951_000 + i;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 27,
+                    owner_id: 98_960_000 + i,
+                    location_id: npc_station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(npc_station_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(4)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 20..24_i64 {
+            let iid = 951_000 + i;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 27,
+                    owner_id: 98_960_000 + i,
+                    location_id: npc_station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    assert_eq!(
+        handle(&ctx, &mut owner_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(npc_station_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+}
+
+#[tokio::test]
+async fn upwell_office_does_not_conflate_reprocessing_setting_3_with_domain_20() {
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, AccessGroupRecord, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::{
+        SETTING_CORP_RENT_OFFICE, SETTING_HOUSING_CAN_DOCK, SETTING_REPROCESSING_TAX,
+    };
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let kw = HashMap::new();
+    let struct_id = 1_030_000_000_320_i64;
+    let owner_corp_id = 98_000_320_i64;
+    let owner_char_id = 90_000_320_i64;
+    let tenant_corp_id = 98_000_321_i64;
+    let tenant_char_id = 90_000_321_i64;
+    let group_id = 7_320_i64;
+    let profile_id = 8_320_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (corp_id, char_id, ticker, bal) in [
+            (owner_corp_id, owner_char_id, "OWN3", 0_i64),
+            (tenant_corp_id, tenant_char_id, "TNT3", 100_000_i64),
+        ] {
+            let mut corp = eve_db::CorporationRecord::new(corp_id, &format!("Corp {ticker}"), ticker, char_id)
+                .with_master_wallet(IskCents::from_isk(bal));
+            corp.members.insert(char_id);
+            corp.member_roles.insert(char_id, u64::MAX);
+            snap.corporations.insert(corp_id, corp);
+            snap.characters.insert(
+                char_id,
+                eve_db::CharacterRecord {
+                    character_id: char_id,
+                    user_id: char_id as u64,
+                    name: format!("{ticker} CEO"),
+                    corporation_id: corp_id,
+                    solar_system_id: 30_000_142,
+                    structure_id: Some(struct_id),
+                    balance: IskCents::from_isk(0),
+                    ..Default::default()
+                },
+            );
+            let uname = format!("u{char_id}");
+            snap.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: char_id as u64,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id,
+                solar_system_id: 30_000_142,
+                name: "CrossDomain Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.station_office_rental_costs.insert(struct_id, 42_000.0);
+
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            group_id,
+            AccessGroupRecord {
+                group_id,
+                creator_id: owner_char_id,
+                owner_corp_id,
+                name: "Tenant Dock & Reproc".into(),
+                description: String::new(),
+                members: HashMap::from([(tenant_corp_id, 1)]),
+            },
+        );
+        let mut prof = StructureAccessProfile {
+            profile_id,
+            owner_corp_id,
+            ..Default::default()
+        };
+        prof.allowed_corporations.insert(tenant_corp_id);
+        prof.general_settings.insert(1, true);
+        prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+        ext.profiles_by_id.insert(profile_id, prof.clone());
+        ext.access_profiles.insert(struct_id, prof);
+        save_ext_state(snap, &ext);
+    });
+
+    let mut owner_sess = make_session(owner_char_id, owner_corp_id, None);
+    owner_sess.user_id = Some(owner_char_id as u64);
+    owner_sess.structure_id = Some(struct_id);
+    let mut tenant_sess = make_session(tenant_char_id, tenant_corp_id, None);
+    tenant_sess.user_id = Some(tenant_char_id as u64);
+    tenant_sess.structure_id = Some(struct_id);
+
+    // (a) Save Reprocessing (settingID = 3) at 0.05 (scalar + ACL rule for tenant group) while domain 20
+    // is unconfigured: docked tenant corp MUST STILL be denied office rental & quote (0 empty count).
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "structureProfiles",
+            None,
+            "SaveProfileSettings",
+            &[
+                PyRep::Integer(struct_id),
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(SETTING_REPROCESSING_TAX),
+                        PyRep::Integer(group_id),
+                        PyRep::Real(0.05),
+                    ]),
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(SETTING_REPROCESSING_TAX),
+                        PyRep::Real(0.05),
+                    ]),
+                ]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle(&ctx, &mut tenant_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut tenant_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "StructureServiceAccessDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut tenant_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(0)
+    );
+
+    // (b) Enable SETTING_CORP_RENT_OFFICE (20) without a custom domain-20 fee: GetPriceQuote MUST use
+    // fallback_office_fee_isk (42_000.0), NOT 0.05 ISK from Reprocessing (settingID = 3).
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "structureProfiles",
+            None,
+            "SaveProfileSettings",
+            &[
+                PyRep::Integer(struct_id),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(SETTING_CORP_RENT_OFFICE),
+                    PyRep::Bool(true),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle(&ctx, &mut tenant_sess, "officeManager", "GetPriceQuote", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::Real(42_000.0)
+    );
+
+    // (c) Disabling Reprocessing via SaveProfileSettings (3, false) MUST NOT block domain-20 office
+    // rentals or zero GetEmptyOfficeCount.
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "structureProfiles",
+            None,
+            "SaveProfileSettings",
+            &[
+                PyRep::Integer(struct_id),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(SETTING_REPROCESSING_TAX),
+                    PyRep::Bool(false),
+                ])]),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(
+        handle(&ctx, &mut tenant_sess, "officeManager", "GetEmptyOfficeCount", &[PyRep::Integer(struct_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_i64()
+            .unwrap()
+            > 24
+    );
+    let rented = handle(&ctx, &mut tenant_sess, "officeManager", "RentOffice", &[PyRep::Integer(struct_id)], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rented.dict_get("cost").and_then(|v| v.as_f64()), Some(42_000.0));
 }

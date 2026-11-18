@@ -1091,4 +1091,137 @@ fn test_require_structure_service_access_market_industry_jump_bridge_and_control
     });
 }
 
+#[test]
+fn evaluate_character_service_bps_isolates_service_id_from_setting_id() {
+    use crate::services::station_structure::structure_lifecycle::{
+        ATTR_SERVICE_FUEL_ONLINE, ATTR_SERVICE_FUEL_PER_HOUR,
+    };
+
+    let mut ctx = test_ctx_with_clock(1_800_000_000);
+    // Register a synthetic Standup service type with type_id = SERVICE_OFFICES (3) so
+    // `is_v24_or_legacy_service_online(..., SERVICE_OFFICES)` returns true via `online_service_type_ids`.
+    {
+        let reg = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut svc_type = reg
+            .types
+            .get(&35_878)
+            .cloned()
+            .expect("Standup Manufacturing Plant I");
+        svc_type.type_id = SERVICE_OFFICES as u32;
+        svc_type.name = "Synthetic Office Service".into();
+        svc_type.default_attributes.insert(ATTR_SERVICE_FUEL_PER_HOUR, 5.0);
+        svc_type.default_attributes.insert(ATTR_SERVICE_FUEL_ONLINE, 10.0);
+        reg.types.insert(SERVICE_OFFICES as u32, svc_type);
+    }
+
+    let owner_corp = 98_601_001_i64;
+    let pilot_id = 90_601_001_i64;
+    let struct_id = 1_060_601_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = clone_char_with(snap, pilot_id, "CrossDomainPilot", owner_corp, 30_000_142, 10);
+        snap.characters.insert(pilot_id, ch);
+        snap.corporations.insert(
+            owner_corp,
+            CorporationRecord::new(owner_corp, "CrossDomain Corp", "XDMN", pilot_id),
+        );
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_833,
+                owner_corp_id: owner_corp,
+                solar_system_id: 30_000_142,
+                name: "CrossDomain Fortizar".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        for (idx, mod_tid) in [35_878_u32, SERVICE_OFFICES as u32].into_iter().enumerate() {
+            let mid = 960_100 + (idx as i64);
+            snap.items.insert(
+                mid,
+                eve_db::InventoryItemRecord {
+                    item_id: mid,
+                    type_id: mod_tid,
+                    owner_id: owner_corp,
+                    location_id: struct_id,
+                    flag: eve_db::InventoryFlag::ServiceSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mid, true);
+        }
+
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 801,
+            owner_corp_id: owner_corp,
+            ..Default::default()
+        };
+        // Setting 20 (SETTING_CORP_RENT_OFFICE) disabled + 500 bps must NOT touch SERVICE_INDUSTRY (20).
+        prof.general_settings.insert(SETTING_CORP_RENT_OFFICE, false);
+        prof.service_settings.insert(SETTING_CORP_RENT_OFFICE, 500);
+        // Setting 3 (SETTING_REPROCESSING_TAX) disabled + 500 bps must NOT touch SERVICE_OFFICES (3).
+        prof.general_settings.insert(SETTING_REPROCESSING_TAX, false);
+        prof.service_settings.insert(SETTING_REPROCESSING_TAX, 500);
+        ext.profiles_by_id.insert(801, prof.clone());
+        ext.access_profiles.insert(struct_id, prof);
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
+            Some(420),
+            "SETTING_CORP_RENT_OFFICE (20) must not block or override SERVICE_INDUSTRY (20)"
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_OFFICES, 777),
+            None,
+            "SETTING_CORP_RENT_OFFICE (20) = false STILL disables SERVICE_OFFICES (3)"
+        );
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.general_settings.remove(&SETTING_CORP_RENT_OFFICE);
+        prof.service_settings.insert(SETTING_CORP_RENT_OFFICE, 999);
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_OFFICES, 777),
+            Some(999),
+            "SETTING_REPROCESSING_TAX (3) = false/500 must not block or override SERVICE_OFFICES (3)"
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
+            Some(420),
+            "SETTING_CORP_RENT_OFFICE (20) = 999 must not override SERVICE_INDUSTRY (20)"
+        );
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get_mut(&struct_id).unwrap();
+        prof.general_settings.insert(SETTING_INDUSTRY_TAX, false);
+        save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, struct_id, pilot_id, SERVICE_INDUSTRY, 420),
+            None,
+            "SETTING_INDUSTRY_TAX (24) = false disables SERVICE_INDUSTRY (20)"
+        );
+    });
+}
 

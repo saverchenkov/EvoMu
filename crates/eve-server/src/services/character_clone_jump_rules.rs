@@ -546,6 +546,8 @@ pub fn handle_clone_jump(
         // feat:clones.clone-jump-preconditions-and-fees:
         // Leaving current body behind at an NPC station costs 900,000 ISK, debited and journaled.
         // At an Upwell structure the owner sets the fee per standing, minimum 1 ISK (in-structure swap is free).
+        let mut wallet_debit_after: Option<IskCents> = None;
+        let mut corp_credit_after: Option<(i64, IskCents)> = None;
         if !same_structure_swap {
             let leave_behind_fee = if departure_loc_id >= 1_000_000_000_000 {
                 if let Some(acl_fee) = dep_custom_acl_fee {
@@ -576,23 +578,34 @@ pub fn handle_clone_jump(
                 new_bal
             };
 
-            snap.append_journal(
-                char_id,
-                "CloneJumpFee",
-                IskCents(-leave_behind_fee.0),
-                balance_after,
-                if departure_loc_id >= 1_000_000_000_000 {
-                    format!("Clone jump leave-behind fee at structure {departure_loc_id}")
-                } else {
-                    "Clone jump leave-behind body fee at NPC station".into()
-                },
-            );
+            if leave_behind_fee.0 > 0 {
+                snap.append_journal(
+                    char_id,
+                    "CloneJumpFee",
+                    IskCents(-leave_behind_fee.0),
+                    balance_after,
+                    if departure_loc_id >= 1_000_000_000_000 {
+                        format!("Clone jump leave-behind fee at structure {departure_loc_id}")
+                    } else {
+                        "Clone jump leave-behind body fee at NPC station".into()
+                    },
+                );
+                wallet_debit_after = Some(balance_after);
+            }
             if departure_loc_id >= 1_000_000_000_000 {
                 if let Some(owner_corp_id) = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id) {
+                    let owner_before = snap.corporations.get(&owner_corp_id).map(|c| c.division_balance(1));
                     crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
                         snap, owner_corp_id, leave_behind_fee, 10, "CloneJumpFee", char_id,
                         format!("Clone jump leave-behind fee from {char_id} at structure {departure_loc_id}"), now_unix,
                     );
+                    if leave_behind_fee.0 > 0 {
+                        if let Some(after_bal) = snap.corporations.get(&owner_corp_id).map(|c| c.division_balance(1)) {
+                            if owner_before != Some(after_bal) {
+                                corp_credit_after = Some((owner_corp_id, after_bal));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -690,6 +703,8 @@ pub fn handle_clone_jump(
             active_implants,
             cleared_zarzakh_gate,
             ship_clone_spawn_pos,
+            wallet_debit_after,
+            corp_credit_after,
         ))
     });
 
@@ -705,6 +720,8 @@ pub fn handle_clone_jump(
             active_implants,
             cleared_zarzakh_gate,
             ship_clone_spawn_pos,
+            wallet_debit_after,
+            corp_credit_after,
         )) => {
             if let Some(locked_gate_id) = cleared_zarzakh_gate {
                 crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
@@ -802,6 +819,12 @@ pub fn handle_clone_jump(
                 dest_loc_id,
                 true,
             );
+            if let Some(char_bal) = wallet_debit_after {
+                let _ = ctx.notify_wallet_balance(false, char_id, 1, char_bal);
+            }
+            if let Some((owner_corp_id, corp_bal)) = corp_credit_after {
+                let _ = ctx.notify_wallet_balance(true, owner_corp_id, 1, corp_bal);
+            }
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnCloneJumpUpdate,

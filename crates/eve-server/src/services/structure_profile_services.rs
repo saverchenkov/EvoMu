@@ -432,18 +432,41 @@ pub fn evaluate_character_service_bps(
     }
     let ext = load_ext_state(snap);
     if let Some(prof) = effective_profile_for_structure(&ext, structure_id, Some(now)) {
-        if prof.general_settings.get(&service_id) == Some(&false) {
-            return None;
-        }
+        // `StructureAccessProfile` setting maps are keyed by `settingID` (`structures/settings.pyj`),
+        // not `serviceID` (`structures/services.pyj`): resolve disablement and flat fees only via mapped setting IDs.
         let (cands, any_of, flat_keys) =
             candidate_settings_for_service_query(ctx, snap, prof, structure_id, service_id);
+        let specific_cands: Vec<i64> = cands
+            .iter()
+            .copied()
+            .filter(|&sid| sid != SETTING_INDUSTRY_TAX)
+            .collect();
+        let setting_disabled = if any_of {
+            cands
+                .iter()
+                .all(|sid| prof.general_settings.get(sid) == Some(&false))
+                || (!specific_cands.is_empty()
+                    && specific_cands
+                        .iter()
+                        .all(|sid| prof.general_settings.get(sid) == Some(&false)))
+                || (cands.contains(&SETTING_INDUSTRY_TAX)
+                    && prof.general_settings.get(&SETTING_INDUSTRY_TAX) == Some(&false)
+                    && !specific_cands
+                        .iter()
+                        .any(|sid| prof.general_settings.get(sid) == Some(&true)))
+        } else {
+            cands
+                .iter()
+                .find_map(|sid| prof.general_settings.get(sid).copied())
+                == Some(false)
+        };
+        if setting_disabled {
+            return None;
+        }
         match evaluate_domain_acl_on_profile(snap, &ext, prof, char_id, &cands, any_of) {
             Some(Ok(bps)) => return Some(bps),
             Some(Err(())) => return None,
             None => {}
-        }
-        if let Some(&bps) = prof.service_settings.get(&service_id) {
-            return Some(bps);
         }
         for &fk in flat_keys {
             if let Some(&bps) = prof.service_settings.get(&fk) {

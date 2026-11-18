@@ -689,10 +689,10 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     // Dynamic price quote updates with occupancy
     let quote_after = ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetPriceQuote", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap().as_f64().unwrap();
     assert_eq!(quote_after, 15_000.0);
-    // 16-office station cap
+    // 24-office NPC station cap
     let full_station_id = ctx.sde.stations.keys().copied().find(|&id| id != 60_003_760).unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        for i in 1..=16 {
+        for i in 1..=24 {
             snap.items.insert(929_000_000 + i, eve_db::InventoryItemRecord {
                 item_id: 929_000_000 + i, type_id: 27, owner_id: 98_000_000 + i, location_id: full_station_id,
                 flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
