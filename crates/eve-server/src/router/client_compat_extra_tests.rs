@@ -542,22 +542,20 @@ fn destiny_and_notification_normalizers_and_suppression_branches() {
     assert_eq!(anom_dict[0].1.dict_get("dungeonID"), Some(&PyRep::Integer(1001)));
 
     // OnModuleAttributeChanges
-    let mod_attrs = normalize_macho_notification(
-        "OnModuleAttributeChanges",
-        vec![PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Integer(1),
-            PyRep::Integer(2),
-            PyRep::Integer(3),
-            PyRep::Integer(4),
-            PyRep::Integer(5),
-            PyRep::Real(6.0),
-            PyRep::Real(7.0),
-        ])])],
-    );
+    let norm_mod_attrs = |args| normalize_macho_notification("OnModuleAttributeChanges", args);
+    let mod_attrs = norm_mod_attrs(vec![PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Integer(1),
+        PyRep::Integer(2),
+        PyRep::Integer(3),
+        PyRep::Integer(4),
+        PyRep::Integer(5),
+        PyRep::Real(6.0),
+        PyRep::Real(7.0),
+    ])])]);
     let PyRep::List(changes) = &mod_attrs[0] else { panic!() };
     assert!(matches!(&changes[0], PyRep::Tuple(elems) if elems.len() == 8 && elems[7] == PyRep::None));
 
-    let mod_attrs_empty = normalize_macho_notification("OnModuleAttributeChanges", vec![PyRep::Integer(0)]);
+    let mod_attrs_empty = norm_mod_attrs(vec![PyRep::Integer(0)]);
     assert_eq!(
         mod_attrs_empty,
         vec![PyRep::List(vec![PyRep::Tuple(vec![
@@ -1698,5 +1696,113 @@ async fn c9_typed_handlers_fleet_sov_corpmgr_emit_canonical_wire_shapes() {
             .dict_get("ceoID")
             .and_then(PyRep::as_i64)
             .is_some_and(|id| id > 0));
+    }
+}
+
+#[test]
+fn module_attribute_changes_normalizes_list_entries_without_mangling() {
+    let cases = [
+        (
+            "7_elem_list_nonzero_attr",
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_001),
+                PyRep::Integer(700_002),
+                PyRep::Integer(9),
+                PyRep::Integer(123_456),
+                PyRep::Real(120.0),
+                PyRep::Real(90.0),
+            ],
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_001),
+                PyRep::Integer(700_002),
+                PyRep::Integer(9),
+                PyRep::Integer(123_456),
+                PyRep::Real(120.0),
+                PyRep::Real(90.0),
+                PyRep::None,
+            ],
+        ),
+        (
+            "7_elem_list_zero_attr",
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::None,
+                PyRep::Integer(700_003),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                PyRep::Real(50.0),
+                PyRep::Real(25.0),
+            ],
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::None,
+                PyRep::Integer(700_003),
+                PyRep::Integer(2),
+                PyRep::Integer(0),
+                PyRep::Real(50.0),
+                PyRep::Real(25.0),
+                PyRep::None,
+            ],
+        ),
+        (
+            "8_elem_list_bool_cause_and_zero_attr",
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_002),
+                PyRep::Integer(700_004),
+                PyRep::Integer(0),
+                PyRep::Integer(987_654),
+                PyRep::Real(10.5),
+                PyRep::Real(5.25),
+                PyRep::Bool(true),
+            ],
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_002),
+                PyRep::Integer(700_004),
+                PyRep::Integer(2),
+                PyRep::Integer(987_654),
+                PyRep::Real(10.5),
+                PyRep::Real(5.25),
+                PyRep::None,
+            ],
+        ),
+        (
+            "8_elem_list_preserves_all_fields",
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_003),
+                PyRep::Integer(700_005),
+                PyRep::Integer(268),
+                PyRep::Integer(555_000),
+                PyRep::Real(200.0),
+                PyRep::Real(150.0),
+                PyRep::Integer(42),
+            ],
+            vec![
+                PyRep::String("OnModuleAttributeChange".into()),
+                PyRep::Integer(100_003),
+                PyRep::Integer(700_005),
+                PyRep::Integer(268),
+                PyRep::Integer(555_000),
+                PyRep::Real(200.0),
+                PyRep::Real(150.0),
+                PyRep::Integer(42),
+            ],
+        ),
+    ];
+
+    for (label, input_elems, expected_elems) in cases {
+        let out = normalize_macho_notification(
+            "OnModuleAttributeChanges",
+            vec![PyRep::List(vec![PyRep::List(input_elems)])],
+        );
+        assert_eq!(
+            out,
+            vec![PyRep::List(vec![PyRep::Tuple(expected_elems)])],
+            "case {label}"
+        );
     }
 }

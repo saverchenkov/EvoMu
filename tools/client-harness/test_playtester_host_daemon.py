@@ -3712,5 +3712,301 @@ class TestBenignClientLogExceptionsFiltering1313(unittest.TestCase):
             self.assertEqual(runner._pending_assertion_escalation.get("log_exceptions"), [real_exc])
 
 
+class TestGmBridgeScatterCapture1268(unittest.TestCase):
+    @staticmethod
+    def _make_gm_bridge_fake(gm_events, *, fail_cmd=False):
+        import types
+
+        class _FakeGmConn:
+            def __init__(self):
+                self.connected = True
+
+            def close(self):
+                self.connected = False
+                gm_events.append(("close",))
+
+        class _FakeSvc:
+            def Login(self, u, pw):
+                gm_events.append(("Login", u, pw))
+                return True
+
+            def GetCharactersToSelect(self):
+                return [{"characterID": 90000003}]
+
+            def SelectCharacterID(self, cid):
+                gm_events.append(("SelectCharacterID", cid))
+                return True
+
+            def SlashCmd(self, cmd):
+                gm_events.append(("SlashCmd", cmd))
+                if fail_cmd:
+                    raise RuntimeError("slash boom")
+                return {"ok": True}
+
+            def AdvanceClock(self, secs, tgt=0):
+                gm_events.append(("AdvanceClock", secs, tgt))
+                if fail_cmd:
+                    raise RuntimeError("clock boom")
+                return {"ok": True}
+
+        fake_bridge = types.ModuleType("evomu_bridge")
+
+        def _install_hook(sm, host="127.0.0.1", port=26000):
+            sm.RemoteSvc = lambda _name: _FakeSvc()
+            return _FakeGmConn()
+
+        fake_bridge.install_service_manager_hook = _install_hook
+        return fake_bridge
+
+    def test_diff_scatter_events_handles_repeats_and_sliding_window(self):
+        fn = playtester.PlaytesterRunner._diff_scatter_events
+        self.assertEqual(fn(["A"], None), [])
+        self.assertEqual(fn(None, ["A", "B"]), ["A", "B"])
+        self.assertEqual(fn(["A", "B"], ["A", "B"]), [])
+        # Duplicate scatter appended after identical suffix
+        self.assertEqual(
+            fn(["OnSessionChanged", "OnModuleAttributeChanges"], ["OnSessionChanged", "OnModuleAttributeChanges", "OnModuleAttributeChanges"]),
+            ["OnModuleAttributeChanges"],
+        )
+        # Full 60-element sliding window shifts oldest item out
+        pre_60 = [f"Old_{i}" for i in range(60)]
+        post_60 = pre_60[2:] + ["OnDamageStateChange", "OnModuleAttributeChanges"]
+        self.assertEqual(fn(pre_60, post_60), ["OnDamageStateChange", "OnModuleAttributeChanges"])
+
+    def test_gm_bridge_heal_and_advancetime_drain_scatters_before_get_state(self):
+        for step_num, action, expected_gm_op in (
+            (
+                1,
+                {"type": "slash_command", "command": "/heal"},
+                ("SlashCmd", "/heal 90000001"),
+            ),
+            (
+                2,
+                {"type": "slash_command", "command": "/advancetime 30"},
+                ("SlashCmd", "/advancetime 90000001 30"),
+            ),
+            (
+                3,
+                {"type": "advance_server_time", "target": "30"},
+                ("AdvanceClock", 30, 90000001),
+            ),
+        ):
+            with self.subTest(step_num=step_num, expected_gm_op=expected_gm_op):
+                with tempfile.TemporaryDirectory() as td:
+                    wt = Path(td)
+                    args = playtester.parse_args(["--worktree", str(wt), "--persona", "gm_tester"])
+                    runner = playtester.PlaytesterRunner(args)
+                    runner.oracle.async_write = False
+                    runner.cached_git_head = "deadbeef"
+
+                    events = []
+                    fake_bridge = self._make_gm_bridge_fake(events)
+                    clock = {"now": 100.0}
+                    fr_polls_after_gm = {"count": 0}
+                    gm_done = {"flag": False}
+
+                    # Intercept GM op timing via fake_bridge SlashCmd/AdvanceClock wrapper
+                    orig_install = fake_bridge.install_service_manager_hook
+
+                    def _tracked_install(sm, host="127.0.0.1", port=26000):
+                        conn = orig_install(sm, host=host, port=port)
+                        orig_remote = sm.RemoteSvc
+
+                        def _wrap_remote(name):
+                            svc = orig_remote(name)
+                            orig_slash = svc.SlashCmd
+                            orig_adv = svc.AdvanceClock
+
+                            def _slash(cmd):
+                                res = orig_slash(cmd)
+                                gm_done["flag"] = True
+                                return res
+
+                            def _adv(secs, tgt=0):
+                                res = orig_adv(secs, tgt)
+                                gm_done["flag"] = True
+                                return res
+
+                            svc.SlashCmd = _slash
+                            svc.AdvanceClock = _adv
+                            return svc
+
+                        sm.RemoteSvc = _wrap_remote
+                        return conn
+
+                    fake_bridge.install_service_manager_hook = _tracked_install
+
+                    def fake_sleep(dt):
+                        clock["now"] += float(dt)
+
+                    snap = {
+                        "active_view": "hangar",
+                        "session": {"charid": 90000001, "stationid": 60003760},
+                        "ui": {"open_windows": [], "modals": [], "clickable_widgets": []},
+                        "open_windows": [],
+                        "modals": [],
+                        "space": {},
+                        "skills_state": {},
+                        "wallet_state": {},
+                    }
+
+                    def fake_rpc_call(method, params=None, timeout=15.0):
+                        events.append(("rpc", method))
+                        if method == "get_state":
+                            return dict(snap)
+                        if method == "get_flight_recorder":
+                            if not gm_done["flag"]:
+                                return {
+                                    "ok": True,
+                                    "result": {
+                                        "macho_calls": [],
+                                        "scatters_observed": ["OnSessionChanged", "OnModuleAttributeChanges"],
+                                    },
+                                }
+                            fr_polls_after_gm["count"] += 1
+                            idx = fr_polls_after_gm["count"]
+                            if idx == 1:
+                                scatters = ["OnSessionChanged", "OnModuleAttributeChanges"]
+                            elif idx == 2:
+                                scatters = [
+                                    "OnSessionChanged",
+                                    "OnModuleAttributeChanges",
+                                    "OnDamageStateChange",
+                                ]
+                            else:
+                                scatters = [
+                                    "OnSessionChanged",
+                                    "OnModuleAttributeChanges",
+                                    "OnDamageStateChange",
+                                    "OnModuleAttributeChanges",
+                                ]
+                            return {
+                                "ok": True,
+                                "result": {"macho_calls": [], "scatters_observed": scatters},
+                            }
+                        return {"ok": True}
+
+                    runner.rpc = mock.Mock()
+                    runner.rpc.call.side_effect = fake_rpc_call
+                    plan_dec = {
+                        "observation": "In hangar",
+                        "previous_action_verification": {"expectation_met": True, "discrepancy_summary": ""},
+                        "bug_report": {"should_file": False},
+                        "current_goal": "Run GM action",
+                        "memory_update": {},
+                        "delegated_plan": {
+                            "plan_goal": "GM scatter settle test",
+                            "horizon_rationale": "Test gm_bridge scatter drain before get_state",
+                            "max_batch_steps": 1,
+                            "steps": [
+                                {
+                                    "step_number": 1,
+                                    "exec_mode": "direct",
+                                    "action": action,
+                                }
+                            ],
+                        },
+                    }
+
+                    with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                         mock.patch.object(playtester, "capture_window_screenshot", return_value={"ok": False}), \
+                         mock.patch.object(playtester, "invoke_agy_planner", return_value=(plan_dec, "hydrogen-l-tf-medium", 0.5)), \
+                         mock.patch.object(playtester.time, "monotonic", side_effect=lambda: clock["now"]), \
+                         mock.patch.object(playtester.time, "sleep", side_effect=fake_sleep):
+                        fr_delta, _ = runner.execute_step(1, {}, [])
+                    runner._close_gm_bridge()
+
+                    rpc_methods = [ev[1] for ev in events if ev[0] == "rpc"]
+                    self.assertNotIn("execute_action", rpc_methods)
+                    self.assertEqual(
+                        fr_delta.get("scatters_observed"),
+                        ["OnDamageStateChange", "OnModuleAttributeChanges"],
+                    )
+                    self.assertGreaterEqual(fr_polls_after_gm["count"], 3)
+                    gm_idx = next(i for i, ev in enumerate(events) if ev == expected_gm_op)
+                    pre_fr_indices = [i for i, ev in enumerate(events) if ev == ("rpc", "get_flight_recorder") and i < gm_idx]
+                    post_fr_indices = [i for i, ev in enumerate(events) if ev == ("rpc", "get_flight_recorder") and i > gm_idx]
+                    # Step executes initial pre-step get_state + post-GM refreshed get_state; refreshed get_state must follow settle polls
+                    post_get_state_indices = [i for i, ev in enumerate(events) if ev == ("rpc", "get_state") and i > gm_idx]
+                    self.assertTrue(pre_fr_indices)
+                    self.assertGreaterEqual(len(post_fr_indices), 3)
+                    self.assertTrue(post_get_state_indices)
+                    self.assertLess(max(post_fr_indices), min(post_get_state_indices))
+
+    def test_gm_bridge_scatter_capture_fallbacks_when_rpc_fails_or_omits_scatters(self):
+        with tempfile.TemporaryDirectory() as td:
+            wt = Path(td)
+            args = playtester.parse_args(["--worktree", str(wt), "--persona", "gm_tester"])
+            runner = playtester.PlaytesterRunner(args)
+            runner.oracle.async_write = False
+
+            # Case 1: RPC omits scatters_observed -> [] without sleeping
+            events = []
+            fake_bridge = self._make_gm_bridge_fake(events)
+            runner.rpc = mock.Mock()
+            runner.rpc.call.return_value = {"ok": True, "macho_calls": []}
+            with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                 mock.patch.object(playtester.time, "sleep", side_effect=AssertionError("unexpected sleep")):
+                res = runner._execute_gm_or_time_control_via_bridge(
+                    {"type": "slash_command", "command": "/heal"},
+                    "slash_command",
+                    90000001,
+                )
+            runner._close_gm_bridge()
+            self.assertTrue(res["action_ok"])
+            self.assertEqual(res["flight_recorder"]["scatters_observed"], [])
+
+            # Case 2: get_flight_recorder raises -> graceful fallback to []
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = RuntimeError("rpc unavailable")
+            with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                 mock.patch.object(playtester.time, "sleep", side_effect=AssertionError("unexpected sleep")):
+                res_err = runner._execute_gm_or_time_control_via_bridge(
+                    {"type": "slash_command", "command": "/heal"},
+                    "slash_command",
+                    90000001,
+                )
+            runner._close_gm_bridge()
+            self.assertTrue(res_err["action_ok"])
+            self.assertEqual(res_err["flight_recorder"]["scatters_observed"], [])
+
+            # Case 3: post get_flight_recorder raises after pre succeeded -> graceful fallback to []
+            call_n = {"n": 0}
+
+            def _flaky_rpc(method, params=None, timeout=5.0):
+                call_n["n"] += 1
+                if call_n["n"] == 1:
+                    return {"scatters_observed": ["OnSessionChanged"]}
+                raise ConnectionResetError("post poll failed")
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = _flaky_rpc
+            with mock.patch.dict(sys.modules, {"evomu_bridge": fake_bridge}), \
+                 mock.patch.object(playtester.time, "sleep", side_effect=AssertionError("unexpected sleep")):
+                res_flaky = runner._execute_gm_or_time_control_via_bridge(
+                    {"type": "slash_command", "command": "/heal"},
+                    "slash_command",
+                    90000001,
+                )
+            runner._close_gm_bridge()
+            self.assertTrue(res_flaky["action_ok"])
+            self.assertEqual(res_flaky["flight_recorder"]["scatters_observed"], [])
+
+            # Case 4: GM bridge RPC fails while RPC is broken -> preserves action_error and falls back cleanly
+            failing_bridge = self._make_gm_bridge_fake([], fail_cmd=True)
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = RuntimeError("rpc offline")
+            with mock.patch.dict(sys.modules, {"evomu_bridge": failing_bridge}):
+                res_fail = runner._execute_gm_or_time_control_via_bridge(
+                    {"type": "slash_command", "command": "/heal"},
+                    "slash_command",
+                    90000001,
+                )
+            runner._close_gm_bridge()
+            self.assertFalse(res_fail["action_ok"])
+            self.assertIn("slash boom", res_fail["action_error"])
+            self.assertEqual(res_fail["flight_recorder"]["scatters_observed"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

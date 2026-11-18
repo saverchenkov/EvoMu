@@ -1108,13 +1108,10 @@ impl ServerContext {
         for (cid, uid) in recipients {
             let mut recipient_args = args.clone();
             if event == "OnModuleAttributeChanges" {
-                recipient_args = crate::router::client_compat::normalize_macho_notification_with_sde(
-                    event,
-                    recipient_args,
-                    Some(&self.sde),
-                );
                 if cid > 0 {
-                    if let Some(PyRep::List(items)) = recipient_args.first_mut() {
+                    if let Some(PyRep::List(items) | PyRep::Tuple(items)) =
+                        recipient_args.first_mut()
+                    {
                         for item in items.iter_mut() {
                             if let PyRep::Tuple(t) | PyRep::List(t) = item {
                                 if matches!(t.get(1), Some(PyRep::None)) {
@@ -1127,6 +1124,11 @@ impl ServerContext {
                         }
                     }
                 }
+                recipient_args = crate::router::client_compat::normalize_macho_notification_with_sde(
+                    event,
+                    recipient_args,
+                    Some(&self.sde),
+                );
             }
             let (packet, marshaled_packet) =
                 Self::build_macho_notification_packet(cid, uid, event, id_type, recipient_args.clone());

@@ -6679,6 +6679,96 @@ class PlaytesterRunner:
             log_warn(f"GM bridge AdvanceClock({secs}) failed: {exc}")
             return None
 
+    @staticmethod
+    def _diff_scatter_events(
+        pre_scatters: Optional[List[str]],
+        post_scatters: Optional[List[str]],
+    ) -> List[str]:
+        """Return newly observed scatter event names between two sliding-window snapshots."""
+        if post_scatters is None:
+            return []
+        if not pre_scatters:
+            return list(post_scatters)
+        max_overlap = min(len(pre_scatters), len(post_scatters))
+        overlap = 0
+        for size in range(max_overlap, 0, -1):
+            if pre_scatters[-size:] == post_scatters[:size]:
+                overlap = size
+                break
+        return list(post_scatters[overlap:])
+
+    def _read_client_scatters(self, timeout: float = 5.0) -> Tuple[bool, Optional[List[str]]]:
+        """Read current scatter event window from the in-client flight recorder."""
+        rpc = getattr(self, "rpc", None)
+        if rpc is None:
+            return False, None
+        try:
+            resp = rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=timeout)
+        except Exception:
+            return False, None
+        if not isinstance(resp, dict):
+            return False, None
+        payload = resp.get("result") if isinstance(resp.get("result"), dict) else resp
+        if resp.get("ok") is False and "scatters_observed" not in payload:
+            return False, None
+        raw = payload.get("scatters_observed")
+        if not isinstance(raw, list):
+            return True, None
+        return True, [str(x) for x in raw if x is not None]
+
+    def _settle_gm_bridge_scatters(
+        self,
+        pre_ok: bool,
+        pre_scatters: Optional[List[str]],
+        *,
+        min_settle_s: float = 0.25,
+        max_settle_s: float = 0.90,
+        poll_interval_s: float = 0.06,
+    ) -> List[str]:
+        """Wait for and capture in-client scatters triggered by a GM bridge call."""
+        if not pre_ok:
+            return []
+        cur_ok, cur_scatters = self._read_client_scatters()
+        if not cur_ok:
+            return []
+        effective_pre = pre_scatters
+        if effective_pre is None:
+            if cur_scatters is None:
+                return []
+            effective_pre = []
+
+        delta = self._diff_scatter_events(effective_pre, cur_scatters)
+        start = time.monotonic()
+        last_delta = delta
+        stable_polls = 0
+        min_delta_settle = max(0.0, float(min_settle_s))
+        max_wait = max(min_delta_settle, float(max_settle_s))
+        step = max(0.01, float(poll_interval_s))
+        max_polls = max(3, int(round(max_wait / step)) + 2)
+
+        for _ in range(max_polls):
+            elapsed = time.monotonic() - start
+            if elapsed >= max_wait:
+                break
+            if elapsed >= min_delta_settle:
+                if delta and stable_polls >= 1:
+                    break
+                if not delta and elapsed >= min_delta_settle + step:
+                    break
+            time.sleep(min(step, max(0.01, max_wait - elapsed)))
+            ok, latest = self._read_client_scatters()
+            if not ok or latest is None:
+                break
+            new_delta = self._diff_scatter_events(effective_pre, latest)
+            if new_delta == last_delta:
+                stable_polls += 1
+            else:
+                stable_polls = 0
+                last_delta = new_delta
+            delta = new_delta
+
+        return delta
+
     def _execute_gm_or_time_control_via_bridge(
         self,
         act: Dict[str, Any],
@@ -6687,8 +6777,11 @@ class PlaytesterRunner:
     ) -> Dict[str, Any]:
         tgt = int(target_char_id or self._default_target_char_id() or 0)
         calls_recorded: List[Dict[str, Any]] = []
+        pre_ok = False
+        pre_scatters: Optional[List[str]] = None
         try:
             gm_sm = self._ensure_gm_bridge()
+            pre_ok, pre_scatters = self._read_client_scatters()
             gm_res: Any = None
             if act_type == "advance_server_time":
                 raw_sec = act.get("seconds")
@@ -6803,26 +6896,38 @@ class PlaytesterRunner:
                     "target_char_id": tgt,
                 })
 
+            scatters_observed = self._settle_gm_bridge_scatters(pre_ok, pre_scatters)
             return {
                 "action_ok": True,
                 "via": "gm_bridge",
                 "gm_result": gm_res,
                 "flight_recorder": {
                     "macho_calls": calls_recorded,
-                    "scatters_observed": [],
+                    "scatters_observed": scatters_observed,
                     "log_exceptions": [],
                     "quasar_errors": [],
                     "macho_exceptions": [],
                 },
             }
         except Exception as exc:
+            scatters_observed = []
+            if pre_ok:
+                try:
+                    scatters_observed = self._settle_gm_bridge_scatters(
+                        pre_ok,
+                        pre_scatters,
+                        min_settle_s=0.05,
+                        max_settle_s=0.25,
+                    )
+                except Exception:
+                    scatters_observed = []
             return {
                 "action_ok": False,
                 "action_error": f"gm_bridge {type(exc).__name__}: {exc}",
                 "via": "gm_bridge",
                 "flight_recorder": {
                     "macho_calls": calls_recorded,
-                    "scatters_observed": [],
+                    "scatters_observed": scatters_observed,
                     "log_exceptions": [],
                     "quasar_errors": [],
                     "macho_exceptions": [],
