@@ -139,7 +139,6 @@ impl crate::SdeRegistry {
         security_status: f64,
         region_id: u32,
     ) -> Option<Vec<String>> {
-        let mut matched_systems = false;
         let mut names = HashSet::new();
 
         for sys in self.solar_systems.values() {
@@ -176,7 +175,6 @@ impl crate::SdeRegistry {
             if !in_band {
                 continue;
             }
-            matched_systems = true;
             if let Some(tids) = self.asteroid_types_by_system.get(&sys.solar_system_id) {
                 for tid in tids {
                     if let Some(inv_ty) = self.types.get(tid) {
@@ -190,7 +188,7 @@ impl crate::SdeRegistry {
             }
         }
 
-        if !matched_systems {
+        if names.is_empty() {
             return None;
         }
         Some(names.into_iter().collect())

@@ -1,7 +1,7 @@
 use crate::common;
 use crate::quasar_progression_complete::quasar_rpc;
 use eve_db::InventoryFlag;
-use eve_destiny::MovementMode;
+use eve_destiny::{MovementMode, WarpPhase};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -647,7 +647,30 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
         cs_damaged.structure_hp
     );
 
-    // 2. Warp to The Fulcrum (60015187) inside the 150 km safe zone, heal, and verify 0 hazard damage across ticks.
+    // Verify warning (dangerLevel = 0.5) and danger (dangerLevel = 1.0) OnDeathzoneStateUpdate notifications were emitted.
+    let pre_warp_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot.char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnDeathzoneStateUpdate")
+        .collect();
+    assert!(
+        pre_warp_notifs.iter().any(|n| matches!(
+            n.args.get(2),
+            Some(PyRep::KeyVal(items))
+                if items.iter().any(|(k, v)| k == "dangerLevel" && matches!(v, PyRep::Real(x) if (*x - 0.5).abs() < 1e-6))
+        )),
+        "Expected OnDeathzoneStateUpdate warning (dangerLevel=0.5) outside safe zone: {pre_warp_notifs:?}"
+    );
+    assert!(
+        pre_warp_notifs.iter().any(|n| matches!(
+            n.args.get(2),
+            Some(PyRep::KeyVal(items))
+                if items.iter().any(|(k, v)| k == "dangerLevel" && matches!(v, PyRep::Real(x) if (*x - 1.0).abs() < 1e-6))
+        )),
+        "Expected OnDeathzoneStateUpdate active damage (dangerLevel=1.0) outside safe zone: {pre_warp_notifs:?}"
+    );
+
+    // 2. Warp to The Fulcrum (60015187) inside the 150 km safe zone: committed warp and arrival inside safe zone deal 0 hazard damage (NO /heal).
     rpc(
         &ctx,
         &mut pilot.sess,
@@ -657,20 +680,60 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
     )
     .await
     .expect("CmdWarpToStuff Fulcrum");
+    let mut committed_warp_observed = false;
+    let mut warp_entry_hull: Option<f64> = None;
     for _ in 0..120 {
         zk_handle.step_manual(1.0).await.unwrap();
         let (_, ball) = zk_handle.get_ball_snapshot(pilot.ship_id).await.unwrap().unwrap();
-        if !matches!(ball.mode, MovementMode::Warp { .. }) {
+        let in_committed_warp = matches!(
+            ball.mode,
+            MovementMode::Warp {
+                phase: WarpPhase::Accelerating | WarpPhase::Cruising | WarpPhase::Decelerating,
+                ..
+            }
+        );
+        if in_committed_warp {
+            committed_warp_observed = true;
+            let cs_now = zk_handle
+                .get_combat_state(pilot.ship_id)
+                .await
+                .unwrap()
+                .expect("ship combat state during warp");
+            match warp_entry_hull {
+                None => warp_entry_hull = Some(cs_now.structure_hp),
+                Some(entry_hull) => assert_eq!(
+                    cs_now.structure_hp, entry_hull,
+                    "Committed warp must take 0 mid-warp Zarzakh gravity hazard damage"
+                ),
+            }
+        } else if !matches!(ball.mode, MovementMode::Warp { .. }) && committed_warp_observed {
             break;
         }
     }
-    common::slash_cmd(&ctx, &mut pilot.sess, "/heal").await;
+    assert!(committed_warp_observed, "Pilot never entered committed warp to Fulcrum");
+    let entry_hull = warp_entry_hull.expect("warp_entry_hull recorded");
     let cs_safe_0 = zk_handle
         .get_combat_state(pilot.ship_id)
         .await
         .unwrap()
         .expect("ship combat state at Fulcrum");
-    assert_eq!(cs_safe_0.structure_hp, max_hull);
+    assert!(cs_safe_0.structure_hp > 0.0);
+    assert_eq!(
+        cs_safe_0.structure_hp, entry_hull,
+        "Warp exit at Fulcrum must preserve exact pre-committed-warp hull without /heal"
+    );
+
+    let warp_or_safe_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(pilot.char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnDeathzoneStateUpdate")
+        .collect();
+    assert!(
+        warp_or_safe_notifs
+            .iter()
+            .any(|n| matches!(n.args.get(2), Some(PyRep::None))),
+        "Expected OnDeathzoneStateUpdate clear (None) when entering committed warp / safe zone"
+    );
 
     for _ in 0..15 {
         zk_handle.step_manual(1.0).await.unwrap();
@@ -680,7 +743,10 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
         .await
         .unwrap()
         .expect("ship survives inside Fulcrum safe zone");
-    assert_eq!(cs_safe_after.structure_hp, max_hull, "Safe zone inside 150 km of Fulcrum must take 0 hazard damage");
+    assert_eq!(
+        cs_safe_after.structure_hp, entry_hull,
+        "Safe zone inside 150 km of Fulcrum must take 0 hazard damage"
+    );
 
     // 3. Sustained exposure (~50s total) outside safe zones destroys a Rifter cleanly.
     let doomed = common::gm_pilot_in_space(&ctx, 62, 90_000_462, 587, ZARZAKH_SYS).await;

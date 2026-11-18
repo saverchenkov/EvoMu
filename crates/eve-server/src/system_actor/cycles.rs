@@ -2619,8 +2619,13 @@ impl SystemHandle {
             destroyed.push((bid, None));
             pending_destroyed.record_one(bid, None);
         }
-        let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
-            &mut bp, sde_opt.as_deref(), self.solar_system_id,
+        let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
+            &mut bp,
+            sde_opt.as_deref(),
+            db_opt.as_ref(),
+            self.solar_system_id,
+            pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+            notify_tx_opt.as_ref(),
         );
         for bid in zk_dead {
             destroyed.push((bid, None));

@@ -2736,10 +2736,13 @@ impl SystemRegistry {
                                 destroyed_balls.push((bid, None));
                                 pending_destroyed_actor.record_one(bid, None);
                             }
-                            for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
+                            for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
                                 &mut ballpark,
                                 sde_opt.as_deref(),
+                                db_opt.as_ref(),
                                 solar_system_id,
+                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                notify_tx_opt.as_ref(),
                             ) {
                                 destroyed_balls.push((bid, None));
                                 pending_destroyed_actor.record_one(bid, None);

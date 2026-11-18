@@ -1457,6 +1457,23 @@ pub struct Ballpark {
     /// Per-target active ECM jam source ownership keyed by target `BallId` (`#1310`).
     #[serde(default)]
     pub ecm_jam_sources: BTreeMap<BallId, EcmJamSources>,
+    /// Per-ball Zarzakh gravity-hazard exposure state (`#1331`, `D-6`).
+    #[serde(default)]
+    pub zarzakh_tracking: BTreeMap<BallId, ZarzakhExposureState>,
+}
+
+/// Per-ball Zarzakh Jovian gravity-hazard exposure timer stored directly on [`Ballpark`] (`#1331`, `D-6`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZarzakhExposureState {
+    /// Simulation tick (`ballpark.current_tick`) at which the next hull damage tick fires.
+    pub next_damage_tick: u64,
+    /// Number of ramping hazard damage ticks already applied during the current exposure window.
+    pub ticks_applied: u32,
+    /// Last `ballpark.current_tick` observed for this entity (used to pause timers during warp/invuln).
+    pub last_seen_tick: u64,
+    /// Last emitted deathzone UI state (`0` = safe/none, `1` = warning, `2` = active damage).
+    #[serde(default)]
+    pub ui_state: u8,
 }
 
 /// Per-target active ECM jam source ownership stored on [`Ballpark`] to avoid enlarging [`CombatState`] (`#1310`).

@@ -381,3 +381,43 @@ fn belt_ores_for_system_filters_unpublished_and_non_asteroid_types() {
         .collect();
     assert_eq!(ids, vec![1012]);
 }
+
+#[test]
+fn belt_ores_beltless_kspace_band_falls_back_to_canonical_ores() {
+    let mut sde = populate_synthetic_ore_sde();
+    // Global `asteroid_types_by_system` is populated only for Jita (30000142, Caldari).
+    std::sync::Arc::make_mut(&mut sde.asteroid_types_by_system).insert(30000142, vec![1012]);
+    // Insert beltless systems in Amarr (region 10, sec 0.7) and Gallente lowsec (region 30, sec 0.2),
+    // plus a barren nullsec F-band system (Detorid 10_000_005, sec -0.2).
+    for (sid, cid, rid, sec) in [
+        (30_000_201, 10, 10, 0.7),
+        (30_000_202, 30, 30, 0.2),
+        (30_000_203, 10, 10_000_005, -0.2),
+    ] {
+        sde.solar_systems.insert(
+            sid,
+            SolarSystem {
+                solar_system_id: sid,
+                constellation_id: cid,
+                region_id: rid,
+                name: format!("Beltless{sid}"),
+                security_status: sec,
+                radius: 1.0,
+                galactic_pos_ly: [0.0; 3],
+                planet_ids: Vec::new(),
+                stations: Vec::new(),
+                wormhole_class_id: None,
+            },
+        );
+    }
+
+    let names = |sec: f64, reg: u32| -> Vec<String> {
+        sde.belt_ores_for_security_and_region(sec, reg)
+            .into_iter()
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    assert_eq!(names(0.7, 10), vec!["Veldspar", "Scordite", "Pyroxeres"]);
+    assert_eq!(names(0.2, 30), vec!["Omber", "Jaspet", "Hemorphite"]);
+    assert!(names(-0.2, 10_000_005).is_empty());
+}
