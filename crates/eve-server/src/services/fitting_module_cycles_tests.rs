@@ -2902,4 +2902,305 @@ async fn handle_module_cycles_overload_thermo_cat5_delay_and_preoverload_guards(
     );
 }
 
+#[tokio::test]
+async fn mercden_remote_shield_repair_overload_persists_heat_and_guards() {
+    const SYN_RSB_G41: u32 = 996_201;
+    const SYN_RSB_NO_CAT5: u32 = 996_202;
+
+    let ctx = seeded_cycles_ctx(|sde| {
+        if let Some(rifter) = sde.types.get_mut(&587) {
+            rifter.default_attributes.insert(eve_sde::attr_ids::HI_SLOTS, 6.0);
+            rifter.default_attributes.insert(eve_sde::attr_ids::MED_SLOTS, 4.0);
+        }
+        let cat5_eid = sde
+            .effects
+            .values()
+            .find(|e| e.effect_category == 5)
+            .map(|e| e.effect_id)
+            .unwrap_or_else(|| {
+                let mut eff = sde.effects.values().next().cloned().expect("seed effects");
+                eff.effect_id = 998;
+                eff.name = "testOverloadEffect".into();
+                eff.effect_category = 5;
+                sde.effects.insert(998, eff);
+                998
+            });
+        let mut rsb_t = custom_inv_type(
+            sde,
+            SYN_RSB_G41,
+            41,
+            7,
+            5.0,
+            0.0,
+            "Small Remote Shield Booster I",
+            &[(6, 20.0), (54, 15_000.0), (68, 1_500.0), (73, 5_000.0), (9, 40.0)],
+        );
+        rsb_t.effect_ids = vec![12, 16, cat5_eid];
+        sde.types.insert(SYN_RSB_G41, rsb_t);
+
+        let mut no_cat5 = custom_inv_type(
+            sde,
+            SYN_RSB_NO_CAT5,
+            41,
+            7,
+            5.0,
+            0.0,
+            "Non-Overloadable Remote Shield Booster",
+            &[(6, 20.0), (54, 15_000.0), (68, 1_500.0), (73, 5_000.0), (9, 40.0)],
+        );
+        no_cat5.effect_ids = vec![12, 16];
+        sde.types.insert(SYN_RSB_NO_CAT5, no_cat5);
+    });
+
+    let char_id = 93_200_001_i64;
+    let corp_id = 98_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_000_500_001_i64;
+    let rsb_id = 1_000_500_002_i64;
+    let rsb_no_overload_id = 1_000_500_003_i64;
+    let den_id = 1_000_500_010_i64;
+
+    ensure_char(&ctx, char_id, corp_id, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, rsb_id, SYN_RSB_G41, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, rsb_no_overload_id, SYN_RSB_NO_CAT5, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 500.0).await;
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            den_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: 85_230,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "TestMercDen".into(),
+                state: "ShieldVulnerable".into(),
+                position: [12_000.0, 0.0, 0.0],
+                shield_hp: 500.0,
+                armor_hp: 5_000.0,
+                hull_hp: 5_000.0,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            eve_db::durable_domain_types::PersistedMercenaryDen {
+                den_id,
+                type_id: 85_230,
+                owner_char_id: char_id,
+                skyhook_id: 1,
+                solar_system_id: sys_id,
+                planet_id: 40_009_001,
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.mercenary_den_reinforcement.insert(den_id, (0, 0, 10));
+    });
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: den_id,
+            type_id: 85_230,
+            position: DVec3::new(12_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            shield_hp: 500.0,
+            max_shield_hp: 5_000.0,
+            armor_hp: 5_000.0,
+            max_armor_hp: 5_000.0,
+            structure_hp: 5_000.0,
+            max_structure_hp: 5_000.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id: den_id,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(100_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 1. Pre-overload guards still reject before MercDen repair (missing Thermodynamics, non-overloadable module, burned-out module)
+    assert_eq!(
+        handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(rsb_id), PyRep::String("defaultEffect".into()), PyRep::Integer(den_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+
+    assert_eq!(
+        handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Overload",
+            &[
+                PyRep::Integer(rsb_no_overload_id),
+                PyRep::String("defaultEffect".into()),
+                PyRep::Integer(den_id),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotOverloadModule"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&rsb_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 40.0);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert_eq!(
+        handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(rsb_id), PyRep::String("defaultEffect".into()), PyRep::Integer(den_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ModuleBurnedOut"
+    );
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_den_reinforcement[&den_id].2),
+        10
+    );
+
+    // Clear burnout and verify Overload MercDen repair persists ModuleState::Overloaded & emits OnHeatAdded
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items
+            .get_mut(&rsb_id)
+            .unwrap()
+            .dynamic_attributes
+            .remove(&eve_sde::attr_ids::DAMAGE);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let ov_rep = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(rsb_id), PyRep::String("defaultEffect".into()), PyRep::Integer(den_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("MercDen Overload repair");
+    let pct_1 = ov_rep.dict_get("shieldPct").and_then(|v| v.as_i64()).expect("shieldPct");
+    assert!(pct_1 > 10, "expected shieldPct > 10 after repair, got {pct_1}");
+    assert!(ctx.db.with_snapshot(|s| {
+        s.ship_fit_inputs
+            .get(&ship_id)
+            .is_some_and(|fi| fi.overloaded_modules.contains(&rsb_id))
+    }));
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&rsb_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+            n.event == "OnHeatAdded"
+                && n.args == vec![PyRep::Integer(1175), PyRep::Integer(rsb_id)]
+        }),
+        "expected OnHeatAdded([1175, rsb_id]) on overloaded MercDen repair"
+    );
+
+    // Pre-overloaded Activate against MercDen also preserves Overloaded state and emits OnHeatAdded
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let act_rep = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(rsb_id), PyRep::String("defaultEffect".into()), PyRep::Integer(den_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Pre-overloaded MercDen Activate repair");
+    let pct_2 = act_rep.dict_get("shieldPct").and_then(|v| v.as_i64()).expect("shieldPct");
+    assert!(pct_2 > pct_1, "expected shieldPct > {pct_1} after second repair, got {pct_2}");
+    assert!(ctx.db.with_snapshot(|s| {
+        s.ship_fit_inputs
+            .get(&ship_id)
+            .is_some_and(|fi| fi.overloaded_modules.contains(&rsb_id))
+    }));
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&rsb_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+    assert!(
+        ctx.drain_notifications_for_char(char_id).iter().any(|n| {
+            n.event == "OnHeatAdded"
+                && n.args == vec![PyRep::Integer(1175), PyRep::Integer(rsb_id)]
+        }),
+        "expected OnHeatAdded([1175, rsb_id]) on pre-overloaded MercDen Activate"
+    );
+}
+
 

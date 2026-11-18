@@ -27,6 +27,13 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+pub(crate) fn cannot_overload_structure_module_error() -> BridgeRpcError {
+    err(
+        "CannotOverloadStructureModule",
+        "Standup structure modules cannot be overloaded",
+    )
+}
+
 fn loaded_charge_sde_damage(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
@@ -683,10 +690,7 @@ pub async fn handle_structure_module_activate(
     is_overload: bool,
 ) -> Result<PyRep, BridgeRpcError> {
     if is_overload {
-        return Err(err(
-            "CannotOverloadStructureModule",
-            "Standup structure modules cannot be overloaded",
-        ));
+        return Err(cannot_overload_structure_module_error());
     }
     let now_unix = ctx.now_unix();
     let (st, mod_type_id, mod_group_id, slot_flag, _owner_ally, _gunner_fleet_members) =

@@ -3342,3 +3342,200 @@ async fn handle_weapons_burnout_thermo_delay_preoverload_and_heat_branches() {
     );
 }
 
+#[tokio::test]
+async fn handle_weapons_rejects_overload_on_standup_weapons_without_firing() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let corp_id = session.corporation_id.unwrap_or(1_000_009);
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(carrier) = sde.types.get_mut(&23_915) {
+        carrier.default_attributes.insert(14, 6.0);
+    }
+    sde.types.insert(
+        35_834,
+        make_fighter_type(
+            35_834,
+            1657,
+            65,
+            10_000.0,
+            vec![(14, 6.0), (263, 1_000_000.0), (265, 1_000_000.0), (9, 1_000_000.0), (482, 500_000.0)],
+        ),
+    );
+    sde.types.insert(
+        35_926,
+        make_fighter_type(35_926, 1330, 66, 4_000.0, vec![(6, 50.0), (73, 5_000.0), (54, 2_500.0)]),
+    );
+    sde.types.insert(
+        35_923,
+        make_fighter_type(35_923, 1328, 66, 4_000.0, vec![(6, 50.0), (73, 10_000.0), (54, 150_000.0), (604, 86.0)]),
+    );
+    sde.types.insert(
+        35_928,
+        make_fighter_type(35_928, 1333, 66, 4_000.0, vec![(6, 100.0), (73, 600_000.0), (54, 250_000.0)]),
+    );
+    sde.types.insert(
+        63_195,
+        make_fighter_type(63_195, 86, 8, 0.1, vec![(114, 250.0)]),
+    );
+    sde.types.insert(
+        37_850,
+        make_fighter_type(37_850, 86, 8, 50.0, vec![(114, 2_000.0)]),
+    );
+    enable_test_overload(&mut sde, &ctx, char_id, &[35_926, 35_923, 35_928]);
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let st_id = 1_000_940_001_i64;
+    let pds_id = 940_101_i64;
+    let gbl_id = 940_102_i64;
+    let vorton_id = 940_103_i64;
+    let flak_ammo_id = 940_104_i64;
+    let bomb_ammo_id = 940_105_i64;
+    let ship_pds_id = 940_106_i64;
+    let hostile_id = 940_201_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_834,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "TestFortizar".into(),
+                state: "ShieldVulnerable".into(),
+                shield_hp: 5_000_000.0,
+                armor_hp: 5_000_000.0,
+                hull_hp: 5_000_000.0,
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            st_id,
+            make_fighter_item(st_id, 35_834, corp_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            pds_id,
+            make_fighter_item(pds_id, 35_926, corp_id, st_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            gbl_id,
+            make_fighter_item(gbl_id, 35_923, corp_id, st_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            vorton_id,
+            make_fighter_item(vorton_id, 35_928, corp_id, st_id, InventoryFlag::HiSlot2, 1),
+        );
+        snap.items.insert(
+            ship_pds_id,
+            make_fighter_item(ship_pds_id, 35_926, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+    });
+    ctx.invalidate_ship_fitting(st_id);
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 1. Unloaded Standup PDS with controlling_structure=true rejects Overload
+    session.structure_id = Some(st_id);
+    session.ship_id = Some(st_id);
+    let unloaded_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(pds_id)], &kwargs)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(unloaded_err.code, "CannotOverloadStructureModule");
+    assert_eq!(unloaded_err.message, "Standup structure modules cannot be overloaded");
+
+    // 2. Spawn structure + hostile target + ammo loaded in SpecializedAmmoHold -> still rejects without firing or consuming ammo/cap
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos, shield) in [
+        (st_id, 35_834_u32, DVec3::ZERO, 5_000_000.0),
+        (ship_id, 23_915_u32, DVec3::new(100.0, 0.0, 0.0), 2_000.0),
+        (hostile_id, 23_915_u32, DVec3::new(1_000.0, 0.0, 0.0), 5_000.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: if tid == 35_834 { 500.0 } else { 50.0 },
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: shield,
+                    max_shield_hp: shield,
+                    armor_hp: 2_000.0,
+                    max_armor_hp: 2_000.0,
+                    structure_hp: 2_000.0,
+                    max_structure_hp: 2_000.0,
+                    capacitor: 5_000.0,
+                    max_capacitor: 5_000.0,
+                    signature_radius: 100.0,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    sys_handle
+        .add_target_lock(
+            st_id,
+            TargetLock {
+                target_id: hostile_id,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(300_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            flak_ammo_id,
+            make_fighter_item(flak_ammo_id, 63_195, corp_id, st_id, InventoryFlag::SpecializedAmmoHold, 500),
+        );
+        snap.items.insert(
+            bomb_ammo_id,
+            make_fighter_item(bomb_ammo_id, 37_850, corp_id, st_id, InventoryFlag::SpecializedAmmoHold, 10),
+        );
+    });
+
+    for args in [
+        vec![PyRep::Integer(pds_id)],
+        vec![PyRep::Integer(gbl_id), PyRep::String("defaultEffect".into()), PyRep::Integer(hostile_id)],
+        vec![PyRep::Integer(vorton_id), PyRep::String("superWeaponVorton".into()), PyRep::Integer(hostile_id)],
+    ] {
+        let err = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "CannotOverloadStructureModule");
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&flak_ammo_id].quantity), 500);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&bomb_ammo_id].quantity), 10);
+    assert!((sys_handle.get_combat_state(hostile_id).await.unwrap().unwrap().shield_hp - 5_000.0).abs() < 1e-6);
+    assert!((sys_handle.get_combat_state(st_id).await.unwrap().unwrap().capacitor - 5_000.0).abs() < 1e-6);
+
+    // 3. Direct handle_weapons with structure ship_id even when session.structure_id is None
+    session.structure_id = None;
+    let no_struct_sess_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(pds_id)], &kwargs)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(no_struct_sess_err.code, "CannotOverloadStructureModule");
+
+    // 4. Fallback Standup group guard on non-structure ship_id
+    session.ship_id = Some(ship_id);
+    let fallback_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(ship_pds_id)], &kwargs)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(fallback_err.code, "CannotOverloadStructureModule");
+}
+
