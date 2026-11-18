@@ -582,8 +582,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         || snap
                             .corporations
                             .get(&ch.corporation_id)
-                            .and_then(|c| c.member_roles.get(&cid))
-                            .is_some_and(|&r| (r & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
+                            .is_some_and(|c| (c.member_base_roles(cid) & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
                     {
                         "Director".to_string()
                     } else {

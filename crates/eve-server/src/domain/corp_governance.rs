@@ -341,7 +341,7 @@ fn effective_corp_role_breakdown_inner(
     };
     let mut out = EffectiveCorpRoles {
         is_ceo: corp.ceo_id == char_id,
-        roles: corp.member_roles.get(&char_id).copied().unwrap_or(0),
+        roles: corp.member_base_roles(char_id),
         ..Default::default()
     };
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {

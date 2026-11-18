@@ -751,22 +751,38 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
         "agentMgr",
         "GetMyJournalDetails",
         Ok(PyRep::Tuple(vec![
-            PyRep::List(vec![PyRep::keyval([
-                ("missionID", PyRep::Integer(77)),
-                ("agentID", PyRep::Integer(3_008_416)),
-                ("title", PyRep::String("Courier Run".into())),
-                ("state", PyRep::String("Accepted".into())),
-                ("missionType", PyRep::String("Courier".into())),
-                ("importantMission", PyRep::Bool(true)),
-                ("expirationTime", PyRep::Integer(1_800_000_000)),
-                (
-                    "bookmarks",
-                    PyRep::List(vec![PyRep::Dict(vec![
-                        (PyRep::String("locationID".into()), PyRep::Integer(60_003_760)),
-                        (PyRep::String("coords".into()), PyRep::None),
-                    ])]),
-                ),
-            ])]),
+            PyRep::List(vec![
+                PyRep::keyval([
+                    ("missionID", PyRep::Integer(77)),
+                    ("agentID", PyRep::Integer(3_008_416)),
+                    ("solarSystemID", PyRep::Integer(30_002_187)),
+                    ("title", PyRep::String("Courier Run".into())),
+                    ("state", PyRep::String("Accepted".into())),
+                    ("missionType", PyRep::String("Courier".into())),
+                    ("importantMission", PyRep::Bool(true)),
+                    ("expirationTime", PyRep::Integer(1_800_000_000)),
+                    (
+                        "bookmarks",
+                        PyRep::List(vec![PyRep::Dict(vec![
+                            (PyRep::String("locationID".into()), PyRep::Integer(60_003_760)),
+                            (PyRep::String("coords".into()), PyRep::None),
+                        ])]),
+                    ),
+                ]),
+                PyRep::keyval([
+                    ("missionID", PyRep::Integer(78)),
+                    ("agentID", PyRep::Integer(3_008_417)),
+                    ("title", PyRep::String("Station Only Run".into())),
+                    ("state", PyRep::String("Accepted".into())),
+                    (
+                        "bookmarks",
+                        PyRep::List(vec![PyRep::Dict(vec![(
+                            PyRep::String("locationID".into()),
+                            PyRep::Integer(60_003_760),
+                        )])]),
+                    ),
+                ]),
+            ]),
             PyRep::List(Vec::new()),
             PyRep::List(Vec::new()),
         ])),
@@ -793,8 +809,17 @@ fn issue_771_and_776_get_members_paged_crowset_and_reprocess_list_compat() {
     };
     assert!(bm_list[0].dict_get("coords").is_none());
     assert_eq!(bm_list[0].dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
-    assert_eq!(bm_list[0].dict_get("solarsystemID"), Some(&PyRep::Integer(30_000_142)));
-    assert_eq!(bm_list[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(bm_list[0].dict_get("solarsystemID"), Some(&PyRep::Integer(30_002_187)));
+    assert_eq!(bm_list[0].dict_get("solarSystemID"), Some(&PyRep::Integer(30_002_187)));
+    let PyRep::Tuple(ref m_tup_no_sys) = m_rows[1] else {
+        panic!("expected second 10-tuple mission row");
+    };
+    let PyRep::List(ref bm_no_sys) = m_tup_no_sys[6] else {
+        panic!("expected bookmarks list on second row");
+    };
+    assert_eq!(bm_no_sys[0].dict_get("locationID"), Some(&PyRep::Integer(60_003_760)));
+    assert!(bm_no_sys[0].dict_get("solarsystemID").is_none());
+    assert!(bm_no_sys[0].dict_get("solarSystemID").is_none());
 
     // #952, #960, #963: OnDamageMessage, OnDamageMessages, OnCombatMessage, and OnGodmaPrimeItem sublocation 805
     assert!(should_suppress_macho_notification(

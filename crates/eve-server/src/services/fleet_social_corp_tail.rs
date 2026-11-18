@@ -38,7 +38,7 @@ pub(crate) fn member_kick_blocker(
     let Some(corp) = snap.corporations.get(&corp_id) else {
         return None;
     };
-    if corp.member_roles.get(&target_id).copied().unwrap_or(0) != 0 {
+    if corp.member_base_roles(target_id) != 0 {
         return Some("MemberHasRoles");
     }
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, target_id)) {
@@ -289,7 +289,7 @@ pub(crate) fn handle_update_members(
                 });
             }
             if !is_ceo {
-                let old_r = corp.member_roles.get(&sp.target_char_id).copied().unwrap_or(0);
+                let old_r = corp.member_base_roles(sp.target_char_id);
                 let old_ra = snap
                     .corp_role_assignments
                     .get(&(corp_id, sp.target_char_id))
@@ -331,8 +331,7 @@ pub(crate) fn handle_update_members(
             let old_roles = snap
                 .corporations
                 .get(&corp_id)
-                .and_then(|c| c.member_roles.get(&target_char_id).copied())
-                .unwrap_or(0);
+                .map_or(0, |c| c.member_base_roles(target_char_id));
             let old_ra = snap
                 .corp_role_assignments
                 .get(&(corp_id, target_char_id))
@@ -765,8 +764,7 @@ fn remove_member_to_bloodline_npc_in_snap(
     let old_role = snap
         .corporations
         .get(&corp_id)
-        .and_then(|c| c.member_roles.get(&tid).copied())
-        .unwrap_or(0);
+        .map_or(0, |c| c.member_base_roles(tid));
     let old_alliance = snap
         .corporations
         .get(&corp_id)

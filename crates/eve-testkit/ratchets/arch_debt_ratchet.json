@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "description": "Repository-wide falling architecture-debt ratchet across non-test crates/eve-server/src (#1197). Both occurrence counts and distinct file counts are strictly pinned (exact=true) and may never regress or silently drop without tightening this baseline in the same commit.",
+  "patterns": {
+    "master_wallet": {
+      "max_occurrences": 0,
+      "max_files": 0,
+      "exact": true,
+      "zero_required": true,
+      "owning_issue": 1197,
+      "regex": "\\bmaster_wallet\\b",
+      "description": "Legacy single master_wallet field/accessor references (#1197)."
+    },
+    "direct_member_roles_get": {
+      "max_occurrences": 0,
+      "max_files": 0,
+      "exact": true,
+      "zero_required": true,
+      "owning_issue": 1197,
+      "regex": "\\bmember_roles\\s*\\.\\s*get\\s*\\(",
+      "description": "Direct member_roles.get(...) bypassing CorporationRecord/corp_governance role helpers (#1197)."
+    },
+    "hardcoded_fallback_entity_ids": {
+      "max_occurrences": 3,
+      "max_files": 2,
+      "exact": true,
+      "owning_issue": 1197,
+      "regex": "\\.unwrap_or\\s*\\(\\s*(?:90_?000_?001|30_?000_?142|60_?003_?760)\\b",
+      "description": "Hardcoded .unwrap_or(90_000_001|30_000_142|60_003_760) fallback entity IDs; residual 3 sites are in wt-par-1331-c excluded files (services/industry_pi.rs, services/fitting_module_cycles_helpers.rs) (#1197)."
+    },
+    "service_state_blobs_refs": {
+      "max_occurrences": 47,
+      "max_files": 17,
+      "exact": true,
+      "owning_issue": 1197,
+      "regex": "\\bservice_state_blobs\\b",
+      "description": "Untyped JSON service_state_blobs references instead of typed snapshot collections (#1197)."
+    },
+    "direct_location_or_ship_assign": {
+      "max_occurrences": 121,
+      "max_files": 48,
+      "exact": true,
+      "owning_issue": 1197,
+      "regex": "\\.\\s*(?:solar_system_id|station_id|structure_id|active_ship_id)\\s*=(?!=)",
+      "description": "Direct mutation of solar_system_id/station_id/structure_id/active_ship_id outside canonical transition helpers (#1197)."
+    },
+    "direct_items_map_mut": {
+      "max_occurrences": 519,
+      "max_files": 152,
+      "exact": true,
+      "owning_issue": 1194,
+      "regex": "\\bitems\\s*\\.\\s*(?:remove|get_mut|insert)\\s*\\(",
+      "description": "Combined direct items.{insert,remove,get_mut}(...) mutations bypassing typed inventory gateway (#1194)."
+    },
+    "items_insert": {
+      "max_occurrences": 192,
+      "max_files": 108,
+      "exact": true,
+      "owning_issue": 1194,
+      "regex": "\\bitems\\s*\\.\\s*insert\\s*\\(",
+      "description": "Direct items.insert(...) bypassing typed inventory gateway (#1194)."
+    },
+    "items_remove": {
+      "max_occurrences": 122,
+      "max_files": 60,
+      "exact": true,
+      "owning_issue": 1194,
+      "regex": "\\bitems\\s*\\.\\s*remove\\s*\\(",
+      "description": "Direct items.remove(...) bypassing typed inventory gateway (#1194)."
+    },
+    "items_get_mut": {
+      "max_occurrences": 205,
+      "max_files": 92,
+      "exact": true,
+      "owning_issue": 1194,
+      "regex": "\\bitems\\s*\\.\\s*get_mut\\s*\\(",
+      "description": "Direct items.get_mut(...) bypassing typed inventory gateway (#1194)."
+    },
+    "positional_rpc_args_index": {
+      "max_occurrences": 1903,
+      "max_files": 183,
+      "exact": true,
+      "owning_issue": 1194,
+      "regex": "\\bargs\\s*\\.\\s*(?:first\\s*\\(\\s*\\)|get\\s*\\(\\s*\\d+\\s*\\))",
+      "description": "Unstructured positional RPC argument reads (args.first(), args.get(N)) instead of typed RPC arg codecs (#1194)."
+    },
+    "stringly_bridge_rpc_error_code": {
+      "max_occurrences": 4371,
+      "max_files": 193,
+      "exact": true,
+      "owning_issue": 1195,
+      "regex": "\\bcode\\s*:\\s* {3,}\\.into\\s*\\(",
+      "description": "BridgeRpcError error codes written as string literals (code: \"X\".into()) instead of typed error enum (#1195)."
+    },
+    "slash_command_prefix_parse": {
+      "max_occurrences": 66,
+      "max_files": 10,
+      "exact": true,
+      "owning_issue": 1193,
+      "strip_literals": false,
+      "literal_regex": "(?:strip_prefix|starts_with)\\s*\\(\\s*\"/",
+      "description": "Hand-rolled slash-command prefix parsing strip_prefix(\"/...\") / starts_with(\"/...\") (#1193)."
+    },
+    "router_binding_grace_helpers": {
+      "max_occurrences": 5,
+      "max_files": 1,
+      "exact": true,
+      "owning_issue": 1190,
+      "path_include": "router/binding.rs",
+      "scoped_regex": "\\bfn\\s+(?:allocate_transition_grace_(?!binding_for_departed_kinds\\b)[a-z0-9_]+_binding|grace_bound_object_for_inflight_[a-z0-9_]+|has_transition_grace_[a-z0-9_]+_binding)\\b",
+      "description": "Per-method/service grace helper functions in router/binding.rs (#1190)."
+    },
+    "ballpark_locks_outside_system_actor": {
+      "max_occurrences": 80,
+      "max_files": 42,
+      "exact": true,
+      "owning_issue": 1342,
+      "path_exclude_substring": "system_actor",
+      "scoped_regex": "\\bballpark\\s*\\.\\s*(?:read|write|try_read|try_write|lock)\\s*\\(",
+      "description": "Direct ballpark lock acquisitions (.read/.write/.try_read/.try_write/.lock) outside system_actor* (#1342)."
+    },
+    "handwritten_item_change_emitters": {
+      "max_occurrences": 29,
+      "max_files": 15,
+      "exact": true,
+      "owning_issue": 931,
+      "regex": "\\b(?:emit|notify)_item_change[A-Za-z0-9_]*\\s*\\(",
+      "description": "Hand-written item-change emitters instead of unified typed notification path (#931)."
+    },
+    "handwritten_account_change_emitters": {
+      "max_occurrences": 44,
+      "max_files": 27,
+      "exact": true,
+      "owning_issue": 931,
+      "regex": "\\b(?:emit|notify)_[A-Za-z0-9_]*account_change[A-Za-z0-9_]*\\s*\\(",
+      "description": "Hand-written account-change emitters instead of unified typed notification path (#931)."
+    },
+    "system_time_now_in_gameplay": {
+      "max_occurrences": 13,
+      "max_files": 11,
+      "exact": true,
+      "owning_issue": 1196,
+      "regex": "\\bSystemTime\\s*::\\s*now\\s*\\(",
+      "description": "Direct SystemTime::now() wall-clock calls bypassing ctx.now_unix() virtual clock (#1196)."
+    },
+    "is_write_locked_by_current_thread": {
+      "max_occurrences": 38,
+      "max_files": 23,
+      "exact": true,
+      "owning_issue": 1238,
+      "regex": "\\bis_write_locked_by_current_thread\\b",
+      "description": "Remaining is_write_locked_by_current_thread lock-reentrancy branches (#1238 follow-up)."
+    }
+  }
+}

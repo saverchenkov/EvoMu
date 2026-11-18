@@ -517,12 +517,19 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
     assert_eq!(col("categoryID"), Some(&PyRep::Integer(6)));
     assert_eq!(col("customInfo"), Some(&PyRep::String("Rifter".into())));
 
-    // Verify locationID fallback chain (station_id -> structure_id -> solar_system_id -> 30_000_142)
-    // and unknown stub_type_id fallback (groupID=29, categoryID=6, customInfo="")
+    // Verify locationID fallback chain (session station_id -> structure_id -> solar_system_id -> DB character),
+    // failing closed with LocationNotFound when no location can be resolved.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_002_187;
+        }
+    });
     for (st_id, str_id, sol_id, exp_loc) in [
         (Some(60_003_760_i64), Some(1_000_000_000_777_i64), Some(sys_id), 60_003_760_i64),
         (None, Some(1_000_000_000_777_i64), Some(sys_id), 1_000_000_000_777_i64),
-        (None, None, None, 30_000_142_i64),
+        (None, None, None, 30_002_187_i64),
     ] {
         let mut alt_sess = sess.clone();
         alt_sess.station_id = st_id;
@@ -541,6 +548,29 @@ fn issue_803_get_inventory_from_id_and_self_inv_item_on_destroyed_dynamic_ship()
         .unwrap();
         assert_eq!(alt_row.dbrow_get("locationID"), Some(&PyRep::Integer(exp_loc)));
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 0;
+        }
+    });
+    let mut no_loc_sess = sess.clone();
+    no_loc_sess.station_id = None;
+    no_loc_sess.structure_id = None;
+    no_loc_sess.solar_system_id = None;
+    let missing_loc_err = handle(
+        &ctx,
+        &no_loc_sess,
+        Some(&b_destroyed),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(missing_loc_err.code, "LocationNotFound");
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(km) = snap.killmails.get_mut(&1) {

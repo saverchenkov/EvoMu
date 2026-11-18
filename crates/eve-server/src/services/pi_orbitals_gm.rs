@@ -10,6 +10,82 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+/// Resolves target planet, solar system, and P0 resource type for GM planet RPCs.
+fn resolve_gm_planet_and_resource(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    explicit_planet: Option<i64>,
+    res_tid_arg: Option<TypeId>,
+) -> Result<(i64, u32, TypeId), BridgeRpcError> {
+    let invalid_planet = |message: String| BridgeRpcError {
+        code: "InvalidPlanetID".into(),
+        message,
+        client_error: None,
+    };
+    let planet_id = if let Some(pid) = explicit_planet {
+        let known = snap.planetary_colonies.values().any(|c| c.planet_id == pid)
+            || ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&pid));
+        if !known {
+            return Err(invalid_planet(format!("Planet {pid} not found")));
+        }
+        pid
+    } else {
+        snap.planetary_colonies
+            .iter()
+            .find(|((cid, _), _)| *cid == char_id)
+            .map(|((_, pid), _)| *pid)
+            .or_else(|| {
+                let target_sys_id = session.solar_system_id.or_else(|| {
+                    snap.characters
+                        .get(&char_id)
+                        .map(|c| c.solar_system_id)
+                        .filter(|&sid| sid > 0)
+                });
+                target_sys_id
+                    .and_then(|sid| ctx.sde.solar_systems.get(&sid))
+                    .and_then(|s| s.planet_ids.first().copied())
+            })
+            .or_else(|| {
+                ctx.sde
+                    .solar_systems
+                    .values()
+                    .flat_map(|s| s.planet_ids.iter().copied())
+                    .next()
+            })
+            .ok_or_else(|| invalid_planet("No planet found for GM planet command".into()))?
+    };
+    let sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.planet_ids.contains(&planet_id))
+        .map(|s| s.solar_system_id)
+        .or_else(|| {
+            snap.planetary_colonies
+                .values()
+                .find(|c| c.planet_id == planet_id)
+                .map(|c| c.solar_system_id)
+                .filter(|&sid| sid > 0)
+        })
+        .or(session.solar_system_id)
+        .or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .map(|c| c.solar_system_id)
+                .filter(|&sid| sid > 0)
+        })
+        .ok_or_else(|| invalid_planet(format!("Solar system not found for planet {planet_id}")))?;
+    let resource_type_id = res_tid_arg.unwrap_or_else(|| {
+        crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
+            .into_iter()
+            .next()
+            .unwrap_or(2268)
+    });
+    Ok((planet_id, sys_id, resource_type_id))
+}
+
 pub fn handle_pi_orbitals_gm(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -418,50 +494,14 @@ pub fn handle_pi_orbitals_gm(
                 .filter(|&b| b > 0.0 && b.is_finite())
                 .unwrap_or(0.25);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let planet_id = if let Some(pid) = explicit_planet {
-                    let known = snap.planetary_colonies.values().any(|c| c.planet_id == pid)
-                        || ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&pid));
-                    if !known {
-                        return Err(BridgeRpcError {
-                            code: "InvalidPlanetID".into(),
-                            message: format!("Planet {pid} not found"),
-                            client_error: None,
-                        });
-                    }
-                    pid
-                } else {
-                    snap.planetary_colonies
-                        .iter()
-                        .find(|((cid, _), _)| *cid == char_id)
-                        .map(|((_, pid), _)| *pid)
-                        .or_else(|| {
-                            ctx.sde
-                                .solar_systems
-                                .values()
-                                .flat_map(|s| s.planet_ids.iter().copied())
-                                .next()
-                        })
-                        .unwrap_or(40_009_082)
-                };
-                let sys_id = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .find(|s| s.planet_ids.contains(&planet_id))
-                    .map(|s| s.solar_system_id)
-                    .or_else(|| {
-                        snap.planetary_colonies
-                            .values()
-                            .find(|c| c.planet_id == planet_id)
-                            .map(|c| c.solar_system_id)
-                    })
-                    .unwrap_or(30_000_142);
-                let resource_type_id = res_tid_arg.unwrap_or_else(|| {
-                    crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
-                        .into_iter()
-                        .next()
-                        .unwrap_or(2268)
-                });
+                let (planet_id, _sys_id, resource_type_id) = resolve_gm_planet_and_resource(
+                    ctx,
+                    snap,
+                    session,
+                    char_id,
+                    explicit_planet,
+                    res_tid_arg,
+                )?;
                 let mut depl = load_planet_depletion(snap, planet_id);
                 depl.nugget_layers.push(PiNuggetLayer {
                     resource_type_id,
@@ -504,50 +544,14 @@ pub fn handle_pi_orbitals_gm(
                 .filter(|&v| v > 0)
                 .map(|v| v as TypeId);
             let res = ctx.db.with_snapshot(|snap| {
-                let planet_id = if let Some(pid) = explicit_planet {
-                    let known = snap.planetary_colonies.values().any(|c| c.planet_id == pid)
-                        || ctx.sde.solar_systems.values().any(|s| s.planet_ids.contains(&pid));
-                    if !known {
-                        return Err(BridgeRpcError {
-                            code: "InvalidPlanetID".into(),
-                            message: format!("Planet {pid} not found"),
-                            client_error: None,
-                        });
-                    }
-                    pid
-                } else {
-                    snap.planetary_colonies
-                        .iter()
-                        .find(|((cid, _), _)| *cid == char_id)
-                        .map(|((_, pid), _)| *pid)
-                        .or_else(|| {
-                            ctx.sde
-                                .solar_systems
-                                .values()
-                                .flat_map(|s| s.planet_ids.iter().copied())
-                                .next()
-                        })
-                        .unwrap_or(40_009_082)
-                };
-                let sys_id = ctx
-                    .sde
-                    .solar_systems
-                    .values()
-                    .find(|s| s.planet_ids.contains(&planet_id))
-                    .map(|s| s.solar_system_id)
-                    .or_else(|| {
-                        snap.planetary_colonies
-                            .values()
-                            .find(|c| c.planet_id == planet_id)
-                            .map(|c| c.solar_system_id)
-                    })
-                    .unwrap_or(30_000_142);
-                let resource_type_id = res_tid_arg.unwrap_or_else(|| {
-                    crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
-                        .into_iter()
-                        .next()
-                        .unwrap_or(2268)
-                });
+                let (planet_id, _sys_id, resource_type_id) = resolve_gm_planet_and_resource(
+                    ctx,
+                    snap,
+                    session,
+                    char_id,
+                    explicit_planet,
+                    res_tid_arg,
+                )?;
                 let data = compute_planet_complete_resource_sh_bytes(
                     ctx,
                     snap,

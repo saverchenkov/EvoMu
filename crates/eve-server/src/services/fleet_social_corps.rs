@@ -55,7 +55,7 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
         let mut touched: HashMap<i64, (u64, u64, u64, u64)> = HashMap::new();
         for mid in promoted.iter().map(|&(m, _)| m).chain(promoted_scoped.iter().map(|&(m, _, _, _)| m)) {
             touched.entry(mid).or_insert_with(|| {
-                let r0 = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&mid).copied()).unwrap_or(0);
+                let r0 = snap.corporations.get(&corp_id).map_or(0, |c| c.member_base_roles(mid));
                 let ra0 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
                 (r0, ra0.roles_at_hq, ra0.roles_at_base, ra0.roles_at_other)
             });
@@ -85,7 +85,7 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
             sc.roles_at_other = dec(ra.roles_at_other);
         }
         touched.into_iter().map(|(mid, (r0, hq0, base0, other0))| {
-            let r1 = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&mid).copied()).unwrap_or(r0);
+            let r1 = snap.corporations.get(&corp_id).map_or(r0, |c| c.member_base_roles(mid));
             let ra1 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
             (mid, r0, r1, hq0, ra1.roles_at_hq, base0, ra1.roles_at_base, other0, ra1.roles_at_other)
         }).collect()
