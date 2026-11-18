@@ -417,9 +417,14 @@ async fn test_mn18_mining_missions_market_and_goals() {
     });
     assert_eq!(remaining_ore, 4_500);
 
-    let mut earned_ind_cp = 0u32;
-    for g in ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32) {
-        if g.def.career_id == 2 && earned_ind_cp < 750 {
+    let goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(char_id as u32);
+    let mut earned_ind_cp: u32 = goals
+        .iter()
+        .filter(|g| g.def.career_id == 2 && g.completed)
+        .map(|g| g.def.career_points)
+        .sum();
+    for g in &goals {
+        if g.def.career_id == 2 && !g.completed && earned_ind_cp < 750 {
             let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(char_id as u32, &g.uuid, now);
             earned_ind_cp += g.def.career_points;
         }

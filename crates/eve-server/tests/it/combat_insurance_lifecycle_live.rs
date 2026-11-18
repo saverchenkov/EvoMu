@@ -187,6 +187,7 @@ async fn test_live_insurance_void_triggers_expiry_and_loss_payout_mail() {
     assert!(lapsed_payout > 0.0 && lapsed_payout < platinum_payout * 0.75, "lapsed hull gets the default 40% payout ({lapsed_payout} vs {platinum_payout})");
 
     // 4. A live Platinum contract pays immediately on loss and sends the insurance EVE-mail.
+    ctx.advance_virtual_clock(360); // clear prior 300s Limited Engagement timer
     let ship_d = new_hull(&ctx, &mut s1).await;
     rpc(&ctx, &mut s1, "insuranceSvc", "InsureShip", &[PyRep::Integer(ship_d), PyRep::Real(1.0)]).await.expect("InsureShip D");
     let d_payout = contract_for(&contracts(&ctx, &mut s1).await, ship_d).and_then(|c| c.dict_get("payoutISK")).and_then(|v| v.as_f64()).expect("payoutISK");
