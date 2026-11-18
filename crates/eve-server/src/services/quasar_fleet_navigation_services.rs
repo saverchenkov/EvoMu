@@ -544,6 +544,7 @@ pub fn register_handlers(
                     paid_completion: false,
                     day_bucket,
                     expired: false,
+                    prematurely_deactivated: false,
                 })
                 .collect();
             {
@@ -674,6 +675,7 @@ pub fn register_handlers(
                 if let Some(list) = map.get_mut(&target_cid) {
                     if let Some(g) = list.iter_mut().find(|g| g.uuid == goal_uuid && !g.expired) {
                         g.expired = true;
+                        g.prematurely_deactivated = true;
                         true
                     } else {
                         false

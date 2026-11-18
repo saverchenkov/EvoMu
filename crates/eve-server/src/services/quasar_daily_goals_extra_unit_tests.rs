@@ -202,6 +202,7 @@ fn store_loading_corrupt_json_empty_store_and_day_bucket_zero_upgrade() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: false,
+            prematurely_deactivated: false,
         }],
     );
     db.with_mut_snapshot(|s| {

@@ -230,6 +230,7 @@ fn build_sde_templates_and_manager_persistence_roundtrip() {
         claimed_at_unix: None,
         day_bucket: 0,
         expired: false,
+        prematurely_deactivated: false,
     };
     let mut legacy_map = HashMap::new();
     legacy_map.insert(7777u32, vec![only_reg_goal]);
@@ -1094,6 +1095,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: true, // un-expires because untouched & active
+            prematurely_deactivated: false,
         },
         CharacterDailyGoal {
             uuid: sde_3.uuid, // active on day 5
@@ -1106,6 +1108,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: true, // keeps expired=true due to progress > 0
+            prematurely_deactivated: false,
         },
         CharacterDailyGoal {
             uuid: sde_4.uuid, // active on day 5
@@ -1118,6 +1121,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: true, // keeps expired=true due to completed
+            prematurely_deactivated: false,
         },
         CharacterDailyGoal {
             uuid: sde_1.uuid, // active on day 5
@@ -1130,6 +1134,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: Some(10),
             day_bucket: 0,
             expired: true, // keeps expired=true due to claimed
+            prematurely_deactivated: false,
         },
         CharacterDailyGoal {
             uuid: sde_bonus.uuid, // active on day 5
@@ -1142,6 +1147,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: true, // keeps expired=true due to paid_completion
+            prematurely_deactivated: false,
         },
         CharacterDailyGoal {
             uuid: sde_2a.uuid, // omitted on day 5
@@ -1154,6 +1160,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
             claimed_at_unix: None,
             day_bucket: 0,
             expired: false, // forced expired=true because !is_active_today
+            prematurely_deactivated: false,
         },
     ];
     assert!(ensure_character_daily_goals_with_templates(&mut legacy_goals, &tpls_pool, day5_ts));
@@ -1199,6 +1206,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
                 claimed_at_unix: None,
                 day_bucket: 5,
                 expired: false,
+                prematurely_deactivated: false,
             }],
         )]),
         monthly_progress: HashMap::from([(
@@ -1248,6 +1256,7 @@ fn ensure_goals_sde_rotation_len_day_bucket_zero_and_rehydrate_edges() {
         claimed_at_unix: None,
         day_bucket: 5,
         expired: false,
+        prematurely_deactivated: false,
     };
     let legacy_two_chars = HashMap::from([
         (char_a, vec![shared_goal.clone()]),

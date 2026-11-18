@@ -168,6 +168,8 @@ pub struct CharacterDailyGoal {
     pub day_bucket: u64,
     #[serde(default)]
     pub expired: bool,
+    #[serde(default)]
+    pub prematurely_deactivated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -330,17 +332,19 @@ fn ensure_character_daily_goals_with_templates(
                 existing.completed_at_unix = None;
                 existing.claimed_at_unix = None;
                 existing.expired = !is_active_today;
+                existing.prematurely_deactivated = false;
                 existing.day_bucket = day_bucket;
                 changed = true;
             } else if existing.day_bucket == 0 && day_bucket > 0 {
                 existing.day_bucket = day_bucket;
-                if !is_active_today
-                    || (existing.current_progress == 0
-                        && !existing.completed
-                        && !existing.claimed
-                        && !existing.paid_completion)
+                if existing.prematurely_deactivated || !is_active_today {
+                    existing.expired = true;
+                } else if existing.current_progress == 0
+                    && !existing.completed
+                    && !existing.claimed
+                    && !existing.paid_completion
                 {
-                    existing.expired = !is_active_today;
+                    existing.expired = false;
                 }
                 changed = true;
             } else if !is_active_today && !existing.expired {
@@ -359,6 +363,7 @@ fn ensure_character_daily_goals_with_templates(
                 claimed_at_unix: None,
                 day_bucket,
                 expired: !is_active_today,
+                prematurely_deactivated: false,
             });
             changed = true;
         }
@@ -965,6 +970,73 @@ impl DailyGoalManager {
             self.save_to_db();
         }
         out
+    }
+
+    /// Resolves a daily goal for single-UUID `GetRequest` lookup across active goals,
+    /// persisted historical/expired character goals (excluding prematurely deactivated ones),
+    /// and known catalog templates.
+    pub fn resolve_goal_for_get_at(
+        &self,
+        character_id: u32,
+        goal_uuid: &[u8; 16],
+        now_unix: u64,
+    ) -> Option<ResolvedDailyGoal> {
+        let effective_now = if now_unix > 0 { now_unix } else { self.now_unix() };
+        let active_goals = self.get_or_init_goals_at(character_id, effective_now);
+        if let Some(active) = active_goals.into_iter().find(|g| &g.uuid == goal_uuid) {
+            return Some(ResolvedDailyGoal {
+                template: active.template,
+                current_progress: active.current_progress,
+                day_bucket: active.day_bucket,
+                is_expired_or_catalog: false,
+            });
+        }
+        self.find_expired_or_template_goal(character_id, goal_uuid, effective_now)
+    }
+
+    /// Fallback lookup for `GetRequest` when `goal_uuid` is absent from active goals:
+    /// checks persisted `character_goals` (honoring `prematurely_deactivated` -> `None`),
+    /// then falls back to known `templates` without resurrecting deactivated goals.
+    fn find_expired_or_template_goal(
+        &self,
+        character_id: u32,
+        goal_uuid: &[u8; 16],
+        effective_now: u64,
+    ) -> Option<ResolvedDailyGoal> {
+        let persisted = {
+            let map = self
+                .character_goals
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            map.get(&character_id)
+                .and_then(|list| list.iter().find(|g| &g.uuid == goal_uuid).cloned())
+        };
+        if let Some(g) = persisted {
+            if g.prematurely_deactivated {
+                return None;
+            }
+            return Some(ResolvedDailyGoal {
+                template: g.template,
+                current_progress: g.current_progress,
+                day_bucket: g.day_bucket,
+                is_expired_or_catalog: true,
+            });
+        }
+
+        let catalog_day_bucket = if effective_now > 0 {
+            daily_goal_day_bucket(effective_now)
+        } else {
+            0
+        };
+        self.get_templates()
+            .into_iter()
+            .find(|t| &t.uuid == goal_uuid)
+            .map(|template| ResolvedDailyGoal {
+                template,
+                current_progress: 0,
+                day_bucket: catalog_day_bucket,
+                is_expired_or_catalog: true,
+            })
     }
 
     pub fn add_progress(
@@ -1606,6 +1678,58 @@ pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u
 // Handler Registration
 // ============================================================================
 
+/// Resolved daily goal payload data for `GetRequest` handlers.
+#[derive(Debug, Clone)]
+pub struct ResolvedDailyGoal {
+    pub template: DailyGoalTemplate,
+    pub current_progress: u64,
+    pub day_bucket: u64,
+    pub is_expired_or_catalog: bool,
+}
+
+/// Computes `(active_after_unix, active_until_unix)` for `GetResponse`, ensuring expired
+/// or catalog-fallback goals always report `active_until < effective_now` when `effective_now > 0`.
+fn resolved_goal_window_unix(resolved: &ResolvedDailyGoal, effective_now: u64) -> (u64, u64) {
+    let (after, until) = daily_goal_window_unix(resolved.day_bucket);
+    if !resolved.is_expired_or_catalog {
+        return (after, until);
+    }
+    if effective_now == 0 {
+        return (0, 0);
+    }
+    if until < effective_now {
+        return (after, until);
+    }
+    let yesterday_bucket = daily_goal_day_bucket(effective_now).saturating_sub(1);
+    let (prev_after, prev_until) = daily_goal_window_unix(yesterday_bucket);
+    if prev_until < effective_now {
+        (prev_after, prev_until)
+    } else {
+        let clamped_until = effective_now.saturating_sub(1);
+        let clamped_after = clamped_until.saturating_sub(86_400);
+        (clamped_after, clamped_until)
+    }
+}
+
+fn resolve_daily_goal_for_rpc(
+    mgr: &DailyGoalManager,
+    cid: Option<u32>,
+    dyn_msg: &DynamicQuasarMessage,
+    now_unix: u64,
+) -> Result<(ResolvedDailyGoal, u64), (u32, String)> {
+    let Some(cid) = cid else {
+        return Err((STATUS_FORBIDDEN, "Active character required".into()));
+    };
+    let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+        return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
+    };
+    let effective_now = if now_unix > 0 { now_unix } else { mgr.now_unix() };
+    let resolved = mgr
+        .resolve_goal_for_get_at(cid, &target_uuid, effective_now)
+        .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
+    Ok((resolved, effective_now))
+}
+
 pub fn register_daily_goal_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -1648,31 +1772,28 @@ pub fn register_daily_goal_handlers(
     router.register_handler(
         "eve_public.dailygoal.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
-            };
-            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let g = goals
-                .iter()
-                .find(|g| g.uuid == target_uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
-
-            let (after, until) = daily_goal_window_unix(g.day_bucket);
+            let (resolved, effective_now) = resolve_daily_goal_for_rpc(
+                &mgr,
+                ctx.effective_character_id(),
+                dyn_msg,
+                ctx.now_unix(),
+            )?;
+            let (after, until) = resolved_goal_window_unix(&resolved, effective_now);
             let attrs = build_daily_goal_attributes(
                 "eve_public.dailygoal.Attributes",
-                &g.template,
+                &resolved.template,
                 after,
                 until,
             );
-            add_daily_goal_earnings(
-                pb::message("eve_public.dailygoal.api.GetResponse")
-                    .set("goal", attrs)
-                    .set("progress", g.current_progress),
-                &g.template,
-            )
+            let resp = pb::message("eve_public.dailygoal.api.GetResponse")
+                .set("goal", attrs)
+                .set("progress", resolved.current_progress);
+            // Omit earnings for expired/catalog-only goals so client `has_unclaimed_rewards()` stays false.
+            if resolved.is_expired_or_catalog {
+                resp
+            } else {
+                add_daily_goal_earnings(resp, &resolved.template)
+            }
             .to_any_or_internal_err()
         }),
     );
@@ -1886,22 +2007,16 @@ pub fn register_daily_goal_handlers(
     router.register_handler(
         "eve.dailygoal.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
-            };
-            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
-            let g = goals
-                .iter()
-                .find(|g| g.uuid == target_uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
-
-            let (after, until) = daily_goal_window_unix(g.day_bucket);
+            let (resolved, effective_now) = resolve_daily_goal_for_rpc(
+                &mgr,
+                ctx.effective_character_id(),
+                dyn_msg,
+                ctx.now_unix(),
+            )?;
+            let (after, until) = resolved_goal_window_unix(&resolved, effective_now);
             let attrs = build_daily_goal_attributes(
                 "eve.dailygoal.Attributes",
-                &g.template,
+                &resolved.template,
                 after,
                 until,
             );
