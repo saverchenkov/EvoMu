@@ -123,15 +123,19 @@ pub fn handle_upgrade_gantry(
                 client_error: None,
             })?;
             let corp_owner = resolve_orbital_corp_owner(snap, st.owner_corp_id, it.owner_id);
-            if let Some(owner_corp) = corp_owner {
-                if char_corp != owner_corp || !snap.corporations.contains_key(&owner_corp) {
-                    return Err(BridgeRpcError {
-                        code: "OrbitalOwnershipDenied".into(),
-                        message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
-                        client_error: None,
-                    });
+            let ownership_ok = match corp_owner {
+                Some(owner_corp) => {
+                    char_corp == owner_corp
+                        && st.owner_corp_id == char_corp
+                        && snap.corporations.contains_key(&owner_corp)
+                        && (!is_player_corp_owner(snap, it.owner_id) || it.owner_id == char_corp)
                 }
-            } else if it.owner_id != char_corp && it.owner_id != char_id {
+                None => {
+                    st.owner_corp_id == char_corp
+                        && (it.owner_id == char_corp || it.owner_id == char_id)
+                }
+            };
+            if !ownership_ok {
                 return Err(BridgeRpcError {
                     code: "OrbitalOwnershipDenied".into(),
                     message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
@@ -142,13 +146,6 @@ pub fn handle_upgrade_gantry(
                 return Err(BridgeRpcError {
                     code: "OrbitalAlreadyUpgraded".into(),
                     message: format!("Orbital {orbital_id} is not an un-upgraded gantry"),
-                    client_error: None,
-                });
-            }
-            if st.owner_corp_id != char_corp {
-                return Err(BridgeRpcError {
-                    code: "OrbitalOwnershipDenied".into(),
-                    message: format!("Corporation {char_corp} does not own orbital structure {orbital_id}"),
                     client_error: None,
                 });
             }

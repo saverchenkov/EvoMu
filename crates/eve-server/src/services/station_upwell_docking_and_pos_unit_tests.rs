@@ -1229,13 +1229,13 @@ async fn pos_mgr_anchor_deployable_matrix_dispatch_and_orbital_handlers_cov() {
             },
         );
     });
-    assert_eq!(handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(existing_orbital_id)]).unwrap_err().code, "OrbitalAlreadyUpgraded");
-    ctx.db.with_mut_snapshot(|s| {
-        s.structures.get_mut(&existing_orbital_id).unwrap().type_id = 3962;
-    });
     assert_eq!(handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(existing_orbital_id)]).unwrap_err().code, "OrbitalOwnershipDenied");
     ctx.db.with_mut_snapshot(|s| {
         s.structures.get_mut(&existing_orbital_id).unwrap().owner_corp_id = corp_id;
+    });
+    assert_eq!(handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(existing_orbital_id)]).unwrap_err().code, "OrbitalAlreadyUpgraded");
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.get_mut(&existing_orbital_id).unwrap().type_id = 3962;
     });
     assert_eq!(handle_upgrade_gantry(&ctx, &sess, &[PyRep::Integer(existing_orbital_id)]).unwrap_err().code, "OrbitalWrongSystem");
     ctx.db.with_mut_snapshot(|s| {
