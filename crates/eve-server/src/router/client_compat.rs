@@ -1484,10 +1484,10 @@ fn normalize_agent_mission_briefing_rep(rep: PyRep) -> PyRep {
     ])
 }
 
-fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
-    normalize_agent_mission_objective_rep_at(rep, None)
-}
-
+/// Normalizes an `agentMgr.GetMissionObjectiveInfo` reply into the MachoNet
+/// objective dictionary shape, computing live `bonusRewards` remaining
+/// 100ns ticks against `now_unix` and clearing expired bonus tuples once
+/// `now_unix` exceeds `bonusExpiryUnix`.
 fn normalize_agent_mission_objective_rep_at(rep: PyRep, now_unix: Option<u64>) -> PyRep {
     if !matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
         return rep;

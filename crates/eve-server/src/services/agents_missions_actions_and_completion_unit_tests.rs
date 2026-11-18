@@ -1221,7 +1221,9 @@ async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
                 bookmark_id: None,
             },
         );
-        save_mission_meta(snap, char_id, &make_meta(900, ag4.agent_id, now4 + 86_400, None));
+        let mut meta_900 = make_meta(900, ag4.agent_id, now4 + 86_400, None);
+        meta_900.offered_level = Some(4);
+        save_mission_meta(snap, char_id, &meta_900);
     });
     let acc_900 = call_agent_mgr(
         &ctx,

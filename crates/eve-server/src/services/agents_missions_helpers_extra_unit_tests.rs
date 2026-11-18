@@ -299,7 +299,7 @@ fn rewards_divisions_alpha_vs_omega_target_resolution_and_security_encounters() 
 
     // Seed agents in divisions 22 (Distribution -> 3894), 23 (Mining -> 3893), 24 (Security -> 3895), and 18 (R&D -> None)
     for (aid, div, a_type, lvl) in [
-        (3_100_001, 22, 2, 1),
+        (3_100_001, 22, 2, 5),
         (3_100_002, 23, 2, 2),
         (3_100_003, 24, 2, 4),
         (3_100_004, 18, 4, 3),

@@ -1807,6 +1807,10 @@ fn module_attribute_changes_normalizes_list_entries_without_mangling() {
     }
 }
 
+fn normalize_agent_mission_objective_rep(rep: PyRep) -> PyRep {
+    normalize_agent_mission_objective_rep_at(rep, None)
+}
+
 #[tokio::test]
 async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
     // 1. Direct unit coverage for `normalize_agent_mission_objective_rep_at` with custom `bonusWindowSecs` & `bonusExpiryUnix`
@@ -1872,10 +1876,13 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
         .expect("L4 security agent")
         .clone();
     let (uid, corp_id) = ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.clone_grade = 2;
-        ch.solar_system_id = 30_000_142;
-        ch.station_id = Some(60_003_760);
+        let (uid, corp_id) = {
+            let ch = snap.characters.get_mut(&char_id).unwrap();
+            ch.clone_grade = 2;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = Some(60_003_760);
+            (ch.user_id, ch.corporation_id)
+        };
         snap.skills.remove(&char_id);
         for (mid, aid, sys_id, win_s) in [
             (13_514_u32, ag1.agent_id, ag1.solar_system_id.unwrap(), 3_840_u64),
@@ -1898,7 +1905,7 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
             crate::services::agents_missions::save_mission_meta(
                 snap,
                 char_id,
-                &eve_db::MissionTimingAndCargoMeta {
+                &crate::services::agents_missions::MissionTimingAndCargoMeta {
                     mission_id: mid,
                     agent_id: aid,
                     offered_at_unix: now0,
@@ -1911,7 +1918,7 @@ async fn agent_mgr_bonus_rewards_wire_timer_and_post_expiry_omission() {
                 },
             );
         }
-        (ch.user_id, ch.corporation_id)
+        (uid, corp_id)
     });
     let mut sess = SessionState {
         user_id: Some(uid),

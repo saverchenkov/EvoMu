@@ -904,16 +904,34 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     assert_eq!(declined.dict_get("state"), Some(&PyRep::String("Declined".into())));
 
     // 5. NPC corp tax: 0% LP tax; 11% ISK tax independently on >= 100_000 ISK rewards in non-exempt NPC corp
+    let l4_tax_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 4
+                && a.agent_type_id == 2
+                && a.solar_system_id.is_some()
+                && a.station_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("SDE must contain an L4 basic agent");
+    let l4_sys_id = l4_tax_ag.solar_system_id.unwrap();
+    let mut sess_l4_tax = char_session(char_id, l4_sys_id, l4_tax_ag.station_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.remove(&(char_id, mid_deliv));
-        snap.characters.get_mut(&char_id).unwrap().corporation_id = 1_000_009; // NPC corp, non-exempt
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.corporation_id = 1_000_009; // NPC corp, non-exempt
+        ch.solar_system_id = l4_sys_id;
+        ch.station_id = l4_tax_ag.station_id;
         snap.active_missions.insert(
             (char_id, 72_003),
             ActiveMissionRecord {
                 character_id: char_id,
                 mission_id: 72_003,
-                agent_id: ag.agent_id,
-                solar_system_id: sys_id,
+                agent_id: l4_tax_ag.agent_id,
+                solar_system_id: l4_sys_id,
                 state: "Accepted".into(),
                 current_room_id: 1,
                 npcs_remaining: 0,
@@ -926,8 +944,21 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
             char_id,
             &MissionTimingAndCargoMeta {
                 mission_id: 72_003,
-                agent_id: ag.agent_id,
+                agent_id: l4_tax_ag.agent_id,
                 offered_level: Some(4), // >= 100k ISK reward -> 11% NPC corp ISK tax applies; 0% LP tax
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            990_002,
+            InventoryItemRecord {
+                item_id: 990_002,
+                owner_id: char_id,
+                location_id: l4_tax_ag.station_id.unwrap(),
+                type_id: 20,
+                quantity: 250,
+                flag: InventoryFlag::Hangar,
+                singleton: false,
                 ..Default::default()
             },
         );
@@ -936,21 +967,21 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
         isk_reward: isk_r,
         bonus_reward: bonus_r,
         lp_reward: raw_lp,
-    } = compute_character_mission_rewards(&ctx, char_id, ag.agent_id, 72_003, sys_id);
+    } = compute_character_mission_rewards(&ctx, char_id, l4_tax_ag.agent_id, 72_003, l4_sys_id);
     assert!(isk_r >= 100_000, "expected >= 100k ISK for tax test, got {isk_r}");
     let (bal_before, lp_before, j_start) = ctx.db.with_snapshot(|s| {
         (
             s.characters[&char_id].balance.raw_cents(),
-            s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0),
+            s.characters[&char_id].loyalty_points.get(&l4_tax_ag.corporation_id).copied().unwrap_or(0),
             s.wallet_journal.len(),
         )
     });
     let comp_tax = handle(
         &ctx,
-        &mut sess_docked,
+        &mut sess_l4_tax,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(ag.agent_id), PyRep::Integer(72_003)],
+        &[PyRep::Integer(6), PyRep::Integer(l4_tax_ag.agent_id), PyRep::Integer(72_003)],
         &HashMap::new(),
     )
     .await
@@ -971,7 +1002,7 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     let expected_net_delta_cents =
         (isk_r * 100 - expected_isk_tax_cents) + (bonus_paid * 100 - expected_bonus_tax_cents);
     ctx.db.with_snapshot(|s| {
-        let lp_after = s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0);
+        let lp_after = s.characters[&char_id].loyalty_points.get(&l4_tax_ag.corporation_id).copied().unwrap_or(0);
         let lp_gained = lp_after - lp_before;
         assert_eq!(lp_gained, raw_lp, "NPC corps charge 0% LP tax ({raw_lp})");
 
