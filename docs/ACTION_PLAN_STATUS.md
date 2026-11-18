@@ -4,18 +4,18 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6222 / 6320 ledger rows closed (98.45%)**, 2379 NA, 1739 tagged tests, 7445 passing tests. Flagged fake by the gap auditor: 100.
+**Parity: 6271 / 6320 ledger rows closed (99.22%)**, 2377 NA, 1743 tagged tests, 7578 passing tests. Flagged fake by the gap auditor: 43.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1604 | 1490 | 94 | 20 |
-| notify | 1311 | 495 | 815 | 1 |
-| plan | 114 | 108 | 0 | 6 |
-| quasar | 1455 | 88 | 1328 | 39 |
-| rpc | 1373 | 1250 | 91 | 32 |
+| feat | 1604 | 1499 | 94 | 11 |
+| notify | 1311 | 495 | 813 | 3 |
+| plan | 114 | 109 | 0 | 5 |
+| quasar | 1455 | 119 | 1328 | 8 |
+| rpc | 1373 | 1260 | 91 | 22 |
 | sde | 213 | 171 | 42 | 0 |
 
 **Real-client journeys (supervisor scoreboard, stage `interim_smoke`, build `3698585`):** **0 / 29 verified** (core smoke: **0 / 7**) (8 parked `Phase LW` row(s) excluded from completeness).
@@ -27,37 +27,33 @@ Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows who
 | Area | Done | Total | Percent | Not applicable |
 |---|---|---|---|---|
 | Flying and navigation | 121 | 122 | 99% | 0 |
-| Ships, fitting and modules | 262 | 266 | 98% | 0 |
+| Ships, fitting and modules | 266 | 266 | 100% | 0 |
 | Combat | 120 | 120 | 100% | 0 |
 | Accounts, characters and skills | 103 | 104 | 99% | 0 |
 | Inventory, markets and contracts | 84 | 85 | 99% | 0 |
-| Industry and resources | 125 | 129 | 97% | 0 |
-| PvE | 117 | 121 | 97% | 0 |
+| Industry and resources | 127 | 129 | 98% | 0 |
+| PvE | 116 | 121 | 96% | 0 |
 | Corporations, alliances and fleets | 124 | 124 | 100% | 0 |
 | Structures and territory | 132 | 133 | 99% | 0 |
 | ESI web API | 138 | 138 | 100% | 0 |
-| Quasar gateway services | 28 | 32 | 88% | 94 |
+| Quasar gateway services | 32 | 32 | 100% | 94 |
 | Game-master mode and commands | 22 | 22 | 100% | 0 |
 | Sessions and server operations | 114 | 114 | 100% | 0 |
-| **All areas** | **1490** | **1510** | **99%** | 94 |
+| **All areas** | **1499** | **1510** | **99%** | 94 |
 
 Features not yet done, by area:
 
 - **Flying and navigation:** `feat:navigation.gravity-hazard-safe-zones (FLAGGED_FAKE)`
 
-- **Ships, fitting and modules:** `feat:cosmetics.skinr-designer (FLAGGED_FAKE)`, `feat:cosmetics.skinr-market (FLAGGED_FAKE)`, `feat:cosmetics.skinr-paragon-hub-listing (FLAGGED_FAKE)`, `feat:cosmetics.skinr-sequencing-studio (FLAGGED_FAKE)`
-
 - **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`
 
 - **Inventory, markets and contracts:** `feat:wallet.nes-store (FLAGGED_FAKE)`
 
-- **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`, `feat:pi.expedited-transfer (FLAGGED_FAKE)`, `feat:pi.launch (FLAGGED_FAKE)`
+- **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`
 
-- **PvE:** `feat:pve.air-career-program (FLAGGED_FAKE)`, `feat:pve.daily-goals (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
+- **PvE:** `feat:pve.dungeon-system (FLAGGED_FAKE)`, `feat:pve.events-sites (FLAGGED_FAKE)`, `feat:pve.homefront-ops (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
 
 - **Structures and territory:** `feat:sovereignty.skyhook-reagent-maturity (FLAGGED_FAKE)`
-
-- **Quasar gateway services:** `feat:quasar.achievement (FLAGGED_FAKE)`, `feat:quasar.career (FLAGGED_FAKE)`, `feat:quasar.cosmetic (FLAGGED_FAKE)`, `feat:quasar.dailygoal (FLAGGED_FAKE)`
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -195,7 +191,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | DONE | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested. | 02ea9ce13 2026-10-21 |
 | E-4 | Industry | DONE | 33/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | DONE | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested. | 958987363 2026-11-06 |
 | E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | agent_mission_completion_isk_lp_standing_and_reload, test_agent_missions_complete_reward_formula_and_storyline_e2e | PARTIAL | Agent finder, conversation, mission offer/accept/decline/quit/complete state machine, dungeon NPC spawns, bonus timer, skill-scaled ISK/LP rewards, standing propagation, and cooldowns verified. | e1cbba77e 2026-11-04 |
-| E-6 | PI basics | BLOCKED_BY_FEATURES | 21/23 | test_e6_pi_extractor_expiry_and_launch_canister | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 252371f52 2026-10-27 |
+| E-6 | PI basics | DONE | 23/23 | test_e6_pi_extractor_expiry_and_launch_canister | DONE | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 252371f52 2026-10-27 |
 | E-7 | AIR NPE server-side node-graph runner & tutorial pocket orchestrator (user-added… | DONE | 3/3 | air_npe_server_nodegraph_runner_full_tutorial_to_completion | DONE | — | ac4908537 2026-11-02 |
 
 ## Phase 8: Social and exploration
@@ -206,7 +202,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-2 | Fleets | DONE | 25/25 | test_plan_so2_fleets_lifecycle_and_warp | DONE | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested. | ff6be7111 2026-10-22 |
 | SO-3 | Corporations, alliances, and structures | DONE | 52/52 | test_corp_projects_goals_and_freelance_workflows | DONE | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested. | 9fa0d342a 2026-10-28 |
 | SO-4 | Bookmarks | DONE | 10/10 | test_access_group_bookmarks_creation_ops_and_subscriptions | DONE | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested. | 1cebacecd 2026-10-21 |
-| SO-5 | Exploration | DONE | 22/22 | test_so5_scanning_dscan_probes_and_acceleration_gates | DONE | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested. | 6eb5708a0 2026-11-06 |
+| SO-5 | Exploration | BLOCKED_BY_FEATURES | 21/22 | test_so5_scanning_dscan_probes_and_acceleration_gates | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested. | 6eb5708a0 2026-11-06 |
 | SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | DONE | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested. | 0d2cd250e 2026-10-23 |
 | SO-7 | Chat | DONE | 11/11 | test_so7_chat_item_fitting_hyperlinks_resolution | DONE | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested. | 252371f52 2026-10-27 |
 
@@ -219,7 +215,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Identity, Account, FastCheckout, Token Purchase, Subscriptions, and Monetization gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | PARTIAL | Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices wired with V24 client static/localization tables imported into evomu_sde.sqlite (`sde_achievements` 68 /  | ddbd4d872 2026-11-16 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | DONE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, test_plan_q5_social_and_organization_quasar_packages, test_quasar | DONE | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented and verified. | 958987363 2026-11-06 |
-| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | FLAGGED_FAKE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | 37721dee9 2026-11-13 |
+| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | DONE | 0/0 | quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan_q6_economy_and_industry_quasar_packages, test_quasar_a | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | f50483bc6 2026-11-17 |
 | Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Space, Celestials, Navigation, Bubble Presence, Dynamic Bounty System, and Pirate Insurgency gateway handlers implemented and verified. | 911eb8b47 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | BLOCKED_BY_FEATURES | 0/0 | test_plan_q9_cosmetics_and_app_infrastructure | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals (with V24 `evomu_sde.sqlite` catalog/localization tables, explicit `DERIVED` server-aut | bb5c2427e 2026-11-09 |
