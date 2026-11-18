@@ -1914,3 +1914,341 @@ async fn issue_935_and_969_v24_contract_create_list_and_search_wire_flow() {
     };
     assert!(expired_list.iter().any(|c| c.dict_get("contractID") == Some(&PyRep::Integer(ex_cid))));
 }
+
+#[tokio::test]
+async fn issue_1328_get_my_expired_contract_list_excludes_deleted_contracts() {
+    use eve_db::{
+        corp_roles, CorpWalletDivisionRecord, CorporationRecord, InventoryFlag,
+        InventoryItemRecord, IskCents,
+    };
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let station_id = 60_003_760_i64;
+    let system_id = 30_000_142_u32;
+    let corp_id = 98_500_128_i64;
+    let mut s1 = setup_pilot(&ctx, 911, "demo", "demo-secret", 90_000_001).await;
+    s1.station_id = Some(station_id);
+    s1.solar_system_id = Some(system_id);
+    s1.corporation_id = Some(corp_id);
+    s1.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_CONTRACT_MANAGER;
+
+    let (
+        p_out_del_item,
+        p_exp_del_item,
+        p_exp_keep_item,
+        p_active_item,
+        c_exp_del_item,
+        c_exp_keep_item,
+    ) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = IskCents::from_isk(50_000_000);
+            ch.station_id = Some(station_id);
+            ch.solar_system_id = system_id;
+            ch.corporation_id = corp_id;
+        }
+        snap.corporations.insert(corp_id, {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = "Live Repro Corp".into();
+            corp.ticker = "LRPC".into();
+            corp.ceo_id = 90_000_001;
+            corp.wallet_divisions = vec![CorpWalletDivisionRecord {
+                division_id: 1,
+                name: "Master".into(),
+                balance: IskCents::from_isk(50_000_000),
+            }];
+            corp.members = [90_000_001].into_iter().collect();
+            corp.member_roles = [(
+                90_000_001,
+                corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_CONTRACT_MANAGER,
+            )]
+            .into_iter()
+            .collect();
+            corp.set_division_balance(1, IskCents::from_isk(50_000_000));
+            corp
+        });
+
+        let mut next_item = |owner_id: i64, flag: InventoryFlag| {
+            snap.next_entity_id += 1;
+            let iid = snap.next_entity_id;
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id,
+                    location_id: station_id,
+                    flag,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            iid
+        };
+
+        (
+            next_item(90_000_001, InventoryFlag::Hangar),
+            next_item(90_000_001, InventoryFlag::Hangar),
+            next_item(90_000_001, InventoryFlag::Hangar),
+            next_item(90_000_001, InventoryFlag::Hangar),
+            next_item(corp_id, InventoryFlag::CorpSAG1),
+            next_item(corp_id, InventoryFlag::CorpSAG1),
+        )
+    });
+
+    let empty_kw = HashMap::new();
+    let make_contract_struct = |item_id: i64, minutes_expire: i64, for_corp: bool, title: &str| {
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::String("ContractStruct".into()),
+                PyRep::Tuple(vec![]),
+                PyRep::Dict(vec![
+                    (PyRep::String("type".into()), PyRep::Integer(1)),
+                    (PyRep::String("isPrivate".into()), PyRep::Integer(0)),
+                    (PyRep::String("minutesExpire".into()), PyRep::Integer(minutes_expire)),
+                    (PyRep::String("startStationID".into()), PyRep::Integer(station_id)),
+                    (PyRep::String("price".into()), PyRep::Real(1_000.0)),
+                    (PyRep::String("collateral".into()), PyRep::Real(0.0)),
+                    (PyRep::String("forCorp".into()), PyRep::Bool(for_corp)),
+                    (PyRep::String("title".into()), PyRep::String(title.into())),
+                    (
+                        PyRep::String("itemList".into()),
+                        PyRep::List(vec![PyRep::keyval([("itemID", PyRep::Integer(item_id))])]),
+                    ),
+                ]),
+            ])),
+            list: vec![],
+            dict: vec![],
+        }
+    };
+
+    let create_cid = |rep: PyRep| match rep {
+        PyRep::List(ids) => ids[0].as_i64().expect("integer contractID"),
+        other => panic!("Expected [contractID] over machoNet:26000, got {other:?}"),
+    };
+
+    // 1. Create and immediately delete an Outstanding personal contract.
+    let p_out_del_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(p_out_del_item, 10_080, false, "Deleted Outstanding")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create p_out_del"),
+    );
+    ctx.dispatch_rpc(
+        &mut s1,
+        "contractProxy",
+        None,
+        "DeleteContract",
+        &[PyRep::Integer(p_out_del_cid)],
+        &empty_kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("delete outstanding contract");
+
+    // 2. Create two 24h personal contracts (will expire), one 7d active personal contract,
+    //    and two 24h corp contracts (will expire).
+    let p_exp_del_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(p_exp_del_item, 1_440, false, "Expired To Delete")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create p_exp_del"),
+    );
+    let p_exp_keep_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(p_exp_keep_item, 1_440, false, "Expired Kept")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create p_exp_keep"),
+    );
+    let p_active_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(p_active_item, 10_080, false, "Still Active")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create p_active"),
+    );
+    let c_exp_del_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(c_exp_del_item, 1_440, true, "Corp Expired To Delete")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create c_exp_del"),
+    );
+    let c_exp_keep_cid = create_cid(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[make_contract_struct(c_exp_keep_item, 1_440, true, "Corp Expired Kept")],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("create c_exp_keep"),
+    );
+
+    // Advance clock past 24h so the 1440m contracts expire while p_active_cid remains Outstanding.
+    ctx.advance_virtual_clock(86_401);
+
+    let extract_ids = |rep: &PyRep| -> Vec<i64> {
+        let Some(PyRep::List(rows)) = rep.dict_get("contracts") else {
+            panic!("Expected contracts list on GetMyExpiredContractList, got {rep:?}");
+        };
+        rows.iter()
+            .filter_map(|c| c.dict_get("contractID").and_then(|v| v.as_i64()))
+            .collect()
+    };
+
+    let personal_before = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyExpiredContractList",
+            &[PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyExpiredContractList(false) before delete");
+    let personal_ids_before = extract_ids(&personal_before);
+    assert!(personal_ids_before.contains(&p_exp_del_cid));
+    assert!(personal_ids_before.contains(&p_exp_keep_cid));
+    assert!(!personal_ids_before.contains(&p_out_del_cid));
+    assert!(!personal_ids_before.contains(&p_active_cid));
+
+    let corp_before = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyExpiredContractList",
+            &[PyRep::Bool(true)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyExpiredContractList(true) before delete");
+    let corp_ids_before = extract_ids(&corp_before);
+    assert!(corp_ids_before.contains(&c_exp_del_cid));
+    assert!(corp_ids_before.contains(&c_exp_keep_cid));
+
+    // Delete the expired personal and corp contracts -> status becomes "Deleted".
+    ctx.dispatch_rpc(
+        &mut s1,
+        "contractProxy",
+        None,
+        "DeleteContract",
+        &[PyRep::Integer(p_exp_del_cid)],
+        &empty_kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("DeleteContract expired personal");
+    ctx.dispatch_rpc(
+        &mut s1,
+        "contractProxy",
+        None,
+        "DeleteContract",
+        &[PyRep::Integer(c_exp_del_cid)],
+        &empty_kw,
+        Some("machoNet:26000"),
+    )
+    .await
+    .expect("DeleteContract expired corp");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.contracts[&p_exp_del_cid].status, "Deleted");
+        assert_eq!(snap.contracts[&c_exp_del_cid].status, "Deleted");
+    });
+
+    // Repeat DeleteContract on already-Deleted contract fails with InvalidContractState (#1328).
+    let repeat_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "DeleteContract",
+            &[PyRep::Integer(p_exp_del_cid)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(repeat_err.code, "InvalidContractState");
+
+    // Both GetMyExpiredContractList(false) and GetMyExpiredContractList(true) exclude Deleted rows.
+    let personal_after = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyExpiredContractList",
+            &[PyRep::Bool(false)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyExpiredContractList(false) after delete");
+    let personal_ids_after = extract_ids(&personal_after);
+    assert!(!personal_ids_after.contains(&p_exp_del_cid));
+    assert!(!personal_ids_after.contains(&p_out_del_cid));
+    assert!(!personal_ids_after.contains(&p_active_cid));
+    assert!(!personal_ids_after.contains(&c_exp_del_cid));
+    assert!(personal_ids_after.contains(&p_exp_keep_cid));
+
+    let corp_after = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "contractProxy",
+            None,
+            "GetMyExpiredContractList",
+            &[PyRep::Bool(true)],
+            &empty_kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetMyExpiredContractList(true) after delete");
+    let corp_ids_after = extract_ids(&corp_after);
+    assert!(!corp_ids_after.contains(&c_exp_del_cid));
+    assert!(corp_ids_after.contains(&c_exp_keep_cid));
+}
