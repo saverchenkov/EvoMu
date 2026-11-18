@@ -599,6 +599,8 @@ async fn test_lowsec_structure_hack_failure_does_not_explode_or_wipe() {
 
 #[tokio::test]
 async fn structure_control_take_and_release_wire_tcp_client_harness() {
+    // parity: notify:OnAssumeStructureControl
+    // parity: notify:OnRelinquishStructureControl
     use eve_machonet::{
         placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
         CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,

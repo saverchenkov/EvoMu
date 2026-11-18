@@ -1497,6 +1497,228 @@ fn upwell_builtin_services_and_clone_bay_setting_23_regressions() {
             evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_JUMP_CLONE, 100),
             Some(2_500_000_000)
         );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                astra_id,
+                outsider_id,
+                StructureServiceKind::CloneBay,
+                1_800_000_000,
+            )
+            .expect("flat scalar 23 = 250_000 ISK must resolve via CloneBay"),
+            Some(2_500_000_000)
+        );
+    });
+
+    // Flat scalar SETTING_CLONINGBAY_TAX (23) = 0.0 ISK must resolve to Some(0), not None.
+    crate::services::station_structure::structure_profiles_rpc::handle_save_profile_settings(
+        &ctx,
+        &owner_sess,
+        &[
+            eve_proto::PyRep::Integer(802),
+            eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                eve_proto::PyRep::Real(0.0),
+            ])]),
+        ],
+    )
+    .expect("save setting 23 = 0.0 ISK");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, outsider_id, SERVICE_JUMP_CLONE, 100),
+            Some(0)
+        );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                astra_id,
+                outsider_id,
+                StructureServiceKind::CloneBay,
+                1_800_000_000,
+            )
+            .expect("flat scalar 23 = 0.0 ISK must resolve to Some(0)"),
+            Some(0)
+        );
+    });
+}
+
+#[test]
+fn abandoned_cored_upwell_repair_and_fitting_setting_2_regressions() {
+    let now_base = 1_800_000_000_u64;
+    let ctx = test_ctx_with_clock(now_base);
+    let owner_corp = 98_602_099_i64;
+    let owner_id = 90_602_099_i64;
+    let astra_id = 1_060_602_099_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            owner_id,
+            clone_char_with(snap, owner_id, "AbnOwner", owner_corp, 30_000_142, 0),
+        );
+        snap.corporations.insert(
+            owner_corp,
+            CorporationRecord::new(owner_corp, "Abn Corp", "ABNC", owner_id),
+        );
+        snap.structures.insert(
+            astra_id,
+            UpwellStructureRecord {
+                structure_id: astra_id,
+                type_id: 35_832,
+                owner_corp_id: owner_corp,
+                solar_system_id: 30_000_142,
+                name: "AbnAstra".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(astra_id).or_default().low_power_since_unix = Some(now_base - 60);
+        save_ext_state(snap, &ext);
+    });
+
+    // LowPower (not yet Abandoned): SERVICE_REPAIR (8), legacy 13, and StructureServiceKind::Repair agree.
+    ctx.db.with_snapshot(|snap| {
+        for svc in [SERVICE_REPAIR, 13] {
+            assert!(is_v24_or_legacy_service_online(&ctx, snap, astra_id, svc));
+            assert!(is_v24_or_legacy_service_online_at(
+                &ctx,
+                snap,
+                astra_id,
+                svc,
+                Some(now_base)
+            ));
+            assert_eq!(
+                evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, svc, 500),
+                Some(500)
+            );
+            assert_eq!(
+                evaluate_character_service_bps_at(
+                    &ctx,
+                    snap,
+                    astra_id,
+                    owner_id,
+                    svc,
+                    500,
+                    Some(now_base),
+                ),
+                Some(500)
+            );
+        }
+        assert!(require_structure_service_access_in_snap(
+            Some(&ctx),
+            snap,
+            astra_id,
+            owner_id,
+            StructureServiceKind::Repair,
+            now_base,
+        )
+        .is_ok());
+
+        // Explicit future timestamp past ABANDON_AFTER_LOW_POWER_SECS rejects SERVICE_REPAIR | 13.
+        let now_abn = now_base + life::ABANDON_AFTER_LOW_POWER_SECS;
+        for svc in [SERVICE_REPAIR, 13] {
+            assert!(!is_v24_or_legacy_service_online_at(
+                &ctx,
+                snap,
+                astra_id,
+                svc,
+                Some(now_abn)
+            ));
+            assert_eq!(
+                evaluate_character_service_bps_at(
+                    &ctx,
+                    snap,
+                    astra_id,
+                    owner_id,
+                    svc,
+                    500,
+                    Some(now_abn),
+                ),
+                None
+            );
+        }
+        assert!(is_v24_or_legacy_service_online_at(
+            &ctx,
+            snap,
+            astra_id,
+            SERVICE_DOCKING,
+            Some(now_abn)
+        ));
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                astra_id,
+                owner_id,
+                StructureServiceKind::Repair,
+                now_abn,
+            )
+            .unwrap_err()
+            .code,
+            "StructureAbandoned"
+        );
+    });
+
+    // Advance virtual clock so non-`_at` entrypoints also observe Abandoned state.
+    ctx.advance_virtual_clock(life::ABANDON_AFTER_LOW_POWER_SECS);
+    ctx.db.with_snapshot(|snap| {
+        for svc in [SERVICE_REPAIR, 13] {
+            assert!(!is_v24_or_legacy_service_online(&ctx, snap, astra_id, svc));
+            assert_eq!(
+                evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, svc, 500),
+                None
+            );
+        }
+        assert!(is_v24_or_legacy_service_online(&ctx, snap, astra_id, SERVICE_DOCKING));
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, SERVICE_DOCKING, 500),
+            Some(500)
+        );
+        assert_eq!(
+            require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                astra_id,
+                owner_id,
+                StructureServiceKind::Repair,
+                ctx.now_unix(),
+            )
+            .unwrap_err()
+            .code,
+            "StructureAbandoned"
+        );
+    });
+
+    // P2-1: general_settings[&SERVICE_FITTING] = false disables SERVICE_FITTING in evaluate_character_service_bps_at.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 899,
+            owner_corp_id: owner_corp,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+        prof.general_settings.insert(SERVICE_FITTING, false);
+        ext.structure_profile_id.insert(astra_id, 899);
+        ext.profiles_by_id.insert(899, prof.clone());
+        ext.access_profiles.insert(astra_id, prof);
+        save_ext_state(snap, &ext);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, SERVICE_FITTING, 500),
+            None
+        );
+        assert_eq!(
+            evaluate_character_service_bps(&ctx, snap, astra_id, owner_id, SERVICE_DOCKING, 500),
+            Some(500)
+        );
     });
 }
 

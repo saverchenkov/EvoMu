@@ -599,6 +599,282 @@ fn standing_mgr_and_paper_doll_server_handle_queries_and_apparel() {
     assert!(rows[0].dict_get("cameraX").is_some());
 }
 
+#[test]
+fn upwell_clone_bay_scalar_setting_23_and_legacy_35894_pricing_across_rpcs() {
+    use crate::services::station_structure::structure_profiles_rpc::handle_save_profile_settings;
+    use crate::services::station_structure::structure_upwell_ops::{
+        load_ext_state, save_ext_state, StructureAccessProfile,
+    };
+    use crate::services::structure_profile_services::{
+        SETTING_CLONINGBAY_TAX, SETTING_HOUSING_CAN_DOCK,
+    };
+    use eve_db::{corp_roles, CorporationRecord};
+
+    let ctx = test_ctx();
+    let empty_kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let owner_corp = 98_923_001_i64;
+    let pilot_corp = 98_923_002_i64;
+    let director_id = 90_923_001_i64;
+    let char_struct_id = 90_923_002_i64;
+    let char_station_id = 90_923_003_i64;
+    let char_zero_id = 90_923_004_i64;
+
+    let sid_default = 1_000_923_000_001_i64;
+    let sid_paid = 1_000_923_000_002_i64;
+    let sid_free = 1_000_923_000_003_i64;
+    let sid_legacy_paid = 1_000_923_000_004_i64;
+    let sid_legacy_free = 1_000_923_000_005_i64;
+
+    let pid_default = 923_100_i64;
+    let pid_paid = 923_101_i64;
+    let pid_free = 923_102_i64;
+    let pid_legacy_paid = 923_103_i64;
+    let pid_legacy_free = 923_104_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            owner_corp,
+            CorporationRecord::new(owner_corp, "Clone Owners", "CLWN", director_id),
+        );
+        snap.corporations.insert(
+            pilot_corp,
+            CorporationRecord::new(pilot_corp, "Clone Pilots", "CLPL", char_struct_id),
+        );
+
+        let template_ch = snap.characters.values().next().cloned().expect("demo char");
+        for (cid, name, corp_id, bal) in [
+            (director_id, "Director", owner_corp, IskCents::from_isk(10_000_000)),
+            (char_struct_id, "StructPilot", pilot_corp, IskCents::from_isk(10_000_000)),
+            (char_station_id, "StationPilot", pilot_corp, IskCents::from_isk(10_000_000)),
+            (char_zero_id, "ZeroIskPilot", pilot_corp, IskCents(0)),
+        ] {
+            let mut ch = template_ch.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = name.into();
+            ch.corporation_id = corp_id;
+            ch.alliance_id = None;
+            ch.clone_grade = 2; // Omega
+            ch.balance = bal;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(sid_default);
+            snap.characters.insert(cid, ch);
+            snap.jump_clones.remove(&cid);
+            snap.skills.entry(cid).or_default().insert(
+                24_242,
+                TrainedSkillRecord {
+                    type_id: 24_242,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+
+        for sid in [sid_default, sid_paid, sid_free, sid_legacy_paid, sid_legacy_free] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: owner_corp,
+                    solar_system_id: sys_id,
+                    name: format!("CloneStruct-{sid}"),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 200,
+                    ..Default::default()
+                },
+            );
+            let mod_id = put_item(
+                snap,
+                35_894,
+                owner_corp,
+                sid,
+                InventoryFlag::ServiceSlot0,
+                1,
+                true,
+            );
+            snap.module_online_states.insert(mod_id, true);
+        }
+
+        let mut ext = load_ext_state(snap);
+        for (sid, pid, legacy_override) in [
+            (sid_default, pid_default, None),
+            (sid_paid, pid_paid, None),
+            (sid_free, pid_free, None),
+            (sid_legacy_paid, pid_legacy_paid, Some(250_000_i64)),
+            (sid_legacy_free, pid_legacy_free, Some(0_i64)),
+        ] {
+            let mut prof = StructureAccessProfile {
+                profile_id: pid,
+                owner_corp_id: owner_corp,
+                corp_only: false,
+                ..Default::default()
+            };
+            prof.general_settings.insert(SETTING_HOUSING_CAN_DOCK, true);
+            if let Some(isk) = legacy_override {
+                prof.service_settings.insert(35_894, isk);
+            }
+            ext.structure_profile_id.insert(sid, pid);
+            ext.profiles_by_id.insert(pid, prof.clone());
+            ext.access_profiles.insert(sid, prof);
+        }
+        save_ext_state(snap, &ext);
+    });
+
+    let mut director_sess = make_session(director_id as u64, director_id, owner_corp, None, None);
+    director_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+
+    // Configure flat scalar SETTING_CLONINGBAY_TAX (23) = 250_000.0 ISK and 0.0 ISK via SaveProfileSettings.
+    handle_save_profile_settings(
+        &ctx,
+        &director_sess,
+        &[
+            PyRep::Integer(pid_paid),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                PyRep::Real(250_000.0),
+            ])]),
+        ],
+    )
+    .expect("save scalar 250_000 ISK");
+    handle_save_profile_settings(
+        &ctx,
+        &director_sess,
+        &[
+            PyRep::Integer(pid_free),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                PyRep::Real(0.0),
+            ])]),
+        ],
+    )
+    .expect("save scalar 0.0 ISK");
+
+    let corp_bal = || {
+        ctx.db.with_snapshot(|snap| {
+            snap.corporations[&owner_corp].master_wallet_balance()
+        })
+    };
+    let char_bal = |cid: i64| {
+        ctx.db.with_snapshot(|snap| snap.characters[&cid].balance)
+    };
+    let set_dock = |cid: i64, sid: i64, as_station: bool| {
+        ctx.db.with_mut_snapshot(|snap| {
+            let ch = snap.characters.get_mut(&cid).unwrap();
+            if as_station {
+                ch.station_id = Some(sid);
+                ch.structure_id = None;
+            } else {
+                ch.station_id = None;
+                ch.structure_id = Some(sid);
+            }
+        });
+    };
+
+    for (sid, expected_isk) in [
+        (sid_default, 900_000_i64),
+        (sid_paid, 250_000_i64),
+        (sid_free, 0_i64),
+        (sid_legacy_paid, 250_000_i64),
+        (sid_legacy_free, 0_i64),
+    ] {
+        let expected_cents = IskCents::from_isk(expected_isk);
+
+        // 1. GetPriceForClone + InstallCloneInStructure
+        let struct_pilot = if expected_isk == 0 { char_zero_id } else { char_struct_id };
+        set_dock(struct_pilot, sid, false);
+        let mut up_sess = make_session(struct_pilot as u64, struct_pilot, pilot_corp, None, Some(sid));
+        let price = handle_clones_and_sheet(
+            &ctx,
+            &mut up_sess,
+            "jumpCloneSvc",
+            "GetPriceForClone",
+            &[],
+            &empty_kw,
+        )
+        .expect("handled")
+        .expect("GetPriceForClone ok");
+        assert_eq!(price.as_f64(), Some(expected_isk as f64));
+
+        let pilot_before = char_bal(struct_pilot);
+        let corp_before = corp_bal();
+        let res = handle_clones_and_sheet(
+            &ctx,
+            &mut up_sess,
+            "jumpCloneSvc",
+            "InstallCloneInStructure",
+            &[],
+            &empty_kw,
+        )
+        .expect("handled")
+        .expect("InstallCloneInStructure ok");
+        assert_eq!(kv_get(&res, "locationID").and_then(PyRep::as_i64), Some(sid));
+        assert_eq!(char_bal(struct_pilot), IskCents(pilot_before.0 - expected_cents.0));
+        assert_eq!(corp_bal(), IskCents(corp_before.0 + expected_cents.0));
+
+        // 2. GetPriceForClone + InstallCloneInStation (structure ID passed as station_id)
+        set_dock(char_station_id, sid, true);
+        let mut st_sess = make_session(char_station_id as u64, char_station_id, pilot_corp, Some(sid), None);
+        let st_price = handle_clones_and_sheet(
+            &ctx,
+            &mut st_sess,
+            "jumpCloneSvc",
+            "GetPriceForClone",
+            &[],
+            &empty_kw,
+        )
+        .expect("handled")
+        .expect("GetPriceForClone via station_id ok");
+        assert_eq!(st_price.as_f64(), Some(expected_isk as f64));
+
+        let st_pilot_before = char_bal(char_station_id);
+        let corp_before = corp_bal();
+        let st_res = handle_clones_and_sheet(
+            &ctx,
+            &mut st_sess,
+            "jumpCloneSvc",
+            "InstallCloneInStation",
+            &[],
+            &empty_kw,
+        )
+        .expect("handled")
+        .expect("InstallCloneInStation at structure ok");
+        assert_eq!(kv_get(&st_res, "locationID").and_then(PyRep::as_i64), Some(sid));
+        assert_eq!(char_bal(char_station_id), IskCents(st_pilot_before.0 - expected_cents.0));
+        assert_eq!(corp_bal(), IskCents(corp_before.0 + expected_cents.0));
+    }
+
+    // Disabling SETTING_CLONINGBAY_TAX (23) = false rejects GetPriceForClone with StructureAccessDenied.
+    handle_save_profile_settings(
+        &ctx,
+        &director_sess,
+        &[
+            PyRep::Integer(pid_paid),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(SETTING_CLONINGBAY_TAX),
+                PyRep::Bool(false),
+            ])]),
+        ],
+    )
+    .expect("disable clone bay");
+    set_dock(char_struct_id, sid_paid, false);
+    let mut denied_sess = make_session(char_struct_id as u64, char_struct_id, pilot_corp, None, Some(sid_paid));
+    let denied_err = handle_clones_and_sheet(
+        &ctx,
+        &mut denied_sess,
+        "jumpCloneSvc",
+        "GetPriceForClone",
+        &[],
+        &empty_kw,
+    )
+    .expect("handled")
+    .expect_err("disabled clone bay must deny GetPriceForClone");
+    assert_eq!(denied_err.code, "StructureAccessDenied");
+}
+
 #[cfg(test)]
 #[path = "character_clones_implants_extra_unit_tests.rs"]
 mod character_clones_implants_extra_unit_tests;

@@ -264,12 +264,24 @@ fn is_dockable_upwell_hull(ctx: &ServerContext, st: &eve_db::UpwellStructureReco
 }
 
 /// Checks whether `service_id` (supporting both V24 `structures/services.pyj` constants and EvoMu
-/// module/legacy IDs) is online at `structure_id`.
+/// module/legacy IDs) is online at `structure_id` using `ctx.now_unix()`.
 pub fn is_v24_or_legacy_service_online(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     structure_id: i64,
     service_id: i64,
+) -> bool {
+    is_v24_or_legacy_service_online_at(ctx, snap, structure_id, service_id, None)
+}
+
+/// Checks whether `service_id` (supporting both V24 `structures/services.pyj` constants and EvoMu
+/// module/legacy IDs) is online at `structure_id` at `now_unix_opt` (defaulting to `ctx.now_unix()`).
+pub fn is_v24_or_legacy_service_online_at(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    service_id: i64,
+    now_unix_opt: Option<u64>,
 ) -> bool {
     let Some(st) = snap.structures.get(&structure_id) else {
         return false;
@@ -277,13 +289,24 @@ pub fn is_v24_or_legacy_service_online(
     if !life::is_operational(&st.state) {
         return false;
     }
+    if matches!(service_id, SERVICE_REPAIR | 13) {
+        if !st.quantum_core_installed || !is_dockable_upwell_hull(ctx, st) {
+            return false;
+        }
+        let now_unix = now_unix_opt.unwrap_or_else(|| ctx.now_unix());
+        let ext = load_ext_state(snap);
+        return !matches!(
+            life::power_state(ctx, snap, &ext, st, now_unix),
+            life::PowerState::Abandoned | life::PowerState::NotOperational
+        );
+    }
     if ops::is_structure_service_online(ctx, snap, structure_id, service_id) {
         return true;
     }
     let online = life::online_service_type_ids(ctx, snap, structure_id);
     match service_id {
         SERVICE_DOCKING => is_dockable_upwell_hull(ctx, st),
-        SERVICE_FITTING | SERVICE_OFFICES | SERVICE_REPAIR | 13 => {
+        SERVICE_FITTING | SERVICE_OFFICES => {
             st.quantum_core_installed && is_dockable_upwell_hull(ctx, st)
         }
         SERVICE_MARKET => online.contains(&35_892),
@@ -417,8 +440,9 @@ fn candidate_settings_for_service_query(
     }
 }
 
-/// Evaluates whether `char_id` can use `service_id` on `structure_id` at `now_unix` and returns
-/// `Some(bps)` (basis points / encoded fee) if allowed, or `None` if offline or denied by Docking or Service ACL.
+/// Evaluates whether `char_id` can use `service_id` on `structure_id` at `ctx.now_unix()` and
+/// returns `Some(bps)` (basis points / encoded fee) if allowed, or `None` if offline or denied by
+/// Docking or Service ACL.
 pub fn evaluate_character_service_bps(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
@@ -427,7 +451,30 @@ pub fn evaluate_character_service_bps(
     service_id: i64,
     default_bps: i64,
 ) -> Option<i64> {
-    let now = ctx.now_unix();
+    evaluate_character_service_bps_at(
+        ctx,
+        snap,
+        structure_id,
+        char_id,
+        service_id,
+        default_bps,
+        None,
+    )
+}
+
+/// Evaluates whether `char_id` can use `service_id` on `structure_id` at `now_unix_opt`
+/// (defaulting to `ctx.now_unix()`) and returns `Some(bps)` if allowed, or `None` if offline or
+/// denied by Docking, PowerState (`Abandoned` for `SERVICE_REPAIR | 13`), or Service ACL.
+pub fn evaluate_character_service_bps_at(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+    service_id: i64,
+    default_bps: i64,
+    now_unix_opt: Option<u64>,
+) -> Option<i64> {
+    let now = now_unix_opt.unwrap_or_else(|| ctx.now_unix());
     let st = snap.structures.get(&structure_id)?;
     if !life::is_operational(&st.state) {
         return None;
@@ -439,7 +486,7 @@ pub fn evaluate_character_service_bps(
     {
         return None;
     }
-    if !is_v24_or_legacy_service_online(ctx, snap, structure_id, service_id) {
+    if !is_v24_or_legacy_service_online_at(ctx, snap, structure_id, service_id, Some(now)) {
         return None;
     }
     let ext = load_ext_state(snap);
@@ -472,7 +519,10 @@ pub fn evaluate_character_service_bps(
                 .find_map(|sid| prof.general_settings.get(sid).copied())
                 == Some(false)
         };
-        if setting_disabled {
+        if setting_disabled
+            || (service_id == SERVICE_FITTING
+                && prof.general_settings.get(&SERVICE_FITTING) == Some(&false))
+        {
             return None;
         }
         match evaluate_domain_acl_on_profile(snap, &ext, prof, char_id, &cands, any_of) {
@@ -778,7 +828,7 @@ pub fn require_structure_service_access_in_snap(
                     ));
                 }
             }
-            check_service_domain_acl_and_tax(
+            if let Some(bps) = check_service_domain_acl_and_tax(
                 snap,
                 structure_id,
                 char_id,
@@ -787,7 +837,15 @@ pub fn require_structure_service_access_in_snap(
                 now_opt,
                 "StructureAccessDenied",
                 "clone bay",
-            )
+            )? {
+                return Ok(Some(bps));
+            }
+            if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
+                if let Some(&bps) = prof.service_settings.get(&SETTING_CLONINGBAY_TAX) {
+                    return Ok(Some(bps.max(0)));
+                }
+            }
+            Ok(None)
         }
         StructureServiceKind::Repair => {
             if !life::is_operational(&st.state) {

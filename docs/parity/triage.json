@@ -131,10 +131,6 @@
     "disposition": "client_local",
     "evidence": "carbonui/uilib.pyj:1139 Uilib._OnFocusChange(): sm.ScatterEvent('OnApplicationFocusChanged', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnApplicationFocusChanged' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
-  "notify:OnAssumeStructureControl": {
-    "disposition": "client_local",
-    "evidence": "eve/client/script/parklife/playerOwned.pyj:575 PlayerOwned.AssumeStructureControl(): sm.ScatterEvent('OnAssumeStructureControl', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnAssumeStructureControl' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
-  },
   "notify:OnAttribute": {
     "disposition": "client_local",
     "evidence": "eve/client/script/environment/godma.pyj:2818 StateManager.Prime(): sm.ScatterEvent('OnAttribute', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnAttribute' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2230,10 +2226,6 @@
   "notify:OnReleaseBallpark": {
     "disposition": "client_local",
     "evidence": "eve/client/script/remote/michelle.pyj:1178 Park.Release(): sm.ScatterEvent('OnReleaseBallpark', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
-  },
-  "notify:OnRelinquishStructureControl": {
-    "disposition": "client_local",
-    "evidence": "eve/client/script/parklife/playerOwned.pyj:600 PlayerOwned.RelinquishStructureControl(): sm.ScatterEvent('OnRelinquishStructureControl', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnRelinquishStructureControl' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
   "notify:OnReloadCorpAssets": {
     "disposition": "client_local",

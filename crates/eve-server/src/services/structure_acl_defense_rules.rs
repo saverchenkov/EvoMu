@@ -1399,6 +1399,22 @@ pub fn validate_docked_ship_fitting_facility_in_snap(
                 format!("Ship fitting service is disabled at structure {dock_id} until its Quantum Core is online"),
             ));
         }
+        use crate::services::structure_profile_services as prof_svc;
+        let ext = load_ext_state(snap);
+        if let Some(prof) =
+            prof_svc::effective_profile_for_structure(&ext, dock_id, Some(ctx.now_unix()))
+        {
+            if prof.general_settings.get(&prof_svc::SERVICE_FITTING) == Some(&false)
+                || prof.general_settings.get(&prof_svc::SETTING_HOUSING_CAN_DOCK) == Some(&false)
+            {
+                return Err(err(
+                    "StructureServiceAccessDenied",
+                    format!(
+                        "Ship fitting service on structure {dock_id} is disabled by profile settings"
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
