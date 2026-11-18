@@ -18,6 +18,7 @@ use crate::notify_ratchet::{
 
 /// Single rule specification loaded from `arch_debt_ratchet.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArchDebtRule {
     pub max_occurrences: usize,
     pub max_files: usize,
@@ -36,15 +37,12 @@ pub struct ArchDebtRule {
     #[serde(default)]
     pub regex: Option<String>,
     #[serde(default)]
-    pub literal_regex: Option<String>,
-    #[serde(default)]
-    pub scoped_regex: Option<String>,
-    #[serde(default)]
     pub description: Option<String>,
 }
 
 /// Top-level `crates/eve-testkit/ratchets/arch_debt_ratchet.json` document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArchDebtRatchet {
     pub version: u32,
     #[serde(default)]
@@ -91,12 +89,24 @@ impl ArchDebtRatchet {
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let parsed: Self = serde_json::from_str(&raw)
             .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-        for name in parsed.patterns.keys() {
-            if PatternKind::from_name(name).is_none() {
-                return Err(format!(
+        for (name, rule) in &parsed.patterns {
+            let kind = PatternKind::from_name(name).ok_or_else(|| {
+                format!(
                     "Unknown arch_debt_ratchet pattern key '{name}' in {}",
                     path.display()
-                ));
+                )
+            })?;
+            match (rule.regex.as_deref(), kind.expected_regex()) {
+                (Some(actual), Some(expected)) if actual == expected => {}
+                (None, None) => {}
+                (actual, expected) => {
+                    return Err(format!(
+                        "Rule '{name}' regex mismatch in {}: got {:?}, expected {:?}",
+                        path.display(),
+                        actual,
+                        expected
+                    ));
+                }
             }
         }
         Ok(parsed)
@@ -185,9 +195,7 @@ pub fn scan_arch_debt_in_dir(dir: &Path) -> Result<ArchDebtScanReport, String> {
                     strip_literals: Some(k.default_strip_literals()),
                     path_include: None,
                     path_exclude_substring: None,
-                    regex: None,
-                    literal_regex: None,
-                    scoped_regex: None,
+                    regex: k.expected_regex().map(str::to_string),
                     description: None,
                 },
             )
@@ -205,6 +213,15 @@ fn scan_arch_debt_in_dir_for_rules(
     for (name, rule) in rules {
         let kind = PatternKind::from_name(name)
             .ok_or_else(|| format!("Unknown arch_debt_ratchet pattern key '{name}'"))?;
+        if let Some(ref actual) = rule.regex {
+            if kind.expected_regex() != Some(actual.as_str()) {
+                return Err(format!(
+                    "Rule '{name}' regex mismatch: got {:?}, expected {:?}",
+                    Some(actual.as_str()),
+                    kind.expected_regex()
+                ));
+            }
+        }
         let keep_literals = !rule.strip_literals.unwrap_or(kind.default_strip_literals());
         needs_keep_literals |= keep_literals;
         active.push((name.clone(), kind, keep_literals, rule));
@@ -238,9 +255,7 @@ fn scan_arch_debt_in_dir_for_rules(
                         } else {
                             fully_stripped.clone()
                         };
-                    let prod_keep_literals = if needs_keep_literals
-                        && (raw.contains("strip_prefix") || raw.contains("starts_with"))
-                    {
+                    let prod_keep_literals = if needs_keep_literals {
                         Some(strip_comments_and_cfg_tests_keep_literals(
                             &raw,
                             &fully_stripped,
@@ -313,6 +328,7 @@ fn scan_arch_debt_in_dir_for_rules(
 enum PatternKind {
     MasterWallet,
     DirectMemberRolesGet,
+    MemberBaseRolesCalls,
     HardcodedFallbackEntityIds,
     ServiceStateBlobsRefs,
     DirectLocationOrShipAssign,
@@ -335,6 +351,7 @@ impl PatternKind {
     const ALL: &'static [Self] = &[
         Self::MasterWallet,
         Self::DirectMemberRolesGet,
+        Self::MemberBaseRolesCalls,
         Self::HardcodedFallbackEntityIds,
         Self::ServiceStateBlobsRefs,
         Self::DirectLocationOrShipAssign,
@@ -357,6 +374,7 @@ impl PatternKind {
         match self {
             Self::MasterWallet => "master_wallet",
             Self::DirectMemberRolesGet => "direct_member_roles_get",
+            Self::MemberBaseRolesCalls => "member_base_roles_calls",
             Self::HardcodedFallbackEntityIds => "hardcoded_fallback_entity_ids",
             Self::ServiceStateBlobsRefs => "service_state_blobs_refs",
             Self::DirectLocationOrShipAssign => "direct_location_or_ship_assign",
@@ -383,6 +401,42 @@ impl PatternKind {
     fn default_strip_literals(self) -> bool {
         !matches!(self, Self::SlashCommandPrefixParse)
     }
+
+    fn expected_regex(self) -> Option<&'static str> {
+        match self {
+            Self::MasterWallet => Some(r"\bmaster_wallet\b"),
+            Self::DirectMemberRolesGet => Some(r"\bmember_roles\s*\.\s*get\s*\("),
+            Self::MemberBaseRolesCalls => Some(r"\.\s*member_base_roles(?:_opt)?\s*\("),
+            Self::HardcodedFallbackEntityIds => Some(
+                r"\.unwrap_or(?:_else\s*\(\s*(?:move\s+)?\|\s*(?:_\s*)?\|\s*(?:\{\s*)?|\s*\(\s*)(?:90_?000_?001|30_?000_?142|60_?003_?760)(?:_?[iu](?:8|16|32|64|128|size))?\b",
+            ),
+            Self::ServiceStateBlobsRefs => Some(r"\bservice_state_blobs\b"),
+            Self::DirectLocationOrShipAssign => {
+                Some(r"\.\s*(?:solar_system_id|station_id|structure_id|active_ship_id)\s*=(?!=)")
+            }
+            Self::DirectItemsMapMut => Some(r"\bitems\s*\.\s*(?:remove|get_mut|insert)\s*\("),
+            Self::ItemsInsert => Some(r"\bitems\s*\.\s*insert\s*\("),
+            Self::ItemsRemove => Some(r"\bitems\s*\.\s*remove\s*\("),
+            Self::ItemsGetMut => Some(r"\bitems\s*\.\s*get_mut\s*\("),
+            Self::PositionalRpcArgsIndex => {
+                Some(r"\bargs\s*\.\s*(?:first\s*\(\s*\)|get\s*\(\s*\d+\s*\))")
+            }
+            Self::StringlyBridgeRpcErrorCode => Some(
+                r"\bcode\s*:\s*(?: {3,}\.(?:into|to_string)\s*\(|String\s*::\s*from\s*\(\s* {3,}\s*\))",
+            ),
+            Self::SlashCommandPrefixParse
+            | Self::RouterBindingGraceHelpers
+            | Self::BallparkLocksOutsideSystemActor => None,
+            Self::HandwrittenItemChangeEmitters => {
+                Some(r"\b(?:emit|notify)_item_change[A-Za-z0-9_]*\s*\(")
+            }
+            Self::HandwrittenAccountChangeEmitters => {
+                Some(r"\b(?:emit|notify)_[A-Za-z0-9_]*account_change[A-Za-z0-9_]*\s*\(")
+            }
+            Self::SystemTimeNowInGameplay => Some(r"\bSystemTime\s*::\s*now\s*\("),
+            Self::IsWriteLockedByCurrentThread => Some(r"\bis_write_locked_by_current_thread\b"),
+        }
+    }
 }
 
 fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usize {
@@ -391,6 +445,7 @@ fn count_pattern_in_source(kind: PatternKind, rel_key: &str, text: &str) -> usiz
         PatternKind::DirectMemberRolesGet => {
             count_word_dot_method_lparen(text, "member_roles", &[b"get"])
         }
+        PatternKind::MemberBaseRolesCalls => count_member_base_roles_calls(text),
         PatternKind::HardcodedFallbackEntityIds => count_hardcoded_fallback_entity_ids(text),
         PatternKind::ServiceStateBlobsRefs => count_whole_word(text, "service_state_blobs"),
         PatternKind::DirectLocationOrShipAssign => count_direct_location_or_ship_assign(text),
@@ -490,6 +545,33 @@ fn count_word_dot_method_lparen(text: &str, obj: &str, methods: &[&[u8]]) -> usi
     count
 }
 
+fn count_member_base_roles_calls(text: &str) -> usize {
+    if !text.contains("member_base_roles") {
+        return 0;
+    }
+    const STEM: &str = "member_base_roles";
+    let b = text.as_bytes();
+    let mut count = 0usize;
+    for (i, _) in text.match_indices(STEM) {
+        let mut dot = i;
+        while dot > 0 && b[dot - 1].is_ascii_whitespace() {
+            dot -= 1;
+        }
+        if dot == 0 || b[dot - 1] != b'.' {
+            continue;
+        }
+        let mut end = i + STEM.len();
+        if end + 4 <= b.len() && &b[end..end + 4] == b"_opt" {
+            end += 4;
+        }
+        let lp = skip_ws(b, end);
+        if lp < b.len() && b[lp] == b'(' {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn count_hardcoded_fallback_entity_ids(text: &str) -> usize {
     if !text.contains(".unwrap_or") {
         return 0;
@@ -503,20 +585,73 @@ fn count_hardcoded_fallback_entity_ids(text: &str) -> usize {
         b"60_003_760",
         b"60003760",
     ];
+    const INT_SUFFIXES: &[&[u8]] = &[
+        b"i8", b"i16", b"i32", b"i64", b"i128", b"isize",
+        b"u8", b"u16", b"u32", b"u64", b"u128", b"usize",
+    ];
     let b = text.as_bytes();
     let mut count = 0usize;
     for (i, _) in text.match_indices(".unwrap_or") {
-        if !has_word_boundary_after(b, i + PREFIX_LEN) {
+        let after = i + PREFIX_LEN;
+        let expr_start = if has_word_boundary_after(b, after) {
+            let lp = skip_ws(b, after);
+            if lp >= b.len() || b[lp] != b'(' {
+                continue;
+            }
+            skip_ws(b, lp + 1)
+        } else if after + 5 <= b.len()
+            && &b[after..after + 5] == b"_else"
+            && has_word_boundary_after(b, after + 5)
+        {
+            let lp = skip_ws(b, after + 5);
+            if lp >= b.len() || b[lp] != b'(' {
+                continue;
+            }
+            let mut p = skip_ws(b, lp + 1);
+            if p + 4 <= b.len()
+                && &b[p..p + 4] == b"move"
+                && has_word_boundary_after(b, p + 4)
+            {
+                p = skip_ws(b, p + 4);
+            }
+            if p >= b.len() || b[p] != b'|' {
+                continue;
+            }
+            p = skip_ws(b, p + 1);
+            if p < b.len() && b[p] == b'_' {
+                p = skip_ws(b, p + 1);
+            }
+            if p >= b.len() || b[p] != b'|' {
+                continue;
+            }
+            p = skip_ws(b, p + 1);
+            if p < b.len() && b[p] == b'{' {
+                p = skip_ws(b, p + 1);
+            }
+            p
+        } else {
             continue;
-        }
-        let j = skip_ws(b, i + PREFIX_LEN);
-        if j < b.len() && b[j] == b'(' {
-            let k = skip_ws(b, j + 1);
-            if FALLBACK_IDS.iter().any(|&id| {
-                k + id.len() <= b.len()
-                    && &b[k..k + id.len()] == id
-                    && has_word_boundary_after(b, k + id.len())
-            }) {
+        };
+
+        if let Some(id_end) = FALLBACK_IDS.iter().find_map(|&id| {
+            (expr_start + id.len() <= b.len() && &b[expr_start..expr_start + id.len()] == id)
+                .then_some(expr_start + id.len())
+        }) {
+            let matches_suffix = if has_word_boundary_after(b, id_end) {
+                true
+            } else {
+                let suf_start = if id_end < b.len() && b[id_end] == b'_' {
+                    id_end + 1
+                } else {
+                    id_end
+                };
+                INT_SUFFIXES.iter().any(|&suf| {
+                    suf_start + suf.len() <= b.len()
+                        && &b[suf_start..suf_start + suf.len()] == suf
+                        && has_word_boundary_after(b, suf_start + suf.len())
+                })
+            };
+            if matches_suffix {
                 count += 1;
             }
         }
@@ -602,7 +737,9 @@ fn count_positional_rpc_args_index(text: &str) -> usize {
 }
 
 fn count_stringly_bridge_rpc_error_code(text: &str) -> usize {
-    if !text.contains("code") || !text.contains(".into") {
+    if !text.contains("code")
+        || (!text.contains(".into") && !text.contains(".to_string") && !text.contains("String"))
+    {
         return 0;
     }
     const WORD_LEN: usize = "code".len();
@@ -618,14 +755,50 @@ fn count_stringly_bridge_rpc_error_code(text: &str) -> usize {
         }
         let k = skip_ws(b, j + 1);
         let trailing_spaces = b[j + 1..k].iter().rev().take_while(|&&c| c == b' ').count();
-        if trailing_spaces >= 3
-            && k + 5 <= b.len()
-            && &b[k..k + 5] == b".into"
-            && has_word_boundary_after(b, k + 5)
+        if trailing_spaces >= 3 {
+            let method_end = if k + 5 <= b.len()
+                && &b[k..k + 5] == b".into"
+                && has_word_boundary_after(b, k + 5)
+            {
+                Some(k + 5)
+            } else if k + 10 <= b.len()
+                && &b[k..k + 10] == b".to_string"
+                && has_word_boundary_after(b, k + 10)
+            {
+                Some(k + 10)
+            } else {
+                None
+            };
+            if let Some(end) = method_end {
+                let lp = skip_ws(b, end);
+                if lp < b.len() && b[lp] == b'(' {
+                    count += 1;
+                    continue;
+                }
+            }
+        }
+        if k + 6 <= b.len()
+            && &b[k..k + 6] == b"String"
+            && has_word_boundary_after(b, k + 6)
         {
-            let lp = skip_ws(b, k + 5);
-            if lp < b.len() && b[lp] == b'(' {
-                count += 1;
+            let colons = skip_ws(b, k + 6);
+            if colons + 1 < b.len() && b[colons] == b':' && b[colons + 1] == b':' {
+                let from_pos = skip_ws(b, colons + 2);
+                if from_pos + 4 <= b.len()
+                    && &b[from_pos..from_pos + 4] == b"from"
+                    && has_word_boundary_after(b, from_pos + 4)
+                {
+                    let lp = skip_ws(b, from_pos + 4);
+                    if lp < b.len() && b[lp] == b'(' {
+                        let inner_end = skip_ws(b, lp + 1);
+                        if inner_end < b.len()
+                            && b[inner_end] == b')'
+                            && b[lp + 1..inner_end].windows(3).any(|w| w == b"   ")
+                        {
+                            count += 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -816,6 +989,42 @@ fn strip_comments_and_cfg_tests_keep_literals(
                 out.push(raw_b[i]);
                 i += 1;
             }
+        } else if raw_b[i] == b'\'' {
+            if i + 1 < n && raw_b[i + 1] == b'\\' {
+                let mut k = i + 3;
+                let limit = (i + 14).min(n);
+                let mut closed = None;
+                while k < limit {
+                    if raw_b[k] == b'\n' || raw_b[k] == b'\r' {
+                        break;
+                    }
+                    if raw_b[k] == b'\'' {
+                        closed = Some(k);
+                        break;
+                    }
+                    k += 1;
+                }
+                if let Some(end) = closed {
+                    out.extend_from_slice(&raw_b[i..=end]);
+                    i = end + 1;
+                    continue;
+                }
+            } else if let Some(ch) = raw[i + 1..].chars().next() {
+                let close_idx = i + 1 + ch.len_utf8();
+                if ch != '\\'
+                    && ch != '\''
+                    && ch != '\n'
+                    && ch != '\r'
+                    && close_idx < n
+                    && raw_b[close_idx] == b'\''
+                {
+                    out.extend_from_slice(&raw_b[i..=close_idx]);
+                    i = close_idx + 1;
+                    continue;
+                }
+            }
+            out.push(raw_b[i]);
+            i += 1;
         } else if raw_b[i] == b'"' {
             out.push(raw_b[i]);
             i += 1;
@@ -924,6 +1133,7 @@ mod tests {
         for required_key in [
             "master_wallet",
             "direct_member_roles_get",
+            "member_base_roles_calls",
             "hardcoded_fallback_entity_ids",
             "service_state_blobs_refs",
             "direct_location_or_ship_assign",
@@ -1010,8 +1220,6 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
             path_include: None,
             path_exclude_substring: None,
             regex: None,
-            literal_regex: None,
-            scoped_regex: None,
             description: None,
         };
         let mut rules = BTreeMap::new();
@@ -1082,6 +1290,101 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
         };
         let zero_err = bad_zero.verify_dir(&src).unwrap_err();
         assert!(zero_err.contains("zero_required=true"), "{zero_err}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arch_debt_ratchet_scanners_catch_char_literals_suffixes_closures_strings_and_member_base_roles() {
+        let tmp = make_temp_dir("bf02_variants");
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("services")).expect("create services dir");
+
+        // 1. Char literals ('\"', '\'', b'\"', b'"', '"', '🦀') + lifetime must never corrupt string state;
+        //    suffixes, closures, .to_string()/String::from, .member_base_roles[_opt], and non-slash strip_literals=false must all count accurately.
+        std::fs::write(
+            src.join("services/variants.rs"),
+            r#"
+pub struct Err { pub code: String }
+pub fn f<'a>(cmd: &'a str, corp: &Corp, err_var: &str, v: Option<i64>) {
+    let _c1 = '\"';
+    let _c2 = '\'';
+    let _c3 = b'\"';
+    let _c4 = b'"';
+    let _c5 = '"';
+    let _c6 = '🦀';
+    let _slash = cmd.strip_prefix("/help");
+    let _fb1 = v.unwrap_or(30_000_142_i64);
+    let _fb2 = v.unwrap_or(60_003_760i32);
+    let _fb3 = v.unwrap_or_else(|| 90_000_001);
+    let _fb4 = v.unwrap_or_else(|_| 60_003_760_i64);
+    let _fb5 = v.unwrap_or_else(move || { 30_000_142_u64 });
+    let _fb_ignored = v.unwrap_or(30_000_142_custom());
+    let _e1 = Err { code: "BadA".into() };
+    let _e2 = Err { code: "BadB".to_string() };
+    let _e3 = Err { code: String::from("BadC") };
+    let _e_var1 = Err { code: err_var.to_string() };
+    let _e_var2 = Err { code: String::from(err_var) };
+    let _r1 = corp.member_base_roles(1);
+    let _r2 = corp.member_base_roles_opt(2);
+    let _comment = "// master_wallet";
+}
+pub fn member_base_roles() {}
+"#,
+        )
+        .expect("write variants.rs");
+
+        // File with NO strip_prefix/starts_with verifying strip_literals=false works on any rule.
+        std::fs::write(
+            src.join("services/lit_only.rs"),
+            "pub fn g() -> &'static str { \"master_wallet\" }\n",
+        )
+        .expect("write lit_only.rs");
+
+        let report = scan_arch_debt_in_dir(&src).expect("scan variants");
+        assert_eq!(report.patterns["slash_command_prefix_parse"].occurrences, 1);
+        assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].occurrences, 5);
+        assert_eq!(report.patterns["stringly_bridge_rpc_error_code"].occurrences, 3);
+        assert_eq!(report.patterns["member_base_roles_calls"].occurrences, 2);
+        assert_eq!(report.patterns["master_wallet"].occurrences, 0);
+
+        let lit_rules = BTreeMap::from([(
+            "master_wallet".to_string(),
+            ArchDebtRule {
+                max_occurrences: 2,
+                max_files: 2,
+                exact: true,
+                zero_required: false,
+                owning_issue: Some(1197),
+                strip_literals: Some(false),
+                path_include: None,
+                path_exclude_substring: None,
+                regex: None,
+                description: None,
+            },
+        )]);
+        let lit_report = scan_arch_debt_in_dir_for_rules(&src, &lit_rules)
+            .expect("strip_literals=false must scan unstripped literals on any rule");
+        assert_eq!(lit_report.patterns["master_wallet"].occurrences, 2);
+        assert_eq!(lit_report.patterns["master_wallet"].files, 2);
+
+        // 2. Unknown JSON fields and mismatched regex strings must fail load_from_path.
+        let bad_field_json = tmp.join("bad_field.json");
+        std::fs::write(
+            &bad_field_json,
+            r#"{"version":1,"patterns":{"master_wallet":{"max_occurrences":0,"max_files":0,"exact":true,"zero_required":true,"regex":"\\bmaster_wallet\\b","literal_regex":"dead"}}}"#,
+        )
+        .expect("write bad_field.json");
+        assert!(ArchDebtRatchet::load_from_path(&bad_field_json).is_err());
+
+        let bad_regex_json = tmp.join("bad_regex.json");
+        std::fs::write(
+            &bad_regex_json,
+            r#"{"version":1,"patterns":{"master_wallet":{"max_occurrences":0,"max_files":0,"exact":true,"zero_required":true,"regex":"\\bwrong\\b"}}}"#,
+        )
+        .expect("write bad_regex.json");
+        let rx_err = ArchDebtRatchet::load_from_path(&bad_regex_json).unwrap_err();
+        assert!(rx_err.contains("regex mismatch"), "{rx_err}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

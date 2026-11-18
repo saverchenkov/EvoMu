@@ -7,11 +7,13 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_CONFLICT, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
     STATUS_OK, STATUS_PRECONDITION_FAILED,
 };
-use eve_db::{corp_roles, IskCents, WorldRepository};
+use eve_db::{
+    corp_roles, CorpMemberRoleAssignment, CorpTitleEntry, IskCents, WorldRepository,
+};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::pb;
 use eve_proto::quasar::{
-    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry,
+    EvePublicRequest, EvePublicResponse, GoogleAny, QuasarDescriptorRegistry, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
@@ -171,6 +173,179 @@ fn user_entitlements_logo_grants_membership_and_direct_skill_purchases() {
         .must_encode();
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk.clone(), now).status_code, STATUS_OK);
     assert_eq!(call(&router, &player, "eve.character.skill.PurchaseSkillsRequest", ok_sk, now).status_code, STATUS_CONFLICT);
+}
+
+#[test]
+fn get_character_membership_honors_role_assignments_titles_stasis_and_isolates_caller() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        Arc::clone(&sde),
+    );
+    register_handlers(&router, Arc::clone(&db));
+
+    let now = 1_760_000_000u64;
+    let corp_id = 98_000_099i64;
+    let ceo_id = 90_000_190i64;
+    let c_assign = 90_000_191i64;
+    let c_title = 90_000_192i64;
+    let c_stasis = 90_000_193i64;
+    let c_plain = 90_000_194i64;
+
+    db.with_mut_snapshot(|snap| {
+        let mut corp = snap
+            .corporations
+            .values()
+            .next()
+            .expect("seed corporation")
+            .clone();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = ceo_id;
+        for cid in [ceo_id, c_assign, c_title, c_stasis, c_plain] {
+            corp.members.insert(cid);
+        }
+        snap.corporations.insert(corp_id, corp);
+
+        let tmpl_ch = snap
+            .characters
+            .values()
+            .next()
+            .expect("seed character")
+            .clone();
+        for cid in [c_assign, c_title, c_stasis, c_plain] {
+            let mut ch = tmpl_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            snap.characters.insert(cid, ch);
+        }
+
+        // 1. Direct corp_role_assignments entry without touching legacy member_base_roles
+        snap.corp_role_assignments.insert(
+            (corp_id, c_assign),
+            CorpMemberRoleAssignment {
+                character_id: c_assign,
+                roles: corp_roles::ROLE_DIRECTOR,
+                ..CorpMemberRoleAssignment::default()
+            },
+        );
+
+        // 2. Title-granted Director role via corp_titles + corp_member_titles
+        snap.corp_titles.insert(
+            corp_id,
+            vec![CorpTitleEntry {
+                title_id: 1,
+                name: "Ops Director".into(),
+                roles: vec!["Director".into()],
+                grantable_roles: Vec::new(),
+                roles_at_hq: Vec::new(),
+                grantable_roles_at_hq: Vec::new(),
+                roles_at_base: Vec::new(),
+                grantable_roles_at_base: Vec::new(),
+                roles_at_other: Vec::new(),
+                grantable_roles_at_other: Vec::new(),
+            }],
+        );
+        snap.corp_member_titles.insert((corp_id, c_title), vec![1]);
+
+        // 3. Pending Director grant in 24h stasis
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(c_stasis, (corp_roles::ROLE_DIRECTOR, now + 86_400));
+    });
+
+    let query_title = |caller: &SessionState, target_cid: i64, ts: u64| -> (u64, String) {
+        let req = pb::message("eve.membership.corporation.GetCharacterRequest")
+            .set("character_id.sequential", target_cid as u32)
+            .must_encode();
+        let resp = call(
+            &router,
+            caller,
+            "eve.membership.corporation.GetCharacterRequest",
+            req,
+            ts,
+        );
+        assert_eq!(resp.status_code, STATUS_OK);
+        let wm = WireMessage::decode(&resp.payload.expect("payload").value)
+            .expect("decode GetCharacterResponse");
+        let corp_bytes = wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .unwrap()
+            .value
+            .as_bytes()
+            .unwrap();
+        let corp_wm = WireMessage::decode(corp_bytes).expect("decode corp id");
+        let resp_corp_id = corp_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .unwrap()
+            .value
+            .as_varint()
+            .unwrap();
+        let attr_bytes = wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .unwrap()
+            .value
+            .as_bytes()
+            .unwrap();
+        let attr_wm = WireMessage::decode(attr_bytes).expect("decode attributes");
+        let title = attr_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .unwrap()
+            .value
+            .as_str()
+            .unwrap()
+            .unwrap()
+            .to_string();
+        (resp_corp_id, title)
+    };
+
+    let caller_dir = sess(
+        Some(1),
+        Some(c_assign),
+        Some(corp_id),
+        service_roles::ROLE_PLAYER_DEFAULT,
+        corp_roles::ROLE_DIRECTOR,
+    );
+    let self_stasis_with_dir_session = sess(
+        Some(2),
+        Some(c_stasis),
+        Some(corp_id),
+        service_roles::ROLE_PLAYER_DEFAULT,
+        corp_roles::ROLE_DIRECTOR,
+    );
+    let caller_plain = sess(
+        Some(3),
+        Some(c_plain),
+        Some(corp_id),
+        service_roles::ROLE_PLAYER_DEFAULT,
+        0,
+    );
+
+    assert_eq!(query_title(&caller_plain, c_assign, now), (corp_id as u64, "Director".into()));
+    assert_eq!(query_title(&caller_plain, c_title, now), (corp_id as u64, "Director".into()));
+    // Pending grant under 24h stasis stays Member even if session mask claims Director
+    assert_eq!(
+        query_title(&self_stasis_with_dir_session, c_stasis, now),
+        (corp_id as u64, "Member".into())
+    );
+    // Once 24h stasis completes, effective role matures to Director
+    assert_eq!(
+        query_title(&caller_plain, c_stasis, now + 86_400),
+        (corp_id as u64, "Director".into())
+    );
+    // Non-self caller's ROLE_DIRECTOR session mask never leaks onto plain target character
+    assert_eq!(query_title(&caller_dir, c_plain, now), (corp_id as u64, "Member".into()));
 }
 
 #[cfg(test)]

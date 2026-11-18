@@ -811,6 +811,119 @@ fn blueprint_manager_c9_typed_replies_and_wire_passthrough() {
     assert_eq!(bpc_detail.dict_get("quantity"), Some(&PyRep::Integer(-2)));
 }
 
+#[test]
+fn get_blueprint_data_fails_closed_and_owner_omits_when_solar_system_unresolvable() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let unknown_loc = 9_999_999_999_i64;
+    let unresolved_bp_id = 892_901_i64;
+    let resolved_bp_id = 892_902_i64;
+    let valid_st = ctx
+        .sde
+        .stations
+        .keys()
+        .copied()
+        .min()
+        .expect("canonical seed station");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 0;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.home_station_id = 0;
+        }
+        snap.items.retain(|_, it| !(it.owner_id == char_id && ctx.sde.blueprints.contains_key(&it.type_id)));
+        snap.items.insert(
+            unresolved_bp_id,
+            eve_db::InventoryItemRecord {
+                item_id: unresolved_bp_id,
+                type_id: 683,
+                owner_id: char_id,
+                location_id: unknown_loc,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            resolved_bp_id,
+            eve_db::InventoryItemRecord {
+                item_id: resolved_bp_id,
+                type_id: 684,
+                owner_id: char_id,
+                location_id: valid_st,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut unlocated_sess = SessionState::new(1);
+    unlocated_sess.user_id = Some(1);
+    unlocated_sess.character_id = Some(char_id);
+    unlocated_sess.corporation_id = Some(98_000_001);
+
+    let kw = HashMap::new();
+    let owner_rep = call_ind_wire_roundtrip(
+        &ctx,
+        &mut unlocated_sess,
+        "blueprintManager",
+        "GetBlueprintDataByOwner",
+        &[PyRep::Integer(char_id)],
+        &kw,
+    );
+    let PyRep::Tuple(owner_pair) = owner_rep else {
+        panic!("expected 2-tuple from GetBlueprintDataByOwner");
+    };
+    let PyRep::List(ref bps) = owner_pair[0] else {
+        panic!("expected blueprint list");
+    };
+    let PyRep::Dict(ref counts) = owner_pair[1] else {
+        panic!("expected facility counts dict");
+    };
+    assert!(
+        bps.iter()
+            .all(|b| b.dict_get("itemID") != Some(&PyRep::Integer(unresolved_bp_id))),
+        "unresolvable solar system blueprint must be omitted rather than emitting solarSystemID=0"
+    );
+    assert!(
+        bps.iter()
+            .any(|b| b.dict_get("itemID") == Some(&PyRep::Integer(resolved_bp_id))),
+        "resolvable station blueprint must remain present"
+    );
+    assert_eq!(counts.len(), 1, "omitted unresolvable blueprint must not inflate facility_counts");
+
+    let by_item_err = handle_industry_facilities_bps(
+        &ctx,
+        &mut unlocated_sess,
+        "blueprintManager",
+        "GetBlueprintData",
+        &[PyRep::Integer(unresolved_bp_id)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("unresolvable item GetBlueprintData must fail closed");
+    assert_eq!(by_item_err.code, "CustomInfo");
+    assert!(by_item_err.message.contains("Cannot resolve solar system"));
+
+    let by_type_err = handle_industry_facilities_bps(
+        &ctx,
+        &mut unlocated_sess,
+        "blueprintManager",
+        "GetBlueprintData",
+        &[PyRep::Integer(683)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("unresolvable type GetBlueprintData must fail closed");
+    assert_eq!(by_type_err.code, "CustomInfo");
+    assert!(by_type_err.message.contains("Cannot resolve solar system"));
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;

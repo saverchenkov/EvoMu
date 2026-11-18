@@ -20,13 +20,21 @@
       "regex": "\\bmember_roles\\s*\\.\\s*get\\s*\\(",
       "description": "Direct member_roles.get(...) bypassing CorporationRecord/corp_governance role helpers (#1197)."
     },
+    "member_base_roles_calls": {
+      "max_occurrences": 9,
+      "max_files": 5,
+      "exact": true,
+      "owning_issue": 1197,
+      "regex": "\\.\\s*member_base_roles(?:_opt)?\\s*\\(",
+      "description": "Direct .member_base_roles(...) / .member_base_roles_opt(...) wrapper calls outside effective_corp_role_breakdown (#1197)."
+    },
     "hardcoded_fallback_entity_ids": {
       "max_occurrences": 3,
       "max_files": 2,
       "exact": true,
       "owning_issue": 1197,
-      "regex": "\\.unwrap_or\\s*\\(\\s*(?:90_?000_?001|30_?000_?142|60_?003_?760)\\b",
-      "description": "Hardcoded .unwrap_or(90_000_001|30_000_142|60_003_760) fallback entity IDs; residual 3 sites are in wt-par-1331-c excluded files (services/industry_pi.rs, services/fitting_module_cycles_helpers.rs) (#1197)."
+      "regex": "\\.unwrap_or(?:_else\\s*\\(\\s*(?:move\\s+)?\\|\\s*(?:_\\s*)?\\|\\s*(?:\\{\\s*)?|\\s*\\(\\s*)(?:90_?000_?001|30_?000_?142|60_?003_?760)(?:_?[iu](?:8|16|32|64|128|size))?\\b",
+      "description": "Hardcoded .unwrap_or / .unwrap_or_else(90_000_001|30_000_142|60_003_760) fallback entity IDs; residual 3 sites are in wt-par-1331-c excluded files (services/industry_pi.rs, services/fitting_module_cycles_helpers.rs) (#1197)."
     },
     "service_state_blobs_refs": {
       "max_occurrences": 47,
@@ -89,8 +97,8 @@
       "max_files": 193,
       "exact": true,
       "owning_issue": 1195,
-      "regex": "\\bcode\\s*:\\s* {3,}\\.into\\s*\\(",
-      "description": "BridgeRpcError error codes written as string literals (code: \"X\".into()) instead of typed error enum (#1195)."
+      "regex": "\\bcode\\s*:\\s*(?: {3,}\\.(?:into|to_string)\\s*\\(|String\\s*::\\s*from\\s*\\(\\s* {3,}\\s*\\))",
+      "description": "BridgeRpcError error codes written as string literals (code: \"X\".into(), \"X\".to_string(), String::from(\"X\")) instead of typed error enum (#1195)."
     },
     "slash_command_prefix_parse": {
       "max_occurrences": 66,
@@ -98,7 +106,6 @@
       "exact": true,
       "owning_issue": 1193,
       "strip_literals": false,
-      "literal_regex": "(?:strip_prefix|starts_with)\\s*\\(\\s*\"/",
       "description": "Hand-rolled slash-command prefix parsing strip_prefix(\"/...\") / starts_with(\"/...\") (#1193)."
     },
     "router_binding_grace_helpers": {
@@ -107,7 +114,6 @@
       "exact": true,
       "owning_issue": 1190,
       "path_include": "router/binding.rs",
-      "scoped_regex": "\\bfn\\s+(?:allocate_transition_grace_(?!binding_for_departed_kinds\\b)[a-z0-9_]+_binding|grace_bound_object_for_inflight_[a-z0-9_]+|has_transition_grace_[a-z0-9_]+_binding)\\b",
       "description": "Per-method/service grace helper functions in router/binding.rs (#1190)."
     },
     "ballpark_locks_outside_system_actor": {
@@ -116,7 +122,6 @@
       "exact": true,
       "owning_issue": 1342,
       "path_exclude_substring": "system_actor",
-      "scoped_regex": "\\bballpark\\s*\\.\\s*(?:read|write|try_read|try_write|lock)\\s*\\(",
       "description": "Direct ballpark lock acquisitions (.read/.write/.try_read/.try_write/.lock) outside system_actor* (#1342)."
     },
     "handwritten_item_change_emitters": {

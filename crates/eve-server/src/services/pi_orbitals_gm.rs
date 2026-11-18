@@ -33,9 +33,10 @@ fn resolve_gm_planet_and_resource(
         pid
     } else {
         snap.planetary_colonies
-            .iter()
-            .find(|((cid, _), _)| *cid == char_id)
-            .map(|((_, pid), _)| *pid)
+            .keys()
+            .filter(|(cid, _)| *cid == char_id)
+            .map(|(_, pid)| *pid)
+            .min()
             .or_else(|| {
                 let target_sys_id = session.solar_system_id.or_else(|| {
                     snap.characters
@@ -51,8 +52,15 @@ fn resolve_gm_planet_and_resource(
                 ctx.sde
                     .solar_systems
                     .values()
-                    .flat_map(|s| s.planet_ids.iter().copied())
-                    .next()
+                    .filter_map(|s| {
+                        s.planet_ids
+                            .iter()
+                            .copied()
+                            .min()
+                            .map(|pid| (s.solar_system_id, pid))
+                    })
+                    .min_by_key(|&(sys_id, _)| sys_id)
+                    .map(|(_, pid)| pid)
             })
             .ok_or_else(|| invalid_planet("No planet found for GM planet command".into()))?
     };
@@ -60,14 +68,15 @@ fn resolve_gm_planet_and_resource(
         .sde
         .solar_systems
         .values()
-        .find(|s| s.planet_ids.contains(&planet_id))
+        .filter(|s| s.planet_ids.contains(&planet_id))
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .or_else(|| {
             snap.planetary_colonies
                 .values()
-                .find(|c| c.planet_id == planet_id)
+                .filter(|c| c.planet_id == planet_id && c.solar_system_id > 0)
+                .min_by_key(|c| (c.solar_system_id, c.owner_id))
                 .map(|c| c.solar_system_id)
-                .filter(|&sid| sid > 0)
         })
         .or(session.solar_system_id)
         .or_else(|| {
@@ -77,12 +86,17 @@ fn resolve_gm_planet_and_resource(
                 .filter(|&sid| sid > 0)
         })
         .ok_or_else(|| invalid_planet(format!("Solar system not found for planet {planet_id}")))?;
-    let resource_type_id = res_tid_arg.unwrap_or_else(|| {
-        crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
+    let resource_type_id = match res_tid_arg {
+        Some(tid) => tid,
+        None => crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id)
             .into_iter()
             .next()
-            .unwrap_or(2268)
-    });
+            .ok_or_else(|| {
+                BridgeRpcError::custom_info(format!(
+                    "No P0 resources available on planet {planet_id}"
+                ))
+            })?,
+    };
     Ok((planet_id, sys_id, resource_type_id))
 }
 
@@ -337,7 +351,8 @@ pub fn handle_pi_orbitals_gm(
                 .sde
                 .solar_systems
                 .values()
-                .find(|s| s.planet_ids.contains(&planet_id))
+                .filter(|s| s.planet_ids.contains(&planet_id))
+                .min_by_key(|s| s.solar_system_id)
                 .map(|s| s.solar_system_id)
             else {
                 return Some(Err(BridgeRpcError {

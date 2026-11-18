@@ -574,16 +574,28 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 ));
             };
 
+            let now_unix = ctx.now_unix();
+            let caller_is_target = ctx
+                .effective_character_id()
+                .is_some_and(|caller_cid| i64::from(caller_cid) == cid);
+
             let (corp_id, title) = db_corp_mem.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {
-                    let corp_title = if snap.corporations.get(&ch.corporation_id).map(|c| c.ceo_id) == Some(cid) {
+                    let eff = crate::domain::corp_governance::effective_corp_role_breakdown(
+                        snap,
+                        ch.corporation_id,
+                        cid,
+                        now_unix,
+                    );
+                    let caller_director = caller_is_target
+                        && ((ctx.corp_role_mask & !eff.unmatured_mask)
+                            & eve_db::corp_roles::ROLE_DIRECTOR)
+                            != 0;
+                    let eff_director =
+                        (eff.any_active_roles() & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
+                    let corp_title = if eff.is_ceo {
                         "Chief Executive Officer".to_string()
-                    } else if (ctx.corp_role_mask & eve_db::corp_roles::ROLE_DIRECTOR) != 0
-                        || snap
-                            .corporations
-                            .get(&ch.corporation_id)
-                            .is_some_and(|c| (c.member_base_roles(cid) & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
-                    {
+                    } else if caller_director || eff_director {
                         "Director".to_string()
                     } else {
                         "Member".to_string()
