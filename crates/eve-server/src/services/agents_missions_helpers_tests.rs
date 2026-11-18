@@ -210,9 +210,17 @@ fn mission_rewards_and_courier_trade_mining_encounter_details_resolve() {
         lp_reward: lp,
         bonus_reward: bonus,
     } = compute_character_mission_rewards(&ctx, char_id, 3_018_921, 100, 30_000_142);
+    let def_100 = resolve_mission_reward_definition(&ctx, char_id, 3_018_921, 100);
+    assert_eq!(def_100.source, RewardCatalogSource::DerivedMissionCurve);
     assert_eq!(lp, 1_500);
-    assert_eq!(isk, 1_200_000);
-    assert_eq!(bonus, 600_000);
+    // Negotiation IV (+20%) scales per-mission base ISK and bonus ISK independently of base_lp * 1_000 / 2.
+    assert_eq!(isk, ((def_100.base_isk as f64) * 1.20).round() as i64);
+    assert_eq!(
+        bonus,
+        ((def_100.time_bonus_isk as f64) * 1.20).round() as i64
+    );
+    assert_ne!(def_100.base_isk, def_100.base_lp * 1_000);
+    assert_ne!(def_100.time_bonus_isk, def_100.base_isk / 2);
 
     let courier = resolve_courier_mission_details(&ctx, &tmpl, &ag).unwrap();
     assert_eq!(courier.cargo_type_id, 3810);
@@ -383,9 +391,145 @@ async fn wave4_courier_min_qty_clamp_missing_sde_mission_quit_and_bookmark_fallb
         .unwrap();
     assert_eq!(st, "Quit");
     assert!(!penalty && was_acc);
+    assert!(!bookmarks_remain(&ctx, char_id));
+}
+
+fn bookmarks_remain(ctx: &ServerContext, char_id: i64) -> bool {
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.items.contains_key(&55_999));
-        assert!(!snap.bookmarks.contains_key(&77_001));
-        assert!(snap.bookmarks.contains_key(&77_002) || snap.bookmarks.is_empty());
+        snap.bookmarks
+            .values()
+            .any(|b| b.owner_id == char_id && b.memo == "Mission Pocket Destination")
+    })
+}
+
+#[test]
+fn per_mission_wiki_catalog_and_derived_curves_produce_distinct_isk_bonus_windows_and_lp() {
+    let mut ctx = make_test_context();
+    let mut sde = (*ctx.sde).clone();
+    // Custom system with exact security_status = 0.6288 -> (1.6288 - 0.6288) = 1.0000
+    sde.solar_systems.insert(
+        30_910_001,
+        SolarSystem {
+            solar_system_id: 30_910_001,
+            region_id: 10_000_002,
+            constellation_id: 20_000_020,
+            name: "CatalogUnitSys".into(),
+            security_status: 0.6288,
+            radius: 1e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: vec![],
+            stations: vec![],
+            wormhole_class_id: None,
+        },
+    );
+    let mut l1_sec = make_agent(3_900_001, 2, 24, 1);
+    l1_sec.solar_system_id = Some(30_910_001);
+    let mut l4_sec = make_agent(3_900_004, 2, 24, 4);
+    l4_sec.solar_system_id = Some(30_910_001);
+    sde.agents.insert(3_900_001, l1_sec);
+    sde.agents.insert(3_900_004, l4_sec);
+    ctx.sde = Arc::new(sde);
+
+    let char_id = 90_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2; // Omega
+        }
+        snap.skills.remove(&char_id);
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(
+            3356, // Negotiation 4 -> 1.20x ISK & bonus
+            TrainedSkillRecord {
+                type_id: 3356,
+                level: 4,
+                skill_points: 100_000.0,
+            },
+        );
+        sk.insert(
+            3895, // Security Connections 3 -> 1.30x LP
+            TrainedSkillRecord {
+                type_id: 3895,
+                level: 3,
+                skill_points: 50_000.0,
+            },
+        );
     });
+
+    // Three real L1 SDE missions from Wiki reports must have distinct rewards and timers
+    let r_denial = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_777, 30_910_001);
+    assert_eq!(r_denial.isk_reward, 80_400); // 67,000 * 1.20
+    assert_eq!(r_denial.bonus_reward, 76_800); // 64,000 * 1.20
+    assert_eq!(r_denial.lp_reward, 95); // round(73 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_001, 13_777),
+        3_600
+    );
+
+    let r_rail3 = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_492, 30_910_001);
+    assert_eq!(r_rail3.isk_reward, 16_800); // 14,000 * 1.20
+    assert_eq!(r_rail3.bonus_reward, 10_800); // 9,000 * 1.20
+    assert_eq!(r_rail3.lp_reward, 18); // round(14 * 1.0 * 1.30)
+
+    let r_patriotic = compute_character_mission_rewards(&ctx, char_id, 3_900_001, 13_514, 30_910_001);
+    assert_eq!(r_patriotic.isk_reward, 34_800); // 29,000 * 1.20
+    assert_eq!(r_patriotic.bonus_reward, 44_400); // 37,000 * 1.20
+    assert_eq!(r_patriotic.lp_reward, 46); // round(35 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_001, 13_514),
+        3_840 // 64m exact Wiki timer
+    );
+
+    // Distinct L4 security missions + L4 Anomic Burner must differ widely
+    let r_spies = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 900, 30_910_001);
+    assert_eq!(r_spies.isk_reward, 429_600); // 358,000 * 1.20
+    assert_eq!(r_spies.bonus_reward, 612_000); // 510,000 * 1.20
+    assert_eq!(r_spies.lp_reward, 2_573); // round(1,979 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 900),
+        14_400
+    );
+
+    let r_desp = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 13_741, 30_910_001);
+    assert_eq!(r_desp.isk_reward, 3_120_000); // 2,600,000 * 1.20
+    assert_eq!(r_desp.bonus_reward, 3_360_000); // 2,800,000 * 1.20
+    assert_eq!(r_desp.lp_reward, 17_163); // round(13,202 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 13_741),
+        21_600
+    );
+
+    let r_burner = compute_character_mission_rewards(&ctx, char_id, 3_900_004, 16_154, 30_910_001);
+    assert_eq!(r_burner.isk_reward, 7_440_000); // 6,200,000 * 1.20
+    assert_eq!(r_burner.bonus_reward, 3_780_000); // 3,150,000 * 1.20
+    assert_eq!(r_burner.lp_reward, 18_850); // round(14,500 * 1.0 * 1.30)
+    assert_eq!(
+        mission_bonus_window_secs(&ctx, char_id, 3_900_004, 16_154),
+        10_800
+    );
+
+    // Derived non-Wiki SDE L1 Courier missions also vary independently and keep bonus window < 7_200s
+    let l1_cour_ids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("BasicCourier"))
+                && !matches!(m.mission_id, 13_491 | 13_512)
+        })
+        .take(5)
+        .map(|m| m.mission_id)
+        .collect();
+    assert!(l1_cour_ids.len() >= 2);
+    for &mid in &l1_cour_ids {
+        let win = mission_bonus_window_secs(&ctx, char_id, 3_900_001, mid);
+        assert!((600..7_200).contains(&win));
+    }
+    let def_a = resolve_mission_reward_definition(&ctx, char_id, 3_900_001, l1_cour_ids[0]);
+    let def_b = resolve_mission_reward_definition(&ctx, char_id, 3_900_001, l1_cour_ids[1]);
+    assert!(
+        (def_a.base_isk, def_a.time_bonus_isk, def_a.base_lp)
+            != (def_b.base_isk, def_b.time_bonus_isk, def_b.base_lp)
+    );
 }

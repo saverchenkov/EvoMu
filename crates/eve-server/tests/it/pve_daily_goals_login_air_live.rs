@@ -621,11 +621,17 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     assert_eq!(offer_isk, calc_isk);
     assert_eq!(offer_lp, calc_lp);
     assert_eq!(offer_bonus, calc_bonus);
-    assert_eq!(calc_bonus, calc_isk / 2);
+    assert!(calc_isk > 0 && calc_lp > 0 && calc_bonus > 0);
+    assert_ne!(calc_bonus, calc_isk / 2);
+    let offer_win = offer_info
+        .dict_get("bonusWindowSecs")
+        .and_then(|v| v.as_i64())
+        .expect("bonusWindowSecs");
+    assert!((600..7_200).contains(&offer_win));
 
-    // Validate scaling formulas:
+    // Validate scaling formulas independently against concrete Wiki-calibrated SDE missions:
     // LP = base_lp * (1.6288 - true_sec) * (1.0 + 0.1 * conn_lvl)
-    // ISK = base_isk * (1.0 + 0.05 * neg_lvl)
+    // ISK & bonus = catalog base * (1.0 + 0.05 * neg_lvl)
     let agent_info = ctx.sde.agents.get(&agent_id).expect("agent in SDE");
     let agent_sys = agent_info.solar_system_id.unwrap_or(30_000_142);
     let true_sec = ctx
@@ -639,15 +645,27 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         23 => 2, // Mining Connections II
         _ => 4,  // Security Connections IV
     };
-    let tmpl = ctx.sde.missions.get(&mission_id).expect("mission template");
-    let base_lp = tmpl.lp_omega.max(100);
     let sec_factor = (1.6288 - true_sec).max(0.01);
-    let expected_lp = ((base_lp as f64) * sec_factor * (1.0 + 0.10 * (conn_lvl as f64))).round() as i64;
-    let base_isk = base_lp * 1_000;
-    let expected_isk = ((base_isk as f64) * (1.0 + 0.05 * 3.0)).round() as i64;
+    let conn_factor = 1.0 + 0.10 * (conn_lvl as f64);
 
-    assert_eq!(calc_lp, expected_lp, "LP reward must match Connections skill formula");
-    assert_eq!(calc_isk, expected_isk, "ISK reward must match Negotiation skill formula");
+    let w_denial = compute_character_mission_rewards(&ctx, char_id, agent_id, 13_777, agent_sys);
+    assert_eq!(w_denial.isk_reward, 77_050); // Denial Of Reconnaissance: 67,000 * 1.15
+    assert_eq!(w_denial.bonus_reward, 73_600); // 64,000 * 1.15
+    assert_eq!(
+        w_denial.lp_reward,
+        (73.0 * sec_factor * conn_factor).round() as i64,
+        "LP reward must match (1.6288 - true_sec) * Connections skill formula"
+    );
+
+    let w_patriotic = compute_character_mission_rewards(&ctx, char_id, agent_id, 13_514, agent_sys);
+    assert_eq!(w_patriotic.isk_reward, 33_350); // Patriotic Measures (4 of 5): 29,000 * 1.15
+    assert_eq!(w_patriotic.bonus_reward, 42_550); // 37,000 * 1.15
+    assert_eq!(
+        w_patriotic.lp_reward,
+        (35.0 * sec_factor * conn_factor).round() as i64,
+        "Distinct L1 missions must yield independent per-mission LP baselines"
+    );
+    assert_eq!(mission_bonus_window_secs(&ctx, char_id, agent_id, 13_514), 3_840);
 
     // Accept mission (DoAction 3)
     let accept_rep = common::borrow_wire_harness(&ctx, &mut pilot)
@@ -701,6 +719,32 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
         Some(mission_id as i64)
     );
 
+    let comp_isk = complete_parts[1]
+        .dict_get("iskReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete iskReward");
+    let comp_bonus = complete_parts[1]
+        .dict_get("bonusReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete bonusReward");
+    let comp_lp = complete_parts[1]
+        .dict_get("lpReward")
+        .and_then(|v| v.as_i64())
+        .expect("complete lpReward");
+    assert_eq!(comp_isk, calc_isk);
+    assert_eq!(comp_bonus, calc_bonus);
+    assert_eq!(comp_lp, calc_lp);
+
+    let npc_tax_cents = |isk: i64| -> i64 {
+        if isk >= 100_000 {
+            ((isk * 100) * 11 + 50) / 100
+        } else {
+            0
+        }
+    };
+    let expected_net_cents =
+        (calc_isk * 100 - npc_tax_cents(calc_isk)) + (calc_bonus * 100 - npc_tax_cents(calc_bonus));
+
     let bal_after = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
     assert!(
         bal_after > bal_before,
@@ -708,10 +752,15 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
     );
     assert_eq!(
         bal_after - bal_before,
-        15_985_000,
-        "Net mission reward reflects calculated reward + bonus minus NPC corp tax"
+        expected_net_cents,
+        "Net mission wallet delta reflects calculated ISK + bonus minus 11% NPC corp tax where >= 100k"
     );
 
+    let expected_lp_net = if calc_isk >= 100_000 {
+        calc_lp - ((calc_lp * 11 + 50) / 100)
+    } else {
+        calc_lp
+    };
     let lp_after = ctx.db.with_snapshot(|s| {
         s.characters[&char_id]
             .loyalty_points
@@ -720,4 +769,5 @@ async fn test_live_pve_login_campaign_and_mission_reward_formula() {
             .unwrap_or(0)
     });
     assert!(lp_after > 0, "Completed mission must credit LP reward to loyalty_points");
+    assert_eq!(lp_after, expected_lp_net);
 }

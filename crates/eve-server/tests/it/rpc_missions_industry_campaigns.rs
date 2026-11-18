@@ -192,6 +192,124 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
 }
 
 #[tokio::test]
+// parity: feat:pve.mission-complete
+// parity: feat:pve.mission-lp-isk-reward-formula
+// parity: plan:E-5
+async fn test_plan_e5_mission_complete_tracker_standings_and_reward_payouts() {
+    eve_testkit::attest(&[
+        "feat:pve.mission-complete",
+        "feat:pve.mission-lp-isk-reward-formula",
+        "plan:E-5",
+    ]);
+
+    use eve_db::{ActiveMissionRecord, IskCents, TrainedSkillRecord};
+    use eve_server::services::agents_missions::{save_mission_meta, MissionTimingAndCargoMeta};
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess = login_pilot_char(&ctx, 51_990, "demo", "demo-secret", PILOT_1).await;
+
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.level == 1 && a.division_id == 24 && a.agent_type_id == 2 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L1 security agent")
+        .clone();
+    let ag_sys = agent.solar_system_id.unwrap();
+    let ag_st = agent.station_id.unwrap();
+    let true_sec = ctx.sde.solar_systems[&ag_sys].security_status;
+    let now0 = ctx.now_unix();
+
+    // Train Negotiation 2 (+10% ISK & bonus) and Security Connections 5 (+50% LP), clear standings
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.clone_grade = 2;
+            ch.solar_system_id = ag_sys;
+            ch.station_id = Some(ag_st);
+            ch.balance = IskCents::from_isk(1_000_000);
+            ch.standings.remove(&agent.corporation_id);
+        }
+        let sk = snap.skills.entry(PILOT_1).or_default();
+        sk.insert(3356, TrainedSkillRecord { type_id: 3356, level: 2, skill_points: 10_000.0 });
+        sk.insert(3895, TrainedSkillRecord { type_id: 3895, level: 5, skill_points: 256_000.0 });
+        snap.active_missions.insert(
+            (PILOT_1, 13_493),
+            ActiveMissionRecord {
+                character_id: PILOT_1,
+                mission_id: 13_493, // Interstellar Railroad (4 of 4): 15,000 ISK, 16,000 bonus, 3,600s, 19 base LP
+                agent_id: agent.agent_id,
+                solar_system_id: ag_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            PILOT_1,
+            &MissionTimingAndCargoMeta {
+                mission_id: 13_493,
+                agent_id: agent.agent_id,
+                offered_at_unix: now0,
+                offer_expiry_unix: now0 + 86_400,
+                offered_level: Some(1),
+                ..Default::default()
+            },
+        );
+    });
+    sess.solar_system_id = Some(ag_sys);
+    sess.station_id = Some(ag_st);
+
+    let acc = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(agent.agent_id), PyRep::Integer(13_493)])
+        .await
+        .expect("Accept 13_493");
+    assert_eq!(field(&acc, "bonusWindowSecs").as_i64(), Some(3_600));
+
+    let tracked = rpc(&ctx, &mut sess, "missionTrackerMgr", "GetAllMissionObjectives", &[])
+        .await
+        .expect("GetAllMissionObjectives");
+    let PyRep::List(obj_list) = tracked else { panic!("expected List") };
+    assert!(obj_list.iter().any(|o| o.dict_get("missionID").and_then(|v| v.as_i64()) == Some(13_493)));
+
+    let info_items = rpc(&ctx, &mut sess, "missionTrackerMgr", "GetMissionInfoItems", &[])
+        .await
+        .expect("GetMissionInfoItems");
+    assert!(matches!(info_items, PyRep::Dict(_) | PyRep::List(_)));
+
+    let bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance.raw_cents());
+    let lp_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].loyalty_points.get(&agent.corporation_id).copied().unwrap_or(0));
+
+    let done = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(agent.agent_id), PyRep::Integer(13_493)])
+        .await
+        .expect("Complete 13_493");
+    // 15,000 * 1.10 = 16,500 ISK; 16,000 * 1.10 = 17,600 bonus; 19 * (1.6288 - true_sec) * 1.50 LP
+    let exp_lp = (19.0 * (1.6288 - true_sec).max(0.01) * 1.50).round() as i64;
+    assert_eq!(field(&done, "iskReward").as_i64(), Some(16_500));
+    assert_eq!(field(&done, "bonusReward").as_i64(), Some(17_600));
+    assert_eq!(field(&done, "lpReward").as_i64(), Some(exp_lp));
+    assert_eq!(field(&done, "rewardItemID"), &PyRep::None);
+
+    let bal_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance.raw_cents());
+    let lp_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].loyalty_points[&agent.corporation_id]);
+    assert_eq!(bal_after - bal_before, (16_500 + 17_600) * 100);
+    assert_eq!(lp_after - lp_before, exp_lp);
+
+    let corp_standings = rpc(&ctx, &mut sess, "standingMgr", "GetCorpStandings", &[])
+        .await
+        .expect("GetCorpStandings after mission completion");
+    let has_corp_standing = match &corp_standings {
+        PyRep::Rowset { rows, .. } => rows.iter().any(|r| r.first().and_then(|v| v.as_i64()) == Some(agent.corporation_id) && r.get(1).and_then(|v| v.as_f64()).is_some_and(|s| s > 0.0)),
+        PyRep::Dict(entries) => entries.iter().any(|(k, v)| k.as_i64() == Some(agent.corporation_id) && v.as_f64().is_some_and(|s| s > 0.0)),
+        _ => false,
+    };
+    assert!(has_corp_standing, "Corp standing must increase and appear in standingMgr.GetCorpStandings");
+}
+
+#[tokio::test]
 // parity: rpc:industryManager.CancelJob
 // parity: rpc:industryManager.GetJob
 // parity: rpc:industryManager.GetJobCounts

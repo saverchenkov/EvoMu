@@ -472,6 +472,11 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
     .unwrap();
     assert_eq!(offer.dict_get("state"), Some(&PyRep::String("Offered".into())));
     let mid = offer.dict_get("missionID").unwrap().as_i64().unwrap() as u32;
+    let offer_win = offer
+        .dict_get("bonusWindowSecs")
+        .and_then(|v| v.as_i64())
+        .expect("bonusWindowSecs on offer");
+    assert!((600..7_200).contains(&offer_win));
 
     // 2. Accept mission (action 3)
     let accepted = handle(
@@ -494,6 +499,7 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
         Some(&PyRep::String("Accepted".into()))
     );
     assert_eq!(accepted.dict_get("missionState"), Some(&PyRep::Integer(2)));
+    assert_eq!(accepted.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(offer_win)));
 
     // 3. GetMyJournalDetails and GetMissionBriefingInfo
     let now = ctx.now_unix();
@@ -541,6 +547,7 @@ async fn full_mission_lifecycle_offer_accept_journal_briefing_complete_and_quit_
         briefing.dict_get("missionID"),
         Some(&PyRep::Integer(mid as i64))
     );
+    assert_eq!(briefing.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(offer_win)));
 
     // 4. Mark mission objectives ready (0 NPCs remaining and satisfy any required delivery item) and complete (action 6)
     ctx.db.with_mut_snapshot(|snap| {

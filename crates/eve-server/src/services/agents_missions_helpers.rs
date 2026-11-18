@@ -299,45 +299,422 @@ pub struct CharacterMissionRewards {
     pub bonus_reward: i64,
 }
 
-/// Computes mission rewards `(isk_reward, lp_reward, bonus_reward)` from V24 SDE templates,
-/// dungeon difficulty, agent solar-system true security, and character Connections/Negotiation skills
-/// (`feat:pve.mission-lp-isk-reward-formula`, `feat:pve.mission-complete`, `plan:E-5`).
-pub fn compute_character_mission_rewards(
+/// Origin of a mission's base `(ISK, bonus ISK, bonus window, base LP)` definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewardCatalogSource {
+    /// Directly calibrated from documented EVE University Wiki mission reward reports.
+    WikiCatalog,
+    /// Real SDE Heraldry (`Paragon`) LP columns paired with a server-calibrated stipend.
+    SdeHeraldryAndDerivedStipend,
+    /// Server-calibrated multi-signal reward curve when FSD keeps CCP reward columns server-side.
+    DerivedMissionCurve,
+}
+
+/// Base (unskilled, security-unadjusted) reward catalog definition for a single mission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionRewardDefinition {
+    pub base_isk: i64,
+    pub time_bonus_isk: i64,
+    pub time_bonus_window_secs: u64,
+    pub base_lp: i64,
+    pub base_lp_alpha: i64,
+    pub grants_lp: bool,
+    pub source: RewardCatalogSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissionRewardCategory {
+    Security,
+    Courier,
+    Mining,
+    Storyline,
+    EpicArc,
+    Research,
+    Career,
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+fn stable_mission_seed(mission_id: u32, norm_title: &str) -> u64 {
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325 ^ u64::from(mission_id);
+    for &b in norm_title.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01B3);
+    }
+    splitmix64(h ^ (u64::from(mission_id) << 32))
+}
+
+fn normalized_mission_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn round_isk_to(amount: i64, step: i64) -> i64 {
+    if step <= 1 {
+        return amount.max(1);
+    }
+    (((amount + step / 2) / step) * step).max(step)
+}
+
+fn parse_chain_step_ratio(norm_title: &str) -> Option<f64> {
+    let start = norm_title.rfind('(')?;
+    let end = norm_title[start..].find(')')? + start;
+    let inner = norm_title[start + 1..end].trim();
+    let (left, right) = inner.split_once(" of ")?;
+    let step: u32 = left.trim().parse().ok()?;
+    let total: u32 = right.trim().parse().ok()?;
+    if total == 0 || step == 0 || step > total {
+        return None;
+    }
+    Some(f64::from(step) / f64::from(total))
+}
+
+/// Curated per-mission reward definitions sourced from documented EVE University Wiki mission reports
+/// (`wiki:Denial_Of_Reconnaissance`, `wiki:Interstellar_Railroad`, `wiki:Patriotic_Measures`,
+/// `wiki:Foreign_Investment`, `wiki:Serpentis_Extravaganza_(Level_3)`, `wiki:The_Sansha_Spies_(Level_4)`,
+/// `wiki:Desperate_Maneuvers`, Storyline reports, and SOE / Empire Epic Arc reports) verified against
+/// real `sde_missions` IDs and titles.
+fn wiki_mission_reward_override(
+    mission_id: u32,
+    norm_title: &str,
+) -> Option<MissionRewardDefinition> {
+    let wiki = |base_isk: i64, time_bonus_isk: i64, win_s: u64, base_lp: i64| {
+        MissionRewardDefinition {
+            base_isk,
+            time_bonus_isk,
+            time_bonus_window_secs: win_s.clamp(600, 21_600),
+            base_lp,
+            base_lp_alpha: if base_lp > 0 { (base_lp / 2).max(1) } else { 0 },
+            grants_lp: base_lp > 0,
+            source: RewardCatalogSource::WikiCatalog,
+        }
+    };
+    let no_lp_wiki = |base_isk: i64, time_bonus_isk: i64, win_s: u64| MissionRewardDefinition {
+        base_isk,
+        time_bonus_isk,
+        time_bonus_window_secs: win_s.clamp(600, 21_600),
+        base_lp: 0,
+        base_lp_alpha: 0,
+        grants_lp: false,
+        source: RewardCatalogSource::WikiCatalog,
+    };
+
+    match (mission_id, norm_title) {
+        // Regular L1-L4 Security missions (`BasicKillMission`)
+        (13777, "denial of reconnaissance") => Some(wiki(67_000, 64_000, 3_600, 73)),
+        (13492, "interstellar railroad (3 of 4)") => Some(wiki(14_000, 9_000, 3_600, 14)),
+        (13493, "interstellar railroad (4 of 4)") => Some(wiki(15_000, 16_000, 3_600, 19)),
+        (13514, "patriotic measures (4 of 5)") => Some(wiki(29_000, 37_000, 3_840, 35)),
+        (4886, "foreign investment") => Some(wiki(82_000, 75_000, 5_400, 113)),
+        (1140, "serpentis extravaganza") => Some(wiki(692_000, 799_000, 10_800, 1_829)),
+        (900, "the sansha spies") => Some(wiki(358_000, 510_000, 14_400, 1_979)),
+        (13741, "desperate maneuvers") => Some(wiki(2_600_000, 2_800_000, 21_600, 13_202)),
+        // Regular L1 Courier missions (`BasicCourierMission`)
+        (13491, "interstellar railroad (2 of 4)") => Some(wiki(20_000, 20_000, 3_600, 21)),
+        (13512, "patriotic measures (2 of 5)") => Some(wiki(24_000, 25_000, 2_640, 23)),
+        // Storyline missions (`grants_lp = false` per `wiki:Loyalty_Points`)
+        (1872, "the audesder war effort, hand in the voucher (1 of 8)") => {
+            Some(no_lp_wiki(298_000, 289_000, 2_880))
+        }
+        (2056, "civilian pullout") => Some(no_lp_wiki(730_000, 761_000, 14_400)),
+        (1900, "civilian pullout - more civilians to evacuate") => {
+            Some(no_lp_wiki(759_000, 802_000, 14_340))
+        }
+        (2825, "courier gone missing (1 of 2)") => Some(no_lp_wiki(15_000_000, 10_000_000, 10_800)),
+        (2570, "heads of management (1 of 2)") => Some(no_lp_wiki(10_000_000, 6_000_000, 21_600)),
+        (15219, "soothe the salvage beast") => Some(no_lp_wiki(1_950_000, 2_300_000, 14_700)),
+        // Epic Arc missions (`grants_lp = false` per `wiki:Loyalty_Points`)
+        (14117, "a beacon beckons") => Some(no_lp_wiki(100_000, 169_000, 3_600)),
+        (14118, "agent inquiry") => Some(no_lp_wiki(100_000, 178_500, 3_600)),
+        (14135, "an economy under threat") => Some(no_lp_wiki(100_000, 131_000, 3_600)),
+        (14390, "burning down the hive") => Some(no_lp_wiki(150_000, 210_500, 3_600)),
+        (14406, "a call to trial") => Some(no_lp_wiki(200_000, 39_000, 3_600)),
+        (14511, "an honorable betrayal") => Some(no_lp_wiki(300_000, 1_000_000, 21_600)),
+        (14597, "almost unmasked") => Some(no_lp_wiki(300_000, 1_500_000, 21_600)),
+        (14607, "a general's best friend") => Some(no_lp_wiki(5_000_000, 1_000_000, 21_600)),
+        (14821, "a different kind of director") => Some(no_lp_wiki(5_000_000, 1_000_000, 21_600)),
+        (14851, "a demonstration") => Some(no_lp_wiki(6_000_000, 1_000_000, 21_600)),
+        (14946, "carry on") => Some(no_lp_wiki(10_000_000, 1_000_000, 21_600)),
+        _ => None,
+    }
+}
+
+/// DERIVED: Server-calibrated Anomic Burner mission rewards anchored to L4 Burner dungeon
+/// difficulty 5 and the `wiki:Anomic_missions` bounty tiers (Agent/Team 5M bounty tier vs Base 13M-22M tier),
+/// since FSD omits CCP server ISK/LP/bonus columns.
+fn derived_anomic_burner_rewards(
+    mission_id: u32,
+    norm_title: &str,
+) -> Option<MissionRewardDefinition> {
+    let mk = |base_isk: i64, time_bonus_isk: i64, win_s: u64, base_lp: i64| {
+        MissionRewardDefinition {
+            base_isk,
+            time_bonus_isk,
+            time_bonus_window_secs: win_s,
+            base_lp,
+            base_lp_alpha: (base_lp / 2).max(1),
+            grants_lp: true,
+            source: RewardCatalogSource::DerivedMissionCurve,
+        }
+    };
+    let named = match mission_id {
+        // Anomic Agent (pirate frigate pockets)
+        16087 if norm_title == "anomic agent" => Some(mk(3_350_000, 1_920_000, 7_200, 8_750)),
+        16089 if norm_title == "anomic agent" => Some(mk(2_950_000, 1_680_000, 7_200, 7_900)),
+        16090 if norm_title == "anomic agent" => Some(mk(3_200_000, 1_840_000, 7_200, 8_400)),
+        16091 if norm_title == "anomic agent" => Some(mk(3_050_000, 1_760_000, 7_200, 8_150)),
+        16092 if norm_title == "anomic agent" => Some(mk(3_450_000, 1_980_000, 7_200, 8_900)),
+        // Anomic Team (assault frigate + logi pockets)
+        16093 if norm_title == "anomic team" => Some(mk(3_400_000, 1_950_000, 7_200, 9_000)),
+        16094 if norm_title == "anomic team" => Some(mk(3_550_000, 2_050_000, 7_200, 9_300)),
+        16095 if norm_title == "anomic team" => Some(mk(3_680_000, 2_120_000, 7_200, 9_550)),
+        16096 if norm_title == "anomic team" => Some(mk(3_820_000, 2_210_000, 7_200, 9_800)),
+        // Anomic Base (cruiser/battlecruiser burner bases)
+        16152 if norm_title == "anomic base" => Some(mk(5_600_000, 2_850_000, 10_800, 13_500)),
+        16153 if norm_title == "anomic base" => Some(mk(4_900_000, 2_450_000, 10_800, 12_000)),
+        16154 if norm_title == "anomic base" => Some(mk(6_200_000, 3_150_000, 10_800, 14_500)),
+        16168 if norm_title == "anomic base" => Some(mk(4_400_000, 2_250_000, 10_800, 11_000)),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+    if norm_title.contains("anomic") || norm_title.contains("burner") {
+        let seed = stable_mission_seed(mission_id, norm_title);
+        let (base_isk, base_lp, win_s) = if norm_title.contains("base") {
+            let isk = round_isk_to(4_300_000 + ((seed % 20) as i64) * 95_000, 1_000);
+            let lp = 10_800 + ((splitmix64(seed ^ 17) % 38) as i64) * 100;
+            (isk, lp, 10_800_u64)
+        } else {
+            let isk = round_isk_to(2_950_000 + ((seed % 18) as i64) * 50_000, 1_000);
+            let lp = 7_800 + ((splitmix64(seed ^ 17) % 21) as i64) * 100;
+            (isk, lp, 7_200_u64)
+        };
+        let bonus_pct = 54 + ((seed >> 12) % 16) as i64;
+        return Some(mk(
+            base_isk,
+            round_isk_to(base_isk * bonus_pct / 100, 1_000),
+            win_s,
+            base_lp,
+        ));
+    }
+    None
+}
+
+/// DERIVED: Combines real SDE Heraldry (`Paragon`) LP columns (`lp_omega`, `lp_alpha`) with a
+/// server-calibrated hull-tier ISK stipend and bonus timer since FSD omits Paragon ISK columns.
+fn resolve_heraldry_reward_definition(
+    mission_id: u32,
+    tmpl: &eve_sde::MissionTemplate,
+    norm_title: &str,
+) -> MissionRewardDefinition {
+    let seed = stable_mission_seed(mission_id, norm_title);
+    let base_lp = if tmpl.lp_omega > 0 { tmpl.lp_omega } else { 2_000 };
+    let base_lp_alpha = if tmpl.lp_alpha > 0 {
+        tmpl.lp_alpha
+    } else {
+        (base_lp / 10).max(1)
+    };
+    let lp_span = (base_lp - 1_500).clamp(0, 3_500);
+    let base_isk = round_isk_to(115_000 + lp_span * 28 + ((seed % 17) as i64) * 2_500, 500);
+    let bonus_pct = 62 + ((seed >> 10) % 33) as i64;
+    let time_bonus_isk = round_isk_to(base_isk * bonus_pct / 100, 500);
+    let win_mins = 40 + ((seed >> 20) % 45);
+    MissionRewardDefinition {
+        base_isk,
+        time_bonus_isk,
+        time_bonus_window_secs: (win_mins * 60).clamp(1_800, 5_400),
+        base_lp,
+        base_lp_alpha,
+        grants_lp: true,
+        source: RewardCatalogSource::SdeHeraldryAndDerivedStipend,
+    }
+}
+
+fn classify_reward_category(
+    tmpl: Option<&eve_sde::MissionTemplate>,
+    norm_title: &str,
+    agent_info: Option<&eve_sde::AgentInfo>,
+) -> MissionRewardCategory {
+    let ct = tmpl
+        .and_then(|t| t.content_template.as_deref())
+        .unwrap_or_default();
+    if ct.contains("EpicArc") || agent_info.is_some_and(|a| a.agent_type_id == 10) {
+        return MissionRewardCategory::EpicArc;
+    }
+    if tmpl.is_some_and(is_storyline_template)
+        || agent_info.is_some_and(|a| is_storyline_agent_type(a.agent_type_id))
+    {
+        return MissionRewardCategory::Storyline;
+    }
+    if agent_info.is_some_and(|a| a.agent_type_id == 12) {
+        return MissionRewardCategory::Career;
+    }
+    if ct.contains("Research") || agent_info.is_some_and(is_rnd_agent) {
+        return MissionRewardCategory::Research;
+    }
+    if ct.contains("Mining")
+        || norm_title.contains("mining")
+        || (!ct.contains("Kill") && agent_info.is_some_and(|a| a.division_id == 23))
+    {
+        return MissionRewardCategory::Mining;
+    }
+    if ct.contains("Trade")
+        || ct.contains("Courier")
+        || tmpl.is_some_and(|t| t.is_courier)
+        || (!ct.contains("Kill") && agent_info.is_some_and(|a| matches!(a.division_id, 22 | 27)))
+    {
+        return MissionRewardCategory::Courier;
+    }
+    MissionRewardCategory::Security
+}
+
+fn lerp_i64(lo: i64, hi: i64, unit_u64: u64) -> i64 {
+    let t = (unit_u64 % 10_000) as f64 / 9_999.0;
+    lo + (((hi - lo) as f64) * t).round() as i64
+}
+
+/// DERIVED: Server-calibrated per-mission reward curve calibrated to documented EVE mission ranges by
+/// `(category, effective_lvl, dungeon_difficulty, chain_step)` using independent per-mission hash lanes
+/// for ISK, LP, bonus ratio (intentionally never fixed at 0.50), and bonus timer window (`[600, 21_600]`s,
+/// keeping L1 windows strictly `< 7_200`s).
+fn derive_mission_reward_definition(
+    mission_id: u32,
+    tmpl: Option<&eve_sde::MissionTemplate>,
+    norm_title: &str,
+    category: MissionRewardCategory,
+    effective_lvl: u8,
+    dungeon_diff: Option<u8>,
+    dungeon_arch: Option<u32>,
+) -> MissionRewardDefinition {
+    let idx = usize::from(effective_lvl.clamp(1, 5)) - 1;
+    let (isk_lo, isk_hi, lp_lo, lp_hi, win_lo_m, win_hi_m) = match category {
+        MissionRewardCategory::Security => [
+            (16_000_i64, 70_000_i64, 18_i64, 92_i64, 25_u64, 75_u64),
+            (68_000, 190_000, 88, 310, 45, 110),
+            (260_000, 780_000, 540, 2_050, 90, 210),
+            (780_000, 2_650_000, 2_250, 8_400, 180, 360),
+            (2_400_000, 6_400_000, 8_200, 22_000, 240, 360),
+        ][idx],
+        MissionRewardCategory::Courier => [
+            (18_000, 46_000, 18, 58, 20, 65),
+            (54_000, 142_000, 68, 195, 35, 90),
+            (180_000, 460_000, 340, 940, 60, 150),
+            (540_000, 1_420_000, 1_150, 3_650, 90, 240),
+            (1_250_000, 2_750_000, 3_200, 8_200, 120, 300),
+        ][idx],
+        MissionRewardCategory::Mining => [
+            (20_000, 54_000, 22, 72, 25, 75),
+            (62_000, 165_000, 84, 245, 45, 100),
+            (220_000, 540_000, 440, 1_220, 75, 180),
+            (640_000, 1_680_000, 1_520, 4_450, 120, 270),
+            (1_450_000, 3_100_000, 4_100, 10_200, 180, 360),
+        ][idx],
+        MissionRewardCategory::Storyline => [
+            (75_000, 185_000, 0, 0, 30, 80),
+            (190_000, 480_000, 0, 0, 60, 150),
+            (480_000, 1_250_000, 0, 0, 120, 240),
+            (1_250_000, 3_600_000, 0, 0, 180, 360),
+            (3_100_000, 6_500_000, 0, 0, 240, 360),
+        ][idx],
+        MissionRewardCategory::EpicArc => [
+            (95_000, 235_000, 0, 0, 30, 80),
+            (245_000, 610_000, 0, 0, 60, 150),
+            (650_000, 1_700_000, 0, 0, 120, 240),
+            (1_550_000, 5_200_000, 0, 0, 180, 360),
+            (3_500_000, 8_500_000, 0, 0, 240, 360),
+        ][idx],
+        MissionRewardCategory::Career => (38_000, 92_000, 0, 0, 30, 60),
+        MissionRewardCategory::Research => {
+            let l = i64::from(effective_lvl.clamp(1, 5));
+            (28_000 * l, 85_000 * l, 0, 0, 30, 90)
+        }
+    };
+
+    let seed = stable_mission_seed(mission_id, norm_title)
+        ^ u64::from(dungeon_arch.unwrap_or(0)).wrapping_mul(0x9E37_79B1);
+    let h_isk = splitmix64(seed ^ 0x9E37_79B9_7F4A_7C15);
+    let h_lp = splitmix64(seed ^ 0xBF58_476D_1CE4_E5B9);
+    let h_ratio = splitmix64(seed ^ 0x94D0_49BB_1331_11EB);
+    let h_win = splitmix64(seed ^ 0xD6E8_FEB8_6659_FD93);
+
+    // Subtle chain-step & dungeon-difficulty weighting keeps multi-part finales and harder dungeons distinct.
+    let chain_mult = parse_chain_step_ratio(norm_title).map_or(1.0, |r| 0.90 + 0.25 * r);
+    let diff_mult = match dungeon_diff {
+        Some(d) if d > effective_lvl => 1.12,
+        Some(d) if d < effective_lvl => 0.92,
+        _ => 1.0,
+    };
+
+    let step = if isk_hi <= 100_000 { 500 } else { 1_000 };
+    let raw_isk = ((lerp_i64(isk_lo, isk_hi, h_isk) as f64) * chain_mult * diff_mult).round() as i64;
+    let base_isk = round_isk_to(raw_isk.clamp(isk_lo, isk_hi.saturating_mul(5) / 4), step);
+
+    // Bonus ratio spans [64%, 128%] (never flat 50%).
+    let bonus_pct = 64 + (h_ratio % 65) as i64;
+    let time_bonus_isk = round_isk_to(base_isk * bonus_pct / 100, step);
+
+    let win_span = (win_hi_m - win_lo_m).max(1);
+    let win_mins = win_lo_m + (h_win % (win_span + 1));
+    let max_win_secs = if effective_lvl == 1 || category == MissionRewardCategory::Career {
+        5_400
+    } else {
+        21_600
+    };
+    let time_bonus_window_secs = (win_mins * 60).clamp(600, max_win_secs);
+
+    let grants_lp = lp_hi > 0;
+    let (base_lp, base_lp_alpha) = if !grants_lp {
+        (0, 0)
+    } else if let Some(t) = tmpl.filter(|t| t.lp_omega > 0) {
+        let alpha = if t.lp_alpha > 0 {
+            t.lp_alpha
+        } else {
+            (t.lp_omega / 2).max(1)
+        };
+        (t.lp_omega, alpha)
+    } else {
+        let raw_lp = ((lerp_i64(lp_lo, lp_hi, h_lp) as f64) * chain_mult * diff_mult).round() as i64;
+        let omega = raw_lp.clamp(lp_lo, lp_hi.saturating_mul(5) / 4).max(1);
+        (omega, (omega / 2).max(1))
+    };
+
+    MissionRewardDefinition {
+        base_isk,
+        time_bonus_isk,
+        time_bonus_window_secs,
+        base_lp,
+        base_lp_alpha,
+        grants_lp,
+        source: RewardCatalogSource::DerivedMissionCurve,
+    }
+}
+
+/// Resolves the per-mission base `(ISK, time_bonus_isk, time_bonus_window_secs, base_lp)` definition
+/// from curated EVE Wiki entries, real SDE Heraldry LP columns, or calibrated multi-signal curves.
+pub fn resolve_mission_reward_definition(
     ctx: &ServerContext,
     char_id: i64,
     agent_id: i64,
     mission_id: u32,
-    sys_id: u32,
-) -> CharacterMissionRewards {
+) -> MissionRewardDefinition {
     let tmpl = ctx.sde.missions.get(&mission_id);
     let agent_info = ctx.sde.agents.get(&agent_id);
-    let agent_sys_id = agent_info.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
-    let true_sec = ctx
-        .sde
-        .solar_systems
-        .get(&agent_sys_id)
-        .map(|s| s.security_status)
-        .unwrap_or(1.0);
-
-    let conn_skill_id = agent_info.and_then(|a| resolve_division_connections_skill(ctx, a.division_id));
-
-    let (is_alpha, neg_lvl, conn_lvl, offered_lvl) = ctx.db.with_snapshot(|snap| {
-        let alpha = snap
-            .characters
-            .get(&char_id)
-            .is_some_and(|c| c.clone_grade <= 1);
-        let sk = snap.skills.get(&char_id);
-        let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
-        let conn = conn_skill_id
-            .and_then(|sid| sk.and_then(|m| m.get(&sid)))
-            .map_or(0, |s| s.level);
-        let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
-        (alpha, neg, conn, olvl)
+    let offered_lvl = ctx.db.with_snapshot(|snap| {
+        load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level)
     });
-
-    let dungeon_diff = tmpl
+    let dungeon = tmpl
         .and_then(|t| t.dungeon_id)
-        .and_then(|did| ctx.sde.dungeons.get(&did))
+        .and_then(|did| ctx.sde.dungeons.get(&did));
+    let dungeon_diff = dungeon
         .and_then(|d| d.difficulty)
         .and_then(|d| u8::try_from(d).ok())
         .filter(|&d| (1..=5).contains(&d));
@@ -347,51 +724,149 @@ pub fn compute_character_mission_rewards(
         .unwrap_or(1)
         .clamp(1, 5);
 
-    let min_level_lp = i64::from(effective_lvl) * 100;
-    let base_lp = tmpl.map_or(min_level_lp, |t| {
-        let sde_raw = if is_alpha && t.lp_alpha > 0 {
-            t.lp_alpha
-        } else if is_alpha && t.lp_omega > 0 {
-            (t.lp_omega / 2).max(1)
-        } else {
-            t.lp_omega
-        };
-        if sde_raw > 0 {
-            sde_raw.max(min_level_lp)
-        } else if is_storyline_template(t)
-            || t.content_template
-                .as_deref()
-                .is_some_and(|ct| ct.contains("EpicArc"))
-        {
-            (min_level_lp.saturating_mul(3) / 2).max(min_level_lp)
-        } else {
-            min_level_lp
-        }
-    });
+    let norm_title = tmpl
+        .map(|t| normalized_mission_title(&t.title))
+        .unwrap_or_default();
+    let is_heraldry = tmpl.is_some_and(|t| {
+        t.content_template
+            .as_deref()
+            .is_some_and(|ct| ct.contains("Heraldry"))
+    }) || agent_info.is_some_and(|a| a.agent_type_id == 13);
 
-    let no_lp_mission = agent_info.is_some_and(|a| {
+    let mut def = if let Some(wiki_def) = wiki_mission_reward_override(mission_id, &norm_title) {
+        let mut out = wiki_def;
+        if let Some(t) = tmpl.filter(|t| t.lp_omega > 0 && out.grants_lp) {
+            out.base_lp = t.lp_omega;
+            out.base_lp_alpha = if t.lp_alpha > 0 {
+                t.lp_alpha
+            } else {
+                (t.lp_omega / 2).max(1)
+            };
+        }
+        out
+    } else if is_heraldry {
+        if let Some(t) = tmpl {
+            resolve_heraldry_reward_definition(mission_id, t, &norm_title)
+        } else {
+            derive_mission_reward_definition(
+                mission_id,
+                None,
+                &norm_title,
+                MissionRewardCategory::Courier,
+                effective_lvl,
+                dungeon_diff,
+                dungeon.and_then(|d| d.archetype_id),
+            )
+        }
+    } else if let Some(anomic_def) = derived_anomic_burner_rewards(mission_id, &norm_title) {
+        let mut out = anomic_def;
+        if let Some(t) = tmpl.filter(|t| t.lp_omega > 0) {
+            out.base_lp = t.lp_omega;
+            out.base_lp_alpha = if t.lp_alpha > 0 {
+                t.lp_alpha
+            } else {
+                (t.lp_omega / 2).max(1)
+            };
+        }
+        out
+    } else {
+        let category = classify_reward_category(tmpl, &norm_title, agent_info);
+        derive_mission_reward_definition(
+            mission_id,
+            tmpl,
+            &norm_title,
+            category,
+            effective_lvl,
+            dungeon_diff,
+            dungeon.and_then(|d| d.archetype_id),
+        )
+    };
+
+    let no_lp_agent = agent_info.is_some_and(|a| {
         is_rnd_agent(a)
             || is_storyline_agent_type(a.agent_type_id)
             || matches!(a.agent_type_id, 10..=12)
-    }) || tmpl.is_some_and(|t| {
+    });
+    let no_lp_tmpl = tmpl.is_some_and(|t| {
         is_storyline_template(t)
             || t.content_template
                 .as_deref()
                 .is_some_and(|ct| ct.contains("EpicArc"))
     });
+    if no_lp_agent || no_lp_tmpl {
+        def.grants_lp = false;
+        def.base_lp = 0;
+        def.base_lp_alpha = 0;
+    }
+
+    def
+}
+
+/// Returns the per-mission bonus completion window in seconds (`[600, 21_600]`).
+pub fn mission_bonus_window_secs(
+    ctx: &ServerContext,
+    char_id: i64,
+    agent_id: i64,
+    mission_id: u32,
+) -> u64 {
+    resolve_mission_reward_definition(ctx, char_id, agent_id, mission_id)
+        .time_bonus_window_secs
+        .clamp(600, 21_600)
+}
+
+/// Computes mission rewards `(isk_reward, lp_reward, bonus_reward)` from per-mission reward
+/// definitions (`wiki:Missions`, `wiki:Loyalty_Points`), agent solar-system true security
+/// (`1.6288 - true_sec`), and character Connections/Negotiation skills
+/// (`feat:pve.mission-lp-isk-reward-formula`, `feat:pve.mission-complete`, `plan:E-5`).
+pub fn compute_character_mission_rewards(
+    ctx: &ServerContext,
+    char_id: i64,
+    agent_id: i64,
+    mission_id: u32,
+    sys_id: u32,
+) -> CharacterMissionRewards {
+    let def = resolve_mission_reward_definition(ctx, char_id, agent_id, mission_id);
+    let agent_info = ctx.sde.agents.get(&agent_id);
+    let agent_sys_id = agent_info.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
+    let true_sec = ctx
+        .sde
+        .solar_systems
+        .get(&agent_sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+
+    let conn_skill_id =
+        agent_info.and_then(|a| resolve_division_connections_skill(ctx, a.division_id));
+
+    let (is_alpha, neg_lvl, conn_lvl) = ctx.db.with_snapshot(|snap| {
+        let alpha = snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|c| c.clone_grade <= 1);
+        let sk = snap.skills.get(&char_id);
+        let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
+        let conn = conn_skill_id
+            .and_then(|sid| sk.and_then(|m| m.get(&sid)))
+            .map_or(0, |s| s.level);
+        (alpha, neg, conn)
+    });
 
     let sec_factor = (1.6288 - true_sec).max(0.01);
     let conn_factor = 1.0 + 0.10 * (conn_lvl.min(5) as f64);
-    let lp_reward = if no_lp_mission {
+    let chosen_base_lp = if is_alpha {
+        def.base_lp_alpha
+    } else {
+        def.base_lp
+    };
+    let lp_reward = if !def.grants_lp {
         0
     } else {
-        ((base_lp as f64) * sec_factor * conn_factor).round() as i64
+        ((chosen_base_lp as f64) * sec_factor * conn_factor).round() as i64
     };
 
-    let base_isk = base_lp.saturating_mul(1_000);
     let neg_factor = 1.0 + 0.05 * (neg_lvl.min(5) as f64);
-    let isk_reward = ((base_isk as f64) * neg_factor).round() as i64;
-    let bonus_reward = isk_reward / 2;
+    let isk_reward = ((def.base_isk as f64) * neg_factor).round() as i64;
+    let bonus_reward = ((def.time_bonus_isk as f64) * neg_factor).round() as i64;
 
     CharacterMissionRewards {
         isk_reward,

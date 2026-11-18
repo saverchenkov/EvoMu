@@ -7,6 +7,8 @@
 //! - `feat:pve.mission-decline`: Mission decline mechanics, cooldowns, and standings impact.
 //! - `feat:pve.mission-quit`: Mission abort / quit mechanics and failure state.
 //! - `feat:pve.mission-complete`: Mission objective completion, ISK/LP reward payout, bonus time rewards, and turn-in.
+//! - `feat:pve.mission-lp-isk-reward-formula`: Base LP * (1.6288 - true_sec) * division Connections LP and +5%/lvl Negotiation ISK/bonus scaling.
+//! - `plan:E-5`: Canonical agent mission offer -> briefing/objective -> accept -> completion -> reward/standing payout lifecycle.
 //! - `feat:pve.mission-expire`: Offered mission expiration timeout and cleanup.
 //! - `feat:pve.mission-journal`: Character active and completed mission journal entries and bookmarks.
 //! - `feat:pve.mission-tracker`: HUD mission tracker objective tracking, dungeon room progression, and NPC kill counts.
@@ -569,24 +571,17 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, sec_sys, sec_sta).await;
     let sec_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(sec_agent.agent_id)).await;
 
-    let offer_unskilled = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Unskilled offer");
-    let base_isk = offer_unskilled.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
-    let base_lp = offer_unskilled.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
-    ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await.expect("Defer unskilled offer");
-
-    // Train Negotiation V (3356), Security Connections V (3895), Social V (3355)
-    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3356 5").await;
-    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3895 5").await;
-    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3355 5").await;
-
+    // Roll a combat security mission first while unskilled, then verify Negotiation V & Security Connections V on that same mission
     let mut chosen_mid = 0_u32;
-    let mut skilled_isk = 0_i64;
-    let mut skilled_lp = 0_i64;
+    let mut base_isk = 0_i64;
+    let mut base_lp = 0_i64;
+    let mut base_bonus = 0_i64;
     for _ in 0..8 {
-        let off = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Skilled offer");
+        let off = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(2)], &kw, None).await.expect("Unskilled offer");
         let mid = off.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
-        skilled_isk = off.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
-        skilled_lp = off.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+        base_isk = off.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
+        base_lp = off.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+        base_bonus = off.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
         let npc_cnt = ctx.db.with_snapshot(|s| s.active_missions.get(&(char_id, mid)).map_or(0, |m| m.npcs_remaining));
         if npc_cnt > 0 {
             chosen_mid = mid;
@@ -595,8 +590,19 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
         ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(10)], &kw, None).await.expect("Defer non-combat mission");
     }
     assert!(chosen_mid > 0, "Expected combat security mission");
-    assert!(skilled_isk > base_isk, "Negotiation skill must increase ISK reward");
-    assert!(skilled_lp > base_lp, "Connections skill must increase LP reward");
+
+    // Train Negotiation V (3356), Security Connections V (3895), Social V (3355)
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3356 5").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3895 5").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3355 5").await;
+
+    let obj_skilled = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "GetMissionObjectiveInfo", &[], &kw, None).await.expect("GetMissionObjectiveInfo skilled");
+    let skilled_isk = obj_skilled.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
+    let skilled_lp = obj_skilled.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+    let skilled_bonus = obj_skilled.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(skilled_isk, ((base_isk as f64) * 1.25).round() as i64, "Negotiation V must give +25% ISK");
+    assert_eq!(skilled_bonus, ((base_bonus as f64) * 1.25).round() as i64, "Negotiation V must give +25% bonus ISK");
+    assert!(skilled_lp > base_lp, "Connections V must increase LP reward");
 
     ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "DoAction", &[PyRep::Integer(3)], &kw, None).await.expect("Accept combat mission");
     ctx.advance_secs(31);
@@ -834,4 +840,248 @@ async fn test_issue_766_agent_dialogue_v24_machonet_wire_contract() {
     let PyRep::Tuple(acc_outer) = accepted else { panic!("tuple") };
     let PyRep::Tuple(acc_inner) = &acc_outer[0] else { panic!("tuple") };
     assert!(matches!(acc_inner[1], PyRep::List(ref a) if a.len() == 2));
+}
+
+#[tokio::test]
+async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
+    // parity: feat:pve.mission-complete, feat:pve.mission-lp-isk-reward-formula, plan:E-5
+    eve_testkit::attest(&[
+        "feat:pve.mission-complete",
+        "feat:pve.mission-lp-isk-reward-formula",
+        "plan:E-5",
+    ]);
+
+    use eve_db::ActiveMissionRecord;
+    use eve_server::services::agents_missions::{
+        save_mission_meta, MissionTimingAndCargoMeta,
+    };
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 96_005_099_i64;
+    ctx.db.provision_gm_account("e5rewards", "e5-rew-sec", char_id, "E5 Rewards Pilot");
+    let mut sess = SessionState::new(9699);
+    crate::common::login_pilot(&ctx, &mut sess, "e5rewards", "e5-rew-sec").await;
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    // Find an L1 Security agent in high-sec and an L1 Security agent in low-sec to verify truesec (1.6288 - true_sec)
+    let hisec_l1 = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.division_id == 24
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some_and(|sid| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&sid)
+                        .is_some_and(|ss| ss.security_status >= 0.70)
+                })
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("High-sec L1 security agent")
+        .clone();
+    let lowsec_l1 = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.level == 1
+                && a.division_id == 24
+                && a.agent_type_id == 2
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some_and(|sid| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&sid)
+                        .is_some_and(|ss| (0.05..=0.45).contains(&ss.security_status))
+                })
+        })
+        .min_by_key(|a| a.agent_id)
+        .expect("Low-sec L1 security agent")
+        .clone();
+
+    let hi_sys = hisec_l1.solar_system_id.unwrap();
+    let hi_st = hisec_l1.station_id.unwrap();
+    let hi_sec = ctx.sde.solar_systems[&hi_sys].security_status;
+    let lo_sys = lowsec_l1.solar_system_id.unwrap();
+    let lo_st = lowsec_l1.station_id.unwrap();
+    let lo_sec = ctx.sde.solar_systems[&lo_sys].security_status;
+
+    // Seed Negotiation 4 (+20% ISK & bonus), Security Connections 3 (+30% LP), plus Distribution 5 / Mining 5
+    // to prove division Connections ignores mismatched skills.
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3356 4").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3895 3").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3894 5").await;
+    crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3893 5").await;
+
+    // Helper to seed an offered WikiCatalog mission & drive Accept -> Objective -> Kill -> Complete via RPCs
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, hi_sys, hi_st).await;
+    let hi_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(hisec_l1.agent_id)).await;
+
+    // 1. Complete Wiki L1 Denial of Reconnaissance (13_777: 67,000 ISK, 64,000 bonus, 3,600s, 73 base LP) in high-sec within window
+    let now0 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(5_000_000);
+        }
+        snap.active_missions.insert(
+            (char_id, 13_777),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 13_777,
+                agent_id: hisec_l1.agent_id,
+                solar_system_id: hi_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 1,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 13_777,
+                agent_id: hisec_l1.agent_id,
+                offered_at_unix: now0,
+                offer_expiry_unix: now0 + 86_400,
+                offered_level: Some(1),
+                ..Default::default()
+            },
+        );
+    });
+
+    let acc_denial = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(hi_oid), "DoAction", &[PyRep::Integer(3), PyRep::Integer(13_777)], &kw, None)
+        .await
+        .expect("Accept 13_777");
+    assert_eq!(acc_denial.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(3_600)));
+    assert_eq!(acc_denial.dict_get("bonusExpiryUnix"), Some(&PyRep::Integer((now0 + 3_600) as i64)));
+
+    // Kill the spawned mission NPCs in space via system actor
+    let denial_balls = ctx.db.with_snapshot(|s| s.active_missions[&(char_id, 13_777)].spawned_npc_ball_ids.clone());
+    assert!(!denial_balls.is_empty());
+    let hi_handle = ctx.systems.get_or_spawn(hi_sys);
+    let lethal = eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 };
+    for bid in denial_balls {
+        hi_handle.apply_damage_with_attacker(bid, lethal, Some(char_id)).await.unwrap().unwrap();
+    }
+
+    let bal_before_denial = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
+    let lp_before_denial = ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&hisec_l1.corporation_id).copied().unwrap_or(0));
+    let j_len_before = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+
+    let done_denial = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(hi_oid), "DoAction", &[PyRep::Integer(6), PyRep::Integer(13_777)], &kw, None)
+        .await
+        .expect("Complete 13_777");
+
+    // 67,000 * 1.20 = 80,400 ISK; 64,000 * 1.20 = 76,800 bonus; 73 * (1.6288 - hi_sec) * 1.30 LP
+    let exp_denial_lp = (73.0 * (1.6288 - hi_sec).max(0.01) * 1.30).round() as i64;
+    assert_eq!(done_denial.dict_get("iskReward"), Some(&PyRep::Integer(80_400)));
+    assert_eq!(done_denial.dict_get("bonusReward"), Some(&PyRep::Integer(76_800)));
+    assert_eq!(done_denial.dict_get("lpReward"), Some(&PyRep::Integer(exp_denial_lp)));
+    assert_eq!(done_denial.dict_get("rewardItemID"), Some(&PyRep::None));
+
+    let bal_after_denial = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
+    let lp_after_denial = ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points[&hisec_l1.corporation_id]);
+    assert_eq!(bal_after_denial - bal_before_denial, (80_400 + 76_800) * 100);
+    assert_eq!(lp_after_denial - lp_before_denial, exp_denial_lp);
+
+    ctx.db.with_snapshot(|s| {
+        let entries: Vec<_> = s.wallet_journal.iter().skip(j_len_before).collect();
+        assert!(entries.iter().any(|e| e.entry_type == "agent_mission_reward" && e.amount == IskCents::from_isk(80_400)));
+        assert!(entries.iter().any(|e| e.entry_type == "agent_mission_time_bonus_reward" && e.amount == IskCents::from_isk(76_800)));
+    });
+
+    // 2. Complete Patriotic Measures (4 of 5) (13_514: 29,000 ISK, 37,000 bonus, 3,840s (64m), 35 base LP) in low-sec
+    //    AFTER advancing past 3,840s -> verifies distinct L1 reward, low-sec LP boost, and expired bonus zeroing
+    dock_pilot_at_station(&ctx, &mut sess, char_id, ship_id, lo_sys, lo_st).await;
+    let lo_oid = bind_service_oid(&ctx, &mut sess, "agentMgr", PyRep::Integer(lowsec_l1.agent_id)).await;
+    let now1 = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, 13_514),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 13_514,
+                agent_id: lowsec_l1.agent_id,
+                solar_system_id: lo_sys,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id: 13_514,
+                agent_id: lowsec_l1.agent_id,
+                offered_at_unix: now1,
+                offer_expiry_unix: now1 + 86_400,
+                offered_level: Some(1),
+                ..Default::default()
+            },
+        );
+    });
+
+    let acc_pat = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(lo_oid), "DoAction", &[PyRep::Integer(3), PyRep::Integer(13_514)], &kw, None)
+        .await
+        .expect("Accept 13_514");
+    assert_eq!(acc_pat.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(3_840)));
+
+    ctx.advance_secs(3_841);
+    let obj_exp = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(lo_oid), "GetMissionObjectiveInfo", &[PyRep::Integer(lowsec_l1.agent_id), PyRep::Integer(13_514)], &kw, None)
+        .await
+        .expect("GetMissionObjectiveInfo expired");
+    assert_eq!(obj_exp.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+
+    let bal_before_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
+    let lp_before_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&lowsec_l1.corporation_id).copied().unwrap_or(0));
+    let j_len_pat = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+
+    let done_pat = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(lo_oid), "DoAction", &[PyRep::Integer(6), PyRep::Integer(13_514)], &kw, None)
+        .await
+        .expect("Complete expired 13_514");
+
+    // 29,000 * 1.20 = 34,800 ISK; expired bonus = 0; 35 * (1.6288 - lo_sec) * 1.30 LP
+    let exp_pat_lp = (35.0 * (1.6288 - lo_sec).max(0.01) * 1.30).round() as i64;
+    assert_eq!(done_pat.dict_get("iskReward"), Some(&PyRep::Integer(34_800)));
+    assert_eq!(done_pat.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+    assert_eq!(done_pat.dict_get("lpReward"), Some(&PyRep::Integer(exp_pat_lp)));
+    assert!(exp_pat_lp > (35.0 * (1.6288 - hi_sec).max(0.01) * 1.30).round() as i64, "Low-sec true security must yield more LP per base LP than high-sec");
+
+    let bal_after_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
+    let lp_after_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points[&lowsec_l1.corporation_id]);
+    assert_eq!(bal_after_pat - bal_before_pat, 34_800 * 100);
+    assert_eq!(lp_after_pat - lp_before_pat, exp_pat_lp);
+
+    ctx.db.with_snapshot(|s| {
+        let entries: Vec<_> = s.wallet_journal.iter().skip(j_len_pat).collect();
+        assert!(entries.iter().any(|e| e.entry_type == "agent_mission_reward" && e.amount == IskCents::from_isk(34_800)));
+        assert!(!entries.iter().any(|e| e.entry_type == "agent_mission_time_bonus_reward"));
+    });
 }

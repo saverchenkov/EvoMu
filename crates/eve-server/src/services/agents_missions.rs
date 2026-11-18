@@ -573,11 +573,20 @@ pub async fn handle_with_bound(
                 .and_then(|mt| mt.offered_level)
                 .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
                 .unwrap_or(1);
+            let now = ctx.now_unix();
             let CharacterMissionRewards {
                 isk_reward,
                 lp_reward,
-                bonus_reward,
+                bonus_reward: raw_bonus_reward,
             } = compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
+            let bonus_window_secs =
+                mission_bonus_window_secs(ctx, char_id, m.agent_id, mission_id);
+            let bonus_expiry_unix = meta.as_ref().and_then(|mt| mt.bonus_expiry_unix);
+            let bonus_reward = if bonus_expiry_unix.is_some_and(|bexp| now > bexp) {
+                0
+            } else {
+                raw_bonus_reward
+            };
             let origin_sid = meta
                 .as_ref()
                 .and_then(|mt| mt.origin_station_id)
@@ -724,7 +733,11 @@ pub async fn handle_with_bound(
                 ("iskReward", PyRep::Integer(isk_reward)),
                 ("lpReward", PyRep::Integer(lp_reward)),
                 ("bonusReward", PyRep::Integer(bonus_reward)),
+                ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
             ];
+            if let Some(bexp) = bonus_expiry_unix {
+                info_fields.push(("bonusExpiryUnix", PyRep::Integer(bexp as i64)));
+            }
             if let Some(fid) = agent_faction_id {
                 info_fields.push(("factionID", PyRep::Integer(fid)));
             }
@@ -1131,6 +1144,8 @@ pub async fn handle_with_bound(
                                 lp_reward,
                                 bonus_reward,
                             } = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
+                            let bonus_window_secs =
+                                mission_bonus_window_secs(ctx, char_id, agent_id, mission_id);
                             ctx.emit_typed(
                                 NotificationTarget::Character(char_id),
                                 OnAgentMissionChange {
@@ -1162,6 +1177,7 @@ pub async fn handle_with_bound(
                                 ("iskReward", PyRep::Integer(isk_reward)),
                                 ("lpReward", PyRep::Integer(lp_reward)),
                                 ("bonusReward", PyRep::Integer(bonus_reward)),
+                                ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
                                 ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                             ];
                             if let Some(dsid) = dest_sid {
@@ -1271,7 +1287,8 @@ pub async fn handle_with_bound(
 
                     let now = ctx.now_unix();
                     let accept_dur = 604_800_u64;
-                    let bonus_dur = mission_bonus_duration(agent_lvl);
+                    let bonus_dur =
+                        mission_bonus_window_secs(ctx, char_id, actual_agent_id, mission_id);
 
                     let m_info = ctx.db.with_snapshot(|snap| {
                         let m = snap.active_missions.get(&(char_id, mission_id))?;
@@ -1448,6 +1465,7 @@ pub async fn handle_with_bound(
                         ("bookmarkID", PyRep::Integer(bookmark_id)),
                         ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                         ("bonusExpiryUnix", PyRep::Integer(bonus_expiry_unix as i64)),
+                        ("bonusWindowSecs", PyRep::Integer(bonus_dur as i64)),
                         ("spawnedNpcBallID", first_npc_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                     ])))
                 }
