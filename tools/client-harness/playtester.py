@@ -2792,20 +2792,9 @@ def build_reasoning_prompt(
         else "- **Live Screenshot:** Omitted on clean fast step (scene graph below is authoritative; screenshots capture automatically on anomalies/Planner transitions)."
     )
 
-    prompt_flight_recorder = last_flight_recorder
-    if isinstance(last_flight_recorder, dict) and last_flight_recorder.get("macho_exceptions"):
-        prompt_flight_recorder = dict(last_flight_recorder)
-        prev_expected_text = str(last_flight_recorder.get("expected_ui_and_state_change") or "")
-        non_benign_macho: List[Any] = []
-        benign_macho: List[Any] = []
-        for exc_item in last_flight_recorder.get("macho_exceptions") or []:
-            if PlaytesterBugOracle.is_expected_user_error(exc_item, prev_expected_text):
-                benign_macho.append(exc_item)
-            else:
-                non_benign_macho.append(exc_item)
-        prompt_flight_recorder["macho_exceptions"] = non_benign_macho
-        if benign_macho:
-            prompt_flight_recorder["benign_macho_exceptions"] = benign_macho
+    prompt_flight_recorder = PlaytesterBugOracle.partition_flight_recorder_exceptions(
+        last_flight_recorder
+    )
 
     role_summary_line = (
         "Your character has full **GM / QA / Admin role access** (`0x7FFFFFFFFFFFFFFF`) so you can both interact with the UI like a player AND invoke GM timer-acceleration commands to test multi-hour gameplay loops (skill training, Upwell structure timers, industry jobs, cooldowns) immediately without waiting real-time."
@@ -2940,6 +2929,7 @@ Choose your next action in the `action` object according to the required JSON sc
    - **Important:** If `Previous Action Flight-Recorder` contains `persona_rotation_cleanup` (`closed_windows` / `closed_secondary_view`), the harness intentionally closed those utility windows at the start of this step after a persona rotation BEFORE capturing `ui_snapshot` and `screen.png` — do NOT mark their disappearance as `ui_state_desync` or `buggy` (`expectation_met = true` and `bug_report.should_file = false` unless there were hard errors or an unrelated mismatch).
    - **Important:** If `Previous Action Flight-Recorder` contains `suppressed_log_exceptions` (with `log_exceptions: []`), a previously-reported client Python exception fired again on the last step and was already captured earlier in this session — if the window/content remained blank or stuck behind a spinner, set `bug_report.should_file = false` unless a distinct new server/RPC error or unrelated bug occurred, and route around the failing UI element.
    - **Important:** If `Previous Action Flight-Recorder` contains `benign_macho_exceptions` (with `macho_exceptions: []`), those are expected/benign `UserError` responses already filtered by the bug oracle (such as `InventoryNotAccessible` for stale UI-cached ships at another location, `ShipInWarp`, `DockingApproach`, skill prerequisites, etc.) — do NOT set `bug_report.should_file = true` for them.
+   - **Important:** If `Previous Action Flight-Recorder` contains `benign_log_exceptions` (with `log_exceptions: []`), those are known benign CCP V24 client-only UI layout races or expected UI rejections already filtered by the bug oracle (such as `minimap.py:_ResizeSlider` `MapSlider.minimumWidth` or `marketbase.py:_OnResize` `NoneType.max` that recover cleanly on layout completion) — do NOT set `bug_report.should_file = true` or `expectation_met = false` solely for them unless a real non-benign error or broken UI occurred.
    - Otherwise, if the previous action succeeded (`ok: true`) and should have changed the UI or game state (e.g., opened a window, switched a tab, queued/completed a skill, updated wallet/inventory, changed ship movement mode, or closed a modal) and the UI state **did not update properly**, set `previous_action_verification.expectation_met = false` and describe the exact discrepancy in `discrepancy_summary`.
 2. Set `bug_report.should_file = true` whenever ANY of the following holds:
    - `previous_action_verification.expectation_met == false` (use `category: "ui_state_desync"` or `"broken_game_mechanic"` or `"blank_or_stuck_window"`).
@@ -3180,7 +3170,7 @@ You are executing **Batch Step {batch_step_idx} of {max_steps}** of the delegate
 ```
 - **Flight-Recorder, `state_diff`, & `scatters_observed`:**
 ```json
-{json.dumps(last_flight_recorder, separators=_sep, indent=_ind)}
+{json.dumps(PlaytesterBugOracle.partition_flight_recorder_exceptions(last_flight_recorder), separators=_sep, indent=_ind)}
 ```
 
 ### Step {step_num} Live Perception
@@ -3198,7 +3188,7 @@ You are executing **Batch Step {batch_step_idx} of {max_steps}** of the delegate
 ### Verification, Self-Correction & Escalation Rules
 1. **Verify Batch Step {batch_step_idx - 1} (`previous_action_verification`):**
    - If the previous action returned `ok: false` / `action_error` due to a minor widget/input mismatch (e.g. widget name changed, a benign modal/tooltip was in the way, or target needed to be locked first) AND you can self-correct it right now within this batch, set `previous_action_verification.expectation_met = true`, explain the self-correction in `reasoning`, and output the corrective `action`!
-   - **CRITICAL ESCALATION RULE:** If the previous action succeeded (`ok: true`) and **failed to update the UI or game state as expected** (silent `ui_state_desync`), OR `last_flight_recorder` contains `log_exceptions`, `quasar_errors`, or non-benign `macho_exceptions`, OR any `abort_conditions` were triggered:
+   - **CRITICAL ESCALATION RULE:** If the previous action succeeded (`ok: true`) and **failed to update the UI or game state as expected** (silent `ui_state_desync`), OR `last_flight_recorder` contains non-empty `log_exceptions`, `quasar_errors`, or non-benign `macho_exceptions` (ignore `benign_log_exceptions` / `benign_macho_exceptions`), OR any `abort_conditions` were triggered:
      - Set `previous_action_verification.expectation_met = false` with a detailed `discrepancy_summary`.
      - Set `batch_status = "escalate"` and explain why in `escalation_reason` so the Parent Planner (`{DEFAULT_MODEL_CHAIN[0]}`) immediately takes over to diagnose and file the bug!
 2. **Otherwise (`expectation_met = true`):**
@@ -5148,6 +5138,103 @@ class PlaytesterBugOracle:
             return True
         return any(m in err_low for m in cls.BENIGN_USER_ERROR_MARKERS)
 
+    @classmethod
+    def _extract_log_exception_parts(
+        cls, entry: Any, fallback_trace: str = ""
+    ) -> Tuple[str, str, str]:
+        """Return `(headline, trace, full_tb)` for a `log_exceptions` dict or raw string."""
+        if isinstance(entry, dict):
+            hl = str(entry.get("headline") or "").strip()
+            tr = str(entry.get("trace") or "").strip() or fallback_trace
+            full_tb = tr or hl or fallback_trace
+        else:
+            raw_s = str(entry).strip()
+            if "\n" in raw_s or raw_s.startswith(("STACKTRACE", "Traceback (most recent call last)")):
+                hl = ""
+                tr = raw_s
+            else:
+                hl = raw_s
+                tr = fallback_trace
+            full_tb = tr or hl or fallback_trace
+        if (
+            cls._is_tb_noise_line(hl)
+            or "\n" in hl
+            or hl.startswith(("STACKTRACE", "Traceback (most recent call last)"))
+        ):
+            hl = ""
+        if hl:
+            hl = cls._strip_build_path_prefix(hl)
+            if 'File "' in hl:
+                hl = cls._format_concise_frame(hl)
+        if not hl:
+            hl = cls._extract_tb_headline(full_tb)
+        return hl, tr, full_tb
+
+    @classmethod
+    def partition_log_exceptions(
+        cls, entries: Any, expected_text: str = "", fallback_trace: str = ""
+    ) -> Tuple[List[Any], List[Any]]:
+        """Split `log_exceptions` into `(non_benign, ignorable_benign)` via `is_ignorable_client_traceback`."""
+        non_benign: List[Any] = []
+        benign: List[Any] = []
+        for entry in entries or []:
+            hl, _, full_tb = cls._extract_log_exception_parts(entry, fallback_trace=fallback_trace)
+            if cls.is_ignorable_client_traceback(hl, full_tb, expected_text):
+                benign.append(entry)
+            else:
+                non_benign.append(entry)
+        return non_benign, benign
+
+    @classmethod
+    def _all_entries_match_benign_client_race(
+        cls, entries: Any, fallback_trace: str = ""
+    ) -> bool:
+        """Return True iff `entries` is non-empty and every entry is a known CCP V24 client UI layout race."""
+        items = list(entries or [])
+        if not items:
+            return False
+        for entry in items:
+            hl, _, full_tb = cls._extract_log_exception_parts(entry, fallback_trace=fallback_trace)
+            if not cls.is_benign_client_traceback(hl, full_tb):
+                return False
+        return True
+
+    @classmethod
+    def partition_flight_recorder_exceptions(
+        cls, flight_recorder: Any, expected_text: str = ""
+    ) -> Any:
+        """Return a non-mutating copy of `flight_recorder` moving benign `macho_exceptions` and `log_exceptions` out of hard lists."""
+        if not isinstance(flight_recorder, dict):
+            return flight_recorder
+        raw_macho = flight_recorder.get("macho_exceptions")
+        raw_logs = flight_recorder.get("log_exceptions")
+        if not raw_macho and not raw_logs:
+            return flight_recorder
+        resolved_expected = expected_text or str(
+            flight_recorder.get("expected_ui_and_state_change") or ""
+        )
+        out = dict(flight_recorder)
+        if raw_macho:
+            non_benign_macho: List[Any] = []
+            benign_macho: List[Any] = list(out.get("benign_macho_exceptions") or [])
+            for exc_item in raw_macho:
+                if cls.is_expected_user_error(exc_item, resolved_expected):
+                    benign_macho.append(exc_item)
+                else:
+                    non_benign_macho.append(exc_item)
+            out["macho_exceptions"] = non_benign_macho
+            if benign_macho:
+                out["benign_macho_exceptions"] = benign_macho
+        if raw_logs:
+            non_benign_logs, benign_logs = cls.partition_log_exceptions(
+                raw_logs, expected_text=resolved_expected
+            )
+            combined_benign_logs = list(out.get("benign_log_exceptions") or []) + benign_logs
+            out["log_exceptions"] = non_benign_logs
+            if combined_benign_logs:
+                out["benign_log_exceptions"] = combined_benign_logs
+        return out
+
     def evaluate_step(
         self,
         step_num: int,
@@ -5184,12 +5271,23 @@ class PlaytesterBugOracle:
         fr_log_excs = fr.get("log_exceptions") or []
         fr_quasar_errs = fr.get("quasar_errors") or []
         fr_macho_excs = fr.get("macho_exceptions") or []
+        expected_text = str((decision.get("action") or {}).get("expected_ui_and_state_change") or "")
+        fr_fallback_trace = new_tb if len(fr_log_excs) == 1 else ""
+        fr_non_benign_log_excs, fr_ignorable_log_excs = self.partition_log_exceptions(
+            fr_log_excs,
+            expected_text=expected_text,
+            fallback_trace=fr_fallback_trace,
+        )
         warp_telemetry = exec_res.get("warp_telemetry") if isinstance(exec_res, dict) else None
 
         prev_fr = last_flight_recorder if isinstance(last_flight_recorder, dict) else {}
-        prev_log_excs = prev_fr.get("log_exceptions") or []
-        prev_suppressed_log_excs = prev_fr.get("suppressed_log_exceptions") or []
         prev_expected_text = str(prev_fr.get("expected_ui_and_state_change") or "")
+        prev_log_excs, prev_ignorable_log_excs = self.partition_log_exceptions(
+            prev_fr.get("log_exceptions") or [],
+            expected_text=prev_expected_text,
+        )
+        prev_all_benign_logs = list(prev_fr.get("benign_log_exceptions") or []) + prev_ignorable_log_excs
+        prev_suppressed_log_excs = prev_fr.get("suppressed_log_exceptions") or []
         prev_quasar_errs = [e for e in (prev_fr.get("quasar_errors") or []) if isinstance(e, dict)]
         prev_non_benign_macho_excs = [
             e
@@ -5197,14 +5295,17 @@ class PlaytesterBugOracle:
             if isinstance(e, dict) and not self.is_expected_user_error(e, prev_expected_text)
         ]
         prev_tb_parts: List[str] = []
-        if prev_fr.get("traceback"):
-            prev_tb_parts.append(str(prev_fr.get("traceback")))
+        raw_prev_tb = str(prev_fr.get("traceback") or "").strip()
+        if raw_prev_tb and not self.is_ignorable_client_traceback("", raw_prev_tb, prev_expected_text):
+            prev_tb_parts.append(raw_prev_tb)
         for ple in prev_log_excs:
             if isinstance(ple, dict):
                 if ple.get("headline"):
                     prev_tb_parts.append(str(ple.get("headline")))
                 if ple.get("trace"):
                     prev_tb_parts.append(str(ple.get("trace")))
+            elif ple:
+                prev_tb_parts.append(str(ple))
         prev_tb = "\n".join(prev_tb_parts).strip()
         prev_action_err = str(prev_fr.get("action_error") or "").strip()
 
@@ -5214,44 +5315,21 @@ class PlaytesterBugOracle:
 
         # 1. Hard client Python traceback (hook-reported deduplicated log_exceptions, plus any unseen
         # traceback block in client_tracebacks.log not already seen in this client session)
-        expected_text = str((decision.get("action") or {}).get("expected_ui_and_state_change") or "")
         if fr_log_excs:
             seen_item_keys = set()
             for e in fr_log_excs[:8]:
-                if isinstance(e, dict):
-                    hl = str(e.get("headline") or "").strip()
-                    tr = str(e.get("trace") or "").strip() or (new_tb if len(fr_log_excs) == 1 else "")
-                else:
-                    raw_s = str(e).strip()
-                    if "\n" in raw_s or raw_s.startswith(("STACKTRACE", "Traceback (most recent call last)")):
-                        hl = ""
-                        tr = raw_s
-                    else:
-                        hl = raw_s
-                        tr = new_tb if len(fr_log_excs) == 1 else ""
-                full_tb = tr or hl or new_tb
+                hl, tr, full_tb = self._extract_log_exception_parts(e, fallback_trace=fr_fallback_trace)
                 sig = self._tb_frame_sig(full_tb)
                 if sig:
                     self._seen_tb_sigs.add(sig)
-                if (
-                    self._is_tb_noise_line(hl)
-                    or "\n" in hl
-                    or hl.startswith(("STACKTRACE", "Traceback (most recent call last)"))
-                ):
-                    hl = ""
-                if hl:
-                    hl = self._strip_build_path_prefix(hl)
-                    if 'File "' in hl:
-                        hl = self._format_concise_frame(hl)
-                if not hl:
-                    hl = self._extract_tb_headline(full_tb)
                 if self.is_ignorable_client_traceback(hl, full_tb, expected_text):
                     continue
                 item_key = (hl[:120], sig)
                 if item_key in seen_item_keys:
                     continue
                 seen_item_keys.add(item_key)
-                clean_tb = self._strip_build_path_prefix(tr or (json.dumps(e, indent=2) if isinstance(e, dict) else raw_s))
+                raw_fallback = json.dumps(e, indent=2) if isinstance(e, dict) else str(e).strip()
+                clean_tb = self._strip_build_path_prefix(tr or raw_fallback)
                 incidents.append(
                     {
                         "kind": "client_traceback",
@@ -5401,7 +5479,7 @@ class PlaytesterBugOracle:
                 and (
                     last_flight_recorder.get("quasar_errors")
                     or last_flight_recorder.get("macho_exceptions")
-                    or last_flight_recorder.get("log_exceptions")
+                    or prev_log_excs
                 )
             )
         )
@@ -5428,11 +5506,37 @@ class PlaytesterBugOracle:
             elif (
                 prev_log_excs
                 and not self._prev_step_dropped_all_log_excs
-                and not fr_log_excs
+                and not fr_non_benign_log_excs
                 and cat in ("client_exception", "client_traceback", "client_crash")
             ):
                 log_info(
                     f"Step {step_num}: Suppressing redundant agent bug_report ({cat}) because Channel 1 already captured previous step log_exceptions"
+                )
+            elif (
+                cat in ("client_exception", "client_traceback", "client_crash")
+                and not prev_log_excs
+                and not prev_tb
+                and not prev_quasar_errs
+                and not prev_non_benign_macho_excs
+                and (
+                    self._all_entries_match_benign_client_race(prev_all_benign_logs)
+                    or (
+                        not fr_non_benign_log_excs
+                        and self._all_entries_match_benign_client_race(
+                            fr_ignorable_log_excs, fr_fallback_trace
+                        )
+                    )
+                    or self.is_benign_client_traceback(
+                        str(br.get("title") or ""),
+                        "\n".join(
+                            str(br.get(k) or "")
+                            for k in ("title", "actual_behavior", "expected_behavior", "subsystem")
+                        ),
+                    )
+                )
+            ):
+                log_info(
+                    f"Step {step_num}: Suppressing agent bug_report ({cat}) because log_exceptions contained only benign client UI layout race(s)"
                 )
             elif (
                 (prev_quasar_errs or prev_non_benign_macho_excs)
@@ -7102,25 +7206,23 @@ class PlaytesterRunner:
         log_step_header(step_num, git_head, self.memory, ui_snapshot)
 
         # Pre-compute hybrid branch & whether a pre-action screenshot is actually needed
+        non_benign_log_excs: List[Any] = []
         non_benign_macho_excs: List[Any] = []
         fr_has_hard_error = False
         need_planner = False
         next_step_spec: Dict[str, Any] = {}
         if self.hybrid_mode:
-            non_benign_macho_excs = (
-                [
-                    e
-                    for e in (last_flight_recorder.get("macho_exceptions") or [])
-                    if not PlaytesterBugOracle.is_expected_user_error(e)
-                ]
-                if isinstance(last_flight_recorder, dict)
-                else []
+            sanitized_prev_fr = PlaytesterBugOracle.partition_flight_recorder_exceptions(
+                last_flight_recorder
             )
+            if isinstance(sanitized_prev_fr, dict):
+                non_benign_log_excs = list(sanitized_prev_fr.get("log_exceptions") or [])
+                non_benign_macho_excs = list(sanitized_prev_fr.get("macho_exceptions") or [])
             fr_has_hard_error = bool(
-                isinstance(last_flight_recorder, dict)
+                isinstance(sanitized_prev_fr, dict)
                 and (
-                    last_flight_recorder.get("log_exceptions")
-                    or last_flight_recorder.get("quasar_errors")
+                    non_benign_log_excs
+                    or sanitized_prev_fr.get("quasar_errors")
                     or non_benign_macho_excs
                 )
             )
@@ -7228,7 +7330,7 @@ class PlaytesterRunner:
                         "trigger": "flight_recorder_exception",
                         "batch_id": self.batch_id,
                         "batch_step_index": self.batch_step_index,
-                        "log_exceptions": last_flight_recorder.get("log_exceptions"),
+                        "log_exceptions": non_benign_log_excs,
                         "quasar_errors": last_flight_recorder.get("quasar_errors"),
                         "macho_exceptions": non_benign_macho_excs,
                         "action_error": last_flight_recorder.get("action_error"),
@@ -7685,15 +7787,23 @@ class PlaytesterRunner:
 
         # Fast post-action assertion & error check for deterministic escalation
         post_fr = (exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {}
-        post_non_benign_macho = [
-            e
-            for e in (post_fr.get("macho_exceptions") or [])
-            if not PlaytesterBugOracle.is_expected_user_error(
-                e, str(action.get("expected_ui_and_state_change") or "")
-            )
-        ]
+        post_expected_text = str(action.get("expected_ui_and_state_change") or "")
+        sanitized_post_fr = PlaytesterBugOracle.partition_flight_recorder_exceptions(
+            post_fr,
+            expected_text=post_expected_text,
+        )
+        post_non_benign_logs = (
+            list(sanitized_post_fr.get("log_exceptions") or [])
+            if isinstance(sanitized_post_fr, dict)
+            else []
+        )
+        post_non_benign_macho = (
+            list(sanitized_post_fr.get("macho_exceptions") or [])
+            if isinstance(sanitized_post_fr, dict)
+            else []
+        )
         post_hard_error = bool(
-            post_fr.get("log_exceptions")
+            post_non_benign_logs
             or post_fr.get("quasar_errors")
             or post_non_benign_macho
         )
@@ -7704,7 +7814,7 @@ class PlaytesterRunner:
         )
         step_act_err = str(exec_res.get("action_error") or "").strip() if isinstance(exec_res, dict) else ""
         benign_reject = PlaytesterBugOracle.is_expected_user_error(
-            step_act_err, str(action.get("expected_ui_and_state_change") or "")
+            step_act_err, post_expected_text
         )
         if not assert_ok and not benign_reject:
             log_warn(f"Step {step_num}: post-action assertion failed -> {assert_err}")
@@ -7721,7 +7831,7 @@ class PlaytesterRunner:
                     "action_ok": exec_res.get("action_ok", True),
                     "action_error": step_act_err,
                     "assertion_failure": "" if assert_ok else assert_err,
-                    "log_exceptions": post_fr.get("log_exceptions"),
+                    "log_exceptions": post_non_benign_logs,
                     "quasar_errors": post_fr.get("quasar_errors"),
                     "macho_exceptions": post_non_benign_macho,
                 }
@@ -7803,6 +7913,10 @@ class PlaytesterRunner:
             fr_delta["traceback"] = exec_res["traceback"]
         if not assert_ok and not benign_reject:
             fr_delta["assertion_failure"] = assert_err
+        fr_delta = PlaytesterBugOracle.partition_flight_recorder_exceptions(
+            fr_delta,
+            expected_text=str(action.get("expected_ui_and_state_change") or ""),
+        )
         return fr_delta, burst_paths
 
     def run(self) -> int:
