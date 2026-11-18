@@ -93,7 +93,7 @@ fn valuation_broker_fees_skill_reductions_and_extract_skin_hex_edges() {
         5_000_000
     );
 
-    // Skill reductions & Paragon Hub tax rates
+    // Skill reductions & Paragon Hub tax rates: non-trading SKINR skills (82664/82665) give (0, 1)
     let (_router, db, _skinr, state) = new_market_harness();
     let cid = 90_000_001i64;
     db.with_mut_snapshot(|s| {
@@ -101,9 +101,19 @@ fn valuation_broker_fees_skill_reductions_and_extract_skin_hex_edges() {
         skills.insert(82665, TrainedSkillRecord { type_id: 82665, level: 5, skill_points: 256_000.0 });
         skills.insert(82664, TrainedSkillRecord { type_id: 82664, level: 5, skill_points: 256_000.0 });
     });
+    assert_eq!(paragon_hub_skill_reductions(&state, cid as u32), (0, 1));
+    assert_eq!(paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Public), 20);
+
+    // Training Paragon Relations/Partnership/Executive (84217/84218/84220) + Hub Promotion/Alg Opt (81368/81369) Lv5 -> (15, 30)
+    db.with_mut_snapshot(|s| {
+        let skills = s.skills.entry(cid).or_default();
+        for sid in [84217u32, 84218, 84220, 81368, 81369] {
+            skills.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+    });
     let (tax_red, max_list) = paragon_hub_skill_reductions(&state, cid as u32);
-    assert!(tax_red <= 15);
-    assert!(max_list >= 5);
+    assert_eq!(tax_red, 15);
+    assert_eq!(max_list, 30);
     assert_eq!(paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Character(1)), 30);
     assert_eq!(paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Corporation(1)), 10);
     assert_eq!(paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Alliance(1)), 10);

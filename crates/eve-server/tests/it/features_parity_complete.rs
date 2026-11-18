@@ -4836,6 +4836,44 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(5501, make_item(5501, 587, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        let mut bpo = make_item(5502, 681, char_id, station_id, InventoryFlag::Hangar, 1, true);
+        bpo.dynamic_attributes.insert(1112, 4.0);
+        bpo.dynamic_attributes.insert(1113, 8.0);
+        snap.items.insert(5502, bpo);
+        snap.industry_jobs.insert(
+            9901,
+            eve_db::IndustryJobRecord {
+                job_id: 9901,
+                installer_id: char_id,
+                facility_id: station_id,
+                blueprint_item_id: 5502,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 3,
+                product_type_id: 587,
+                status: "Active".to_string(),
+                duration_seconds: 3_600,
+                start_unix: 1_760_000_000,
+                blueprint_location_id: station_id,
+                output_location_id: station_id,
+                cost: Some(25_000.0),
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            4401,
+            eve_db::ContractRecord {
+                contract_id: 4401,
+                issuer_id: char_id,
+                issuer_corp_id: 98_000_001,
+                contract_type: "ItemExchange".to_string(),
+                availability: "Public".to_string(),
+                price: IskCents::from_isk(2_500_000),
+                reward: IskCents::ZERO,
+                expiration_unix: 1_800_000_000,
+                ..Default::default()
+            },
+        );
         snap.market_orders.insert(
             7101,
             MarketOrderRecord {
@@ -4934,13 +4972,29 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
     });
     assert!(has_rifter, "GetShipAssetsResponse must contain seeded ship item 5501 (Rifter type 587 at station)");
 
-    // 4. Industry & Blueprints: Blueprint list, facility details, and system cost indices
+    // 4. Industry & Blueprints: Blueprint list, active job, facility details, and system cost indices
     let bp_rsp = send_quasar(&ctx, &mut sess, "eve.character.industry.blueprints.GetRequest", char_payload.clone(), b"q6-08").await;
     assert_eq!(bp_rsp.internal_origin, "evomu.quasar.public_gateway");
-    assert!(bp_rsp.payload.as_ref().unwrap().type_url.ends_with("blueprints.GetResponse"));
+    let bp_pl = bp_rsp.payload.as_ref().expect("blueprints payload");
+    assert!(bp_pl.type_url.ends_with("blueprints.GetResponse"));
+    let bp_wm = eve_proto::quasar::WireMessage::decode(&bp_pl.value).expect("decode blueprints");
+    let bp_entry = crate::quasar_goal_tale_notices::sub(&bp_wm, 1);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&bp_entry, 1), 1), Some(5502));
+    let bp_attrs = crate::quasar_goal_tale_notices::sub(&bp_entry, 2);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&bp_attrs, 1), 1), Some(681));
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&bp_attrs, 2), Some(4));
+
+    let ind_job_rsp = send_quasar(&ctx, &mut sess, "eve.character.industry.job.GetRequest", char_payload.clone(), b"q6-08j").await;
+    let ind_job_wm = eve_proto::quasar::WireMessage::decode(&ind_job_rsp.payload.as_ref().unwrap().value).expect("decode jobs");
+    let first_job = crate::quasar_goal_tale_notices::sub(&ind_job_wm, 1);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&first_job, 1), 1), Some(9901));
+
     let fac_rsp = send_quasar(&ctx, &mut sess, "eve.industry.facility.GetRequest", Vec::new(), b"q6-09").await;
     assert_eq!(fac_rsp.internal_origin, "evomu.quasar.public_gateway");
-    assert!(fac_rsp.payload.as_ref().unwrap().type_url.ends_with("facility.GetResponse"));
+    let fac_wm = eve_proto::quasar::WireMessage::decode(&fac_rsp.payload.as_ref().unwrap().value).expect("decode facility");
+    let fac_entry = crate::quasar_goal_tale_notices::sub(&fac_wm, 1);
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&fac_entry, 1), 1), Some(station_id as u64));
+
     let sys_cost_rsp = send_quasar(&ctx, &mut sess, "eve.industry.system.GetCostIndicesRequest", Vec::new(), b"q6-10").await;
     assert_eq!(sys_cost_rsp.internal_origin, "evomu.quasar.public_gateway");
     let cost_pl = sys_cost_rsp.payload.as_ref().expect("cost indices payload");
@@ -4948,6 +5002,7 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
     let cost_wm = eve_proto::quasar::WireMessage::decode(&cost_pl.value).expect("decode cost indices");
     let cost_entry = crate::quasar_goal_tale_notices::sub(&cost_wm, 1);
     assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&cost_entry, 1), 1), Some(u64::from(sys_id)));
+    assert!(cost_entry.fields.iter().any(|f| f.field_number == 2), "cost_indices must carry activity indices");
 
     // 5. Accounting & Contracts
     let entry_type_rsp = send_quasar(&ctx, &mut sess, "eve.accounting.entrytype.GetAllRequest", Vec::new(), b"q6-11").await;
@@ -4960,12 +5015,20 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
     assert!(journal_rsp.payload.as_ref().unwrap().type_url.ends_with("GetCharacterEntriesResponse"));
 
     let mut contract_payload = Vec::new();
-    encode_id_field(1, 1, &mut contract_payload);
+    encode_id_field(1, 4401, &mut contract_payload);
     let contract_rsp = send_quasar(&ctx, &mut sess, "eve.contract.item_exchange.GetRequest", contract_payload, b"q6-13").await;
     assert_eq!(contract_rsp.internal_origin, "evomu.quasar.public_gateway");
-    assert!(contract_rsp.payload.as_ref().unwrap().type_url.ends_with("item_exchange.GetResponse"));
+    let contract_wm = eve_proto::quasar::WireMessage::decode(&contract_rsp.payload.as_ref().unwrap().value).expect("decode contract");
+    let contract_attrs = crate::quasar_goal_tale_notices::sub(&contract_wm, 1);
+    let raw_price_units = crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&contract_attrs, 8), 1);
+    let decoded_price_isk = raw_price_units.map(|v| ((v >> 1) as i64) ^ (-((v & 1) as i64)));
+    assert_eq!(
+        decoded_price_isk,
+        Some(2_500_000),
+        "Seeded contract 4401 sint64 price must decode as 2,500,000 ISK"
+    );
 
-    // 6. Planetary, Moon & Asteroid Belt
+    // 6. Planetary, Moon & Asteroid Belt (real SDE data)
     let mut sys_payload = Vec::new();
     encode_id_field(1, sys_id as u64, &mut sys_payload);
     let planets_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetPlanetsInSolarSystemRequest", sys_payload, b"q6-14").await;
@@ -4976,37 +5039,48 @@ async fn test_plan_q6_economy_and_industry_quasar_packages() {
     assert_eq!(planets_wm.fields.iter().filter(|f| f.field_number == 1).count(), 8);
 
     let mut pln_payload = Vec::new();
-    encode_id_field(1, 40_000_001, &mut pln_payload);
-    let pln_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetRequest", pln_payload.clone(), b"q6-15").await;
+    encode_id_field(1, 40_000_002, &mut pln_payload);
+    let pln_rsp = send_quasar(&ctx, &mut sess, "eve.planet.GetRequest", pln_payload, b"q6-15").await;
     assert_eq!(pln_rsp.internal_origin, "evomu.quasar.public_gateway");
     let pln_wm = eve_proto::quasar::WireMessage::decode(&pln_rsp.payload.as_ref().unwrap().value).expect("decode planet");
     let pln_attrs = crate::quasar_goal_tale_notices::sub(&pln_wm, 1);
-    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&pln_attrs, 1), 1), Some(u64::from(sys_id)));
+    assert_eq!(crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&pln_attrs, 1), 1), Some(30_000_001));
     assert_eq!(
         pln_attrs.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
-        Some("Planet #40000001")
+        Some("Tanoo I")
     );
 
-    let pi_schem_rsp = send_quasar(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", pln_payload.clone(), b"q6-16").await;
+    let mut sch_payload = Vec::new();
+    encode_id_field(1, 65, &mut sch_payload);
+    let pi_schem_rsp = send_quasar(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", sch_payload, b"q6-16").await;
     assert_eq!(pi_schem_rsp.internal_origin, "evomu.quasar.public_gateway");
-    assert!(pi_schem_rsp.payload.as_ref().unwrap().type_url.ends_with("schematic.GetResponse"));
+    let sch_wm = eve_proto::quasar::WireMessage::decode(&pi_schem_rsp.payload.as_ref().unwrap().value).expect("decode schematic");
+    let sch_attrs = crate::quasar_goal_tale_notices::sub(&sch_wm, 1);
+    assert_eq!(
+        sch_attrs.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
+        Some("Superconductors")
+    );
 
-    let moon_rsp = send_quasar(&ctx, &mut sess, "eve.moon.GetRequest", pln_payload.clone(), b"q6-17").await;
+    let mut moon_payload = Vec::new();
+    encode_id_field(1, 40_009_081, &mut moon_payload);
+    let moon_rsp = send_quasar(&ctx, &mut sess, "eve.moon.GetRequest", moon_payload, b"q6-17").await;
     assert_eq!(moon_rsp.internal_origin, "evomu.quasar.public_gateway");
     let moon_wm = eve_proto::quasar::WireMessage::decode(&moon_rsp.payload.as_ref().unwrap().value).expect("decode moon");
     let moon_attrs = crate::quasar_goal_tale_notices::sub(&moon_wm, 1);
     assert_eq!(
         moon_attrs.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
-        Some("Moon #40000001")
+        Some("Jita III - Moon 1")
     );
 
-    let belt_rsp = send_quasar(&ctx, &mut sess, "eve.asteroidbelt.GetRequest", pln_payload, b"q6-18").await;
+    let mut belt_payload = Vec::new();
+    encode_id_field(1, 40_000_003, &mut belt_payload);
+    let belt_rsp = send_quasar(&ctx, &mut sess, "eve.asteroidbelt.GetRequest", belt_payload, b"q6-18").await;
     assert_eq!(belt_rsp.internal_origin, "evomu.quasar.public_gateway");
     let belt_wm = eve_proto::quasar::WireMessage::decode(&belt_rsp.payload.as_ref().unwrap().value).expect("decode belt");
     let belt_attrs = crate::quasar_goal_tale_notices::sub(&belt_wm, 1);
     assert_eq!(
         belt_attrs.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).map(|b| String::from_utf8_lossy(b).into_owned()).as_deref(),
-        Some("Asteroid Belt #40000001")
+        Some("Tanoo I - Asteroid Belt 1")
     );
 }
 }
@@ -5415,28 +5489,47 @@ async fn test_plan_esi7_fleets_and_ui_navigation() {
 async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     eve_testkit::attest(&["plan:Q-9"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.balance = IskCents::from_isk(50_000_000);
+            ch.plex_balance = 5_000;
+        }
+    });
 
-    // 1. Quasar cosmetic market fee endpoints
+    // 1. Quasar cosmetic market fee & tax endpoints (decoded canonical fee/tax payloads)
+    let mut pub_target = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 1, &mut pub_target);
+    let mut target_req = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &pub_target, &mut target_req);
+
     let fee_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-        Vec::new(),
+        target_req.clone(),
     )
     .await;
     assert_eq!(fee_rsp.status_code, STATUS_OK);
+    let fee_wm = eve_proto::quasar::WireMessage::decode(&fee_rsp.payload.expect("fee payload").value).expect("decode fee");
+    let fee_entry = crate::quasar_goal_tale_notices::sub(&fee_wm, 1);
+    let fee_isk = crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&fee_entry, 2), 1);
+    assert!(fee_isk.is_some(), "GetBrokerFeesResponse must contain broker_fees entries");
 
     let tax_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve_public.cosmetic.market.api.GetTaxRateRequest",
-        Vec::new(),
+        target_req.clone(),
     )
     .await;
     assert_eq!(tax_rsp.status_code, STATUS_OK);
+    let tax_wm = eve_proto::quasar::WireMessage::decode(&tax_rsp.payload.expect("tax payload").value).expect("decode tax");
+    let zigzag_tax = crate::quasar_goal_tale_notices::varint(&crate::quasar_goal_tale_notices::sub(&tax_wm, 1), 1).expect("tax units");
+    assert_eq!((zigzag_tax >> 1) as i64, 20, "Untrained public Paragon Hub tax rate must be 20%");
 
-    // 2. Component and SKIN listings endpoints
+    // 2. Component listings endpoints backed by SDE group 4726
     let comp_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -5466,16 +5559,83 @@ async fn test_plan_q9_cosmetics_and_app_infrastructure() {
         "Seeded component listing must reference an authentic SDE group 4726 type"
     );
 
-    let skin_rsp = quasar_rpc(
+    // 3. Finite sequencing job -> CompleteEarly -> Paragon Hub SKIN listing CRUD
+    let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
+    let coat_comp = skinr_cat
+        .components
+        .values()
+        .find(|c| {
+            c.category == eve_server::services::quasar_cosmetics_skinr::COMP_CAT_MATERIAL
+                && !c.disallowed_slots.contains(&1)
+        })
+        .expect("SDE SKINR material component")
+        .component_id;
+
+    let mut comp_id_msg = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, coat_comp as u64, &mut comp_id_msg);
+    let mut comp_kind_msg = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &comp_id_msg, &mut comp_kind_msg);
+    let mut grant_req = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &comp_kind_msg, &mut grant_req);
+    eve_proto::quasar::encode_varint_field(2, 2, &mut grant_req);
+
+    sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let grant_rsp = quasar_rpc(
         &ctx,
         &mut sess,
-        "eve_public.cosmetic.market.skin.listing.api.GetAllRequest",
-        Vec::new(),
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.finite.api.admin.GrantRequest",
+        grant_req,
     )
     .await;
-    assert_eq!(skin_rsp.status_code, STATUS_OK);
+    assert_eq!(grant_rsp.status_code, STATUS_OK);
+    sess.role = 0;
 
-    // 3. Sequencing active jobs endpoint
+    let mut s_idx = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 1, &mut s_idx);
+    let mut c_idx = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, coat_comp as u64, &mut c_idx);
+    let mut coat_cfg = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &c_idx, &mut coat_cfg);
+    let mut cfg_outer = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &coat_cfg, &mut cfg_outer);
+    let mut slot_msg = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &s_idx, &mut slot_msg);
+    eve_proto::quasar::encode_bytes_field(2, &cfg_outer, &mut slot_msg);
+    let mut ship_type_msg = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 587, &mut ship_type_msg);
+    let mut layout_msg = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &slot_msg, &mut layout_msg);
+    eve_proto::quasar::encode_bytes_field(2, &ship_type_msg, &mut layout_msg);
+    eve_proto::quasar::encode_varint_field(3, 1, &mut layout_msg);
+
+    let mut init_req = Vec::new();
+    eve_proto::quasar::encode_string_field(1, "Q9 Closure Rifter", &mut init_req);
+    eve_proto::quasar::encode_string_field(2, "Paragon Closure", &mut init_req);
+    eve_proto::quasar::encode_bytes_field(3, &layout_msg, &mut init_req);
+    eve_proto::quasar::encode_varint_field(5, 1, &mut init_req);
+
+    let init_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        init_req,
+    )
+    .await;
+    assert_eq!(init_rsp.status_code, STATUS_OK);
+    let init_wm = eve_proto::quasar::WireMessage::decode(&init_rsp.payload.expect("init payload").value).expect("decode init");
+    let init_attrs = crate::quasar_goal_tale_notices::sub(&init_wm, 2);
+    let skin_hex = String::from_utf8(
+        crate::quasar_goal_tale_notices::sub(&init_attrs, 1)
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_bytes())
+            .unwrap_or(&[])
+            .to_vec(),
+    )
+    .expect("skin hex");
+    assert!(!skin_hex.is_empty(), "Sequencing job must produce non-empty skin hex");
+
     let job_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -5484,6 +5644,58 @@ async fn test_plan_q9_cosmetics_and_app_infrastructure() {
     )
     .await;
     assert_eq!(job_rsp.status_code, STATUS_OK);
+    let jobs_wm = eve_proto::quasar::WireMessage::decode(&job_rsp.payload.expect("active jobs").value).expect("decode jobs");
+    assert!(!jobs_wm.fields.is_empty(), "Active sequencing job must be visible in GetAllActiveResponse");
+
+    let early_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(early_rsp.status_code, STATUS_OK);
+
+    let mut skin_id_msg = Vec::new();
+    eve_proto::quasar::encode_string_field(1, &skin_hex, &mut skin_id_msg);
+    let mut seq_cid = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 90_000_001, &mut seq_cid);
+    let mut lic_id = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &seq_cid, &mut lic_id);
+    eve_proto::quasar::encode_bytes_field(2, &skin_id_msg, &mut lic_id);
+    let mut isk_val = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 2_000_000, &mut isk_val);
+    let mut dur_msg = Vec::new();
+    eve_proto::quasar::encode_varint_field(1, 86_400, &mut dur_msg);
+    let mut create_req = Vec::new();
+    eve_proto::quasar::encode_bytes_field(1, &isk_val, &mut create_req);
+    eve_proto::quasar::encode_bytes_field(3, &lic_id, &mut create_req);
+    eve_proto::quasar::encode_bytes_field(4, &dur_msg, &mut create_req);
+    eve_proto::quasar::encode_varint_field(5, 1, &mut create_req);
+    eve_proto::quasar::encode_bytes_field(6, &pub_target, &mut create_req);
+
+    let create_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        create_req,
+    )
+    .await;
+    assert_eq!(create_rsp.status_code, STATUS_OK);
+
+    let skin_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.market.skin.listing.api.GetAllRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(skin_rsp.status_code, STATUS_OK);
+    let skin_bytes = skin_rsp.payload.expect("skin listings payload").value;
+    assert!(
+        String::from_utf8_lossy(&skin_bytes).contains(&skin_hex),
+        "Paragon Hub SKIN listing GetAllResponse must include listed skin {skin_hex}"
+    );
 }
 
 // parity: plan:Z-3

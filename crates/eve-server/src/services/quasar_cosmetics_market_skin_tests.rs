@@ -11,7 +11,7 @@ use crate::quasar_gateway::{
 use crate::services::quasar_cosmetics_skinr::{
     SequencingJobRecord, SkinDesignRecord, SkinrCosmeticsState, ThirdPartySkinLicense,
 };
-use eve_db::IskCents;
+use eve_db::{IskCents, TrainedSkillRecord};
 use eve_machonet::service_roles;
 use eve_proto::pb;
 use eve_proto::quasar::{
@@ -151,6 +151,24 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         .set("quantity", 2u32)
         .set("target.corporation.sequential", corp_a as u32)
         .must_encode();
+    // Untrained Hub Promotion / Alg Optimization (81368/81369 Lv 0) caps active listings at 1.
+    assert_eq!(
+        call(
+            &router,
+            &seller_sess,
+            "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+            req_corp_create.clone(),
+            now + 1,
+        )
+        .status_code,
+        STATUS_PRECONDITION_FAILED
+    );
+    db.with_mut_snapshot(|s| {
+        s.skills.entry(seller).or_default().insert(
+            81368,
+            TrainedSkillRecord { type_id: 81368, level: 1, skill_points: 250.0 },
+        );
+    });
     assert_eq!(
         call(
             &router,
@@ -386,7 +404,8 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
     );
     db.with_snapshot(|s| {
         assert_eq!(s.unified_plex_balance(buyer_ok), 475);
-        assert_eq!(s.unified_plex_balance(seller), 43);
+        // V24 `sellSkinDialogue.pyj`: `math.floor(25 - 25 * 10 / 100.0) = 22` PLEX net -> 20 + 22 = 42
+        assert_eq!(s.unified_plex_balance(seller), 42);
         assert_eq!(
             s.characters
                 .get(&buyer_ok)
@@ -478,6 +497,10 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
     admin_ctx.service_role_mask = service_roles::ROLE_GM_DEFAULT;
     assert!(skin_admin_set_expiration_eve(&state, &admin_ctx, &admin_dyn).is_ok());
 
+    let lic_key = SkinrCosmeticsState::skin_lic_key(seller as u32, skin_hex);
+    let lic_before_expire = skinr.data.read().unwrap().skin_licenses[&lic_key].clone();
+    assert!(lic_before_expire.escrowed > 0);
+
     let buy_expired = pb::message("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest")
         .set("listing.uuid", pub_uuid.to_vec())
         .set("quantity", 1u32)
@@ -492,6 +515,13 @@ fn skin_listing_lifecycle_create_cancel_visibility_purchase_and_admin_expiration
         )
         .status_code,
         STATUS_BAD_REQUEST
+    );
+    let lic_after_expire = skinr.data.read().unwrap().skin_licenses[&lic_key].clone();
+    assert_eq!(lic_after_expire.escrowed, 0, "expired sweep must release escrowed licenses");
+    assert_eq!(
+        lic_after_expire.unactivated,
+        lic_before_expire.unactivated + lic_before_expire.escrowed,
+        "expired sweep must restore unactivated license count"
     );
 }
 

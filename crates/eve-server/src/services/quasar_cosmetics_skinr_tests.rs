@@ -644,3 +644,38 @@ fn title_definitions_flatbuffer_schema_clean_client_and_dynamic_esi_port() {
     let empty_fb = encode_title_definitions_flatbuffer(&[]);
     assert_eq!(empty_fb.get(4..8), Some(b"TITL".as_slice()));
 }
+
+#[test]
+fn blend_mode_2_and_3_exclude_secondary_pattern_material_slot_8() {
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let state = SkinrCosmeticsState::load_unregistered(db, shared_sde());
+    let pat_id = state
+        .catalog
+        .components
+        .iter()
+        .find(|(_, c)| c.is_pattern())
+        .map(|(&id, _)| id)
+        .expect("pattern component");
+    let coat_id = state
+        .catalog
+        .components
+        .iter()
+        .find(|(_, c)| {
+            !c.is_pattern()
+                && state
+                    .catalog
+                    .point_values
+                    .get(&(c.category, c.rarity))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+        })
+        .map(|(&id, _)| id)
+        .expect("coating component with positive points");
+    let slots = [(7u32, pat_id), (8u32, coat_id)];
+    let (pts_overlay, _) = state.catalog.compute_points_and_tier_for_design(587, 1, &slots);
+    let (pts_subtract, _) = state.catalog.compute_points_and_tier_for_design(587, 2, &slots);
+    let (pts_exclusion, _) = state.catalog.compute_points_and_tier_for_design(587, 3, &slots);
+    assert_eq!(pts_subtract, pts_exclusion);
+    assert!(pts_subtract < pts_overlay, "blend mode 2/3 must skip slot 8 component points");
+}

@@ -387,6 +387,16 @@ async fn test_quasar_cosmetic_catalog() {
     assert_eq!(r_jobs.status_code, STATUS_OK);
 
     // 3. SKINR design draft lifecycle (Capacity, Save, Get, GetAllSaved, Delete)
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(cid as i64).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
     let r_cap = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest", Vec::new()).await;
     assert_eq!(r_cap.status_code, STATUS_OK);
 

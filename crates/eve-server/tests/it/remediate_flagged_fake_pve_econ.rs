@@ -2842,9 +2842,10 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         .sde
         .celestials_in_system(JITA_SYS)
         .into_iter()
-        .find(|c| c.group_id == 7)
+        .find(|c| c.group_id == 7 && c.name == "Jita IV")
         .map(|c| c.celestial_id)
-        .unwrap_or(40_009_122);
+        .unwrap_or(40_009_082);
+    let tanoo_planet_i = 40_000_002i64;
     let mut ord_q = id_payload(1, 10_000_002);
     ord_q.extend_from_slice(&id_payload(2, JITA_STATION));
     ord_q.extend_from_slice(&id_payload(3, 34));
@@ -2869,7 +2870,7 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         (
             "eve.character.industry.blueprints.GetRequest",
             id_payload(1, char_id),
-            false,
+            true,
         ),
         ("eve.industry.facility.GetRequest", Vec::new(), true),
         ("eve.industry.system.GetCostIndicesRequest", Vec::new(), true),
@@ -2887,7 +2888,7 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
         ("eve.moon.GetMoonsOfPlanetRequest", id_payload(1, jita_planet_iv), true),
         (
             "eve.asteroidbelt.GetBeltsOfPlanetRequest",
-            id_payload(1, jita_planet_iv),
+            id_payload(1, tanoo_planet_i),
             true,
         ),
         (
@@ -2917,6 +2918,25 @@ async fn quasar_economy_industry_h2c_and_persistence_end_to_end() {
                 !any.value.is_empty(),
                 "{msg_type} must return non-empty protobuf payload"
             );
+            let wm = WireMessage::decode(&any.value).expect("decode h2c response");
+            match msg_type {
+                "eve.planet.GetRequest" => assert!(
+                    String::from_utf8_lossy(&any.value).contains("Jita IV"),
+                    "Jita IV planet payload must carry real SDE name"
+                ),
+                "eve.planet.GetPlanetsInSolarSystemRequest" => assert_eq!(
+                    wm.fields.iter().filter(|f| f.field_number == 1).count(),
+                    8
+                ),
+                "eve.character.industry.job.GetRequest"
+                | "eve.character.industry.blueprints.GetRequest"
+                | "eve.asteroidbelt.GetBeltsOfPlanetRequest"
+                | "eve.moon.GetMoonsOfPlanetRequest" => assert!(
+                    wm.fields.iter().any(|f| f.field_number == 1),
+                    "{msg_type} must contain decoded entry"
+                ),
+                _ => {}
+            }
         }
     }
 

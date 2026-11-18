@@ -234,15 +234,15 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
         assert_eq!(call(&router, &player, ep, Vec::new(), now).status_code, STATUS_OK, "{ep}");
     }
 
-    // Grant infinite coating component so InitiateRequest has required component license
+    // Grant infinite coating component so InitiateRequest exercises sequence binder validation + consumption
     let st_tmp = SkinrCosmeticsState::load(Arc::clone(&db), Arc::clone(&sde));
-    let coat_id = *st_tmp
+    let (coat_id, coat_binder_tid, coat_binder_cnt) = st_tmp
         .catalog
         .components
         .iter()
-        .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1))
-        .map(|(id, _)| id)
-        .expect("coating component");
+        .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1) && c.binder_type_id > 0 && c.binder_count > 0)
+        .map(|(&id, c)| (id, c.binder_type_id, c.binder_count))
+        .expect("coating component with sequence binder");
     let inf_grant = pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
     )
@@ -284,6 +284,43 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
     .set("licenses", 1u32)
     .must_encode();
 
+    // Missing sequence binders in hangar must reject with 400 and conserve PLEX & active jobs
+    let plex_before_fail = db.with_snapshot(|s| s.unified_plex_balance(cid));
+    assert_eq!(
+        call(
+            &router,
+            &player,
+            "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+            init_req.clone(),
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.unified_plex_balance(cid)), plex_before_fail);
+    assert!(st_tmp.data.read().unwrap().sequencing_jobs.is_empty());
+
+    // Supply exact required sequence binders in hangar -> succeeds and consumes binders
+    db.with_mut_snapshot(|s| {
+        let station_id = s.characters.get(&cid).and_then(|c| c.station_id).unwrap_or(60_003_760);
+        s.next_entity_id += 1;
+        let iid = s.next_entity_id;
+        s.items.insert(
+            iid,
+            eve_db::InventoryItemRecord {
+                item_id: iid,
+                type_id: coat_binder_tid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: coat_binder_cnt as i32,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
     let init_rsp = call(
         &router,
         &player,
@@ -292,6 +329,16 @@ fn sequencing_pricing_durations_and_job_lifecycle() {
         now,
     );
     assert_eq!(init_rsp.status_code, STATUS_OK);
+    assert_eq!(
+        db.with_snapshot(|s| {
+            s.items
+                .values()
+                .filter(|it| it.owner_id == cid && it.type_id == coat_binder_tid)
+                .map(|it| it.quantity)
+                .sum::<i32>()
+        }),
+        0
+    );
 
     // GetAllActiveRequest & CompleteEarlyRequest (empty body completes first active job)
     let act_rsp = call(
@@ -348,12 +395,31 @@ async fn issue_545_cluster_tick_settles_matured_skinr_job_and_publishes_notices(
         }
     });
 
-    let coat_id = SkinrStaticCatalog::load(&shared_sde())
+    let (coat_id, coat_binder_tid, coat_binder_cnt) = SkinrStaticCatalog::load(&shared_sde())
         .components
         .iter()
-        .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1))
-        .map(|(&id, _)| id)
-        .expect("coating component");
+        .find(|(_, c)| !c.is_pattern() && !c.disallowed_slots.contains(&1) && c.binder_type_id > 0 && c.binder_count > 0)
+        .map(|(&id, c)| (id, c.binder_type_id, c.binder_count))
+        .expect("coating component with sequence binder");
+    ctx.db.with_mut_snapshot(|s| {
+        let station_id = s.characters.get(&cid).and_then(|c| c.station_id).unwrap_or(60_003_760);
+        s.next_entity_id += 1;
+        let iid = s.next_entity_id;
+        s.items.insert(
+            iid,
+            eve_db::InventoryItemRecord {
+                item_id: iid,
+                type_id: coat_binder_tid,
+                owner_id: cid,
+                location_id: station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: coat_binder_cnt as i32,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     let inf_grant = pb::message(
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.infinite.api.admin.GrantRequest",
     )

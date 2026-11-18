@@ -249,16 +249,23 @@ impl SkinrStaticCatalog {
             .unwrap_or(&self.tier_thresholds)
     }
 
-    /// Computes total design points and resolves the tier level (`1..=20`) for `ship_type_id`
-    /// using the hull's `isisGroupID` threshold table (`points <= threshold[tier]` for `1..=19`,
-    /// or `20` when exceeding tier 19).
-    pub fn compute_points_and_tier_for_ship(
+    /// Resolves total design points and tier level (`1..=20`) using V24 `BaseSkinDesign.compute_current_points_value`
+    /// (`NO_SECONDARY_COLOR_BLEND_MODES` `SUBTRACT=2` / `EXCLUSION=3` ignore `SlotID::SECONDARY_PATTERN_MATERIAL=8`).
+    pub fn compute_points_and_tier_for_design(
         &self,
         ship_type_id: u32,
-        fitted_components: &[u32],
+        pattern_blend_mode: u32,
+        fitted_slots: &[(u32, u32)],
     ) -> (u32, u32) {
+        const SLOT_SECONDARY_PATTERN_MATERIAL: u32 = 8;
+        const BLEND_SUBTRACT: u32 = 2;
+        const BLEND_EXCLUSION: u32 = 3;
+        let skip_secondary_pat_mat = matches!(pattern_blend_mode, BLEND_SUBTRACT | BLEND_EXCLUSION);
         let mut points = 0u32;
-        for &cid in fitted_components {
+        for &(slot_id, cid) in fitted_slots {
+            if skip_secondary_pat_mat && slot_id == SLOT_SECONDARY_PATTERN_MATERIAL {
+                continue;
+            }
             if let Some(comp) = self.components.get(&cid) {
                 let pt = self
                     .point_values
@@ -276,6 +283,18 @@ impl SkinrStaticCatalog {
         }
         let max_tier = thresholds.keys().next_back().copied().unwrap_or(19);
         (points, (max_tier + 1).min(20))
+    }
+
+    /// Computes total design points and resolves the tier level (`1..=20`) for `ship_type_id`
+    /// using the hull's `isisGroupID` threshold table (`points <= threshold[tier]` for `1..=19`,
+    /// or `20` when exceeding tier 19).
+    pub fn compute_points_and_tier_for_ship(
+        &self,
+        ship_type_id: u32,
+        fitted_components: &[u32],
+    ) -> (u32, u32) {
+        let slots: Vec<(u32, u32)> = fitted_components.iter().map(|&cid| (0, cid)).collect();
+        self.compute_points_and_tier_for_design(ship_type_id, 1, &slots)
     }
 
     /// Computes total design points and resolves the tier level (`1..=20`) for a standard frigate hull (`587`).
@@ -978,6 +997,45 @@ fn handle_item_consume(
         .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;
 
     let now = ctx.now_unix();
+    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+
+    Ok(any_msg(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeResponse",
+        Vec::new(),
+    ))
+}
+
+/// Grants a finite or infinite SKINR component license directly from a component item type
+/// (shared by `ConsumeRequest` and `component.listing.api.InitiatePurchaseListingRequest` when
+/// `immediately_activate == true`). Returns `true` when `type_id` mapped to an SDE component.
+pub(super) fn grant_component_license_from_item_type(
+    state: &SkinrCosmeticsState,
+    cid: u32,
+    type_id: u32,
+    quantity: u64,
+    now: u64,
+) -> bool {
+    let Some(&(comp_id, uses_granted)) = state.catalog.item_type_to_component.get(&type_id) else {
+        return false;
+    };
+    let is_pattern = state
+        .catalog
+        .components
+        .get(&comp_id)
+        .is_some_and(SdeSkinComponent::is_pattern);
+    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+    true
+}
+
+fn grant_component_license_from_item(
+    state: &SkinrCosmeticsState,
+    cid: u32,
+    comp_id: u32,
+    is_pattern: bool,
+    uses_granted: i32,
+    quantity: u64,
+    now: u64,
+) {
     state.sync_redeemed_skins_if_needed();
     let key = SkinrCosmeticsState::comp_key(cid, is_pattern, comp_id);
     if uses_granted <= 0 {
@@ -1009,11 +1067,6 @@ fn handle_item_consume(
         state.save();
         queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(added_capacity), now);
     }
-
-    Ok(any_msg(
-        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeResponse",
-        Vec::new(),
-    ))
 }
 
 // ============================================================================

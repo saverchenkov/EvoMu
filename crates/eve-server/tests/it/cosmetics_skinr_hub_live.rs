@@ -421,8 +421,8 @@ async fn test_cosmetics_skinr_paragon_hub_market_and_skills_live() {
     ).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
-    // 3. Create 6 distinct listings to verify listing limit > 5 enabled by Hub Promotion & Hub Algorithm Optimization
-    // Without skills, max active listings is 5. With 81368 and 81369 trained, capacity is 35.
+    // 3. Create 6 distinct listings to verify listing limit > 1 enabled by Hub Promotion & Hub Algorithm Optimization
+    // Without skills, max active listings is 1. With 81368 V (+5) and 81369 V (+24) trained, capacity is 30.
     let mut skin_id_msg = Vec::new();
     encode_string_field(1, &skin_hex, &mut skin_id_msg);
     let mut lic_id = Vec::new();

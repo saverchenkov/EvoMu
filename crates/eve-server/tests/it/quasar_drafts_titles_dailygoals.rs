@@ -189,6 +189,24 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let mut player_sess = build_player_sess(10_103, 90_000_103, 98_000_001);
     let empty_kw = HashMap::new();
 
+    // Seed char 90_000_101 (FK for character_skills) and train Studio Management (81370) Lv 4 -> 20 slots
+    ctx.db.with_mut_snapshot(|s| {
+        if !s.characters.contains_key(&90_000_101) {
+            let mut c = s.characters.get(&90_000_001).cloned().expect("demo char");
+            c.character_id = 90_000_101;
+            c.corporation_id = 98_000_001;
+            s.characters.insert(90_000_101, c);
+        }
+        s.skills.entry(90_000_101).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+    });
+
     // Subscribe session 1 for notices
     ctx.dispatch_rpc(&mut sess1, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
         .await

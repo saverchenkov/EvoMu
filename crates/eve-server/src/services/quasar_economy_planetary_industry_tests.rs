@@ -5,8 +5,8 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
 };
 use eve_db::{
-    AccountRecord, ContractRecord, CorporationRecord, IskCents, JournalMeta, WalletJournalEntry,
-    WorldRepository,
+    AccountRecord, ContractRecord, CorporationRecord, IndustryJobRecord, InventoryItemRecord,
+    IskCents, JournalMeta, WalletJournalEntry, WorldRepository,
 };
 use eve_proto::pb;
 use eve_proto::quasar::{
@@ -391,6 +391,60 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 ban_reason: None,
             },
         );
+        snap.items.insert(
+            88_001,
+            InventoryItemRecord {
+                item_id: 88_001,
+                type_id: 681,
+                owner_id: cid,
+                location_id: 60_003_760,
+                singleton: true,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            91_001,
+            IndustryJobRecord {
+                job_id: 91_001,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                blueprint_item_id: 88_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 2,
+                product_type_id: 587,
+                status: "Active".to_string(),
+                duration_seconds: 3_600,
+                start_unix: 1_760_000_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(12_500.0),
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            91_002,
+            IndustryJobRecord {
+                job_id: 91_002,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                blueprint_item_id: 88_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Delivered".to_string(),
+                duration_seconds: 1_800,
+                start_unix: 1_759_990_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(6_250.0),
+                completed_unix: Some(1_759_991_800),
+                completed_character_id: Some(cid),
+                ..Default::default()
+            },
+        );
         Ok::<(), String>(())
     })
     .unwrap();
@@ -421,12 +475,24 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 },
             )
             .expect(rpc);
-        if rpc != "eve.character.industry.blueprints.GetRequest"
-            && rpc != "eve.killmail.Attributes"
-        {
+        if rpc != "eve.killmail.Attributes" {
             assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
         }
     }
+
+    // Real SDE celestials, schematic & wrong-group negative check
+    assert_eq!(
+        router.dispatch(&user, &encode_id_req("eve.planet.GetRequest", 40_000_001)).unwrap_err().0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
+    let tanoo_i = router.dispatch(&user, &encode_id_req("eve.planet.GetRequest", 40_000_002)).expect("Tanoo I");
+    assert!(!tanoo_i.value.is_empty());
+    let schem_65 = router.dispatch(&user, &encode_id_req("eve.planetinteraction.schematic.GetRequest", 65)).expect("schematic 65");
+    assert!(String::from_utf8_lossy(&schem_65.value).contains("Superconductors"));
+    let jita_moon = router.dispatch(&user, &encode_id_req("eve.moon.GetRequest", 40_009_081)).expect("Jita III - Moon 1");
+    assert!(String::from_utf8_lossy(&jita_moon.value).contains("Jita III - Moon 1"));
+    let tanoo_belt = router.dispatch(&user, &encode_id_req("eve.asteroidbelt.GetRequest", 40_000_003)).expect("Tanoo I - Asteroid Belt 1");
+    assert!(String::from_utf8_lossy(&tanoo_belt.value).contains("Tanoo I - Asteroid Belt 1"));
 
     for rpc in [
         "eve.planet.GetRequest",

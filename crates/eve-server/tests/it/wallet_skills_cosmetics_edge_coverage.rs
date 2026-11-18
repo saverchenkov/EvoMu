@@ -2879,6 +2879,17 @@ async fn test_cosmetics_skinr_fast_checkout_and_char_lifecycle_edges() {
         STATUS_FORBIDDEN | STATUS_UNAUTHORIZED
     ));
 
+    // Train Studio Management (81370) Lv 4 -> 20 saved draft slots, then 21st hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(CHAR_DEMO).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 4,
+                skill_points: 45_255.0,
+            },
+        );
+    });
     // Save 20 drafts cleanly, then 21st hits SKINR draft capacity limit -> STATUS_BAD_REQUEST
     for i in 1..=20u32 {
         let mut save_bytes = Vec::new();

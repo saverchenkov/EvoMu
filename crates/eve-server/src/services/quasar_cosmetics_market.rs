@@ -276,8 +276,14 @@ pub fn seed_component_listings_if_empty(data: &mut CosmeticsMarketData, sde: &Sd
         fallback.sort_unstable();
         design_types.extend(fallback.into_iter().take(4));
     }
+    // Real `evomu_sde.sqlite` seeds 1,100+ group-4726 components above; this placeholder loop is
+    // strictly for stripped unit-test `SdeRegistry` fixtures lacking SKINR groups.
+    #[cfg(test)]
     while design_types.len() < 4 {
         design_types.push(82_340 + design_types.len() as u32);
+    }
+    if design_types.len() < 4 {
+        return false;
     }
     let templates = [
         (design_types[0], Some(250_000u64), None, 1u64, 0u32),
@@ -548,13 +554,15 @@ fn market_get_broker_fees(_st: &CosmeticsMarketState, ctx: &AuthoritativeContext
 }
 
 fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
+    // V24 `trading_const.pyj`: base max concurrent listings = 1, 81368 Hub Promotion (+1/lvl),
+    // 81369 Hub Algorithm Optimization (+[0, 4, 9, 14, 19, 24] cumulative -> max 30).
+    const HUB_ALG_OPT_BONUS: [usize; 6] = [0, 4, 9, 14, 19, 24];
     st.db.with_snapshot(|s| {
-        let Some(sk_map) = s.skills.get(&(cid as i64)) else { return (0, 5); };
-        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u64).unwrap_or(0);
+        let Some(sk_map) = s.skills.get(&(cid as i64)) else { return (0, 1); };
+        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as usize).unwrap_or(0).min(5);
         // SDE group 4734: 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership (-1%/lvl).
-        let fee_reduction_pct = (lvl(84217) + lvl(84218) + lvl(84220)).min(15);
-        // SDE group 4734: 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl), base 5 -> max 35.
-        let max_listings = 5 + (lvl(81368) + lvl(81369) * 5) as usize;
+        let fee_reduction_pct = ((lvl(84217) + lvl(84218) + lvl(84220)) as u64).min(15);
+        let max_listings = 1 + lvl(81368) + HUB_ALG_OPT_BONUS[lvl(81369)];
         (fee_reduction_pct, max_listings)
     })
 }
@@ -698,6 +706,12 @@ fn component_initiate_purchase(
     };
     st.save();
 
+    let activate_directly = immediately_activate
+        && st
+            .skinr
+            .catalog
+            .item_type_to_component
+            .contains_key(&listing.component_item_type_id);
     let mut debited_bal: Option<IskCents> = None;
     let mut plex_notice: Option<(u64, u64, i64, i64)> = None;
     let succeeded = st.db.with_mut_snapshot(|s| {
@@ -720,40 +734,51 @@ fn component_initiate_purchase(
                 plex_notice = Some((uid, s.next_entity_id as u64, -total_plex, rem_plex));
             }
         }
-        let location_id = ch_station.or(ch_struct).unwrap_or_else(|| {
-            if st.skinr.sde.stations.contains_key(&ch_home) {
-                ch_home
-            } else {
-                st.skinr.sde.stations.keys().copied().min().unwrap_or(ch_home)
-            }
-        });
         if let (Some(total_cost), Some(rem)) = (checked_isk_total, debited_bal) {
             s.append_journal(cid as i64, "ParagonHubComponentPurchase", IskCents(-total_cost.0), rem, format!("Paragon Hub component purchase ({quantity_u64}x)"));
         }
-        let item_id = s
-            .items
-            .keys()
-            .copied()
-            .max()
-            .unwrap_or(990_000_000)
-            .max(990_000_000)
-            + 1;
-        s.items.insert(
-            item_id,
-            InventoryItemRecord {
+        if !activate_directly {
+            let location_id = ch_station.or(ch_struct).unwrap_or_else(|| {
+                if st.skinr.sde.stations.contains_key(&ch_home) {
+                    ch_home
+                } else {
+                    st.skinr.sde.stations.keys().copied().min().unwrap_or(ch_home)
+                }
+            });
+            let item_id = s
+                .items
+                .keys()
+                .copied()
+                .max()
+                .unwrap_or(990_000_000)
+                .max(990_000_000)
+                + 1;
+            s.items.insert(
                 item_id,
-                type_id: listing.component_item_type_id,
-                owner_id: cid as i64,
-                location_id,
-                flag: InventoryFlag::Hangar,
-                quantity: granted_qty,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
+                InventoryItemRecord {
+                    item_id,
+                    type_id: listing.component_item_type_id,
+                    owner_id: cid as i64,
+                    location_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: granted_qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
         true
     });
+    if succeeded && activate_directly {
+        let _ = super::quasar_cosmetics_skinr::grant_component_license_from_item_type(
+            &st.skinr,
+            cid,
+            listing.component_item_type_id,
+            granted_qty_u64,
+            now,
+        );
+    }
     if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }
     if let Some((uid, tx_id, delta, rem)) = plex_notice {
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, rem, "Paragon Hub component purchase", now);
@@ -790,6 +815,44 @@ fn skin_visible_to(
     }
 }
 
+/// Sweeps expired Paragon Hub SKIN listings and restores escrowed licenses back to sellers' unactivated counts.
+fn sweep_expired_skin_listings(st: &CosmeticsMarketState, now: u64) -> Vec<String> {
+    let expired: Vec<(String, SkinListingRecord)> = {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        let keys: Vec<String> = data
+            .skin_listings
+            .iter()
+            .filter(|(_, l)| l.expires_unix <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| data.skin_listings.remove(&k).map(|rec| (k, rec)))
+            .collect()
+    };
+    if expired.is_empty() {
+        return Vec::new();
+    }
+    {
+        st.skinr.sync_redeemed_skins_if_needed();
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+        for (_, rec) in &expired {
+            if rec.quantity == 0 {
+                continue;
+            }
+            let lic_key = SkinrCosmeticsState::skin_lic_key(rec.seller_id, &rec.skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
+                let qty = u64::from(rec.quantity);
+                let restored = qty.min(lic.escrowed);
+                lic.unactivated = lic.unactivated.saturating_add(restored);
+                lic.escrowed = lic.escrowed.saturating_sub(restored);
+            }
+        }
+    }
+    st.skinr.save();
+    st.save();
+    expired.into_iter().map(|(k, _)| k).collect()
+}
+
 fn skin_get_all(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
@@ -797,6 +860,7 @@ fn skin_get_all(
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let now = ctx.now_unix();
+    sweep_expired_skin_listings(st, now);
     let (corp_id, alliance_id) = st.db.with_snapshot(|s| {
         s.characters
             .get(&(cid as i64))
@@ -830,6 +894,7 @@ fn skin_get_all_owned(
     _msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    sweep_expired_skin_listings(st, ctx.now_unix());
     let listings: Vec<SkinListingRecord> = st
         .data
         .read()
@@ -971,6 +1036,7 @@ fn skin_initiate_create(
     let broker_fee = checked_isk_cents(broker_fee_for_valuation(est_val, duration_secs, &target))
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
+    sweep_expired_skin_listings(st, now);
     // Settle matured SKINR sequencing jobs before checking unactivated licenses so
     // finished skins can be listed on Paragon Hub without polling sequencing RPCs first (`#545`).
     st.skinr.settle_completed_jobs(now);
@@ -1071,6 +1137,7 @@ fn skin_cancel_listing(
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
     let key = hex(&uuid);
+    sweep_expired_skin_listings(st, ctx.now_unix());
     let removed = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(existing) = data.skin_listings.get(&key) else {
@@ -1134,6 +1201,9 @@ fn skin_initiate_purchase(
             .unwrap_or((1_000_009, None))
     });
     let key = hex(&uuid);
+    if sweep_expired_skin_listings(st, now).iter().any(|k| k == &key) {
+        return Err((STATUS_BAD_REQUEST, "Skin listing has expired".to_string()));
+    }
     let (listing, tx_uuid) = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(l) = data.skin_listings.get(&key).cloned() else {
@@ -1248,11 +1318,12 @@ fn skin_initiate_purchase(
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Total PLEX units overflow".to_string()))?;
                 let total_plex_i64 = i64::try_from(total_plex)
                     .map_err(|_| (STATUS_BAD_REQUEST, "Total PLEX units exceed i64".to_string()))?;
-                let tax_plex = total_plex
-                    .checked_mul(tax_pct)
+                // V24 `sellSkinDialogue.pyj`: `profit = math.floor(price - price * tax_rate / 100.0)`
+                let net_plex = total_plex
+                    .checked_mul(100u64.saturating_sub(tax_pct))
                     .map(|v| v / 100)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "PLEX tax calculation overflows".to_string()))?;
-                let net_plex_i64 = i64::try_from(total_plex.saturating_sub(tax_plex))
+                let net_plex_i64 = i64::try_from(net_plex)
                     .map_err(|_| (STATUS_BAD_REQUEST, "Net PLEX credit exceeds i64".to_string()))?;
                 Ok((total_plex_i64, net_plex_i64))
             })();

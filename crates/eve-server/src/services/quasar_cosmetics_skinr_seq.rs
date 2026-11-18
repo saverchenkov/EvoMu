@@ -19,11 +19,13 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
+use eve_db::InventoryFlag;
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleDuration,
     GoogleTimestamp, WireMessage,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const DEFAULT_SHIP_TYPE_ID: u32 = 587; // Rifter
@@ -779,10 +781,28 @@ fn handle_job_initiate(
         }
     }
 
-    let comp_ids: Vec<u32> = required_comps.iter().map(|&(c, _)| c).collect();
+    let mut design_slots: Vec<(u32, u32)> = Vec::new();
+    for s in &slots {
+        design_slots.push((s.slot_id, s.component_id));
+        if let Some(pc) = s.primary_coating_id {
+            if !slots.iter().any(|x| x.slot_id == 6 && x.component_id == pc) {
+                design_slots.push((6, pc));
+            }
+        }
+        if let Some(sc) = s.secondary_coating_id {
+            if !slots.iter().any(|x| x.slot_id == 8 && x.component_id == sc) {
+                design_slots.push((8, sc));
+            }
+        }
+    }
+    for &(cid_extra, _) in &required_comps {
+        if !design_slots.iter().any(|&(_, c)| c == cid_extra) {
+            design_slots.push((0, cid_extra));
+        }
+    }
     let (_pts, tier_level) = state
         .catalog
-        .compute_points_and_tier_for_ship(ship_type_id, &comp_ids);
+        .compute_points_and_tier_for_design(ship_type_id, blend_mode, &design_slots);
     let base_plex_cents = tier_base_plex_cents(tier_level);
     let unit_plex_cents = (base_plex_cents.saturating_mul(100 - price_disc as u64) / 100).max(100);
     let total_plex_cents = unit_plex_cents.saturating_mul(u64::from(licenses_qty));
@@ -792,7 +812,7 @@ fn handle_job_initiate(
     let base_secs = tier_base_duration_secs(tier_level);
     let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
 
-    let (job_uuid, skin_hex, job_rec) = {
+    let (job_uuid, skin_hex, job_rec, required_binders) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         let active_count = data
             .sequencing_jobs
@@ -805,15 +825,21 @@ fn handle_job_initiate(
             queue_job_failed_notice(cid, &next_uuid, 1, now);
             return Err((STATUS_BAD_REQUEST, "Maximum active sequencing jobs reached".into()));
         }
-        let cap_ok = required_comps.iter().all(|&(comp_id, is_pat)| {
+        let mut req_binders: BTreeMap<u32, u64> = BTreeMap::new();
+        for &(comp_id, is_pat) in &required_comps {
             let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
-            data.infinite_licenses.contains_key(&key)
-                || data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) >= licenses_qty as u64
-        });
-        if !cap_ok {
-            drop(data);
-            queue_job_failed_notice(cid, &next_uuid, 3, now);
-            return Err((STATUS_BAD_REQUEST, "SKINR sequencing license capacity exceeded".into()));
+            if data.infinite_licenses.contains_key(&key) {
+                if let Some(comp_def) = state.catalog.components.get(&comp_id) {
+                    if comp_def.binder_type_id > 0 && comp_def.binder_count > 0 {
+                        let amt = u64::from(comp_def.binder_count).saturating_mul(u64::from(licenses_qty));
+                        *req_binders.entry(comp_def.binder_type_id).or_default() += amt;
+                    }
+                }
+            } else if data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) < licenses_qty as u64 {
+                drop(data);
+                queue_job_failed_notice(cid, &next_uuid, 3, now);
+                return Err((STATUS_BAD_REQUEST, "SKINR sequencing license capacity exceeded".into()));
+            }
         }
         for &(comp_id, is_pat) in &required_comps {
             let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
@@ -852,21 +878,56 @@ fn handle_job_initiate(
             failed_reason: None,
         };
         data.sequencing_jobs.insert(hex_bytes(&uuid), job.clone());
-        (uuid, shex, job)
+        (uuid, shex, job, req_binders)
     };
 
-    // Check and debit PLEX sequencing cost from unified account PLEX Vault
-    let mut plex_notice: Option<(u64, u64, i64)> = None;
-    state.db.with_mut_snapshot(|s| {
-        if let (Some(uid), Some(rem_plex)) = (
-            s.account_of_character(cid as i64),
-            s.adjust_unified_plex(cid as i64, -total_plex_cost),
-        ) {
-            s.next_entity_id += 1;
-            plex_notice = Some((uid, s.next_entity_id as u64, rem_plex));
+    // Atomically validate sequence binders (for unlimited licenses) + PLEX balance before consuming either.
+    let debit_res = state.db.with_mut_snapshot(|s| -> Result<(u64, u64, i64), &'static str> {
+        for (&btid, &need) in &required_binders {
+            let avail: u64 = s
+                .items
+                .values()
+                .filter(|it| it.owner_id == cid as i64 && it.flag == InventoryFlag::Hangar && it.type_id == btid)
+                .map(|it| u64::try_from(it.quantity).unwrap_or(0))
+                .sum();
+            if avail < need {
+                return Err("Insufficient sequence binders for unlimited SKINR component license");
+            }
         }
+        let Some(uid) = s.account_of_character(cid as i64) else {
+            return Err("Insufficient PLEX for SKINR sequencing");
+        };
+        let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
+            return Err("Insufficient PLEX for SKINR sequencing");
+        };
+        for (&btid, &need) in &required_binders {
+            let mut rem_need = need;
+            let mut stack_ids: Vec<i64> = s
+                .items
+                .iter()
+                .filter(|(_, it)| it.owner_id == cid as i64 && it.flag == InventoryFlag::Hangar && it.type_id == btid && it.quantity > 0)
+                .map(|(&iid, _)| iid)
+                .collect();
+            stack_ids.sort_unstable();
+            for iid in stack_ids {
+                if rem_need == 0 {
+                    break;
+                }
+                if let Some(it) = s.items.get_mut(&iid) {
+                    let take = rem_need.min(u64::try_from(it.quantity).unwrap_or(0));
+                    it.quantity -= take as i32;
+                    it.version += 1;
+                    rem_need -= take;
+                    if it.quantity <= 0 {
+                        s.items.remove(&iid);
+                    }
+                }
+            }
+        }
+        s.next_entity_id += 1;
+        Ok((uid, s.next_entity_id as u64, rem_plex))
     });
-    if let Some((uid, tx_id, rem_plex)) = plex_notice {
+    if let Ok((uid, tx_id, rem_plex)) = debit_res {
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(
             uid,
             tx_id,
@@ -876,6 +937,7 @@ fn handle_job_initiate(
             now,
         );
     } else {
+        let err_msg = debit_res.unwrap_err();
         {
             let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
             data.sequencing_jobs.remove(&hex_bytes(&job_uuid));
@@ -890,7 +952,7 @@ fn handle_job_initiate(
             }
         }
         queue_job_failed_notice(cid, &job_uuid, 3, now);
-        return Err((STATUS_BAD_REQUEST, "Insufficient PLEX for SKINR sequencing".into()));
+        return Err((STATUS_BAD_REQUEST, err_msg.to_string()));
     }
     state.save();
     queue_job_started_notice(cid, &job_uuid, now);

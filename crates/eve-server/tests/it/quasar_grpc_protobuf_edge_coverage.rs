@@ -924,7 +924,17 @@ async fn quasar_cosmetics_drafts_skinr_and_market_edge_paths() {
         );
     }
 
-    // Save a draft for s1, verify s2 cannot Get/Update/Delete it (403)
+    // Save a draft for s1 (requires Studio Management 81370 >= Lv 1), verify s2 cannot Get/Update/Delete it (403)
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(90_000_001).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
     let mut save_req = Vec::new();
     let mut design = Vec::new();
     encode_varint_field(1, 587, &mut design); // Rifter hull

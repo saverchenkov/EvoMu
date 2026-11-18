@@ -203,6 +203,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
         }),
         "Expected TransactionSucceededNotice for component purchase"
     );
+    let activated_comp = skinr.catalog.item_type_to_component.get(&comp_type_id).copied();
     ctx.db.with_snapshot(|s| {
         assert_eq!(
             s.characters[&(buyer_cid as i64)].balance,
@@ -214,8 +215,43 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
             .filter(|i| i.owner_id == buyer_cid as i64 && i.type_id == comp_type_id)
             .map(|i| i.quantity)
             .sum();
-        assert_eq!(owned_qty, 2);
+        if activated_comp.is_some() {
+            assert_eq!(
+                owned_qty, 0,
+                "immediately_activate=true on catalog component must grant SKINR license directly without hangar item"
+            );
+        } else {
+            assert_eq!(owned_qty, 2);
+        }
     });
+    if activated_comp.is_some() {
+        let rsp_owned = quasar_rpc(
+            &ctx,
+            &mut buyer,
+            "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GetOwnedRequest",
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(rsp_owned.status_code, STATUS_OK);
+        let dyn_owned = reg
+            .decode_dynamic(
+                "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GetOwnedResponse",
+                &rsp_owned.payload.as_ref().unwrap().value,
+            )
+            .expect("decode component GetOwnedResponse");
+        let fin_count = match dyn_owned.get(1) {
+            Some(DynamicValue::Repeated(v)) => v.len(),
+            _ => 0,
+        };
+        let inf_count = match dyn_owned.get(2) {
+            Some(DynamicValue::Repeated(v)) => v.len(),
+            _ => 0,
+        };
+        assert!(
+            fin_count + inf_count >= 1,
+            "immediately_activate=true must grant at least one component license"
+        );
+    }
 }
 
 #[tokio::test]

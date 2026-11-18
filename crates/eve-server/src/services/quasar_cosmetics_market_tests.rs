@@ -336,8 +336,15 @@ fn fee_tax_and_buyer_fee_rpcs_cover_skills_targets_and_db_skin_fallback() {
             sks.insert(sid, sk);
         }
     });
-    assert_eq!(paragon_hub_skill_reductions(&state, cid as u32), (15, 5 + 4 + 10));
+    assert_eq!(paragon_hub_skill_reductions(&state, cid as u32), (15, 1 + 4 + 9));
     assert_eq!(paragon_hub_tax_pct(&state, cid as u32, &ListingTargetRecord::Public), 5);
+
+    db.with_mut_snapshot(|s| {
+        let sks = s.skills.entry(cid).or_default();
+        sks.get_mut(&81368).unwrap().level = 5;
+        sks.get_mut(&81369).unwrap().level = 5;
+    });
+    assert_eq!(paragon_hub_skill_reductions(&state, cid as u32), (15, 30));
 
     assert_eq!(
         call(

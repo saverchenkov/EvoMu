@@ -11,7 +11,7 @@ use eve_proto::quasar::WireMessage;
 
 #[test]
 fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
-    let (_router, db, _skinr, state) = new_market_harness();
+    let (_router, db, skinr, state) = new_market_harness();
     let now = 1_700_000_000u64;
     let cid = 2_112_000_201i64;
     make_char(&db, cid, 98_000_001, None, 1_000_000_00, 50, 0);
@@ -158,9 +158,37 @@ fn component_listings_get_all_purchase_isk_plex_failures_and_overflow_bounds() {
     assert_eq!(r_buy_plex.status_code, STATUS_OK);
     let wm_bp = WireMessage::decode(&r_buy_plex.payload.unwrap().value).unwrap();
     assert_eq!(wm_varint(&wm_bp, 2), 1);
+    let plex_comp_tid = state
+        .data
+        .read()
+        .unwrap()
+        .component_listings
+        .get(&hex(&plex_ok_uuid))
+        .unwrap()
+        .component_item_type_id;
+    let activated_comp = skinr.catalog.item_type_to_component.get(&plex_comp_tid).copied();
     db.with_snapshot(|s| {
         assert_eq!(s.unified_plex_balance(cid), 50 - (plex_unit_cents / 100));
+        if activated_comp.is_some() {
+            assert_eq!(
+                s.items
+                    .values()
+                    .filter(|it| it.owner_id == cid && it.type_id == plex_comp_tid)
+                    .count(),
+                0,
+                "immediately_activate=true on SDE component must grant license directly without hangar item"
+            );
+        }
     });
+    if let Some((comp_id, uses)) = activated_comp {
+        let is_pat = skinr.catalog.components.get(&comp_id).is_some_and(|c| c.is_pattern());
+        let lics = skinr.data.read().unwrap();
+        let lic = lics
+            .finite_licenses
+            .get(&crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::comp_key(cid as u32, is_pat, comp_id))
+            .expect("immediately_activate must grant finite component license");
+        assert!(lic.capacity >= uses as u64);
+    }
 
     let fail_plex = pb::message("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest")
         .set("listing.uuid", plex_ok_uuid.to_vec())

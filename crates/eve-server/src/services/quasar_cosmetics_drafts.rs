@@ -488,6 +488,32 @@ pub fn get_or_init_titles(char_id: u32, data: &mut QuasarCosmeticsStateData) -> 
     entry.clone()
 }
 
+/// Resolves character SKINR saved-draft capacity from `saved_designs_const.pyj` SDE skills:
+/// `81370` (`Studio Management`, `+5/lvl`, max 25) + `81371` (`Advanced Studio Management`,
+/// `[0, 10, 20, 40, 65, 95]`, max +95) -> `0..=120`, unless overridden by `custom_capacity`.
+fn resolve_save_capacity(st: &QuasarCosmeticsState, char_id: u32) -> u64 {
+    if let Some(custom) = st
+        .data
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .custom_capacity
+        .get(&char_id)
+        .copied()
+    {
+        return custom;
+    }
+    const SKILL_STUDIO_MANAGEMENT: u32 = 81_370;
+    const SKILL_ADV_STUDIO_MANAGEMENT: u32 = 81_371;
+    const ADV_BONUS_BY_LVL: [u64; 6] = [0, 10, 20, 40, 65, 95];
+    st.db.with_snapshot(|s| {
+        let Some(sk_map) = s.skills.get(&(char_id as i64)) else {
+            return 0;
+        };
+        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as usize).unwrap_or(0).min(5);
+        (lvl(SKILL_STUDIO_MANAGEMENT) as u64) * 5 + ADV_BONUS_BY_LVL[lvl(SKILL_ADV_STUDIO_MANAGEMENT)]
+    })
+}
+
 pub fn register_draft_and_title_handlers(
     router: &PublicGatewayRouter,
     state: Arc<QuasarCosmeticsState>,
@@ -608,17 +634,13 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
 
-                // Capacity check: dynamic capacity from custom_capacity or base 20
-                let cap = {
-                    let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                    data.custom_capacity.get(&char_id).copied().unwrap_or(20)
-                };
+                // Capacity check: dynamic capacity from custom_capacity or SDE group 4734 Studio Management skills (0..=120)
+                let cap = resolve_save_capacity(&st, char_id);
                 {
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                    if let Some(user_drafts) = data.saved_drafts.get(&char_id) {
-                        if (user_drafts.len() as u64) >= cap {
-                            return Err((STATUS_BAD_REQUEST, format!("SKINR draft capacity exceeded (max {cap})")));
-                        }
+                    let used = data.saved_drafts.get(&char_id).map_or(0, |d| d.len() as u64);
+                    if used >= cap {
+                        return Err((STATUS_BAD_REQUEST, format!("SKINR draft capacity exceeded (max {cap})")));
                     }
                 }
 
@@ -862,10 +884,7 @@ pub fn register_draft_and_title_handlers(
                 let Some(char_id) = ctx.effective_character_id() else {
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
-                let cap = {
-                    let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                    data.custom_capacity.get(&char_id).copied().unwrap_or(20)
-                };
+                let cap = resolve_save_capacity(&st, char_id);
                 pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse")
                     .set("capacity", cap)
                     .to_any()

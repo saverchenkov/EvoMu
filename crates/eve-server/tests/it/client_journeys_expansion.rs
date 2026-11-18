@@ -593,6 +593,17 @@ async fn test_journey_cosmetics_store() {
     (sess.user_id, sess.character_id, sess.corporation_id, sess.solar_system_id, sess.ship_id, sess.station_id) =
         (Some(1), Some(char_id), Some(1_000_170), Some(30_000_142), Some(ship_id), Some(60_003_760));
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(char_id).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+
     let mut draft_body = Vec::new();
     encode_bytes_field(1, b"skinr-custom-design-01", &mut draft_body);
 

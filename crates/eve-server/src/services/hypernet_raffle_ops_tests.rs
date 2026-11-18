@@ -27,6 +27,14 @@ fn hypernet_raffle_helpers_and_rpc_mutations() {
     for &sz in &ALLOWED_RAFFLE_SIZES {
         assert_eq!(compute_required_hypercores(100_000_000.0, sz).unwrap(), 14);
     }
+    assert!(validate_raffle_total_price(999.0).is_err());
+    assert!(validate_raffle_total_price(1_000.0).is_ok());
+    assert!(validate_raffle_total_price(10_000_000_000_001.0).is_err());
+    // Dynamic PLEX market price scaling: 7_000_000 ISK PLEX -> 700k token_price -> 14M = 1 core vs 2 cores at 3.5M default
+    assert_eq!(
+        compute_required_hypercores_for_plex_price(14_000_000.0, 8, 7_000_000.0).unwrap(),
+        1
+    );
 
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
@@ -369,6 +377,97 @@ async fn create_raffle_rejects_invalid_and_non_finite_ticket_prices_and_counts()
     .unwrap()
     .expect("valid integer ticket_price must create raffle");
     assert_eq!(ok.dict_get("ticket_price").and_then(|v| v.as_f64()), Some(1_000.0));
+
+    // V24 RaffleTypeValidation (list 133): PLEX (44992) and HyperCores (52568) rejected;
+    // sub-MIN_TOTAL_PRICE (8 * 100 = 800 < 1000) rejected; non-singleton Blueprint rejected.
+    let plex_item_id = 999_600_101_i64;
+    let unseq_bp_id = 999_600_102_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            plex_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: plex_item_id,
+                type_id: PLEX_TYPE_ID,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            unseq_bp_id,
+            eve_db::InventoryItemRecord {
+                item_id: unseq_bp_id,
+                type_id: 681, // Rifter Blueprint (category 9)
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(plex_item_id), PyRep::Integer(8), PyRep::Real(1_000.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidRaffleItem"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(core_id), PyRep::Integer(8), PyRep::Real(1_000.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidRaffleItem"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(unseq_bp_id), PyRep::Integer(8), PyRep::Real(1_000.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidRaffleItem"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "raffleProxy",
+            "CreateRaffle",
+            &[PyRep::Integer(unseq_bp_id), PyRep::Integer(8), PyRep::Real(100.0)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidTicketPrice"
+    );
 }
 
 #[cfg(test)]

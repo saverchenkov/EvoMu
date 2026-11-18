@@ -294,7 +294,7 @@ async fn test_quasar_planet_and_planetinteraction() {
     let sess = make_session(1003, 103, 90_000_103, 1_000_103);
 
     // Call eve.planet.GetRequest
-    let req_val = encode_id_msg(1, 40_000_001);
+    let req_val = encode_id_msg(1, 40_000_002);
     let rsp = quasar_call(&ctx, &sess, "eve.planet.GetRequest", req_val);
     assert_eq!(rsp.status_code, STATUS_OK);
     let payload = rsp.payload.expect("payload");
@@ -303,7 +303,7 @@ async fn test_quasar_planet_and_planetinteraction() {
     let attr_bytes = wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
     let attr_wm = WireMessage::decode(attr_bytes).expect("decode Attributes");
     let name_field = attr_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap().unwrap();
-    assert_eq!(name_field, "Planet #40000001");
+    assert_eq!(name_field, "Tanoo I");
 
     // Call eve.planet.GetPlanetsInSolarSystemRequest
     let sys_req = encode_id_msg(1, 30_000_142);
