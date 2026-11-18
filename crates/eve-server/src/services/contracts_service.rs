@@ -438,48 +438,47 @@ impl ContractItemReply {
             .runs_remaining
             .map(|r| PyRep::Integer(i64::from(r)))
             .unwrap_or(PyRep::Integer(-1));
+        // V24 contract UI evaluates `item.licensedProductionRunsRemaining or 0`;
+        // -1 would be truthy and display "-1 runs", so unlimited/BPO uses None.
+        let licensed_runs_rep = self
+            .runs_remaining
+            .map(|r| PyRep::Integer(i64::from(r)))
+            .unwrap_or(PyRep::None);
+        let mut fields = vec![
+            ("itemID", PyRep::Integer(self.item_id)),
+            ("typeID", PyRep::Integer(self.type_id)),
+            ("itemTypeID", PyRep::Integer(self.type_id)),
+            ("quantity", PyRep::Integer(self.quantity)),
+            ("inCrate", PyRep::Bool(self.in_crate)),
+            ("parentID", PyRep::Integer(self.parent_id)),
+            ("flagID", PyRep::Integer(self.flag_id)),
+            ("singleton", PyRep::Bool(self.singleton)),
+            ("copy", PyRep::Bool(self.copy)),
+            ("isBlueprintCopy", PyRep::Bool(self.copy)),
+            ("materialLevel", PyRep::Integer(self.material_efficiency)),
+            ("productivityLevel", PyRep::Integer(self.time_efficiency)),
+            ("licensedProductionRunsRemaining", licensed_runs_rep),
+            ("materialEfficiency", PyRep::Integer(self.material_efficiency)),
+            ("timeEfficiency", PyRep::Integer(self.time_efficiency)),
+            ("runs", runs_rep.clone()),
+            ("runsRemaining", runs_rep),
+            ("damage", PyRep::Real(self.damage)),
+        ];
         if self.in_crate {
             let dyn_entries = self
                 .dynamic_attributes
                 .iter()
                 .map(|&(attr_id, val)| (PyRep::Integer(attr_id), PyRep::Real(val)))
                 .collect();
-            PyRep::keyval([
-                ("itemID", PyRep::Integer(self.item_id)),
-                ("typeID", PyRep::Integer(self.type_id)),
-                ("itemTypeID", PyRep::Integer(self.type_id)),
-                ("quantity", PyRep::Integer(self.quantity)),
-                ("inCrate", PyRep::Bool(true)),
-                ("parentID", PyRep::Integer(self.parent_id)),
-                ("flagID", PyRep::Integer(self.flag_id)),
-                ("singleton", PyRep::Bool(self.singleton)),
-                ("copy", PyRep::Bool(self.copy)),
-                ("isBlueprintCopy", PyRep::Bool(self.copy)),
-                ("materialEfficiency", PyRep::Integer(self.material_efficiency)),
-                ("timeEfficiency", PyRep::Integer(self.time_efficiency)),
-                ("runs", runs_rep.clone()),
-                ("runsRemaining", runs_rep),
-                ("damage", PyRep::Real(self.damage)),
-                (
-                    "sourceMutaplasmidID",
-                    self.source_mutaplasmid_id
-                        .map(|m| PyRep::Integer(i64::from(m)))
-                        .unwrap_or(PyRep::None),
-                ),
-                ("dynamicAttributes", PyRep::Dict(dyn_entries)),
-            ])
-        } else {
-            PyRep::keyval([
-                ("typeID", PyRep::Integer(self.type_id)),
-                ("itemTypeID", PyRep::Integer(self.type_id)),
-                ("quantity", PyRep::Integer(self.quantity)),
-                ("inCrate", PyRep::Bool(false)),
-                ("itemID", PyRep::Integer(self.item_id)),
-                ("parentID", PyRep::Integer(self.parent_id)),
-                ("flagID", PyRep::Integer(self.flag_id)),
-                ("copy", PyRep::Bool(self.copy)),
-            ])
+            fields.push((
+                "sourceMutaplasmidID",
+                self.source_mutaplasmid_id
+                    .map(|m| PyRep::Integer(i64::from(m)))
+                    .unwrap_or(PyRep::None),
+            ));
+            fields.push(("dynamicAttributes", PyRep::Dict(dyn_entries)));
         }
+        PyRep::keyval(fields)
     }
 }
 

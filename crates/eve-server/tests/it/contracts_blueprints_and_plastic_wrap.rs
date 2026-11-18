@@ -150,17 +150,25 @@ async fn test_contracts_item_exchange_blueprints_metadata_bpo_and_bpc() {
     let bpo_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(bpo_id)).expect("BPO item entry");
     assert_eq!(field(bpo_entry, "copy"), PyRep::Bool(false));
     assert_eq!(field(bpo_entry, "isBlueprintCopy"), PyRep::Bool(false));
+    assert_eq!(field(bpo_entry, "materialLevel"), PyRep::Integer(10));
+    assert_eq!(field(bpo_entry, "productivityLevel"), PyRep::Integer(20));
+    assert_eq!(field(bpo_entry, "licensedProductionRunsRemaining"), PyRep::None);
     assert_eq!(field(bpo_entry, "materialEfficiency"), PyRep::Integer(10));
     assert_eq!(field(bpo_entry, "timeEfficiency"), PyRep::Integer(20));
     assert_eq!(field(bpo_entry, "runsRemaining"), PyRep::Integer(-1));
+    assert_eq!(field(bpo_entry, "damage"), PyRep::Real(0.0));
     assert_eq!(field(bpo_entry, "singleton"), PyRep::Bool(true));
 
     let bpc_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(bpc_id)).expect("BPC item entry");
     assert_eq!(field(bpc_entry, "copy"), PyRep::Bool(true));
     assert_eq!(field(bpc_entry, "isBlueprintCopy"), PyRep::Bool(true));
+    assert_eq!(field(bpc_entry, "materialLevel"), PyRep::Integer(8));
+    assert_eq!(field(bpc_entry, "productivityLevel"), PyRep::Integer(14));
+    assert_eq!(field(bpc_entry, "licensedProductionRunsRemaining"), PyRep::Integer(7));
     assert_eq!(field(bpc_entry, "materialEfficiency"), PyRep::Integer(8));
     assert_eq!(field(bpc_entry, "timeEfficiency"), PyRep::Integer(14));
     assert_eq!(field(bpc_entry, "runsRemaining"), PyRep::Integer(7));
+    assert_eq!(field(bpc_entry, "damage"), PyRep::Real(0.0));
     assert_eq!(field(bpc_entry, "singleton"), PyRep::Bool(true));
 
     // Pilot 2 searches contracts by itemTypeID filter
@@ -274,16 +282,27 @@ async fn test_contracts_blueprint_singleton_and_abyssal_preservation() {
 
     let bpc_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(bpc_id)).expect("BPC entry");
     assert_eq!(field(bpc_entry, "copy"), PyRep::Bool(true));
+    assert_eq!(field(bpc_entry, "materialLevel"), PyRep::Integer(4));
+    assert_eq!(field(bpc_entry, "productivityLevel"), PyRep::Integer(8));
+    assert_eq!(field(bpc_entry, "licensedProductionRunsRemaining"), PyRep::Integer(12));
     assert_eq!(field(bpc_entry, "materialEfficiency"), PyRep::Integer(4));
     assert_eq!(field(bpc_entry, "timeEfficiency"), PyRep::Integer(8));
     assert_eq!(field(bpc_entry, "runsRemaining"), PyRep::Integer(12));
+    assert_eq!(field(bpc_entry, "damage"), PyRep::Real(0.0));
 
     let dmg_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(dmg_id)).expect("Damaged entry");
     assert_eq!(field(dmg_entry, "damage"), PyRep::Real(0.35));
+    assert_eq!(field(dmg_entry, "materialLevel"), PyRep::Integer(0));
+    assert_eq!(field(dmg_entry, "productivityLevel"), PyRep::Integer(0));
+    assert_eq!(field(dmg_entry, "licensedProductionRunsRemaining"), PyRep::None);
     assert_eq!(field(dmg_entry, "singleton"), PyRep::Bool(true));
 
     let aby_entry = items.iter().find(|it| field(it, "itemID") == PyRep::Integer(aby_id)).expect("Abyssal entry");
     assert_eq!(field(aby_entry, "sourceMutaplasmidID"), PyRep::Integer(MUTAPLASMID_TYPE_ID));
+    assert_eq!(field(aby_entry, "damage"), PyRep::Real(15.5));
+    assert_eq!(field(aby_entry, "materialLevel"), PyRep::Integer(0));
+    assert_eq!(field(aby_entry, "productivityLevel"), PyRep::Integer(0));
+    assert_eq!(field(aby_entry, "licensedProductionRunsRemaining"), PyRep::None);
     assert_eq!(field(aby_entry, "singleton"), PyRep::Bool(true));
 
     // Also verify contractProxy.SearchContracts exposes all contract items
@@ -727,4 +746,106 @@ async fn test_contracts_fitted_ship_and_non_empty_container_lifecycle_and_locks(
     )
     .await
     .expect("New owner can trash contained item after contract settlement");
+}
+
+#[tokio::test]
+async fn test_contracts_v24_container_blueprints_and_requested_items_fields() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess1 = select_pilot(&ctx, 77_011, "demo", "demo-secret", PILOT_1).await;
+    let mut sess2 = select_pilot(&ctx, 77_012, "other", "other-secret", PILOT_2).await;
+
+    let (cont_id, child_bpo_id, child_bpc_id, child_dmg_id) = ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&PILOT_1).expect("PILOT_1 character").balance = IskCents::from_f64_isk(50_000_000.0);
+        s.next_entity_id += 4;
+        let base = s.next_entity_id;
+        let cont_id = base - 3;
+        let child_bpo_id = base - 2;
+        let child_bpc_id = base - 1;
+        let child_dmg_id = base;
+
+        s.items.insert(cont_id, InventoryItemRecord {
+            item_id: cont_id, type_id: 17_366, owner_id: PILOT_1, location_id: JITA_STATION,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        s.items.insert(child_bpo_id, InventoryItemRecord {
+            item_id: child_bpo_id, type_id: RIFTER_BP_TYPE_ID as u32, owner_id: PILOT_1, location_id: cont_id,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, is_blueprint_copy: false,
+            blueprint_runs_remaining: None, dynamic_attributes: HashMap::from([(1112, 10.0), (1113, 20.0)]),
+            version: 1, ..Default::default()
+        });
+        s.items.insert(child_bpc_id, InventoryItemRecord {
+            item_id: child_bpc_id, type_id: RIFTER_BP_TYPE_ID as u32, owner_id: PILOT_1, location_id: cont_id,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, is_blueprint_copy: true,
+            blueprint_runs_remaining: Some(5), dynamic_attributes: HashMap::from([(1112, 6.0), (1113, 16.0)]),
+            version: 1, ..Default::default()
+        });
+        s.items.insert(child_dmg_id, InventoryItemRecord {
+            item_id: child_dmg_id, type_id: MWD_TYPE_ID as u32, owner_id: PILOT_1, location_id: cont_id,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true,
+            dynamic_attributes: HashMap::from([(3, 0.45)]), version: 1, ..Default::default()
+        });
+
+        (cont_id, child_bpo_id, child_bpc_id, child_dmg_id)
+    });
+
+    let confirm_kw = HashMap::from([("confirm".to_string(), PyRep::Bool(true))]);
+    let params = PyRep::keyval([
+        ("contractType", PyRep::String("ItemExchange".into())),
+        ("availability", PyRep::String("Public".into())),
+        ("assigneeID", PyRep::Integer(0)),
+        ("expireTime", PyRep::Integer(1440)),
+        ("numDays", PyRep::Integer(3)),
+        ("startStationID", PyRep::Integer(JITA_STATION)),
+        ("endStationID", PyRep::Integer(JITA_STATION)),
+        ("price", PyRep::Real(750_000.0)),
+        ("reward", PyRep::Real(0.0)),
+        ("collateral", PyRep::Real(0.0)),
+        ("title", PyRep::String("Container BPs + Requested BP".into())),
+        ("itemList", PyRep::List(vec![PyRep::Integer(cont_id)])),
+        ("requestedItems", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(RIFTER_BP_TYPE_ID), PyRep::Integer(1)])])),
+    ]);
+    let create_rep = rpc_kw(&ctx, &mut sess1, "contractProxy", "CreateContract", &[params], &confirm_kw)
+        .await
+        .expect("CreateContract container BPs + requested BP");
+    let cid = contract_id_from_create_rep(&create_rep);
+
+    let info = rpc(&ctx, &mut sess2, "contractProxy", "GetContract", &[PyRep::Integer(cid)])
+        .await
+        .expect("contractProxy.GetContract");
+    let PyRep::List(items) = field(&info, "items") else {
+        panic!("expected items list in GetContract");
+    };
+    assert_eq!(items.len(), 5);
+
+    let hangar_flag = i64::from(InventoryFlag::Hangar as u16);
+    let find_item = |iid: i64| items.iter().find(|it| field(it, "itemID") == PyRep::Integer(iid)).expect("offered item");
+    let assert_v24_fields = |entry: &PyRep,
+                             in_crate: bool,
+                             parent_id: i64,
+                             flag_id: i64,
+                             copy: bool,
+                             me: i64,
+                             te: i64,
+                             licensed: PyRep,
+                             damage: f64| {
+        assert_eq!(field(entry, "inCrate"), PyRep::Bool(in_crate));
+        assert_eq!(field(entry, "parentID"), PyRep::Integer(parent_id));
+        assert_eq!(field(entry, "flagID"), PyRep::Integer(flag_id));
+        assert_eq!(field(entry, "copy"), PyRep::Bool(copy));
+        assert_eq!(field(entry, "materialLevel"), PyRep::Integer(me));
+        assert_eq!(field(entry, "productivityLevel"), PyRep::Integer(te));
+        assert_eq!(field(entry, "licensedProductionRunsRemaining"), licensed);
+        assert_eq!(field(entry, "damage"), PyRep::Real(damage));
+    };
+
+    assert_v24_fields(find_item(cont_id), true, 0, 0, false, 0, 0, PyRep::None, 0.0);
+    assert_v24_fields(find_item(child_bpo_id), true, cont_id, hangar_flag, false, 10, 20, PyRep::None, 0.0);
+    assert_v24_fields(find_item(child_bpc_id), true, cont_id, hangar_flag, true, 6, 16, PyRep::Integer(5), 0.0);
+    assert_v24_fields(find_item(child_dmg_id), true, cont_id, hangar_flag, false, 0, 0, PyRep::None, 0.45);
+
+    let req_bp = items.iter().find(|it| field(it, "inCrate") == PyRep::Bool(false)).expect("requested BP entry");
+    assert_eq!(field(req_bp, "itemTypeID"), PyRep::Integer(RIFTER_BP_TYPE_ID));
+    assert_eq!(field(req_bp, "typeID"), PyRep::Integer(RIFTER_BP_TYPE_ID));
+    assert_v24_fields(req_bp, false, 0, 0, false, 0, 0, PyRep::None, 0.0);
 }
