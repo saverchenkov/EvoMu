@@ -192,7 +192,7 @@ pub(crate) fn handle_apply_ecm_burst(
 impl super::SystemHandle {
     pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
         let (removed, db_opt) = {
-            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let mut bp = self.ballpark.write_untracked().unwrap_or_else(|e| e.into_inner());
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
             let super::SystemActorState {

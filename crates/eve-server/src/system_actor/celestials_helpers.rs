@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use super::SystemHandle;
-use eve_db::lock_rank::{RankedRwLock, RANK_BALLPARK, RANK_LEAF};
+use super::{BallparkHandle, SystemHandle};
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_destiny::{BallId, Ballpark};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
@@ -12,11 +12,9 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 struct DbBallparkEntry {
-    ballpark: std::sync::Weak<RankedRwLock<Ballpark, RANK_BALLPARK>>,
+    ballpark: std::sync::Weak<BallparkHandle>,
     ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
     scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-    view_tx: std::sync::Weak<tokio::sync::watch::Sender<Arc<crate::system_actor::SystemView>>>,
-    tidi_factor_bits: std::sync::Weak<std::sync::atomic::AtomicU64>,
 }
 
 fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
@@ -41,8 +39,6 @@ pub(crate) fn register_db_system_ballpark(
             ballpark: Arc::downgrade(&handle.ballpark),
             ball_positions: Arc::downgrade(&handle.ball_positions),
             scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
-            view_tx: Arc::downgrade(&handle.view_tx),
-            tidi_factor_bits: Arc::downgrade(&handle.tidi_factor_bits),
         },
     );
 }
@@ -292,23 +288,6 @@ pub fn try_remove_ball_for_db(
             let apply_remove = |bp: &mut Ballpark| {
                 let _ = bp.remove_ball(ball_id);
                 sync_ball_positions(bp, &pos_arc, &scram_arc);
-                if let Some(tx) = entry.view_tx.upgrade() {
-                    let tidi = entry
-                        .tidi_factor_bits
-                        .upgrade()
-                        .map(|bits| {
-                            let raw = f64::from_bits(bits.load(std::sync::atomic::Ordering::Relaxed));
-                            if raw.is_finite() {
-                                raw.clamp(0.1, 1.0)
-                            } else {
-                                1.0
-                            }
-                        })
-                        .unwrap_or(1.0);
-                    let prev = { tx.borrow().clone() };
-                    let next = crate::system_actor::SystemView::from_ballpark(bp, None, tidi, Some(prev.as_ref()));
-                    let _ = tx.send(Arc::new(next));
-                }
             };
             if eve_db::lock_rank::held_lock_ranks().contains(&eve_db::lock_rank::RANK_BALLPARK) {
                 eve_db::lock_rank::assert_locks_below(eve_db::lock_rank::RANK_BALLPARK + 1);
@@ -1237,7 +1216,6 @@ impl SystemHandle {
             }
             bp.force_stop_warp(ball_id)?;
             crate::system_actor::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-            self.publish_view_from(&bp, None);
             bp.current_tick
         };
         self.record_warp_stop(ball_id);

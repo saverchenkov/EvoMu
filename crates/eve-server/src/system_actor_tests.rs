@@ -1085,17 +1085,32 @@ async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_u
     handle.set_tidi_factor_raw(0.5);
     assert!((handle.view().tidi_factor - 0.5).abs() < 1e-12);
 
-    // Lock-free view reads succeed even while handle.ballpark is exclusively write-locked
-    // or poisoned on the calling thread.
+    // Lock-free view reads succeed even while handle.ballpark is exclusively write-locked,
+    // keep seeing the pre-write snapshot until the write guard drops cleanly, and immediately
+    // reflect direct `.ballpark.write()` mutations once the guard releases.
     {
-        let _bp_write = handle.ballpark.write().unwrap();
+        let mut bp_write = handle.ballpark.write().unwrap();
+        bp_write.set_warp_scramble_strength(ship_a, 2);
+        bp_write.combat_states.get_mut(&ship_a).unwrap().is_cloaked = true;
         let lock_free_view = handle.view();
         assert_eq!(lock_free_view.current_tick, 3);
         assert!(lock_free_view.contains_ball(ship_a));
+        assert!(!lock_free_view.is_ball_scrambled(ship_a));
+        assert!(!lock_free_view.is_ball_cloaked(ship_a));
     }
+    let after_direct_write = handle.view();
+    assert!(after_direct_write.is_ball_scrambled(ship_a));
+    assert!(after_direct_write.is_ball_cloaked(ship_a));
+    assert!((after_direct_write.tidi_factor - 0.5).abs() < 1e-12);
 
+    // Panicking while holding a direct write guard does NOT publish half-mutated dirty state,
+    // whereas recovering and completing a write guard publishes cleanly.
+    let pre_poison_pos = handle.view().ball_position(ship_a);
+    assert!(pre_poison_pos.is_some());
+    assert_ne!(pre_poison_pos, Some(DVec3::new(999_999.0, 0.0, 0.0)));
     let poison_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _bp_write = handle.ballpark.write().unwrap();
+        let mut bp_write = handle.ballpark.write().unwrap();
+        bp_write.set_ball_position(ship_a, DVec3::new(999_999.0, 0.0, 0.0));
         panic!("simulated ballpark poison for #1342 view test");
     }));
     assert!(poison_res.is_err());
@@ -1103,4 +1118,13 @@ async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_u
     let view_while_poisoned = handle.view();
     assert_eq!(view_while_poisoned.current_tick, 3);
     assert!(view_while_poisoned.contains_ball(ship_a));
+    assert_eq!(view_while_poisoned.ball_position(ship_a), pre_poison_pos);
+    {
+        let mut recovered = handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        recovered.set_ball_position(ship_a, DVec3::new(12_345.0, 0.0, 0.0));
+    }
+    assert_eq!(
+        handle.view().ball_position(ship_a),
+        Some(DVec3::new(12_345.0, 0.0, 0.0))
+    );
 }

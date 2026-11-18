@@ -25,8 +25,8 @@ use belts::{
     reconcile_spawned_belt_asteroids, respawn_due_asteroids,
 };
 use eve_db::lock_rank::{
-    held_lock_ranks, AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_BALLPARK,
-    RANK_LEAF, RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
+    held_lock_ranks, AnyRwLock, RankedMutex, RankedRwLock, RANK_ACTOR_STATE, RANK_LEAF,
+    RANK_SERVICE_STATE, RANK_SYSTEM_REGISTRY,
 };
 use eve_destiny::wire::{
     encode_set_state_payload, encode_set_state_update,
@@ -968,15 +968,18 @@ impl SystemRegistry {
         let (view_tx, view_rx) = tokio::sync::watch::channel(Arc::new(initial_view));
         let view_tx = Arc::new(view_tx);
         let view_tx_actor = Arc::clone(&view_tx);
-        let ballpark_shared: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>> =
-            Arc::new(RankedRwLock::new(initial_ballpark));
+        let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
+        let tidi_factor_bits_actor = tidi_factor_bits.clone();
+        let ballpark_shared: Arc<BallparkHandle> = Arc::new(BallparkHandle::new(
+            initial_ballpark,
+            Arc::clone(&view_tx),
+            Arc::clone(&tidi_factor_bits),
+        ));
         let ballpark_actor = ballpark_shared.clone();
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
-        let tidi_factor_bits_actor = tidi_factor_bits.clone();
         let sim_elapsed_secs_bits = Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits()));
         let sim_elapsed_secs_bits_actor = sim_elapsed_secs_bits.clone();
         let last_visible_stamp = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1051,8 +1054,8 @@ impl SystemRegistry {
                     }));
                 }
                 let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
-                let actor_delivery_out: Option<PendingActorDelivery> = {
-                let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
+                let (actor_delivery_out, next_view): (Option<PendingActorDelivery>, SystemView) = {
+                let mut ballpark = ballpark_actor.write_untracked().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
                 let out = (|| -> Option<PendingActorDelivery> {
                 let SystemActorState {
@@ -3027,14 +3030,7 @@ impl SystemRegistry {
                     }
                 }
                 })();
-                let raw_tidi = f64::from_bits(
-                    tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed),
-                );
-                let cur_tidi = if raw_tidi.is_finite() {
-                    raw_tidi.clamp(0.10, 1.0)
-                } else {
-                    1.0
-                };
+                let cur_tidi = celestials::clamp_tidi_factor_bits(&tidi_factor_bits_actor);
                 let prev_view = { view_tx_actor.borrow().clone() };
                 let next_view = SystemView::from_ballpark(
                     &ballpark,
@@ -3042,9 +3038,9 @@ impl SystemRegistry {
                     cur_tidi,
                     Some(prev_view.as_ref()),
                 );
-                let _ = view_tx_actor.send(Arc::new(next_view));
-                out
+                (out, next_view)
                 };
+                let _ = view_tx_actor.send(Arc::new(next_view));
                 for send_reply in deferred_replies {
                     send_reply();
                 }
