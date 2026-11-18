@@ -30,18 +30,12 @@ fn push_char_notification_with_db_missing_char_and_dropped_rx_branches() {
 
     // Character not in `s.characters` -> uid_opt is None, dropped broadcast receiver ignored.
     let unknown_char = 99_999_888_i64;
-    push_char_notification_with_db(
-        &ctx.db,
-        Some(&pend),
-        Some(&tx),
-        unknown_char,
-        "OnProgressionTaskCompleted",
-        vec![PyRep::Integer(42)],
-    );
+    emit_progression_task_completed_with_db(&ctx.db, Some(&pend), Some(&tx), unknown_char, 42);
     let q = pend.read().unwrap();
     let items = q.get(&unknown_char).expect("unknown char queued");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].event, "OnProgressionTaskCompleted");
+    assert_eq!(items[0].args, vec![PyRep::Integer(42)]);
     drop(q);
 
     // DB-backed progression emitters with Some(&tx) and with pending_notifications = None.

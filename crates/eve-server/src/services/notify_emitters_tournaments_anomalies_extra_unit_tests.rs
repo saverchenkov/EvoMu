@@ -222,28 +222,48 @@ fn tournament_dedup_signal_tracker_filtering_and_dungeon_trigger_queue_cap_kill_
         panic!("expected Tuple for full_state");
     }
 
-    // 4. push_dungeon_room_trigger_notify: None channel/map early return & 256 queue cap
+    // 4. push_dungeon_room_trigger_notify_typed: None channel/map early return & 256 queue cap
     let pend: RwLock<HashMap<i64, Vec<PendingMachoNotification>>> = RwLock::new(HashMap::new());
     let (tx, _rx) = broadcast::channel(512);
-    push_dungeon_room_trigger_notify(&ctx.db, None, Some(&tx), char_id, "Evt", vec![]);
-    push_dungeon_room_trigger_notify(&ctx.db, Some(&pend), None, char_id, "Evt", vec![]);
+    push_dungeon_room_trigger_notify_typed(
+        &ctx.db,
+        None,
+        Some(&tx),
+        char_id,
+        crate::router::notify_registry::OnDungeonTriggerMusic {
+            dungeon_id: 42,
+            music_trigger_id: 0,
+        },
+    );
+    push_dungeon_room_trigger_notify_typed(
+        &ctx.db,
+        Some(&pend),
+        None,
+        char_id,
+        crate::router::notify_registry::OnDungeonTriggerMusic {
+            dungeon_id: 42,
+            music_trigger_id: 0,
+        },
+    );
     assert!(pend.read().unwrap().is_empty());
 
     for i in 0..260 {
-        push_dungeon_room_trigger_notify(
+        push_dungeon_room_trigger_notify_typed(
             &ctx.db,
             Some(&pend),
             Some(&tx),
             char_id,
-            "OnDungeonTriggerMusic",
-            vec![PyRep::Integer(i)],
+            crate::router::notify_registry::OnDungeonTriggerMusic {
+                dungeon_id: 42,
+                music_trigger_id: i,
+            },
         );
     }
     let q = pend.read().unwrap();
     let list = &q[&char_id];
     assert_eq!(list.len(), 256);
-    assert_eq!(list.first().unwrap().args, vec![PyRep::Integer(4)]);
-    assert_eq!(list.last().unwrap().args, vec![PyRep::Integer(259)]);
+    assert_eq!(list.first().unwrap().args, vec![PyRep::Integer(42), PyRep::Integer(4)]);
+    assert_eq!(list.last().unwrap().args, vec![PyRep::Integer(42), PyRep::Integer(259)]);
 }
 
 #[test]

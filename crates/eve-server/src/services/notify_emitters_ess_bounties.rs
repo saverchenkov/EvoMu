@@ -5,7 +5,9 @@
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::notify_registry::{
-    emit_typed_char_with_db, OnCombatMessage, OnProgressionAdvanced, OnProgressionTaskCompleted,
+    build_pending_registered_notification, emit_typed_char_with_db,
+    push_pending_char_notification_256, OnCombatMessage, OnProgressionAdvanced,
+    OnProgressionTaskCompleted,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::lock_rank::AnyRwLock;
@@ -28,27 +30,17 @@ pub(crate) fn push_char_notification_with_db(
         return;
     };
     let uid_opt = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(char_id, uid_opt, event, "charid", args.clone());
-    let notif = PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id: char_id,
-        event: event.to_string(),
-        id_type: "charid".to_string(),
+    let Some(notif) = build_pending_registered_notification(
+        char_id,
+        uid_opt,
+        event,
+        "charid",
         args,
-        packet,
-        marshaled_packet,
-        created_filetime: db.clock().now_blueos_filetime_ticks(),
+        db.clock().now_blueos_filetime_ticks(),
+    ) else {
+        return;
     };
-    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
-    let q = queues.entry(char_id).or_default();
-    if q.len() >= 256 {
-        q.remove(0);
-    }
-    q.push(notif.clone());
-    if let Some(tx) = notify_tx {
-        let _ = tx.send((char_id, notif));
-    }
+    push_pending_char_notification_256(pend, notify_tx, char_id, notif);
 }
 
 /// Emits `OnProgressionAdvanced(objective_id, last_completed_task_id)` (`id_type = "charid"`).

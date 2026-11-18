@@ -28,12 +28,46 @@ fn push_char_notification_with_db_handles_guards_queue_cap_and_broadcast() {
     let (tx, mut rx) = broadcast::channel(300);
 
     // Non-positive char_id is ignored
-    push_char_notification_with_db(&ctx.db, Some(&pend), Some(&tx), 0, "OnStep", vec![]);
-    push_char_notification_with_db(&ctx.db, Some(&pend), Some(&tx), -5, "OnStep", vec![]);
+    push_char_notification_with_db(
+        &ctx.db,
+        Some(&pend),
+        Some(&tx),
+        0,
+        "OnDungeonCompleted",
+        vec![PyRep::Integer(1)],
+    );
+    push_char_notification_with_db(
+        &ctx.db,
+        Some(&pend),
+        Some(&tx),
+        -5,
+        "OnDungeonCompleted",
+        vec![PyRep::Integer(1)],
+    );
     assert!(pend.read().unwrap().is_empty());
 
     // None pending_notifications is ignored
-    push_char_notification_with_db(&ctx.db, None, Some(&tx), char_id, "OnStep", vec![]);
+    push_char_notification_with_db(
+        &ctx.db,
+        None,
+        Some(&tx),
+        char_id,
+        "OnDungeonCompleted",
+        vec![PyRep::Integer(1)],
+    );
+    assert!(rx.try_recv().is_err());
+
+    // Unregistered event or invalid arity is rejected without enqueueing
+    push_char_notification_with_db(&ctx.db, Some(&pend), Some(&tx), char_id, "OnStep", vec![]);
+    push_char_notification_with_db(
+        &ctx.db,
+        Some(&pend),
+        Some(&tx),
+        char_id,
+        "OnDungeonCompleted",
+        vec![],
+    );
+    assert!(pend.read().unwrap().is_empty());
     assert!(rx.try_recv().is_err());
 
     // Fill queue up to 256 and verify 257th drops oldest (index 0)
@@ -43,7 +77,7 @@ fn push_char_notification_with_db_handles_guards_queue_cap_and_broadcast() {
             Some(&pend),
             Some(&tx),
             char_id,
-            "OnStep",
+            "OnDungeonCompleted",
             vec![PyRep::Integer(i)],
         );
     }
@@ -56,7 +90,7 @@ fn push_char_notification_with_db_handles_guards_queue_cap_and_broadcast() {
     assert_eq!(q[0].recipient_char_id, char_id);
     let (recv_cid, recv_notif) = rx.try_recv().expect("broadcast sent");
     assert_eq!(recv_cid, char_id);
-    assert_eq!(recv_notif.event, "OnStep");
+    assert_eq!(recv_notif.event, "OnDungeonCompleted");
 }
 
 #[test]

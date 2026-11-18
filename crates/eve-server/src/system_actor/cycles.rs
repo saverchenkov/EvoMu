@@ -2,6 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+use crate::router::notify_registry::{
+    build_pending_typed_notification, emit_typed_target_to_char_with_id_type, FailLockTarget,
+    OnCapacitorChange, OnChargeBeingLoadedToModule, OnDamageMessage, OnDamageMessages,
+    OnDamageStateChange, OnModuleAttributeChanges, OnMultiEvent, OnRemoteMessage, OnTarget,
+    TypedNotification,
+};
 use crate::system_actor::*;
 use eve_db::lock_rank::AnyRwLock;
 use eve_destiny::{BallId, Ballpark, MovementMode};
@@ -2854,6 +2860,45 @@ fn resolve_ball_pilot_char_id(
         .filter(|&c| c > 0)
 }
 
+fn enqueue_target_lost_typed<N: TypedNotification>(
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    pending: &dyn AnyRwLock<
+        std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
+    >,
+    notify_tx_opt: Option<
+        &tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    >,
+    now: i64,
+    cid: i64,
+    id_type: &str,
+    notif: N,
+) {
+    let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
+    emit_typed_target_to_char_with_id_type(
+        Some(pending),
+        notify_tx_opt,
+        cid,
+        uid,
+        id_type,
+        now,
+        notif,
+    );
+}
+
+fn on_target_multi_event(mode: &str, ball_id: i64) -> OnMultiEvent {
+    OnMultiEvent {
+        events: vec![eve_proto::PyRep::Tuple(vec![
+            eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::String("OnTarget".into()),
+                eve_proto::PyRep::String(mode.into()),
+                eve_proto::PyRep::Integer(ball_id),
+                eve_proto::PyRep::String(String::new()),
+            ]),
+            eve_proto::PyRep::Integer(0),
+        ])],
+    }
+}
+
 pub(crate) fn flush_target_lost_notifications(
     ballpark: &eve_destiny::Ballpark,
     events: &[eve_destiny::DestinyEvent],
@@ -2873,53 +2918,15 @@ pub(crate) fn flush_target_lost_notifications(
     let now = db_opt
         .map(|db| db.clock().now_blueos_filetime_ticks())
         .unwrap_or(133_500_000_000_000_000);
-    let enqueue_typed_notif = |cid: i64, event: &str, id_type: &str, args: Vec<eve_proto::PyRep>| {
-        let uid =
-            db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
-        let (packet, marshaled_packet) =
-            crate::router::ServerContext::build_macho_notification_packet(
-                cid,
-                uid,
-                event,
-                id_type,
-                args.clone(),
-            );
-        let notif = crate::router::PendingMachoNotification {
-            seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-            recipient_char_id: cid,
-            event: event.to_string(),
-            id_type: id_type.to_string(),
-            args,
-            packet,
-            marshaled_packet,
-            created_filetime: now,
-        };
-        pending
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(cid)
-            .or_default()
-            .push(notif.clone());
-        if let Some(tx) = notify_tx_opt {
-            let _ = tx.send((cid, notif));
-        }
-    };
-    let enqueue_notif = |cid: i64, event: &str, args: Vec<eve_proto::PyRep>| {
-        enqueue_typed_notif(cid, event, "charid", args);
-    };
     let enqueue_otherlost = |t_char: i64, source_id: i64| {
-        enqueue_notif(
+        enqueue_target_lost_typed(
+            db_opt,
+            pending,
+            notify_tx_opt,
+            now,
             t_char,
-            "OnMultiEvent",
-            vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
-                eve_proto::PyRep::Tuple(vec![
-                    eve_proto::PyRep::String("OnTarget".into()),
-                    eve_proto::PyRep::String("otherlost".into()),
-                    eve_proto::PyRep::Integer(source_id),
-                    eve_proto::PyRep::String(String::new()),
-                ]),
-                eve_proto::PyRep::Integer(0),
-            ])])],
+            OnMultiEvent::DEFAULT_ID_TYPE,
+            on_target_multi_event("otherlost", source_id),
         );
     };
     for ev in events {
@@ -2932,11 +2939,16 @@ pub(crate) fn flush_target_lost_notifications(
             let target_char_id = resolve_ball_pilot_char_id(ballpark, db_opt, *target_id)
                 .filter(|&c| Some(c) != source_char_id);
             if let Some(cid) = source_char_id {
-                enqueue_typed_notif(
+                enqueue_target_lost_typed(
+                    db_opt,
+                    pending,
+                    notify_tx_opt,
+                    now,
                     cid,
-                    "FailLockTarget",
-                    "service:target",
-                    vec![eve_proto::PyRep::Integer(*target_id)],
+                    FailLockTarget::DEFAULT_ID_TYPE,
+                    FailLockTarget {
+                        target_id: *target_id,
+                    },
                 );
             }
             if let Some(t_char) = target_char_id {
@@ -2957,26 +2969,27 @@ pub(crate) fn flush_target_lost_notifications(
             let target_char_id = resolve_ball_pilot_char_id(ballpark, db_opt, *target_id)
                 .filter(|&c| Some(c) != source_char_id);
             if let Some(cid) = source_char_id {
-                enqueue_notif(
+                enqueue_target_lost_typed(
+                    db_opt,
+                    pending,
+                    notify_tx_opt,
+                    now,
                     cid,
-                    "OnTarget",
-                    vec![
-                        eve_proto::PyRep::Integer(*target_id),
-                        eve_proto::PyRep::String("lost".into()),
-                    ],
+                    OnTarget::DEFAULT_ID_TYPE,
+                    OnTarget {
+                        arg0: eve_proto::PyRep::Integer(*target_id),
+                        arg1: eve_proto::PyRep::String("lost".into()),
+                        reason: None,
+                    },
                 );
-                enqueue_notif(
+                enqueue_target_lost_typed(
+                    db_opt,
+                    pending,
+                    notify_tx_opt,
+                    now,
                     cid,
-                    "OnMultiEvent",
-                    vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
-                        eve_proto::PyRep::Tuple(vec![
-                            eve_proto::PyRep::String("OnTarget".into()),
-                            eve_proto::PyRep::String("lost".into()),
-                            eve_proto::PyRep::Integer(*target_id),
-                            eve_proto::PyRep::String(String::new()),
-                        ]),
-                        eve_proto::PyRep::Integer(0),
-                    ])])],
+                    OnMultiEvent::DEFAULT_ID_TYPE,
+                    on_target_multi_event("lost", *target_id),
                 );
             }
             if let Some(t_char) = target_char_id {
@@ -3135,7 +3148,7 @@ fn capacitor_telemetry_key(n: &crate::router::PendingMachoNotification) -> Optio
     None
 }
 
-fn enqueue_cycle_char_notification(
+fn enqueue_cycle_char_notification<N: TypedNotification>(
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     pending: &dyn AnyRwLock<
         std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
@@ -3145,28 +3158,10 @@ fn enqueue_cycle_char_notification(
     >,
     now: i64,
     cid: i64,
-    event: &str,
-    args: Vec<eve_proto::PyRep>,
+    notif: N,
 ) {
     let uid = db_opt.and_then(|db| db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.user_id)));
-    let (packet, marshaled_packet) =
-        crate::router::ServerContext::build_macho_notification_packet(
-            cid,
-            uid,
-            event,
-            "charid",
-            args.clone(),
-        );
-    let notif = crate::router::PendingMachoNotification {
-        seq_id: crate::router::cache_notifications::next_notification_seq_id(),
-        recipient_char_id: cid,
-        event: event.to_string(),
-        id_type: "charid".to_string(),
-        args,
-        packet,
-        marshaled_packet,
-        created_filetime: now,
-    };
+    let notif = build_pending_typed_notification(cid, uid, N::DEFAULT_ID_TYPE, now, notif);
     {
         let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
         let q = q_guard.entry(cid).or_default();
@@ -3251,8 +3246,10 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
                     notify_tx_opt,
                     now,
                     acid,
-                    "OnDamageStateChange",
-                    vec![eve_proto::PyRep::Integer(*target_id), damage_tuple.clone()],
+                    OnDamageStateChange {
+                        ship_id: *target_id,
+                        damage_state: damage_tuple.clone(),
+                    },
                 );
             }
             if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
@@ -3262,8 +3259,10 @@ pub(crate) fn flush_pending_cycle_damage_notifications_with_ballpark(
                     notify_tx_opt,
                     now,
                     vcid,
-                    "OnDamageStateChange",
-                    vec![eve_proto::PyRep::Integer(*target_id), damage_tuple],
+                    OnDamageStateChange {
+                        ship_id: *target_id,
+                        damage_state: damage_tuple,
+                    },
                 );
             }
         }
@@ -3336,25 +3335,53 @@ pub(crate) fn build_cycle_damage_message_dict(
     eve_proto::PyRep::Dict(entries)
 }
 
+struct CycleNotifySink<'a> {
+    db_opt: Option<&'a std::sync::Arc<eve_db::WorldRepository>>,
+    pending: &'a dyn AnyRwLock<
+        std::collections::HashMap<i64, Vec<crate::router::PendingMachoNotification>>,
+    >,
+    notify_tx_opt: Option<
+        &'a tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    >,
+    now: i64,
+}
+
+impl CycleNotifySink<'_> {
+    fn push<N: TypedNotification>(&self, cid: i64, notif: N) {
+        enqueue_cycle_char_notification(
+            self.db_opt,
+            self.pending,
+            self.notify_tx_opt,
+            self.now,
+            cid,
+            notif,
+        );
+    }
+}
+
 fn enqueue_cycle_weapon_log_pair(
-    enqueue_notif: &impl Fn(i64, &str, Vec<eve_proto::PyRep>),
+    sink: &CycleNotifySink<'_>,
     recipient_cid: CharacterId,
     msg_key: &str,
     dict: eve_proto::PyRep,
 ) {
     let msg_tuple = vec![eve_proto::PyRep::String(msg_key.into()), dict.clone()];
-    enqueue_notif(recipient_cid, "OnDamageMessage", vec![dict]);
-    enqueue_notif(
+    sink.push(
         recipient_cid,
-        "OnDamageMessages",
-        vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(
-            msg_tuple,
-        )])],
+        OnDamageMessage {
+            damage_messages_args: dict,
+        },
+    );
+    sink.push(
+        recipient_cid,
+        OnDamageMessages {
+            dmgmsgs: vec![eve_proto::PyRep::Tuple(msg_tuple)],
+        },
     );
 }
 
 fn flush_cycle_weapon_log_entries(
-    enqueue_notif: &impl Fn(i64, &str, Vec<eve_proto::PyRep>),
+    sink: &CycleNotifySink<'_>,
     attacker_char_id: Option<CharacterId>,
     attacker_ship_id: BallId,
     target_id: BallId,
@@ -3377,7 +3404,7 @@ fn flush_cycle_weapon_log_entries(
             hit_quality,
             "me",
         );
-        enqueue_cycle_weapon_log_pair(enqueue_notif, acid, attacker_msg_key, dmg_dict);
+        enqueue_cycle_weapon_log_pair(sink, acid, attacker_msg_key, dmg_dict);
     }
     if let Some(vcid) = target_char_id.filter(|&c| c > 0 && c != owner_cid) {
         let vic_dict = build_cycle_damage_message_dict(
@@ -3389,7 +3416,7 @@ fn flush_cycle_weapon_log_entries(
             hit_quality,
             "other",
         );
-        enqueue_cycle_weapon_log_pair(enqueue_notif, vcid, victim_msg_key, vic_dict);
+        enqueue_cycle_weapon_log_pair(sink, vcid, victim_msg_key, vic_dict);
     }
 }
 
@@ -3411,8 +3438,11 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
     let now = db_opt
         .map(|db| db.clock().now_blueos_filetime_ticks())
         .unwrap_or(133_500_000_000_000_000);
-    let enqueue_notif = |cid: i64, event: &str, args: Vec<eve_proto::PyRep>| {
-        enqueue_cycle_char_notification(db_opt, pending, notify_tx_opt, now, cid, event, args);
+    let sink = CycleNotifySink {
+        db_opt,
+        pending,
+        notify_tx_opt,
+        now,
     };
     for action in pending_cycle_actions.iter_mut() {
         if let super::PendingCycleAction::ShipCapacitorChanged {
@@ -3428,27 +3458,27 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                 continue;
             }
             *notified = true;
-            enqueue_notif(
+            sink.push(
                 *char_id,
-                "OnCapacitorChange",
-                vec![
-                    eve_proto::PyRep::Integer(*ship_id),
-                    eve_proto::PyRep::Real(*new_cap),
-                    eve_proto::PyRep::Real(*max_cap),
-                ],
+                OnCapacitorChange {
+                    ship_id: *ship_id,
+                    new_cap: *new_cap,
+                    max_cap: *max_cap,
+                },
             );
-            enqueue_notif(
+            sink.push(
                 *char_id,
-                "OnModuleAttributeChanges",
-                vec![eve_proto::PyRep::List(vec![
-                    crate::router::ServerContext::build_ship_capacitor_attr_change_rep(
-                        *char_id,
-                        *ship_id,
-                        crate::router::host_wall_blueos_filetime_ticks(),
-                        *new_cap,
-                        if old_cap.is_finite() { *old_cap } else { *new_cap },
-                    ),
-                ])],
+                OnModuleAttributeChanges {
+                    changes: eve_proto::PyRep::List(vec![
+                        crate::router::ServerContext::build_ship_capacitor_attr_change_rep(
+                            *char_id,
+                            *ship_id,
+                            crate::router::host_wall_blueos_filetime_ticks(),
+                            *new_cap,
+                            if old_cap.is_finite() { *old_cap } else { *new_cap },
+                        ),
+                    ]),
+                },
             );
             continue;
         }
@@ -3465,20 +3495,13 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                 continue;
             }
             *notified = true;
-            enqueue_notif(
+            sink.push(
                 *char_id,
-                "OnChargeBeingLoadedToModule",
-                vec![
-                    eve_proto::PyRep::List(
-                        module_ids
-                            .iter()
-                            .copied()
-                            .map(eve_proto::PyRep::Integer)
-                            .collect(),
-                    ),
-                    eve_proto::PyRep::Integer(i64::from(*charge_type_id)),
-                    eve_proto::PyRep::Real(*time_ms),
-                ],
+                OnChargeBeingLoadedToModule {
+                    item_ids: module_ids.clone(),
+                    charge_type_id: i64::from(*charge_type_id),
+                    time_ms: *time_ms,
+                },
             );
             continue;
         }
@@ -3499,13 +3522,13 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
                     eve_proto::PyRep::Integer(i64::from(*module_type_id)),
                 ]),
             )]);
-            enqueue_notif(
+            sink.push(
                 *char_id,
-                "OnRemoteMessage",
-                vec![
-                    eve_proto::PyRep::String("NoCharges".into()),
-                    dict,
-                ],
+                OnRemoteMessage {
+                    msg_id: "NoCharges".into(),
+                    dict: Some(dict),
+                    kw: None,
+                },
             );
             continue;
         }
@@ -3525,7 +3548,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
             }
             *notified = true;
             flush_cycle_weapon_log_entries(
-                &enqueue_notif,
+                &sink,
                 *attacker_char_id,
                 *attacker_ship_id,
                 *target_id,
@@ -3549,7 +3572,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
             }
             *notified = true;
             flush_cycle_weapon_log_entries(
-                &enqueue_notif,
+                &sink,
                 *attacker_char_id,
                 *attacker_ship_id,
                 *target_id,

@@ -899,8 +899,10 @@ fn cap_telemetry_coalesces_and_evicts_before_state_notifications() {
         None,
         now,
         char_id,
-        "OnSovereigntyChanged",
-        vec![eve_proto::PyRep::Integer(30_000_142), eve_proto::PyRep::None],
+        crate::router::notify_registry::OnSovereigntyChanged {
+            solar_system_id: 30_000_142,
+            alliance_id: None,
+        },
     );
     enqueue_cycle_char_notification(
         Some(&db),
@@ -908,12 +910,11 @@ fn cap_telemetry_coalesces_and_evicts_before_state_notifications() {
         None,
         now,
         char_id,
-        "OnSolarSystemSovStructuresUpdated",
-        vec![
-            eve_proto::PyRep::Integer(30_000_142),
-            eve_proto::PyRep::List(vec![]),
-            eve_proto::PyRep::Dict(vec![]),
-        ],
+        crate::router::notify_registry::OnSolarSystemSovStructuresUpdated {
+            solar_system_id: 30_000_142,
+            solar_system_structures_info: eve_proto::PyRep::List(vec![]),
+            changes: eve_proto::PyRep::Dict(vec![]),
+        },
     );
     // Unrelated non-capacitor OnModuleAttributeChanges (attr 9) must not be coalesced with attr 18.
     enqueue_cycle_char_notification(
@@ -922,17 +923,18 @@ fn cap_telemetry_coalesces_and_evicts_before_state_notifications() {
         None,
         now,
         char_id,
-        "OnModuleAttributeChanges",
-        vec![eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
-            eve_proto::PyRep::String("OnModuleAttributeChange".into()),
-            eve_proto::PyRep::Integer(char_id),
-            eve_proto::PyRep::Integer(ship_id),
-            eve_proto::PyRep::Integer(9),
-            eve_proto::PyRep::Integer(now),
-            eve_proto::PyRep::Real(100.0),
-            eve_proto::PyRep::Real(90.0),
-            eve_proto::PyRep::None,
-        ])])],
+        crate::router::notify_registry::OnModuleAttributeChanges {
+            changes: eve_proto::PyRep::List(vec![eve_proto::PyRep::Tuple(vec![
+                eve_proto::PyRep::String("OnModuleAttributeChange".into()),
+                eve_proto::PyRep::Integer(char_id),
+                eve_proto::PyRep::Integer(ship_id),
+                eve_proto::PyRep::Integer(9),
+                eve_proto::PyRep::Integer(now),
+                eve_proto::PyRep::Real(100.0),
+                eve_proto::PyRep::Real(90.0),
+                eve_proto::PyRep::None,
+            ])]),
+        },
     );
 
     // 1. 150 passive recharge ticks for one ship coalesce to the latest cap pair without evicting sov notices.

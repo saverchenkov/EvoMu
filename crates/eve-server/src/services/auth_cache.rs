@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::notify_registry::OnSessionChanged;
+use crate::router::notify_registry::{OnNotificationReceived, OnSessionChanged};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode};
@@ -336,12 +336,30 @@ pub async fn handle(
                 Some(other) => vec![other.clone()],
                 None => Vec::new(),
             };
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                notif_name,
-                "charid",
-                payload,
-            );
+            if notif_name == "OnNotificationReceived" && payload.len() <= 1 {
+                let data = payload.into_iter().next().unwrap_or(PyRep::None);
+                ctx.emit_typed(
+                    NotificationTarget::Character(char_id),
+                    OnNotificationReceived {
+                        notification_id: 0,
+                        type_id: 0,
+                        sender_id: session.character_id,
+                        created: ctx.now_blueos_filetime_ticks(),
+                        data,
+                    },
+                );
+            } else if ctx
+                .emit_registered_to_char(char_id, notif_name, "charid", payload)
+                .is_none()
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: format!(
+                        "ForwardCharacterNotification: unknown notification or invalid arity for {notif_name}"
+                    ),
+                    client_error: None,
+                }));
+            }
             Some(Ok(PyRep::Bool(true)))
         }
 
