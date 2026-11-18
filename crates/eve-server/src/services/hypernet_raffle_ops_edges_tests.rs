@@ -420,7 +420,9 @@ fn create_raffle_location_item_hypercore_validation_and_buy_ticket_award_edges()
     )
     .unwrap()
     .unwrap();
-    let raffle_id = created.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let raffle_id = created
+        .as_i64()
+        .expect("CreateRaffle must return integer raffle_id");
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&881_099].quantity), 2);
 
     // BuyTicket negative index / >= ticket_count -> TicketUnavailable; BuyRandomTickets invalid count -> InvalidArgument / NotEnoughTickets

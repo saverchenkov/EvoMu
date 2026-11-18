@@ -505,7 +505,6 @@ async fn freelance_project_delete_and_hypernet_relay_lifecycle() {
 // parity: feat:serverops.daily-jobs
 // parity: feat:serverops.node-balancing
 // parity: feat:serverops.time-dilation
-// parity: plan:Q-6
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entitlements_serverops_and_sqlite_restart_persistence() {
     let db_path = std::env::temp_dir().join(format!("evomu_shard4_ops_{}.sqlite", std::process::id()));

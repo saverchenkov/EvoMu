@@ -972,12 +972,15 @@ async fn test_quasar_accounting_loyalty_contracts() {
     // 2. Accounting Entry Types
     let entry_types_rsp = quasar_ok(&ctx, &mut sess, "eve.accounting.entrytype.GetAllRequest", Vec::new(), b"acc-03", "entrytype.GetAllResponse").await;
     let et_list = dyn_list(&entry_types_rsp, "entry_types");
-    assert_eq!(et_list.len(), 4);
+    assert!(et_list.len() >= 18);
     assert!(et_list.iter().any(|et| {
         dyn_u64(et, "id.sequential") == Some(1) && dyn_str(et, "attributes.name") == Some("Player Trading")
     }));
     assert!(et_list.iter().any(|et| {
-        dyn_u64(et, "id.sequential") == Some(42) && dyn_str(et, "attributes.name") == Some("Industry Job Fee")
+        dyn_u64(et, "id.sequential") == Some(42) && dyn_str(et, "attributes.name") == Some("Market Escrow")
+    }));
+    assert!(et_list.iter().any(|et| {
+        dyn_u64(et, "id.sequential") == Some(56) && dyn_str(et, "attributes.name") == Some("Manufacturing")
     }));
 
     // 3. Loyalty Points Wallet assetholding operations (Deposit & Withdraw + unauth 403)
@@ -1031,22 +1034,92 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     eve_testkit::attest(&["plan:Q-6"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut bpo = eve_db::InventoryItemRecord {
+            item_id: 77_001,
+            type_id: 681,
+            owner_id: 90_000_001,
+            location_id: 60_003_760,
+            singleton: true,
+            quantity: 1,
+            ..Default::default()
+        };
+        bpo.dynamic_attributes.insert(1112, 5.0);
+        bpo.dynamic_attributes.insert(1113, 10.0);
+        snap.items.insert(77_001, bpo);
+        snap.industry_jobs.insert(
+            92_001,
+            eve_db::IndustryJobRecord {
+                job_id: 92_001,
+                installer_id: 90_000_001,
+                facility_id: 60_003_760,
+                blueprint_item_id: 77_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 2,
+                product_type_id: 587,
+                status: "Active".to_string(),
+                duration_seconds: 3_600,
+                start_unix: 1_760_000_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(15_000.0),
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            92_002,
+            eve_db::IndustryJobRecord {
+                job_id: 92_002,
+                installer_id: 90_000_001,
+                facility_id: 60_003_760,
+                blueprint_item_id: 77_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Delivered".to_string(),
+                duration_seconds: 1_800,
+                start_unix: 1_759_990_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(7_500.0),
+                completed_unix: Some(1_759_991_800),
+                completed_character_id: Some(90_000_001),
+                ..Default::default()
+            },
+        );
+    });
     let mut sess = login_pilot_char(&ctx, 1001, "demo", "demo-secret", 90_000_001).await;
 
     // 1. Industry (jobs, blueprints, facilities, cost indices)
     let mut char_payload = Vec::new();
     encode_id_field(1, 90_000_001, &mut char_payload);
     let jobs_get = quasar_ok(&ctx, &mut sess, "eve.character.industry.job.GetRequest", char_payload.clone(), b"ind-01", "industry.job.GetResponse").await;
-    assert!(dyn_list(&jobs_get, "jobs").iter().any(|j| dyn_u64(j, "id.sequential") == Some(80001)));
+    let all_jobs = dyn_list(&jobs_get, "jobs");
+    assert!(all_jobs.iter().any(|j| dyn_u64(j, "id.sequential") == Some(92_001)));
+    assert!(all_jobs.iter().any(|j| dyn_u64(j, "id.sequential") == Some(92_002)));
 
     let jobs_active = quasar_ok(&ctx, &mut sess, "eve.character.industry.job.GetActiveRequest", char_payload.clone(), b"ind-01a", "GetActiveResponse").await;
-    assert!(dyn_list(&jobs_active, "jobs").iter().any(|j| dyn_u64(j, "id.sequential") == Some(80001)));
+    let act_jobs = dyn_list(&jobs_active, "jobs");
+    assert_eq!(act_jobs.len(), 1);
+    assert_eq!(dyn_u64(act_jobs[0], "id.sequential"), Some(92_001));
+    assert_eq!(dyn_u64(act_jobs[0], "manufacturing.product.sequential"), Some(587));
+    assert_eq!(dyn_u64(act_jobs[0], "manufacturing.runs"), Some(2));
 
     let jobs_done = quasar_ok(&ctx, &mut sess, "eve.character.industry.job.GetCompletedRequest", char_payload.clone(), b"ind-01c", "GetCompletedResponse").await;
-    assert!(dyn_list(&jobs_done, "jobs").iter().any(|j| dyn_u64(j, "id.sequential") == Some(80001)));
+    let done_jobs = dyn_list(&jobs_done, "jobs");
+    assert_eq!(done_jobs.len(), 1);
+    assert_eq!(dyn_u64(done_jobs[0], "id.sequential"), Some(92_002));
 
     let bps = quasar_ok(&ctx, &mut sess, "eve.character.industry.blueprints.GetRequest", char_payload, b"ind-01b", "blueprints.GetResponse").await;
-    assert!(dyn_list(&bps, "blueprints").is_empty());
+    let bp_list = dyn_list(&bps, "blueprints");
+    assert!(bp_list.iter().any(|b| {
+        dyn_u64(b, "blueprint_id.sequential") == Some(77_001)
+            && dyn_u64(b, "attributes.type.sequential") == Some(681)
+            && dyn_u64(b, "attributes.material_efficiency") == Some(5)
+            && dyn_u64(b, "attributes.time_efficiency") == Some(10)
+    }));
 
     let fac = quasar_ok(&ctx, &mut sess, "eve.industry.facility.GetRequest", Vec::new(), b"ind-02", "facility.GetResponse").await;
     let facs = dyn_list(&fac, "facilities");
@@ -1060,13 +1133,14 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let indices = dyn_list(&cost, "cost_indices");
     assert_eq!(indices.len(), 1);
     assert_eq!(dyn_u64(indices[0], "solar_system.sequential"), Some(30_000_142));
+    assert!(!dyn_list(indices[0], "indices").is_empty());
 
     // 2. Planet & Skyhook (+ admin gate check)
     let mut planet_payload = Vec::new();
-    encode_id_field(1, 40_000_001, &mut planet_payload);
+    encode_id_field(1, 40_000_002, &mut planet_payload);
     let pln = quasar_ok(&ctx, &mut sess, "eve.planet.GetRequest", planet_payload.clone(), b"pln-01", "planet.GetResponse").await;
-    assert_eq!(dyn_u64(&pln, "planet.solarsystem.sequential"), Some(30_000_142));
-    assert_eq!(dyn_str(&pln, "planet.name"), Some("Planet #40000001"));
+    assert_eq!(dyn_u64(&pln, "planet.solarsystem.sequential"), Some(30_000_001));
+    assert_eq!(dyn_str(&pln, "planet.name"), Some("Tanoo I"));
     assert_eq!(dyn_u64(&pln, "planet.type.sequential"), Some(11));
 
     let mut sys_payload = Vec::new();
@@ -1074,65 +1148,177 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     let sys_planets = quasar_ok(&ctx, &mut sess, "eve.planet.GetPlanetsInSolarSystemRequest", sys_payload, b"pln-02", "GetPlanetsInSolarSystemResponse").await;
     let p_list = dyn_list(&sys_planets, "planets");
     assert_eq!(p_list.len(), 8);
-    assert_eq!(dyn_u64(p_list[0], "sequential"), Some(3_000_014_201));
+    assert_eq!(dyn_u64(p_list[0], "sequential"), Some(40_009_077));
+
+    let skyhook_id = 900_800_001_i64;
+    let skyhook_alt_id = 900_800_002_i64;
+    let target_corp_id = 98_000_881_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut alt_corp = snap.corporations[&98_000_001].clone();
+        alt_corp.corporation_id = target_corp_id;
+        alt_corp.name = "Skyhook Successor Corp".to_string();
+        alt_corp.ticker = "SKY2".to_string();
+        snap.corporations.insert(target_corp_id, alt_corp);
+        snap.corp_governance.entry(98_000_001).or_default().reinforce_hour = 18;
+        snap.corp_governance.entry(target_corp_id).or_default().reinforce_hour = 18;
+        snap.structures.insert(
+            skyhook_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Skyhook".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            skyhook_alt_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_alt_id,
+                type_id: eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Skyhook Reinforced".to_string(),
+                state: "ArmorReinforced".to_string(),
+                quantum_core_installed: true,
+                reinforced_until_unix: ctx.now_unix() + 7_200,
+                ..Default::default()
+            },
+        );
+        snap.structure_vulnerability_windows.insert(skyhook_alt_id, (7, 3));
+    });
+    let mut skyhook_req = Vec::new();
+    encode_id_field(1, skyhook_id as u64, &mut skyhook_req);
+    let mut change_owner_req = Vec::new();
+    encode_id_field(2, skyhook_id as u64, &mut change_owner_req);
+    encode_id_field(3, 30_000_142, &mut change_owner_req);
+    encode_id_field(4, target_corp_id as u64, &mut change_owner_req);
 
     assert_eq!(
-        quasar_send(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new(), b"pln-03-deny").await.status_code,
+        quasar_send(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", change_owner_req.clone(), b"pln-03-deny").await.status_code,
         STATUS_FORBIDDEN,
         "non-GM ChangeOwnerRequest must fail with 403"
     );
     let saved_role = sess.role;
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", Vec::new(), b"pln-03", "ChangeOwnerResponse").await;
+    quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.admin.api.ChangeOwnerRequest", change_owner_req, b"pln-03", "ChangeOwnerResponse").await;
     sess.role = saved_role;
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].owner_corp_id, target_corp_id);
+    });
 
-    let reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", planet_payload.clone(), b"pln-04", "GetReinforcementExitHourResponse").await;
+    let reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", skyhook_req.clone(), b"pln-04", "GetReinforcementExitHourResponse").await;
     assert_eq!(dyn_u64(&reinf, "reinforcement_exit_hour"), Some(18));
 
-    let sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", planet_payload.clone(), b"pln-05", "GetStateResponse").await;
+    let mut alt_skyhook_req = Vec::new();
+    encode_id_field(1, skyhook_alt_id as u64, &mut alt_skyhook_req);
+    let alt_reinf = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetReinforcementExitHourRequest", alt_skyhook_req.clone(), b"pln-04b", "GetReinforcementExitHourResponse").await;
+    assert_eq!(dyn_u64(&alt_reinf, "reinforcement_exit_hour"), Some(7));
+
+    let sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", skyhook_req, b"pln-05", "GetStateResponse").await;
     assert_eq!(dyn_bool(&sky_state, "no_timer"), Some(true));
+    let alt_sky_state = quasar_ok(&ctx, &mut sess, "eve.planet.skyhook.api.GetStateRequest", alt_skyhook_req, b"pln-05b", "GetStateResponse").await;
+    assert!(dyn_u64(&alt_sky_state, "timer_end.seconds").is_some_and(|s| s > ctx.now_unix()));
 
-    // 3. Planet Interaction (collector, factory, schematic, storage)
-    let mut pi_payload = Vec::new();
-    encode_id_field(1, 55001, &mut pi_payload);
-    let col = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", pi_payload.clone(), b"pi-01", "collector.GetResponse").await;
+    let mut missing_sky_req = Vec::new();
+    encode_id_field(1, 999_888_777, &mut missing_sky_req);
+    for (rpc, payload) in [
+        ("eve.planet.skyhook.api.GetReinforcementExitHourRequest", Vec::new()),
+        ("eve.planet.skyhook.api.GetReinforcementExitHourRequest", missing_sky_req.clone()),
+        ("eve.planet.skyhook.api.GetStateRequest", Vec::new()),
+        ("eve.planet.skyhook.api.GetStateRequest", missing_sky_req),
+    ] {
+        assert_eq!(
+            quasar_send(&ctx, &mut sess, rpc, payload, b"pln-nf").await.status_code,
+            404,
+            "{rpc} must return 404 on empty/unknown skyhook ID"
+        );
+    }
+
+    // 3. Planet Interaction (collector, factory, schematic, storage) backed by real colony pins
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colony_layouts.insert(
+            (90_000_001, 40_000_002),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_001,
+                        type_id: 2848,
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_002,
+                        type_id: 2469,
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 80_003,
+                        type_id: 2541,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+    });
+    let mut col_payload = Vec::new();
+    encode_id_field(1, 80_001, &mut col_payload);
+    let col = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", col_payload, b"pi-01", "collector.GetResponse").await;
     assert_eq!(dyn_u64(&col, "collector.character.sequential"), Some(90_000_001));
-    assert_eq!(dyn_u64(&col, "collector.planet.sequential"), Some(55001));
+    assert_eq!(dyn_u64(&col, "collector.planet.sequential"), Some(40_000_002));
 
-    let fact = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.factory.GetRequest", pi_payload.clone(), b"pi-02", "factory.GetResponse").await;
+    let mut fact_payload = Vec::new();
+    encode_id_field(1, 80_002, &mut fact_payload);
+    let fact = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.factory.GetRequest", fact_payload, b"pi-02", "factory.GetResponse").await;
     assert_eq!(dyn_u64(&fact, "factory.character.sequential"), Some(90_000_001));
-    assert_eq!(dyn_u64(&fact, "factory.planet.sequential"), Some(55001));
+    assert_eq!(dyn_u64(&fact, "factory.planet.sequential"), Some(40_000_002));
 
-    let sch = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", pi_payload.clone(), b"pi-03", "schematic.GetResponse").await;
+    let mut sch_payload = Vec::new();
+    encode_id_field(1, 65, &mut sch_payload);
+    let sch = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.schematic.GetRequest", sch_payload, b"pi-03", "schematic.GetResponse").await;
     assert_eq!(dyn_u64(&sch, "schematic.cycle_time_sec"), Some(3600));
-    assert_eq!(dyn_str(&sch, "schematic.schematic_name"), Some("PI Schematic #55001"));
+    assert_eq!(dyn_str(&sch, "schematic.schematic_name"), Some("Superconductors"));
 
-    let stg = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.storage.GetRequest", pi_payload, b"pi-04", "storage.GetResponse").await;
+    let mut stg_payload = Vec::new();
+    encode_id_field(1, 80_003, &mut stg_payload);
+    let stg = quasar_ok(&ctx, &mut sess, "eve.planetinteraction.storage.GetRequest", stg_payload, b"pi-04", "storage.GetResponse").await;
     assert_eq!(dyn_u64(&stg, "storage.character.sequential"), Some(90_000_001));
-    assert_eq!(dyn_u64(&stg, "storage.planet.sequential"), Some(55001));
+    assert_eq!(dyn_u64(&stg, "storage.planet.sequential"), Some(40_000_002));
+
+    let mut missing_pin_payload = Vec::new();
+    encode_id_field(1, 80_999, &mut missing_pin_payload);
+    assert_eq!(
+        quasar_send(&ctx, &mut sess, "eve.planetinteraction.collector.GetRequest", missing_pin_payload, b"pi-404").await.status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // 4. Moon & Asteroid Belt
     let mut moon_payload = Vec::new();
-    encode_id_field(1, 40_000_101, &mut moon_payload);
+    encode_id_field(1, 40_009_081, &mut moon_payload);
     let moon = quasar_ok(&ctx, &mut sess, "eve.moon.GetRequest", moon_payload, b"mn-01", "moon.GetResponse").await;
-    assert_eq!(dyn_str(&moon, "attributes.name"), Some("Moon #40000101"));
+    assert_eq!(dyn_str(&moon, "attributes.name"), Some("Jita III - Moon 1"));
     assert_eq!(dyn_u64(&moon, "attributes.solar_system.sequential"), Some(30_000_142));
 
-    let moons = quasar_ok(&ctx, &mut sess, "eve.moon.GetMoonsOfPlanetRequest", planet_payload.clone(), b"mn-02", "GetMoonsOfPlanetResponse").await;
+    let mut jita_iii_payload = Vec::new();
+    encode_id_field(1, 40_009_080, &mut jita_iii_payload);
+    let moons = quasar_ok(&ctx, &mut sess, "eve.moon.GetMoonsOfPlanetRequest", jita_iii_payload, b"mn-02", "GetMoonsOfPlanetResponse").await;
     let m_list = dyn_list(&moons, "moons");
-    assert_eq!(m_list.len(), 4);
-    assert_eq!(dyn_u64(m_list[0], "sequential"), Some(400_000_011));
+    assert!(!m_list.is_empty());
+    assert!(m_list.iter().any(|m| dyn_u64(m, "sequential") == Some(40_009_081)));
 
     let mut belt_payload = Vec::new();
-    encode_id_field(1, 40_000_201, &mut belt_payload);
+    encode_id_field(1, 40_000_003, &mut belt_payload);
     let belt = quasar_ok(&ctx, &mut sess, "eve.asteroidbelt.GetRequest", belt_payload, b"ab-01", "asteroidbelt.GetResponse").await;
-    assert_eq!(dyn_str(&belt, "attributes.name"), Some("Asteroid Belt #40000201"));
-    assert_eq!(dyn_u64(&belt, "attributes.solar_system.sequential"), Some(30_000_142));
+    assert_eq!(dyn_str(&belt, "attributes.name"), Some("Tanoo I - Asteroid Belt 1"));
+    assert_eq!(dyn_u64(&belt, "attributes.solar_system.sequential"), Some(30_000_001));
 
     let belts = quasar_ok(&ctx, &mut sess, "eve.asteroidbelt.GetBeltsOfPlanetRequest", planet_payload, b"ab-02", "GetBeltsOfPlanetResponse").await;
     let b_list = dyn_list(&belts, "belts");
-    assert_eq!(b_list.len(), 2);
-    assert_eq!(dyn_u64(b_list[0], "sequential"), Some(4_000_000_101));
+    assert_eq!(b_list.len(), 1);
+    assert_eq!(dyn_u64(b_list[0], "sequential"), Some(40_000_003));
 }
 
 #[tokio::test]

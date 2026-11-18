@@ -10,14 +10,20 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
-use eve_db::WorldRepository;
+use crate::router::delta_projection::{
+    build_inv_item_dbrow, build_item_tombstone, compute_item_change_entries,
+};
+use crate::router::NotificationTarget;
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+use eve_db::{InventoryItemRecord, WorldRepository};
 use eve_proto::pb::{self, ProtoBuilder};
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, GoogleAny, GoogleTimestamp, WireMessage,
 };
+use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -249,16 +255,23 @@ impl SkinrStaticCatalog {
             .unwrap_or(&self.tier_thresholds)
     }
 
-    /// Computes total design points and resolves the tier level (`1..=20`) for `ship_type_id`
-    /// using the hull's `isisGroupID` threshold table (`points <= threshold[tier]` for `1..=19`,
-    /// or `20` when exceeding tier 19).
-    pub fn compute_points_and_tier_for_ship(
+    /// Resolves total design points and tier level (`1..=20`) using V24 `BaseSkinDesign.compute_current_points_value`
+    /// (`NO_SECONDARY_COLOR_BLEND_MODES` `SUBTRACT=2` / `EXCLUSION=3` ignore `SlotID::SECONDARY_PATTERN_MATERIAL=8`).
+    pub fn compute_points_and_tier_for_design(
         &self,
         ship_type_id: u32,
-        fitted_components: &[u32],
+        pattern_blend_mode: u32,
+        fitted_slots: &[(u32, u32)],
     ) -> (u32, u32) {
+        const SLOT_SECONDARY_PATTERN_MATERIAL: u32 = 8;
+        const BLEND_SUBTRACT: u32 = 2;
+        const BLEND_EXCLUSION: u32 = 3;
+        let skip_secondary_pat_mat = matches!(pattern_blend_mode, BLEND_SUBTRACT | BLEND_EXCLUSION);
         let mut points = 0u32;
-        for &cid in fitted_components {
+        for &(slot_id, cid) in fitted_slots {
+            if skip_secondary_pat_mat && slot_id == SLOT_SECONDARY_PATTERN_MATERIAL {
+                continue;
+            }
             if let Some(comp) = self.components.get(&cid) {
                 let pt = self
                     .point_values
@@ -276,6 +289,18 @@ impl SkinrStaticCatalog {
         }
         let max_tier = thresholds.keys().next_back().copied().unwrap_or(19);
         (points, (max_tier + 1).min(20))
+    }
+
+    /// Computes total design points and resolves the tier level (`1..=20`) for `ship_type_id`
+    /// using the hull's `isisGroupID` threshold table (`points <= threshold[tier]` for `1..=19`,
+    /// or `20` when exceeding tier 19).
+    pub fn compute_points_and_tier_for_ship(
+        &self,
+        ship_type_id: u32,
+        fitted_components: &[u32],
+    ) -> (u32, u32) {
+        let slots: Vec<(u32, u32)> = fitted_components.iter().map(|&cid| (0, cid)).collect();
+        self.compute_points_and_tier_for_design(ship_type_id, 1, &slots)
     }
 
     /// Computes total design points and resolves the tier level (`1..=20`) for a standard frigate hull (`587`).
@@ -419,6 +444,96 @@ fn db_skinr_state_map(
         std::sync::Mutex<HashMap<u64, Vec<std::sync::Weak<SkinrCosmeticsState>>>>,
     > = std::sync::OnceLock::new();
     MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+type WeakMachoSinkLock = std::sync::Weak<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>;
+
+fn db_macho_sink_map() -> &'static std::sync::Mutex<HashMap<u64, WeakMachoSinkLock>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, WeakMachoSinkLock>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub(super) fn register_macho_notify_sink(
+    db_id: u64,
+    sink: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
+) {
+    let mut map = db_macho_sink_map().lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() > 256 {
+        map.retain(|_, w| w.strong_count() > 0);
+    }
+    map.insert(db_id, Arc::downgrade(sink));
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ItemChangeEvent {
+    pub old: Option<InventoryItemRecord>,
+    pub new: Option<InventoryItemRecord>,
+    pub custom_name: String,
+}
+
+pub(super) fn emit_item_changes_with_sink(
+    sink: Option<&MachoNotifySink>,
+    sde: &SdeRegistry,
+    char_id: i64,
+    events: &[ItemChangeEvent],
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    for ev in events {
+        let (row, changes) = match (ev.old.as_ref(), ev.new.as_ref()) {
+            (None, Some(new_item)) => (
+                build_inv_item_dbrow(new_item, sde, &ev.custom_name),
+                vec![(3, PyRep::Integer(0))],
+            ),
+            (Some(old_item), None) => {
+                let (tomb, tomb_changes) = build_item_tombstone(old_item);
+                (build_inv_item_dbrow(&tomb, sde, &ev.custom_name), tomb_changes)
+            }
+            (Some(old_item), Some(new_item)) => {
+                let delta = compute_item_change_entries(old_item, new_item);
+                if delta.is_empty() {
+                    continue;
+                }
+                (build_inv_item_dbrow(new_item, sde, &ev.custom_name), delta)
+            }
+            (None, None) => continue,
+        };
+        let change_dict = PyRep::Dict(
+            changes
+                .into_iter()
+                .map(|(col_ix, old_val)| (PyRep::Integer(col_ix as i64), old_val))
+                .collect(),
+        );
+        sink(
+            NotificationTarget::Character(char_id),
+            "OnItemChange",
+            "charid",
+            vec![row, change_dict],
+        );
+    }
+}
+
+pub(super) fn emit_item_changes(
+    db_id: u64,
+    sde: &SdeRegistry,
+    char_id: i64,
+    events: &[ItemChangeEvent],
+) {
+    if events.is_empty() {
+        return;
+    }
+    let sink_lock = {
+        let mut map = db_macho_sink_map().lock().unwrap_or_else(|e| e.into_inner());
+        let lock = map.get(&db_id).and_then(std::sync::Weak::upgrade);
+        if lock.is_none() {
+            map.remove(&db_id);
+        }
+        lock
+    };
+    let sink = sink_lock.and_then(|l| l.read().unwrap_or_else(|e| e.into_inner()).clone());
+    emit_item_changes_with_sink(sink.as_ref(), sde, char_id, events);
 }
 
 pub(super) fn register_live_skinr_state(state: &Arc<SkinrCosmeticsState>) {
@@ -909,9 +1024,9 @@ fn handle_item_consume(
         return Err((STATUS_BAD_REQUEST, "ConsumeRequest requires valid item ID and quantity > 0".into()));
     }
 
-    let (comp_id, uses_granted, is_pattern) = state
+    let (comp_id, uses_granted, is_pattern, item_change) = state
         .db
-        .try_with_mut_snapshot(|s| -> Result<(u32, i32, bool), eve_proto::BridgeRpcError> {
+        .try_with_mut_snapshot(|s| -> Result<(u32, i32, bool, ItemChangeEvent), eve_proto::BridgeRpcError> {
             let Some(item) = s.items.get(&(item_id as i64)) else {
                 return Err(eve_proto::BridgeRpcError {
                     code: STATUS_NOT_FOUND.to_string(),
@@ -955,6 +1070,12 @@ fn handle_item_consume(
                     client_error: None,
                 });
             };
+            let old_item = item.clone();
+            let custom_name = s
+                .item_custom_names
+                .get(&(item_id as i64))
+                .cloned()
+                .unwrap_or_default();
             let is_pattern = state
                 .catalog
                 .components
@@ -973,11 +1094,101 @@ fn handle_item_consume(
                 message: e.to_string(),
                 client_error: None,
             })?;
-            Ok((comp_id, uses_granted, is_pattern))
+            let new_item = s.items.get(&(item_id as i64)).cloned();
+            Ok((
+                comp_id,
+                uses_granted,
+                is_pattern,
+                ItemChangeEvent {
+                    old: Some(old_item),
+                    new: new_item,
+                    custom_name,
+                },
+            ))
         })
         .map_err(|e| (e.code.parse::<u32>().unwrap_or(500), e.message))?;
 
+    emit_item_changes(state.db.instance_id(), &state.sde, cid as i64, &[item_change]);
     let now = ctx.now_unix();
+    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+
+    Ok(any_msg(
+        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeResponse",
+        Vec::new(),
+    ))
+}
+
+/// Plans direct component activation vs hangar item delivery for `immediately_activate` purchases:
+/// finite components (`uses_granted > 0`) activate all purchased stacks; unlimited components
+/// (`uses_granted <= 0`) activate at most 1 (if not already owned) and deliver any surplus to hangar
+/// so paid items are never silently lost.
+pub(super) fn plan_component_activation(
+    state: &SkinrCosmeticsState,
+    cid: u32,
+    type_id: u32,
+    quantity: u64,
+    immediately_activate: bool,
+) -> (u64, u64) {
+    if !immediately_activate {
+        return (0, quantity);
+    }
+    let Some(&(comp_id, uses_granted)) = state.catalog.item_type_to_component.get(&type_id) else {
+        return (0, quantity);
+    };
+    if uses_granted > 0 {
+        return (quantity, 0);
+    }
+    state.sync_redeemed_skins_if_needed();
+    let is_pattern = state
+        .catalog
+        .components
+        .get(&comp_id)
+        .is_some_and(SdeSkinComponent::is_pattern);
+    let key = SkinrCosmeticsState::comp_key(cid, is_pattern, comp_id);
+    let already_infinite = state
+        .data
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .infinite_licenses
+        .contains_key(&key);
+    if already_infinite {
+        (0, quantity)
+    } else {
+        (1.min(quantity), quantity.saturating_sub(1))
+    }
+}
+
+/// Grants a finite or infinite SKINR component license directly from a component item type
+/// (shared by `ConsumeRequest` and `component.listing.api.InitiatePurchaseListingRequest` when
+/// `immediately_activate == true`). Returns `true` when `type_id` mapped to an SDE component.
+pub(super) fn grant_component_license_from_item_type(
+    state: &SkinrCosmeticsState,
+    cid: u32,
+    type_id: u32,
+    quantity: u64,
+    now: u64,
+) -> bool {
+    let Some(&(comp_id, uses_granted)) = state.catalog.item_type_to_component.get(&type_id) else {
+        return false;
+    };
+    let is_pattern = state
+        .catalog
+        .components
+        .get(&comp_id)
+        .is_some_and(SdeSkinComponent::is_pattern);
+    grant_component_license_from_item(state, cid, comp_id, is_pattern, uses_granted, quantity, now);
+    true
+}
+
+fn grant_component_license_from_item(
+    state: &SkinrCosmeticsState,
+    cid: u32,
+    comp_id: u32,
+    is_pattern: bool,
+    uses_granted: i32,
+    quantity: u64,
+    now: u64,
+) {
     state.sync_redeemed_skins_if_needed();
     let key = SkinrCosmeticsState::comp_key(cid, is_pattern, comp_id);
     if uses_granted <= 0 {
@@ -1009,11 +1220,6 @@ fn handle_item_consume(
         state.save();
         queue_component_license_granted_notice(cid, comp_id, is_pattern, Some(added_capacity), now);
     }
-
-    Ok(any_msg(
-        "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeResponse",
-        Vec::new(),
-    ))
 }
 
 // ============================================================================
@@ -1224,6 +1430,7 @@ fn handle_title_version_get_default(state: &SkinrCosmeticsState) -> HandlerResul
 
 pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
     register_live_skinr_state(&state);
+    register_macho_notify_sink(state.db.instance_id(), &router.macho_notify_sink);
     let st_rehydrate = Arc::clone(&state);
     let st_sync = Arc::clone(&state);
     router.register_persistence_hooks(

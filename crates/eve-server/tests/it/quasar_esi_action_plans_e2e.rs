@@ -206,29 +206,7 @@ async fn test_shard5_plan_q6_quasar_economy_industry_pi_end_to_end() {
         let mut p1 = login(&ctx, 54_101, "demo", PILOT_1).await;
         assert_eq!(p1.role & service_roles::ROLE_GM_MASK, 0);
 
-        // Mutate live state via non-GM MachoNet RPCs: place market sell order & install industry job
-        let sell_trit_id = buy(&ctx, &mut p1, TRITANIUM, 200).await[0];
-        let sell_res = rpc(
-            &ctx,
-            &mut p1,
-            "marketProxy",
-            "PlaceMultiSellOrder",
-            &[
-                PyRep::List(vec![PyRep::Dict(vec![
-                    (PyRep::String("itemID".into()), PyRep::Integer(sell_trit_id)),
-                    (PyRep::String("typeID".into()), PyRep::Integer(TRITANIUM as i64)),
-                    (PyRep::String("price".into()), PyRep::Real(5.25)),
-                    (PyRep::String("quantity".into()), PyRep::Integer(200)),
-                    (PyRep::String("stationID".into()), PyRep::Integer(JITA_STN)),
-                    (PyRep::String("duration".into()), PyRep::Integer(90)),
-                ])]),
-                PyRep::Bool(false),
-            ],
-        )
-        .await
-        .unwrap();
-        assert!(sell_res.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
-
+        // Mutate live state via non-GM MachoNet RPCs: install industry job first (so TRITANIUM 1M stock isn't mixed with sell order), then place resting market sell order
         let _rifter_bpo = buy(&ctx, &mut p1, 687, 1).await[0];
         for (tid, qty) in [
             (TRITANIUM, 1_000_000_i64),
@@ -243,25 +221,87 @@ async fn test_shard5_plan_q6_quasar_economy_industry_pi_end_to_end() {
         }
         rpc(&ctx, &mut p1, "industryManager", "InstallJob", &[PyRep::Integer(687), PyRep::Integer(1), PyRep::Integer(1)]).await.unwrap();
 
+        let sell_pyerite_id = buy(&ctx, &mut p1, 35, 200).await[0];
+        let sell_res = rpc(
+            &ctx,
+            &mut p1,
+            "marketProxy",
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::Dict(vec![
+                    (PyRep::String("itemID".into()), PyRep::Integer(sell_pyerite_id)),
+                    (PyRep::String("typeID".into()), PyRep::Integer(35)),
+                    (PyRep::String("price".into()), PyRep::Real(50_000.0)),
+                    (PyRep::String("quantity".into()), PyRep::Integer(200)),
+                    (PyRep::String("stationID".into()), PyRep::Integer(JITA_STN)),
+                    (PyRep::String("duration".into()), PyRep::Integer(90)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(sell_res.dict_get("orderID").and_then(|v| v.as_i64()).is_some());
+        assert_eq!(sell_res.dict_get("filledImmediately").and_then(|v| v.as_bool()), Some(false));
+
         // Query live state through Q-6 Economy, Inventory, AssetHolding, Accounting, LP, Contracts, Industry, PI, Moon & Belt packages
         let mut ord_q = id_payload(1, 10_000_002);
         ord_q.extend_from_slice(&id_payload(2, JITA_STN));
         ord_q.extend_from_slice(&id_payload(3, TRITANIUM as i64));
-        assert_eq!(quasar(&ctx, &p1, "eve.market.orders.GetOrdersRequest", ord_q).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.market.price.GetForAllTypesRequest", Vec::new()).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.inventory.genericitemtype.GetRequest", id_payload(1, TRITANIUM as i64)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.inventory.genericname.GetNameByIDRequest", id_payload(1, TRITANIUM as i64)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.asset.GetAssetsItemsRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
+        let ord_rsp = quasar(&ctx, &p1, "eve.market.orders.GetOrdersRequest", ord_q);
+        assert_eq!(ord_rsp.status_code, STATUS_OK);
+        assert!(!ord_rsp.payload.as_ref().unwrap().value.is_empty());
+        let price_rsp = quasar(&ctx, &p1, "eve.market.price.GetForAllTypesRequest", Vec::new());
+        assert_eq!(price_rsp.status_code, STATUS_OK);
+        assert!(!price_rsp.payload.as_ref().unwrap().value.is_empty());
+        let item_type_rsp = quasar(&ctx, &p1, "eve.inventory.genericitemtype.GetRequest", id_payload(1, TRITANIUM as i64));
+        assert_eq!(item_type_rsp.status_code, STATUS_OK);
+        assert!(String::from_utf8_lossy(&item_type_rsp.payload.as_ref().unwrap().value).contains("Tritanium"));
+        assert!(!quasar(&ctx, &p1, "eve.inventory.genericname.GetNameByIDRequest", id_payload(1, TRITANIUM as i64)).payload.as_ref().unwrap().value.is_empty());
+        let assets_rsp = quasar(&ctx, &p1, "eve.asset.GetAssetsItemsRequest", id_payload(1, PILOT_1));
+        assert_eq!(assets_rsp.status_code, STATUS_OK);
+        assert!(!assets_rsp.payload.as_ref().unwrap().value.is_empty());
         assert_eq!(quasar(&ctx, &p1, "eve.assetholding.entitlement.api.GetUnredeemedByHolderAndGroupNameRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.accounting.character.journal.GetCharacterEntriesRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.character.industry.job.GetRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.character.industry.blueprints.GetRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.industry.system.GetCostIndicesRequest", Vec::new()).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.planet.GetRequest", id_payload(1, JITA_PLANET_IV)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.planet.GetPlanetsInSolarSystemRequest", id_payload(1, JITA_SYS as i64)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, PILOT_1)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.moon.GetMoonsOfPlanetRequest", id_payload(1, JITA_PLANET_IV)).status_code, STATUS_OK);
-        assert_eq!(quasar(&ctx, &p1, "eve.asteroidbelt.GetBeltsOfPlanetRequest", id_payload(1, JITA_PLANET_IV)).status_code, STATUS_OK);
+        let acct_rsp = quasar(&ctx, &p1, "eve.accounting.character.journal.GetCharacterEntriesRequest", id_payload(1, PILOT_1));
+        assert_eq!(acct_rsp.status_code, STATUS_OK);
+        assert!(!acct_rsp.payload.as_ref().unwrap().value.is_empty());
+        let ind_job_rsp = quasar(&ctx, &p1, "eve.character.industry.job.GetRequest", id_payload(1, PILOT_1));
+        assert_eq!(ind_job_rsp.status_code, STATUS_OK);
+        assert!(!ind_job_rsp.payload.as_ref().unwrap().value.is_empty());
+        let bp_rsp = quasar(&ctx, &p1, "eve.character.industry.blueprints.GetRequest", id_payload(1, PILOT_1));
+        assert_eq!(bp_rsp.status_code, STATUS_OK);
+        assert!(!bp_rsp.payload.as_ref().unwrap().value.is_empty());
+        let cost_rsp = quasar(&ctx, &p1, "eve.industry.system.GetCostIndicesRequest", Vec::new());
+        assert_eq!(cost_rsp.status_code, STATUS_OK);
+        assert!(!cost_rsp.payload.as_ref().unwrap().value.is_empty());
+        let pln_rsp = quasar(&ctx, &p1, "eve.planet.GetRequest", id_payload(1, JITA_PLANET_IV));
+        assert_eq!(pln_rsp.status_code, STATUS_OK);
+        assert!(String::from_utf8_lossy(&pln_rsp.payload.as_ref().unwrap().value).contains("Jita IV"));
+        let sys_pln_rsp = quasar(&ctx, &p1, "eve.planet.GetPlanetsInSolarSystemRequest", id_payload(1, JITA_SYS as i64));
+        assert_eq!(sys_pln_rsp.status_code, STATUS_OK);
+        assert!(!sys_pln_rsp.payload.as_ref().unwrap().value.is_empty());
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.planetary_colony_layouts.insert(
+                (PILOT_1, JITA_PLANET_IV),
+                eve_db::PlanetaryColonyLayoutRecord {
+                    pins: vec![eve_db::PlanetaryPinRecord {
+                        pin_id: 910_001,
+                        type_id: 2848,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, 910_001)).status_code, STATUS_OK);
+        assert_eq!(quasar(&ctx, &p1, "eve.planetinteraction.collector.GetRequest", id_payload(1, 910_999)).status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
+        let moons_rsp = quasar(&ctx, &p1, "eve.moon.GetMoonsOfPlanetRequest", id_payload(1, JITA_PLANET_IV));
+        assert_eq!(moons_rsp.status_code, STATUS_OK);
+        assert!(!moons_rsp.payload.as_ref().unwrap().value.is_empty());
+        let belts_rsp = quasar(&ctx, &p1, "eve.asteroidbelt.GetBeltsOfPlanetRequest", id_payload(1, 40_000_002));
+        assert_eq!(belts_rsp.status_code, STATUS_OK);
+        assert!(!belts_rsp.payload.as_ref().unwrap().value.is_empty());
     }
 
     // Reopen SQLite and verify industry job & market order remain visible via Q-6 Quasar endpoints
@@ -269,8 +309,10 @@ async fn test_shard5_plan_q6_quasar_economy_industry_pi_end_to_end() {
     let p1_reload = login(&ctx2, 54_109, "demo", PILOT_1).await;
     let jobs = quasar(&ctx2, &p1_reload, "eve.character.industry.job.GetRequest", id_payload(1, PILOT_1));
     assert_eq!(jobs.status_code, STATUS_OK);
+    assert!(!jobs.payload.as_ref().unwrap().value.is_empty());
     let orders = quasar(&ctx2, &p1_reload, "eve.market.orders.GetOpenForCharacterRequest", id_payload(1, PILOT_1));
     assert_eq!(orders.status_code, STATUS_OK);
+    assert!(!orders.payload.as_ref().unwrap().value.is_empty());
     let _ = std::fs::remove_file(&db_path);
 }
 

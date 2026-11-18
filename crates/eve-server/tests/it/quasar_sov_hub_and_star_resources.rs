@@ -273,6 +273,10 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
             85_233,
             eve_db::TrainedSkillRecord { type_id: 85_233, level: 3, skill_points: 0.0 },
         );
+        snap.skills.entry(PILOT).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord { type_id: 81_370, level: 1, skill_points: 250.0 },
+        );
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;

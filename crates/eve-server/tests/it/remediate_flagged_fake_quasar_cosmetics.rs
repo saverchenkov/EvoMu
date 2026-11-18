@@ -586,6 +586,16 @@ async fn skinr_designer_and_sequencing_studio_grpc_lifecycle() {
         // Grant component item via MachoNet /createitem, then consume it via Quasar HTTP/2 ConsumeRequest
         let comp_created = common::slash_cmd(&ctx, &mut des_sess, &format!("/createitem {coat_item_type} 1")).await;
         let comp_item_id = comp_created.dict_get("itemID").and_then(|v| v.as_i64()).expect("component itemID");
+        // Unlimited SDE components (coat_uses <= 0, e.g. -1) consume Sequence Binders on InitiateRequest.
+        if coat_uses <= 0 && coat_comp.binder_type_id > 0 && coat_comp.binder_count > 0 {
+            let need_binders = coat_comp.binder_count.saturating_mul(10);
+            common::slash_cmd(
+                &ctx,
+                &mut des_sess,
+                &format!("/createitem {} {}", coat_comp.binder_type_id, need_binders),
+            )
+            .await;
+        }
 
         let mut client = GrpcClient::connect(Arc::clone(&ctx), "skinr_des", "des-pass", designer_cid, 0x11).await;
         client.open_notice_stream().await;
@@ -988,7 +998,7 @@ async fn paragon_hub_cosmetics_market_and_titles_grpc_lifecycle() {
 
         // Train Paragon Hub tax & slot capacity skills for seller:
         // 84217/84218/84220 -> -15% public tax (20% -> 5%)
-        // 81368/81369 -> +5 + 25 = 35 max listings (vs base 5)
+        // 81368 V (+5) + 81369 V (+24) -> 30 max listings (vs base 1)
         for sid in [84217u32, 84218, 84220, 81368, 81369, 81375] {
             common::slash_cmd(&ctx, &mut sel_sess, &format!("/giveskill {sid} 5")).await;
         }

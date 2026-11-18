@@ -5,8 +5,8 @@ use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
 };
 use eve_db::{
-    AccountRecord, ContractRecord, CorporationRecord, IskCents, JournalMeta, WalletJournalEntry,
-    WorldRepository,
+    AccountRecord, ContractRecord, CorporationRecord, IndustryJobRecord, InventoryItemRecord,
+    IskCents, JournalMeta, WalletJournalEntry, WorldRepository,
 };
 use eve_proto::pb;
 use eve_proto::quasar::{
@@ -45,8 +45,12 @@ impl TestRouterExt for PublicGatewayRouter {
             .get(norm)
             .cloned()
             .expect("registered handler");
-        let dyn_msg =
-            crate::services::quasar_char_skill_services::decode_wire_dynamic(norm, &req.value);
+        let dyn_msg = self
+            .descriptors
+            .decode_dynamic_or_wire(norm, &req.value)
+            .unwrap_or_else(|_| {
+                crate::services::quasar_char_skill_services::decode_wire_dynamic(norm, &req.value)
+            });
         handler(ctx, req, &dyn_msg)
     }
 }
@@ -60,12 +64,6 @@ fn make_router_and_db() -> (Arc<PublicGatewayRouter>, Arc<WorldRepository>, Arc<
         Arc::clone(&db),
         Arc::clone(&sde),
     ));
-    register_economy_planetary_industry_handlers(
-        &router,
-        Arc::clone(&db),
-        Arc::clone(&sde),
-        descriptors,
-    );
     (router, db, sde)
 }
 
@@ -111,6 +109,15 @@ fn encode_id_req(type_name: &str, id: u64) -> GoogleAny {
     GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
         value: req,
+    }
+}
+
+fn encode_user_id_req(type_name: &str, user_id: i32) -> GoogleAny {
+    GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+        value: pb::message(type_name)
+            .set("user.sequential", user_id)
+            .must_encode(),
     }
 }
 
@@ -172,6 +179,18 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
             reason: "Corp tax".to_string(),
         });
         snap.wallet_journal_meta.insert(
+            1,
+            JournalMeta {
+                ref_type_id: 85,
+                first_party_id: 1000009,
+                second_party_id: cid,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_771_111_222,
+            },
+        );
+        snap.wallet_journal_meta.insert(
             2,
             JournalMeta {
                 ref_type_id: 0,
@@ -180,7 +199,7 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
                 context_id: 0,
                 context: Default::default(),
                 account_key: 1000,
-                date_unix: 1_760_000_000,
+                date_unix: 1_771_234_567,
             },
         );
         Ok::<(), String>(())
@@ -204,6 +223,17 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
     );
     let char_resp = router.dispatch(&user, &char_req_empty).expect("GetCharacterEntries");
     assert!(!char_resp.value.is_empty());
+    let char_ts_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1_771_111_222),
+        }],
+    }
+    .encode();
+    assert!(char_resp
+        .value
+        .windows(char_ts_bytes.len())
+        .any(|w| w == char_ts_bytes.as_slice()));
 
     // Requesting another character's journal -> FORBIDDEN
     let char_req_other = encode_id_req(
@@ -233,6 +263,21 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
         .dispatch(&user, &corp_req)
         .expect("CEO GetCorporationEntries");
     assert!(!corp_resp.value.is_empty());
+    let corp_ts_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1_771_234_567),
+        }],
+    }
+    .encode();
+    assert!(corp_resp
+        .value
+        .windows(corp_ts_bytes.len())
+        .any(|w| w == corp_ts_bytes.as_slice()));
+    assert!(corp_resp
+        .value
+        .windows(b"Corp tax".len())
+        .any(|w| w == b"Corp tax"));
 
     // Non-CEO member without accountant/director/trader role -> FORBIDDEN
     let member_no_role = 211200102i64;
@@ -271,6 +316,10 @@ fn extract_u64_and_accounting_journal_entries_and_auth() {
         )
         .expect("entrytype GetAllRequest");
     assert!(!et_resp.value.is_empty());
+    assert!(et_resp
+        .value
+        .windows(b"Manufacturing".len())
+        .any(|w| w == b"Manufacturing"));
 }
 
 #[test]
@@ -304,6 +353,7 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
                 start_station_id: 60003760,
                 end_station_id: 60003760,
                 expiration_unix: 1_800_000_000,
+                date_issued_unix: 1_755_000_000,
                 num_days: 14,
                 ..Default::default()
             },
@@ -327,6 +377,7 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
                 start_station_id: 60003760,
                 end_station_id: 60003760,
                 expiration_unix: 1_800_000_000,
+                date_issued_unix: 1_755_000_000,
                 num_days: 14,
                 ..Default::default()
             },
@@ -340,11 +391,25 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
     let assignee_ctx = make_ctx(Some(assignee as u32), 0);
     let stranger_ctx = make_ctx(Some(stranger as u32), 0);
 
-    // Public contract readable by anyone (even anon) and missing contract returns default public attrs
+    // Public contract readable by anyone (even anon); missing contract returns STATUS_NOT_FOUND
     let pub_req = encode_id_req("eve.contract.item_exchange.GetRequest", 1001);
-    assert!(router.dispatch(&anon, &pub_req).is_ok());
+    let pub_resp = router.dispatch(&anon, &pub_req).expect("public contract");
+    let pub_ts_bytes = WireMessage {
+        fields: vec![WireField {
+            field_number: 1,
+            value: WireValue::Varint(1_755_000_000),
+        }],
+    }
+    .encode();
+    assert!(pub_resp
+        .value
+        .windows(pub_ts_bytes.len())
+        .any(|w| w == pub_ts_bytes.as_slice()));
     let missing_req = encode_id_req("eve.contract.item_exchange.GetRequest", 9999);
-    assert!(router.dispatch(&anon, &missing_req).is_ok());
+    assert_eq!(
+        router.dispatch(&anon, &missing_req).unwrap_err().0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // Private contract: anon -> UNAUTHORIZED, stranger -> FORBIDDEN, issuer/assignee -> OK
     let priv_req = encode_id_req("eve.contract.item_exchange.GetRequest", 1002);
@@ -359,7 +424,9 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
     assert!(router.dispatch(&issuer_ctx, &priv_req).is_ok());
     assert!(router.dispatch(&assignee_ctx, &priv_req).is_ok());
 
-    // 4 & 5. LoyaltyPoints WithdrawRequest & DepositRequest
+    // 4 & 5. LoyaltyPoints WithdrawRequest & DepositRequest (authoritative handlers in
+    // `quasar_fleet_navigation_services.rs` require GM/programmer admin role and validate payload)
+    let lp_admin_ctx = make_ctx(Some(issuer as u32), ROLE_PROGRAMMER);
     for rpc in [
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
@@ -369,7 +436,14 @@ fn contract_item_exchange_and_lp_assetholding_handlers() {
             value: vec![],
         };
         assert_eq!(router.dispatch(&anon, &req).unwrap_err().0, STATUS_FORBIDDEN);
-        assert!(router.dispatch(&issuer_ctx, &req).is_ok());
+        assert_eq!(
+            router.dispatch(&issuer_ctx, &req).unwrap_err().0,
+            STATUS_FORBIDDEN
+        );
+        assert_eq!(
+            router.dispatch(&lp_admin_ctx, &req).unwrap_err().0,
+            STATUS_BAD_REQUEST
+        );
     }
 }
 
@@ -391,9 +465,112 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 ban_reason: None,
             },
         );
+        snap.items.insert(
+            88_001,
+            InventoryItemRecord {
+                item_id: 88_001,
+                type_id: 681,
+                owner_id: cid,
+                location_id: 60_003_760,
+                singleton: true,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            91_001,
+            IndustryJobRecord {
+                job_id: 91_001,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                blueprint_item_id: 88_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 2,
+                product_type_id: 587,
+                status: "Active".to_string(),
+                duration_seconds: 3_600,
+                start_unix: 1_760_000_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(12_500.0),
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs.insert(
+            91_002,
+            IndustryJobRecord {
+                job_id: 91_002,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                blueprint_item_id: 88_001,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Delivered".to_string(),
+                duration_seconds: 1_800,
+                start_unix: 1_759_990_000,
+                blueprint_location_id: 60_003_760,
+                output_location_id: 60_003_760,
+                cost: Some(6_250.0),
+                completed_unix: Some(1_759_991_800),
+                completed_character_id: Some(cid),
+                ..Default::default()
+            },
+        );
+        snap.planetary_colony_layouts.insert(
+            (cid, 40_000_002),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_001,
+                        type_id: 2848, // Extractor Control Unit
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_002,
+                        type_id: 2469, // Basic Industry Facility
+                        ..Default::default()
+                    },
+                    eve_db::PlanetaryPinRecord {
+                        pin_id: 50_003,
+                        type_id: 2541, // Storage Facility
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
         Ok::<(), String>(())
     })
     .unwrap();
+
+    let cid_rx = 211200121i64;
+    seed_char(&db, cid_rx, 1000009, 1_000);
+    let skyhook_id = 900_600_001i64;
+    let target_corp_id = 98_000_777i64;
+    db.with_mut_snapshot(|snap| {
+        let mut alt_corp = snap.corporations[&98_000_001].clone();
+        alt_corp.corporation_id = target_corp_id;
+        alt_corp.name = "Skyhook Target Corp".to_string();
+        snap.corporations.insert(target_corp_id, alt_corp);
+        snap.corp_governance.entry(98_000_001).or_default().reinforce_hour = 18;
+        snap.corp_governance.entry(target_corp_id).or_default().reinforce_hour = 18;
+        snap.structures.insert(
+            skyhook_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: crate::services::sov_services::TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Test Skyhook".to_string(),
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+    });
 
     let user = make_ctx(Some(cid as u32), 0);
     let admin = make_ctx(Some(cid as u32), ROLE_PROGRAMMER);
@@ -405,10 +582,7 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
         "eve.character.industry.blueprints.GetRequest",
         "eve.industry.facility.GetRequest",
         "eve.industry.system.GetCostIndicesRequest",
-        "eve.planet.skyhook.api.GetReinforcementExitHourRequest",
-        "eve.planet.skyhook.api.GetStateRequest",
         "eve.bloodline.GetAllRequest",
-        "eve.localization.cerberus.api.GetLocalizedTextRequest",
         "eve.killmail.Attributes",
         "eve.id.api.GetRequest",
     ] {
@@ -421,13 +595,139 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
                 },
             )
             .expect(rpc);
-        if rpc != "eve.character.industry.blueprints.GetRequest"
-            && rpc != "eve.killmail.Attributes"
-        {
+        if rpc != "eve.killmail.Attributes" {
             assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
         }
     }
 
+    // Persisted Skyhook state & reinforcement exit hour (+ 404 on empty/missing Skyhook IDs)
+    for rpc in [
+        "eve.planet.skyhook.api.GetReinforcementExitHourRequest",
+        "eve.planet.skyhook.api.GetStateRequest",
+    ] {
+        assert!(
+            !router
+                .dispatch(&user, &encode_id_req(rpc, skyhook_id as u64))
+                .expect(rpc)
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            router
+                .dispatch(
+                    &user,
+                    &GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rpc}"),
+                        value: vec![],
+                    },
+                )
+                .unwrap_err()
+                .0,
+            crate::quasar_gateway::STATUS_NOT_FOUND
+        );
+        assert_eq!(
+            router.dispatch(&user, &encode_id_req(rpc, 999_888_777)).unwrap_err().0,
+            crate::quasar_gateway::STATUS_NOT_FOUND
+        );
+    }
+
+    // Real SDE celestials, schematic & wrong-group negative check
+    assert_eq!(
+        router.dispatch(&user, &encode_id_req("eve.planet.GetRequest", 40_000_001)).unwrap_err().0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
+    let tanoo_i = router.dispatch(&user, &encode_id_req("eve.planet.GetRequest", 40_000_002)).expect("Tanoo I");
+    assert!(!tanoo_i.value.is_empty());
+    let schem_65 = router.dispatch(&user, &encode_id_req("eve.planetinteraction.schematic.GetRequest", 65)).expect("schematic 65");
+    assert!(String::from_utf8_lossy(&schem_65.value).contains("Superconductors"));
+    let jita_moon = router.dispatch(&user, &encode_id_req("eve.moon.GetRequest", 40_009_081)).expect("Jita III - Moon 1");
+    assert!(String::from_utf8_lossy(&jita_moon.value).contains("Jita III - Moon 1"));
+    let tanoo_belt = router.dispatch(&user, &encode_id_req("eve.asteroidbelt.GetRequest", 40_000_003)).expect("Tanoo I - Asteroid Belt 1");
+    assert!(String::from_utf8_lossy(&tanoo_belt.value).contains("Tanoo I - Asteroid Belt 1"));
+
+    for (rpc, id) in [
+        ("eve.planet.GetRequest", 40_000_002_u64),
+        ("eve.planet.GetPlanetsInSolarSystemRequest", 30_000_142),
+        ("eve.planetinteraction.collector.GetRequest", 50_001),
+        ("eve.planetinteraction.factory.GetRequest", 50_002),
+        ("eve.planetinteraction.schematic.GetRequest", 65),
+        ("eve.planetinteraction.storage.GetRequest", 50_003),
+        ("eve.moon.GetRequest", 40_009_081),
+        ("eve.moon.GetMoonsOfPlanetRequest", 40_009_080),
+        ("eve.asteroidbelt.GetRequest", 40_000_003),
+        ("eve.asteroidbelt.GetBeltsOfPlanetRequest", 40_000_002),
+    ] {
+        let resp = router.dispatch(&user, &encode_id_req(rpc, id)).expect(rpc);
+        assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
+    }
+
+    // `eve.user.Identifier.sequential` is protobuf `sint32` (ZigZag-encoded)
+    for (rpc, id) in [
+        ("eve.id.api.GetByUserRequest", 1),
+        ("eve.id.legacy.api.GetUserRequest", 1),
+    ] {
+        let resp = router
+            .dispatch(&user, &encode_user_id_req(rpc, id))
+            .expect(rpc);
+        assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
+    }
+
+    // Cross-user ID queries require admin role; unknown user IDs return 404; missing localization returns 404/400.
+    for rpc in ["eve.id.api.GetByUserRequest", "eve.id.legacy.api.GetUserRequest"] {
+        assert_eq!(
+            router
+                .dispatch(&user, &encode_user_id_req(rpc, 77))
+                .unwrap_err()
+                .0,
+            STATUS_FORBIDDEN
+        );
+        assert!(router.dispatch(&admin, &encode_user_id_req(rpc, 77)).is_ok());
+        assert_eq!(
+            router
+                .dispatch(&admin, &encode_user_id_req(rpc, 999_888))
+                .unwrap_err()
+                .0,
+            crate::quasar_gateway::STATUS_NOT_FOUND
+        );
+    }
+    assert_eq!(
+        router
+            .dispatch(
+                &user,
+                &GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.message.api.GetLocalizedTextRequest"),
+                    value: vec![],
+                },
+            )
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        router
+            .dispatch(
+                &user,
+                &encode_id_req("eve.localization.message.api.GetLocalizedTextRequest", 999_999_999),
+            )
+            .unwrap_err()
+            .0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        router
+            .dispatch(
+                &user,
+                &GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.cerberus.api.GetLocalizedTextRequest"),
+                    value: vec![],
+                },
+            )
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+
+    // Missing/unknown IDs return STATUS_NOT_FOUND (no synthetic fallbacks)
     for rpc in [
         "eve.planet.GetRequest",
         "eve.planet.GetPlanetsInSolarSystemRequest",
@@ -439,38 +739,295 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
         "eve.moon.GetMoonsOfPlanetRequest",
         "eve.asteroidbelt.GetRequest",
         "eve.asteroidbelt.GetBeltsOfPlanetRequest",
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        "eve.id.api.GetByUserRequest",
-        "eve.id.legacy.api.GetUserRequest",
     ] {
-        let resp = router.dispatch(&user, &encode_id_req(rpc, 77)).expect(rpc);
-        assert!(!resp.value.is_empty(), "{rpc} should return non-empty payload");
+        assert_eq!(
+            router.dispatch(&user, &encode_id_req(rpc, 999_999)).unwrap_err().0,
+            crate::quasar_gateway::STATUS_NOT_FOUND,
+            "{rpc} must return STATUS_NOT_FOUND on unknown id 999_999"
+        );
     }
+    let other_user = make_ctx(Some(211_200_199), 0);
+    assert_eq!(
+        router
+            .dispatch(&other_user, &encode_id_req("eve.planetinteraction.collector.GetRequest", 50_001))
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
+    // Undocked / anonymous facility.GetRequest returns empty facilities list
+    let anon = make_ctx(None, 0);
+    let anon_fac = router
+        .dispatch(
+            &anon,
+            &GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.industry.facility.GetRequest"),
+                value: vec![],
+            },
+        )
+        .expect("anonymous facility.GetRequest");
+    assert!(anon_fac.value.is_empty(), "anonymous facility list must be empty");
 
-    // Skyhook ChangeOwnerRequest requires admin
+    // Skyhook ChangeOwnerRequest requires admin and persists new owner corporation
+    let sky_req_bytes = pb::message("eve.planet.skyhook.admin.api.ChangeOwnerRequest")
+        .set("skyhook.sequential", skyhook_id as u64)
+        .set("solar_system.sequential", 30_000_142u32)
+        .set("corporation.sequential", target_corp_id as u32)
+        .must_encode();
     let sky_req = GoogleAny {
         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.planet.skyhook.admin.api.ChangeOwnerRequest"),
-        value: vec![],
+        value: sky_req_bytes,
     };
     assert_eq!(router.dispatch(&user, &sky_req).unwrap_err().0, STATUS_FORBIDDEN);
     assert!(router.dispatch(&admin, &sky_req).is_ok());
+    assert_eq!(db.with_snapshot(|s| s.structures[&skyhook_id].owner_corp_id), target_corp_id);
 
-    // TransferByOwnerRequest: default 10,000 ISK succeeds, then 100,000 ISK fails (Insufficient ISK)
+    // TransferByOwnerRequest requires admin role, explicit positive amount & valid recipient
     let xfer_type = format!("{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.TransferByOwnerRequest");
-    assert!(router
-        .dispatch(&user, &GoogleAny { type_url: xfer_type.clone(), value: vec![] })
-        .is_ok());
-
-    let big_xfer = pb::message("eve.isk.wallet.api.TransferByOwnerRequest")
-        .set("amount.units", 100_000i64)
+    let valid_xfer = pb::message("eve.isk.wallet.api.TransferByOwnerRequest")
+        .set("transfer_from.character.sequential", cid as u32)
+        .set("transfer_to.character.sequential", cid_rx as u32)
+        .set("amount.units", 10_000i64)
         .must_encode();
     assert_eq!(
         router
-            .dispatch(&user, &GoogleAny { type_url: xfer_type, value: big_xfer })
+            .dispatch(&user, &GoogleAny { type_url: xfer_type.clone(), value: valid_xfer.clone() })
+            .unwrap_err()
+            .0,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        router
+            .dispatch(&admin, &GoogleAny { type_url: xfer_type.clone(), value: vec![] })
             .unwrap_err()
             .0,
         STATUS_BAD_REQUEST
     );
+    assert!(router
+        .dispatch(&admin, &GoogleAny { type_url: xfer_type.clone(), value: valid_xfer })
+        .is_ok());
+    db.with_snapshot(|s| {
+        assert_eq!(s.characters[&cid].balance, IskCents::from_isk(40_000));
+        assert_eq!(s.characters[&cid_rx].balance, IskCents::from_isk(11_000));
+    });
+
+    let big_xfer = pb::message("eve.isk.wallet.api.TransferByOwnerRequest")
+        .set("transfer_from.character.sequential", cid as u32)
+        .set("transfer_to.character.sequential", cid_rx as u32)
+        .set("amount.units", 100_000i64)
+        .must_encode();
+    assert_eq!(
+        router
+            .dispatch(&admin, &GoogleAny { type_url: xfer_type, value: big_xfer })
+            .unwrap_err()
+            .0,
+        STATUS_BAD_REQUEST
+    );
+}
+
+fn decode_journal_entries_in_order(
+    descriptors: &QuasarDescriptorRegistry,
+    resp_full_name: &str,
+    payload: &[u8],
+) -> Vec<(u64, String)> {
+    let field_num = |msg: &str, field: &str| -> (u32, String) {
+        let d = descriptors
+            .messages_by_full_name
+            .get(msg.trim_start_matches('.'))
+            .unwrap_or_else(|| panic!("missing descriptor {msg}"));
+        let f = d
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .unwrap_or_else(|| panic!("missing field {field} on {msg}"));
+        (f.number as u32, f.type_name.trim_start_matches('.').to_string())
+    };
+    let (entries_num, entry_msg_name) = field_num(resp_full_name, "entries");
+    let (id_num, id_msg_name) = field_num(&entry_msg_name, "id");
+    let (tx_num, _) = field_num(&id_msg_name, "transaction");
+    let (attrs_num, attrs_msg_name) = field_num(&entry_msg_name, "attributes");
+    let (desc_num, _) = field_num(&attrs_msg_name, "description");
+
+    let dyn_resp = descriptors
+        .decode_dynamic_or_wire(resp_full_name, payload)
+        .expect("decode journal response");
+    let Some(DynamicValue::Repeated(items)) = dyn_resp.get(entries_num) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let DynamicValue::Message(entry) = item else { return None };
+            let DynamicValue::Message(id_msg) = entry.get(id_num)? else { return None };
+            let tx_id = match id_msg.get(tx_num) {
+                Some(DynamicValue::Uint64(v)) => *v,
+                Some(DynamicValue::Uint32(v)) => u64::from(*v),
+                Some(DynamicValue::Int64(v)) => *v as u64,
+                _ => 0,
+            };
+            let desc = match entry.get(attrs_num) {
+                Some(DynamicValue::Message(am)) => match am.get(desc_num) {
+                    Some(DynamicValue::String(s)) => s.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            Some((tx_id, desc))
+        })
+        .collect()
+}
+
+#[test]
+fn accounting_journal_filters_strictly_and_returns_newest_200_first() {
+    let (router, db, _sde) = make_router_and_db();
+    let cid = 211200150i64;
+    let corp_id = 98000150i64;
+    seed_char(&db, cid, corp_id, 7_777_777);
+
+    db.try_with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "JournalFilterCorp".to_string();
+        corp.ticker = "JFC".to_string();
+        corp.ceo_id = cid;
+        corp.hq_station_id = Some(60003760);
+        corp.members = HashSet::from([cid]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for i in 1i64..=205 {
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: i,
+                character_id: cid,
+                entry_type: "Bounty".to_string(),
+                amount: IskCents::from_isk(1_000 + i),
+                balance_after: IskCents::from_isk(7_000_000 + i),
+                reason: format!("char_entry_{i:03}"),
+            });
+            snap.wallet_journal_timestamps.insert(i, 1_770_000_000 + i as u64);
+        }
+        for i in 1i64..=205 {
+            let eid = 1000 + i;
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: eid,
+                character_id: corp_id,
+                entry_type: "Tax".to_string(),
+                amount: IskCents::from_isk(500 + i),
+                balance_after: IskCents::from_isk(100_000 + i),
+                reason: format!("corp_entry_{i:03}"),
+            });
+            snap.wallet_journal_meta.insert(
+                eid,
+                JournalMeta {
+                    ref_type_id: 85,
+                    first_party_id: cid,
+                    second_party_id: corp_id,
+                    context_id: 0,
+                    context: Default::default(),
+                    account_key: 1000,
+                    date_unix: 1_775_000_000 + i as u64,
+                },
+            );
+        }
+        // Cross-party pair: one row owned by corp_id and one row owned by personal character cid
+        // whose JournalMeta still names corp_id as second_party_id.
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 2000,
+            character_id: corp_id,
+            entry_type: "Donation".to_string(),
+            amount: IskCents::from_isk(5_000),
+            balance_after: IskCents::from_isk(555_555),
+            reason: "corp_cross_party".to_string(),
+        });
+        snap.wallet_journal_meta.insert(
+            2000,
+            JournalMeta {
+                ref_type_id: 10,
+                first_party_id: cid,
+                second_party_id: corp_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_776_000_000,
+            },
+        );
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 2001,
+            character_id: cid,
+            entry_type: "Donation".to_string(),
+            amount: IskCents::from_isk(-5_000),
+            balance_after: IskCents::from_isk(999_888_777),
+            reason: "personal_counterparty_balance_secret".to_string(),
+        });
+        snap.wallet_journal_meta.insert(
+            2001,
+            JournalMeta {
+                ref_type_id: 10,
+                first_party_id: cid,
+                second_party_id: corp_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_776_000_001,
+            },
+        );
+        Ok::<(), String>(())
+    })
+    .unwrap();
+
+    let ceo = make_ctx(Some(cid as u32), 0);
+    let corp_req = encode_id_req(
+        "eve.accounting.corporation.journal.GetCorporationEntriesRequest",
+        corp_id as u64,
+    );
+    let corp_resp = router
+        .dispatch(&ceo, &corp_req)
+        .expect("CEO GetCorporationEntriesRequest");
+    let corp_entries = decode_journal_entries_in_order(
+        &router.descriptors,
+        "eve.accounting.corporation.journal.GetCorporationEntriesResponse",
+        &corp_resp.value,
+    );
+    assert_eq!(corp_entries.len(), 200, "corp journal should cap at newest 200 entries");
+    assert_eq!(corp_entries[0], (2000, "corp_cross_party".to_string()));
+    assert_eq!(corp_entries[1], (1205, "corp_entry_205".to_string()));
+    assert_eq!(corp_entries[199], (1007, "corp_entry_007".to_string()));
+    assert_eq!(
+        corp_entries.iter().filter(|(id, _)| *id == 2000).count(),
+        1,
+        "corp cross-party row must not be duplicated"
+    );
+    assert!(
+        !corp_entries
+            .iter()
+            .any(|(id, desc)| *id == 2001 || desc.contains("personal_counterparty_balance_secret")),
+        "corp journal must never return counterparty personal entries or leak personal balances"
+    );
+    assert!(!corp_resp
+        .value
+        .windows(b"personal_counterparty_balance_secret".len())
+        .any(|w| w == b"personal_counterparty_balance_secret"));
+
+    let char_req = GoogleAny {
+        type_url: format!(
+            "{TYPE_GOOGLEAPIS_PREFIX}eve.accounting.character.journal.GetCharacterEntriesRequest"
+        ),
+        value: vec![],
+    };
+    let char_resp = router
+        .dispatch(&ceo, &char_req)
+        .expect("GetCharacterEntriesRequest");
+    let char_entries = decode_journal_entries_in_order(
+        &router.descriptors,
+        "eve.accounting.character.journal.GetCharacterEntriesResponse",
+        &char_resp.value,
+    );
+    assert_eq!(char_entries.len(), 200, "character journal should cap at newest 200 entries");
+    assert_eq!(
+        char_entries[0],
+        (2001, "personal_counterparty_balance_secret".to_string())
+    );
+    assert_eq!(char_entries[1], (205, "char_entry_205".to_string()));
+    assert_eq!(char_entries[199], (7, "char_entry_007".to_string()));
 }
 
 #[cfg(test)]

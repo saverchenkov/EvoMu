@@ -3647,8 +3647,18 @@ async fn test_batch2_raffle_character_seeding_and_create() {
     )
     .await
     .expect("CreateRaffle");
-    assert_eq!(kv_i64(&created, "item_id"), Some(raffle_item_id));
-    assert_eq!(kv_i64(&created, "owner_id"), Some(90_000_001));
+    let created_id = created.as_i64().expect("CreateRaffle must return integer raffle_id");
+    let got_raffle = rpc(
+        &ctx,
+        &mut player,
+        "raffleProxy",
+        "GetRaffle",
+        &[PyRep::Integer(created_id)],
+    )
+    .await
+    .expect("GetRaffle");
+    assert_eq!(kv_i64(&got_raffle, "item_id"), Some(raffle_item_id));
+    assert_eq!(kv_i64(&got_raffle, "owner_id"), Some(90_000_001));
 
     ctx.db.with_snapshot(|snap| {
         let escrowed = snap.items.get(&raffle_item_id).expect("escrowed item");

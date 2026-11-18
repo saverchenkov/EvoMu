@@ -445,7 +445,7 @@ async fn test_homefront_sites_and_hypernet_raffle_e2e() {
         )
         .await
         .expect("CreateRaffle");
-    let raffle_id = created.dict_get("raffle_id").and_then(PyRep::as_i64).expect("raffle_id");
+    let raffle_id = created.as_i64().expect("raffle_id");
 
     let prices_active = ctx
         .dispatch_rpc(

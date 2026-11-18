@@ -52,12 +52,6 @@ fn make_router_and_db() -> (Arc<PublicGatewayRouter>, Arc<WorldRepository>) {
         Arc::clone(&db),
         Arc::clone(&sde),
     ));
-    register_economy_planetary_industry_handlers(
-        &router,
-        Arc::clone(&db),
-        Arc::clone(&sde),
-        descriptors,
-    );
     (router, db)
 }
 
@@ -140,10 +134,12 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
                 grantable_roles_at_other: 0,
             },
         );
-        // Add a journal entry matched via wallet_journal_meta.first_party_id == corp_id
+        // Authentic corporation journal entry (`character_id == corp_id`), plus a personal
+        // counterparty row (`character_id == ceo_id`) with `first_party_id == corp_id` that
+        // GetCorporationEntriesRequest must NOT include or leak.
         snap.wallet_journal.push(WalletJournalEntry {
             entry_id: 901,
-            character_id: ceo_id,
+            character_id: corp_id,
             entry_type: "Contract".into(),
             amount: IskCents::from_isk(50_000),
             balance_after: IskCents::from_isk(950_000),
@@ -159,6 +155,26 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
                 context: Default::default(),
                 account_key: 1000,
                 date_unix: 1_760_000_000,
+            },
+        );
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 902,
+            character_id: ceo_id,
+            entry_type: "Contract".into(),
+            amount: IskCents::from_isk(-50_000),
+            balance_after: IskCents::from_isk(1_234_567),
+            reason: "Personal counterparty entry".into(),
+        });
+        snap.wallet_journal_meta.insert(
+            902,
+            JournalMeta {
+                ref_type_id: 0,
+                first_party_id: corp_id,
+                second_party_id: ceo_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_760_000_001,
             },
         );
     });
@@ -186,6 +202,8 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
     let ctx_trader = make_ctx(Some(1), Some(trader_id as u32), Some(corp_id as u32), 0);
     let rsp_trader = dispatch_dyn(&router, &ctx_trader, rpc, &d_nested).expect("trader access");
     assert!(!rsp_trader.value.is_empty());
+    assert!(rsp_trader.value.windows(b"Corp first party".len()).any(|w| w == b"Corp first party"));
+    assert!(!rsp_trader.value.windows(b"Personal counterparty entry".len()).any(|w| w == b"Personal counterparty entry"));
 
     // 3. Starter corp (1_000_009) overridden by ctx_corp (corp_id) + ctx role bitmask ROLE_JUNIOR_ACCOUNTANT
     let ctx_starter = make_ctx(
@@ -351,69 +369,193 @@ fn admin_lp_ops_structure_facility_isk_transfer_variants_and_id_handlers() {
     let (router, db) = make_router_and_db();
     let cid = 211200520i64;
     seed_char(&db, cid, 1000009, 100_000);
-    // Dock character in a structure (station_id = None, structure_id = Some)
+    // Dock character in a seeded Upwell structure (station_id = None, structure_id = Some)
     db.with_mut_snapshot(|s| {
+        let st_id = 1_030_000_000_777_i64;
+        s.structures.insert(
+            st_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: st_id,
+                type_id: 35_832,
+                owner_corp_id: 1_000_009,
+                solar_system_id: 30_000_142,
+                name: "Test Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
         let ch = s.characters.get_mut(&cid).unwrap();
         ch.station_id = None;
-        ch.structure_id = Some(1_030_000_000_777);
+        ch.structure_id = Some(st_id);
     });
 
     let admin_no_char = make_ctx(Some(99), None, None, ROLE_PROGRAMMER);
     let user = make_ctx(Some(99), Some(cid as u32), None, 0);
     let empty_d = DynamicQuasarMessage::new("req");
 
-    // 1. Admin without active character can call LP WithdrawRequest and DepositRequest
+    let rx_cid = cid + 1;
+    seed_char(&db, rx_cid, 1000009, 1_000);
+    db.with_mut_snapshot(|s| {
+        s.accounts.insert(
+            "pilot99".to_string(),
+            eve_db::AccountRecord {
+                user_id: 99,
+                username: "pilot99".to_string(),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        s.items.insert(
+            88_002,
+            eve_db::InventoryItemRecord {
+                item_id: 88_002,
+                type_id: 681,
+                owner_id: cid,
+                location_id: 60_003_760,
+                singleton: true,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        s.industry_jobs.insert(
+            91_002,
+            eve_db::IndustryJobRecord {
+                job_id: 91_002,
+                installer_id: cid,
+                facility_id: 60_003_760,
+                blueprint_item_id: 88_002,
+                blueprint_type_id: 681,
+                activity_id: 1,
+                runs: 1,
+                product_type_id: 587,
+                status: "Active".to_string(),
+                duration_seconds: 600,
+                start_unix: 1_760_000_000,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Admin without active character reaches real LP handler (rejects empty UUID with 400; non-admin gets 403)
     for rpc in [
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
     ] {
-        assert!(dispatch_dyn(&router, &admin_no_char, rpc, &empty_d).is_ok());
+        assert_eq!(
+            dispatch_dyn(&router, &user, rpc, &empty_d).unwrap_err().0,
+            crate::quasar_gateway::STATUS_FORBIDDEN
+        );
+        assert_eq!(
+            dispatch_dyn(&router, &admin_no_char, rpc, &empty_d).unwrap_err().0,
+            crate::quasar_gateway::STATUS_BAD_REQUEST
+        );
     }
 
-    // 2. Facility & CostIndices for both structure-docked character and anonymous caller
+    // 2. Facility & CostIndices: seeded structure returns facility, anonymous caller gets empty facilities list,
+    //    and cost indices contain only systems with active industry jobs (no synthetic 0.01 fallback)
+    let user_fac = dispatch_dyn(&router, &user, "eve.industry.facility.GetRequest", &empty_d)
+        .expect("seeded structure facility");
+    assert!(!user_fac.value.is_empty());
+    let anon_fac = dispatch_dyn(&router, &admin_no_char, "eve.industry.facility.GetRequest", &empty_d)
+        .expect("anonymous facility.GetRequest");
+    assert!(anon_fac.value.is_empty());
     for ctx in [&user, &admin_no_char] {
-        assert!(
-            dispatch_dyn(&router, ctx, "eve.industry.facility.GetRequest", &empty_d).is_ok()
-        );
-        assert!(dispatch_dyn(
+        let rsp = dispatch_dyn(
             &router,
             ctx,
             "eve.industry.system.GetCostIndicesRequest",
-            &empty_d
+            &empty_d,
         )
-        .is_ok());
+        .expect("cost indices");
+        assert!(!rsp.value.is_empty());
     }
 
-    // 3. TransferByOwnerRequest with Int64(2500) in field 5 submessage
+    // 3. TransferByOwnerRequest requires admin and debits/credits atomically (no overflow panic)
     let mut amt_m = DynamicQuasarMessage::new("amt");
     amt_m.set(1, DynamicValue::Int64(2_500));
+    let mut to_char = DynamicQuasarMessage::new("char");
+    to_char.set(1, DynamicValue::Uint32(rx_cid as u32));
+    let mut to_owner = DynamicQuasarMessage::new("owner");
+    to_owner.set(1, DynamicValue::Message(Box::new(to_char)));
     let mut xfer_d = DynamicQuasarMessage::new("req");
+    xfer_d.set(4, DynamicValue::Message(Box::new(to_owner)));
     xfer_d.set(5, DynamicValue::Message(Box::new(amt_m)));
+    assert_eq!(
+        dispatch_dyn(&router, &user, "eve.isk.wallet.api.TransferByOwnerRequest", &xfer_d)
+            .unwrap_err()
+            .0,
+        crate::quasar_gateway::STATUS_FORBIDDEN
+    );
+    let admin_user = make_ctx(Some(99), Some(cid as u32), None, ROLE_PROGRAMMER);
     dispatch_dyn(
         &router,
-        &user,
+        &admin_user,
         "eve.isk.wallet.api.TransferByOwnerRequest",
         &xfer_d,
     )
-    .expect("TransferByOwner Int64(2500)");
+    .expect("admin TransferByOwner Int64(2500)");
+    db.with_snapshot(|s| {
+        assert_eq!(s.characters[&cid].balance, IskCents::from_isk(97_500));
+        assert_eq!(s.characters[&rx_cid].balance, IskCents::from_isk(3_500));
+    });
+
+    // Overflowing i64::MAX ISK units must return 400 (not panic on checked_mul(100))
+    let mut ovf_amt = DynamicQuasarMessage::new("amt");
+    ovf_amt.set(1, DynamicValue::Int64(i64::MAX));
+    let mut ovf_req = xfer_d.clone();
+    ovf_req.set(5, DynamicValue::Message(Box::new(ovf_amt)));
     assert_eq!(
-        db.with_snapshot(|s| s.characters[&cid].balance),
-        IskCents::from_isk(97_500)
+        dispatch_dyn(
+            &router,
+            &admin_user,
+            "eve.isk.wallet.api.TransferByOwnerRequest",
+            &ovf_req,
+        )
+        .unwrap_err()
+        .0,
+        crate::quasar_gateway::STATUS_BAD_REQUEST
     );
 
-    // 4. GetLocalizedTextRequest, GetByUserRequest, GetUserRequest with Uint32 and empty fallback
+    // 4. GetLocalizedTextRequest requires valid/existing SDE ID; GetByUserRequest/GetUserRequest enforce self/admin & 404
     let mut u32_sub = DynamicQuasarMessage::new("sub");
     u32_sub.set(1, DynamicValue::Uint32(888));
     let mut d_u32 = DynamicQuasarMessage::new("req");
     d_u32.set(1, DynamicValue::Message(Box::new(u32_sub)));
 
-    for rpc in [
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        "eve.id.api.GetByUserRequest",
-        "eve.id.legacy.api.GetUserRequest",
-    ] {
-        assert!(dispatch_dyn(&router, &user, rpc, &d_u32).is_ok());
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &user,
+            "eve.localization.message.api.GetLocalizedTextRequest",
+            &empty_d,
+        )
+        .unwrap_err()
+        .0,
+        crate::quasar_gateway::STATUS_BAD_REQUEST
+    );
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &user,
+            "eve.localization.message.api.GetLocalizedTextRequest",
+            &d_u32,
+        )
+        .unwrap_err()
+        .0,
+        crate::quasar_gateway::STATUS_NOT_FOUND
+    );
+    for rpc in ["eve.id.api.GetByUserRequest", "eve.id.legacy.api.GetUserRequest"] {
         assert!(dispatch_dyn(&router, &user, rpc, &empty_d).is_ok());
+        assert_eq!(
+            dispatch_dyn(&router, &user, rpc, &d_u32).unwrap_err().0,
+            crate::quasar_gateway::STATUS_FORBIDDEN
+        );
+        assert_eq!(
+            dispatch_dyn(&router, &admin_user, rpc, &d_u32).unwrap_err().0,
+            crate::quasar_gateway::STATUS_NOT_FOUND
+        );
     }
 }
 
@@ -541,15 +683,35 @@ fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_
         );
     });
 
-    // 7. TransferByOwnerRequest (`effective_character_id().filter(|&v| v > 0)`):
-    //    - `Some(0)` and `None` MUST return `STATUS_UNAUTHORIZED` (kills `> -> ==` and `> -> >=`)
-    //    - `Some(positive_cid)` MUST succeed, debit balance, and emit notice (kills `> -> <` and `register -> ()`)
+    // 7. TransferByOwnerRequest:
+    //    - Non-admin caller MUST return `STATUS_FORBIDDEN`
+    //    - Admin caller with missing/zero acting/from character (`Some(0)` and `None`) MUST return `STATUS_UNAUTHORIZED`
+    //    - Admin caller with explicit positive amount + recipient MUST debit source, credit recipient,
+    //      append both journal entries, emit GrantCommanded notices, and fire OnAccountChange
     let mut amt_m = DynamicQuasarMessage::new("amt");
     amt_m.set(1, DynamicValue::Int64(1_250));
+    let mut to_ch = DynamicQuasarMessage::new("ch");
+    to_ch.set(1, DynamicValue::Uint32(ceo_id as u32));
+    let mut to_owner = DynamicQuasarMessage::new("owner");
+    to_owner.set(1, DynamicValue::Message(Box::new(to_ch)));
     let mut xfer_d = DynamicQuasarMessage::new("req");
+    xfer_d.set(4, DynamicValue::Message(Box::new(to_owner)));
     xfer_d.set(5, DynamicValue::Message(Box::new(amt_m)));
 
-    let zero_char_ctx = make_ctx(Some(99), Some(0), None, 0);
+    let unpriv_ctx = make_ctx(Some(99), Some(sess_role_only as u32), None, 0);
+    assert_eq!(
+        dispatch_dyn(
+            &router,
+            &unpriv_ctx,
+            "eve.isk.wallet.api.TransferByOwnerRequest",
+            &xfer_d
+        )
+        .unwrap_err()
+        .0,
+        STATUS_FORBIDDEN
+    );
+
+    let zero_char_ctx = make_ctx(Some(99), Some(0), None, ROLE_PROGRAMMER);
     assert_eq!(
         dispatch_dyn(
             &router,
@@ -562,7 +724,7 @@ fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_
         STATUS_UNAUTHORIZED
     );
 
-    let none_char_ctx = make_ctx(Some(99), None, None, 0);
+    let none_char_ctx = make_ctx(Some(99), None, None, ROLE_PROGRAMMER);
     assert_eq!(
         dispatch_dyn(
             &router,
@@ -576,21 +738,37 @@ fn authorize_corp_financial_access_roles_and_transfer_by_owner_positive_id_kill_
     );
 
     let notices_before = router.pending_notices.read().unwrap().len();
-    let valid_ctx = make_ctx(Some(99), Some(sess_role_only as u32), None, 0);
+    let macho_captured = Arc::new(std::sync::Mutex::new(Vec::<(i64, String, f64)>::new()));
+    let cap_clone = Arc::clone(&macho_captured);
+    *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _id, args| {
+        if let crate::router::NotificationTarget::Character(cid) = target {
+            let bal = args.get(2).and_then(eve_proto::PyRep::as_f64).unwrap_or(-1.0);
+            cap_clone.lock().unwrap().push((cid, event.to_string(), bal));
+        }
+    }));
+
+    let src_before = db.with_snapshot(|s| s.characters[&sess_role_only].balance);
+    let dst_before = db.with_snapshot(|s| s.characters[&ceo_id].balance);
+    let j_before = db.with_snapshot(|s| s.wallet_journal.len());
+    let valid_ctx = make_ctx(Some(99), Some(sess_role_only as u32), None, ROLE_PROGRAMMER);
     let rsp = dispatch_dyn(
         &router,
         &valid_ctx,
         "eve.isk.wallet.api.TransferByOwnerRequest",
         &xfer_d,
     )
-    .expect("positive character id must pass TransferByOwnerRequest");
+    .expect("admin positive character id must pass TransferByOwnerRequest");
     assert!(rsp.type_url.ends_with("eve.isk.wallet.api.TransferByOwnerResponse"));
-    assert_eq!(
-        db.with_snapshot(|s| s.characters[&sess_role_only].balance),
-        IskCents::from_isk(98_750)
-    );
+    db.with_snapshot(|s| {
+        let amt = IskCents::from_isk(1_250);
+        assert_eq!(s.characters[&sess_role_only].balance, IskCents(src_before.0 - amt.0));
+        assert_eq!(s.characters[&ceo_id].balance, IskCents(dst_before.0 + amt.0));
+        assert_eq!(s.wallet_journal.len(), j_before + 2);
+    });
     assert_eq!(
         router.pending_notices.read().unwrap().len(),
-        notices_before + 1
+        notices_before + 2
     );
+    let macho_evs = macho_captured.lock().unwrap();
+    assert_eq!(macho_evs.iter().filter(|e| e.1 == "OnAccountChange").count(), 2);
 }

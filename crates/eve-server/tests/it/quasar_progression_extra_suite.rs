@@ -500,7 +500,22 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     let lic_rsp = call_req(&ctx, &session, "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest", Vec::new(), true);
     assert_eq!(lic_rsp.status_code, STATUS_OK);
 
-    // 4. Saved SKINR Design Drafts: authorization & distinct draft IDs
+    // 4. Saved SKINR Design Drafts: authorization & distinct draft IDs (seed char FK + train Studio Management 81370 Lv 1)
+    ctx.db.with_mut_snapshot(|s| {
+        if !s.characters.contains_key(&90_000_105) {
+            let mut c = s.characters.get(&90_000_001).cloned().expect("demo char");
+            c.character_id = 90_000_105;
+            s.characters.insert(90_000_105, c);
+        }
+        s.skills.entry(90_000_105).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
     let mut no_char = SessionState::new(20_099);
     no_char.user_id = Some(105);
     let unauth = call_req(&ctx, &no_char, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new(), true);
@@ -606,6 +621,14 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
         c.character_id = 90_000_110;
         c.corporation_id = 98_000_001;
         s.characters.insert(90_000_110, c);
+        s.skills.entry(90_000_110).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
     });
     let (mut cg_req_b, mut curr_b, mut isk_b, mut pool_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(500_000), &mut curr_b);

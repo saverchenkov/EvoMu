@@ -365,7 +365,7 @@ async fn non_gm_paragon_hub_and_skinr_sde_grounded_e2e_and_sqlite_reload() {
 
         ctx.db.with_mut_snapshot(|s| {
             let sk = s.skills.entry(seller_cid).or_default();
-            for (sid, lvl) in [(84217u32, 5u8), (84218, 5), (84220, 5), (81377, 5), (81372, 5), (81375, 5), (81364, 3), (81368, 1)] {
+            for (sid, lvl) in [(84217u32, 5u8), (84218, 5), (84220, 5), (81377, 5), (81372, 5), (81375, 5), (81364, 3), (81368, 5)] {
                 sk.insert(sid, TrainedSkillRecord { type_id: sid, level: lvl, skill_points: 256_000.0 });
             }
         });

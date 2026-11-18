@@ -341,13 +341,9 @@ async fn test_raffle_lifecycle_creation_and_ticket_sales() {
     )
     .await
     .expect("CreateRaffle");
-    let PyRep::KeyVal(rkv) = created else {
-        panic!("expected KeyVal from CreateRaffle");
+    let PyRep::Integer(raffle_id) = created else {
+        panic!("expected Integer raffle_id from CreateRaffle, got {created:?}");
     };
-    let raffle_id = rkv
-        .get("raffle_id")
-        .and_then(|v| v.as_i64())
-        .expect("raffle_id");
     assert!(raffle_id > 0);
 
     // 5. GetRaffle verifies active listing
@@ -571,7 +567,7 @@ async fn test_raffle_npc_station_only_random_tickets_and_historic_prices() {
 
     // Restore valid Jita NPC station and create a 512-ticket raffle
     set_p1_loc(&mut p1, Some(JITA_STATION_ID), None, 30_000_142);
-    let PyRep::KeyVal(r1) = rpc(
+    let PyRep::Integer(raf_1) = rpc(
         &ctx,
         &mut p1,
         "raffleProxy",
@@ -581,9 +577,8 @@ async fn test_raffle_npc_station_only_random_tickets_and_historic_prices() {
     .await
     .expect("CreateRaffle 512 tickets")
     else {
-        panic!("expected KeyVal");
+        panic!("expected Integer raffle_id");
     };
-    let raf_1 = r1.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
 
     // 2. Active price reflects the open 512 * 1,000 = 512,000 ISK raffle
     let PyRep::Tuple(active_tup) = rpc(
@@ -631,7 +626,7 @@ async fn test_raffle_npc_station_only_random_tickets_and_historic_prices() {
     );
 
     // 4. Create and finish a 2nd raffle (16 * 100,000 = 1,600,000 ISK) and verify historic avg
-    let PyRep::KeyVal(r2) = rpc(
+    let PyRep::Integer(raf_2) = rpc(
         &ctx,
         &mut p1,
         "raffleProxy",
@@ -641,9 +636,8 @@ async fn test_raffle_npc_station_only_random_tickets_and_historic_prices() {
     .await
     .expect("CreateRaffle 16 tickets")
     else {
-        panic!("expected KeyVal");
+        panic!("expected Integer raffle_id");
     };
-    let raf_2 = r2.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
     rpc(
         &ctx,
         &mut p2,
@@ -724,12 +718,9 @@ async fn test_raffle_queries_and_subscriptions() {
             (PyRep::String("ticket_price".into()), PyRep::Real(price)),
         ])
     };
-    let PyRep::KeyVal(r_a) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_a, 8, 100_000.0)]).await.expect("CreateRaffle A") else { panic!("expected KeyVal"); };
-    let raf_a = r_a.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let PyRep::KeyVal(r_b) = rpc(&ctx, &mut p_amarr, "raffleProxy", "CreateRaffle", &[make_raffle(item_b, 16, 500_000.0)]).await.expect("CreateRaffle B") else { panic!("expected KeyVal"); };
-    let raf_b = r_b.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
-    let PyRep::KeyVal(r_c) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_c, 8, 50_000.0)]).await.expect("CreateRaffle C") else { panic!("expected KeyVal"); };
-    let raf_c = r_c.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::Integer(raf_a) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_a, 8, 100_000.0)]).await.expect("CreateRaffle A") else { panic!("expected Integer raffle_id"); };
+    let PyRep::Integer(raf_b) = rpc(&ctx, &mut p_amarr, "raffleProxy", "CreateRaffle", &[make_raffle(item_b, 16, 500_000.0)]).await.expect("CreateRaffle B") else { panic!("expected Integer raffle_id"); };
+    let PyRep::Integer(raf_c) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_c, 8, 50_000.0)]).await.expect("CreateRaffle C") else { panic!("expected Integer raffle_id"); };
 
     // Complete Raffle C by purchasing all 8 tickets with P2
     rpc(&ctx, &mut p2, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raf_c), PyRep::Integer(8)]).await.expect("Buy all C");
@@ -762,8 +753,15 @@ async fn test_raffle_queries_and_subscriptions() {
     assert!(matches!(&fg_price[0], PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_b))));
 
     // 4. GetCreatedParticipated & GetMyRaffleHistory
-    let PyRep::List(created_participated) = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated") else { panic!("expected List"); };
-    assert!(created_participated.len() >= 2);
+    let created_participated = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated");
+    assert!(matches!(created_participated, PyRep::Dict(_)), "expected Dict from GetCreatedParticipated");
+    let created_total = created_participated.dict_get("created_running").and_then(PyRep::as_i64).unwrap_or(0)
+        + created_participated.dict_get("finished_undelivered").and_then(PyRep::as_i64).unwrap_or(0)
+        + created_participated.dict_get("finished_expired").and_then(PyRep::as_i64).unwrap_or(0)
+        + created_participated.dict_get("finished_delivered").and_then(PyRep::as_i64).unwrap_or(0);
+    assert!(created_total >= 2);
+    assert_eq!(created_participated.dict_get("created_running"), Some(&PyRep::Integer(1)));
+    assert_eq!(created_participated.dict_get("finished_undelivered"), Some(&PyRep::Integer(1)));
     let PyRep::Tuple(hist_parts) = rpc(&ctx, &mut p2, "raffleProxy", "GetMyRaffleHistory", &[]).await.expect("GetMyRaffleHistory") else { panic!("expected 2-tuple"); };
     assert_eq!(hist_parts.len(), 2);
     let PyRep::List(history) = &hist_parts[0] else { panic!("expected List at [0]"); };

@@ -133,7 +133,7 @@ async fn test_quasar_asteroidbelt_and_capacitor() {
     let sess = make_session(101, 1001, 90_000_001, 1_000_001);
 
     // Call eve.asteroidbelt.GetRequest
-    let req_val = encode_id_msg(1, 40_000_001);
+    let req_val = encode_id_msg(1, 40_000_003);
     let rsp = quasar_call(&ctx, &sess, "eve.asteroidbelt.GetRequest", req_val);
     assert_eq!(rsp.status_code, STATUS_OK);
     let payload = rsp.payload.expect("payload");
@@ -142,17 +142,17 @@ async fn test_quasar_asteroidbelt_and_capacitor() {
     let attr_bytes = wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
     let attr_wm = WireMessage::decode(attr_bytes).expect("decode Attributes");
     let name_field = attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap().unwrap();
-    assert!(name_field.contains("Asteroid Belt #40000001"));
+    assert_eq!(name_field, "Tanoo I - Asteroid Belt 1");
 
     // Call eve.asteroidbelt.GetBeltsOfPlanetRequest
-    let planet_req = encode_id_msg(1, 40_000_100);
+    let planet_req = encode_id_msg(1, 40_000_002);
     let planet_rsp = quasar_call(&ctx, &sess, "eve.asteroidbelt.GetBeltsOfPlanetRequest", planet_req);
     assert_eq!(planet_rsp.status_code, STATUS_OK);
     let planet_payload = planet_rsp.payload.expect("payload");
     assert_eq!(planet_payload.normalized_type_name(), "eve.asteroidbelt.GetBeltsOfPlanetResponse");
     let planet_wm = WireMessage::decode(&planet_payload.value).expect("decode GetBeltsOfPlanetResponse");
     let belt_fields: Vec<_> = planet_wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(belt_fields.len(), 2);
+    assert_eq!(belt_fields.len(), 1);
 
     // 2. Quasar Capacitor descriptor verification (1 proto file)
     let cap_idx = reg

@@ -19,9 +19,16 @@ use eve_sde::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
 pub const HYPERCORE_TYPE_ID: TypeId = 52_568;
+pub const PLEX_TYPE_ID: TypeId = 44_992;
+pub const RAFFLE_VALIDATION_TYPE_LIST_ID: u32 = 133;
+pub const RAFFLE_SINGLETON_TYPE_LIST_ID: u32 = 134;
 pub const ALLOWED_RAFFLE_SIZES: [u32; 4] = [8, 16, 48, 512];
 pub const RAFFLE_DURATION_SECS: u64 = 72 * 3_600;
 pub const RAFFLE_SALES_TAX_PERCENT: i64 = 5;
+pub const MIN_TOTAL_PRICE_ISK: f64 = 1_000.0;
+pub const MAX_TOTAL_PRICE_ISK: f64 = 10_000_000_000_000.0;
+pub const LOCAL_DEFAULT_PLEX_PRICE_ISK: f64 = 3_500_000.0;
+pub const HYPERNET_TOKEN_FEE_RATIO: f64 = 0.05;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -54,13 +61,113 @@ pub(crate) fn raffle_note_id(raffle_id: i64) -> i64 {
     -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()))
 }
 
-/// Computes required HyperCores (`type_id = 52568`) from total raffle price using the exact V24 client formula.
-///
-/// Provenance: V24 client `eve/client/script/ui/shared/raffle/raffleCreationData.py:303` (`token_amount`):
-/// `max(1, int(math.floor(total_price / _get_hypercore_base_price() * TOKEN_PRICE_RATIO)))` where
-/// `TOKEN_PRICE_RATIO = 0.05` (`raffleConst.py:42`) and `typeID 52568` `basePrice = 350_000.0`
-/// (equivalent to `max(1, floor(est_value_isk / 7_000_000.0))`, independent of `ticket_count`).
-pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Result<i32, BridgeRpcError> {
+/// Resolves current PLEX (`type_id = 44992`) reference price in ISK from `market_history`
+/// (preferring The Forge `10_000_002`, falling back to any region's latest average), or
+/// V24 `raffles/common/const.pyj` `LOCAL_DEFAULT_PLEX_PRICE` (`3_500_000.0`) when absent.
+pub fn resolve_hypernet_plex_price(snap: &eve_db::WorldStateSnapshot) -> f64 {
+    const THE_FORGE_REGION_ID: u32 = 10_000_002;
+    let latest_avg = |records: &[eve_db::MarketHistoryDayRecord]| -> Option<f64> {
+        records
+            .iter()
+            .max_by(|a, b| a.date.cmp(&b.date))
+            .map(|r| r.average)
+            .filter(|avg| avg.is_finite() && *avg > 0.0)
+    };
+    if let Some(avg) = snap
+        .market_history
+        .get(&(THE_FORGE_REGION_ID, PLEX_TYPE_ID))
+        .and_then(|recs| latest_avg(recs))
+    {
+        return avg;
+    }
+    snap.market_history
+        .iter()
+        .filter(|((_, tid), _)| *tid == PLEX_TYPE_ID)
+        .min_by_key(|((region_id, _), _)| *region_id)
+        .and_then(|(_, recs)| latest_avg(recs))
+        .unwrap_or(LOCAL_DEFAULT_PLEX_PRICE_ISK)
+}
+
+/// Validates total HyperNet raffle price against V24 `raffles/common/const.pyj` bounds
+/// (`MIN_TOTAL_PRICE = 1_000.0`, `MAX_TOTAL_PRICE = 10_000_000_000_000.0`).
+pub fn validate_raffle_total_price(total_price_isk: f64) -> Result<(), BridgeRpcError> {
+    if !total_price_isk.is_finite()
+        || total_price_isk < MIN_TOTAL_PRICE_ISK
+        || total_price_isk > MAX_TOTAL_PRICE_ISK
+    {
+        return Err(rpc_err(
+            "InvalidTicketPrice",
+            format!(
+                "HyperNet total raffle price must be between {MIN_TOTAL_PRICE_ISK:.0} and {MAX_TOTAL_PRICE_ISK:.0} ISK"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates item eligibility for HyperNet raffling against V24 `raffles/common/const.pyj`
+/// `VALIDATION_TYPE_LIST_ID` (`133`, `RaffleTypeValidation`) and `ALLOWED_SINGLETON_TYPE_LIST_ID`
+/// (`134`, `RaffleSingletonValidation`).
+pub fn validate_raffle_item_for_hypernet(
+    ctx: &ServerContext,
+    item: &eve_db::InventoryItemRecord,
+) -> Result<(), BridgeRpcError> {
+    if item.type_id == HYPERCORE_TYPE_ID || item.type_id == PLEX_TYPE_ID {
+        return Err(rpc_err(
+            "InvalidRaffleItem",
+            "HyperCores and PLEX cannot be raffled on the HyperNet Relay",
+        ));
+    }
+    if let Some(ty) = ctx.sde.types.get(&item.type_id) {
+        if !ty.published {
+            return Err(rpc_err(
+                "InvalidRaffleItem",
+                "Unpublished types cannot be raffled on the HyperNet Relay",
+            ));
+        }
+        if ctx
+            .sde
+            .type_lists
+            .get(&RAFFLE_VALIDATION_TYPE_LIST_ID)
+            .is_some_and(|tl| tl.contains(ty))
+        {
+            return Err(rpc_err(
+                "InvalidRaffleItem",
+                "Item type is excluded by HyperNet RaffleTypeValidation (type list 133)",
+            ));
+        }
+        if !item.singleton
+            && (ctx
+                .sde
+                .type_lists
+                .get(&RAFFLE_SINGLETON_TYPE_LIST_ID)
+                .is_some_and(|tl| tl.contains(ty))
+                || ty.category_id == 9)
+        {
+            return Err(rpc_err(
+                "InvalidRaffleItem",
+                "Blueprints and singleton-restricted items must be assembled singletons for HyperNet",
+            ));
+        }
+    } else if !ctx.sde.types.is_empty() {
+        return Err(rpc_err(
+            "InvalidRaffleItem",
+            format!("Unknown item type {} cannot be raffled on HyperNet", item.type_id),
+        ));
+    }
+    Ok(())
+}
+
+/// Computes required HyperCores (`type_id = 52568`) for a raffle at the given PLEX ISK price
+/// using V24 `raffles/common/util.pyj`:
+/// `_get_token_price() = max(1, _get_plex_price() / 10)` and
+/// `tokens_required(total_price) = max(1, int(total_price / _get_token_price() * BROKERS_FEE))`
+/// (`BROKERS_FEE = 0.05`, independent of `ticket_count`).
+pub fn compute_required_hypercores_for_plex_price(
+    est_value_isk: f64,
+    ticket_count: u32,
+    plex_price_isk: f64,
+) -> Result<i32, BridgeRpcError> {
     if !ALLOWED_RAFFLE_SIZES.contains(&ticket_count) {
         return Err(rpc_err(
             "InvalidRaffleTicketCount",
@@ -70,12 +177,21 @@ pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Res
     if !est_value_isk.is_finite() || est_value_isk <= 0.0 {
         return Err(rpc_err("InvalidRafflePrice", "Estimated raffle value must be positive"));
     }
-    const HYPERCORE_BASE_PRICE: f64 = 350_000.0;
-    const TOKEN_PRICE_RATIO: f64 = 0.05;
-    let cores = ((est_value_isk / HYPERCORE_BASE_PRICE) * TOKEN_PRICE_RATIO)
+    let effective_plex_isk = if plex_price_isk.is_finite() && plex_price_isk > 0.0 {
+        plex_price_isk
+    } else {
+        LOCAL_DEFAULT_PLEX_PRICE_ISK
+    };
+    let token_price_isk = (effective_plex_isk / 10.0).max(1.0);
+    let cores = ((est_value_isk / token_price_isk) * HYPERNET_TOKEN_FEE_RATIO)
         .floor()
         .clamp(1.0, i32::MAX as f64) as i32;
     Ok(cores)
+}
+
+/// Computes required HyperCores (`type_id = 52568`) using V24 `LOCAL_DEFAULT_PLEX_PRICE` (`3_500_000.0` ISK).
+pub fn compute_required_hypercores(est_value_isk: f64, ticket_count: u32) -> Result<i32, BridgeRpcError> {
+    compute_required_hypercores_for_plex_price(est_value_isk, ticket_count, LOCAL_DEFAULT_PLEX_PRICE_ISK)
 }
 
 /// Sweeps expired HyperNet raffles (`now_unix >= expires_unix` and not sold out), refunding ticket buyers' ISK
@@ -315,6 +431,53 @@ fn handle_raffle_subscription(
     Some(Ok(PyRep::None))
 }
 
+fn collect_pyrep_fields<'a>(rep: &'a PyRep, out: &mut HashMap<&'a str, &'a PyRep>) -> bool {
+    match rep {
+        PyRep::KeyVal(kv) => {
+            for (k, v) in kv {
+                out.insert(k.as_str(), v);
+            }
+            true
+        }
+        PyRep::Dict(entries) => {
+            for (k, v) in entries {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks, v);
+                }
+            }
+            true
+        }
+        PyRep::Object { args, .. } => collect_pyrep_fields(args, out),
+        PyRep::ObjectEx { header, dict, .. } => {
+            let mut found = false;
+            if let PyRep::Tuple(items) = header.as_ref() {
+                for item in items {
+                    if collect_pyrep_fields(item, out) {
+                        found = true;
+                    }
+                }
+            }
+            for (k, v) in dict {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks, v);
+                }
+                found = true;
+            }
+            found
+        }
+        PyRep::Tuple(items) => {
+            let mut found = false;
+            for item in items {
+                if collect_pyrep_fields(item, out) {
+                    found = true;
+                }
+            }
+            found
+        }
+        _ => false,
+    }
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -372,53 +535,33 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let rpc = RpcArgs::new(args, kwargs);
-            let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) = match args.first() {
-                Some(PyRep::KeyVal(kv)) => {
-                    let item_id = match kv.get("item_id").or_else(|| kv.get("itemID")) {
+            let mut field_map: HashMap<&str, &PyRep> = HashMap::new();
+            let (item_id, ticket_count_opt, ticket_price_opt, custom_duration) =
+                if args.first().is_some_and(|a0| collect_pyrep_fields(a0, &mut field_map)) {
+                    let fk = |k1: &str, k2: &str| field_map.get(k1).or_else(|| field_map.get(k2)).copied();
+                    let item_id = match fk("item_id", "itemID") {
                         Some(PyRep::Integer(id)) if *id > 0 => *id,
                         _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
                     };
-                    let ticket_count_opt = match kv.get("ticket_count").or_else(|| kv.get("ticketCount")) {
+                    let ticket_count_opt = match fk("ticket_count", "ticketCount") {
                         None | Some(PyRep::None) => None,
                         Some(PyRep::Integer(tc)) => Some(*tc),
                         Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
                     };
-                    let ticket_price_opt = match kv.get("ticket_price").or_else(|| kv.get("ticketPrice")) {
+                    let ticket_price_opt = match fk("ticket_price", "ticketPrice") {
                         Some(PyRep::Real(p)) => Some(*p),
                         Some(PyRep::Integer(p)) => Some(*p as f64),
                         _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
                     };
-                    let duration = match kv.get("duration").or_else(|| kv.get("duration_secs")).or_else(|| kv.get("durationSecs")) {
+                    let duration = match fk("duration", "duration_secs")
+                        .or_else(|| field_map.get("durationSecs").copied())
+                    {
                         None | Some(PyRep::None) => None,
                         Some(PyRep::Integer(d)) => Some(*d),
                         Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
                     };
                     (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-                Some(PyRep::Dict(kv)) => {
-                    let fk = |k: &str| kv.iter().find(|(ek, _)| ek.as_str() == Some(k)).map(|(_, ev)| ev);
-                    let item_id = match fk("item_id").or_else(|| fk("itemID")) {
-                        Some(PyRep::Integer(id)) if *id > 0 => *id,
-                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
-                    };
-                    let ticket_count_opt = match fk("ticket_count").or_else(|| fk("ticketCount")) {
-                        None | Some(PyRep::None) => None,
-                        Some(PyRep::Integer(tc)) => Some(*tc),
-                        Some(_) => return Some(Err(rpc_err("InvalidArgument", "ticket_count must be an integer"))),
-                    };
-                    let ticket_price_opt = match fk("ticket_price").or_else(|| fk("ticketPrice")) {
-                        Some(PyRep::Real(p)) => Some(*p),
-                        Some(PyRep::Integer(p)) => Some(*p as f64),
-                        _ => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive finite ticket_price"))),
-                    };
-                    let duration = match fk("duration").or_else(|| fk("duration_secs")).or_else(|| fk("durationSecs")) {
-                        None | Some(PyRep::None) => None,
-                        Some(PyRep::Integer(d)) => Some(*d),
-                        Some(_) => return Some(Err(rpc_err("InvalidRaffleDuration", "duration must be an integer"))),
-                    };
-                    (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-                _ => {
+                } else {
                     let item_id = match rpc.req_i64_any(0, &["itemID", "item_id"]) {
                         Ok(v) if v > 0 => v,
                         Ok(_) => return Some(Err(rpc_err("InvalidArgument", "CreateRaffle requires positive item_id"))),
@@ -439,8 +582,7 @@ pub fn handle(
                         Err(e) => return Some(Err(e)),
                     };
                     (item_id, ticket_count_opt, ticket_price_opt, duration)
-                }
-            };
+                };
             let duration_secs = match custom_duration {
                 Some(d) if d <= 0 || d > (RAFFLE_DURATION_SECS as i64) => {
                     return Some(Err(rpc_err(
@@ -503,6 +645,9 @@ pub fn handle(
                     "HyperNet total raffle value overflows finite ISK range",
                 )));
             }
+            if let Err(err) = validate_raffle_total_price(total_price_isk) {
+                return Some(Err(err));
+            }
             let ticket_price_cents_val = IskCents::from_f64_isk(ticket_price_isk);
             let ticket_price_cents = ticket_price_cents_val.0;
             if ticket_price_cents < 100
@@ -529,9 +674,15 @@ pub fn handle(
                     .get(&item_id)
                     .cloned()
                     .ok_or_else(|| rpc_err("ItemNotFound", "Raffle item not found"))?;
+                validate_raffle_item_for_hypernet(ctx, &item)?;
                 let item_adj_price = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(ctx, Some(snap), item.type_id);
                 let est_value_isk = (ticket_price_isk * (ticket_count as f64)).max(item_adj_price);
-                let required_cores = compute_required_hypercores(est_value_isk, ticket_count)?;
+                let plex_price_isk = resolve_hypernet_plex_price(snap);
+                let required_cores = compute_required_hypercores_for_plex_price(
+                    est_value_isk,
+                    ticket_count,
+                    plex_price_isk,
+                )?;
                 let active_ship_id = snap
                     .characters
                     .get(&char_id)
@@ -540,7 +691,7 @@ pub fn handle(
                     .items
                     .values()
                     .any(|child| child.item_id != item_id && child.location_id == item_id && child.quantity > 0);
-                // HyperNet_Relay.md:34: item must be a single unstacked item in an NPC station hangar.
+                // raffles/common/const.pyj + util.pyj: item must be a single unstacked item in an NPC station hangar.
                 if item.owner_id != char_id
                     || item.location_id != station_id
                     || item.flag != InventoryFlag::Hangar
@@ -554,29 +705,18 @@ pub fn handle(
                         "Raffle item must be a single unstacked, unlocked, empty item in NPC station hangar (not active ship)",
                     ));
                 }
-                let core_item_id = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == station_id
-                            && i.flag == InventoryFlag::Hangar
-                            && i.type_id == HYPERCORE_TYPE_ID
-                            && i.quantity >= required_cores
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                    })
-                    .map(|i| i.item_id)
-                    .ok_or_else(|| {
-                        rpc_err(
-                            "InsufficientHyperCores",
-                            format!("Need {required_cores} HyperCores (type 52568) in station hangar"),
-                        )
-                    })?;
                 let mut core_opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
                 core_opts.required_location_id = Some(station_id);
                 core_opts.required_flag = Some(InventoryFlag::Hangar);
-                snap.consume_exact_item_quantity(core_item_id, required_cores, core_opts)
-                    .map_err(|e| rpc_err("InsufficientHyperCores", e.to_string()))?;
+                snap.consume_owner_items(HYPERCORE_TYPE_ID, required_cores, core_opts)
+                    .map_err(|e| {
+                        rpc_err(
+                            "InsufficientHyperCores",
+                            format!(
+                                "Need {required_cores} HyperCores (type 52568) in station hangar: {e}"
+                            ),
+                        )
+                    })?;
                 // Validate and transfer item into HyperNet escrow (-52_568), then seal with Locked flag
                 let mut escrow_spec = eve_db::TransferItemSpec::move_whole(
                     Some(char_id),
@@ -643,7 +783,7 @@ pub fn handle(
                             },
                         );
                     }
-                    Some(Ok(kv))
+                    Some(Ok(PyRep::Integer(rec.raffle_id)))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -941,11 +1081,55 @@ pub fn handle(
                 PyRep::Integer(page_size as i64),
             ])))
         }
+        ("raffleProxy", "GetCreatedParticipated") => {
+            let char_id = session.character_id.unwrap_or(0);
+            let _ = sweep_expired_raffles(ctx);
+            let stats = ctx.db.with_snapshot(|snap| {
+                let mut created_running: i64 = 0;
+                let mut finished_delivered: i64 = 0;
+                let mut finished_expired: i64 = 0;
+                let mut finished_undelivered: i64 = 0;
+                let mut raffles_participated: i64 = 0;
+                let mut raffles_won: i64 = 0;
+                for n in snap.owner_notes.values().filter(|n| n.character_id == -74) {
+                    let Ok(r) = serde_json::from_str::<RaffleStateRecord>(&n.note) else {
+                        continue;
+                    };
+                    if r.creator_id == char_id {
+                        if r.winner_id.is_some() {
+                            if r.item_awarded {
+                                finished_delivered += 1;
+                            } else {
+                                finished_undelivered += 1;
+                            }
+                        } else if r.expired {
+                            finished_expired += 1;
+                        } else {
+                            created_running += 1;
+                        }
+                    }
+                    if r.sold_tickets.values().any(|&cid| cid == char_id) {
+                        raffles_participated += 1;
+                        if r.winner_id == Some(char_id) {
+                            raffles_won += 1;
+                        }
+                    }
+                }
+                vec![
+                    (PyRep::String("created_running".into()), PyRep::Integer(created_running)),
+                    (PyRep::String("finished_delivered".into()), PyRep::Integer(finished_delivered)),
+                    (PyRep::String("finished_expired".into()), PyRep::Integer(finished_expired)),
+                    (PyRep::String("finished_undelivered".into()), PyRep::Integer(finished_undelivered)),
+                    (PyRep::String("raffles_participated".into()), PyRep::Integer(raffles_participated)),
+                    (PyRep::String("raffles_won".into()), PyRep::Integer(raffles_won)),
+                ]
+            });
+            Some(Ok(PyRep::Dict(stats)))
+        }
         (
             "raffleProxy",
             "Grab"
             | "FilteredGrab"
-            | "GetCreatedParticipated"
             | "GetMyActiveTickets",
         ) => {
             let char_id = session.character_id.unwrap_or(0);
@@ -1020,7 +1204,7 @@ pub fn handle(
                                 true
                             }
                             "GetMyActiveTickets" => is_active && r.sold_tickets.values().any(|&cid| cid == char_id),
-                            "GetCreatedParticipated" | "GetMyRaffleHistory" => is_mine,
+                            "GetMyRaffleHistory" => is_mine,
                             _ => true,
                         }
                     })
@@ -1201,9 +1385,11 @@ pub fn handle_character_seeding(
             .or_else(|| kwargs.get("ticket_price").or_else(|| kwargs.get("ticketPrice")))
             .and_then(|a| a.as_f64().or_else(|| a.as_i64().map(|n| n as f64)))
             .unwrap_or(1_000.0);
-        if !ticket_price_isk.is_finite() || ticket_price_isk <= 0.0 {
+        if !ticket_price_isk.is_finite() || ticket_price_isk < 1.0 {
             return Err(BridgeRpcError::user_error("InvalidTicketPrice"));
         }
+        let total_price_isk = ticket_price_isk * f64::from(ticket_count);
+        validate_raffle_total_price(total_price_isk)?;
         if target_char_id == char_id && session.structure_id.is_some() {
             return Err(rpc_err(
                 "InvalidRaffleLocation",
@@ -1251,6 +1437,7 @@ pub fn handle_character_seeding(
                 ));
             }
             let active_ship_id = ch.active_ship_id;
+            let plex_price_isk = resolve_hypernet_plex_price(snap);
             let mut planned = Vec::with_capacity(item_ids.len());
             let mut total_cores_needed: i64 = 0;
             for &iid in &item_ids {
@@ -1259,6 +1446,7 @@ pub fn handle_character_seeding(
                     .get(&iid)
                     .cloned()
                     .ok_or_else(|| rpc_err("ItemNotFound", "Raffle item not found"))?;
+                validate_raffle_item_for_hypernet(ctx, &item)?;
                 let has_contents = snap
                     .items
                     .values()
@@ -1283,7 +1471,8 @@ pub fn handle_character_seeding(
                     item.type_id,
                 );
                 let est_val = (ticket_price_isk * (ticket_count as f64)).max(adj);
-                let req_cores = compute_required_hypercores(est_val, ticket_count)?;
+                let req_cores =
+                    compute_required_hypercores_for_plex_price(est_val, ticket_count, plex_price_isk)?;
                 total_cores_needed += i64::from(req_cores);
                 planned.push((iid, item.type_id, req_cores));
             }
@@ -1429,10 +1618,8 @@ pub fn handle_character_seeding(
         .opt_positive_f64(4, "ticketPrice")
         .map_err(|_| BridgeRpcError::user_error("InvalidTicketPrice"))?
         .unwrap_or(1000.0);
-    let hypercores_used = compute_required_hypercores(
-        ticket_price_isk * (ticket_count as f64),
-        ticket_count,
-    )?;
+    let total_price_isk = ticket_price_isk * (ticket_count as f64);
+    validate_raffle_total_price(total_price_isk)?;
     let ticket_price_cents = IskCents::from_f64_isk(ticket_price_isk).0;
     let now = ctx.now_unix();
     let sess_station = (target_char_id == char_id).then_some(session.station_id).flatten();
@@ -1445,6 +1632,12 @@ pub fn handle_character_seeding(
             .station_id
             .or(sess_station)
             .ok_or_else(|| BridgeRpcError::user_error("CharacterNotDocked"))?;
+        let plex_price_isk = resolve_hypernet_plex_price(snap);
+        let hypercores_used = compute_required_hypercores_for_plex_price(
+            total_price_isk,
+            ticket_count,
+            plex_price_isk,
+        )?;
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
             snap.next_entity_id += 1;

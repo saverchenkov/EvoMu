@@ -736,7 +736,7 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
         )
         .await
         .expect("CreateRaffle 1");
-        let r1_id = raffle1.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+        let r1_id = raffle1.as_i64().unwrap();
 
         let buy_res = rpc_call(
             &ctx,
@@ -762,7 +762,7 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
         )
         .await
         .expect("CreateRaffle 2");
-        let r2_id = raffle2.dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+        let r2_id = raffle2.as_i64().unwrap();
         rpc_call(
             &ctx,
             &mut buyer_sess,

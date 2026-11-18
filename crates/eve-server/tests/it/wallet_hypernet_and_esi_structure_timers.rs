@@ -172,19 +172,13 @@ async fn test_hypernet_hypercore_sizing_and_expiry_refund_lifecycle() {
         )
         .await
         .expect("CreateRaffle 48 nodes");
-    let PyRep::KeyVal(r_kv) = create_rep else { panic!("expected KeyVal") };
-    let raffle_id = r_kv
-        .get("raffle_id")
-        .and_then(|v| v.as_i64())
-        .expect("raffle_id");
-    let cores_used = r_kv
-        .get("hypercores_used")
-        .and_then(|v| v.as_i64())
-        .expect("hypercores_used");
-    assert!(cores_used > 0);
+    let raffle_id = create_rep
+        .as_i64()
+        .expect("CreateRaffle must return integer raffle_id");
 
     let cores_remaining = ctx.db.with_snapshot(|s| s.items[&hypercore_item].quantity);
-    assert_eq!(cores_remaining, 100 - (cores_used as i32));
+    let cores_used = 100 - cores_remaining;
+    assert!(cores_used > 0);
 
     ctx.db.with_snapshot(|s| {
         let it = &s.items[&valid_item];

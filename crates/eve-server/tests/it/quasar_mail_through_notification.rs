@@ -362,7 +362,7 @@ async fn test_quasar_market_and_moon() {
 
     // Call eve.moon.GetRequest
     let mut moon_req = Vec::new();
-    encode_id_field(1, 40_000_001, &mut moon_req);
+    encode_id_field(1, 40_009_081, &mut moon_req);
     let moon_rsp = quasar_rpc(&ctx, &mut sess, "eve.moon.GetRequest", moon_req).await;
     assert_eq!(moon_rsp.status_code, 200);
     let moon_any = moon_rsp.payload.expect("moon GetResponse");
@@ -371,7 +371,7 @@ async fn test_quasar_market_and_moon() {
     let attr_bytes = wm_moon.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
     let attr_wm = WireMessage::decode(attr_bytes).expect("decode moon Attributes");
     let moon_name = attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_str().unwrap().unwrap();
-    assert!(moon_name.contains("Moon #40000001"));
+    assert_eq!(moon_name, "Jita III - Moon 1");
 
     // Call eve.moon.GetMoonsOfPlanetRequest
     let mut planet_req = Vec::new();

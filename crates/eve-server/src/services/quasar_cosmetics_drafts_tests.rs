@@ -127,7 +127,62 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
     let p1 = sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
     let p2 = sess(Some(2), Some(90_000_002), service_roles::ROLE_PLAYER_DEFAULT);
 
-    // Save capacity
+    // Save capacity: base 5 saved draft slots even when unskilled (`5..=125` with Studio Mgmt skills).
+    let cap0_rsp = call(
+        &router,
+        &p2,
+        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
+        Vec::new(),
+        now,
+    );
+    assert_eq!(cap0_rsp.status_code, STATUS_OK);
+    let cap0_wm = WireMessage::decode(&cap0_rsp.payload.unwrap().value).expect("decode cap0");
+    assert_eq!(
+        cap0_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 1)
+            .and_then(|f| f.value.as_varint())
+            .unwrap_or(0),
+        5
+    );
+    for i in 1..=5 {
+        let req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
+            .set("name", format!("Unskilled Draft {i}"))
+            .set("line_name", "Base Line")
+            .must_encode();
+        assert_eq!(
+            call(&router, &p2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", req, now).status_code,
+            STATUS_OK
+        );
+    }
+    let blocked_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")
+        .set("name", "Blocked At 6th Unskilled")
+        .set("line_name", "Blocked")
+        .must_encode();
+    assert_eq!(
+        call(
+            &router,
+            &p2,
+            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
+            blocked_req,
+            now,
+        )
+        .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // Train Studio Management (81370) Lv 1 for p1 -> 5 base + 5 = 10 slots
+    db.with_mut_snapshot(|s| {
+        s.skills.entry(90_000_001).or_default().insert(
+            81_370,
+            eve_db::TrainedSkillRecord {
+                type_id: 81_370,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
     let cap_rsp = call(
         &router,
         &p1,
@@ -136,6 +191,11 @@ fn skinr_draft_crud_capacity_and_cross_character_isolation() {
         now,
     );
     assert_eq!(cap_rsp.status_code, STATUS_OK);
+    let cap_wm = WireMessage::decode(&cap_rsp.payload.unwrap().value).expect("decode cap1");
+    assert_eq!(
+        cap_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()),
+        Some(10)
+    );
 
     // Save draft for p1
     let save_req = pb::message("eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest")

@@ -294,7 +294,7 @@ async fn test_quasar_planet_and_planetinteraction() {
     let sess = make_session(1003, 103, 90_000_103, 1_000_103);
 
     // Call eve.planet.GetRequest
-    let req_val = encode_id_msg(1, 40_000_001);
+    let req_val = encode_id_msg(1, 40_000_002);
     let rsp = quasar_call(&ctx, &sess, "eve.planet.GetRequest", req_val);
     assert_eq!(rsp.status_code, STATUS_OK);
     let payload = rsp.payload.expect("payload");
@@ -303,7 +303,7 @@ async fn test_quasar_planet_and_planetinteraction() {
     let attr_bytes = wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
     let attr_wm = WireMessage::decode(attr_bytes).expect("decode Attributes");
     let name_field = attr_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap().unwrap();
-    assert_eq!(name_field, "Planet #40000001");
+    assert_eq!(name_field, "Tanoo I");
 
     // Call eve.planet.GetPlanetsInSolarSystemRequest
     let sys_req = encode_id_msg(1, 30_000_142);
@@ -335,10 +335,29 @@ async fn test_quasar_planet_and_planetinteraction() {
     }
     assert_eq!(reg.files_by_domain.get("planetinteraction").map(|v| v.len()), Some(8));
 
+    // Seed real PI colony pins on Jita IV for this character
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colony_layouts.insert(
+            (sess.character_id.unwrap(), 40_009_082),
+            eve_db::PlanetaryColonyLayoutRecord {
+                pins: vec![
+                    eve_db::PlanetaryPinRecord { pin_id: 501, type_id: 2848, ..Default::default() },
+                    eve_db::PlanetaryPinRecord { pin_id: 502, type_id: 2469, ..Default::default() },
+                    eve_db::PlanetaryPinRecord { pin_id: 503, type_id: 2541, ..Default::default() },
+                ],
+                ..Default::default()
+            },
+        );
+    });
+
     // Call eve.planetinteraction.collector.GetRequest
     let col_rsp = quasar_call(&ctx, &sess, "eve.planetinteraction.collector.GetRequest", encode_id_msg(1, 501));
     assert_eq!(col_rsp.status_code, STATUS_OK);
     assert_eq!(col_rsp.payload.unwrap().normalized_type_name(), "eve.planetinteraction.collector.GetResponse");
+    assert_eq!(
+        quasar_call(&ctx, &sess, "eve.planetinteraction.collector.GetRequest", encode_id_msg(1, 999_501)).status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     // Call eve.planetinteraction.factory.GetRequest
     let fact_rsp = quasar_call(&ctx, &sess, "eve.planetinteraction.factory.GetRequest", encode_id_msg(1, 502));

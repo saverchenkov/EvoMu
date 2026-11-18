@@ -7149,7 +7149,7 @@ async fn test_wallet_nes_evermarks_hypernet() {
     )
     .await
     .expect("CreateRaffle");
-    let raffle_id = create_res.dict_get("raffleID").and_then(|v| v.as_i64()).expect("raffleID");
+    let raffle_id = create_res.as_i64().expect("raffleID");
     let mut buyer_sess = make_sess(12, 502, buyer_cid, 1_000_009, 30_000_142, Some(jita_station), 0, 0);
     call_rpc(
         &ctx,
