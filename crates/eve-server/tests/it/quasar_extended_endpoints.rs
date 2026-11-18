@@ -324,21 +324,17 @@ async fn quasar_skill_plan_extended_endpoints_and_definitions() {
 #[tokio::test]
 async fn quasar_achievement_category_endpoints_and_notices() {
     // parity: quasar:eveProto/generated/eve_public/achievement/category/api/admin/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj
+    // DATA GAP (AGENTS.md:71): `quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj`
+    // and `quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj` stay open
+    // until CDN score weights and category-milestone checkpoints exist; client `achievements.static` ships
+    // `score: 0` and no milestone checkpoints (see docs/BLOCKERS.md #16).
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/achievement/category/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/category/definition/category_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/category/milestone/definition/milestone_pb2.pyj",
     ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(20_003, 90_000_003, 98_000_001);
 
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
 
@@ -355,73 +351,180 @@ async fn quasar_achievement_category_endpoints_and_notices() {
     assert_eq!(cat_ms_fd.package, "eve_public.achievement.category.milestone.definition");
     assert_eq!(cat_ms_fd.messages[0].name, "Identifier");
 
-    // 2. Subscribe session for category notices
-    let empty_kw = HashMap::new();
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
-    let mut stream_rx = ctx
-        .quasar_gateway
-        .take_stream_receiver(sess.session_id)
-        .expect("take_stream_receiver");
+    let cat_notice_fd = reg
+        .get_file_by_pyj("eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj")
+        .expect("category notices");
+    assert_eq!(cat_notice_fd.package, "eve_public.achievement.category.api");
+    assert_eq!(cat_notice_fd.messages[0].name, "ProgressedNotice");
 
-    // 3. Category isolation and reset testing (DATA GAP: SDE achievements have category_id = 0 without CDN checkpoints)
-    ctx.quasar_gateway.progression.achievements.set_category_score(90_000_003, 1, 25);
-    let rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(9, 5), b"p1").await;
-    assert_eq!(rsp1.status_code, STATUS_OK);
-    let rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(2, 10), b"p2").await;
-    assert_eq!(rsp2.status_code, STATUS_OK);
-
-    // Reset Category 1 score and emit category milestone notice
-    let mut cat_id1 = Vec::new();
-    encode_bytes_field(1, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut cat_id1);
-    let mut reset_body1 = Vec::new();
-    encode_bytes_field(1, &cat_id1, &mut reset_body1);
-    let rsp_reset1 = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.category.api.admin.ResetRequest",
-        reset_body1,
-        b"corr-ach-cat-01",
+    // 2. Drive real gameplay mining cycles -> SDE achievement 2 ("Mine Ore", derived category 3)
+    let mod_id = 920_001_001_i64;
+    let ast_id = 920_001_002_i64;
+    let mut mp = crate::mining_cycle_engine::pilot(
+        crate::mining_cycle_engine::VENTURE,
+        &[
+            (crate::mining_cycle_engine::SKILL_MINING, 5),
+            (crate::mining_cycle_engine::SKILL_MINING_FRIGATE, 5),
+        ],
+        &[(mod_id, crate::mining_cycle_engine::MINER_I, eve_db::InventoryFlag::HiSlot0)],
     )
     .await;
-    assert_eq!(rsp_reset1.status_code, STATUS_OK);
-    eve_server::services::quasar_achievements::publish_achievement_category_milestone_notice(
-        &ctx.quasar_gateway,
-        90_000_003,
-        1,
-        101,
-    );
+    crate::mining_cycle_engine::rock(&mp, ast_id, crate::mining_cycle_engine::VELDSPAR, 50_000, 1_000.0).await;
 
-    // Uncategorized SDE achievements (category_id = 0) retain progress when Category 1 is reset
-    let ach1_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(9), b"g1-after").await;
-    assert_eq!(ach1_after.status_code, STATUS_OK);
-    let dyn_ach1 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach1_after.payload.unwrap().value).unwrap();
-    assert_eq!(dyn_ach1.get(3), Some(&DynamicValue::Uint64(5)), "Uncategorized SDE achievement 9 must remain intact");
+    let empty_kw = HashMap::new();
+    mp.ctx
+        .dispatch_rpc(&mut mp.sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
+        .await
+        .expect("Subscribe");
+    let mut stream_rx = mp
+        .ctx
+        .quasar_gateway
+        .take_stream_receiver(mp.sess.session_id)
+        .expect("take_stream_receiver");
 
-    let ach2_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(2), b"g2-after").await;
+    for cycle in 1..=3_u64 {
+        let outcome = crate::mining_cycle_engine::mine_once(&mp.ctx, &mut mp.sess, mod_id, ast_id)
+            .await
+            .expect("mine_once");
+        assert!(outcome.units_delivered > 0, "Cycle {cycle} must harvest ore");
+    }
+
+    let mut cat3_uuid = [0u8; 16];
+    cat3_uuid[12..16].copy_from_slice(&3_u32.to_be_bytes());
+    let mut ach2_uuid = [0u8; 16];
+    ach2_uuid[12..16].copy_from_slice(&2_u32.to_be_bytes());
+
+    let mining_notices = drain_notices(&mut stream_rx);
+    let mut cat3_prog_count = 0usize;
+    let mut ach2_values = Vec::new();
+    let mut ach2_completed = false;
+    for notice in &mining_notices {
+        let Some(ref payload) = notice.payload else { continue };
+        match payload.normalized_type_name() {
+            "eve_public.achievement.category.api.ProgressedNotice" => {
+                let dyn_n = reg
+                    .decode_dynamic("eve_public.achievement.category.api.ProgressedNotice", &payload.value)
+                    .expect("decode category ProgressedNotice");
+                let uuid = match dyn_n.get(1) {
+                    Some(DynamicValue::Message(id)) => match id.get(1) {
+                        Some(DynamicValue::Bytes(b)) => b.as_slice(),
+                        _ => &[],
+                    },
+                    _ => &[],
+                };
+                if uuid == cat3_uuid {
+                    cat3_prog_count += 1;
+                    // Real SDE ships zero category score weights (DATA GAP)
+                    assert_eq!(dyn_n.get(2), Some(&DynamicValue::Uint32(0)));
+                }
+            }
+            "eve_public.achievement.api.ProgressedNotice" => {
+                let dyn_n = reg
+                    .decode_dynamic("eve_public.achievement.api.ProgressedNotice", &payload.value)
+                    .expect("decode achievement ProgressedNotice");
+                let uuid = match dyn_n.get(1) {
+                    Some(DynamicValue::Message(id)) => match id.get(1) {
+                        Some(DynamicValue::Bytes(b)) => b.as_slice(),
+                        _ => &[],
+                    },
+                    _ => &[],
+                };
+                if uuid == ach2_uuid {
+                    if let Some(DynamicValue::Uint64(v)) = dyn_n.get(2) {
+                        ach2_values.push(*v);
+                    }
+                }
+            }
+            "eve_public.achievement.api.CompletedNotice" => {
+                let dyn_n = reg
+                    .decode_dynamic("eve_public.achievement.api.CompletedNotice", &payload.value)
+                    .expect("decode achievement CompletedNotice");
+                if let Some(DynamicValue::Message(id)) = dyn_n.get(1) {
+                    if id.get(1) == Some(&DynamicValue::Bytes(ach2_uuid.to_vec())) {
+                        ach2_completed = true;
+                    }
+                }
+            }
+            "eve_public.achievement.category.milestone.api.ReachedNotice" => {
+                panic!("DATA GAP: no fabricated category.milestone.api.ReachedNotice allowed on default SDE");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(cat3_prog_count, 0, "Zero-score SDE achievements must not emit unchanged category ProgressedNotices");
+    assert_eq!(ach2_values, vec![1, 2, 3]);
+    assert!(ach2_completed, "Achievement 2 must complete on cycle 3");
+
+    // 3. Category isolation & reset testing: advance achievement 9 (category 2) and reset category 3
+    mp.sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let rsp1 = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(9, 1), b"p1").await;
+    assert_eq!(rsp1.status_code, STATUS_OK);
+
+    let mut cat_id3 = Vec::new();
+    encode_bytes_field(1, &cat3_uuid, &mut cat_id3);
+    let mut reset_body3 = Vec::new();
+    encode_bytes_field(1, &cat_id3, &mut reset_body3);
+    let rsp_reset3 = quasar_rpc(
+        &mp.ctx,
+        &mut mp.sess,
+        "eve_public.achievement.category.api.admin.ResetRequest",
+        reset_body3,
+        b"corr-ach-cat-03",
+    )
+    .await;
+    assert_eq!(rsp_reset3.status_code, STATUS_OK);
+
+    // Achievement 9 (category 2) stays completed while achievement 2 (category 3) is reset to 0
+    let ach9_after = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.api.GetRequest", make_ach_req(9), b"g9-after").await;
+    assert_eq!(ach9_after.status_code, STATUS_OK);
+    let dyn_ach9 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach9_after.payload.unwrap().value).unwrap();
+    assert_eq!(dyn_ach9.get(3), Some(&DynamicValue::Uint64(1)), "Category 2 achievement 9 must remain intact");
+
+    let ach2_after = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.api.GetRequest", make_ach_req(2), b"g2-after").await;
     assert_eq!(ach2_after.status_code, STATUS_OK);
     let dyn_ach2 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach2_after.payload.unwrap().value).unwrap();
-    assert_eq!(dyn_ach2.get(3), Some(&DynamicValue::Uint64(10)), "Uncategorized SDE achievement 2 must remain intact");
+    assert_eq!(dyn_ach2.get(3), Some(&DynamicValue::Uint64(0)), "Category 3 achievement 2 must be reset to 0");
+    assert_eq!(dyn_ach2.get(2), Some(&DynamicValue::Bool(true)), "Reset achievement 2 must report not_completed=true");
 
     // Negative assertions: missing category_id returns 400 (STATUS_BAD_REQUEST)
-    let bad_get = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", Vec::new(), b"bad-get").await;
+    let bad_get = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.category.api.GetRequest", Vec::new(), b"bad-get").await;
     assert_eq!(bad_get.status_code, STATUS_BAD_REQUEST);
 
-    let bad_reset = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.admin.ResetRequest", Vec::new(), b"bad-reset").await;
+    let bad_reset = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.category.api.admin.ResetRequest", Vec::new(), b"bad-reset").await;
     assert_eq!(bad_reset.status_code, STATUS_BAD_REQUEST);
 
-    // 4. Drain notices via gateway stream (emitted during real request dispatches)
-    let mut cat1_req = Vec::new();
-    encode_bytes_field(1, &cat_id1, &mut cat1_req);
-    let cat1_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", cat1_req, b"corr-cat1").await;
-    assert_eq!(cat1_rsp.status_code, STATUS_OK);
-    let dyn_cat1 = reg.decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat1_rsp.payload.unwrap().value).unwrap();
-    assert_eq!(dyn_cat1.get(1), Some(&DynamicValue::Uint32(0)), "Category 1 score must be 0 after reset");
+    // Query category 3 after reset and decode post-mining admin/reset category notices
+    let mut cat3_req = Vec::new();
+    encode_bytes_field(1, &cat_id3, &mut cat3_req);
+    let cat3_rsp = quasar_rpc(&mp.ctx, &mut mp.sess, "eve_public.achievement.category.api.GetRequest", cat3_req, b"corr-cat3").await;
+    assert_eq!(cat3_rsp.status_code, STATUS_OK);
+    let dyn_cat3 = reg.decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat3_rsp.payload.unwrap().value).unwrap();
+    assert_eq!(dyn_cat3.get(1), Some(&DynamicValue::Uint32(0)), "Category 3 score must be 0 after reset");
+    assert!(dyn_cat3.get(2).is_none(), "No category reached_milestones on default SDE");
 
-    let received = drain_notices(&mut stream_rx);
-    assert!(received.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.category.api.ProgressedNotice")).unwrap_or(false)));
-    assert!(received.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.category.milestone.api.ReachedNotice")).unwrap_or(false)));
+    let post_notices = drain_notices(&mut stream_rx);
+    let mut saw_cat2_prog = false;
+    let mut saw_cat3_reset_prog = false;
+    let mut cat2_uuid = [0u8; 16];
+    cat2_uuid[12..16].copy_from_slice(&2_u32.to_be_bytes());
+    for notice in &post_notices {
+        let Some(ref payload) = notice.payload else { continue };
+        if payload.normalized_type_name() == "eve_public.achievement.category.api.ProgressedNotice" {
+            let dyn_n = reg
+                .decode_dynamic("eve_public.achievement.category.api.ProgressedNotice", &payload.value)
+                .expect("decode category ProgressedNotice");
+            assert_eq!(dyn_n.get(2), Some(&DynamicValue::Uint32(0)));
+            if let Some(DynamicValue::Message(id)) = dyn_n.get(1) {
+                if id.get(1) == Some(&DynamicValue::Bytes(cat2_uuid.to_vec())) {
+                    saw_cat2_prog = true;
+                } else if id.get(1) == Some(&DynamicValue::Bytes(cat3_uuid.to_vec())) {
+                    saw_cat3_reset_prog = true;
+                }
+            }
+        }
+    }
+    assert!(!saw_cat2_prog, "Zero-score SDE AddProgressRequest must not emit unchanged category 2 ProgressedNotice");
+    assert!(saw_cat3_reset_prog, "Expected decoded category 3 ProgressedNotice from ResetRequest");
 }
 
 // ============================================================================
@@ -430,15 +533,15 @@ async fn quasar_achievement_category_endpoints_and_notices() {
 
 #[tokio::test]
 async fn quasar_achievement_milestones_rewards_and_events() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/milestone/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/achievement_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/version/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/api/events_pb2.pyj
+    // DATA GAP (AGENTS.md:71): `quasar:eveProto/generated/eve_public/achievement/milestone/api/notices_pb2.pyj`
+    // stays open until CDN milestone checkpoints exist; client `achievements.static` ships none.
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/milestone/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/milestone/definition/milestone_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/reward/definition/reward_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/contribution/contribution_pb2.pyj",
@@ -480,13 +583,14 @@ async fn quasar_achievement_milestones_rewards_and_events() {
     assert_eq!(events_fd.package, "eve_public.achievement.api");
     assert_eq!(events_fd.messages.len(), 4); // Pinned, Unpinned, Tracked, Untracked
 
-    // 2. Publish domain events via Events.Publish
+    // 2. Publish domain events via Events.Publish and decode payload dynamically
     let mut pin_data = Vec::new();
     let mut char_id_bytes = Vec::new();
     encode_varint_field(1, 90_000_004, &mut char_id_bytes);
     encode_bytes_field(1, &char_id_bytes, &mut pin_data);
+    let expected_ach_uuid = [0x41, 0x43, 0x48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     let mut ach_id_bytes = Vec::new();
-    encode_bytes_field(1, &[0x41, 0x43, 0x48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut ach_id_bytes);
+    encode_bytes_field(1, &expected_ach_uuid, &mut ach_id_bytes);
     encode_bytes_field(2, &ach_id_bytes, &mut pin_data);
 
     let event = EvePublicEvent {
@@ -509,13 +613,24 @@ async fn quasar_achievement_milestones_rewards_and_events() {
 
     let published_events = ctx.quasar_gateway.published_events.read().unwrap();
     assert_eq!(published_events.len(), 1);
-    assert_eq!(
-        published_events[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.achievement.api.Pinned"
-    );
+    let pinned_payload = published_events[0].payload.as_ref().unwrap();
+    assert_eq!(pinned_payload.normalized_type_name(), "eve_public.achievement.api.Pinned");
+    let dyn_pin = reg
+        .decode_dynamic("eve_public.achievement.api.Pinned", &pinned_payload.value)
+        .expect("decode Pinned event");
+    let pin_cid = match dyn_pin.get(1) {
+        Some(DynamicValue::Message(c)) => c.get(1).cloned(),
+        _ => None,
+    };
+    assert_eq!(pin_cid, Some(DynamicValue::Uint32(90_000_004)));
+    let pin_aid = match dyn_pin.get(2) {
+        Some(DynamicValue::Message(a)) => a.get(1).cloned(),
+        _ => None,
+    };
+    assert_eq!(pin_aid, Some(DynamicValue::Bytes(expected_ach_uuid.to_vec())));
     drop(published_events);
 
-    // 3. Emit milestone reached notice and version notice
+    // 3. Emit progress/completion and version notices via real server requests (no direct publish bypass)
     let empty_kw = HashMap::new();
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
         .await
@@ -525,7 +640,6 @@ async fn quasar_achievement_milestones_rewards_and_events() {
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
 
-    // 3. Emit milestone reached notice and version notice via real server requests
     let prog_resp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -545,13 +659,17 @@ async fn quasar_achievement_milestones_rewards_and_events() {
     )
     .await;
     assert_eq!(get_ver.status_code, STATUS_OK);
+    let dyn_def_ver = reg
+        .decode_dynamic("eve.achievement.definition.version.api.GetDefaultVersionResponse", &get_ver.payload.unwrap().value)
+        .expect("decode GetDefaultVersionResponse");
+    if let Some(DynamicValue::Message(v)) = dyn_def_ver.get(1) {
+        assert_eq!(v.get(1), Some(&DynamicValue::Uint32(24)));
+        assert_eq!(v.get(2), Some(&DynamicValue::Uint32(1)));
+        assert_eq!(v.get(3), Some(&DynamicValue::Uint32(1)));
+    } else {
+        panic!("GetDefaultVersionResponse missing version");
+    }
 
-    eve_server::services::quasar_achievements::publish_achievement_milestone_reached_notice(
-        &ctx.quasar_gateway,
-        90_000_004,
-        2,
-        1,
-    );
     let ver_resp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -562,10 +680,52 @@ async fn quasar_achievement_milestones_rewards_and_events() {
     .await;
     assert_eq!(ver_resp.status_code, STATUS_OK);
 
+    let mut ach2_uuid = [0u8; 16];
+    ach2_uuid[12..16].copy_from_slice(&2_u32.to_be_bytes());
     let received = drain_notices(&mut stream_rx);
-    assert!(!received.is_empty(), "Expected notices from progress and version updates");
-    assert!(received.iter().any(|n| n.payload.as_ref().map(|p| p.normalized_type_name() == "eve_public.achievement.milestone.api.ReachedNotice").unwrap_or(false)));
-    assert!(received.iter().any(|n| n.payload.as_ref().map(|p| p.normalized_type_name() == "eve_public.achievement.definition.version.api.CheckVersionNotice").unwrap_or(false)));
+    let mut saw_prog = false;
+    let mut saw_comp = false;
+    let mut saw_check_ver = false;
+    for notice in &received {
+        let Some(ref payload) = notice.payload else { continue };
+        match payload.normalized_type_name() {
+            "eve_public.achievement.api.ProgressedNotice" => {
+                let dyn_p = reg
+                    .decode_dynamic("eve_public.achievement.api.ProgressedNotice", &payload.value)
+                    .expect("decode ProgressedNotice");
+                assert_eq!(dyn_p.get(2), Some(&DynamicValue::Uint64(10)));
+                saw_prog = true;
+            }
+            "eve_public.achievement.api.CompletedNotice" => {
+                let dyn_c = reg
+                    .decode_dynamic("eve_public.achievement.api.CompletedNotice", &payload.value)
+                    .expect("decode CompletedNotice");
+                if let Some(DynamicValue::Message(id)) = dyn_c.get(1) {
+                    if id.get(1) == Some(&DynamicValue::Bytes(ach2_uuid.to_vec())) {
+                        saw_comp = true;
+                    }
+                }
+            }
+            "eve_public.achievement.definition.version.api.CheckVersionNotice" => {
+                let dyn_v = reg
+                    .decode_dynamic("eve_public.achievement.definition.version.api.CheckVersionNotice", &payload.value)
+                    .expect("decode CheckVersionNotice");
+                if let Some(DynamicValue::Message(v)) = dyn_v.get(1) {
+                    assert_eq!(v.get(1), Some(&DynamicValue::Uint32(24)));
+                    assert_eq!(v.get(2), Some(&DynamicValue::Uint32(1)));
+                    assert_eq!(v.get(3), Some(&DynamicValue::Uint32(0)));
+                    saw_check_ver = true;
+                }
+            }
+            "eve_public.achievement.milestone.api.ReachedNotice" => {
+                panic!("DATA GAP: no fabricated achievement.milestone.api.ReachedNotice allowed on default SDE");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_prog, "Expected decoded ProgressedNotice from AddProgressRequest");
+    assert!(saw_comp, "Expected decoded CompletedNotice when delta 10 completes SDE target 3");
+    assert!(saw_check_ver, "Expected decoded CheckVersionNotice from SetDefaultVersionRequest");
 }
 
 #[allow(dead_code, unused_imports)]

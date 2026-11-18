@@ -22,6 +22,24 @@ fn id_to_uuid(id: u32) -> [u8; 16] {
     uuid
 }
 
+fn queue_category_progressed_notice(
+    cid: u32,
+    cat_id: u32,
+    score: u32,
+    now_unix: u64,
+) -> Result<(), (u32, String)> {
+    let cat_prog = pb::message("eve_public.achievement.category.api.ProgressedNotice")
+        .set("category.uuid", id_to_uuid(cat_id))
+        .set("score", score)
+        .to_any_or_internal_err()?;
+    super::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::NoticeScope::Character(cid),
+        cat_prog,
+        now_unix,
+    );
+    Ok(())
+}
+
 pub fn publish_achievement_milestone_reached_notice(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
     cid: u32,
@@ -127,23 +145,22 @@ pub fn register_achievement_admin_handlers(
             .filter(|&d| d > 0)
             .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid progress delta".into()))?;
 
-        let Some((ach, just_completed, new_milestones)) =
-            mgr_prog.add_progress(cid, aid, delta, ctx.now_unix())
+        let Some(outcome) = mgr_prog.add_progress_with_outcomes(cid, aid, delta, ctx.now_unix())
         else {
             return Err((STATUS_NOT_FOUND, "Achievement not found".into()));
         };
         mgr_prog.save_to_db();
 
-        let cat_id = ach.def.category_id;
-        let cat_score = mgr_prog.category_score(cid, cat_id);
         emit_achievement_notices(
             cid,
             aid,
-            cat_id,
-            ach.progress,
-            cat_score,
-            just_completed,
-            &new_milestones,
+            outcome.achievement.def.category_id,
+            outcome.achievement.progress,
+            outcome.cat_score,
+            outcome.cat_score_changed,
+            outcome.just_completed,
+            &outcome.new_ach_milestones,
+            &outcome.new_cat_milestones,
             ctx.now_unix(),
         );
 
@@ -171,13 +188,21 @@ pub fn register_achievement_admin_handlers(
             .and_then(extract_u32_ident)
             .filter(|&id| id > 0)
             .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
-        let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
+        let outcome = mgr_comp.mark_completed_with_outcomes(cid, aid, ctx.now_unix())?;
         mgr_comp.save_to_db();
 
-        let cat_id = ach.def.category_id;
-        let cat_score = mgr_comp.category_score(cid, cat_id);
-        let ms: Vec<u32> = (1..=ach.def.milestone_targets.len() as u32).collect();
-        emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, true, &ms, ctx.now_unix());
+        emit_achievement_notices(
+            cid,
+            aid,
+            outcome.achievement.def.category_id,
+            outcome.achievement.progress,
+            outcome.cat_score,
+            outcome.cat_score_changed,
+            outcome.just_completed,
+            &outcome.new_ach_milestones,
+            &outcome.new_cat_milestones,
+            ctx.now_unix(),
+        );
 
         pb::message("eve_public.achievement.api.admin.CompleteResponse")
             .to_any_or_internal_err()
@@ -209,8 +234,11 @@ pub fn register_achievement_admin_handlers(
                 .and_then(extract_u32_ident)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
-            let _ = mgr.reset_achievement(cid, aid)?;
+            let (_, score_update) = mgr.reset_achievement_with_category_score(cid, aid)?;
             mgr.save_to_db();
+            if let Some((cat_id, new_score)) = score_update {
+                queue_category_progressed_notice(cid, cat_id, new_score, ctx.now_unix())?;
+            }
             pb::message("eve_public.achievement.api.admin.ResetResponse")
                 .to_any_or_internal_err()
         }),
@@ -247,15 +275,7 @@ pub fn register_achievement_admin_handlers(
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             mgr_cat_reset.reset_category(cid, cat_id);
 
-            let cat_prog = pb::message("eve_public.achievement.category.api.ProgressedNotice")
-                .set("category.uuid", id_to_uuid(cat_id))
-                .set("score", 0u32)
-                .to_any_or_internal_err()?;
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
-                cat_prog,
-                ctx.now_unix(),
-            );
+            queue_category_progressed_notice(cid, cat_id, 0, ctx.now_unix())?;
 
             pb::message("eve_public.achievement.category.api.admin.ResetResponse")
                 .to_any_or_internal_err()
@@ -399,9 +419,21 @@ pub fn register_achievement_handlers(
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
-            pb::message("eve_public.achievement.category.api.GetResponse")
-                .set("score", score)
-                .to_any_or_internal_err()
+            let reached_milestones = mgr.reached_category_milestones(cid, cat_id);
+            let mut msg = pb::message("eve_public.achievement.category.api.GetResponse")
+                .set("score", score);
+            for rm in reached_milestones {
+                let ts = GoogleTimestamp {
+                    seconds: rm.reached_date as i64,
+                    nanos: 0,
+                };
+                msg = msg.add_with("reached_milestones", |entry| {
+                    entry
+                        .set("milestone.uuid", id_to_uuid(rm.milestone_id))
+                        .set("reached_date", ts)
+                });
+            }
+            msg.to_any_or_internal_err()
         }),
     );
 
