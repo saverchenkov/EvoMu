@@ -2065,3 +2065,201 @@ fn remote_contract_creation_from_space_or_other_station_parity_1275() {
         assert_eq!(snap.items[&struct_item].location_id, cross_cid);
     });
 }
+
+#[test]
+fn container_child_blueprint_and_requested_blueprint_v24_fields_1345() {
+    let (mut ctx, mut issuer_sess, issuer_id, mut acc_sess, _acc_id, station_id, _dest_id, _corp_id) =
+        setup_extra_contracts_env();
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    sde_mut.types.insert(691, make_fighter_type(691, 105, 9, 0.01, vec![]));
+    sde_mut.types.insert(587, make_fighter_type(587, 46, 7, 5.0, vec![]));
+
+    let cont_id = 840_001_i64;
+    let child_bpo_id = 840_002_i64;
+    let child_bpc_id = 840_003_i64;
+    let child_dmg_id = 840_004_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cont_id,
+            eve_db::InventoryItemRecord {
+                item_id: cont_id,
+                type_id: 17_366,
+                owner_id: issuer_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            child_bpo_id,
+            eve_db::InventoryItemRecord {
+                item_id: child_bpo_id,
+                type_id: 691,
+                owner_id: issuer_id,
+                location_id: cont_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+                dynamic_attributes: HashMap::from([(1112, 9.0), (1113, 18.0)]),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            child_bpc_id,
+            eve_db::InventoryItemRecord {
+                item_id: child_bpc_id,
+                type_id: 691,
+                owner_id: issuer_id,
+                location_id: cont_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                is_blueprint_copy: true,
+                blueprint_runs_remaining: Some(4),
+                dynamic_attributes: HashMap::from([(1112, 5.0), (1113, 12.0)]),
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            child_dmg_id,
+            eve_db::InventoryItemRecord {
+                item_id: child_dmg_id,
+                type_id: 587,
+                owner_id: issuer_id,
+                location_id: cont_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                dynamic_attributes: HashMap::from([(3, 0.42)]),
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let created = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::Integer(1)),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(250_000.0)),
+            ("itemList", PyRep::List(vec![PyRep::Integer(cont_id)])),
+            (
+                "requestedItems",
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(691), PyRep::Integer(1)])]),
+            ),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let cid = created_cid(&created).unwrap();
+
+    let assert_fields = |entry: &PyRep,
+                         in_crate: bool,
+                         parent_id: i64,
+                         flag_id: i64,
+                         copy: bool,
+                         me: i64,
+                         te: i64,
+                         licensed: PyRep,
+                         damage: f64| {
+        assert_eq!(entry.dict_get("inCrate"), Some(&PyRep::Bool(in_crate)));
+        assert_eq!(entry.dict_get("parentID"), Some(&PyRep::Integer(parent_id)));
+        assert_eq!(entry.dict_get("flagID"), Some(&PyRep::Integer(flag_id)));
+        assert_eq!(entry.dict_get("copy"), Some(&PyRep::Bool(copy)));
+        assert_eq!(entry.dict_get("materialLevel"), Some(&PyRep::Integer(me)));
+        assert_eq!(entry.dict_get("productivityLevel"), Some(&PyRep::Integer(te)));
+        assert_eq!(
+            entry.dict_get("licensedProductionRunsRemaining"),
+            Some(&licensed)
+        );
+        assert_eq!(entry.dict_get("damage"), Some(&PyRep::Real(damage)));
+    };
+
+    let hangar_flag = i64::from(InventoryFlag::Hangar as u16);
+    for method_rep in [
+        handle(
+            &ctx,
+            &mut acc_sess,
+            "contractProxy",
+            "GetContract",
+            &[PyRep::Integer(cid)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        handle(
+            &ctx,
+            &mut acc_sess,
+            "contractProxy",
+            "GetContractInfo", // rpc-lint: allow test fixture
+            &[PyRep::Integer(cid)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+    ] {
+        let Some(PyRep::List(items)) = method_rep.dict_get("items") else {
+            panic!("expected items list");
+        };
+        assert_eq!(items.len(), 5);
+        let find_by_id = |iid: i64| -> &PyRep {
+            items
+                .iter()
+                .find(|r| dict_i64(r, "itemID") == Some(iid))
+                .unwrap_or_else(|| panic!("missing item {iid}"))
+        };
+        assert_fields(find_by_id(cont_id), true, 0, 0, false, 0, 0, PyRep::None, 0.0);
+        assert_fields(
+            find_by_id(child_bpo_id),
+            true,
+            cont_id,
+            hangar_flag,
+            false,
+            9,
+            18,
+            PyRep::None,
+            0.0,
+        );
+        assert_fields(
+            find_by_id(child_bpc_id),
+            true,
+            cont_id,
+            hangar_flag,
+            true,
+            5,
+            12,
+            PyRep::Integer(4),
+            0.0,
+        );
+        assert_fields(
+            find_by_id(child_dmg_id),
+            true,
+            cont_id,
+            hangar_flag,
+            false,
+            0,
+            0,
+            PyRep::None,
+            0.42,
+        );
+        let req = items
+            .iter()
+            .find(|r| r.dict_get("inCrate") == Some(&PyRep::Bool(false)))
+            .expect("requested blueprint item");
+        assert_eq!(dict_i64(req, "itemTypeID"), Some(691));
+        assert_fields(req, false, 0, 0, false, 0, 0, PyRep::None, 0.0);
+    }
+}

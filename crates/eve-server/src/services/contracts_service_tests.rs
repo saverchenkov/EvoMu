@@ -1558,8 +1558,16 @@ fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() 
     assert_eq!(detail_items.len(), 2);
     assert_eq!(detail_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
     assert_eq!(detail_items[0].dict_get("inCrate"), Some(&PyRep::Bool(true)));
+    assert_eq!(detail_items[0].dict_get("materialLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(detail_items[0].dict_get("productivityLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(detail_items[0].dict_get("licensedProductionRunsRemaining"), Some(&PyRep::None));
+    assert_eq!(detail_items[0].dict_get("damage"), Some(&PyRep::Real(0.0)));
     assert_eq!(detail_items[1].dict_get("itemTypeID"), Some(&PyRep::Integer(35)));
     assert_eq!(detail_items[1].dict_get("inCrate"), Some(&PyRep::Bool(false)));
+    assert_eq!(detail_items[1].dict_get("materialLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(detail_items[1].dict_get("productivityLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(detail_items[1].dict_get("licensedProductionRunsRemaining"), Some(&PyRep::None));
+    assert_eq!(detail_items[1].dict_get("damage"), Some(&PyRep::Real(0.0)));
 
     // 2. Contract list endpoints return {contracts: [...], items: {cid: [...]}}.
     for method in ["GetContractListForOwner", "GetMyCurrentContractList"] {
@@ -1578,6 +1586,10 @@ fn contract_handlers_emit_canonical_v24_wire_shapes_without_hardcoded_domains() 
         assert_eq!(cid_items.len(), 2);
         assert_eq!(cid_items[0].dict_get("itemTypeID"), Some(&PyRep::Integer(34)));
         assert_eq!(cid_items[1].dict_get("inCrate"), Some(&PyRep::Bool(false)));
+        assert_eq!(cid_items[1].dict_get("materialLevel"), Some(&PyRep::Integer(0)));
+        assert_eq!(cid_items[1].dict_get("productivityLevel"), Some(&PyRep::Integer(0)));
+        assert_eq!(cid_items[1].dict_get("licensedProductionRunsRemaining"), Some(&PyRep::None));
+        assert_eq!(cid_items[1].dict_get("damage"), Some(&PyRep::Real(0.0)));
     }
     let my_bids = handle(&ctx, &mut acc_sess, "contractProxy", "GetMyBids", &[], &kw)
         .unwrap()
@@ -1947,5 +1959,279 @@ fn get_my_expired_contract_list_status_boundary_matrix_1328() {
         .filter_map(|&(cid, _, expected)| expected.then_some(cid))
         .collect();
     assert_eq!(returned_ids, expected_ids);
+}
+
+#[test]
+fn contract_item_reply_v24_blueprint_and_damage_fields_1345() {
+    let (mut ctx, mut issuer_sess, issuer_id, mut acc_sess, _acc_id, station_id, _) =
+        setup_contracts_ctx();
+    let sde_mut = Arc::make_mut(&mut ctx.sde);
+    sde_mut.types.insert(691, make_fighter_type(691, 105, 9, 0.01, vec![]));
+    sde_mut.types.insert(587, make_fighter_type(587, 46, 7, 5.0, vec![]));
+    sde_mut.types.insert(17_366, make_fighter_type(17_366, 448, 2, 100.0, vec![]));
+
+    let bpo_id = 910_001_i64;
+    let bpc_id = 910_002_i64;
+    let cont_id = 910_003_i64;
+    let child_bpo_id = 910_004_i64;
+    let dmg_id = 910_005_i64;
+
+    let bpo_rec = eve_db::InventoryItemRecord {
+        item_id: bpo_id,
+        type_id: 691,
+        owner_id: issuer_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+        dynamic_attributes: HashMap::from([(1112, 10.0), (1113, 20.0)]),
+        ..Default::default()
+    };
+    let bpc_rec = eve_db::InventoryItemRecord {
+        item_id: bpc_id,
+        type_id: 691,
+        owner_id: issuer_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: true,
+        blueprint_runs_remaining: Some(7),
+        dynamic_attributes: HashMap::from([(1112, 8.0), (1113, 14.0)]),
+        ..Default::default()
+    };
+    let cont_rec = eve_db::InventoryItemRecord {
+        item_id: cont_id,
+        type_id: 17_366,
+        owner_id: issuer_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        ..Default::default()
+    };
+    let child_bpo_rec = eve_db::InventoryItemRecord {
+        item_id: child_bpo_id,
+        type_id: 691,
+        owner_id: issuer_id,
+        location_id: cont_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+        dynamic_attributes: HashMap::from([(1112, 9.0), (1113, 18.0)]),
+        ..Default::default()
+    };
+    let dmg_rec = eve_db::InventoryItemRecord {
+        item_id: dmg_id,
+        type_id: 587,
+        owner_id: issuer_id,
+        location_id: station_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        dynamic_attributes: HashMap::from([(3, 0.35)]),
+        ..Default::default()
+    };
+
+    let assert_v24_item = |entry: &PyRep,
+                           in_crate: bool,
+                           copy: bool,
+                           me: i64,
+                           te: i64,
+                           licensed_runs: PyRep,
+                           compat_runs: i64,
+                           damage: f64,
+                           parent_id: i64,
+                           flag_id: i64| {
+        assert_eq!(entry.dict_get("inCrate"), Some(&PyRep::Bool(in_crate)));
+        assert_eq!(entry.dict_get("copy"), Some(&PyRep::Bool(copy)));
+        assert_eq!(entry.dict_get("isBlueprintCopy"), Some(&PyRep::Bool(copy)));
+        assert_eq!(entry.dict_get("materialLevel"), Some(&PyRep::Integer(me)));
+        assert_eq!(entry.dict_get("productivityLevel"), Some(&PyRep::Integer(te)));
+        assert_eq!(
+            entry.dict_get("licensedProductionRunsRemaining"),
+            Some(&licensed_runs)
+        );
+        assert_eq!(entry.dict_get("materialEfficiency"), Some(&PyRep::Integer(me)));
+        assert_eq!(entry.dict_get("timeEfficiency"), Some(&PyRep::Integer(te)));
+        assert_eq!(entry.dict_get("runs"), Some(&PyRep::Integer(compat_runs)));
+        assert_eq!(
+            entry.dict_get("runsRemaining"),
+            Some(&PyRep::Integer(compat_runs))
+        );
+        assert_eq!(entry.dict_get("damage"), Some(&PyRep::Real(damage)));
+        assert_eq!(entry.dict_get("parentID"), Some(&PyRep::Integer(parent_id)));
+        assert_eq!(entry.dict_get("flagID"), Some(&PyRep::Integer(flag_id)));
+    };
+
+    // Direct serialization check for offered, child, damaged, and requested items.
+    assert_v24_item(
+        &ContractItemReply::offered(&bpo_rec).to_pyrep(),
+        true,
+        false,
+        10,
+        20,
+        PyRep::None,
+        -1,
+        0.0,
+        0,
+        0,
+    );
+    assert_v24_item(
+        &ContractItemReply::offered(&bpc_rec).to_pyrep(),
+        true,
+        true,
+        8,
+        14,
+        PyRep::Integer(7),
+        7,
+        0.0,
+        0,
+        0,
+    );
+    assert_v24_item(
+        &ContractItemReply::offered_child(&child_bpo_rec).to_pyrep(),
+        true,
+        false,
+        9,
+        18,
+        PyRep::None,
+        -1,
+        0.0,
+        cont_id,
+        i64::from(InventoryFlag::Hangar as u16),
+    );
+    assert_v24_item(
+        &ContractItemReply::offered(&dmg_rec).to_pyrep(),
+        true,
+        false,
+        0,
+        0,
+        PyRep::None,
+        -1,
+        0.35,
+        0,
+        0,
+    );
+    let req_rep = ContractItemReply::requested(691, 2).to_pyrep();
+    assert_v24_item(&req_rep, false, false, 0, 0, PyRep::None, -1, 0.0, 0, 0);
+    assert_eq!(req_rep.dict_get("itemTypeID"), Some(&PyRep::Integer(691)));
+    assert_eq!(req_rep.dict_get("typeID"), Some(&PyRep::Integer(691)));
+    assert_eq!(req_rep.dict_get("quantity"), Some(&PyRep::Integer(2)));
+
+    // Full CreateContract -> GetContract / GetContractInfo / SearchContracts wire verification.
+    ctx.db.with_mut_snapshot(|snap| {
+        for rec in [bpo_rec, bpc_rec, cont_rec, child_bpo_rec, dmg_rec] {
+            snap.items.insert(rec.item_id, rec);
+        }
+    });
+    let kw = HashMap::new();
+    let created = handle(
+        &ctx,
+        &mut issuer_sess,
+        "contractProxy",
+        "CreateContract",
+        &[PyRep::keyval([
+            ("contractType", PyRep::String("ItemExchange".into())),
+            ("availability", PyRep::String("Public".into())),
+            ("startStationID", PyRep::Integer(station_id)),
+            ("price", PyRep::Real(1_000_000.0)),
+            (
+                "itemList",
+                PyRep::List(vec![
+                    PyRep::Integer(bpo_id),
+                    PyRep::Integer(bpc_id),
+                    PyRep::Integer(cont_id),
+                    PyRep::Integer(dmg_id),
+                ]),
+            ),
+            (
+                "requestedItems",
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(691), PyRep::Integer(2)])]),
+            ),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let cid = created_cid(&created).unwrap();
+
+    let get_rep = handle(
+        &ctx,
+        &mut acc_sess,
+        "contractProxy",
+        "GetContract",
+        &[PyRep::Integer(cid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let info_rep = handle(
+        &ctx,
+        &mut acc_sess,
+        "contractProxy",
+        "GetContractInfo", // rpc-lint: allow test fixture
+        &[PyRep::Integer(cid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let search_rep = handle(
+        &ctx,
+        &mut acc_sess,
+        "contractProxy",
+        "SearchContracts",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let search_items = contract_list_rows(&search_rep)
+        .iter()
+        .find(|e| e.dict_get("contract").and_then(|c| dict_i64(c, "contractID")) == Some(cid))
+        .and_then(|e| e.dict_get("items"))
+        .cloned()
+        .expect("contract in SearchContracts");
+
+    for items_val in [
+        get_rep.dict_get("items").expect("GetContract items"),
+        info_rep.dict_get("items").expect("GetContractInfo items"),
+        &search_items,
+    ] {
+        let PyRep::List(items) = items_val else {
+            panic!("expected items list");
+        };
+        assert_eq!(items.len(), 6);
+        let find_offered = |iid: i64| -> &PyRep {
+            items
+                .iter()
+                .find(|r| dict_i64(r, "itemID") == Some(iid) && dict_bool(r, "inCrate") == Some(true))
+                .unwrap_or_else(|| panic!("missing offered item {iid}"))
+        };
+        assert_v24_item(find_offered(bpo_id), true, false, 10, 20, PyRep::None, -1, 0.0, 0, 0);
+        assert_v24_item(find_offered(bpc_id), true, true, 8, 14, PyRep::Integer(7), 7, 0.0, 0, 0);
+        assert_v24_item(
+            find_offered(child_bpo_id),
+            true,
+            false,
+            9,
+            18,
+            PyRep::None,
+            -1,
+            0.0,
+            cont_id,
+            i64::from(InventoryFlag::Hangar as u16),
+        );
+        assert_v24_item(find_offered(dmg_id), true, false, 0, 0, PyRep::None, -1, 0.35, 0, 0);
+        let req_item = items
+            .iter()
+            .find(|r| dict_bool(r, "inCrate") == Some(false) && dict_i64(r, "itemTypeID") == Some(691))
+            .expect("requested blueprint entry");
+        assert_v24_item(req_item, false, false, 0, 0, PyRep::None, -1, 0.0, 0, 0);
+    }
 }
 

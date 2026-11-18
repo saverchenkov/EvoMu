@@ -1198,14 +1198,21 @@ async fn test_contracts_visibility_search_fees_limits_reject_blueprints_and_gm_e
     let PyRep::KeyVal(bpc_meta) = &items_meta[0] else { panic!("Expected KeyVal for BPC item metadata"); };
     assert_eq!(bpc_meta.get("copy"), Some(&PyRep::Bool(true)));
     assert_eq!(bpc_meta.get("isBlueprintCopy"), Some(&PyRep::Bool(true)));
+    assert_eq!(bpc_meta.get("materialLevel"), Some(&PyRep::Integer(8)));
+    assert_eq!(bpc_meta.get("productivityLevel"), Some(&PyRep::Integer(14)));
+    assert_eq!(bpc_meta.get("licensedProductionRunsRemaining"), Some(&PyRep::Integer(7)));
     assert_eq!(bpc_meta.get("runsRemaining"), Some(&PyRep::Integer(7)));
     assert_eq!(bpc_meta.get("materialEfficiency"), Some(&PyRep::Integer(8)));
     assert_eq!(bpc_meta.get("timeEfficiency"), Some(&PyRep::Integer(14)));
+    assert_eq!(bpc_meta.get("damage"), Some(&PyRep::Real(0.0)));
     assert_eq!(bpc_meta.get("singleton"), Some(&PyRep::Bool(true)));
 
     let PyRep::KeyVal(aby_meta) = &items_meta[1] else { panic!("Expected KeyVal for Abyssal item metadata"); };
     assert_eq!(aby_meta.get("sourceMutaplasmidID"), Some(&PyRep::Integer(47_740)));
     assert_eq!(aby_meta.get("damage"), Some(&PyRep::Real(0.25)));
+    assert_eq!(aby_meta.get("materialLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(aby_meta.get("productivityLevel"), Some(&PyRep::Integer(0)));
+    assert_eq!(aby_meta.get("licensedProductionRunsRemaining"), Some(&PyRep::None));
 
     // SearchContracts filtered by itemTypeID (`feat:contracts.search`)
     let mut search_kw = HashMap::new();
