@@ -962,3 +962,83 @@ fn jita_to_perimeter_gate_points_toward_perimeter_within_one_degree() {
     // Degenerate zero-delta orientation degrades safely to None rather than NaN.
     assert_eq!(compute_stargate_dun_rotation(jita_id, jita_id, &ctx.sde), None);
 }
+
+#[test]
+fn fx_floor_keeps_uniform_batch_stamp_for_mixed_and_standalone_damage_state() {
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 10;
+    let obs_id = 201_i64;
+    let fx_ev = DestinyEvent::OnSpecialFX {
+        ball_id: obs_id,
+        module_id: Some(9001),
+        guid: "effects.DoomsdayBeam".to_string(),
+        is_active: true,
+    };
+    let dmg_ev = DestinyEvent::OnDamageStateChange {
+        ball_id: obs_id,
+        shield_ratio: 1.0,
+        armor_ratio: 1.0,
+        structure_ratio: 1.0,
+    };
+
+    // 1. Mixed (OnSpecialFX + OnDamageStateChange) at tick 10 with fx_floor=15 must encode ALL
+    //    updates uniformly at stamp 15 (single stamp per notification).
+    let last_fx = std::sync::atomic::AtomicU64::new(0);
+    let mixed = encode_destiny_updates_with_fx_floor(
+        10,
+        15,
+        &[fx_ev, dmg_ev.clone()],
+        Some(&bp),
+        Some(&last_fx),
+    );
+    assert_eq!(last_fx.load(std::sync::atomic::Ordering::Acquire), 15);
+    let PyRep::List(items) = &mixed else {
+        panic!("expected PyRep::List, got {mixed:?}");
+    };
+    assert_eq!(items.len(), 2);
+    for entry in items {
+        let parsed = crate::sequencer_invariants::parse_destiny_entry(entry);
+        assert_eq!(parsed.map(|(st, _, _)| st), Some(Some(15)));
+    }
+
+    // 2. Standalone non-FX OnDamageStateChange in `build_tick_broadcast_with_fx_floor` when
+    //    fx_floor (15) > current_tick (11) must also clamp up to 15 while keeping `bcast.tick == 11`.
+    bp.current_tick = 11;
+    bp.balls.insert(
+        obs_id,
+        Ball {
+            id: obs_id,
+            type_id: 11567,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    );
+    bp.observer_events.insert(obs_id, vec![dmg_ev]);
+    let bcast = build_tick_broadcast_with_fx_floor(
+        30_000_142,
+        &mut bp,
+        Vec::new(),
+        15,
+        None,
+        Some(&last_fx),
+    );
+    assert_eq!(bcast.tick, 11);
+    let PyRep::List(obs_items) = bcast
+        .observer_updates_pyrep
+        .get(&obs_id)
+        .expect("observer_updates_pyrep present")
+    else {
+        panic!("expected PyRep::List");
+    };
+    assert_eq!(obs_items.len(), 1);
+    assert_eq!(
+        crate::sequencer_invariants::parse_destiny_entry(&obs_items[0]).map(|(s, a, _)| (s, a)),
+        Some((Some(15), "OnDamageStateChange"))
+    );
+}

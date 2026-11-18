@@ -809,6 +809,35 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         }
     }
 
+    // 4b. `#1268`: `notify` also patches `cid` and `now_ft` when an entry is already `PyRep::List`.
+    let attr_change_list_arg = vec![PyRep::List(vec![PyRep::List(vec![
+        PyRep::String("OnModuleAttributeChange".into()),
+        PyRep::None,
+        PyRep::Integer(700_002),
+        PyRep::Integer(9),
+        PyRep::Integer(0),
+        PyRep::Real(120.0),
+        PyRep::Real(90.0),
+    ])])];
+    let res_list = ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnModuleAttributeChanges",
+        "charid",
+        attr_change_list_arg,
+    );
+    assert_eq!(res_list.len(), 1);
+    if let PyRep::List(items) = &res_list[0].args[0] {
+        match &items[0] {
+            PyRep::List(t) | PyRep::Tuple(t) => {
+                assert_eq!(t[1], PyRep::Integer(char_id));
+                assert_ne!(t[4], PyRep::Integer(0));
+            }
+            other => panic!("expected List/Tuple entry, got {other:?}"),
+        }
+    } else {
+        panic!("expected OnModuleAttributeChanges List arg");
+    }
+
     // 5. `notify_module_effect_started` d73 == 0 fallback to attr 51 & d73 > 0 precedence
     let ship_id = 100_880_001_i64;
     let mod_d73_zero = 770_001_i64;

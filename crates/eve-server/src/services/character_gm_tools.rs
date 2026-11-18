@@ -923,7 +923,7 @@ pub(crate) async fn execute_gm_heal(
     };
 
     if target_char_id > 0 && target_ship_id > 0 {
-        let now_ft = ctx.now_blueos_filetime_ticks();
+        let now_ft = ctx.now_system_sim_filetime_ticks_for_ship(target_char_id, target_ship_id);
         let mut attr_changes: Vec<PyRep> = Vec::new();
         let push_change =
             |list: &mut Vec<PyRep>, item_id: i64, attr_id: u16, new_val: f64, old_val: f64| {

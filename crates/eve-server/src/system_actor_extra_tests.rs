@@ -633,3 +633,81 @@ async fn test_system_actor_persisted_asteroids_damage_nanite_partial_ecm_and_com
     let _ = h.step_manual(1.0).await.unwrap();
     assert!(actor_lock_hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
 }
+
+#[tokio::test]
+async fn heal_flush_peer_observer_updates_preserves_fx_floor_and_single_stamp() {
+    let reg = SystemRegistry::new();
+    let h = reg.get_or_spawn(30_000_142);
+
+    let ego_ship = 9_201;
+    let peer_ship = 9_202;
+    let injured = CombatState {
+        shield_hp: 500.0,
+        max_shield_hp: 1_000.0,
+        armor_hp: 800.0,
+        max_armor_hp: 1_000.0,
+        structure_hp: 900.0,
+        max_structure_hp: 1_000.0,
+        capacitor: 0.0,
+        max_capacitor: 1_000.0,
+        ..Default::default()
+    };
+    h.spawn_ball_with_combat(make_ball(ego_ship, 11567, DVec3::ZERO), injured)
+        .await
+        .unwrap();
+    h.spawn_ball_with_combat(
+        make_ball(peer_ship, 587, DVec3::new(1_000.0, 0.0, 0.0)),
+        CombatState::default(),
+    )
+    .await
+    .unwrap();
+
+    // Prime SetState drains so both observers are ready for incremental TickBroadcast updates.
+    let _ = h.drain_observer_updates(ego_ship).await.unwrap();
+    let _ = h.drain_observer_updates(peer_ship).await.unwrap();
+    let mut rx = h.subscribe();
+
+    // Advance one tick (`tick = 1`) then simulate an active FX floor (`last_fx_stamp = 10`) ahead
+    // of `current_tick`, as happens under TiDi/DoS FX before the next 1Hz Step.
+    let tick_bcast = h.step_manual(1.0).await.unwrap();
+    let base_tick = tick_bcast.tick;
+    while rx.try_recv().is_ok() {}
+    let fx_floor = base_tick + 5;
+    h.last_fx_stamp
+        .fetch_max(fx_floor, std::sync::atomic::Ordering::AcqRel);
+
+    let healed = h.heal_combat_state(ego_ship).await.unwrap();
+    assert!((healed.shield_hp - healed.max_shield_hp).abs() < 1e-6);
+    let flushed = h.flush_peer_observer_updates(None).await.unwrap();
+    assert!(flushed >= 1);
+
+    let msg = rx
+        .try_recv()
+        .expect("FlushPeerObserverUpdates must emit immediate TickBroadcast");
+    assert_eq!(msg.tick, base_tick);
+    for &obs_id in &[ego_ship, peer_ship] {
+        let rep = msg
+            .observer_updates_pyrep
+            .get(&obs_id)
+            .unwrap_or_else(|| panic!("missing observer update for {obs_id}"));
+        let PyRep::List(items) = rep else {
+            panic!("expected PyRep::List updates for {obs_id}, got {rep:?}");
+        };
+        assert!(!items.is_empty());
+        let mut saw_dmg = false;
+        for entry in items {
+            let parsed = crate::sequencer_invariants::parse_destiny_entry(entry)
+                .expect("valid destiny entry");
+            assert_eq!(
+                parsed.0,
+                Some(fx_floor as u32),
+                "FlushPeerObserverUpdates for {obs_id} must clamp {} to fx_floor={fx_floor}",
+                parsed.1
+            );
+            if parsed.1 == "OnDamageStateChange" {
+                saw_dmg = true;
+            }
+        }
+        assert!(saw_dmg, "missing OnDamageStateChange for observer {obs_id}");
+    }
+}

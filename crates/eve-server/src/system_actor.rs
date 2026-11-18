@@ -1674,7 +1674,14 @@ impl SystemRegistry {
                                     .iter()
                                     .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
                                 {
-                                    ballpark.current_tick = ballpark.current_tick.saturating_add(1);
+                                    let min_floor = last_visible_stamp_actor
+                                        .load(std::sync::atomic::Ordering::Acquire)
+                                        .max(
+                                            last_fx_stamp_actor
+                                                .load(std::sync::atomic::Ordering::Acquire),
+                                        );
+                                    ballpark.current_tick =
+                                        ballpark.current_tick.saturating_add(1).max(min_floor);
                                     last_visible_stamp_actor.fetch_max(
                                         ballpark.current_tick,
                                         std::sync::atomic::Ordering::AcqRel,
@@ -2454,6 +2461,7 @@ impl SystemRegistry {
                                         let mut observer_events = std::collections::BTreeMap::new();
                                         let mut observer_updates_pyrep =
                                             std::collections::BTreeMap::new();
+                                        let mut flushed_max_stamp = u64::from(stamp);
                                         for obs_id in ready_obs_ids {
                                             let obs_evs = ballpark.drain_observer_events(obs_id);
                                             if !obs_evs.is_empty() {
@@ -2461,6 +2469,8 @@ impl SystemRegistry {
                                                     .load(std::sync::atomic::Ordering::Acquire)
                                                     .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
                                                     as u32;
+                                                flushed_max_stamp =
+                                                    flushed_max_stamp.max(u64::from(stamp.max(fx_floor)));
                                                 observer_updates_pyrep.insert(
                                                     obs_id,
                                                     belts::encode_destiny_updates_with_fx_floor(
@@ -2476,6 +2486,10 @@ impl SystemRegistry {
                                         }
                                         flushed = observer_events.len();
                                         if flushed > 0 {
+                                            last_visible_stamp_actor.fetch_max(
+                                                flushed_max_stamp,
+                                                std::sync::atomic::Ordering::AcqRel,
+                                            );
                                             let _ = event_tx_actor.send(TickBroadcast {
                                                 solar_system_id,
                                                 tick: ballpark.current_tick,
