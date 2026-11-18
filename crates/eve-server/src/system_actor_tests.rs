@@ -960,3 +960,147 @@ async fn apply_fit_projection_updates_baseline_preserving_active_multipliers_and
     let (_, snap_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!((snap_ball.max_velocity - 420.0).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_under_ballpark_lock() {
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+
+    let initial_view = handle.view();
+    assert_eq!(initial_view.solar_system_id, 30_000_142);
+    assert_eq!(initial_view.current_tick, 1);
+    assert!((initial_view.tidi_factor - 1.0).abs() < 1e-12);
+    assert!(initial_view.balls.is_empty());
+
+    let ship_a: BallId = 810_000_001;
+    let ship_b: BallId = 810_000_002;
+    let mut ball_a = make_actor_ball(ship_a, 28_659, DVec3::new(1_000.0, 0.0, 0.0));
+    ball_a.velocity = DVec3::new(120.0, 0.0, 0.0);
+    ball_a.mode = MovementMode::GotoDirection { direction: DVec3::X };
+    ball_a.mass = 12_000_000.0;
+    ball_a.radius = 130.0;
+
+    handle
+        .spawn_ball_with_meta(
+            ball_a,
+            CombatState {
+                shield_hp: 250.0,
+                max_shield_hp: 500.0,
+                armor_hp: 300.0,
+                max_armor_hp: 400.0,
+                structure_hp: 150.0,
+                max_structure_hp: 300.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 900,
+                category_id: 6,
+                owner_id: 90_001,
+                corp_id: 98_001,
+                alliance_id: 99_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_b, 587, DVec3::new(2_500.0, 0.0, 0.0)),
+            CombatState {
+                is_tethered: true,
+                is_cloaked: true,
+                warp_scramble_strength: 2,
+                warp_core_strength: 1,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_002,
+                is_cloaked: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let after_spawn = handle.view();
+    assert!(after_spawn.contains_ball(ship_a));
+    assert_eq!(after_spawn.owner_id(ship_a), Some(90_001));
+    assert_eq!(after_spawn.corp_id(ship_a), Some(98_001));
+    assert_eq!(after_spawn.alliance_id(ship_a), Some(99_001));
+    assert_eq!(after_spawn.group_id(ship_a), Some(900));
+    assert_eq!(after_spawn.ball_velocity(ship_a), Some(DVec3::new(120.0, 0.0, 0.0)));
+    assert!(matches!(
+        after_spawn.movement_mode(ship_a),
+        Some(MovementMode::GotoDirection { .. })
+    ));
+    let fracs = after_spawn.damage_fractions(ship_a).unwrap();
+    assert!((fracs.shield - 0.5).abs() < 1e-9);
+    assert!((fracs.armor - 0.75).abs() < 1e-9);
+    assert!((fracs.structure - 0.5).abs() < 1e-9);
+    assert!(after_spawn.is_ball_cloaked(ship_b));
+    assert!(after_spawn.is_ball_tethered(ship_b));
+    assert!(after_spawn.is_ball_invulnerable(ship_b));
+    assert!(after_spawn.is_ball_scrambled(ship_b));
+
+    let bastion_mod = 95_001_i64;
+    handle
+        .add_module_cycle(ActiveModuleCycle {
+            ship_id: ship_a,
+            module_id: bastion_mod,
+            module_type_id: 33400,
+            effect_name: "bastion".to_string(),
+            duration_s: 60.0,
+            repeat: 1,
+            ..ActiveModuleCycle::default()
+        })
+        .await
+        .unwrap();
+    let _ = handle.step_manual(1.0).await.unwrap();
+
+    let after_step = handle.view();
+    assert_eq!(after_step.current_tick, 2);
+    assert!((after_step.sim_elapsed_secs - 1.0).abs() < 1e-9);
+    assert!(after_step.has_active_module(ship_a));
+    assert!(after_step.has_active_bastion(ship_a));
+
+    // Synchronous mutators keep SystemView current without going through cmd_tx.
+    handle.try_set_ball_position(ship_a, DVec3::new(9_000.0, 0.0, 0.0));
+    assert_eq!(
+        handle.view().ball_position(ship_a),
+        Some(DVec3::new(9_000.0, 0.0, 0.0))
+    );
+    assert!(handle.view().has_active_bastion(ship_a));
+
+    handle.try_step_manual(1.0);
+    assert_eq!(handle.view().current_tick, 3);
+
+    handle.try_remove_module_cycle(ship_a, bastion_mod);
+    let after_mod_rm = handle.view();
+    assert!(!after_mod_rm.has_active_bastion(ship_a));
+    assert!(!after_mod_rm.has_active_module(ship_a));
+
+    handle.set_tidi_factor_raw(0.5);
+    assert!((handle.view().tidi_factor - 0.5).abs() < 1e-12);
+
+    // Lock-free view reads succeed even while handle.ballpark is exclusively write-locked
+    // or poisoned on the calling thread.
+    {
+        let _bp_write = handle.ballpark.write().unwrap();
+        let lock_free_view = handle.view();
+        assert_eq!(lock_free_view.current_tick, 3);
+        assert!(lock_free_view.contains_ball(ship_a));
+    }
+
+    let poison_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _bp_write = handle.ballpark.write().unwrap();
+        panic!("simulated ballpark poison for #1342 view test");
+    }));
+    assert!(poison_res.is_err());
+    assert!(handle.ballpark.try_read().is_err());
+    let view_while_poisoned = handle.view();
+    assert_eq!(view_while_poisoned.current_tick, 3);
+    assert!(view_while_poisoned.contains_ball(ship_a));
+}

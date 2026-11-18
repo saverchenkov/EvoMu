@@ -313,12 +313,9 @@ pub(crate) async fn handle_set_password(
                 Some(sid) => sys_handle.get_ball_snapshot(sid).await.ok().flatten(),
                 None => None,
             };
-            let cloaked = session.ship_id.is_some_and(|sid| {
-                sys_handle.ballpark.read().ok().is_some_and(|bp| {
-                    bp.combat_states.get(&sid).is_some_and(|cs| cs.is_cloaked)
-                        || bp.ball_slim_meta.get(&sid).is_some_and(|m| m.is_cloaked)
-                })
-            });
+            let cloaked = session
+                .ship_id
+                .is_some_and(|sid| sys_handle.view().is_ball_cloaked(sid));
             let cb = sys_handle.get_ball_snapshot(container_id).await.ok().flatten();
             Some((sys_id, sb, cloaked, cb))
         } else {

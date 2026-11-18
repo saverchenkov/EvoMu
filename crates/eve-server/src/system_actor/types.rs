@@ -4,8 +4,8 @@
 
 use eve_db::lock_rank::{RankedMutex, RankedRwLock, RANK_LEAF};
 use eve_destiny::{
-    Ball, BallId, CombatState, DamageVector, DestinyEvent, MovementMode, SlimItemMeta,
-    TargetLock,
+    Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
+    SlimItemMeta, TargetLock, WarpBubbleMgr,
 };
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -1191,6 +1191,426 @@ impl Default for ClusterNodeRegistry {
             last_sim_activation_ft_by_system: HashMap::new(),
             scheduled_downtime_enabled: true,
         }
+    }
+}
+
+/// Normalized shield, armor, and structure HP fractions (`0.0..=1.0`) for a ball.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BallDamageFractions {
+    pub shield: f64,
+    pub armor: f64,
+    pub structure: f64,
+}
+
+impl BallDamageFractions {
+    /// Computes normalized HP fractions `[0.0, 1.0]` from a [`CombatState`].
+    pub fn from_combat_state(cs: &CombatState) -> Self {
+        let ratio = |hp: f64, max: f64| -> f64 {
+            if max > 0.0 && max.is_finite() {
+                (hp / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            shield: ratio(cs.shield_hp, cs.max_shield_hp),
+            armor: ratio(cs.armor_hp, cs.max_armor_hp),
+            structure: ratio(cs.structure_hp, cs.max_structure_hp),
+        }
+    }
+}
+
+/// Immutable, lock-free snapshot of a solar system's live `Ballpark` and active-module
+/// state published by the system actor and synchronous mutators (`RFC-1 §7.3`, `#1342`).
+#[derive(Debug, Clone)]
+pub struct SystemView {
+    pub solar_system_id: SolarSystemId,
+    pub current_tick: u64,
+    pub sim_unix_secs: u64,
+    pub tidi_factor: f64,
+    pub sim_elapsed_secs: f64,
+    pub balls: BTreeMap<BallId, Ball>,
+    pub static_ball_ids: HashSet<BallId>,
+    pub ball_group_ids: HashMap<BallId, u32>,
+    pub ball_slim_meta: HashMap<BallId, SlimItemMeta>,
+    pub combat_states: HashMap<BallId, CombatState>,
+    pub scrambled_balls: HashSet<BallId>,
+    pub cloaked_balls: HashSet<BallId>,
+    pub tethered_balls: HashSet<BallId>,
+    pub invulnerable_balls: HashSet<BallId>,
+    pub warp_disrupted_balls: HashSet<BallId>,
+    pub warp_bubble_mgr: WarpBubbleMgr,
+    pub ball_grid_ids: HashMap<BallId, u64>,
+    pub grids: BTreeMap<u64, GridBubble>,
+    pub target_locks: BTreeMap<BallId, Vec<TargetLock>>,
+    pub active_module_ships: HashSet<BallId>,
+    pub active_bastion_ships: HashSet<BallId>,
+    pub active_triage_ships: HashSet<BallId>,
+    pub active_siege_ships: HashSet<BallId>,
+    pub active_industrial_core_ships: HashSet<BallId>,
+    pub active_microjump_ships: HashSet<BallId>,
+}
+
+impl Default for SystemView {
+    fn default() -> Self {
+        Self {
+            solar_system_id: 0,
+            current_tick: 0,
+            sim_unix_secs: 0,
+            tidi_factor: 1.0,
+            sim_elapsed_secs: 0.0,
+            balls: BTreeMap::new(),
+            static_ball_ids: HashSet::new(),
+            ball_group_ids: HashMap::new(),
+            ball_slim_meta: HashMap::new(),
+            combat_states: HashMap::new(),
+            scrambled_balls: HashSet::new(),
+            cloaked_balls: HashSet::new(),
+            tethered_balls: HashSet::new(),
+            invulnerable_balls: HashSet::new(),
+            warp_disrupted_balls: HashSet::new(),
+            warp_bubble_mgr: WarpBubbleMgr::default(),
+            ball_grid_ids: HashMap::new(),
+            grids: BTreeMap::new(),
+            target_locks: BTreeMap::new(),
+            active_module_ships: HashSet::new(),
+            active_bastion_ships: HashSet::new(),
+            active_triage_ships: HashSet::new(),
+            active_siege_ships: HashSet::new(),
+            active_industrial_core_ships: HashSet::new(),
+            active_microjump_ships: HashSet::new(),
+        }
+    }
+}
+
+impl SystemView {
+    /// Captures a consistent [`SystemView`] from `ballpark` and optional `actor_state`.
+    ///
+    /// When `actor_state` is `None` (because the caller only holds `ballpark`), `previous`
+    /// supplies the previously observed `sim_elapsed_secs` and active-module ship sets so
+    /// synchronous ballpark-only mutations do not erase active module flags.
+    pub(crate) fn from_ballpark(
+        ballpark: &Ballpark,
+        actor_state: Option<&SystemActorState>,
+        tidi_factor: f64,
+        previous: Option<&SystemView>,
+    ) -> Self {
+        let mut cloaked_balls = HashSet::new();
+        let mut tethered_balls = HashSet::new();
+        let mut invulnerable_balls = HashSet::new();
+        let mut scrambled_balls = HashSet::new();
+        let mut warp_disrupted_balls = HashSet::new();
+
+        for (&ball_id, cs) in &ballpark.combat_states {
+            if cs.is_cloaked {
+                cloaked_balls.insert(ball_id);
+            }
+            if cs.is_tethered {
+                tethered_balls.insert(ball_id);
+            }
+            if cs.is_invulnerable() {
+                invulnerable_balls.insert(ball_id);
+            }
+            if cs.is_warp_scrambled() {
+                scrambled_balls.insert(ball_id);
+            }
+        }
+        for (&ball_id, meta) in &ballpark.ball_slim_meta {
+            if meta.is_cloaked {
+                cloaked_balls.insert(ball_id);
+            }
+        }
+        for (&ball_id, ball) in &ballpark.balls {
+            if !ballpark.is_ball_bubble_immune(ball_id)
+                && ballpark.warp_bubble_mgr.is_scrambled_at(ball.position)
+            {
+                warp_disrupted_balls.insert(ball_id);
+                scrambled_balls.insert(ball_id);
+            }
+        }
+
+        let (
+            sim_elapsed_secs,
+            active_module_ships,
+            active_bastion_ships,
+            active_triage_ships,
+            active_siege_ships,
+            active_industrial_core_ships,
+            active_microjump_ships,
+        ) = if let Some(st) = actor_state {
+            let mut mods = HashSet::new();
+            let mut bastion = HashSet::new();
+            let mut triage = HashSet::new();
+            let mut siege = HashSet::new();
+            let mut ind_core = HashSet::new();
+            let mut microjump = HashSet::new();
+            for c in &st.active_module_cycles {
+                mods.insert(c.ship_id);
+                let eff_lower = c.effect_name.to_ascii_lowercase();
+                if c.module_type_id == 33400 || eff_lower.contains("bastion") {
+                    bastion.insert(c.ship_id);
+                }
+                if matches!(c.module_type_id, 27951 | 4294) || eff_lower.contains("triage") {
+                    triage.insert(c.ship_id);
+                }
+                if matches!(c.module_type_id, 20280 | 4292) || eff_lower.contains("siege") {
+                    siege.insert(c.ship_id);
+                }
+                if matches!(c.module_type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591)
+                    || eff_lower.contains("industrial")
+                {
+                    ind_core.insert(c.ship_id);
+                }
+                if c.mjd_jump_distance_m.is_some() || eff_lower.contains("microjump") {
+                    microjump.insert(c.ship_id);
+                }
+            }
+            (
+                st.sim_elapsed_secs,
+                mods,
+                bastion,
+                triage,
+                siege,
+                ind_core,
+                microjump,
+            )
+        } else if let Some(prev) = previous {
+            (
+                prev.sim_elapsed_secs,
+                prev.active_module_ships.clone(),
+                prev.active_bastion_ships.clone(),
+                prev.active_triage_ships.clone(),
+                prev.active_siege_ships.clone(),
+                prev.active_industrial_core_ships.clone(),
+                prev.active_microjump_ships.clone(),
+            )
+        } else {
+            (
+                0.0,
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+                HashSet::new(),
+            )
+        };
+
+        Self {
+            solar_system_id: ballpark.solar_system_id,
+            current_tick: ballpark.current_tick,
+            sim_unix_secs: ballpark.sim_unix_secs,
+            tidi_factor,
+            sim_elapsed_secs,
+            balls: ballpark.balls.clone(),
+            static_ball_ids: ballpark.static_ball_ids.iter().copied().collect(),
+            ball_group_ids: ballpark.ball_group_ids.iter().map(|(&k, &v)| (k, v)).collect(),
+            ball_slim_meta: ballpark
+                .ball_slim_meta
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+            combat_states: ballpark
+                .combat_states
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+            scrambled_balls,
+            cloaked_balls,
+            tethered_balls,
+            invulnerable_balls,
+            warp_disrupted_balls,
+            warp_bubble_mgr: ballpark.warp_bubble_mgr.clone(),
+            ball_grid_ids: ballpark.ball_grid_ids.iter().map(|(&k, &v)| (k, v)).collect(),
+            grids: ballpark.grids.clone(),
+            target_locks: ballpark.target_locks.clone(),
+            active_module_ships,
+            active_bastion_ships,
+            active_triage_ships,
+            active_siege_ships,
+            active_industrial_core_ships,
+            active_microjump_ships,
+        }
+    }
+
+    pub fn ball(&self, ball_id: BallId) -> Option<&Ball> {
+        self.balls.get(&ball_id)
+    }
+
+    pub fn contains_ball(&self, ball_id: BallId) -> bool {
+        self.balls.contains_key(&ball_id)
+    }
+
+    pub fn ball_position(&self, ball_id: BallId) -> Option<DVec3> {
+        self.balls.get(&ball_id).map(|b| b.position)
+    }
+
+    pub fn ball_velocity(&self, ball_id: BallId) -> Option<DVec3> {
+        self.balls.get(&ball_id).map(|b| b.velocity)
+    }
+
+    pub fn movement_mode(&self, ball_id: BallId) -> Option<&MovementMode> {
+        self.balls.get(&ball_id).map(|b| &b.mode)
+    }
+
+    pub fn group_id(&self, ball_id: BallId) -> Option<u32> {
+        self.ball_slim_meta
+            .get(&ball_id)
+            .map(|m| m.group_id)
+            .or_else(|| self.ball_group_ids.get(&ball_id).copied())
+    }
+
+    pub fn owner_id(&self, ball_id: BallId) -> Option<i64> {
+        self.ball_slim_meta.get(&ball_id).map(|m| m.owner_id)
+    }
+
+    pub fn corp_id(&self, ball_id: BallId) -> Option<i64> {
+        self.ball_slim_meta.get(&ball_id).map(|m| m.corp_id)
+    }
+
+    pub fn alliance_id(&self, ball_id: BallId) -> Option<i64> {
+        self.ball_slim_meta.get(&ball_id).map(|m| m.alliance_id)
+    }
+
+    pub fn combat_state(&self, ball_id: BallId) -> Option<&CombatState> {
+        self.combat_states.get(&ball_id)
+    }
+
+    pub fn slim_meta(&self, ball_id: BallId) -> Option<&SlimItemMeta> {
+        self.ball_slim_meta.get(&ball_id)
+    }
+
+    pub fn damage_fractions(&self, ball_id: BallId) -> Option<BallDamageFractions> {
+        self.combat_states
+            .get(&ball_id)
+            .map(BallDamageFractions::from_combat_state)
+    }
+
+    /// Mirrors `Ballpark::is_static_ball`.
+    pub fn is_static_ball(&self, ball_id: BallId) -> bool {
+        self.static_ball_ids.contains(&ball_id)
+            || self
+                .balls
+                .get(&ball_id)
+                .is_some_and(|b| matches!(b.mode, MovementMode::Rigid))
+    }
+
+    pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
+        self.scrambled_balls.contains(&ball_id)
+    }
+
+    pub fn is_ball_cloaked(&self, ball_id: BallId) -> bool {
+        self.cloaked_balls.contains(&ball_id)
+    }
+
+    pub fn is_gate_cloaked(&self, ball_id: BallId) -> bool {
+        self.combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0)
+    }
+
+    pub fn is_ball_tethered(&self, ball_id: BallId) -> bool {
+        self.tethered_balls.contains(&ball_id)
+    }
+
+    pub fn is_ball_invulnerable(&self, ball_id: BallId) -> bool {
+        self.invulnerable_balls.contains(&ball_id)
+    }
+
+    pub fn is_ball_warp_disrupted(&self, ball_id: BallId) -> bool {
+        self.warp_disrupted_balls.contains(&ball_id)
+    }
+
+    pub fn has_active_module(&self, ball_id: BallId) -> bool {
+        self.active_module_ships.contains(&ball_id)
+    }
+
+    pub fn has_active_bastion(&self, ball_id: BallId) -> bool {
+        self.active_bastion_ships.contains(&ball_id)
+    }
+
+    pub fn has_active_triage(&self, ball_id: BallId) -> bool {
+        self.active_triage_ships.contains(&ball_id)
+    }
+
+    pub fn has_active_siege(&self, ball_id: BallId) -> bool {
+        self.active_siege_ships.contains(&ball_id)
+    }
+
+    pub fn has_active_industrial_core(&self, ball_id: BallId) -> bool {
+        self.active_industrial_core_ships.contains(&ball_id)
+    }
+
+    pub fn has_active_microjump(&self, ball_id: BallId) -> bool {
+        self.active_microjump_ships.contains(&ball_id)
+    }
+
+    /// Yields every ball ID currently holding a lock (locking or locked) on `target_id`.
+    pub fn targeters_of(&self, target_id: BallId) -> impl Iterator<Item = BallId> + '_ {
+        self.target_locks
+            .iter()
+            .filter_map(move |(&source_id, locks)| {
+                if source_id != target_id && locks.iter().any(|l| l.target_id == target_id) {
+                    Some(source_id)
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub fn is_ball_targeted(&self, target_id: BallId) -> bool {
+        self.targeters_of(target_id).next().is_some()
+    }
+
+    pub fn bubble_id_for_ball(&self, ball_id: BallId) -> Option<u64> {
+        self.ball_grid_ids.get(&ball_id).copied()
+    }
+
+    pub fn grid_bubble(&self, grid_id: u64) -> Option<&GridBubble> {
+        self.grids.get(&grid_id)
+    }
+
+    /// Mirrors `Ballpark::visible_balls_for_observer`.
+    pub fn visible_balls_for_observer(&self, observer_ball_id: BallId) -> Vec<&Ball> {
+        let obs_gid = self.ball_grid_ids.get(&observer_ball_id).copied();
+        self.balls
+            .values()
+            .filter(|b| {
+                if self.is_static_ball(b.id)
+                    || matches!(b.mode, MovementMode::Rigid | MovementMode::Field)
+                {
+                    return true;
+                }
+                let Some(gid) = obs_gid else {
+                    return false;
+                };
+                b.id == observer_ball_id
+                    || (self.ball_grid_ids.get(&b.id) == Some(&gid)
+                        && !self.combat_states.get(&b.id).is_some_and(|c| c.is_cloaked))
+            })
+            .collect()
+    }
+
+    /// Mirrors `Ballpark::dynamic_balls_in_bubble`.
+    pub fn dynamic_balls_in_bubble(&self, observer_ball_id: BallId) -> Vec<&Ball> {
+        let Some(obs_gid) = self.ball_grid_ids.get(&observer_ball_id).copied() else {
+            return Vec::new();
+        };
+        let Some(grid) = self.grids.get(&obs_gid) else {
+            return Vec::new();
+        };
+        grid.members
+            .iter()
+            .filter_map(|&id| {
+                let b = self.balls.get(&id)?;
+                if id != observer_ball_id
+                    && self.combat_states.get(&id).is_some_and(|c| c.is_cloaked)
+                {
+                    return None;
+                }
+                Some(b)
+            })
+            .collect()
     }
 }
 

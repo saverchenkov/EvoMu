@@ -280,11 +280,7 @@ pub(crate) fn collect_ship_destiny_dbuffs(
         })
         .collect();
     if let Some(sys) = sys_opt {
-        let tethered = sys
-            .ballpark
-            .try_read()
-            .map(|bp| bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_tethered))
-            .unwrap_or(false);
+        let tethered = sys.view().is_ball_tethered(ship_id);
         if tethered && !dbuffs.iter().any(|&(id, _, _)| id == 60) {
             dbuffs.push((60, 1.0, eve_destiny::unix_to_filetime(now_unix + 3600)));
         }

@@ -681,6 +681,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<SystemCommand>(1);
     drop(cmd_rx);
     let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (dead_view_tx, dead_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
     let dead = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
@@ -693,6 +695,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
         ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: Arc::new(dead_view_tx),
+        view_rx: dead_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
@@ -874,6 +878,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         }
     });
     let (drop_evt_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (drop_view_tx, drop_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
     let drop_h = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx: drop_tx,
@@ -886,6 +892,8 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
         ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: Arc::new(drop_view_tx),
+        view_rx: drop_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
@@ -1353,6 +1361,8 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
     drop(cmd_rx);
     let (event_tx, _) = tokio::sync::broadcast::channel(4);
+    let (handle_view_tx, handle_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
     let handle = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
@@ -1365,6 +1375,8 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
         ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(eve_destiny::Ballpark::new(30_000_142))),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: Arc::new(handle_view_tx),
+        view_rx: handle_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),

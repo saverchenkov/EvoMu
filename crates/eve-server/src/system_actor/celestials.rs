@@ -33,6 +33,8 @@ pub struct SystemHandle {
     pub(crate) active_module_ships: Arc<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
     pub ballpark: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>>,
     pub(crate) actor_state: Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
+    pub(crate) view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
+    pub(crate) view_rx: tokio::sync::watch::Receiver<Arc<super::SystemView>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) sim_elapsed_secs_bits: Arc<std::sync::atomic::AtomicU64>,
@@ -63,6 +65,62 @@ pub struct SystemHandle {
 }
 
 impl SystemHandle {
+    /// Returns the latest lock-free published [`super::SystemView`] snapshot.
+    pub(crate) fn view(&self) -> Arc<super::SystemView> {
+        self.view_rx.borrow().clone()
+    }
+
+    /// Publishes a fresh [`super::SystemView`] by reading `ballpark` (and `actor_state`
+    /// when rank-safe). Callers that already hold a `ballpark` guard must call
+    /// [`Self::publish_view_from`] instead to avoid self-deadlocking.
+    #[allow(dead_code)] // Follow-up `cycles.rs` sync helpers (deferred on lock) & Track 2 callers call this (#1342).
+    pub(crate) fn publish_view(&self) {
+        if eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            return;
+        }
+        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        self.publish_view_from(&bp, None);
+    }
+
+    /// Publishes a fresh [`super::SystemView`] from an already-locked `ballpark` (and
+    /// optional `actor_state`). When `actor_state` is `None`, reads `self.actor_state`
+    /// non-blockingly if rank-safe, otherwise preserves prior active-module flags.
+    pub(crate) fn publish_view_from(
+        &self,
+        ballpark: &Ballpark,
+        actor_state: Option<&super::SystemActorState>,
+    ) {
+        let tidi = self.tidi_factor();
+        let prev = { self.view_rx.borrow().clone() };
+        let next = if actor_state.is_some() {
+            super::SystemView::from_ballpark(ballpark, actor_state, tidi, Some(prev.as_ref()))
+        } else if !eve_db::lock_rank::held_lock_ranks()
+            .iter()
+            .any(|&r| r >= eve_db::lock_rank::RANK_ACTOR_STATE)
+        {
+            match self.actor_state.try_read() {
+                Ok(st) => super::SystemView::from_ballpark(
+                    ballpark,
+                    Some(&st),
+                    tidi,
+                    Some(prev.as_ref()),
+                ),
+                Err(_) => super::SystemView::from_ballpark(
+                    ballpark,
+                    None,
+                    tidi,
+                    Some(prev.as_ref()),
+                ),
+            }
+        } else {
+            super::SystemView::from_ballpark(ballpark, None, tidi, Some(prev.as_ref()))
+        };
+        let _ = self.view_tx.send(Arc::new(next));
+    }
+
     #[track_caller]
     pub(crate) fn cmd_sender(&self) -> &mpsc::Sender<SystemCommand> {
         assert_no_locks_held();
@@ -199,6 +257,7 @@ impl SystemHandle {
                 if res.is_none() {
                     return TryRepairCombatOutcome::NotPresent;
                 }
+                self.publish_view_from(&bp, None);
                 res
             }
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -247,6 +306,9 @@ impl SystemHandle {
             let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let ok = bp.set_ball_position(ball_id, position);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            if ok {
+                self.publish_view_from(&bp, None);
+            }
             ok
         };
         if updated {
@@ -260,6 +322,7 @@ impl SystemHandle {
         if let Ok(mut bp) = self.ballpark.write() {
             let _ = bp.force_stop_warp(ball_id);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            self.publish_view_from(&bp, None);
         }
         let tracking = {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
@@ -727,6 +790,7 @@ impl SystemHandle {
                     self.event_tx.receiver_count(),
                 );
                 super::sync_ball_positions(bp, &self.ball_positions, &self.scrambled_balls);
+                self.publish_view_from(bp, Some(st));
                 (removed_cycles, fallback_slim_owner, db_opt_cloned, deact_guard)
             };
         let (removed_cycles, fallback_slim_owner, db_opt, deact_guard) =
@@ -971,6 +1035,7 @@ impl SystemHandle {
             .insert(ball_id, (asteroid.clone(), ast_ball));
         st.asteroids.insert(ball_id, asteroid);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, Some(&st));
     }
 
     pub fn sync_asteroid_quantity(&self, asteroid_id: BallId, remaining_units: u64, due_unix_on_belt_empty: u64) {
@@ -1037,6 +1102,7 @@ impl SystemHandle {
                 self.idle_ticks
                     .store(0, std::sync::atomic::Ordering::Relaxed);
             }
+            self.publish_view_from(bp, None);
         };
         if eve_db::lock_rank::held_lock_ranks()
             .iter()
@@ -1132,6 +1198,7 @@ impl SystemHandle {
             self.idle_ticks
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        self.publish_view_from(&bp, None);
     }
 
     pub fn try_update_combat_state<F: FnOnce(&mut CombatState)>(&self, ball_id: BallId, f: F) -> bool {
@@ -1139,6 +1206,7 @@ impl SystemHandle {
         if let Some(cs) = bp.combat_states.get_mut(&ball_id) {
             f(cs);
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            self.publish_view_from(&bp, None);
             true
         } else {
             false
@@ -1149,6 +1217,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         bp.add_mobile_warp_disruptor(id, position, radius);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
     }
 
     /// Atomically mutates declarative modifiers on `ball_id`'s [`CombatState`] and recomputes
@@ -1165,6 +1234,7 @@ impl SystemHandle {
         f(cs);
         bp.recompute_ball_attributes(ball_id);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
         true
     }
 
@@ -1201,6 +1271,7 @@ impl SystemHandle {
                 );
             }
         }
+        self.publish_view_from(&bp, None);
         true
     }
 
@@ -1208,6 +1279,7 @@ impl SystemHandle {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let _ = bp.remove_warp_bubble(id);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, None);
     }
 
     pub fn tidi_factor(&self) -> f64 {
@@ -1229,11 +1301,21 @@ impl SystemHandle {
             .tidi_factor_bits
             .swap(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let prev = f64::from_bits(prev_bits);
-        if prev.is_finite() {
+        let prev_clamped = if prev.is_finite() {
             prev.clamp(0.10, 1.0)
         } else {
             1.0
+        };
+        if (clamped - prev_clamped).abs() > f64::EPSILON
+            && !eve_db::lock_rank::held_lock_ranks()
+                .iter()
+                .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
+        {
+            if let Ok(bp) = self.ballpark.try_read() {
+                self.publish_view_from(&bp, None);
+            }
         }
+        prev_clamped
     }
 
     /// Records an owner-visible or prime (`SetState`) Destiny stamp so subsequent `OnSpecialFX`
@@ -1311,6 +1393,7 @@ impl SystemHandle {
         );
         if count > 0 {
             super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            self.publish_view_from(&bp, Some(&st));
         }
         count
     }
@@ -1360,6 +1443,7 @@ impl SystemHandle {
             &st_mut.warp_tracking,
         );
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        self.publish_view_from(&bp, Some(&st));
         let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
@@ -1560,11 +1644,15 @@ impl SystemHandle {
     /// if `ballpark` is currently write-locked (for synchronous hooks inside `step_system_tick`).
     pub fn try_emit_destiny_event(&self, ball_id: BallId, event: DestinyEvent) -> bool {
         if let Ok(mut bp) = self.ballpark.try_write() {
-            return crate::system_actor::cycles_tackle::apply_destiny_event_in_actor(
+            let applied = crate::system_actor::cycles_tackle::apply_destiny_event_in_actor(
                 &mut bp,
                 ball_id,
                 event,
             );
+            if applied {
+                self.publish_view_from(&bp, None);
+            }
+            return applied;
         }
         let (tx, _rx) = oneshot::channel();
         self.cmd_sender()

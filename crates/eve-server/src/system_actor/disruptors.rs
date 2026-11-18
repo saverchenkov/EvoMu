@@ -224,7 +224,9 @@ impl super::SystemHandle {
                     mod_guard.insert(c.ship_id);
                 }
             }
-            (removed_cycle, db_opt.clone())
+            let res = (removed_cycle, db_opt.clone());
+            self.publish_view_from(&bp, Some(&st));
+            res
         };
         if let Some(removed) = removed {
             if let Some(db_ref) = db_opt {

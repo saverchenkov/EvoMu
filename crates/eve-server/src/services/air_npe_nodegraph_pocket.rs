@@ -313,11 +313,7 @@ pub(crate) fn check_npe_live_combat_or_scramble(
                 .active_system_handles()
                 .into_iter()
                 .find(|(id, _)| *id == sys_id)
-                .is_some_and(|(_, h)| {
-                    h.ballpark
-                        .try_read()
-                        .is_ok_and(|bp| bp.is_ball_scrambled(ship_id))
-                }));
+                .is_some_and(|(_, h)| h.view().is_ball_scrambled(ship_id)));
     if scrambled {
         return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::WarpScrambled));
     }

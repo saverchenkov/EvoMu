@@ -952,13 +952,6 @@ impl SystemRegistry {
             }
         }
         celestials::update_system_hibernation_flag(&initial_actor_state, &initial_ballpark, 0);
-        let ballpark_shared: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>> =
-            Arc::new(RankedRwLock::new(initial_ballpark));
-        let ballpark_actor = ballpark_shared.clone();
-        let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
-            Arc::new(RankedRwLock::new(initial_actor_state));
-        let actor_state_actor = actor_state_shared.clone();
-        let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let initial_tidi = self.cluster_nodes.read().ok()
             .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
             .or_else(|| self.db.as_ref().and_then(|db| db.with_snapshot(|snap| {
@@ -966,6 +959,22 @@ impl SystemRegistry {
                 snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
             })))
             .unwrap_or(1.0).clamp(0.10, 1.0);
+        let initial_view = SystemView::from_ballpark(
+            &initial_ballpark,
+            Some(&initial_actor_state),
+            initial_tidi,
+            None,
+        );
+        let (view_tx, view_rx) = tokio::sync::watch::channel(Arc::new(initial_view));
+        let view_tx = Arc::new(view_tx);
+        let view_tx_actor = Arc::clone(&view_tx);
+        let ballpark_shared: Arc<RankedRwLock<Ballpark, RANK_BALLPARK>> =
+            Arc::new(RankedRwLock::new(initial_ballpark));
+        let ballpark_actor = ballpark_shared.clone();
+        let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
+            Arc::new(RankedRwLock::new(initial_actor_state));
+        let actor_state_actor = actor_state_shared.clone();
+        let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
         let tidi_factor_bits_actor = tidi_factor_bits.clone();
         let sim_elapsed_secs_bits = Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits()));
@@ -1031,9 +1040,21 @@ impl SystemRegistry {
                         WeaponVolleyOutput,
                     ),
                 }
+                #[inline]
+                fn defer_reply<T: Send + 'static>(
+                    deferred: &mut Vec<Box<dyn FnOnce() + Send>>,
+                    reply: tokio::sync::oneshot::Sender<T>,
+                    value: T,
+                ) {
+                    deferred.push(Box::new(move || {
+                        let _ = reply.send(value);
+                    }));
+                }
+                let mut deferred_replies: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
                 let actor_delivery_out: Option<PendingActorDelivery> = {
                 let mut ballpark = ballpark_actor.write().unwrap_or_else(|e| e.into_inner());
                 let mut actor_st = actor_state_actor.write().unwrap_or_else(|e| e.into_inner());
+                let out = (|| -> Option<PendingActorDelivery> {
                 let SystemActorState {
                     active_module_cycles,
                     pending_anchoring_disruptors,
@@ -1104,13 +1125,13 @@ impl SystemRegistry {
                                 }
                                 spawned_checkpoint_ball = Some(ball_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(ballpark.current_tick));
+                                defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                             }
                             SystemCommand::SetBallMaxVelocity { ball_id, max_velocity, reply } => {
-                                let _ = reply.send(ballpark.set_ball_max_velocity(ball_id, max_velocity));
+                                defer_reply(&mut deferred_replies, reply, ballpark.set_ball_max_velocity(ball_id, max_velocity));
                             }
                             SystemCommand::SetBallMaxVelocityCap { ball_id, cap, reply } => {
-                                let _ = reply.send(ballpark.set_ball_max_velocity_cap(ball_id, cap));
+                                defer_reply(&mut deferred_replies, reply, ballpark.set_ball_max_velocity_cap(ball_id, cap));
                             }
                             SystemCommand::SpawnBallWithCombat {
                                 ball,
@@ -1143,7 +1164,7 @@ impl SystemRegistry {
                                 spawned_checkpoint_ball = Some(ball_id);
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(tick));
+                                defer_reply(&mut deferred_replies, reply, Ok(tick));
                             }
                             SystemCommand::SpawnBallWithMeta {
                                 ball,
@@ -1177,7 +1198,7 @@ impl SystemRegistry {
                                 spawned_checkpoint_ball = Some(ball_id);
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(tick));
+                                defer_reply(&mut deferred_replies, reply, Ok(tick));
                             }
                             SystemCommand::ChangeSlimItem {
                                 ball_id,
@@ -1188,7 +1209,7 @@ impl SystemRegistry {
                                 if changed {
                                     spawned_checkpoint_ball = Some(ball_id);
                                 }
-                                let _ = reply.send(changed);
+                                defer_reply(&mut deferred_replies, reply, changed);
                             }
                             SystemCommand::SetBallWormholeStages {
                                 ball_id,
@@ -1201,7 +1222,7 @@ impl SystemRegistry {
                                     wormhole_age,
                                     wormhole_size,
                                 );
-                                let _ = reply.send(changed);
+                                defer_reply(&mut deferred_replies, reply, changed);
                             }
                             SystemCommand::GetBallSlimItem { ball_id, reply } => {
                                 let slim = ballpark.balls.get(&ball_id).map(|b| {
@@ -1215,13 +1236,13 @@ impl SystemRegistry {
                                         &meta,
                                     )
                                 });
-                                let _ = reply.send(slim);
+                                defer_reply(&mut deferred_replies, reply, slim);
                             }
                             SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
                                 let ball_id = asteroid.asteroid_id;
                                 if asteroids.contains_key(&ball_id) {
-                                    let _ = reply.send(Ok(ball_id));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Ok(ball_id));
+                                    return None;
                                 }
                                 let mut ast_ball = ball;
                                 SystemHandle::spawn_asteroid_ball_in_ballpark(
@@ -1246,7 +1267,7 @@ impl SystemRegistry {
                                 asteroid_templates.insert(ball_id, (asteroid.clone(), ast_ball));
                                 asteroids.insert(ball_id, asteroid);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(ball_id));
+                                defer_reply(&mut deferred_replies, reply, Ok(ball_id));
                             }
                             SystemCommand::MineAsteroid {
                                 asteroid_id,
@@ -1269,10 +1290,10 @@ impl SystemRegistry {
                                     &downtime_utc_atomic,
                                 );
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::GetAsteroidState { asteroid_id, reply } => {
-                                let _ = reply.send(asteroids.get(&asteroid_id).cloned());
+                                defer_reply(&mut deferred_replies, reply, asteroids.get(&asteroid_id).cloned());
                             }
                             SystemCommand::BreakGateCloak { ball_id, reply } => {
                                 let broken = ballpark.deactivate_cloak(ball_id);
@@ -1280,7 +1301,7 @@ impl SystemRegistry {
                                     meta.is_cloaked = false;
                                     ballpark.change_slim_item(ball_id, meta);
                                 }
-                                let _ = reply.send(broken);
+                                defer_reply(&mut deferred_replies, reply, broken);
                             }
                             SystemCommand::PopulateAsteroids { reply } => {
                                 let first_sde_belt_ast_id =
@@ -1325,7 +1346,7 @@ impl SystemRegistry {
                                 }
                                 populated.sort_by_key(|a| a.asteroid_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(populated);
+                                defer_reply(&mut deferred_replies, reply, populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
                                 crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
@@ -1355,7 +1376,7 @@ impl SystemRegistry {
                                     .unwrap_or_else(|e| e.into_inner())
                                     .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ball_id));
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(removed);
+                                defer_reply(&mut deferred_replies, reply, removed);
                             }
                             SystemCommand::AcceptDocking {
                                 ship_id,
@@ -1395,7 +1416,7 @@ impl SystemRegistry {
                                     ballpark.accept_docking_at(ship_id, station_id, station_pos)
                                 };
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(removed);
+                                defer_reply(&mut deferred_replies, reply, removed);
                             }
                             SystemCommand::TakeBall {
                                 ball_id,
@@ -1410,8 +1431,8 @@ impl SystemRegistry {
                                     let _ = ballpark.remove_ball(ball_id);
                                     warp_provenance.remove(&ball_id);
                                     celestials::clear_shared_warp_tracking(warp_tracking, ball_id, true);
-                                    let _ = reply.send(None);
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, None);
+                                    return None;
                                 }
                                 let tick = ballpark.current_tick;
                                 let before_cycles = active_module_cycles.len();
@@ -1471,7 +1492,7 @@ impl SystemRegistry {
                                     ballpark.remove_ball(ball_id)
                                 };
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(removed.map(|ball| TakenBall {
+                                defer_reply(&mut deferred_replies, reply, removed.map(|ball| TakenBall {
                                     tick,
                                     ball,
                                     combat_state,
@@ -1496,7 +1517,7 @@ impl SystemRegistry {
                                 );
                                 spawned_checkpoint_ball = Some(ball_id);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(tick));
+                                defer_reply(&mut deferred_replies, reply, Ok(tick));
                             }
                             SystemCommand::EmitPackagedActions {
                                 ball_id,
@@ -1507,7 +1528,7 @@ impl SystemRegistry {
                                 if known {
                                     ballpark.emit_packaged_actions(Some(ball_id), &events);
                                 }
-                                let _ = reply.send(known);
+                                defer_reply(&mut deferred_replies, reply, known);
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
                                 apply_set_movement_mode_command(
@@ -1571,9 +1592,9 @@ impl SystemRegistry {
                                         deact_guard.as_ref(),
                                     );
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                    defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                 } else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} not in system or has no combat state")));
                                 }
                             }
                             SystemCommand::SetWarpCoreStrength { ball_id, strength, reply } => {
@@ -1589,18 +1610,18 @@ impl SystemRegistry {
                                         deact_guard.as_ref(),
                                     );
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                    defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                 } else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system or has no combat state")));
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} not in system or has no combat state")));
                                 }
                             }
                             SystemCommand::AddWarpBubble { id, position, radius, reply } => {
                                 ballpark.add_warp_bubble(id, position, radius);
-                                let _ = reply.send(Ok(ballpark.current_tick));
+                                defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                             }
                             SystemCommand::RemoveWarpBubble { id, reply } => {
                                 let removed = ballpark.remove_warp_bubble(id).is_some();
-                                let _ = reply.send(removed);
+                                defer_reply(&mut deferred_replies, reply, removed);
                             }
                             SystemCommand::SetSpeedFraction {
                                 ball_id,
@@ -1608,9 +1629,9 @@ impl SystemRegistry {
                                 reply,
                             } => {
                                 if ballpark.set_speed_fraction(ball_id, fraction) {
-                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                    defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                 } else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} not in system {solar_system_id}")));
                                 }
                             }
                             SystemCommand::SetBallPosition {
@@ -1628,7 +1649,7 @@ impl SystemRegistry {
                                     );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(updated);
+                                defer_reply(&mut deferred_replies, reply, updated);
                             }
                             SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
                                 let known = cycles_tackle::apply_destiny_event_in_actor(
@@ -1636,7 +1657,7 @@ impl SystemRegistry {
                                     ball_id,
                                     event,
                                 );
-                                let _ = reply.send(known);
+                                defer_reply(&mut deferred_replies, reply, known);
                             }
                             SystemCommand::EmitObserverDestinyEvent {
                                 observer_ball_id,
@@ -1651,7 +1672,7 @@ impl SystemRegistry {
                                         .or_default()
                                         .push(event);
                                 }
-                                let _ = reply.send(ok);
+                                defer_reply(&mut deferred_replies, reply, ok);
                             }
                             SystemCommand::GotoPoint { ball_id, point, reply } => {
                                 let res = ballpark
@@ -1665,16 +1686,16 @@ impl SystemRegistry {
                                         ball_space_entry_epochs,
                                     );
                                 }
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::PushSetState {
                                 observer_ball_id,
                                 reply,
                             } => {
                                 if ballpark.queue_set_state(observer_ball_id) {
-                                    let _ = reply.send(Ok(ballpark.current_tick));
+                                    defer_reply(&mut deferred_replies, reply, Ok(ballpark.current_tick));
                                 } else {
-                                    let _ = reply.send(Err(format!(
+                                    defer_reply(&mut deferred_replies, reply, Err(format!(
                                         "Observer ball {observer_ball_id} not in system {solar_system_id}"
                                     )));
                                 }
@@ -1712,14 +1733,14 @@ impl SystemRegistry {
                             }
                             SystemCommand::GetBallSnapshot { ball_id, reply } => {
                                 let res = ballpark.balls.get(&ball_id).cloned().map(|b| (ballpark.current_tick, b));
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::GetBallGroupId { ball_id, reply } => {
-                                let _ = reply.send(ballpark.ball_group_id(ball_id));
+                                defer_reply(&mut deferred_replies, reply, ballpark.ball_group_id(ball_id));
                             }
                             SystemCommand::ListBalls { reply } => {
                                 let balls: Vec<Ball> = ballpark.balls.values().cloned().collect();
-                                let _ = reply.send(balls);
+                                defer_reply(&mut deferred_replies, reply, balls);
                             }
                             SystemCommand::ListBallsInBubble {
                                 observer_ball_id,
@@ -1739,7 +1760,7 @@ impl SystemRegistry {
                                         .cloned()
                                         .collect()
                                 };
-                                let _ = reply.send(balls);
+                                defer_reply(&mut deferred_replies, reply, balls);
                             }
                             SystemCommand::GetSetState {
                                 observer_ball_id,
@@ -1755,19 +1776,19 @@ impl SystemRegistry {
                                         &ballpark,
                                         observer_ball_id,
                                     )]);
-                                    let _ = reply.send(Ok((ballpark.current_tick, payload, update_list)));
+                                    defer_reply(&mut deferred_replies, reply, Ok((ballpark.current_tick, payload, update_list)));
                                 } else {
-                                    let _ = reply.send(Err(format!(
+                                    defer_reply(&mut deferred_replies, reply, Err(format!(
                                         "Observer ball {observer_ball_id} not in system {solar_system_id}"
                                     )));
                                 }
                             }
                             SystemCommand::CurrentTick { reply } => {
-                                let _ = reply.send(ballpark.current_tick);
+                                defer_reply(&mut deferred_replies, reply, ballpark.current_tick);
                             }
                             SystemCommand::GetBubbleIdForBall { ball_id, reply } => {
                                 let bid = ballpark.bubble_id_for_ball(ball_id);
-                                let _ = reply.send(bid);
+                                defer_reply(&mut deferred_replies, reply, bid);
                             }
                             SystemCommand::DrainObserverUpdates {
                                 observer_ball_id,
@@ -1781,7 +1802,7 @@ impl SystemRegistry {
                                     &last_fx_stamp_actor,
                                     &broadcast_seq_gate_actor,
                                 );
-                                let _ = reply.send((tick, events, pyrep));
+                                defer_reply(&mut deferred_replies, reply, (tick, events, pyrep));
                             }
                             SystemCommand::DrainObserverUpdatesWithSeq {
                                 observer_ball_id,
@@ -1795,7 +1816,7 @@ impl SystemRegistry {
                                     &last_fx_stamp_actor,
                                     &broadcast_seq_gate_actor,
                                 );
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::ApplyDamage { ball_id, damage, reply } => {
                                 let is_invuln_stronghold = db_opt
@@ -1807,9 +1828,9 @@ impl SystemRegistry {
                                 });
                                 if is_invuln_stronghold {
                                     if let Some(b) = ballpark.balls.get(&ball_id).cloned() {
-                                        let _ = reply.send(Some((0.0, false, b)));
+                                        defer_reply(&mut deferred_replies, reply, Some((0.0, false, b)));
                                     } else {
-                                        let _ = reply.send(None);
+                                        defer_reply(&mut deferred_replies, reply, None);
                                     }
                                 } else if let Some((applied, destroyed, ball_opt)) = crate::services::mobile_deployables::handle_ball_damage_in_actor(&db_opt, &sde_opt, solar_system_id, ball_id, damage, &mut ballpark, now_unix)
                                     .or_else(|| crate::services::fw_gameplay::fw_gameplay_insurgency::handle_fob_ball_damage_in_actor(db_opt.as_deref(), solar_system_id, ball_id, damage, &mut ballpark, now_unix))
@@ -1846,12 +1867,12 @@ impl SystemRegistry {
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     if let Some(ball_snap) = ball_opt {
-                                        let _ = reply.send(Some((applied, destroyed, ball_snap)));
+                                        defer_reply(&mut deferred_replies, reply, Some((applied, destroyed, ball_snap)));
                                     } else {
-                                        let _ = reply.send(None);
+                                        defer_reply(&mut deferred_replies, reply, None);
                                     }
                                 } else {
-                                    let _ = reply.send(None);
+                                    defer_reply(&mut deferred_replies, reply, None);
                                 }
                             }
                             SystemCommand::ApplyTrueDamage { ball_id, amount, reply } => {
@@ -1881,12 +1902,12 @@ impl SystemRegistry {
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     if let Some(ball_snap) = ball_opt {
-                                        let _ = reply.send(Some((applied, destroyed, ball_snap)));
+                                        defer_reply(&mut deferred_replies, reply, Some((applied, destroyed, ball_snap)));
                                     } else {
-                                        let _ = reply.send(None);
+                                        defer_reply(&mut deferred_replies, reply, None);
                                     }
                                 } else {
-                                    let _ = reply.send(None);
+                                    defer_reply(&mut deferred_replies, reply, None);
                                 }
                             }
                             SystemCommand::StepManual { dt, reply } => {
@@ -1900,12 +1921,12 @@ impl SystemRegistry {
                             }
                             SystemCommand::GetTargetLocks { ball_id, reply } => {
                                 let locks = ballpark.get_target_locks(ball_id);
-                                let _ = reply.send(locks);
+                                defer_reply(&mut deferred_replies, reply, locks);
                             }
                             SystemCommand::AddTargetLock { source_id, lock, reply } => {
                                 if ballpark.combat_states.get(&lock.target_id).is_some_and(|tcs| tcs.is_tethered) {
-                                    let _ = reply.send(Err("Target is tethered and invulnerable to target locks".into()));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Err("Target is tethered and invulnerable to target locks".into()));
+                                    return None;
                                 }
                                 let mut tether_cleared = false;
                                 if let Some(cs) = ballpark.combat_states.get_mut(&source_id) {
@@ -1923,7 +1944,7 @@ impl SystemRegistry {
                                 if tether_cleared {
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             cmd @ (SystemCommand::RemoveTargetLock { .. }
                             | SystemCommand::RemoveTargetLockQuiet { .. }) => {
@@ -1950,7 +1971,7 @@ impl SystemRegistry {
                                         deact_guard.as_ref(),
                                     );
                                 }
-                                let _ = reply.send(removed);
+                                defer_reply(&mut deferred_replies, reply, removed);
                             }
                             cmd @ (SystemCommand::ClearTargetLocks { .. }
                             | SystemCommand::ClearTargetLocksQuiet { .. }) => {
@@ -1977,16 +1998,16 @@ impl SystemRegistry {
                                         deact_guard.as_ref(),
                                     );
                                 }
-                                let _ = reply.send(count);
+                                defer_reply(&mut deferred_replies, reply, count);
                             }
                             SystemCommand::SetCapacitor { ball_id, capacitor, reply } => {
                                 if !ballpark.balls.contains_key(&ball_id) {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} is not in space")));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} is not in space")));
+                                    return None;
                                 }
                                 let Some(cs) = ballpark.combat_states.get_mut(&ball_id) else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} has no combat state")));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} has no combat state")));
+                                    return None;
                                 };
                                 cs.capacitor = capacitor;
                                 if let Some(db) = &db_opt {
@@ -1997,17 +2018,17 @@ impl SystemRegistry {
                                         std::iter::once((ball_id, &cloned)),
                                     );
                                 }
-                                let _ = reply.send(Ok(()));
+                                defer_reply(&mut deferred_replies, reply, Ok(()));
                             }
                             SystemCommand::HealCombatState { ball_id, reply } => {
                                 if !ballpark.balls.contains_key(&ball_id) {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} is not in space")));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} is not in space")));
+                                    return None;
                                 }
                                 let grid_id = ballpark.ball_grid_ids.get(&ball_id).copied();
                                 let Some(cs) = ballpark.combat_states.get_mut(&ball_id) else {
-                                    let _ = reply.send(Err(format!("Ball {ball_id} has no combat state")));
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, Err(format!("Ball {ball_id} has no combat state")));
+                                    return None;
                                 };
                                 cs.shield_hp = cs.max_shield_hp;
                                 cs.armor_hp = cs.max_armor_hp;
@@ -2033,7 +2054,7 @@ impl SystemRegistry {
                                         crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
                                     }
                                 }
-                                let _ = reply.send(Ok(cloned));
+                                defer_reply(&mut deferred_replies, reply, Ok(cloned));
                             }
                             SystemCommand::SetCombatState { ball_id, combat_state, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2049,20 +2070,20 @@ impl SystemRegistry {
                                     combat_state,
                                 );
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(Ok(()));
+                                defer_reply(&mut deferred_replies, reply, Ok(()));
                             }
                             SystemCommand::GetCombatState { ball_id, reply } => {
                                 let cs = ballpark.combat_states.get(&ball_id).cloned();
-                                let _ = reply.send(cs);
+                                defer_reply(&mut deferred_replies, reply, cs);
                             }
                             SystemCommand::ModifyCombatState { ball_id, f, reply } => {
                                 if !ballpark.balls.contains_key(&ball_id) {
-                                    let _ = reply.send(None);
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, None);
+                                    return None;
                                 }
                                 let Some(mut cs) = ballpark.combat_states.get(&ball_id).cloned() else {
-                                    let _ = reply.send(None);
-                                    return;
+                                    defer_reply(&mut deferred_replies, reply, None);
+                                    return None;
                                 };
                                 f(&mut cs);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2086,7 +2107,7 @@ impl SystemRegistry {
                                         std::iter::once((ball_id, ucs)),
                                     );
                                 }
-                                let _ = reply.send(updated);
+                                defer_reply(&mut deferred_replies, reply, updated);
                             }
                             SystemCommand::RepairCombatState {
                                 ball_id,
@@ -2116,7 +2137,7 @@ impl SystemRegistry {
                                         std::iter::once((ball_id, ucs)),
                                     );
                                 }
-                                let _ = reply.send(updated);
+                                defer_reply(&mut deferred_replies, reply, updated);
                             }
                             SystemCommand::AddModuleCycle { cycle, reply } => {
                                 let cyc_key = (cycle.ship_id, cycle.module_id);
@@ -2136,7 +2157,7 @@ impl SystemRegistry {
                                 }
                                 cycles_tackle::snapshot_active_tackle_totals(&ballpark, active_module_cycles, &mut last_active_totals);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::RemoveModuleCycle { ship_id, module_id, reply } => {
                                 let mut remaining_cooldown = None;
@@ -2165,7 +2186,7 @@ impl SystemRegistry {
                                         mod_guard.insert(c.ship_id);
                                     }
                                 }
-                                let _ = reply.send(Ok(remaining_cooldown));
+                                defer_reply(&mut deferred_replies, reply, Ok(remaining_cooldown));
                             }
                             SystemCommand::RequestCycleDeactivation { ship_id, module_id, reply } => {
                                 let updated = if let Some(cycle) = active_module_cycles
@@ -2190,7 +2211,7 @@ impl SystemRegistry {
                                 } else {
                                     false
                                 };
-                                let _ = reply.send(updated);
+                                defer_reply(&mut deferred_replies, reply, updated);
                             }
                             SystemCommand::FireWeaponCycleVolley { ship_id, module_id, reply } => {
                                 let mut volley_destroyed = Vec::new();
@@ -2293,7 +2314,7 @@ impl SystemRegistry {
                                 let exists = active_module_cycles
                                     .iter()
                                     .any(|c| c.ship_id == ship_id && c.module_id == module_id);
-                                let _ = reply.send(exists);
+                                defer_reply(&mut deferred_replies, reply, exists);
                             }
                             SystemCommand::ReconcileModuleCycleBeforeActivate { ship_id, module_id, now_unix, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2309,7 +2330,7 @@ impl SystemRegistry {
                                     module_id,
                                     now_unix,
                                 );
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2325,13 +2346,13 @@ impl SystemRegistry {
                                     module_id,
                                     is_overloaded,
                                 );
-                                let _ = reply.send(updated);
+                                defer_reply(&mut deferred_replies, reply, updated);
                             }
                             SystemCommand::StartNaniteRepair { repair, reply } => {
                                 if !active_nanite_repairs.iter().any(|r| r.ship_id == repair.ship_id && r.module_id == repair.module_id) {
                                     active_nanite_repairs.push(repair);
                                 }
-                                let _ = reply.send(());
+                                defer_reply(&mut deferred_replies, reply, ());
                             }
                             SystemCommand::StopNaniteRepair { ship_id, module_id, reply } => {
                                 let mut rem = None;
@@ -2349,14 +2370,14 @@ impl SystemRegistry {
                                     let paste_refund = r.paste_consumed_so_far.saturating_sub(used_units);
                                     rem = Some((rem_dmg, paste_refund));
                                 }
-                                let _ = reply.send(rem);
+                                defer_reply(&mut deferred_replies, reply, rem);
                             }
                             SystemCommand::RecordIncomingArmorDamage { ship_id, damage, reply } => {
                                 let entry = rah_incoming_damage.entry(ship_id).or_insert([0.0; 4]);
                                 for (dst, src) in entry.iter_mut().zip(damage.iter()) {
                                     *dst += *src;
                                 }
-                                let _ = reply.send(());
+                                defer_reply(&mut deferred_replies, reply, ());
                             }
                             SystemCommand::StopNonWarpModuleCycles { ship_id, reply } => {
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2382,10 +2403,10 @@ impl SystemRegistry {
                                         mod_guard.insert(c.ship_id);
                                     }
                                 }
-                                let _ = reply.send(());
+                                defer_reply(&mut deferred_replies, reply, ());
                             }
                             SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
-                                let _ = reply.send(ballpark.set_interdiction_nullified(ball_id, nullified));
+                                defer_reply(&mut deferred_replies, reply, ballpark.set_interdiction_nullified(ball_id, nullified));
                             }
                             SystemCommand::FastForwardClock { ship_id, secs, reply } => {
                                 let was_warping = matches!(
@@ -2421,7 +2442,7 @@ impl SystemRegistry {
                                         .unwrap_or_else(|e| e.into_inner())
                                         .insert(ship_id, tokio::time::Instant::now());
                                 }
-                                let _ = reply.send(());
+                                defer_reply(&mut deferred_replies, reply, ());
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);
@@ -2434,7 +2455,7 @@ impl SystemRegistry {
                                     );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::MicroJumpField { ball_id, distance_meters, field_radius_meters, max_jumped_ships, reply } => {
                                 let res = ballpark.micro_jump_field(ball_id, distance_meters, field_radius_meters, max_jumped_ships);
@@ -2447,29 +2468,29 @@ impl SystemRegistry {
                                     );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(res);
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::IsBallScrambled { ball_id, reply } => {
-                                let _ = reply.send(ballpark.is_ball_scrambled(ball_id));
+                                defer_reply(&mut deferred_replies, reply, ballpark.is_ball_scrambled(ball_id));
                             }
                             SystemCommand::AddInterdictionSphere { id, position, radius, reply } => {
                                 let ok = ballpark.add_interdiction_sphere(id, position, radius);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(ok);
+                                defer_reply(&mut deferred_replies, reply, ok);
                             }
                             SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply } => {
                                 let ok = ballpark.add_mobile_warp_disruptor(id, position, radius);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(ok);
+                                defer_reply(&mut deferred_replies, reply, ok);
                             }
                             SystemCommand::ScheduleMobileWarpDisruptor { id, type_id, position, radius, anchoring_delay_s, reply } => {
                                 let ok = handle_schedule_mobile_warp_disruptor(&mut ballpark, pending_anchoring_disruptors, id, type_id, position, radius, anchoring_delay_s);
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
-                                let _ = reply.send(ok);
+                                defer_reply(&mut deferred_replies, reply, ok);
                             }
                             cmd @ (SystemCommand::ApplyEcmJam { .. }
                             | SystemCommand::ApplyEcmJamFrom { .. }
@@ -2503,7 +2524,7 @@ impl SystemRegistry {
                                     );
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
-                                let _ = reply.send(exists);
+                                defer_reply(&mut deferred_replies, reply, exists);
                             }
                             SystemCommand::ApplyEcmBurst { source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides, reply } => {
                                 let jammed = handle_apply_ecm_burst(&mut ballpark, &active_module_cycles, &sde_opt, &mechanic_rng_opt, source_id, burst_radius_m, jam_strengths, duration_s, roll, ship_eval_overrides);
@@ -2523,7 +2544,7 @@ impl SystemRegistry {
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 }
-                                let _ = reply.send(jammed);
+                                defer_reply(&mut deferred_replies, reply, jammed);
                             }
                             SystemCommand::FlushPeerObserverUpdates {
                                 exclude_ball_id,
@@ -2602,7 +2623,7 @@ impl SystemRegistry {
                                         }
                                     }
                                 }
-                                let _ = reply.send(flushed);
+                                defer_reply(&mut deferred_replies, reply, flushed);
                             }
                             SystemCommand::ApplyFitProjection {
                                 ship_id,
@@ -2616,7 +2637,7 @@ impl SystemRegistry {
                                     projection,
                                 );
                                 if let Some(tx) = reply {
-                                    let _ = tx.send(applied);
+                                    defer_reply(&mut deferred_replies, tx, applied);
                                 }
                             }
                         }
@@ -2992,7 +3013,7 @@ impl SystemRegistry {
                             }
                             if let Some(reply) = flush_checkpoint_reply {
                                 let entries = celestials::collect_all_condition_checkpoint_entries(&mut actor_st, &ballpark);
-                                let _ = reply.send(entries);
+                                defer_reply(&mut deferred_replies, reply, entries);
                             }
                             celestials::update_system_hibernation_flag(
                                 &actor_st,
@@ -3005,7 +3026,28 @@ impl SystemRegistry {
                         }
                     }
                 }
+                })();
+                let raw_tidi = f64::from_bits(
+                    tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                let cur_tidi = if raw_tidi.is_finite() {
+                    raw_tidi.clamp(0.10, 1.0)
+                } else {
+                    1.0
                 };
+                let prev_view = { view_tx_actor.borrow().clone() };
+                let next_view = SystemView::from_ballpark(
+                    &ballpark,
+                    Some(&actor_st),
+                    cur_tidi,
+                    Some(prev_view.as_ref()),
+                );
+                let _ = view_tx_actor.send(Arc::new(next_view));
+                out
+                };
+                for send_reply in deferred_replies {
+                    send_reply();
+                }
                 if let Some(actor_delivery) = actor_delivery_out {
                     #[cfg(test)]
                     if panic_after_destruction_actor
@@ -3087,6 +3129,8 @@ impl SystemRegistry {
             active_module_ships,
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,
+            view_tx,
+            view_rx,
             last_auto_stepped_unix,
             tidi_factor_bits,
             sim_elapsed_secs_bits,

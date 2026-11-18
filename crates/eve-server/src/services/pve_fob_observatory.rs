@@ -335,19 +335,18 @@ pub async fn destroy_pirate_fob_and_payout(
     let _ = sys.spawn_ball(cont_ball).await;
 
     let (live_on_grid_combatants, live_ineligible, all_grid_balls) = {
-        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let view = sys.view();
         let mut eligible_balls = BTreeSet::new();
         let mut blocked_balls = BTreeSet::new();
         let mut any_balls = BTreeSet::new();
-        for (&bid, b) in &bp.balls {
+        for (&bid, b) in &view.balls {
             any_balls.insert(bid);
             if b.position.distance(fob_pos) > 250_000.0 {
                 blocked_balls.insert(bid);
                 continue;
             }
-            let is_cloaked = bp.combat_states.get(&bid).is_some_and(|cs| cs.is_cloaked)
-                || bp.ball_slim_meta.get(&bid).is_some_and(|sm| sm.is_cloaked);
-            let is_dead = bp.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
+            let is_cloaked = view.is_ball_cloaked(bid);
+            let is_dead = view.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
             if is_cloaked || is_dead || b.type_id == 670 {
                 blocked_balls.insert(bid);
             } else {
@@ -1145,7 +1144,7 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
         record_fob_combat_participant(ctx, target_ball_id, attacker_char_id);
     }
     let (on_grid_combat_ships, ineligible_balls) = {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let view = sys_handle.view();
         let fob_pos = ctx.db.with_snapshot(|snap| {
             snap.structures
                 .get(&target_ball_id)
@@ -1154,13 +1153,12 @@ pub async fn apply_live_combat_damage_to_pirate_fob(
         });
         let mut combat_ships = std::collections::HashSet::new();
         let mut blocked_balls = std::collections::HashSet::new();
-        for (&bid, b) in &bp.balls {
+        for (&bid, b) in &view.balls {
             if b.position.distance(fob_pos) > 250_000.0 {
                 continue;
             }
-            let is_cloaked = bp.combat_states.get(&bid).is_some_and(|cs| cs.is_cloaked)
-                || bp.ball_slim_meta.get(&bid).is_some_and(|sm| sm.is_cloaked);
-            let is_dead = bp.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
+            let is_cloaked = view.is_ball_cloaked(bid);
+            let is_dead = view.combat_states.get(&bid).is_some_and(|cs| cs.structure_hp <= 0.0);
             if is_cloaked || is_dead || b.type_id == 670 {
                 blocked_balls.insert(bid);
             } else {

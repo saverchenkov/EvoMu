@@ -220,10 +220,9 @@ pub fn handle_clone_jump(
             return None;
         }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let b = bp.balls.get(&ship_id)?;
-        let cloaked = bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_cloaked)
-            || bp.ball_slim_meta.get(&ship_id).is_some_and(|m| m.is_cloaked);
+        let view = sys_handle.view();
+        let b = view.balls.get(&ship_id)?;
+        let cloaked = view.is_ball_cloaked(ship_id);
         let adj_x = b.position.x + b.radius.max(250.0) + 150.0;
         Some((sys_id, [adj_x, b.position.y, b.position.z], cloaked))
     });

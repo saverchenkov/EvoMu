@@ -605,3 +605,337 @@ fn pending_destroyed_outbox_checkout_entries_isolates_unrelated_pending_items_11
     assert!(!outbox.is_non_empty());
     assert_eq!(outbox.totals(), (3, 3));
 }
+
+#[test]
+fn system_view_from_ballpark_captures_kinematics_flags_damage_modules_and_grids() {
+    use super::{BallDamageFractions, SystemView};
+    use eve_destiny::{Ball, Ballpark, CombatState, MovementMode, SlimItemMeta, TargetLock};
+
+    let def = SystemView::default();
+    assert!((def.tidi_factor - 1.0).abs() < 1e-12);
+    assert!(def.balls.is_empty());
+
+    let mut bp = Ballpark::new(30_000_142);
+    bp.current_tick = 42;
+    bp.sim_unix_secs = 1_700_000_123;
+
+    let planet_id = 40_009_001_i64;
+    bp.add_static_ball_with_meta(
+        Ball {
+            id: planet_id,
+            type_id: 11,
+            position: DVec3::new(0.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e18,
+            radius: 500_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        SlimItemMeta {
+            group_id: 7,
+            category_id: 2,
+            owner_id: 1_000_125,
+            ..Default::default()
+        },
+    );
+
+    let ship_a = 1001_i64;
+    let ship_b = 1002_i64;
+    let ship_c = 1003_i64;
+    let ship_d = 1004_i64;
+    let shuttle_e = 1005_i64;
+    let ship_f = 1006_i64;
+
+    bp.set_ball_slim_meta(
+        ship_a,
+        SlimItemMeta {
+            group_id: 900,
+            category_id: 6,
+            owner_id: 90_001,
+            char_id: Some(90_001),
+            corp_id: 98_001,
+            alliance_id: 99_001,
+            is_cloaked: false,
+            ..Default::default()
+        },
+    );
+    bp.add_ball(Ball {
+        id: ship_a,
+        type_id: 28_659,
+        position: DVec3::new(10_000.0, 0.0, 0.0),
+        velocity: DVec3::new(150.0, 0.0, 0.0),
+        max_velocity: 200.0,
+        inertia: 3.1,
+        mass: 12_500_000.0,
+        radius: 135.0,
+        speed_fraction: 0.75,
+        mode: MovementMode::GotoDirection { direction: DVec3::X },
+    });
+    bp.combat_states.insert(
+        ship_a,
+        CombatState {
+            shield_hp: 250.0,
+            max_shield_hp: 500.0,
+            armor_hp: 300.0,
+            max_armor_hp: 400.0,
+            structure_hp: 150.0,
+            max_structure_hp: 300.0,
+            warp_scramble_strength: 2,
+            warp_core_strength: 1,
+            ..CombatState::default()
+        },
+    );
+
+    bp.add_ball(Ball {
+        id: ship_b,
+        type_id: 587,
+        position: DVec3::new(12_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.insert(
+        ship_b,
+        CombatState {
+            is_cloaked: true,
+            is_tethered: true,
+            gate_cloak_remaining_ticks: 6,
+            ..CombatState::default()
+        },
+    );
+
+    bp.set_ball_slim_meta(
+        ship_c,
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: 90_003,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    );
+    bp.add_ball(Ball {
+        id: ship_c,
+        type_id: 587,
+        position: DVec3::new(13_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+
+    bp.add_warp_bubble(90_999, DVec3::new(50_000_000.0, 0.0, 0.0), 20_000.0);
+    bp.add_ball(Ball {
+        id: ship_d,
+        type_id: 587,
+        position: DVec3::new(50_005_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.insert(
+        ship_d,
+        CombatState {
+            max_shield_hp: 0.0,
+            shield_hp: 0.0,
+            max_armor_hp: 0.0,
+            armor_hp: 0.0,
+            max_structure_hp: 0.0,
+            structure_hp: 0.0,
+            ..CombatState::default()
+        },
+    );
+
+    bp.ball_group_ids.insert(shuttle_e, 31);
+    bp.add_ball(Ball {
+        id: shuttle_e,
+        type_id: 672,
+        position: DVec3::new(50_006_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 500.0,
+        inertia: 1.0,
+        mass: 800_000.0,
+        radius: 25.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+
+    bp.add_ball(Ball {
+        id: ship_f,
+        type_id: 28_606,
+        position: DVec3::new(15_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 100.0,
+        inertia: 5.0,
+        mass: 100_000_000.0,
+        radius: 300.0,
+        speed_fraction: 1.0,
+        mode: MovementMode::Stop,
+    });
+
+    bp.target_locks.insert(
+        ship_a,
+        vec![TargetLock {
+            target_id: ship_b,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        }],
+    );
+
+    let mut st = SystemActorState::default();
+    st.sim_elapsed_secs = 27.5;
+    st.active_module_cycles.push(ActiveModuleCycle {
+        ship_id: ship_a,
+        module_id: 1,
+        module_type_id: 33400,
+        effect_name: "bastion".into(),
+        ..ActiveModuleCycle::default()
+    });
+    st.active_module_cycles.push(ActiveModuleCycle {
+        ship_id: ship_b,
+        module_id: 2,
+        module_type_id: 27951,
+        effect_name: "triage".into(),
+        ..ActiveModuleCycle::default()
+    });
+    st.active_module_cycles.push(ActiveModuleCycle {
+        ship_id: ship_c,
+        module_id: 3,
+        module_type_id: 20280,
+        effect_name: "siege".into(),
+        ..ActiveModuleCycle::default()
+    });
+    st.active_module_cycles.push(ActiveModuleCycle {
+        ship_id: ship_f,
+        module_id: 4,
+        module_type_id: 28583,
+        effect_name: "industrialCore".into(),
+        ..ActiveModuleCycle::default()
+    });
+    st.active_module_cycles.push(ActiveModuleCycle {
+        ship_id: ship_d,
+        module_id: 5,
+        module_type_id: 4383,
+        effect_name: "microJumpDrive".into(),
+        mjd_jump_distance_m: Some(100_000.0),
+        ..ActiveModuleCycle::default()
+    });
+
+    let view = SystemView::from_ballpark(&bp, Some(&st), 0.5, None);
+    assert_eq!(view.solar_system_id, 30_000_142);
+    assert_eq!(view.current_tick, 42);
+    assert_eq!(view.sim_unix_secs, 1_700_000_123);
+    assert!((view.tidi_factor - 0.5).abs() < 1e-12);
+    assert!((view.sim_elapsed_secs - 27.5).abs() < 1e-12);
+
+    assert!(view.contains_ball(ship_a));
+    assert!(view.is_static_ball(planet_id));
+    assert!(!view.is_static_ball(ship_a));
+    assert_eq!(view.ball_position(ship_a), Some(DVec3::new(10_000.0, 0.0, 0.0)));
+    assert_eq!(view.ball_velocity(ship_a), Some(DVec3::new(150.0, 0.0, 0.0)));
+    assert!(matches!(
+        view.movement_mode(ship_a),
+        Some(MovementMode::GotoDirection { .. })
+    ));
+    assert!((view.ball(ship_a).unwrap().mass - 12_500_000.0).abs() < 1e-6);
+    assert!((view.ball(ship_a).unwrap().radius - 135.0).abs() < 1e-6);
+    assert_eq!(view.group_id(ship_a), Some(900));
+    assert_eq!(view.owner_id(ship_a), Some(90_001));
+    assert_eq!(view.corp_id(ship_a), Some(98_001));
+    assert_eq!(view.alliance_id(ship_a), Some(99_001));
+
+    let fracs = view.damage_fractions(ship_a).unwrap();
+    assert_eq!(
+        fracs,
+        BallDamageFractions {
+            shield: 0.5,
+            armor: 0.75,
+            structure: 0.5,
+        }
+    );
+    let zero_fracs = view.damage_fractions(ship_d).unwrap();
+    assert_eq!(
+        zero_fracs,
+        BallDamageFractions {
+            shield: 0.0,
+            armor: 0.0,
+            structure: 0.0,
+        }
+    );
+
+    assert!(view.is_ball_scrambled(ship_a));
+    assert!(view.is_ball_scrambled(ship_d));
+    assert!(view.is_ball_warp_disrupted(ship_d));
+    assert!(!view.is_ball_warp_disrupted(ship_a));
+    assert!(!view.is_ball_scrambled(shuttle_e));
+    assert!(!view.is_ball_warp_disrupted(shuttle_e));
+
+    assert!(view.is_ball_cloaked(ship_b));
+    assert!(view.is_ball_cloaked(ship_c));
+    assert!(view.is_gate_cloaked(ship_b));
+    assert!(view.is_ball_tethered(ship_b));
+    assert!(view.is_ball_invulnerable(ship_b));
+    assert!(!view.is_ball_tethered(ship_a));
+    assert!(!view.is_ball_invulnerable(ship_a));
+
+    assert!(view.has_active_module(ship_a));
+    assert!(view.has_active_bastion(ship_a));
+    assert!(view.has_active_triage(ship_b));
+    assert!(view.has_active_siege(ship_c));
+    assert!(view.has_active_industrial_core(ship_f));
+    assert!(view.has_active_microjump(ship_d));
+
+    assert!(view.is_ball_targeted(ship_b));
+    assert!(!view.is_ball_targeted(ship_a));
+    assert_eq!(view.targeters_of(ship_b).collect::<Vec<_>>(), vec![ship_a]);
+
+    assert_eq!(view.bubble_id_for_ball(ship_a), bp.bubble_id_for_ball(ship_a));
+    let obs_gid = view.bubble_id_for_ball(ship_a).unwrap();
+    assert!(view.grid_bubble(obs_gid).is_some());
+    let expected_vis: Vec<i64> = bp
+        .visible_balls_for_observer(ship_a)
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    let got_vis: Vec<i64> = view
+        .visible_balls_for_observer(ship_a)
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    assert_eq!(got_vis, expected_vis);
+    let expected_dyn: Vec<i64> = bp
+        .dynamic_balls_in_bubble(ship_a)
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    let got_dyn: Vec<i64> = view
+        .dynamic_balls_in_bubble(ship_a)
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    assert_eq!(got_dyn, expected_dyn);
+
+    // Passing actor_state = None preserves prior active-module flags and sim_elapsed_secs
+    let preserved = SystemView::from_ballpark(&bp, None, 0.5, Some(&view));
+    assert!(preserved.has_active_bastion(ship_a));
+    assert!(preserved.has_active_triage(ship_b));
+    assert!(preserved.has_active_siege(ship_c));
+    assert!(preserved.has_active_industrial_core(ship_f));
+    assert!(preserved.has_active_microjump(ship_d));
+    assert!((preserved.sim_elapsed_secs - 27.5).abs() < 1e-12);
+}

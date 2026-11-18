@@ -996,26 +996,13 @@ pub async fn handle_hub_and_scan(
                 DVec3::ZERO
             };
 
-            let mut cloaked_balls: std::collections::HashSet<i64> = std::collections::HashSet::new();
-            if let Ok(bp) = handle.ballpark.read() {
-                for (&bid, cs) in &bp.combat_states {
-                    if cs.is_cloaked {
-                        cloaked_balls.insert(bid);
-                    }
-                }
-                for (&bid, sm) in &bp.ball_slim_meta {
-                    if sm.is_cloaked {
-                        cloaked_balls.insert(bid);
-                    }
-                }
-            }
-
             let cos_half = (scan_angle_rad * 0.5).cos();
             let check_cone = scan_angle_rad < std::f64::consts::TAU && dir_vec_opt.is_some();
             let all_balls = handle.list_balls().await.unwrap_or_default();
+            let view = handle.view();
             let mut results = Vec::new();
             for b in all_balls {
-                if Some(b.id) == session.ship_id || cloaked_balls.contains(&b.id) {
+                if Some(b.id) == session.ship_id || view.is_ball_cloaked(b.id) {
                     continue;
                 }
                 let offset = b.position - ship_pos;

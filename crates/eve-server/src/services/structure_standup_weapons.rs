@@ -202,14 +202,12 @@ fn resolve_victim_owner(ctx: &ServerContext, sys_handle: &SystemHandle, ball_id:
                     .filter(|oid| snap.characters.contains_key(oid))
             })
     }).or_else(|| {
-        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-        let meta = bp.ball_slim_meta.get(&ball_id)?;
+        let view = sys_handle.view();
+        let meta = view.ball_slim_meta.get(&ball_id)?;
         meta.char_id.filter(|cid| ctx.db.with_snapshot(|s| s.characters.contains_key(cid)))
     });
     let is_sub = sys_handle
-        .ballpark
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+        .view()
         .ball_slim_meta
         .get(&ball_id)
         .is_some_and(|m| matches!(m.category_id, 18 | 87));

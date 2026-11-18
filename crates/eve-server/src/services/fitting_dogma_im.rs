@@ -1390,21 +1390,11 @@ pub(crate) async fn handle_dogma_im(
             if session.station_id.is_none() && session.structure_id.is_none() {
                 if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                     let sys = ctx.systems.get_or_spawn(sys_id);
-                    let targeter_ids: Vec<PyRep> = {
-                        let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-                        bp.target_locks
-                            .iter()
-                            .filter_map(|(&source_id, locks)| {
-                                if source_id != ship_id
-                                    && locks.iter().any(|l| l.target_id == ship_id)
-                                {
-                                    Some(PyRep::Integer(source_id))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    };
+                    let view = sys.view();
+                    let targeter_ids: Vec<PyRep> = view
+                        .targeters_of(ship_id)
+                        .map(PyRep::Integer)
+                        .collect();
                     return Some(Ok(PyRep::List(targeter_ids)));
                 }
             }
