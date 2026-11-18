@@ -1041,3 +1041,319 @@ async fn destroy_skyhooks_rejects_zero_or_damaged_hp_prunes_mto_and_reconciles_w
         "expected flushed workforce StateChangedNotice, got {notice_urls:?}"
     );
 }
+
+#[tokio::test]
+async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
+    use crate::services::sov_gameplay::sov_gameplay_skyhook::{
+        SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP,
+    };
+    use crate::services::sov_gameplay::TYPE_MERCENARY_DEN;
+    use eve_db::durable_domain_types::PersistedSovHubData;
+    use eve_db::{
+        corp_roles, AllianceRecord, CharacterRecord, CorporationRecord, PersistedMercenaryDen,
+        UpwellStructureRecord,
+    };
+
+    let ctx = test_ctx();
+    let sys_id: u32 = 30_000_669; // N3-JBX
+    let planet_id = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .iter()
+        .find(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .unwrap_or(40_042_501);
+    let corp_id: i64 = 98_910_001;
+    let alliance_id: i64 = 99_910_001;
+    let char_id: i64 = 2_119_100_001;
+
+    // Seed older Destroyed tombstones BEFORE anchoring live structures at smaller IDs so HashMap/BTree
+    // scans would hit the tombstones if `!destroyed` filtering were omitted.
+    let old_skyhook_id: i64 = 1_091_000_001;
+    let live_skyhook_id: i64 = 1_091_000_002;
+    let old_hub_id: i64 = 1_091_000_010;
+    let live_hub_id: i64 = 1_091_000_011;
+    let den_id: i64 = 1_091_000_020;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            char_id,
+            CharacterRecord {
+                character_id: char_id,
+                user_id: char_id as u64,
+                name: "Sov Director".into(),
+                corporation_id: corp_id,
+                alliance_id: Some(alliance_id),
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+        let mut corp = CorporationRecord {
+            corporation_id: corp_id,
+            name: "Sov Test Corp".into(),
+            ticker: "STC".into(),
+            ceo_id: char_id,
+            alliance_id: Some(alliance_id),
+            members: [char_id].into_iter().collect(),
+            ..Default::default()
+        };
+        corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+        snap.alliances.insert(
+            alliance_id,
+            AllianceRecord {
+                alliance_id,
+                name: "Sov Test Alliance".into(),
+                short_name: "STA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+            },
+        );
+        snap.system_states.entry(sys_id).or_default().sov_alliance_id = Some(alliance_id);
+
+        snap.structures.insert(
+            old_skyhook_id,
+            UpwellStructureRecord {
+                structure_id: old_skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Old Destroyed Skyhook".into(),
+                state: "Destroyed".into(),
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            live_skyhook_id,
+            UpwellStructureRecord {
+                structure_id: live_skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Live Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                shield_hp: SKYHOOK_BASE_SHIELD_HP,
+                armor_hp: SKYHOOK_BASE_ARMOR_HP,
+                hull_hp: SKYHOOK_BASE_HULL_HP,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(old_skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_planets.insert(live_skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_reagents.insert(live_skyhook_id, (81_143, 250));
+        snap.sov_runtime.mercenary_den_tax_pct.insert(live_skyhook_id, 15);
+
+        snap.structures.insert(
+            old_hub_id,
+            UpwellStructureRecord {
+                structure_id: old_hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Old Destroyed Hub".into(),
+                state: "Destroyed".into(),
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 0.0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            live_hub_id,
+            UpwellStructureRecord {
+                structure_id: live_hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Live Hub".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            live_hub_id,
+            PersistedSovHubData {
+                hub_id: live_hub_id,
+                ..Default::default()
+            },
+        );
+
+        snap.structures.insert(
+            den_id,
+            UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_corp_id: 98_910_099,
+                solar_system_id: sys_id,
+                name: "Attached MercDen".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_char_id: 2_119_100_099,
+                skyhook_id: live_skyhook_id,
+                solar_system_id: sys_id,
+                planet_id,
+                enabled: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Hub resolution, fuel ACL check, and SetSovHubFuelAccessGroup reject destroyed tombstone and match live hub.
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            resolve_sov_hub_id(snap, Some(i64::from(sys_id)), None),
+            Some(live_hub_id)
+        );
+        assert_eq!(resolve_sov_hub_id(snap, None, Some(sys_id)), Some(live_hub_id));
+        assert!(!can_access_sov_hub_fuel(
+            snap,
+            old_hub_id,
+            char_id,
+            corp_id,
+            Some(alliance_id),
+            0,
+            false
+        ));
+        assert!(can_access_sov_hub_fuel(
+            snap,
+            live_hub_id,
+            char_id,
+            corp_id,
+            Some(alliance_id),
+            0,
+            false
+        ));
+    });
+
+    let mut sess = sov_session(char_id, corp_id, sys_id, None);
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    let kw = std::collections::HashMap::new();
+
+    let old_hub_err = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "SetSovHubFuelAccessGroup",
+        &[PyRep::Integer(old_hub_id), PyRep::Integer(42)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(old_hub_err.code, "CorpRoleDenied");
+
+    let set_live_res = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "SetSovHubFuelAccessGroup",
+        &[PyRep::Integer(i64::from(sys_id)), PyRep::Integer(42)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(set_live_res, PyRep::Integer(42));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.sov_runtime.fuel_access_groups.get(&live_hub_id), Some(&42));
+        assert!(!snap.sov_runtime.fuel_access_groups.contains_key(&old_hub_id));
+    });
+
+    // 2. GetMyCorporationSkyhooks returns only the live Skyhook (not the destroyed tombstone).
+    let my_skyhooks = handle(
+        &ctx,
+        &mut sess,
+        "colonyResourcesMgr",
+        "GetMyCorporationSkyhooks",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::List(rows) = my_skyhooks else {
+        panic!("expected list from GetMyCorporationSkyhooks");
+    };
+    assert_eq!(rows.len(), 1);
+    let PyRep::KeyVal(kv) = &rows[0] else {
+        panic!("expected KeyVal skyhook row");
+    };
+    assert!(kv
+        .iter()
+        .any(|(k, v)| k == "skyhookID" && *v == PyRep::Integer(live_skyhook_id)));
+
+    // 3. map.GetCurrentSovData returns live_hub_id (ignoring old_hub_id tombstone).
+    let sov_data = handle(&ctx, &mut sess, "map", "GetCurrentSovData", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let PyRep::List(sov_rows) = sov_data else {
+        panic!("expected list from GetCurrentSovData");
+    };
+    let sys_entry = sov_rows
+        .iter()
+        .find_map(|r| match r {
+            PyRep::KeyVal(fields)
+                if fields
+                    .iter()
+                    .any(|(k, v)| k == "solarSystemID" && *v == PyRep::Integer(i64::from(sys_id))) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .expect("expected sov row for sys_id");
+    assert!(sys_entry
+        .iter()
+        .any(|(k, v)| k == "infrastructureHubID" && *v == PyRep::Integer(live_hub_id)));
+
+    // 4. DestroySkyhooks succeeds cleanly (`== 1`) instead of failing on the 0 HP destroyed tombstone.
+    let destroy_res = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "DestroySkyhooks",
+        &[PyRep::Integer(i64::from(sys_id))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(destroy_res, PyRep::Integer(1));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&live_skyhook_id));
+        assert_eq!(
+            snap.structures.get(&old_skyhook_id).map(|s| s.state.as_str()),
+            Some("Destroyed")
+        );
+        assert_eq!(snap.structures[&den_id].state, "Destroyed");
+        assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_id));
+        assert!(!snap.sov_runtime.mercenary_den_tax_pct.contains_key(&live_skyhook_id));
+    });
+
+    let after_skyhooks = handle(
+        &ctx,
+        &mut sess,
+        "colonyResourcesMgr",
+        "GetMyCorporationSkyhooks",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(after_skyhooks, PyRep::List(Vec::new()));
+}

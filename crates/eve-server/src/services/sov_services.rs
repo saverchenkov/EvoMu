@@ -82,7 +82,11 @@ pub(crate) fn resolve_sov_hub_id(
             if let Some((&hid, _)) = snap
                 .structures
                 .iter()
-                .find(|(_, s)| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+                .find(|(_, s)| {
+                    s.solar_system_id == sys_id
+                        && s.type_id == TYPE_SOVEREIGNTY_HUB
+                        && !s.state.eq_ignore_ascii_case("destroyed")
+                })
             {
                 return Some(hid);
             }
@@ -92,7 +96,11 @@ pub(crate) fn resolve_sov_hub_id(
     let sys_id = session_sys?;
     snap.structures
         .iter()
-        .find(|(_, s)| s.solar_system_id == sys_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+        .find(|(_, s)| {
+            s.solar_system_id == sys_id
+                && s.type_id == TYPE_SOVEREIGNTY_HUB
+                && !s.state.eq_ignore_ascii_case("destroyed")
+        })
         .map(|(&hid, _)| hid)
 }
 
@@ -115,7 +123,7 @@ pub(crate) fn can_access_sov_hub_fuel(
     let Some(st) = snap
         .structures
         .get(&hub_id)
-        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
+        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && !s.state.eq_ignore_ascii_case("destroyed"))
     else {
         return false;
     };
@@ -451,7 +459,7 @@ pub async fn handle(
                 }
                 snap.structures
                     .get(&hub_id)
-                    .map(|st| st.owner_corp_id == corp_id)
+                    .map(|st| !st.state.eq_ignore_ascii_case("destroyed") && st.owner_corp_id == corp_id)
                     .unwrap_or(false)
             });
             if !is_corp_director {
@@ -587,6 +595,7 @@ pub async fn handle(
                         s.solar_system_id == sys_id
                             && s.type_id == TYPE_ORBITAL_SKYHOOK
                             && s.owner_corp_id == char_corp
+                            && !s.state.eq_ignore_ascii_case("destroyed")
                     })
                     .map(|s| {
                         (
@@ -633,7 +642,7 @@ pub async fn handle(
                         });
                     }
                 }
-                let (skyhook_ids, removed_den_ids, removed_mto_balls) = if targets.is_empty() {
+                let (skyhook_ids, removed_dens, removed_mto_balls) = if targets.is_empty() {
                     (Vec::new(), Vec::new(), Vec::new())
                 } else {
                     super::quasar_sov_workforce::with_system_hub_network_reconcile::<_, BridgeRpcError>(
@@ -644,36 +653,24 @@ pub async fn handle(
                         now_unix,
                         |snap| {
                             let mut skyhook_ids = Vec::with_capacity(targets.len());
-                            let mut removed_den_ids = Vec::new();
+                            let mut removed_dens = Vec::new();
                             let mut removed_mto_balls = Vec::new();
                             for (sid, _, _, _, _, _) in targets {
                                 snap.structures.remove(&sid);
-                                crate::services::sov_gameplay::cleanup_destroyed_skyhook_in_snap(snap, sid);
-                                snap.sov_runtime.mercenary_den_tax_pct.remove(&sid);
-                                let den_ids: Vec<i64> = snap
-                                    .sov_runtime
-                                    .mercenary_dens
-                                    .values()
-                                    .filter(|md| md.skyhook_id == sid)
-                                    .map(|md| md.den_id)
-                                    .collect();
-                                for did in den_ids {
-                                    let (_, mut balls) =
-                                        super::quasar_sov_mercden::cleanup_destroyed_mercenary_den_in_snap(
-                                            snap, did,
-                                        );
-                                    removed_den_ids.push(did);
-                                    removed_mto_balls.append(&mut balls);
-                                }
+                                let mut cleanup = crate::services::sov_gameplay::cleanup_skyhook_and_attached_dens_in_snap(
+                                    snap, sid,
+                                );
+                                removed_dens.append(&mut cleanup.removed_dens);
+                                removed_mto_balls.append(&mut cleanup.removed_mto_balls);
                                 skyhook_ids.push(sid);
                             }
-                            Ok((skyhook_ids, removed_den_ids, removed_mto_balls))
+                            Ok((skyhook_ids, removed_dens, removed_mto_balls))
                         },
                     )?
                 };
-                Ok::<_, BridgeRpcError>((skyhook_ids, removed_den_ids, removed_mto_balls))
+                Ok::<_, BridgeRpcError>((skyhook_ids, removed_dens, removed_mto_balls))
             });
-            let (destroyed_ids, removed_den_ids, removed_mto_balls) = match destroy_res {
+            let (destroyed_ids, removed_dens, removed_mto_balls) = match destroy_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -682,15 +679,29 @@ pub async fn handle(
                 for &sid in &destroyed_ids {
                     let _ = sys_handle.remove_ball(sid).await;
                 }
-                for &did in &removed_den_ids {
+                for &(did, owner_cid) in &removed_dens {
                     let _ = sys_handle.remove_ball(did).await;
+                    if owner_cid > 0 {
+                        ctx.emit_typed(
+                            NotificationTarget::Character(owner_cid),
+                            crate::router::notify_registry::OnMyMercenaryDenRemoved {
+                                notify_msg: "MercenaryDenRemoved".to_string(),
+                                notify_args: PyRep::Dict(vec![(
+                                    PyRep::String("itemID".into()),
+                                    PyRep::Integer(did),
+                                )]),
+                            },
+                        );
+                    }
                 }
                 for &bid in &removed_mto_balls {
                     let _ = sys_handle.remove_ball(bid).await;
                 }
             }
 
-            emit_sov_structures_updated(ctx, sys_id, &destroyed_ids);
+            let mut sov_updated_ids = destroyed_ids.clone();
+            sov_updated_ids.extend(removed_dens.iter().map(|(did, _)| *did));
+            emit_sov_structures_updated(ctx, sys_id, &sov_updated_ids);
             crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now_unix);
             Some(Ok(PyRep::Integer(destroyed_ids.len() as i64)))
         }
@@ -704,7 +715,11 @@ pub async fn handle(
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 snap.structures
                     .values()
-                    .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == corp_id)
+                    .filter(|s| {
+                        s.type_id == TYPE_ORBITAL_SKYHOOK
+                            && s.owner_corp_id == corp_id
+                            && !s.state.eq_ignore_ascii_case("destroyed")
+                    })
                     .map(|s| {
                         let reagents = snap
                             .sov_runtime
@@ -851,6 +866,7 @@ pub async fn handle(
                                 .find(|s| {
                                     s.solar_system_id == sys_id
                                         && (s.type_id == TYPE_SOVEREIGNTY_HUB || s.type_id == 32226)
+                                        && !s.state.eq_ignore_ascii_case("destroyed")
                                 })
                                 .map(|s| s.structure_id);
                             let corp_id = snap

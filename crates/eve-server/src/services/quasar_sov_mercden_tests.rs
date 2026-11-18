@@ -722,3 +722,302 @@ fn mercenary_den_anarchy_evolution_admin_modify_and_complete_reconcile_workforce
         .iter()
         .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
 }
+
+#[tokio::test]
+async fn vuln_end_recovery_reenables_mercenary_den_and_reconciles_workforce_export_cascade() {
+    use crate::services::quasar_sov_hub::{
+        all_upgrade_definitions, compute_hub_resources, max_exportable_workforce, system_yield,
+        UpgradeDefinition,
+    };
+    use crate::services::quasar_sov_workforce::{exported_amount, imports};
+    use crate::services::sov_gameplay::{
+        flush_pending_quasar, tick_mercenary_den_reinforcements_in_snap_with_sde,
+        TYPE_MERCENARY_DEN,
+    };
+    use crate::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
+    use eve_db::durable_domain_types::{PersistedHubUpgrade, PersistedSovHubData};
+    use eve_db::{PersistedMercenaryDen, PersistedWorkforceMode, UpwellStructureRecord};
+
+    let sde = shared_sde();
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = crate::router::ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+
+    let sys_a: u32 = 30_000_669; // N3-JBX
+    let sys_b: u32 = 30_000_671; // GN-PDU (1 jump)
+    let corp_id: i64 = 98_770_001;
+    let hub_a: i64 = 1_097_700_001;
+    let hub_b: i64 = 1_097_700_002;
+    let skyhook_a: i64 = 1_097_700_010;
+    let den_id: i64 = 1_097_700_020;
+    let t0 = ctx.now_unix();
+
+    let mut sess_a = eve_machonet::SessionState::new(7_700_001);
+    sess_a.solar_system_id = Some(sys_a);
+    let mut rx_a = ctx.quasar_gateway.subscribe_session(&sess_a, Vec::new(), t0);
+    let mut sess_b = eve_machonet::SessionState::new(7_700_002);
+    sess_b.solar_system_id = Some(sys_b);
+    let mut rx_b = ctx.quasar_gateway.subscribe_session(&sess_b, Vec::new(), t0);
+    let reinf_until = t0 + 100;
+    let vuln_end = t0 + 500;
+
+    let (planet_wf_id, planet_wf) = sde
+        .celestials_in_system_slice(sys_a)
+        .iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| (c.celestial_id, crate::services::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius).1))
+        .max_by_key(|&(_, wf)| wf)
+        .expect("SYS_A must contain a workforce planet");
+    assert!(planet_wf >= 500, "expected positive workforce planet, got {planet_wf}");
+
+    let sys_a_power: u64 = {
+        let y = system_yield(&sde, sys_a);
+        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
+    };
+    let sys_b_power: u64 = {
+        let y = system_yield(&sde, sys_b);
+        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
+    };
+
+    let expected_disrupted_planet = planet_wf - (planet_wf * anarchy_workforce_disruption_pct(5)) / 100;
+    // Optional local upgrade on Hub A whose demand stays strictly covered even under Stage 5 disruption.
+    let defs: Vec<UpgradeDefinition> = all_upgrade_definitions(&sde);
+    let hub_a_local = defs
+        .iter()
+        .find(|d| {
+            d.workforce_produced == 0
+                && d.workforce_required > 0
+                && d.workforce_required <= expected_disrupted_planet
+                && d.power_required <= sys_a_power
+                && d.fuel_type == 0
+        })
+        .cloned();
+    let hub_a_local_wf = hub_a_local.as_ref().map(|d| d.workforce_required).unwrap_or(0);
+    let hub_a_max_disabled = planet_wf - hub_a_local_wf;
+    let hub_a_max_enabled = expected_disrupted_planet - hub_a_local_wf;
+    assert!(
+        hub_a_max_enabled < hub_a_max_disabled,
+        "expected Stage 5 Den to reduce Hub A max export ({hub_a_max_enabled} < {hub_a_max_disabled})"
+    );
+
+    let hub_b_upg = defs
+        .iter()
+        .find(|d| {
+            d.workforce_produced == 0
+                && d.workforce_required > hub_a_max_enabled
+                && d.workforce_required <= hub_a_max_disabled
+                && d.power_required <= sys_b_power
+        })
+        .cloned();
+    let hub_b_upgrades: Vec<UpgradeDefinition> = if let Some(u) = hub_b_upg {
+        vec![u]
+    } else {
+        // Fallback: pick two distinct exclusive-group upgrades whose combined workforce straddles the drop.
+        let mut chosen = Vec::new();
+        'outer: for (i, a) in defs.iter().enumerate() {
+            if a.workforce_produced > 0 || a.workforce_required == 0 || a.power_required > sys_b_power {
+                continue;
+            }
+            for b in defs.iter().skip(i + 1) {
+                if b.workforce_produced > 0
+                    || b.workforce_required == 0
+                    || (!a.exclusive_group.is_empty() && a.exclusive_group == b.exclusive_group)
+                {
+                    continue;
+                }
+                let tot_wf = a.workforce_required + b.workforce_required;
+                if a.power_required + b.power_required <= sys_b_power
+                    && tot_wf > hub_a_max_enabled
+                    && tot_wf <= hub_a_max_disabled
+                {
+                    chosen = vec![a.clone(), b.clone()];
+                    break 'outer;
+                }
+            }
+        }
+        assert!(!chosen.is_empty(), "expected SYS_B upgrades straddling [{hub_a_max_enabled}, {hub_a_max_disabled}]");
+        chosen
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (sid, hid, name) in [
+            (sys_a, hub_a, "Hub A"),
+            (sys_b, hub_b, "Hub B"),
+        ] {
+            snap.system_states.entry(sid).or_default().sov_alliance_id = Some(99_770_001);
+            snap.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sid,
+                    name: name.into(),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.structures.insert(
+            skyhook_a,
+            UpwellStructureRecord {
+                structure_id: skyhook_a,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_a,
+                name: "Skyhook A".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.skyhook_planets.insert(skyhook_a, planet_wf_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_a, true);
+
+        let mut fuel_b = std::collections::BTreeMap::new();
+        for u in &hub_b_upgrades {
+            if u.fuel_type > 0 {
+                fuel_b.insert(u.fuel_type, u.fuel_startup + u.fuel_per_hour * 100);
+            }
+        }
+        let upgrades_a = hub_a_local
+            .as_ref()
+            .map(|u| {
+                vec![PersistedHubUpgrade {
+                    type_id: u.type_id,
+                    online: true,
+                    low_power: false,
+                }]
+            })
+            .unwrap_or_default();
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                upgrades: upgrades_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: hub_a_max_disabled,
+                },
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                upgrades: hub_b_upgrades
+                    .iter()
+                    .map(|u| PersistedHubUpgrade {
+                        type_id: u.type_id,
+                        online: true,
+                        low_power: false,
+                    })
+                    .collect(),
+                fuel: fuel_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                last_updated_unix: t0,
+                ..Default::default()
+            },
+        );
+
+        // Mercenary Den has Stage 5 Anarchy (`100`) but is currently disabled in HullVulnerable
+        // waiting on `vuln_end`.
+        snap.structures.insert(
+            den_id,
+            UpwellStructureRecord {
+                structure_id: den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_corp_id: 98_770_099,
+                solar_system_id: sys_a,
+                name: "Vuln MercDen".into(),
+                state: "HullVulnerable".into(),
+                reinforced_until_unix: vuln_end,
+                shield_hp: 0.0,
+                armor_hp: 0.0,
+                hull_hp: 500.0,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.mercenary_dens.insert(
+            den_id,
+            PersistedMercenaryDen {
+                den_id,
+                type_id: TYPE_MERCENARY_DEN,
+                owner_char_id: 2_117_700_001,
+                skyhook_id: skyhook_a,
+                solar_system_id: sys_a,
+                planet_id: planet_wf_id,
+                enabled: false,
+                cargo_extraction_enabled: false,
+                development_level: 10,
+                anarchy_level: 100,
+                infomorphs: 0,
+                simulated_at_unix: t0,
+                next_activity_generation_unix: t0 + 3_600,
+            },
+        );
+        snap.sov_runtime
+            .mercenary_den_reinforcement
+            .insert(den_id, (reinf_until, vuln_end, 0));
+
+        assert_eq!(compute_hub_resources(snap, &sde, hub_a).unwrap().workforce_local, planet_wf);
+        assert_eq!(max_exportable_workforce(snap, &sde, hub_a), Some(hub_a_max_disabled));
+        assert_eq!(imports(snap, &sde, hub_b), vec![(sys_a, hub_a_max_disabled)]);
+    });
+
+    // When `vuln_end` expires, `tick_mercenary_den_reinforcements_in_snap_with_sde` re-enables the Den
+    // AND reconciles Hub A/Hub B workforce + exports + Quasar notices!
+    let pending: crate::services::quasar_sov_hub::PendingNotices = Default::default();
+    ctx.db.with_mut_snapshot(|snap| {
+        tick_mercenary_den_reinforcements_in_snap_with_sde(snap, Some(&sde), &pending, vuln_end);
+        assert!(snap.sov_runtime.mercenary_dens[&den_id].enabled);
+        assert_eq!(snap.structures[&den_id].state, "ShieldVulnerable");
+        assert_eq!(
+            compute_hub_resources(snap, &sde, hub_a).unwrap().workforce_local,
+            expected_disrupted_planet
+        );
+        assert_eq!(exported_amount(snap, hub_a), hub_a_max_enabled);
+        if hub_a_local.is_some() {
+            assert!(!snap.sov_runtime.sov_hubs[&hub_a].upgrades[0].low_power);
+        }
+        assert_eq!(imports(snap, &sde, hub_b), vec![(sys_a, hub_a_max_enabled)]);
+        assert!(
+            snap.sov_runtime.sov_hubs[&hub_b]
+                .upgrades
+                .last()
+                .expect("hub b upgrade")
+                .low_power
+        );
+    });
+    flush_pending_quasar(&ctx, &pending, vuln_end);
+
+    let mut urls_a = Vec::new();
+    while let Ok(n) = rx_a.try_recv() {
+        if let Some(p) = n.payload {
+            urls_a.push(p.type_url);
+        }
+    }
+    assert!(urls_a
+        .iter()
+        .any(|u| u.ends_with("mercenaryden.api.EvolutionStateChangedNotice")));
+    assert!(urls_a
+        .iter()
+        .any(|u| u.ends_with("workforce.api.StateChangedNotice")));
+    assert!(urls_a
+        .iter()
+        .any(|u| u.ends_with("hub.api.ResourcesSimulatedNotice")));
+
+    let mut urls_b = Vec::new();
+    while let Ok(n) = rx_b.try_recv() {
+        if let Some(p) = n.payload {
+            urls_b.push(p.type_url);
+        }
+    }
+    assert!(urls_b
+        .iter()
+        .any(|u| u.ends_with("upgrade.api.HubUpgradesSimulatedNotice")));
+}
