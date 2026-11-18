@@ -1558,3 +1558,34 @@ async fn handle_bridge_client_collapses_forged_bound_id_and_kicked_session_probe
     Ok(())
 }
 
+#[test]
+fn test_1172_partition_bridge_sys_rx_with_watermark_continuity() {
+    let mk = |seq: u64| TickBroadcast {
+        solar_system_id: 30_000_142,
+        tick: 100 + seq,
+        broadcast_seq: seq,
+        events: Vec::new(),
+        observer_events: BTreeMap::new(),
+        observer_updates_pyrep: BTreeMap::new(),
+    };
+
+    // Pre-watermark lag only -> pre=[3,4], post=[5,6], post_loss=false.
+    let (tx1, mut rx1) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=6_u64 {
+        let _ = tx1.send(mk(seq));
+    }
+    let (pre1, post1, loss1) = partition_bridge_sys_rx_with_watermark(&mut rx1, 4);
+    assert!(!loss1);
+    assert_eq!(pre1.iter().map(|t| t.broadcast_seq).collect::<Vec<_>>(), vec![3, 4]);
+    assert_eq!(post1.iter().map(|t| t.broadcast_seq).collect::<Vec<_>>(), vec![5, 6]);
+
+    // True post-watermark lag (seq 5 missing -> oldest retained 6 > 4 + 1) -> post_loss=true.
+    let (tx2, mut rx2) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=9_u64 {
+        let _ = tx2.send(mk(seq));
+    }
+    let (_pre2, post2, loss2) = partition_bridge_sys_rx_with_watermark(&mut rx2, 4);
+    assert!(loss2);
+    assert!(post2.is_empty());
+}
+

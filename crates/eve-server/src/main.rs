@@ -658,6 +658,72 @@ async fn write_bounded_frame<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Partition queued bridge `sys_rx` ticks around `watermark_seq`, preserving `> watermark_seq`
+/// ticks when `TryRecvError::Lagged` evicted only stale `<= watermark_seq` ticks (`#1172`).
+/// Returns `(pre_ticks, post_ticks, post_loss)`.
+fn partition_bridge_sys_rx_with_watermark(
+    sys_rx: &mut tokio::sync::broadcast::Receiver<eve_server::system_actor::TickBroadcast>,
+    watermark_seq: u64,
+) -> (
+    Vec<eve_server::system_actor::TickBroadcast>,
+    Vec<eve_server::system_actor::TickBroadcast>,
+    bool,
+) {
+    let mut pre_ticks = Vec::new();
+    let mut post_ticks = Vec::new();
+    let mut saw_post_watermark = false;
+    let mut pending_lag = false;
+    let mut post_loss = false;
+    loop {
+        match sys_rx.try_recv() {
+            Ok(tick_msg) => {
+                if post_loss {
+                    continue;
+                }
+                if pending_lag {
+                    if tick_msg.broadcast_seq == 0
+                        || tick_msg.broadcast_seq > watermark_seq.saturating_add(1)
+                    {
+                        post_ticks.clear();
+                        post_loss = true;
+                        pending_lag = false;
+                        continue;
+                    }
+                    pending_lag = false;
+                }
+                let is_pre =
+                    tick_msg.broadcast_seq == 0 || tick_msg.broadcast_seq <= watermark_seq;
+                if is_pre {
+                    pre_ticks.push(tick_msg);
+                } else {
+                    saw_post_watermark = true;
+                    post_ticks.push(tick_msg);
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                post_ticks.clear();
+                if saw_post_watermark {
+                    post_loss = true;
+                    pending_lag = false;
+                } else {
+                    pending_lag = true;
+                }
+            }
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => {
+                if pending_lag {
+                    post_ticks.clear();
+                    post_loss = true;
+                }
+                break;
+            }
+        }
+    }
+    (pre_ticks, post_ticks, post_loss)
+}
+
 /// Handles connections from the Python Client Bridge (`evomu_bridge.py`) using length-prefixed JSON.
 /// Uses a dedicated reader task feeding a cancel-safe `mpsc::channel` so 1 Hz `sys_rx` broadcast ticks
 /// inside `tokio::select!` can never cancel an in-flight `read_exact` call.
@@ -819,39 +885,40 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                 session.ship_id.or(prev_session.ship_id),
                             ) {
                                 let handle = ctx.systems.get_or_spawn(sys_id);
-                                if let Ok((tick, events, pyrep, watermark_seq)) =
+                                if let Ok((mut tick, mut events, mut pyrep, watermark_seq)) =
                                     handle.drain_observer_updates_with_seq(ship_id).await
                                 {
-                                    let mut post_ticks = Vec::new();
-                                    let mut lagged = false;
-                                    loop {
-                                        match sys_rx.try_recv() {
-                                            Ok(tick_msg) => {
-                                                if lagged {
-                                                    continue;
-                                                }
-                                                let is_pre = tick_msg.broadcast_seq == 0
-                                                    || tick_msg.broadcast_seq <= watermark_seq;
-                                                if !is_pre {
-                                                    post_ticks.push(tick_msg);
-                                                    continue;
-                                                }
-                                                emit_bridge_tick_envelope(
-                                                    &mut writer,
-                                                    &session,
-                                                    ship_id,
-                                                    &tick_msg,
-                                                )
-                                                .await;
-                                            }
-                                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
-                                                lagged = true;
-                                                post_ticks.clear();
-                                            }
-                                            Err(
-                                                tokio::sync::broadcast::error::TryRecvError::Empty
-                                                | tokio::sync::broadcast::error::TryRecvError::Closed,
-                                            ) => break,
+                                    let (pre_ticks, mut post_ticks, post_loss) =
+                                        partition_bridge_sys_rx_with_watermark(
+                                            &mut sys_rx,
+                                            watermark_seq,
+                                        );
+                                    if post_loss {
+                                        let _ = handle.push_set_state(ship_id).await;
+                                        if let Ok((t2, ev2, py2, seq2)) =
+                                            handle.drain_observer_updates_with_seq(ship_id).await
+                                        {
+                                            tick = t2;
+                                            events = ev2;
+                                            pyrep = py2;
+                                            let (_, p2, _) =
+                                                partition_bridge_sys_rx_with_watermark(
+                                                    &mut sys_rx,
+                                                    seq2,
+                                                );
+                                            post_ticks = p2;
+                                        } else {
+                                            post_ticks.clear();
+                                        }
+                                    } else {
+                                        for tick_msg in pre_ticks {
+                                            emit_bridge_tick_envelope(
+                                                &mut writer,
+                                                &session,
+                                                ship_id,
+                                                &tick_msg,
+                                            )
+                                            .await;
                                         }
                                     }
                                     if !events.is_empty() {

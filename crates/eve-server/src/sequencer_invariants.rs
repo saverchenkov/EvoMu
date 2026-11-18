@@ -333,6 +333,11 @@ impl SequencerGuardState {
             filtered.push(entry);
         }
 
+        const TOMBSTONE_RETENTION_WINDOW_TICKS: u32 = 64;
+        let retain_floor = frame_stamp.saturating_sub(TOMBSTONE_RETENTION_WINDOW_TICKS);
+        self.removed_tombstone_stamps
+            .retain(|_, &mut tomb| tomb >= retain_floor);
+
         let keep = !filtered.is_empty();
         match updates {
             PyRep::List(items) | PyRep::Tuple(items) => {
@@ -1438,5 +1443,37 @@ mod tests {
         ));
         assert!(materialized.contains(&9001));
         assert!(!gate.removed_tombstone_stamps.contains_key(&9001));
+
+        // Tombstones older than the 64-tick retention window must be pruned to bound growth.
+        let mut stale_rm = PyRep::List(vec![make_entry(
+            51,
+            "RemoveBalls",
+            vec![PyRep::List(vec![PyRep::Integer(9002)])],
+        )]);
+        assert!(!gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            51,
+            &mut stale_rm,
+            &mut events,
+        ));
+        assert_eq!(gate.removed_tombstone_stamps.get(&9002), Some(&51));
+        let mut noop_far = PyRep::List(vec![make_entry(
+            200,
+            "Stop",
+            vec![PyRep::Integer(501)],
+        )]);
+        assert!(gate.reconcile_destiny_updates_with_gate(
+            &mut materialized,
+            None,
+            79,
+            1,
+            200,
+            &mut noop_far,
+            &mut events,
+        ));
+        assert!(!gate.removed_tombstone_stamps.contains_key(&9002));
     }
 }

@@ -1806,3 +1806,368 @@ async fn test_1172_step_n_tick_broadcast_delivers_before_peer_set_state_n_plus_1
     );
 }
 
+#[test]
+fn test_1172_drain_sys_rx_discarding_up_to_seq_continuity_and_lag() {
+    use crate::system_actor::TickBroadcast;
+
+    let ctx = Arc::new(ServerContext::new());
+    let sys_id = 30_000_142_u32;
+    let ship_id = 895_201_i64;
+
+    let mk_tick = |tick: u64, broadcast_seq: u64| {
+        let ev = eve_destiny::DestinyEvent::SetSpeedFraction {
+            ball_id: ship_id,
+            fraction: 0.5,
+        };
+        let mut observer_updates_pyrep = std::collections::BTreeMap::new();
+        observer_updates_pyrep.insert(
+            ship_id,
+            PyRep::List(vec![eve_destiny::wire::encode_destiny_event(
+                tick as u32,
+                &ev,
+                None,
+            )]),
+        );
+        let mut observer_events = std::collections::BTreeMap::new();
+        observer_events.insert(ship_id, vec![ev]);
+        TickBroadcast {
+            solar_system_id: sys_id,
+            tick,
+            broadcast_seq,
+            events: Vec::new(),
+            observer_events,
+            observer_updates_pyrep,
+        }
+    };
+
+    // Case 1 (HF1172-02a): Lag evicted only pre-watermark <= watermark_seq messages, leaving
+    // earliest retained seq <= watermark_seq (buffer holds [3, 4, 5, 6] for watermark_seq = 4).
+    // Continuity at watermark_seq + 1 is intact; post-watermark ticks [5, 6] must be preserved.
+    let (tx1, mut rx1) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=6_u64 {
+        let _ = tx1.send(mk_tick(100 + seq, seq));
+    }
+    let mut post1 = Vec::new();
+    let loss1 = drain_sys_rx_discarding_up_to_seq(&ctx, &mut rx1, sys_id, &[ship_id], 1, 4, &mut post1);
+    assert!(
+        !loss1,
+        "pre-watermark lag leaving earliest seq <= watermark_seq must preserve post-watermark ticks"
+    );
+    assert_eq!(
+        post1.iter().map(|b| b.stamp).collect::<Vec<_>>(),
+        vec![105, 106]
+    );
+
+    // Case 2 (HF1172-02a boundary): Lag evicted 1..=4 exactly, leaving earliest retained seq ==
+    // watermark_seq + 1 (buffer holds [5, 6, 7, 8] for watermark_seq = 4). Zero post-watermark loss.
+    let (tx2, mut rx2) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=8_u64 {
+        let _ = tx2.send(mk_tick(200 + seq, seq));
+    }
+    let mut post2 = Vec::new();
+    let loss2 = drain_sys_rx_discarding_up_to_seq(&ctx, &mut rx2, sys_id, &[ship_id], 1, 4, &mut post2);
+    assert!(
+        !loss2,
+        "lag leaving earliest seq == watermark_seq + 1 has intact continuity"
+    );
+    assert_eq!(
+        post2.iter().map(|b| b.stamp).collect::<Vec<_>>(),
+        vec![205, 206, 207, 208]
+    );
+
+    // Case 3 (HF1172-02b): True post-watermark lag (seq 5 evicted; buffer holds [6, 7, 8, 9] for
+    // watermark_seq = 4) breaks continuity at watermark_seq + 1 -> must report true and clear.
+    let (tx3, mut rx3) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=9_u64 {
+        let _ = tx3.send(mk_tick(300 + seq, seq));
+    }
+    let mut post3 = Vec::new();
+    let loss3 = drain_sys_rx_discarding_up_to_seq(&ctx, &mut rx3, sys_id, &[ship_id], 1, 4, &mut post3);
+    assert!(loss3, "evicting watermark_seq + 1 must report post-watermark loss");
+    assert!(post3.is_empty(), "post_batches must be cleared on post-watermark loss");
+
+    // Case 4 (HF1172-02b boundary with watermark_seq == 0): seq 1 evicted -> earliest 2 > 0 + 1.
+    let (tx4, mut rx4) = tokio::sync::broadcast::channel(4);
+    for seq in 1..=5_u64 {
+        let _ = tx4.send(mk_tick(400 + seq, seq));
+    }
+    let mut post4 = Vec::new();
+    let loss4 = drain_sys_rx_discarding_up_to_seq(&ctx, &mut rx4, sys_id, &[ship_id], 1, 0, &mut post4);
+    assert!(loss4, "evicting seq 1 past watermark_seq == 0 must report post-watermark loss");
+    assert!(post4.is_empty());
+}
+
+#[tokio::test]
+async fn test_1172_caller_resyncs_when_drain_sys_rx_discarding_up_to_seq_reports_post_loss() {
+    use crate::outbound_sequencer::OutFrame;
+    use crate::router::client_wire::ClientWireSession;
+    use crate::sequencer_invariants::parse_destiny_entry;
+    use crate::system_actor::TickBroadcast;
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.session_change_timers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+
+    let sys_id = 30_000_142_u32;
+    let st_pos = ctx.sde.stations[&60_003_760_i64].position;
+    let ego_char_id = 90_000_001_i64;
+    let ego_ship = 895_301_i64;
+    let tayra_type_id = 649_u32;
+    let ego_pos = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+
+    let corp_id = ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = snap
+            .characters
+            .get_mut(&ego_char_id)
+            .map(|ch| {
+                ch.active_ship_id = ego_ship;
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.corporation_id
+            })
+            .expect("seeded character");
+        snap.items.insert(
+            ego_ship,
+            InventoryItemRecord {
+                item_id: ego_ship,
+                type_id: tayra_type_id,
+                owner_id: ego_char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        corp_id
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ego_ship,
+                type_id: tayra_type_id,
+                position: ego_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sess = SessionState::new(11_722);
+    sess.user_id = Some(1);
+    sess.character_id = Some(ego_char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ego_ship);
+    sess.live_notify_listener = true;
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(ego_char_id), true, ctx.now_unix_secs())
+        .unwrap();
+    ctx.sync_session(&mut sess);
+
+    let mut ego_wire = ClientWireSession::from_session(&ctx, sess);
+    // Simulate AwaitingSetState before first SetState arrives, with a stale SetState already
+    // queued on observer `ego_ship`, followed by >4096 post-watermark broadcasts overflowing sys_rx.
+    let ep = ego_wire.wire_state.current_epoch();
+    ego_wire.wire_state.destiny = DestinyStream::AwaitingSetState { epoch: ep };
+    let beyonce_bid = ctx
+        .bind_object(&ego_wire.session, "beyonce", sys_id as i64)
+        .expect("bind beyonce");
+    sys_handle.push_set_state(ego_ship).await.unwrap();
+
+    for seq in 2..=4_105_u64 {
+        let _ = sys_handle.event_tx.send(TickBroadcast {
+            solar_system_id: sys_id,
+            tick: seq,
+            broadcast_seq: seq,
+            events: Vec::new(),
+            observer_events: std::collections::BTreeMap::new(),
+            observer_updates_pyrep: std::collections::BTreeMap::new(),
+        });
+    }
+
+    let empty_kw = HashMap::new();
+    let rpc = ego_wire
+        .call_wire(
+            "beyonce",
+            Some(beyonce_bid),
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(0.5)],
+            &empty_kw,
+        )
+        .await;
+    assert!(rpc.rpc_result.is_ok(), "RPC failed: {:?}", rpc.rpc_result);
+    assert!(rpc.marshal_errors.is_empty(), "marshal errors: {:?}", rpc.marshal_errors);
+    assert!(
+        matches!(ego_wire.wire_state.destiny, DestinyStream::Live { .. }),
+        "stream must resync SetState and attach Live after post-watermark lag, got {:?}",
+        ego_wire.wire_state.destiny
+    );
+
+    let mut saw_resynced_set_state = false;
+    let mut actions = Vec::new();
+    for frame in &rpc.out_frames {
+        if let OutFrame::DoDestinyUpdate { updates, .. } = frame {
+            if let PyRep::List(entries) = updates {
+                for entry in entries {
+                    if let Some((_, action, _)) = parse_destiny_entry(entry) {
+                        if action == "SetState" {
+                            saw_resynced_set_state = true;
+                        }
+                        actions.push(action.to_string());
+                    }
+                }
+            }
+        }
+    }
+    assert!(saw_resynced_set_state, "resynced DoDestinyUpdate must contain SetState");
+    assert_eq!(
+        actions,
+        vec!["SetState".to_string()],
+        "resync after post_lagged must discard stale SetState+SetSpeedFraction snapshot and emit fresh SetState only"
+    );
+}
+
+#[tokio::test]
+async fn test_1172_notify_rx_ship_swap_broadcast_lagged_triggers_set_state_resync() {
+    use crate::outbound_sequencer::{
+        normalize_server_destiny_batch, sequence_tick_with_events, OutFrame, SessionWireState,
+    };
+    use crate::sequencer_invariants::parse_destiny_entry;
+    use crate::system_actor::TickBroadcast;
+    use eve_destiny::{Ball, CombatState, MovementMode};
+    use glam::DVec3;
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_142_u32;
+    let st_pos = ctx.sde.stations[&60_003_760_i64].position;
+    let old_ship = 895_401_i64;
+    let new_pod = 895_402_i64;
+    let tayra_type_id = 649_u32;
+    let pod_type_id = 670_u32;
+    let base_pos = st_pos + DVec3::new(500_000_000.0, 0.0, 0.0);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mk_ball = |id: i64, type_id: u32, offset_x: f64| Ball {
+        id,
+        type_id,
+        position: base_pos + DVec3::new(offset_x, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.0,
+        mass: 1_100_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    sys_handle
+        .spawn_ball_with_combat(mk_ball(old_ship, tayra_type_id, 0.0), CombatState::default())
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball_with_combat(mk_ball(new_pod, pod_type_id, 150.0), CombatState::default())
+        .await
+        .unwrap();
+    sys_handle.push_set_state(old_ship).await.unwrap();
+    let _ = sys_handle.drain_observer_updates(old_ship).await;
+
+    // Live session in the same solar system before ship swap (`is_live_same_system` initially true).
+    let mut sys_rx = sys_handle.subscribe();
+    let mut wire_state = SessionWireState::new(11_723, 911_723);
+    let ep = wire_state.enter_space(Some(sys_id));
+    wire_state.destiny = DestinyStream::Live {
+        epoch: ep,
+        set_state_stamp: 100,
+        last_stamp: 100,
+    };
+    wire_state.materialized.insert(old_ship);
+
+    // Queue an incremental handoff (RemoveBall + AddBalls2, i.e., `has_set_state == false`) onto
+    // `new_pod`, matching in-space pod ejection / ship swap prior to `notify_rx` firing.
+    assert!(
+        sys_handle.try_handoff_in_space_observer(old_ship, new_pod, &[new_pod]),
+        "handoff must queue incremental updates on new_pod"
+    );
+
+    // Overflow `sys_rx` past tokio broadcast capacity (4096) so the pre-watermark drain hits
+    // `TryRecvError::Lagged` and reverts `wire_state.destiny` to `AwaitingSetState`.
+    for seq in 1..=4_105_u64 {
+        let _ = sys_handle.event_tx.send(TickBroadcast {
+            solar_system_id: sys_id,
+            tick: seq,
+            broadcast_seq: seq,
+            events: Vec::new(),
+            observer_events: std::collections::BTreeMap::new(),
+            observer_updates_pyrep: std::collections::BTreeMap::new(),
+        });
+    }
+
+    let sync = sync_in_space_ship_swap_destiny(
+        &ctx,
+        &mut sys_rx,
+        &mut wire_state,
+        11_723,
+        sys_id,
+        new_pod,
+        Some(old_ship),
+        true,
+    )
+    .await
+    .expect("ship swap sync outcome");
+
+    assert!(
+        sync.pre_batches.is_empty(),
+        "lagged pre-watermark batches must be discarded"
+    );
+    let direct_batch = sync
+        .direct_batch
+        .expect("HF1172-01: lagged ship swap must synthesize a resync SetState batch");
+    assert!(
+        direct_batch.has_set_state,
+        "HF1172-01: resync direct batch must contain SetState when sys_rx lagged"
+    );
+
+    let mut emitted_set_state = false;
+    for sub in normalize_server_destiny_batch(&mut wire_state, direct_batch) {
+        let (frame_opt, _evs) = sequence_tick_with_events(&mut wire_state, sub);
+        if let Some(OutFrame::DoDestinyUpdate { updates, .. }) = frame_opt {
+            if let PyRep::List(entries) = updates {
+                for entry in &entries {
+                    if let Some((_, "SetState", _)) = parse_destiny_entry(entry) {
+                        emitted_set_state = true;
+                    }
+                }
+            }
+        }
+    }
+    for post in sync.post_batches {
+        for sub in normalize_server_destiny_batch(&mut wire_state, post) {
+            let _ = sequence_tick_with_events(&mut wire_state, sub);
+        }
+    }
+
+    assert!(emitted_set_state, "must emit DoDestinyUpdate(SetState) before SessionChange");
+    assert!(
+        matches!(wire_state.destiny, DestinyStream::Live { .. }),
+        "session must recover to Live rather than stranding in AwaitingSetState, got {:?}",
+        wire_state.destiny
+    );
+}
+
