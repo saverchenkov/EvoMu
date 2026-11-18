@@ -15,11 +15,10 @@ use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, EveInternalRequest, EveInternalResponse, EvePublicCharacterId, EvePublicEvent,
-    EvePublicNotice, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleEmpty, GoogleTimestamp,
-    InternalGatewayRequest, InternalGatewayResponse, NoticeTargetGroup, QuasarDescriptorRegistry,
-    QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, EveInternalRequest,
+    EveInternalResponse, EvePublicEvent, EvePublicNotice, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleEmpty, GoogleTimestamp, InternalGatewayRequest, InternalGatewayResponse,
+    NoticeTargetGroup, QuasarDescriptorRegistry, QuasarMessage, WireMessage,
 };
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
@@ -866,18 +865,16 @@ impl PublicGatewayRouter {
                     return Err((STATUS_UNAUTHORIZED, "Authenticated user required".to_string()));
                 };
                 let chars = db_chars.get_characters_for_user(uid as u64);
-                let mut out = Vec::new();
+                let mut resp =
+                    eve_proto::pb::message("eve_public.character.GetNamesByUserResponse");
                 for ch in chars {
-                    let mut entry = Vec::new();
-                    let cid = EvePublicCharacterId { sequential: ch.character_id as u32 };
-                    encode_bytes_field(1, &cid.encode_proto(), &mut entry);
-                    encode_string_field(2, &ch.name, &mut entry);
-                    encode_bytes_field(1, &entry, &mut out);
+                    resp = resp.add_with("characters", |entry| {
+                        entry
+                            .set("identifier.sequential", ch.character_id as u32)
+                            .set("name", ch.name.as_str())
+                    });
                 }
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.GetNamesByUserResponse"),
-                    value: out,
-                })
+                resp.to_any().map_err(pb_err_to_internal)
             }),
         );
 

@@ -270,6 +270,99 @@ fn pb_builder_rejects_unknown_message_and_wire_mismatches() {
 }
 
 #[test]
+fn pb_builder_rejects_nested_and_builder_descriptor_mismatches() {
+    // DynamicQuasarMessage with wrong full_name rejected on Message field
+    let wrong_dyn = DynamicQuasarMessage::new("eve_public.ui.Annotation");
+    let err = message("eve_public.career.goal.api.GetAllResponse.Goal")
+        .set("goal", wrong_dyn)
+        .encode()
+        .expect_err("mismatched DynamicQuasarMessage type must fail");
+    match &err {
+        PbError::MessageTypeMismatch {
+            expected_type,
+            actual_type,
+            ..
+        } => {
+            assert_eq!(expected_type, "eve_public.career.goal.Identifier");
+            assert_eq!(actual_type, "eve_public.ui.Annotation");
+        }
+        other => panic!("expected MessageTypeMismatch, got {other:?}"),
+    }
+
+    // set_with on non-message field, add_with on singular field, set_with on repeated field
+    let err = message("eve_public.career.goal.api.GetAllResponse.Goal")
+        .set_with("progress", |b| b)
+        .encode()
+        .expect_err(".set_with() on scalar field must fail");
+    assert!(matches!(err, PbError::TypeMismatch { .. }));
+
+    let err = message("eve_public.career.goal.api.GetAllResponse.Goal")
+        .add_with("goal", |b| b)
+        .encode()
+        .expect_err(".add_with() on singular message field must fail");
+    assert!(matches!(err, PbError::SingularFieldForAdd { .. }));
+
+    let err = message("eve_public.career.goal.api.GetAllResponse.Goal")
+        .set_with("reward_label_states", |b| b)
+        .encode()
+        .expect_err(".set_with() on repeated message field must fail");
+    assert!(matches!(err, PbError::RepeatedFieldNeedsAddOrList { .. }));
+
+    // eve_public.character.GetNamesByUserResponse descriptor validation & wire parity
+    let typo_err = message("eve_public.character.GetNamesByUserResponse")
+        .add_with("characters", |c| c.set("identifier.typo", 1u32))
+        .encode()
+        .expect_err("misspelled nested field inside .add_with() must fail");
+    match &typo_err {
+        PbError::UnknownField {
+            message_type,
+            field,
+            valid_fields,
+        } => {
+            assert_eq!(message_type, "eve_public.character.Identifier");
+            assert_eq!(field, "typo");
+            assert_eq!(valid_fields, &vec!["sequential".to_string()]);
+        }
+        other => panic!("expected UnknownField, got {other:?}"),
+    }
+
+    let type_err = message("eve_public.character.GetNamesByUserResponse")
+        .add_with("characters", |c| c.set("identifier.sequential", "not-a-u32"))
+        .encode()
+        .expect_err("string on uint32 sequential field must fail");
+    assert!(matches!(type_err, PbError::TypeMismatch { .. }));
+
+    let name_err = message("eve_public.character.GetNamesByUserResponse")
+        .add_with("characters", |c| c.set("name", 123u32))
+        .encode()
+        .expect_err("uint32 on string name field must fail");
+    assert!(matches!(name_err, PbError::TypeMismatch { .. }));
+
+    let rep_err = message("eve_public.character.GetNamesByUserResponse")
+        .set("characters", "not-a-list")
+        .encode()
+        .expect_err(".set() with scalar on repeated characters field must fail");
+    assert!(matches!(rep_err, PbError::RepeatedFieldNeedsAddOrList { .. }));
+
+    // Byte-exact wire parity for eve_public.character.GetNamesByUserResponse
+    let built = message("eve_public.character.GetNamesByUserResponse")
+        .add_with("characters", |c| {
+            c.set("identifier.sequential", 90_000_001u32)
+                .set("name", "PilotOne")
+        })
+        .encode()
+        .expect("encode GetNamesByUserResponse");
+    let mut expected_id = Vec::new();
+    encode_varint_field(1, 90_000_001u64, &mut expected_id);
+    let mut expected_entry = Vec::new();
+    encode_bytes_field(1, &expected_id, &mut expected_entry);
+    encode_string_field(2, "PilotOne", &mut expected_entry);
+    let mut expected = Vec::new();
+    encode_bytes_field(1, &expected_entry, &mut expected);
+    assert_eq!(built, expected);
+}
+
+#[test]
 fn raw_encode_field_source_counter_ignores_comments_and_strings() {
     let src = r##"
         // encode_varint_field(1, 0, &mut out);
@@ -291,16 +384,36 @@ fn raw_encode_field_source_counter_ignores_comments_and_strings() {
 fn raw_encode_field_ratchet_enforced_on_eve_server_src() {
     let ratchet = RawEncodeFieldRatchet::load_default()
         .expect("load crates/eve-proto/ratchets/raw_encode_field_ratchet.json");
-    assert!(
-        ratchet.max_raw_encode_field_calls < 3_694,
-        "ratchet must stay strictly tightened below initial 3,694 baseline"
+    assert_eq!(
+        ratchet.max_raw_encode_field_calls, 0,
+        "C-9 (#933) ratchet must remain locked at 0 raw encode_*_field calls"
+    );
+    assert_eq!(
+        ratchet.max_files_with_raw_encode_field, 0,
+        "C-9 (#933) ratchet must remain locked at 0 files with raw encode_*_field calls"
     );
     let report = ratchet
         .verify_default()
-        .expect("eve-server/src must remain at or below raw_encode_field ratchet");
+        .expect("eve-server/src must remain at 0 raw_encode_field calls");
+    assert_eq!(report.raw_encode_field_calls, 0);
+    assert_eq!(report.files_with_raw_encode_field, 0);
     assert!(
-        report.raw_encode_field_calls <= ratchet.max_raw_encode_field_calls,
-        "report {report} exceeded {}",
-        ratchet.max_raw_encode_field_calls
+        report.per_file_calls.is_empty(),
+        "unexpected files still containing raw encode_*_field calls: {:?}",
+        report.per_file_calls
     );
+
+    let call_regression = RawEncodeFieldScanReport {
+        raw_encode_field_calls: 1,
+        files_with_raw_encode_field: 0,
+        per_file_calls: HashMap::new(),
+    };
+    assert!(ratchet.assert_ratchet(&call_regression).is_err());
+
+    let file_regression = RawEncodeFieldScanReport {
+        raw_encode_field_calls: 0,
+        files_with_raw_encode_field: 1,
+        per_file_calls: HashMap::from([("regress.rs".to_string(), 1)]),
+    };
+    assert!(ratchet.assert_ratchet(&file_regression).is_err());
 }

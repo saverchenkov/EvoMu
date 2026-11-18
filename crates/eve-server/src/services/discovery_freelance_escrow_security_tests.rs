@@ -10,8 +10,7 @@ use eve_db::{
     corp_roles, ContractRecord, InventoryFlag, InventoryItemRecord, IskCents, WorldRepository,
 };
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage, DynamicValue,
-    GoogleAny, QuasarDescriptorRegistry,
+    AuthoritativeContext, DynamicQuasarMessage, DynamicValue, GoogleAny, QuasarDescriptorRegistry,
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
@@ -328,5 +327,4 @@ fn r7_td_06_freelance_escrow_payout_wallet_sync_role_and_item_lock_enforced() {
         assert_eq!(corp.master_wallet_balance(), IskCents::from_isk(4_000_000));
         assert_eq!(corp.division_balance(1), IskCents::from_isk(4_000_000));
     });
-    let _ = (encode_bytes_field, encode_varint_field);
 }
