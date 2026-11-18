@@ -38,6 +38,8 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "baseHangarBehaviours",
             "modularHangarBehaviours",
             "modularHangarCapitalBehaviours",
+            "modularHangarCamera",
+            "modularHangarCapitalCamera",
             "wreck",
             "slotsContainer",
             "sensorGfxHandler",
@@ -1165,6 +1167,381 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         # Successful drop passes through normally and calls entry.Blink().
         self.assertEqual(wnd._MoveItems(mk_entry("ok"), [object()]), "moved")
         self.assertEqual(blinks, ["ok"])
+
+    def test_1318_modular_hangar_camera_none_model_secondary_view_reopen_and_fade_recovery(self):
+        events = []
+        delayed_calls = []
+
+        uthread2_mod = types.ModuleType("uthread2")
+
+        def _fake_delay(fn, delay, *args, **kwargs):
+            delayed_calls.append((delay, fn, args, kwargs))
+            return ("timer", len(delayed_calls))
+
+        uthread2_mod.call_after_simtime_delay = _fake_delay
+        sys.modules["uthread2"] = uthread2_mod
+
+        mhc_mod = types.ModuleType("eve.client.script.ui.camera.modularHangarCamera")
+
+        class ModularHangarCamera(object):
+            def __init__(self):
+                self.model = None
+                self.currentShipSizeClass = 0
+                self._atPosition = (0.0, 0.0, 0.0)
+                self._eyePosition = (-354.38, -1148.97, -680.02)
+                self.atPosition = self._atPosition
+                self.changingShip = False
+                self.yaw = 0.5
+                self.pitch = 0.5
+                self.zoomFactor = 0.5
+
+            def GetZoomToPoint(self):
+                return self.atPosition
+
+            def GetEyePosition(self):
+                return self._eyePosition
+
+            def SetEyePosition(self, pos):
+                self._eyePosition = pos
+                events.append(("SetEyePosition", pos))
+
+            def _CalculateFocalPoint(self, model):
+                return (0.0, 0.0, 0.0) if model is None else (1.0, 2.0, 3.0)
+
+            def GetSizeDependantZoomConstants(self):
+                axis = max(self.model.generatedShapeEllipsoidRadius)
+                if self.currentShipSizeClass == 2:
+                    return (1450.0 + 0.2 * axis, 250.0, 500.0)
+                return (385.0 + 0.4 * axis, 10.0, 120.0)
+
+            def CalculateTargetPoint(self):
+                _ = max(self.model.generatedShapeEllipsoidRadius)
+                self.GetSizeDependantZoomConstants()
+                _ = self.model.rotationCurve.currentValue
+                return (10.0, 20.0, 30.0)
+
+            def _updateShipChangeLocations(self):
+                _ = max(self.model.generatedShapeEllipsoidRadius)
+                return "updated"
+
+            def AnimEnterHangar(self, model, startPos, endPos, duration=None):
+                self.model = model
+                self.atPosition = self._CalculateFocalPoint(model)
+                self.changingShip = False
+                self.SetEyePosition(self.CalculateTargetPoint())
+                self.yaw = 0
+                self.pitch = 0
+
+                def AllignCamera():
+                    _ = model.rotationCurve.currentValue
+                    self.yaw = 1.2
+                    events.append("AllignCamera")
+
+                uthread2_mod.call_after_simtime_delay(AllignCamera, 0.3)
+
+        mhc_mod.ModularHangarCamera = ModularHangarCamera
+        sys.modules["eve.client.script.ui.camera.modularHangarCamera"] = mhc_mod
+
+        hv_mod = types.ModuleType("eve.client.script.ui.view.hangarView")
+        hv_mod.REPLACE_UPDATE = 2
+        hv_mod.REPLACE_SWITCHSHIPS = 1
+
+        class ModularHangarShipBehaviour(object):
+            def __init__(self, ship_to_place=None, small_docks=None, repopulate_dock=False):
+                self.smallDocks = [] if small_docks is None else list(small_docks)
+                self.bigDocks = []
+                self.ship_to_place = ship_to_place
+                self.repopulate_dock = repopulate_dock
+                self.playerDock = None
+
+            def SetAnchorPoint(self, hangar_model, hangar_scene):
+                events.append(("SetAnchorPoint", hangar_model, hangar_scene))
+                if self.repopulate_dock:
+                    self.smallDocks.append("dock_1")
+
+            def UpdateActiveShipIDs(self, type_id, item_id):
+                events.append(("UpdateActiveShipIDs", type_id, item_id))
+
+            def populateDocksWithInventoryShips(self, ships, scene, hangar):
+                events.append("populateDocksWithInventoryShips")
+
+            def PlaceShip(self, item_id, type_id, skip_anim):
+                events.append(("PlaceShip", item_id, type_id, bool(self.smallDocks)))
+                if not self.smallDocks:
+                    return None
+                return self.ship_to_place
+
+        class HangarView(object):
+            def __init__(self, ship_behaviour, cam):
+                self.shipBehaviour = ship_behaviour
+                self.activeHangarScene = types.SimpleNamespace(objects=[])
+                self.activeHangarModel = object()
+                self.activeShipModel = None
+                self.skipDockingAnimation = False
+                self._starting_boarding_moment = False
+                self._retriggerableFadeFromBlackTasklet = None
+                self.invCache = None
+                self._cam = cam
+
+            def GetCamera(self):
+                return self._cam
+
+            def GetActiveShipItemID(self):
+                return 1897518389
+
+            def GetActiveShipTypeID(self):
+                return 32880
+
+            def _FadeFromBlackHandler(self, delay, is_quick):
+                events.append(("_FadeFromBlackHandler", delay, is_quick))
+                self._retriggerableFadeFromBlackTasklet = ("fade", delay, is_quick)
+
+            def ClearScene(self):
+                self.shipBehaviour = None
+                self.activeHangarScene = None
+                self.activeShipModel = None
+
+            def LoadCamera(self, cameraID=None, reopen=False):
+                if not reopen or self.activeShipModel is None:
+                    self.ReplaceExistingShipModel(hv_mod.REPLACE_UPDATE, fade=True)
+
+            def ReplaceExistingShipModel(self, eventType, fade=True, skipAnimation=False):
+                events.append(("ReplaceExistingShipModel", eventType, fade, skipAnimation))
+                item_id = self.GetActiveShipItemID()
+                type_id = self.GetActiveShipTypeID()
+                self._ReplaceExistingShipModelModular(eventType, item_id, type_id, skipAnimation)
+
+            def _ReplaceExistingShipModelModular(self, eventType, itemID, typeID, skipAnimation):
+                self.shipBehaviour.UpdateActiveShipIDs(self.GetActiveShipTypeID(), self.GetActiveShipItemID())
+                self.shipBehaviour.populateDocksWithInventoryShips([], self.activeHangarScene, self.activeHangarModel)
+                ship = self.shipBehaviour.PlaceShip(itemID, typeID, self.skipDockingAnimation)
+                if ship is not None and self.activeShipModel is not None and ship.name == self.activeShipModel.name:
+                    self.activeShipModel = ship
+                    return
+                self.GetCamera().AnimEnterHangar(ship, None, None)
+                if not self._starting_boarding_moment:
+                    self._FadeFromBlackHandler(0.5, False)
+                self.activeShipModel = ship
+
+        hv_mod.HangarView = HangarView
+        sys.modules["eve.client.script.ui.view.hangarView"] = hv_mod
+
+        vss_mod = types.ModuleType("eve.client.script.ui.services.viewStateSvc")
+
+        class ViewStateSvc(object):
+            def __init__(self, hangar_view):
+                self.hangar_view = hangar_view
+
+            def _OpenView(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                self.hangar_view.LoadCamera(cameraID=cameraID, reopen=reopen)
+
+            def _OpenPrimaryView(self, name, **kwargs):
+                self._OpenView(types.SimpleNamespace(name=name), reopen=True)
+
+            def ActivateView(self, name, **kwargs):
+                self._OpenPrimaryView(name, **kwargs)
+
+            def CloseSecondaryView(self):
+                self.ActivateView("hangar")
+
+        vss_mod.ViewStateSvc = ViewStateSvc
+        sys.modules["eve.client.script.ui.services.viewStateSvc"] = vss_mod
+
+        builtins.session = types.SimpleNamespace(stationid=None, structureid=1001896944936, shipid=1897518389)
+        evomu_site._install_camera_dock_guard()
+
+        # Case 1: Secondary view SkillPlanner closes after Board Ship while PlaceShip returns None -> no crash, fades from black, no None AllignCamera.
+        cam1 = ModularHangarCamera()
+        beh1 = ModularHangarShipBehaviour(ship_to_place=None, small_docks=[], repopulate_dock=False)
+        view1 = HangarView(beh1, cam1)
+        svc1 = ViewStateSvc(view1)
+        svc1.CloseSecondaryView()
+
+        self.assertIn(("_FadeFromBlackHandler", 0.5, False), events)
+        self.assertIsNone(cam1.model)
+        self.assertEqual(cam1.yaw, 0)
+        self.assertEqual(cam1.pitch, 0)
+        self.assertEqual(cam1.GetSizeDependantZoomConstants(), (385.0, 10.0, 120.0))
+        cam1.currentShipSizeClass = 2
+        self.assertEqual(cam1.GetSizeDependantZoomConstants(), (1450.0, 250.0, 500.0))
+        self.assertIsNone(cam1._updateShipChangeLocations())
+        # No AllignCamera(model=None) was scheduled (delay 0.3); only bounded ship-placement retry (delay 0.5) was scheduled.
+        self.assertEqual(len(delayed_calls), 1)
+        self.assertEqual(delayed_calls[0][0], 0.5)
+
+        # Case 1b: When retry fires after ship asset becomes available, it recovers activeShipModel and caps retries at 2 if still unavailable.
+        beh1.smallDocks.append("dock_retry")
+        beh1.ship_to_place = None
+        delayed_calls[0][1]()  # Attempt #1 still fails -> schedules attempt #2.
+        self.assertEqual(len(delayed_calls), 2)
+        beh1.ship_to_place = None
+        delayed_calls[1][1]()  # Attempt #2 reaches retry cap -> no attempt #3.
+        self.assertEqual(len(delayed_calls), 2)
+
+        # Reset retry state via successful placement on fresh call.
+        venture_model = types.SimpleNamespace(
+            name="1897518389",
+            generatedShapeEllipsoidRadius=(12.0, 8.0, 24.0),
+            rotationCurve=types.SimpleNamespace(currentValue=(0.0, 0.0, 0.0, 1.0)),
+        )
+        delayed_calls.clear()
+        events.clear()
+        beh2 = ModularHangarShipBehaviour(ship_to_place=None, small_docks=["dock_ok"], repopulate_dock=False)
+        cam2 = ModularHangarCamera()
+        view2 = HangarView(beh2, cam2)
+        view2.ReplaceExistingShipModel(hv_mod.REPLACE_UPDATE)
+        self.assertEqual(len(delayed_calls), 1)
+        beh2.ship_to_place = venture_model
+        delayed_calls[0][1]()
+        self.assertIs(view2.activeShipModel, venture_model)
+        self.assertEqual(view2._evomu_ship_retry_count, 0)
+        # AllignCamera was now scheduled cleanly for the non-None model and runs without error.
+        self.assertEqual(delayed_calls[-1][0], 0.3)
+        delayed_calls[-1][1]()
+        self.assertIn("AllignCamera", events)
+
+        # Case 2: Empty docks from deferred LoadView get rebuilt via SetAnchorPoint before PlaceShip on reopening hangar.
+        delayed_calls.clear()
+        events.clear()
+        cam3 = ModularHangarCamera()
+        beh3 = ModularHangarShipBehaviour(ship_to_place=venture_model, small_docks=[], repopulate_dock=True)
+        view3 = HangarView(beh3, cam3)
+        ViewStateSvc(view3).CloseSecondaryView()
+        self.assertIs(view3.activeShipModel, venture_model)
+        self.assertTrue(any(ev[0] == "SetAnchorPoint" for ev in events))
+        self.assertIn(("_FadeFromBlackHandler", 0.5, False), events)
+
+        # Case 3: GetCamera() -> None during _ReplaceExistingShipModelModular uses _NullHangarCamera cleanly and cleans override.
+        events.clear()
+        delayed_calls.clear()
+        beh4 = ModularHangarShipBehaviour(ship_to_place=None, small_docks=[], repopulate_dock=False)
+        view4 = HangarView(beh4, cam=None)
+        view4._ReplaceExistingShipModelModular(hv_mod.REPLACE_UPDATE, 1897518389, 32880, False)
+        self.assertIsNone(view4.GetCamera())
+        self.assertIn(("_FadeFromBlackHandler", 0.5, False), events)
+        # Deferred retry from view4 does nothing if view is cleared before timer fires.
+        view4.ClearScene()
+        events.clear()
+        delayed_calls[0][1]()
+        self.assertEqual(events, [])
+
+    def test_1318_modular_capital_camera_and_negative_none_masking_checks(self):
+        mhc_mod = types.ModuleType("eve.client.script.ui.camera.modularHangarCamera")
+
+        class ModularHangarCamera(object):
+            def __init__(self):
+                self.model = None
+                self.currentShipSizeClass = 1
+                self._eyePosition = (0.0, 0.0, 0.0)
+                self.atPosition = (0.0, 0.0, 0.0)
+
+            def _CalculateFocalPoint(self, model):
+                return (0.0, 0.0, 0.0)
+
+            def SetEyePosition(self, pos):
+                self._eyePosition = pos
+
+            def GetSizeDependantZoomConstants(self):
+                _ = max(self.model.generatedShapeEllipsoidRadius)
+                return (385.0, 10.0, 120.0)
+
+            def CalculateTargetPoint(self):
+                _ = max(self.model.generatedShapeEllipsoidRadius)
+                return (1.0, 2.0, 3.0)
+
+            def _updateShipChangeLocations(self):
+                _ = max(self.model.generatedShapeEllipsoidRadius)
+
+            def AnimEnterHangar(self, model, startPos, endPos, duration=None):
+                self.model = model
+                self.SetEyePosition(self.CalculateTargetPoint())
+
+        mhc_mod.ModularHangarCamera = ModularHangarCamera
+        sys.modules["eve.client.script.ui.camera.modularHangarCamera"] = mhc_mod
+
+        mhcc_mod = types.ModuleType("eve.client.script.ui.camera.modularHangarCapitalCamera")
+
+        class ModularHangarCapitalCamera(object):
+            def __init__(self):
+                self.model = None
+                self.orbitTarget = (3150.0, 2220.0, 16500.0)
+                self.poiTarget = (0.0, -500.0, 7500.0)
+                self._eyePosition = (0.0, 0.0, 0.0)
+                self.lerpingIntoPosition = False
+                self.orbitUpdateThread = "running"
+
+            def SetEyePosition(self, pos):
+                self._eyePosition = pos
+
+            def _configureCameraStartLocations(self, typeID, wasOrbiting=False):
+                if wasOrbiting:
+                    _ = self.model.modelWorldPosition
+                    return "orbiting"
+                return ("default", typeID)
+
+            def CalculateOrbitTarget(self):
+                _ = self.model.GetBoundingSphereRadius()
+                _ = self.model.modelWorldPosition
+                return (100.0, 200.0, 300.0)
+
+            def AnimEnterHangar(self, model, startPos, endPos, duration=None):
+                self.CalculateOrbitTarget()
+                self.SetEyePosition(self.orbitTarget)
+
+            def Orbit(self, dx, dy):
+                self.orbitTarget = self.CalculateOrbitTarget()
+                self.poiTarget = self.model.modelWorldPosition
+                return "orbited"
+
+            def CapitalOrbitUpdateThread(self):
+                try:
+                    if not self.lerpingIntoPosition:
+                        self.poiTarget = self.model.modelWorldPosition
+                finally:
+                    self.orbitUpdateThread = None
+
+        mhcc_mod.ModularHangarCapitalCamera = ModularHangarCapitalCamera
+        sys.modules["eve.client.script.ui.camera.modularHangarCapitalCamera"] = mhcc_mod
+
+        # Late import hook installation via _EvomuMetaHook().
+        evomu_site._EvomuMetaHook().find_module("late")
+        self.assertIn("modularHangarCamera", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertIn("modularHangarCapitalCamera", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        cap_cam = ModularHangarCapitalCamera()
+        self.assertIsNone(cap_cam.AnimEnterHangar(None, None, None))
+        self.assertEqual(cap_cam._eyePosition, (3150.0, 2220.0, 16500.0))
+        self.assertEqual(cap_cam.CalculateOrbitTarget(), (3150.0, 2220.0, 16500.0))
+        self.assertIsNone(cap_cam.Orbit(1.0, 2.0))
+        self.assertEqual(cap_cam._configureCameraStartLocations(19720, wasOrbiting=True), ("default", 19720))
+        self.assertIsNone(cap_cam.CapitalOrbitUpdateThread())
+        self.assertIsNone(cap_cam.orbitUpdateThread)
+
+        # Negative assertions: unrelated AttributeError on non-None models MUST propagate unmasked.
+        broken_std_model = object()
+        std_cam = ModularHangarCamera()
+        with self.assertRaises(AttributeError):
+            std_cam.AnimEnterHangar(broken_std_model, None, None)
+        with self.assertRaises(AttributeError):
+            std_cam.CalculateTargetPoint()
+        with self.assertRaises(AttributeError):
+            std_cam.GetSizeDependantZoomConstants()
+        with self.assertRaises(AttributeError):
+            std_cam._updateShipChangeLocations()
+
+        broken_cap_model = object()
+        cap_cam.model = broken_cap_model
+        cap_cam.orbitUpdateThread = "running"
+        with self.assertRaises(AttributeError):
+            cap_cam.AnimEnterHangar(broken_cap_model, None, None)
+        with self.assertRaises(AttributeError):
+            cap_cam.CalculateOrbitTarget()
+        with self.assertRaises(AttributeError):
+            cap_cam.Orbit(1.0, 2.0)
+        with self.assertRaises(AttributeError):
+            cap_cam._configureCameraStartLocations(19720, wasOrbiting=True)
+        with self.assertRaises(AttributeError):
+            cap_cam.CapitalOrbitUpdateThread()
 
 
 if __name__ == "__main__":
