@@ -734,6 +734,23 @@ pub async fn handle_with_bound(
                 ("lpReward", PyRep::Integer(lp_reward)),
                 ("bonusReward", PyRep::Integer(bonus_reward)),
                 ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
+                ("bonusRewards", {
+                    let rem_secs = bonus_expiry_unix
+                        .map(|bexp| bexp.saturating_sub(now))
+                        .unwrap_or(bonus_window_secs);
+                    let window_mins = ((bonus_window_secs + 59) / 60).max(1) as i64;
+                    if bonus_reward > 0 {
+                        PyRep::List(vec![PyRep::Tuple(vec![
+                            PyRep::Integer(rem_secs.saturating_mul(10_000_000) as i64),
+                            PyRep::Integer(29), // const.typeCredits
+                            PyRep::Integer(bonus_reward),
+                            PyRep::None,
+                            PyRep::Integer(window_mins),
+                        ])])
+                    } else {
+                        PyRep::List(Vec::new())
+                    }
+                }),
             ];
             if let Some(bexp) = bonus_expiry_unix {
                 info_fields.push(("bonusExpiryUnix", PyRep::Integer(bexp as i64)));
@@ -1073,13 +1090,13 @@ pub async fn handle_with_bound(
                         } else {
                             ctx.sde.missions
                                 .values().filter(|m| {
-                                    mission_matches_agent_pool(m, agent_info)
+                                    mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
                                         && m.has_standing_rewards
                                         && !snap.active_missions.contains_key(&(char_id, m.mission_id))
                                 }).min_by_key(|m| m.mission_id).or_else(|| {
                                     ctx.sde.missions
                                         .values().filter(|m| {
-                                            mission_matches_agent_pool(m, agent_info)
+                                            mission_matches_agent_pool_with_sde(&ctx.sde, m, agent_info)
                                                 && !snap.active_missions.contains_key(&(char_id, m.mission_id))
                                         }).min_by_key(|m| m.mission_id)
                                 })
@@ -1684,21 +1701,23 @@ pub async fn handle_with_bound(
                         let credited_lp = ((lp_reward.max(0) as f64) * lp_mult).round() as i64;
 
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let reward_cents = IskCents::from_isk(isk_reward);
-                            ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-                            let bal_after_reward = ch.balance;
+                            if isk_reward > 0 {
+                                let reward_cents = IskCents::from_isk(isk_reward);
+                                ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+                                let bal_after_reward = ch.balance;
 
-                            snap.next_entity_id += 1;
-                            let jid1 = snap.next_entity_id;
-                            snap.wallet_journal.push(WalletJournalEntry {
-                                entry_id: jid1,
-                                character_id: char_id,
-                                entry_type: "agent_mission_reward".to_string(),
-                                amount: reward_cents,
-                                balance_after: bal_after_reward,
-                                reason: format!("Mission {mission_id} reward"),
-                            });
-                            snap.wallet_journal_timestamps.insert(jid1, now);
+                                snap.next_entity_id += 1;
+                                let jid1 = snap.next_entity_id;
+                                snap.wallet_journal.push(WalletJournalEntry {
+                                    entry_id: jid1,
+                                    character_id: char_id,
+                                    entry_type: "agent_mission_reward".to_string(),
+                                    amount: reward_cents,
+                                    balance_after: bal_after_reward,
+                                    reason: format!("Mission {mission_id} reward"),
+                                });
+                                snap.wallet_journal_timestamps.insert(jid1, now);
+                            }
 
                             if bonus_paid > 0 {
                                 let bonus_cents = IskCents::from_isk(bonus_paid);

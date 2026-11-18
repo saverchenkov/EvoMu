@@ -595,3 +595,103 @@ fn cosmos_and_data_center_agents_grant_zero_lp_on_real_sde_missions() {
     let std_rewards = compute_character_mission_rewards(&ctx, char_id, std_sec_agent.agent_id, 13_777, std_sys);
     assert!(std_rewards.lp_reward > 0);
 }
+
+#[test]
+fn rnd_research_missions_award_zero_isk_and_zero_lp() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let rnd_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| is_rnd_agent(a) && a.solar_system_id.is_some())
+        .expect("SDE R&D agent")
+        .clone();
+    let rnd_sys = rnd_agent.solar_system_id.unwrap();
+    let rnd_mids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            m.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("Research"))
+        })
+        .map(|m| m.mission_id)
+        .collect();
+    assert!(!rnd_mids.is_empty(), "SDE must include Research missions");
+
+    for mid in rnd_mids {
+        let def = resolve_mission_reward_definition(&ctx, char_id, rnd_agent.agent_id, mid);
+        assert_eq!(def.base_isk, 0, "R&D mission {mid} base_isk must be 0");
+        assert_eq!(def.time_bonus_isk, 0, "R&D mission {mid} bonus ISK must be 0");
+        assert!(!def.grants_lp && def.base_lp == 0 && def.base_lp_alpha == 0);
+        let rewards = compute_character_mission_rewards(&ctx, char_id, rnd_agent.agent_id, mid, rnd_sys);
+        assert_eq!(rewards.isk_reward, 0);
+        assert_eq!(rewards.bonus_reward, 0);
+        assert_eq!(rewards.lp_reward, 0);
+        let win = mission_bonus_window_secs(&ctx, char_id, rnd_agent.agent_id, mid);
+        assert!((1_800..=5_400).contains(&win));
+    }
+}
+
+#[test]
+fn level_gating_blocks_higher_dungeon_and_anomic_offers_and_payouts_for_l1_agents() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let find_sec = |lvl: u8| {
+        ctx.sde
+            .agents
+            .values()
+            .filter(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == lvl && a.solar_system_id.is_some())
+            .min_by_key(|a| a.agent_id)
+            .expect("SDE Basic Security agent")
+            .clone()
+    };
+    let ag1 = find_sec(1);
+    let ag2 = find_sec(2);
+    let ag3 = find_sec(3);
+    let ag4 = find_sec(4);
+    let mut ag1_zero = ag1.clone();
+    ag1_zero.solar_system_id = ag4.solar_system_id; // same true-sec for strict level check
+
+    // Pool matching with SDE enforces dungeon difficulty == agent.level and L4+ for Anomic/Burner
+    let t_l1 = &ctx.sde.missions[&13_777];
+    let t_l2 = &ctx.sde.missions[&4_886];
+    let t_l3 = &ctx.sde.missions[&1_140];
+    let t_l4 = &ctx.sde.missions[&900];
+    let t_l4_desp = &ctx.sde.missions[&13_741];
+    let t_burner = &ctx.sde.missions[&16_154];
+
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l1, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l2, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l3, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l4, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_l4_desp, &ag1));
+    assert!(!mission_matches_agent_pool(&t_burner, &ag1));
+    assert!(!mission_matches_agent_pool(&t_burner, &ag3));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag1));
+    assert!(!mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag3));
+
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l2, &ag2));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l3, &ag3));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_l4, &ag4));
+    assert!(mission_matches_agent_pool_with_sde(&ctx.sde, t_burner, &ag4));
+
+    // L1 agent evaluating L2-L4/Burner missions cannot claim higher-level Wiki/Burner overrides
+    let ag1_sys = ag1.solar_system_id.unwrap();
+    for &high_mid in &[4_886_u32, 1_140, 900, 13_741, 16_154] {
+        let def = resolve_mission_reward_definition(&ctx, char_id, ag1.agent_id, high_mid);
+        assert!(
+            def.base_isk <= 90_000 && def.base_lp <= 120,
+            "L1 agent must stay in L1 reward bounds for mismatched mission {high_mid}: {def:?}"
+        );
+        let rw = compute_character_mission_rewards(&ctx, char_id, ag1.agent_id, high_mid, ag1_sys);
+        assert!(rw.isk_reward <= 90_000 && rw.bonus_reward <= 120_000);
+    }
+    // Canonical matching agents receive full Wiki/Burner definitions
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag2.agent_id, 4_886).base_isk, 82_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag3.agent_id, 1_140).base_isk, 692_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 900).base_isk, 358_000);
+    assert_eq!(resolve_mission_reward_definition(&ctx, char_id, ag4.agent_id, 16_154).base_isk, 6_200_000);
+}

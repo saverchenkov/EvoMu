@@ -818,11 +818,19 @@ async fn test_research_agent_daily_mission() {
         );
     });
 
+    let (bal_before, lp_before, j_start) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (
+            ch.balance.0,
+            ch.loyalty_points.get(&rnd_agent.corporation_id).copied().unwrap_or(0),
+            snap.wallet_journal.len(),
+        )
+    });
     let tally_before = ctx.db.with_snapshot(|snap| snap.mission_tally.get(&char_id).copied().unwrap_or(0));
     let initial_points_before = active_res[0].initial_points;
 
     // Complete daily mission
-    rpc_call(
+    let comp_rep = rpc_call(
         &ctx,
         &mut sess,
         "agentMgr",
@@ -831,6 +839,41 @@ async fn test_research_agent_daily_mission() {
     )
     .await
     .expect("Complete daily mission");
+    assert_eq!(
+        comp_rep.dict_get("iskReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 ISK"
+    );
+    assert_eq!(
+        comp_rep.dict_get("bonusReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 bonus ISK"
+    );
+    assert_eq!(
+        comp_rep.dict_get("lpReward").and_then(|v| v.as_i64()),
+        Some(0),
+        "R&D daily mission must award 0 LP"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(
+            ch.balance.0, bal_before,
+            "Completing R&D daily mission must leave character ISK balance unchanged"
+        );
+        assert_eq!(
+            ch.loyalty_points.get(&rnd_agent.corporation_id).copied().unwrap_or(0),
+            lp_before,
+            "Completing R&D daily mission must leave character LP unchanged"
+        );
+        assert!(
+            !snap
+                .wallet_journal
+                .iter()
+                .skip(j_start)
+                .any(|e| e.character_id == char_id && e.entry_type == "agent_mission_reward"),
+            "Completing R&D daily mission must not create an agent_mission_reward wallet journal entry"
+        );
+    });
 
     // Completing adds 1 day's RP to active research entry
     let active_res_after = ctx.db.with_snapshot(|snap| {

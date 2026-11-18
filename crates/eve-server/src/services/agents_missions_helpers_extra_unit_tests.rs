@@ -647,6 +647,13 @@ fn wave4_agent_pool_divisions_npc_selector_and_mission_target_fallbacks() {
     assert!(!mission_matches_agent_pool(&t_mine, &agent(1, 1_000_009, 2, 99, 1)));
     assert!(!mission_matches_agent_pool(&t_mine, &agent(1, 1_000_009, 5, 24, 1)));
     assert!(!mission_matches_agent_pool(&t_none, &agent(1, 1_000_009, 12, 24, 1)));
+    let t_anomic = tmpl(16_154, "Anomic Base ", Some("BasicKill"), false);
+    assert!(!mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 1)));
+    assert!(!mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 3)));
+    assert!(mission_matches_agent_pool(&t_anomic, &agent(1, 1_000_009, 2, 24, 4)));
+    let t_epic_mining = tmpl(14_833, "Re-examining Options", Some("EpicArcAgentInteraction"), false);
+    assert!(!mission_matches_agent_pool(&t_epic_mining, &agent(1, 1_000_009, 2, 23, 1)));
+    assert!(mission_matches_agent_pool(&t_epic_mining, &agent(1, 1_000_009, 10, 23, 1)));
 
     // resolve_division_connections_skill all fallback division IDs
     assert_eq!(resolve_division_connections_skill(&ctx, 27), Some(3894));

@@ -79,6 +79,13 @@ pub fn mission_matches_agent_pool(
         return false;
     }
     let ct = tmpl.content_template.as_deref().unwrap_or_default();
+    if ct.contains("EpicArc") && agent.agent_type_id != 10 {
+        return false;
+    }
+    let title_lc = tmpl.title.to_lowercase();
+    if (title_lc.contains("anomic") || title_lc.contains("burner")) && agent.level < 4 {
+        return false;
+    }
     match agent.agent_type_id {
         10 => ct.contains("EpicArc"),
         4 => ct.contains("Research"),
@@ -91,12 +98,37 @@ pub fn mission_matches_agent_pool(
         _ => match agent.division_id {
             18 => ct.contains("Research") || tmpl.is_courier,
             22 => ct.contains("BasicCourier"),
-            23 => ct.contains("BasicMining") || tmpl.title.to_lowercase().contains("mining"),
+            23 => ct.contains("BasicMining") || title_lc.contains("mining"),
             24 => ct.contains("BasicKill"),
             37 => ct.contains("Heraldry") || ct.contains("BasicKill"),
             _ => ct.contains("BasicKill") || ct.contains("BasicCourier"),
         },
     }
+}
+
+/// Level- and dungeon-difficulty-aware variant of [`mission_matches_agent_pool`].
+/// Enforces `sde.dungeons[dungeon_id].difficulty == agent.level` for dungeon-backed
+/// regular missions, while permitting L4+ agents (`agent.level >= 4`) to draw difficulty-5
+/// `"Anomic"` / `"Burner"` missions.
+pub fn mission_matches_agent_pool_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    tmpl: &eve_sde::MissionTemplate,
+    agent: &eve_sde::AgentInfo,
+) -> bool {
+    if !mission_matches_agent_pool(tmpl, agent) {
+        return false;
+    }
+    let title_lc = tmpl.title.to_lowercase();
+    if title_lc.contains("anomic") || title_lc.contains("burner") {
+        return agent.level >= 4;
+    }
+    let dungeon_diff = tmpl
+        .dungeon_id
+        .and_then(|did| sde.dungeons.get(&did))
+        .and_then(|d| d.difficulty)
+        .and_then(|d| u8::try_from(d).ok())
+        .filter(|&d| (1..=5).contains(&d));
+    dungeon_diff.is_none_or(|diff| diff == agent.level.clamp(1, 5))
 }
 
 pub fn resolve_fw_warzone_system(agent_corp_id: i64) -> u32 {
@@ -387,66 +419,79 @@ fn parse_chain_step_ratio(norm_title: &str) -> Option<f64> {
 fn wiki_mission_reward_override(
     mission_id: u32,
     norm_title: &str,
+    effective_lvl: u8,
 ) -> Option<MissionRewardDefinition> {
-    let wiki = |base_isk: i64, time_bonus_isk: i64, win_s: u64, base_lp: i64| {
-        MissionRewardDefinition {
-            base_isk,
-            time_bonus_isk,
-            time_bonus_window_secs: win_s.clamp(600, 21_600),
-            base_lp,
-            base_lp_alpha: if base_lp > 0 { (base_lp / 2).max(1) } else { 0 },
-            grants_lp: base_lp > 0,
-            source: RewardCatalogSource::WikiCatalog,
-        }
+    let wiki = |lvl: u8, base_isk: i64, time_bonus_isk: i64, win_s: u64, base_lp: i64| {
+        (
+            Some(lvl),
+            MissionRewardDefinition {
+                base_isk,
+                time_bonus_isk,
+                time_bonus_window_secs: win_s.clamp(600, 21_600),
+                base_lp,
+                base_lp_alpha: if base_lp > 0 { (base_lp / 2).max(1) } else { 0 },
+                grants_lp: base_lp > 0,
+                source: RewardCatalogSource::WikiCatalog,
+            },
+        )
     };
-    let no_lp_wiki = |base_isk: i64, time_bonus_isk: i64, win_s: u64| MissionRewardDefinition {
-        base_isk,
-        time_bonus_isk,
-        time_bonus_window_secs: win_s.clamp(600, 21_600),
-        base_lp: 0,
-        base_lp_alpha: 0,
-        grants_lp: false,
-        source: RewardCatalogSource::WikiCatalog,
+    let no_lp_wiki = |base_isk: i64, time_bonus_isk: i64, win_s: u64| {
+        (
+            None::<u8>,
+            MissionRewardDefinition {
+                base_isk,
+                time_bonus_isk,
+                time_bonus_window_secs: win_s.clamp(600, 21_600),
+                base_lp: 0,
+                base_lp_alpha: 0,
+                grants_lp: false,
+                source: RewardCatalogSource::WikiCatalog,
+            },
+        )
     };
 
-    match (mission_id, norm_title) {
+    let (canon_lvl, def) = match (mission_id, norm_title) {
         // Regular L1-L4 Security missions (`BasicKillMission`)
-        (13777, "denial of reconnaissance") => Some(wiki(67_000, 64_000, 3_600, 73)),
-        (13492, "interstellar railroad (3 of 4)") => Some(wiki(14_000, 9_000, 3_600, 14)),
-        (13493, "interstellar railroad (4 of 4)") => Some(wiki(15_000, 16_000, 3_600, 19)),
-        (13514, "patriotic measures (4 of 5)") => Some(wiki(29_000, 37_000, 3_840, 35)),
-        (4886, "foreign investment") => Some(wiki(82_000, 75_000, 5_400, 113)),
-        (1140, "serpentis extravaganza") => Some(wiki(692_000, 799_000, 10_800, 1_829)),
-        (900, "the sansha spies") => Some(wiki(358_000, 510_000, 14_400, 1_979)),
-        (13741, "desperate maneuvers") => Some(wiki(2_600_000, 2_800_000, 21_600, 13_202)),
+        (13777, "denial of reconnaissance") => wiki(1, 67_000, 64_000, 3_600, 73),
+        (13492, "interstellar railroad (3 of 4)") => wiki(1, 14_000, 9_000, 3_600, 14),
+        (13493, "interstellar railroad (4 of 4)") => wiki(1, 15_000, 16_000, 3_600, 19),
+        (13514, "patriotic measures (4 of 5)") => wiki(1, 29_000, 37_000, 3_840, 35),
+        (4886, "foreign investment") => wiki(2, 82_000, 75_000, 5_400, 113),
+        (1140, "serpentis extravaganza") => wiki(3, 692_000, 799_000, 10_800, 1_829),
+        (900, "the sansha spies") => wiki(4, 358_000, 510_000, 14_400, 1_979),
+        (13741, "desperate maneuvers") => wiki(4, 2_600_000, 2_800_000, 21_600, 13_202),
         // Regular L1 Courier missions (`BasicCourierMission`)
-        (13491, "interstellar railroad (2 of 4)") => Some(wiki(20_000, 20_000, 3_600, 21)),
-        (13512, "patriotic measures (2 of 5)") => Some(wiki(24_000, 25_000, 2_640, 23)),
+        (13491, "interstellar railroad (2 of 4)") => wiki(1, 20_000, 20_000, 3_600, 21),
+        (13512, "patriotic measures (2 of 5)") => wiki(1, 24_000, 25_000, 2_640, 23),
         // Storyline missions (`grants_lp = false` per `wiki:Loyalty_Points`)
         (1872, "the audesder war effort, hand in the voucher (1 of 8)") => {
-            Some(no_lp_wiki(298_000, 289_000, 2_880))
+            no_lp_wiki(298_000, 289_000, 2_880)
         }
-        (2056, "civilian pullout") => Some(no_lp_wiki(730_000, 761_000, 14_400)),
+        (2056, "civilian pullout") => no_lp_wiki(730_000, 761_000, 14_400),
         (1900, "civilian pullout - more civilians to evacuate") => {
-            Some(no_lp_wiki(759_000, 802_000, 14_340))
+            no_lp_wiki(759_000, 802_000, 14_340)
         }
-        (2825, "courier gone missing (1 of 2)") => Some(no_lp_wiki(15_000_000, 10_000_000, 10_800)),
-        (2570, "heads of management (1 of 2)") => Some(no_lp_wiki(10_000_000, 6_000_000, 21_600)),
-        (15219, "soothe the salvage beast") => Some(no_lp_wiki(1_950_000, 2_300_000, 14_700)),
+        (2825, "courier gone missing (1 of 2)") => no_lp_wiki(15_000_000, 10_000_000, 10_800),
+        (2570, "heads of management (1 of 2)") => no_lp_wiki(10_000_000, 6_000_000, 21_600),
+        (15219, "soothe the salvage beast") => no_lp_wiki(1_950_000, 2_300_000, 14_700),
         // Epic Arc missions (`grants_lp = false` per `wiki:Loyalty_Points`)
-        (14117, "a beacon beckons") => Some(no_lp_wiki(100_000, 169_000, 3_600)),
-        (14118, "agent inquiry") => Some(no_lp_wiki(100_000, 178_500, 3_600)),
-        (14135, "an economy under threat") => Some(no_lp_wiki(100_000, 131_000, 3_600)),
-        (14390, "burning down the hive") => Some(no_lp_wiki(150_000, 210_500, 3_600)),
-        (14406, "a call to trial") => Some(no_lp_wiki(200_000, 39_000, 3_600)),
-        (14511, "an honorable betrayal") => Some(no_lp_wiki(300_000, 1_000_000, 21_600)),
-        (14597, "almost unmasked") => Some(no_lp_wiki(300_000, 1_500_000, 21_600)),
-        (14607, "a general's best friend") => Some(no_lp_wiki(5_000_000, 1_000_000, 21_600)),
-        (14821, "a different kind of director") => Some(no_lp_wiki(5_000_000, 1_000_000, 21_600)),
-        (14851, "a demonstration") => Some(no_lp_wiki(6_000_000, 1_000_000, 21_600)),
-        (14946, "carry on") => Some(no_lp_wiki(10_000_000, 1_000_000, 21_600)),
-        _ => None,
+        (14117, "a beacon beckons") => no_lp_wiki(100_000, 169_000, 3_600),
+        (14118, "agent inquiry") => no_lp_wiki(100_000, 178_500, 3_600),
+        (14135, "an economy under threat") => no_lp_wiki(100_000, 131_000, 3_600),
+        (14390, "burning down the hive") => no_lp_wiki(150_000, 210_500, 3_600),
+        (14406, "a call to trial") => no_lp_wiki(200_000, 39_000, 3_600),
+        (14511, "an honorable betrayal") => no_lp_wiki(300_000, 1_000_000, 21_600),
+        (14597, "almost unmasked") => no_lp_wiki(300_000, 1_500_000, 21_600),
+        (14607, "a general's best friend") => no_lp_wiki(5_000_000, 1_000_000, 21_600),
+        (14821, "a different kind of director") => no_lp_wiki(5_000_000, 1_000_000, 21_600),
+        (14851, "a demonstration") => no_lp_wiki(6_000_000, 1_000_000, 21_600),
+        (14946, "carry on") => no_lp_wiki(10_000_000, 1_000_000, 21_600),
+        _ => return None,
+    };
+    if canon_lvl.is_some_and(|lvl| effective_lvl != lvl) {
+        return None;
     }
+    Some(def)
 }
 
 /// DERIVED: Server-calibrated Anomic Burner mission rewards anchored to L4 Burner dungeon
@@ -455,7 +500,11 @@ fn wiki_mission_reward_override(
 fn derived_anomic_burner_rewards(
     mission_id: u32,
     norm_title: &str,
+    effective_lvl: u8,
 ) -> Option<MissionRewardDefinition> {
+    if effective_lvl < 4 {
+        return None;
+    }
     let mk = |base_isk: i64, time_bonus_isk: i64, win_s: u64, base_lp: i64| {
         MissionRewardDefinition {
             base_isk,
@@ -655,10 +704,8 @@ fn derive_mission_reward_definition(
             (1_050_000, 2_900_000, 0, 0, 180, 360),
             (2_500_000, 5_600_000, 0, 0, 240, 360),
         ][idx],
-        MissionRewardCategory::Research => {
-            let l = i64::from(effective_lvl.clamp(1, 5));
-            (28_000 * l, 85_000 * l, 0, 0, 30, 90)
-        }
+        // R&D daily missions double daily Research Points for 1 day and award 0 ISK / 0 LP.
+        MissionRewardCategory::Research => (0, 0, 0, 0, 30, 90),
     };
 
     let seed = stable_mission_seed(mission_id, norm_title)
@@ -676,13 +723,19 @@ fn derive_mission_reward_definition(
         _ => 1.0,
     };
 
-    let step = if isk_hi <= 100_000 { 500 } else { 1_000 };
-    let raw_isk = ((lerp_i64(isk_lo, isk_hi, h_isk) as f64) * chain_mult * diff_mult).round() as i64;
-    let base_isk = round_isk_to(raw_isk.clamp(isk_lo, isk_hi.saturating_mul(5) / 4), step);
+    let (base_isk, time_bonus_isk) = if isk_hi <= 0 {
+        (0, 0)
+    } else {
+        let step = if isk_hi <= 100_000 { 500 } else { 1_000 };
+        let raw_isk =
+            ((lerp_i64(isk_lo, isk_hi, h_isk) as f64) * chain_mult * diff_mult).round() as i64;
+        let base = round_isk_to(raw_isk.clamp(isk_lo, isk_hi.saturating_mul(5) / 4), step);
 
-    // Bonus ratio spans [64%, 128%] (never flat 50%).
-    let bonus_pct = 64 + (h_ratio % 65) as i64;
-    let time_bonus_isk = round_isk_to(base_isk * bonus_pct / 100, step);
+        // Bonus ratio spans [64%, 128%] (never flat 50%).
+        let bonus_pct = 64 + (h_ratio % 65) as i64;
+        let bonus = round_isk_to(base * bonus_pct / 100, step);
+        (base, bonus)
+    };
 
     let win_span = (win_hi_m - win_lo_m).max(1);
     let win_mins = win_lo_m + (h_win % (win_span + 1));
@@ -740,11 +793,28 @@ pub fn resolve_mission_reward_definition(
         .and_then(|d| d.difficulty)
         .and_then(|d| u8::try_from(d).ok())
         .filter(|&d| (1..=5).contains(&d));
-    let effective_lvl = offered_lvl
-        .or(dungeon_diff)
-        .or_else(|| agent_info.map(|a| a.level))
-        .unwrap_or(1)
-        .clamp(1, 5);
+    let is_storyline_or_epic = agent_info
+        .is_some_and(|a| is_storyline_agent_type(a.agent_type_id) || a.agent_type_id == 10)
+        || tmpl.is_some_and(|t| {
+            is_storyline_template(t)
+                || t.content_template
+                    .as_deref()
+                    .is_some_and(|ct| ct.contains("EpicArc"))
+        });
+    let effective_lvl = if is_storyline_or_epic {
+        offered_lvl
+            .or(dungeon_diff)
+            .or_else(|| agent_info.map(|a| a.level))
+            .unwrap_or(1)
+            .clamp(1, 5)
+    } else {
+        match (offered_lvl, agent_info.map(|a| a.level)) {
+            (Some(ol), Some(al)) => ol.min(al).clamp(1, 5),
+            (Some(ol), None) => ol.clamp(1, 5),
+            (None, Some(al)) => al.clamp(1, 5),
+            (None, None) => dungeon_diff.unwrap_or(1).clamp(1, 5),
+        }
+    };
 
     let norm_title = tmpl
         .map(|t| normalized_mission_title(&t.title))
@@ -755,7 +825,9 @@ pub fn resolve_mission_reward_definition(
             .is_some_and(|ct| ct.contains("Heraldry"))
     }) || agent_info.is_some_and(|a| a.agent_type_id == 13);
 
-    let mut def = if let Some(wiki_def) = wiki_mission_reward_override(mission_id, &norm_title) {
+    let mut def = if let Some(wiki_def) =
+        wiki_mission_reward_override(mission_id, &norm_title, effective_lvl)
+    {
         let mut out = wiki_def;
         if let Some(t) = tmpl.filter(|t| t.lp_omega > 0 && out.grants_lp) {
             out.base_lp = t.lp_omega;
@@ -780,7 +852,9 @@ pub fn resolve_mission_reward_definition(
                 dungeon.and_then(|d| d.archetype_id),
             )
         }
-    } else if let Some(anomic_def) = derived_anomic_burner_rewards(mission_id, &norm_title) {
+    } else if let Some(anomic_def) =
+        derived_anomic_burner_rewards(mission_id, &norm_title, effective_lvl)
+    {
         let mut out = anomic_def;
         if let Some(t) = tmpl.filter(|t| t.lp_omega > 0) {
             out.base_lp = t.lp_omega;
@@ -793,18 +867,25 @@ pub fn resolve_mission_reward_definition(
         out
     } else {
         let category = classify_reward_category(tmpl, &norm_title, agent_info);
+        let capped_diff = dungeon_diff.map(|d| d.min(effective_lvl));
         derive_mission_reward_definition(
             mission_id,
             tmpl,
             &norm_title,
             category,
             effective_lvl,
-            dungeon_diff,
+            capped_diff,
             dungeon.and_then(|d| d.archetype_id),
         )
     };
 
     // Data Center (5), COSMOS (8), Epic Arc (10), Tutorial (11), Career (12), R&D, and Storyline agents pay 0 LP.
+    let is_rnd_mission = agent_info.is_some_and(is_rnd_agent)
+        || tmpl.is_some_and(|t| {
+            t.content_template
+                .as_deref()
+                .is_some_and(|ct| ct.contains("Research"))
+        });
     let no_lp_agent = agent_info.is_some_and(|a| {
         is_rnd_agent(a)
             || is_storyline_agent_type(a.agent_type_id)
@@ -816,7 +897,11 @@ pub fn resolve_mission_reward_definition(
                 .as_deref()
                 .is_some_and(|ct| ct.contains("EpicArc"))
     });
-    if no_lp_agent || no_lp_tmpl {
+    if is_rnd_mission {
+        def.base_isk = 0;
+        def.time_bonus_isk = 0;
+    }
+    if is_rnd_mission || no_lp_agent || no_lp_tmpl {
         def.grants_lp = false;
         def.base_lp = 0;
         def.base_lp_alpha = 0;

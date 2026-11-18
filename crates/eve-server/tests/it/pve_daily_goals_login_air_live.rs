@@ -801,11 +801,11 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
             .clone()
     };
     let ag4 = find_sec_agent(4);
-    let ag1 = find_sec_agent(1);
+    let ag2 = find_sec_agent(2);
     let ag4_sys = ag4.solar_system_id.unwrap();
     let ag4_sta = ag4.station_id.unwrap();
-    let ag1_sys = ag1.solar_system_id.unwrap();
-    let ag1_sta = ag1.station_id.unwrap();
+    let ag2_sys = ag2.solar_system_id.unwrap();
+    let ag2_sta = ag2.station_id.unwrap();
 
     // Case 1: L4 The Sansha Spies (900) — base ISK >= 100k AND bonus >= 100k (both independently taxed 11%; LP untaxed).
     let now = ctx.now_unix();
@@ -817,8 +817,8 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
             ch.station_id = Some(ag4_sta);
             ch.standings.insert(ag4.agent_id, 7.0);
             ch.standings.insert(ag4.corporation_id, 7.0);
-            ch.standings.insert(ag1.agent_id, 7.0);
-            ch.standings.insert(ag1.corporation_id, 7.0);
+            ch.standings.insert(ag2.agent_id, 7.0);
+            ch.standings.insert(ag2.corporation_id, 7.0);
         }
         snap.active_missions.insert(
             (char_id, 900),
@@ -906,21 +906,21 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
         }));
     });
 
-    // Case 2: L1 Foreign Investment (4886) with Neg V — base ISK = 102_500 (>= 100k, taxed 11%)
+    // Case 2: L2 Foreign Investment (4886) with Neg V — base ISK = 102_500 (>= 100k, taxed 11%)
     // while bonus ISK = 93_750 (< 100k, 0% tax!), and LP remains completely untaxed.
     let now2 = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = ag1_sys;
-            ch.station_id = Some(ag1_sta);
+            ch.solar_system_id = ag2_sys;
+            ch.station_id = Some(ag2_sta);
         }
         snap.active_missions.insert(
             (char_id, 4886),
             eve_db::ActiveMissionRecord {
                 character_id: char_id,
                 mission_id: 4886,
-                agent_id: ag1.agent_id,
-                solar_system_id: ag1_sys,
+                agent_id: ag2.agent_id,
+                solar_system_id: ag2_sys,
                 state: "Offered".into(),
                 current_room_id: 1,
                 npcs_remaining: 0,
@@ -933,60 +933,60 @@ async fn test_live_npc_corp_mission_isk_tax_and_untaxed_lp() {
             char_id,
             &MissionTimingAndCargoMeta {
                 mission_id: 4886,
-                agent_id: ag1.agent_id,
+                agent_id: ag2.agent_id,
                 offered_at_unix: now2,
                 offer_expiry_unix: now2 + 86_400,
-                origin_station_id: Some(ag1_sta),
-                offered_level: Some(1),
+                origin_station_id: Some(ag2_sta),
+                offered_level: Some(2),
                 ..Default::default()
             },
         );
     });
-    pilot.solar_system_id = Some(ag1_sys);
-    pilot.station_id = Some(ag1_sta);
+    pilot.solar_system_id = Some(ag2_sys);
+    pilot.station_id = Some(ag2_sta);
 
-    let bind1 = common::borrow_wire_harness(&ctx, &mut pilot)
-        .call("agentMgr", None, "MachoBindObject", &[PyRep::Integer(ag1.agent_id), PyRep::None], &kw)
+    let bind2 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", None, "MachoBindObject", &[PyRep::Integer(ag2.agent_id), PyRep::None], &kw)
         .await
-        .expect("bind ag1");
-    let oid1 = extract_bound_id_from_wire_rep(&bind1).expect("oid1");
+        .expect("bind ag2");
+    let oid2 = extract_bound_id_from_wire_rep(&bind2).expect("oid2");
     common::borrow_wire_harness(&ctx, &mut pilot)
-        .call("agentMgr", Some(oid1), "DoAction", &[PyRep::Integer(3)], &kw)
+        .call("agentMgr", Some(oid2), "DoAction", &[PyRep::Integer(3)], &kw)
         .await
         .expect("accept 4886");
 
-    let (bal_before_1, lp_before_1, j_start_1) = ctx.db.with_snapshot(|s| {
+    let (bal_before_2, lp_before_2, j_start_2) = ctx.db.with_snapshot(|s| {
         (
             s.characters[&char_id].balance.0,
-            s.characters[&char_id].loyalty_points.get(&ag1.corporation_id).copied().unwrap_or(0),
+            s.characters[&char_id].loyalty_points.get(&ag2.corporation_id).copied().unwrap_or(0),
             s.wallet_journal.len(),
         )
     });
-    let comp1 = common::borrow_wire_harness(&ctx, &mut pilot)
-        .call("agentMgr", Some(oid1), "DoAction", &[PyRep::Integer(6)], &kw)
+    let comp2 = common::borrow_wire_harness(&ctx, &mut pilot)
+        .call("agentMgr", Some(oid2), "DoAction", &[PyRep::Integer(6)], &kw)
         .await
         .expect("complete 4886");
-    let PyRep::Tuple(parts1) = comp1 else { panic!("Expected 2-tuple") };
-    let expected_isk_1 = 82_000_i64 * 5 / 4; // 102_500 >= 100_000
-    let expected_bonus_1 = 75_000_i64 * 5 / 4; // 93_750 < 100_000
-    let truesec_1 = ctx.sde.solar_systems.get(&ag1_sys).map(|s| s.security_status).unwrap_or(1.0);
-    let expected_lp_1 = (113.0 * (1.6288 - truesec_1).max(0.01) * 1.40).round() as i64;
-    assert_eq!(parts1[1].dict_get("iskReward").and_then(|v| v.as_i64()), Some(expected_isk_1));
-    assert_eq!(parts1[1].dict_get("bonusReward").and_then(|v| v.as_i64()), Some(expected_bonus_1));
-    assert_eq!(parts1[1].dict_get("lpReward").and_then(|v| v.as_i64()), Some(expected_lp_1));
+    let PyRep::Tuple(parts2) = comp2 else { panic!("Expected 2-tuple") };
+    let expected_isk_2 = 82_000_i64 * 5 / 4; // 102_500 >= 100_000
+    let expected_bonus_2 = 75_000_i64 * 5 / 4; // 93_750 < 100_000
+    let truesec_2 = ctx.sde.solar_systems.get(&ag2_sys).map(|s| s.security_status).unwrap_or(1.0);
+    let expected_lp_2 = (113.0 * (1.6288 - truesec_2).max(0.01) * 1.40).round() as i64;
+    assert_eq!(parts2[1].dict_get("iskReward").and_then(|v| v.as_i64()), Some(expected_isk_2));
+    assert_eq!(parts2[1].dict_get("bonusReward").and_then(|v| v.as_i64()), Some(expected_bonus_2));
+    assert_eq!(parts2[1].dict_get("lpReward").and_then(|v| v.as_i64()), Some(expected_lp_2));
 
-    let tax_base_1_cents = ((expected_isk_1 * 100) * 11 + 50) / 100;
-    let expected_net_1_cents = (expected_isk_1 * 100 - tax_base_1_cents) + expected_bonus_1 * 100;
+    let tax_base_2_cents = ((expected_isk_2 * 100) * 11 + 50) / 100;
+    let expected_net_2_cents = (expected_isk_2 * 100 - tax_base_2_cents) + expected_bonus_2 * 100;
     ctx.db.with_snapshot(|s| {
         let bal_after = s.characters[&char_id].balance.0;
-        assert_eq!(bal_after - bal_before_1, expected_net_1_cents);
-        let lp_after = s.characters[&char_id].loyalty_points.get(&ag1.corporation_id).copied().unwrap_or(0);
-        assert_eq!(lp_after - lp_before_1, expected_lp_1, "NPC corp must pay untaxed LP");
-        let entries: Vec<_> = s.wallet_journal.iter().skip(j_start_1).collect();
+        assert_eq!(bal_after - bal_before_2, expected_net_2_cents);
+        let lp_after = s.characters[&char_id].loyalty_points.get(&ag2.corporation_id).copied().unwrap_or(0);
+        assert_eq!(lp_after - lp_before_2, expected_lp_2, "NPC corp must pay untaxed LP");
+        let entries: Vec<_> = s.wallet_journal.iter().skip(j_start_2).collect();
         assert!(entries.iter().any(|e| {
             e.character_id == char_id
                 && e.entry_type == "agent_mission_reward_corporation_tax"
-                && e.amount.0 == -tax_base_1_cents
+                && e.amount.0 == -tax_base_2_cents
         }));
         assert!(
             !entries.iter().any(|e| {
