@@ -4,7 +4,7 @@
   "max_suppress_rules": 5,
   "max_notify_arms": 34,
   "max_destiny_rewrites": 4,
-  "max_production_lines": 3396,
+  "max_production_lines": 3383,
   "max_transport_conditionals": 3,
   "max_direct_layer_test_calls": 349,
   "max_service_caller_trace_comparisons": 0,

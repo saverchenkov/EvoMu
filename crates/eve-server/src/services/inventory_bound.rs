@@ -712,11 +712,30 @@ fn self_inv_item(
             .get(&stub_type_id)
             .map(|t| (i64::from(t.group_id), i64::from(t.category_id), t.name.clone()))
             .unwrap_or((29, 6, String::new()));
-        let loc_id = session
+        let loc_id_opt = session
             .station_id
             .or(session.structure_id)
             .or_else(|| session.solar_system_id.map(i64::from))
-            .unwrap_or(30_000_142);
+            .filter(|&id| id > 0)
+            .or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&char_id).and_then(|c| {
+                        c.station_id
+                            .or(c.structure_id)
+                            .or_else(|| (c.solar_system_id > 0).then_some(i64::from(c.solar_system_id)))
+                            .filter(|&id| id > 0)
+                    })
+                })
+            });
+        let Some(loc_id) = loc_id_opt else {
+            return Err(BridgeRpcError {
+                code: "LocationNotFound".into(),
+                message: format!(
+                    "Cannot resolve inventory location for character {char_id} item {object_id}"
+                ),
+                client_error: None,
+            });
+        };
         return Ok(header.build_dbrow(vec![
             PyRep::Integer(object_id),
             PyRep::Integer(i64::from(stub_type_id)),

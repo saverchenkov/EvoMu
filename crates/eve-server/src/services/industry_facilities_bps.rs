@@ -982,7 +982,13 @@ pub fn handle_industry_facilities_bps(
                         let flag_i64 = it.flag as u16 as i64;
                         let resolved_sys_id = sys_opt
                             .or_else(|| session.solar_system_id.map(i64::from))
-                            .unwrap_or(30_000_142);
+                            .or_else(|| {
+                                snap.characters
+                                    .get(&char_id)
+                                    .map(|c| i64::from(c.solar_system_id))
+                                    .filter(|&sid| sid > 0)
+                            })
+                            .unwrap_or(0);
                         bps.push(BlueprintInstanceRep {
                             item_id: it.item_id,
                             type_id: i64::from(bp.blueprint_type_id),
@@ -1124,7 +1130,13 @@ pub fn handle_industry_facilities_bps(
                         .map(|st| i64::from(st.solar_system_id))
                         .or(resolved_sys)
                         .or_else(|| session.solar_system_id.map(i64::from))
-                        .unwrap_or(30_000_142);
+                        .or_else(|| {
+                            snap.characters
+                                .get(&char_id)
+                                .map(|c| i64::from(c.solar_system_id))
+                                .filter(|&sid| sid > 0)
+                        })
+                        .unwrap_or(0);
                     let active_job_id = snap
                         .industry_jobs
                         .values()

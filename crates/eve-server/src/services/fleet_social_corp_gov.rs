@@ -1921,7 +1921,7 @@ pub(super) fn handle_corp_gov(
                     }
                     old_ceo_id = corp.ceo_id;
                     if old_ceo_id > 0 && old_ceo_id != new_ceo_id {
-                        if corp.member_roles.get(&old_ceo_id).copied() == Some(u64::MAX) {
+                        if corp.member_base_roles_opt(old_ceo_id) == Some(u64::MAX) {
                             corp.member_roles.insert(old_ceo_id, 0);
                         }
                     }

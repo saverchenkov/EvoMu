@@ -543,7 +543,7 @@ pub fn handle(
                     let mut changed_members: Vec<(i64, u64, u64, u64, (u64, u64, u64, u64, u64, u64))> =
                         Vec::new();
                     for &tid in &target_ids {
-                        let old_role = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&tid).copied()).unwrap_or(0);
+                        let old_role = snap.corporations.get(&corp_id).map_or(0, |c| c.member_base_roles(tid));
                         let (prev_pending, prev_scoped, prev_title_mask, old_title_roles) = snap.corp_governance.get(&corp_id).map(|g| {
                             let tm = g.member_titles.get(&tid).copied().unwrap_or(0);
                             let tr = g.titles.iter().fold(0u64, |acc, (&t_id, &(_, r))| {

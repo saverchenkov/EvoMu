@@ -846,34 +846,39 @@ fn on_module_attribute_changes_notify_and_client_compat_boundaries() {
 #[test]
 fn agent_mission_objective_compat_and_aggression_settings_all_combinations() {
     // 1. normalize_macho_rpc_reply("agentMgr", "GetMissionObjectiveInfo", ...):
-    //    originStationID <= 0 fallback (60_003_760), destinationStationID <= 0 vs > 0,
+    //    originStationID <= 0 must not fabricate synthetic Jita fallback IDs,
+    //    explicit originStationID/solarSystemID are preserved, destinationStationID <= 0 vs > 0,
     //    contentID <= 0 clamped to 1, and transport hasCargo across (completion_status, mission_state)
-    let combat_raw = PyRep::keyval([
-        ("contentID", PyRep::Integer(0)),
-        ("missionState", PyRep::Integer(1)),
-        ("completionStatus", PyRep::Integer(0)),
-        ("originStationID", PyRep::Integer(0)),
-        ("destinationStationID", PyRep::Integer(0)),
-        ("iskReward", PyRep::Integer(50_000)),
-        ("bonusReward", PyRep::Integer(25_000)),
-        ("loyaltyPoints", PyRep::Integer(100)),
-    ]);
-    let combat_norm = normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetMissionObjectiveInfo",
-        Ok(combat_raw),
-    )
-    .unwrap();
-    let Some(PyRep::List(dungeons)) = combat_norm.dict_get("dungeons") else {
-        panic!("expected dungeons list");
-    };
-    assert_eq!(dungeons.len(), 1);
-    assert_eq!(dungeons[0].dict_get("dungeonID"), Some(&PyRep::Integer(1)));
-    assert_eq!(
-        dungeons[0].dict_get("locationID"),
-        Some(&PyRep::Integer(60_003_760))
-    );
-    assert_eq!(dungeons[0].dict_get("completed"), Some(&PyRep::Bool(false)));
+    for (sys_in, origin_in, exp_loc, exp_sys) in [
+        (0_i64, 0_i64, None, None),
+        (30_002_187, 60_008_494, Some(60_008_494), Some(30_002_187)),
+    ] {
+        let combat_raw = PyRep::keyval([
+            ("contentID", PyRep::Integer(0)),
+            ("missionState", PyRep::Integer(1)),
+            ("completionStatus", PyRep::Integer(0)),
+            ("solarSystemID", PyRep::Integer(sys_in)),
+            ("originStationID", PyRep::Integer(origin_in)),
+            ("destinationStationID", PyRep::Integer(0)),
+            ("iskReward", PyRep::Integer(50_000)),
+            ("bonusReward", PyRep::Integer(25_000)),
+            ("loyaltyPoints", PyRep::Integer(100)),
+        ]);
+        let combat_norm = normalize_macho_rpc_reply(
+            "agentMgr",
+            "GetMissionObjectiveInfo",
+            Ok(combat_raw),
+        )
+        .unwrap();
+        let Some(PyRep::List(dungeons)) = combat_norm.dict_get("dungeons") else {
+            panic!("expected dungeons list");
+        };
+        assert_eq!(dungeons.len(), 1);
+        assert_eq!(dungeons[0].dict_get("dungeonID"), Some(&PyRep::Integer(1)));
+        assert_eq!(dungeons[0].dict_get("locationID"), exp_loc.map(PyRep::Integer).as_ref());
+        assert_eq!(dungeons[0].dict_get("solarsystemID"), exp_sys.map(PyRep::Integer).as_ref());
+        assert_eq!(dungeons[0].dict_get("completed"), Some(&PyRep::Bool(false)));
+    }
 
     for (comp_status, m_state, expected_has_cargo) in [
         (0_i64, 1_i64, false),
@@ -882,6 +887,8 @@ fn agent_mission_objective_compat_and_aggression_settings_all_combinations() {
     ] {
         let courier_raw = PyRep::keyval([
             ("contentID", PyRep::Integer(42)),
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("solarSystemID", PyRep::Integer(30_000_142)),
             ("missionState", PyRep::Integer(m_state)),
             ("completionStatus", PyRep::Integer(comp_status)),
             ("originStationID", PyRep::Integer(60_003_760)),

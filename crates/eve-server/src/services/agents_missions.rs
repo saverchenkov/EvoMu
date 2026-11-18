@@ -587,29 +587,43 @@ pub async fn handle_with_bound(
             } else {
                 raw_bonus_reward
             };
-            let origin_sid = meta
+            let origin_sid_opt = meta
                 .as_ref()
                 .and_then(|mt| mt.origin_station_id)
                 .or_else(|| ctx.sde.agents.get(&m.agent_id).and_then(|a| a.station_id))
-                .unwrap_or(60_003_760);
+                .or(session.station_id)
+                .filter(|&id| id > 0);
+            let Some(origin_loc_id) = origin_sid_opt
+                .or_else(|| (m.solar_system_id > 0).then_some(i64::from(m.solar_system_id)))
+                .or_else(|| (sys_id > 0).then_some(i64::from(sys_id)))
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "MissionLocationMissing".into(),
+                    message: format!("Mission {mission_id} has no resolvable origin location"),
+                    client_error: None,
+                }));
+            };
             let dest_sid_opt = meta.as_ref().and_then(|mt| mt.destination_station_id);
-            let make_loc = |sid: i64, ltype: &str| {
-                let lsys = ctx
-                    .sde
-                    .stations
-                    .get(&sid)
+            let make_loc = |loc_id: i64, ltype: &str| {
+                let st_opt = ctx.sde.stations.get(&loc_id);
+                let is_station_loc = st_opt.is_some()
+                    || origin_sid_opt.is_some_and(|sid| sid == loc_id)
+                    || dest_sid_opt.is_some_and(|sid| sid == loc_id);
+                let lsys = st_opt
                     .map(|st| st.solar_system_id as i64)
                     .unwrap_or(m.solar_system_id as i64);
-                let ltid = ctx
-                    .sde
-                    .stations
-                    .get(&sid)
-                    .map(|st| st.station_type_id as i64)
-                    .unwrap_or(1529);
+                let (station_rep, ltid) = if is_station_loc {
+                    (
+                        PyRep::Integer(loc_id),
+                        st_opt.map(|st| st.station_type_id as i64).unwrap_or(1529),
+                    )
+                } else {
+                    (PyRep::None, 5_i64)
+                };
                 PyRep::Dict(vec![
-                    (PyRep::String("locationID".into()), PyRep::Integer(sid)),
+                    (PyRep::String("locationID".into()), PyRep::Integer(loc_id)),
                     (PyRep::String("solarsystemID".into()), PyRep::Integer(lsys)),
-                    (PyRep::String("stationID".into()), PyRep::Integer(sid)),
+                    (PyRep::String("stationID".into()), station_rep),
                     (PyRep::String("typeID".into()), PyRep::Integer(ltid)),
                     (PyRep::String("agentID".into()), PyRep::Integer(m.agent_id)),
                     (PyRep::String("shipTypeID".into()), PyRep::None),
@@ -617,7 +631,7 @@ pub async fn handle_with_bound(
                     (PyRep::String("BookmarkID".into()), m.bookmark_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ])
             };
-            let mut locations = vec![make_loc(origin_sid, "agenthomebase")];
+            let mut locations = vec![make_loc(origin_loc_id, "agenthomebase")];
             if let Some(dsid) = dest_sid_opt {
                 locations.push(make_loc(dsid, "objective.destination"));
             }
@@ -647,8 +661,9 @@ pub async fn handle_with_bound(
             let fallback_corp_or_faction_id = agent_corp_id
                 .or(agent_faction_id)
                 .unwrap_or(1_000_002);
-            let pickup_owner_id =
-                station_owner_id(origin_sid).unwrap_or(fallback_corp_or_faction_id);
+            let pickup_owner_id = origin_sid_opt
+                .and_then(station_owner_id)
+                .unwrap_or(fallback_corp_or_faction_id);
             let dropoff_owner_id = dest_sid_opt
                 .and_then(station_owner_id)
                 .unwrap_or(pickup_owner_id);
@@ -684,10 +699,13 @@ pub async fn handle_with_bound(
                     (PyRep::String("dungeonID".into()), PyRep::Integer(sde_dungeon_id)),
                     (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
                     (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
-                    (PyRep::String("locationID".into()), PyRep::Integer(origin_sid)),
-                    (PyRep::String("stationID".into()), PyRep::Integer(origin_sid)),
+                    (PyRep::String("locationID".into()), PyRep::Integer(origin_loc_id)),
+                    (
+                        PyRep::String("stationID".into()),
+                        origin_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
                     (PyRep::String("typeID".into()), PyRep::Integer(1529)),
-                    (PyRep::String("location".into()), make_loc(origin_sid, "dungeon")),
+                    (PyRep::String("location".into()), make_loc(origin_loc_id, "dungeon")),
                     (PyRep::String("ownerID".into()), PyRep::Integer(dungeon_owner_id)),
                     (PyRep::String("optional".into()), PyRep::Bool(false)),
                     (
@@ -723,7 +741,7 @@ pub async fn handle_with_bound(
                 ("objectives", PyRep::String(objectives.into())),
                 ("locations", PyRep::List(locations)),
                 ("dungeons", PyRep::List(dungeons)),
-                ("originStationID", PyRep::Integer(origin_sid)),
+                ("originStationID", origin_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("destinationStationID", dest_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("solarsystemID", PyRep::Integer(m.solar_system_id as i64)),
                 ("currentRoomID", PyRep::Integer(m.current_room_id as i64)),

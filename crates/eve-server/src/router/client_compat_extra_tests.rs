@@ -866,10 +866,22 @@ fn wave2_wave4_normalizer_and_effect_id_helper_edges() {
         assert_eq!(outer[1].dict_get("loyaltyPoints"), Some(&PyRep::Integer(250)));
     }
 
-    // 7. normalize_agent_mission_objective_rep: transport objective hasCargo & dungeons branches
+    // 7. normalize_agent_mission_objective_rep: transport objective hasCargo, fail-closed unanchored, & dungeons branches
     assert_eq!(normalize_agent_mission_objective_rep(PyRep::Integer(5)), PyRep::Integer(5));
+    let unanchored_rep = normalize_agent_mission_objective_rep(PyRep::keyval([
+        ("destinationStationID", PyRep::Integer(60_003_761)),
+        ("requiredTypeID", PyRep::Integer(35)),
+        ("requiredQuantity", PyRep::Integer(50)),
+    ]));
+    assert!(
+        matches!(unanchored_rep.dict_get("objectives"), Some(PyRep::List(objs)) if objs.is_empty()),
+        "omitting agentID/originStationID/solarsystemID must not synthesize hardcoded fallback objectives"
+    );
     for (comp_status, m_state, exp_has_cargo) in [(0, 1, false), (0, 2, true), (1, 1, true)] {
         let obj_rep = normalize_agent_mission_objective_rep(PyRep::keyval([
+            ("agentID", PyRep::Integer(3_008_416)),
+            ("originStationID", PyRep::Integer(60_003_760)),
+            ("solarsystemID", PyRep::Integer(30_000_142)),
             ("destinationStationID", PyRep::Integer(60_003_761)),
             ("requiredTypeID", PyRep::Integer(35)),
             ("requiredQuantity", PyRep::Integer(50)),

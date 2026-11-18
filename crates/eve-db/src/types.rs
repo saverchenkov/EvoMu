@@ -1186,6 +1186,16 @@ impl CorporationRecord {
         self.division_balance(1)
     }
 
+    /// Returns the explicitly stored base role mask for `char_id`, if an entry exists.
+    pub fn member_base_roles_opt(&self, char_id: i64) -> Option<u64> {
+        self.member_roles.get(&char_id).copied()
+    }
+
+    /// Returns the explicitly stored base role mask for `char_id`, defaulting to `0`.
+    pub fn member_base_roles(&self, char_id: i64) -> u64 {
+        self.member_base_roles_opt(char_id).unwrap_or(0)
+    }
+
     /// Returns the corporation's effective loyalty-point tax rate in `[0.0, 1.0]`, falling back to `tax_rate`.
     pub fn effective_lp_tax_rate(&self) -> f64 {
         self.loyalty_point_tax_rate
