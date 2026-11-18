@@ -1360,11 +1360,13 @@ impl SystemHandle {
             &st_mut.warp_tracking,
         );
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let broadcast_seq_gate = Arc::clone(&st.broadcast_seq_gate);
         drop(st);
         let broadcast = self.build_tick_broadcast_for_handle(&mut bp, events);
+        let warp_events = broadcast.events.clone();
+        super::send_tick_broadcast_sequenced_owned(&self.event_tx, &broadcast_seq_gate, broadcast);
         drop(bp);
-        self.record_warp_stops_from_events(&broadcast.events);
-        let _ = self.event_tx.send(broadcast);
+        self.record_warp_stops_from_events(&warp_events);
     }
 
     pub fn sim_elapsed_secs(&self) -> f64 {
@@ -1748,6 +1750,24 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    /// Drains pending bubble-scoped `DestinyEvent`s for `observer_ball_id` along with the actor's
+    /// latest `TickBroadcast.broadcast_seq` watermark at the instant of the drain (`GH #1172`).
+    pub async fn drain_observer_updates_with_seq(
+        &self,
+        observer_ball_id: BallId,
+    ) -> Result<(u64, Vec<DestinyEvent>, PyRep, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::DrainObserverUpdatesWithSeq {
+                observer_ball_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn apply_damage(&self, ball_id: BallId, damage: DamageVector) -> Result<Option<(f64, bool, Ball)>, String> {
         self.apply_damage_with_attacker(ball_id, damage, None).await
     }
@@ -1912,6 +1932,7 @@ impl SystemHandle {
         Ok(output.broadcast.unwrap_or_else(|| TickBroadcast {
             solar_system_id: self.solar_system_id,
             tick: output.tick,
+            broadcast_seq: 0,
             events: Vec::new(),
             observer_events: std::collections::BTreeMap::new(),
             observer_updates_pyrep: std::collections::BTreeMap::new(),
@@ -2498,7 +2519,7 @@ pub(crate) use celestials_helpers::{
     clear_landed_warp_tracking_from_events, clear_shared_warp_tracking,
     collect_all_condition_checkpoint_entries, collect_dirty_condition_checkpoint_entries,
     collect_immediate_armor_hull_checkpoint_entries,
-    collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs,
+    collect_landed_warp_positions, fast_forward_clock_in_actor_with_epochs_and_seq,
     persist_ball_positions_in_db, persist_landed_warps_in_db,
     record_spawned_ball_checkpoint_baseline, record_warp_stops_from_events_in_map,
     register_committed_warp_cache, register_db_system_ballpark, register_tethered_balls_cache,

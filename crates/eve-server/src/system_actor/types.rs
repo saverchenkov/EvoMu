@@ -62,6 +62,8 @@ pub struct MiningExtractionResult {
 pub struct TickBroadcast {
     pub solar_system_id: SolarSystemId,
     pub tick: u64,
+    /// Monotonic per-system broadcast sequence number assigned at `event_tx.send` time (`GH #1172`).
+    pub broadcast_seq: u64,
     pub events: Vec<DestinyEvent>,
     pub observer_events: BTreeMap<BallId, Vec<DestinyEvent>>,
     pub observer_updates_pyrep: BTreeMap<BallId, PyRep>,
@@ -681,6 +683,8 @@ pub(crate) struct SystemActorState {
     pub(crate) pending_destroyed_balls: PendingDestroyedOutbox,
     pub(crate) warp_provenance: HashMap<BallId, WarpProvenance>,
     pub(crate) warp_tracking: SharedWarpTracking,
+    /// Serializes monotonic `TickBroadcast.broadcast_seq` assignment with `event_tx.send` (`GH #1172`).
+    pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
 }
 
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
@@ -887,6 +891,10 @@ pub enum SystemCommand {
     DrainObserverUpdates {
         observer_ball_id: BallId,
         reply: oneshot::Sender<(u64, Vec<DestinyEvent>, PyRep)>,
+    },
+    DrainObserverUpdatesWithSeq {
+        observer_ball_id: BallId,
+        reply: oneshot::Sender<(u64, Vec<DestinyEvent>, PyRep, u64)>,
     },
     ApplyDamage {
         ball_id: BallId,

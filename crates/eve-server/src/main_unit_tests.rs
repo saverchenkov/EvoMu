@@ -362,6 +362,7 @@ async fn handle_bridge_client_handles_errors_notifications_ticks_and_kick() -> R
     let tb = TickBroadcast {
         solar_system_id: 30_000_142,
         tick: 5,
+        broadcast_seq: 0,
         events: vec![DestinyEvent::OnAudioActivated],
         observer_events: BTreeMap::new(),
         observer_updates_pyrep: pyrep_map,

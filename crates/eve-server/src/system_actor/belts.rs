@@ -991,6 +991,7 @@ pub(super) fn build_tick_broadcast_with_fx_floor(
     TickBroadcast {
         solar_system_id,
         tick: ballpark.current_tick,
+        broadcast_seq: 0,
         events,
         observer_events,
         observer_updates_pyrep,

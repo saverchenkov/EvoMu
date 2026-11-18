@@ -126,6 +126,7 @@ impl SessionWireState {
         for id in ids {
             if id > 0 {
                 self.materialized.insert(id);
+                self.guard.seed_validator_materialized(id);
             }
         }
     }
@@ -143,6 +144,7 @@ impl SessionWireState {
                 if bp.balls.contains_key(&observer_ship_id) {
                     for b in bp.visible_balls_for_observer(observer_ship_id) {
                         self.materialized.insert(b.id);
+                        self.guard.seed_validator_materialized(b.id);
                     }
                 }
             }
@@ -911,6 +913,7 @@ struct ServerDestinyNormalizer {
     stream: DestinyStream,
     sim_materialized: HashSet<BallId>,
     active_add_stamps: std::collections::HashMap<BallId, u32>,
+    removed_tombstone_stamps: std::collections::HashMap<BallId, u32>,
     synthetic_remove_floor: Option<(u32, u32)>,
 }
 
@@ -920,6 +923,7 @@ impl ServerDestinyNormalizer {
             stream: state.destiny,
             sim_materialized: state.materialized.clone(),
             active_add_stamps: state.guard.last_addballs_stamp.clone(),
+            removed_tombstone_stamps: state.guard.removed_tombstone_stamps.clone(),
             synthetic_remove_floor: state.synthetic_remove_floor,
         }
     }
@@ -936,6 +940,7 @@ impl ServerDestinyNormalizer {
             self.stream = DestinyStream::AwaitingSetState { epoch: batch.epoch };
             self.sim_materialized.clear();
             self.active_add_stamps.clear();
+            self.removed_tombstone_stamps.clear();
             self.synthetic_remove_floor = None;
         }
 
@@ -1016,6 +1021,7 @@ impl ServerDestinyNormalizer {
                 if action == "SetState" {
                     self.active_add_stamps.clear();
                     self.sim_materialized.clear();
+                    self.removed_tombstone_stamps.clear();
                     if let Some(ref args) = args_opt {
                         let mut added = Vec::new();
                         crate::sequencer_invariants::extract_set_state_entities(args, &mut added);
@@ -1036,6 +1042,14 @@ impl ServerDestinyNormalizer {
                             &mut added,
                         );
                         for id in added {
+                            if self
+                                .removed_tombstone_stamps
+                                .get(&id)
+                                .is_some_and(|&tomb| eff_stamp <= tomb)
+                            {
+                                continue;
+                            }
+                            self.removed_tombstone_stamps.remove(&id);
                             self.active_add_stamps.insert(id, eff_stamp);
                             self.sim_materialized.insert(id);
                         }
@@ -1066,8 +1080,13 @@ impl ServerDestinyNormalizer {
                         stay_ids.push(id);
                     }
                     if defer_pairs.is_empty() {
-                        for id in &stay_ids {
-                            self.sim_materialized.remove(id);
+                        for &id in &stay_ids {
+                            if !self.sim_materialized.remove(&id) {
+                                self.removed_tombstone_stamps
+                                    .entry(id)
+                                    .and_modify(|t| *t = (*t).max(eff_stamp))
+                                    .or_insert(eff_stamp);
+                            }
                         }
                         idx += 1;
                         continue;
@@ -1120,8 +1139,13 @@ impl ServerDestinyNormalizer {
                         break;
                     }
 
-                    for id in &stay_ids {
-                        self.sim_materialized.remove(id);
+                    for &id in &stay_ids {
+                        if !self.sim_materialized.remove(&id) {
+                            self.removed_tombstone_stamps
+                                .entry(id)
+                                .and_modify(|t| *t = (*t).max(eff_stamp))
+                                .or_insert(eff_stamp);
+                        }
                     }
                     let mut grouped: std::collections::BTreeMap<u32, Vec<BallId>> =
                         std::collections::BTreeMap::new();
@@ -2565,5 +2589,100 @@ mod tests {
         assert_eq!(destiny_stamps, vec![12, 13, 14]);
         assert!(matches!(wire.destiny, DestinyStream::Detached));
         assert_eq!(wire.sequencer_counters().invariant_violations, 0);
+    }
+
+    #[test]
+    fn direct_drain_remove_tombstones_reordered_same_stamp_addballs2_and_raw_remove_is_flagged() {
+        // 1. Sequenced pipeline: direct drain RemoveBalls(9001) at stamp 50 followed by
+        //    TickBroadcast AddBalls2(9001) at stamp 50 must neither materialize 9001 nor emit
+        //    a ghost removal / resurrect 9001.
+        let mut wire = SessionWireState::new(98_117_201, 9201);
+        let ep = wire.enter_space(Some(30_000_142));
+        let init = DestinyBatch::new(
+            ep,
+            49,
+            true,
+            named_update(49, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]),
+        );
+        assert!(sequence_tick(&mut wire, init).is_some());
+        assert!(!wire.materialized.contains(&9001));
+
+        let direct_drain_outcome = sequence_server_rpc_with_events(
+            &mut wire,
+            RpcCompletion {
+                call_id: 11,
+                response_frame: PyRep::Integer(1),
+                session_change_frame: None,
+                pending_tick_batches: vec![],
+                destiny_drain: DestinyDrain::Updates(DestinyBatch::new(
+                    ep,
+                    50,
+                    false,
+                    PyRep::List(vec![make_remove_balls_entry(50, &[9001])]),
+                )),
+                notifications: vec![],
+                item_change_before_session_change: false,
+            },
+        );
+        assert!(
+            !direct_drain_outcome
+                .frames
+                .iter()
+                .any(|f| matches!(f, OutFrame::DoDestinyUpdate { .. })),
+            "unmaterialized direct-drain RemoveBalls(9001) must be suppressed cleanly"
+        );
+
+        let (tick_frame, tick_events) = sequence_tick_with_events(
+            &mut wire,
+            DestinyBatch::new(
+                ep,
+                50,
+                false,
+                named_update(50, "AddBalls2", vec![PyRep::Integer(9001)]),
+            ),
+        );
+        assert!(
+            tick_frame.is_none(),
+            "reordered same-stamp TickBroadcast AddBalls2(9001) after tombstone must be suppressed"
+        );
+        assert!(!wire.materialized.contains(&9001));
+        assert!(
+            tick_events
+                .iter()
+                .any(|e| e.reason.starts_with("tombstoned-addballs:")),
+            "expected tombstone drop ledger event, got {tick_events:?}"
+        );
+        assert_eq!(wire.sequencer_counters().invariant_violations, 0);
+
+        // Legitimate later-stamp (51) AddBalls2(9001) clears tombstone and materializes 9001.
+        let (respawn_frame, _) = sequence_tick_with_events(
+            &mut wire,
+            DestinyBatch::new(
+                ep,
+                51,
+                false,
+                named_update(51, "AddBalls2", vec![PyRep::Integer(9001)]),
+            ),
+        );
+        assert!(respawn_frame.is_some());
+        assert!(wire.materialized.contains(&9001));
+
+        // 2. Raw validator path: emitting RemoveBalls(9001) at stamp 50 without prior
+        //    materialization must NEVER pass unflagged.
+        let mut raw_wire = SessionWireState::new(98_117_202, 9202);
+        raw_wire.set_invariant_validator_mode(InvariantValidatorMode::RecordAndEmit);
+        let raw_ep = raw_wire.enter_space(Some(30_000_142));
+        let raw_init = named_update(49, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(1))])]);
+        assert!(raw_wire
+            .validate_outgoing_destiny_frame(raw_ep, 49, &raw_init)
+            .is_empty());
+
+        let raw_remove = PyRep::List(vec![make_remove_balls_entry(50, &[9001])]);
+        let violations = raw_wire.validate_outgoing_destiny_frame(raw_ep, 50, &raw_remove);
+        assert_eq!(
+            violations,
+            vec![crate::sequencer_invariants::INV_REMOVE_AFTER_ADDBALLS]
+        );
+        assert_eq!(raw_wire.sequencer_counters().invariant_violations, 1);
     }
 }

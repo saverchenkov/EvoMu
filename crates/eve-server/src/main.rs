@@ -607,6 +607,40 @@ async fn read_bounded_frame<R: tokio::io::AsyncRead + Unpin>(
     Ok(Some(payload))
 }
 
+async fn emit_bridge_tick_envelope<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    session: &SessionState,
+    ship_id: i64,
+    tick_msg: &eve_server::system_actor::TickBroadcast,
+) {
+    if session.character_id.is_some()
+        && session.station_id.is_none()
+        && session.solar_system_id == Some(tick_msg.solar_system_id)
+    {
+        if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+            let ev = BridgeEnvelope::ServerEvent {
+                tick: tick_msg.tick,
+                event: "DoDestinyUpdate".to_string(),
+                args: vec![updates_pyrep.clone()],
+            };
+            if let Ok(bytes) = serde_json::to_vec(&ev) {
+                let _ = write_bounded_frame(writer, &bytes).await;
+            }
+        } else if !tick_msg.events.is_empty() {
+            if let Ok(event_json) = serde_json::to_string(&tick_msg.events) {
+                let ev = BridgeEnvelope::ServerEvent {
+                    tick: tick_msg.tick,
+                    event: "DoDestinyUpdate".to_string(),
+                    args: vec![PyRep::String(event_json)],
+                };
+                if let Ok(bytes) = serde_json::to_vec(&ev) {
+                    let _ = write_bounded_frame(writer, &bytes).await;
+                }
+            }
+        }
+    }
+}
+
 async fn write_bounded_frame<W: tokio::io::AsyncWrite + Unpin>(
     stream: &mut W,
     payload: &[u8],
@@ -785,7 +819,41 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                 session.ship_id.or(prev_session.ship_id),
                             ) {
                                 let handle = ctx.systems.get_or_spawn(sys_id);
-                                if let Ok((tick, events, pyrep)) = handle.drain_observer_updates(ship_id).await {
+                                if let Ok((tick, events, pyrep, watermark_seq)) =
+                                    handle.drain_observer_updates_with_seq(ship_id).await
+                                {
+                                    let mut post_ticks = Vec::new();
+                                    let mut lagged = false;
+                                    loop {
+                                        match sys_rx.try_recv() {
+                                            Ok(tick_msg) => {
+                                                if lagged {
+                                                    continue;
+                                                }
+                                                let is_pre = tick_msg.broadcast_seq == 0
+                                                    || tick_msg.broadcast_seq <= watermark_seq;
+                                                if !is_pre {
+                                                    post_ticks.push(tick_msg);
+                                                    continue;
+                                                }
+                                                emit_bridge_tick_envelope(
+                                                    &mut writer,
+                                                    &session,
+                                                    ship_id,
+                                                    &tick_msg,
+                                                )
+                                                .await;
+                                            }
+                                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                                                lagged = true;
+                                                post_ticks.clear();
+                                            }
+                                            Err(
+                                                tokio::sync::broadcast::error::TryRecvError::Empty
+                                                | tokio::sync::broadcast::error::TryRecvError::Closed,
+                                            ) => break,
+                                        }
+                                    }
                                     if !events.is_empty() {
                                         let ev = BridgeEnvelope::ServerEvent {
                                             tick,
@@ -795,6 +863,15 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                         if let Ok(bytes) = serde_json::to_vec(&ev) {
                                             let _ = write_bounded_frame(&mut writer, &bytes).await;
                                         }
+                                    }
+                                    for tick_msg in post_ticks {
+                                        emit_bridge_tick_envelope(
+                                            &mut writer,
+                                            &session,
+                                            ship_id,
+                                            &tick_msg,
+                                        )
+                                        .await;
                                     }
                                 }
                                 let _ = handle
