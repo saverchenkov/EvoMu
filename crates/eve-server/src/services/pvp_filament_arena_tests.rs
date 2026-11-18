@@ -415,3 +415,137 @@ async fn arch_585_arena_hazard_enforces_invuln_preserves_events_and_step_hook_pa
             .any(|it| it.owner_id == cid_b && it.location_id == 32_000_001 && it.type_id != 670));
     });
 }
+
+/// Spawns an isolated Proving Grounds arena and returns per-step out-of-bounds HP deltas.
+async fn sample_oob_arena_damage_per_step(step_dt: f64, steps: usize) -> Vec<f64> {
+    let ctx = test_ctx();
+    let cid_a = 90_000_001_i64;
+    let cid_b = 90_000_002_i64;
+    let arena_oob_x = PROVING_ARENA_BOUNDARY_RADIUS_M + 20_000.0;
+
+    let (ship_a, ship_b) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 2;
+        let sa = snap.next_entity_id - 1;
+        let sb = snap.next_entity_id;
+        for (sid, cid) in [(sa, cid_a), (sb, cid_b)] {
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: 32_000_001,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(sid, [0.0, 0.0, 0.0]);
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = sid;
+                ch.solar_system_id = 32_000_001;
+                ch.station_id = None;
+            }
+        }
+        let mut store = load_pvp_store(snap);
+        store.active_matches.insert(
+            77_703,
+            PvpArenaMatchInstance {
+                match_id: 77_703,
+                event_id: 171,
+                arena_solar_system_id: 32_000_001,
+                end_gate_id: 1_900_990_003,
+                team_a: vec![cid_a],
+                team_b: vec![cid_b],
+                origin_systems: HashMap::from([(cid_a, 30_000_142), (cid_b, 30_000_142)]),
+                exited_pilots: HashSet::new(),
+                winner_char_id: None,
+                active: true,
+                started_unix: ctx.now_unix(),
+            },
+        );
+        save_pvp_store(snap, &store);
+        (sa, sb)
+    });
+
+    let sys = ctx.systems.get_or_spawn(32_000_001);
+    for (sid, pos) in [
+        (ship_a, DVec3::ZERO),
+        (ship_b, DVec3::new(arena_oob_x, 0.0, 0.0)),
+    ] {
+        sys.spawn_ball(Ball {
+            id: sid,
+            type_id: 587,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    }
+    let mut prev_hp = 10_000.0;
+    sys.set_combat_state(
+        ship_b,
+        CombatState {
+            shield_hp: 1_000.0,
+            max_shield_hp: 1_000.0,
+            armor_hp: 5_000.0,
+            max_armor_hp: 5_000.0,
+            structure_hp: 4_000.0,
+            max_structure_hp: 4_000.0,
+            shield_recharge_time_ms: 0.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut losses = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        sys.step_manual(step_dt).await.unwrap();
+        let cs = sys
+            .get_combat_state(ship_b)
+            .await
+            .unwrap()
+            .expect("ship_b must remain alive with 10_000 total HP");
+        let hp = cs.shield_hp + cs.armor_hp + cs.structure_hp;
+        losses.push(prev_hp - hp);
+        prev_hp = hp;
+    }
+    losses
+}
+
+/// Regression coverage for #1347: verifies 1 Hz arena sphere hazard scales per simulated tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arena_hazard_scales_with_simulated_ticks_per_step_manual() {
+    // Each 1.0 s step runs 1 arena hazard tick: 250 -> 375 -> 500.
+    let one_sec_losses = sample_oob_arena_damage_per_step(1.0, 3).await;
+    let tick1 = PROVING_HAZARD_BASE_DPS;
+    let tick2 = PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK);
+    let tick3 = PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * 2.0);
+    let tick4 = PROVING_HAZARD_BASE_DPS * (1.0 + PROVING_HAZARD_RAMP_PER_TICK * 3.0);
+    assert_eq!(one_sec_losses.len(), 3);
+    assert!((one_sec_losses[0] - tick1).abs() < 1e-6, "losses: {one_sec_losses:?}");
+    assert!((one_sec_losses[1] - tick2).abs() < 1e-6, "losses: {one_sec_losses:?}");
+    assert!((one_sec_losses[2] - tick3).abs() < 1e-6, "losses: {one_sec_losses:?}");
+
+    // A 2.0 s step advances 2 simulated seconds, applying two 1 Hz hazard ticks per call:
+    // (250 + 375 = 625), then (500 + 625 = 1125).
+    let two_sec_losses = sample_oob_arena_damage_per_step(2.0, 2).await;
+    assert_eq!(two_sec_losses.len(), 2);
+    assert!(
+        (two_sec_losses[0] - (tick1 + tick2)).abs() < 1e-6,
+        "losses: {two_sec_losses:?}"
+    );
+    assert!(
+        (two_sec_losses[1] - (tick3 + tick4)).abs() < 1e-6,
+        "losses: {two_sec_losses:?}"
+    );
+}
