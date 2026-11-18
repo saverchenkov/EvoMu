@@ -4843,20 +4843,14 @@ pub(crate) mod pve_dungeons_events_remediation {
 // - `feat:pve.milestones`
 
 use eve_db::d6_types::{PersistedMercenaryActivity, PersistedMercenaryDen};
-use eve_destiny::MovementMode;
+use eve_db::TrainedSkillRecord;
+use eve_destiny::{DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::pve_dungeon_runtime::{
-    get_dungeon_instance_state, on_dungeon_npc_killed,
-};
-use eve_server::services::pve_dungeon_runtime_rpc::{
-    on_dungeon_approach, on_dungeon_item_looted, spawn_dungeon_instance,
-    try_activate_dungeon_runtime_gate,
-};
-use eve_server::services::pve_special_sites::{
-    ensure_seasonal_event_sites_for_system, on_special_site_npc_destroyed_core,
-};
+use eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state;
+use eve_server::services::pve_special_sites::with_pve_special_reg;
+use eve_server::services::pve_special_sites_combat::get_seasonal_site_details;
 use eve_server::services::season_fsd::load_season_config;
 use eve_server::services::season_manager::load_season_state_from_blobs;
 use eve_server::services::sov_gameplay::on_space_entity_destroyed_ext;
@@ -4932,272 +4926,629 @@ async fn rpc(
         .await
 }
 
+async fn step_until_warp_landed_at(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+) {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..180 {
+        let _ = sys_handle.step_manual(1.0).await;
+        if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(ship_id).await {
+            if matches!(b.mode, MovementMode::Stop) {
+                break;
+            }
+        }
+    }
+    let _ = rpc(ctx, sess, "beyonce", "UpdateStateRequest", &[])
+        .await
+        .expect("UpdateStateRequest after warp");
+}
+
+async fn follow_until_within(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    sys_id: u32,
+    ship_id: i64,
+    target_id: i64,
+    max_dist_m: f64,
+) {
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let beyonce_oid = ctx.bind_object(sess, "beyonce", i64::from(sys_id)).unwrap();
+    let _ = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdSetSpeedFraction",
+            &[PyRep::Real(1.0)],
+            &kw,
+            None,
+        )
+        .await;
+    sys_handle
+        .get_ball_snapshot(target_id)
+        .await
+        .ok()
+        .flatten()
+        .expect("target ball present");
+    let _ = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "CmdFollowBall",
+            &[PyRep::Integer(target_id), PyRep::Real(500.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CmdFollowBall");
+    let Some((_, target_ball)) = sys_handle.get_ball_snapshot(target_id).await.ok().flatten() else {
+        return;
+    };
+    let target_pos = target_ball.position;
+    for _ in 0..240 {
+        let _ = sys_handle.step_manual(1.0).await;
+        if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
+            if sb.position.distance(target_pos) <= max_dist_m {
+                break;
+            }
+        }
+    }
+    let _ = ctx
+        .dispatch_rpc(
+            sess,
+            "beyonce",
+            Some(beyonce_oid),
+            "UpdateStateRequest",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("UpdateStateRequest after follow");
+}
+
+fn equip_data_analyzer_and_hacking(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id: i64, hull_tid: u32) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: hull_tid,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ship_id + 1,
+            InventoryItemRecord {
+                item_id: ship_id + 1,
+                type_id: 22_175,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            21_718,
+            TrainedSkillRecord {
+                type_id: 21_718,
+                level: 5,
+                skill_points: 1_280_000.0,
+            },
+        );
+    });
+}
+
+async fn hack_container_to_win_for_char(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    can_id: i64,
+) -> PyRep {
+    let start = rpc(ctx, sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(can_id)])
+        .await
+        .expect("StartNewGameInstance");
+    assert!(start.dict_get("virusCoherence").and_then(|v| v.as_i64()).unwrap_or(0) >= 80);
+    let core_idx = with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games[&(char_id, can_id)]
+            .tiles
+            .iter()
+            .find(|t| format!("{:?}", t.kind) == "SystemCore")
+            .expect("SystemCore tile")
+            .tile_index
+    });
+    let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
+    path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
+    for &idx in &path {
+        for _ in 0..8 {
+            let r = rpc(
+                ctx,
+                sess,
+                "hackingMgr",
+                "ClickedOnTile",
+                &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)],
+            )
+            .await
+            .expect("ClickedOnTile");
+            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                return r;
+            }
+            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
+                break;
+            }
+        }
+    }
+    panic!("Expected hacking minigame to reach Won state");
+}
+
+fn extract_rowset(rep: &PyRep) -> (Vec<String>, Vec<Vec<PyRep>>) {
+    match rep {
+        PyRep::Rowset { columns, rows } | PyRep::TupleSet { columns, rows } => {
+            (columns.clone(), rows.clone())
+        }
+        PyRep::IndexRowset { columns, items, .. } => (
+            columns.clone(),
+            items.iter().map(|(_, r)| r.clone()).collect(),
+        ),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+fn row_field<'a>(cols: &[String], row: &'a [PyRep], name: &str) -> Option<&'a PyRep> {
+    cols.iter().position(|c| c == name).and_then(|i| row.get(i))
+}
+
 #[tokio::test]
 async fn test_pve_dungeon_system_authentic_lifecycle() {
     // parity: feat:pve.dungeon-system
     eve_testkit::attest(&["feat:pve.dungeon-system"]);
 
     let ctx = new_ctx();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
     let (mut sess, ship_id) = setup_pilot(&ctx, PILOT_A, JITA).await;
-    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    equip_data_analyzer_and_hacking(&ctx, PILOT_A, JITA, ship_id, 587);
+    let lethal = DamageVector {
+        em: 100_000_000.0,
+        thermal: 100_000_000.0,
+        kinetic: 100_000_000.0,
+        explosive: 100_000_000.0,
+    };
 
-    // 1. Define and spawn multi-room dungeon instance with objects, NPC groups, and triggers
-    let room1 = PyRep::Dict(vec![
-        (PyRep::String("roomName".into()), PyRep::String("Staging Pocket".into())),
-        (PyRep::String("gateLocked".into()), PyRep::Bool(true)),
-        (
-            PyRep::String("objects".into()),
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("name".into()), PyRep::String("Deadspace Supply Cache".into())),
-                (PyRep::String("typeID".into()), PyRep::Integer(17_996)),
-                (PyRep::String("isContainer".into()), PyRep::Bool(true)),
-                (PyRep::String("radius".into()), PyRep::Real(500.0)),
-                (PyRep::String("offset".into()), PyRep::List(vec![PyRep::Real(1_500.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
-                (PyRep::String("lootItems".into()), PyRep::List(vec![
-                    PyRep::List(vec![PyRep::Integer(34), PyRep::Integer(50)]),
-                    PyRep::List(vec![PyRep::Integer(2838), PyRep::Integer(1)]),
-                ])),
-            ])]),
-        ),
-        (
-            PyRep::String("npcGroups".into()),
-            PyRep::List(vec![
-                PyRep::Dict(vec![
-                    (PyRep::String("groupID".into()), PyRep::Integer(1)),
-                    (PyRep::String("wave".into()), PyRep::Integer(1)),
-                    (PyRep::String("spawnImmediately".into()), PyRep::Bool(true)),
-                    (PyRep::String("npcs".into()), PyRep::List(vec![PyRep::List(vec![PyRep::Integer(10_043), PyRep::Integer(2)])])),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::String("groupID".into()), PyRep::Integer(2)),
-                    (PyRep::String("wave".into()), PyRep::Integer(2)),
-                    (PyRep::String("spawnImmediately".into()), PyRep::Bool(false)),
-                    (PyRep::String("npcs".into()), PyRep::List(vec![PyRep::List(vec![PyRep::Integer(10_043), PyRep::Integer(1)])])),
-                ]),
-            ]),
-        ),
-        (
-            PyRep::String("triggers".into()),
-            PyRep::List(vec![
-                PyRep::Dict(vec![
-                    (PyRep::String("kind".into()), PyRep::String("approach".into())),
-                    (PyRep::String("action".into()), PyRep::String("TriggerMessage".into())),
-                    (PyRep::String("targetObjectIndex".into()), PyRep::Integer(0)),
-                    (PyRep::String("radius".into()), PyRep::Real(3_000.0)),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::String("kind".into()), PyRep::String("loot".into())),
-                    (PyRep::String("action".into()), PyRep::String("SpawnNpcGroup".into())),
-                    (PyRep::String("actionGroup".into()), PyRep::Integer(2)),
-                    (PyRep::String("targetObjectIndex".into()), PyRep::Integer(0)),
-                ]),
-                PyRep::Dict(vec![
-                    (PyRep::String("kind".into()), PyRep::String("kill".into())),
-                    (PyRep::String("action".into()), PyRep::String("UnlockGate".into())),
-                ]),
-            ]),
-        ),
-    ]);
+    // 1. Discover SDE-loaded multi-room dungeon DSG-30000142 (Guristas Scout Outpost, dungeon 98 in sde_dungeons)
+    let sde_d98 = ctx
+        .sde
+        .dungeons
+        .get(&98)
+        .expect("SDE dungeon 98 (Guristas Scout Outpost) present in evomu_sde.sqlite");
+    assert!(sde_d98.archetype_id.is_some());
 
-    let room2 = PyRep::Dict(vec![
-        (PyRep::String("roomName".into()), PyRep::String("Sanctum Pocket".into())),
-        (PyRep::String("gateLocked".into()), PyRep::Bool(false)),
+    ensure_system_pve_sites_seeded(&ctx, JITA).await;
+    let (dsg_pos, dsg_inst_id, dsg_did) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&JITA]
+            .iter()
+            .find(|s| s.site_id == "DSG-30000142" && s.site_category == "Deadspace")
+            .expect("Naturally seeded SDE deadspace signature DSG-30000142");
         (
-            PyRep::String("objects".into()),
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("name".into()), PyRep::String("Pirate Command Outpost".into())),
-                (PyRep::String("typeID".into()), PyRep::Integer(24_690)),
-                (PyRep::String("isContainer".into()), PyRep::Bool(false)),
-                (PyRep::String("radius".into()), PyRep::Real(1_000.0)),
-            ])]),
-        ),
-        (
-            PyRep::String("npcGroups".into()),
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("groupID".into()), PyRep::Integer(1)),
-                (PyRep::String("wave".into()), PyRep::Integer(1)),
-                (PyRep::String("spawnImmediately".into()), PyRep::Bool(true)),
-                (PyRep::String("npcs".into()), PyRep::List(vec![PyRep::List(vec![PyRep::Integer(17_615), PyRep::Integer(1)])])),
-            ])]),
-        ),
-        (
-            PyRep::String("triggers".into()),
-            PyRep::List(vec![PyRep::Dict(vec![
-                (PyRep::String("kind".into()), PyRep::String("kill".into())),
-                (PyRep::String("action".into()), PyRep::String("CompleteDungeon".into())),
-            ])]),
-        ),
-    ]);
-
-    let kw = HashMap::from([
-        ("solarSystemID".to_string(), PyRep::Integer(JITA as i64)),
-        ("dungeonID".to_string(), PyRep::Integer(3_501)),
-        ("dungeonName".to_string(), PyRep::String("Serpentis Multi-Room Complex".into())),
-        ("category".to_string(), PyRep::String("Deadspace".into())),
-        ("hasEntryGate".to_string(), PyRep::Bool(false)),
-        (
-            "position".to_string(),
-            PyRep::List(vec![PyRep::Real(120_000_000.0), PyRep::Real(0.0), PyRep::Real(80_000_000.0)]),
-        ),
-        ("rooms".to_string(), PyRep::List(vec![room1, room2])),
-    ]);
-
-    let spawn_rep = spawn_dungeon_instance(&ctx, PILOT_A, Some(JITA), &[], &kw)
-        .await
-        .expect("spawn_dungeon_instance");
-    let inst_id = spawn_rep
-        .dict_get("instanceID")
-        .and_then(|v| v.as_i64())
-        .expect("dungeon instanceID");
-
-    // 2. Verify Room 1 object, gate, and initial NPC spawning
-    let sys_handle = ctx.systems.get_or_spawn(JITA);
-    let (room1_gate_id, cont_ball_id, wave1_npc_ids) = ctx.db.with_snapshot(|snap| {
-        let store = &snap.dungeon_runtime;
-        let inst = &store.instances[&inst_id];
-        let r1 = &inst.rooms[0];
-        (
-            r1.gate_ball_id.expect("room 1 gate ball id"),
-            r1.objects[0].ball_id,
-            r1.npc_groups[0].npc_ball_ids.clone(),
+            s.position,
+            s.expedition_instance_id.expect("runtime dungeon instance"),
+            s.dungeon_id,
         )
     });
+    assert_eq!(dsg_did, 98);
 
-    assert!(sys_handle.get_ball_snapshot(room1_gate_id).await.ok().flatten().is_some());
-    assert!(sys_handle.get_ball_snapshot(cont_ball_id).await.ok().flatten().is_some());
-    assert_eq!(wave1_npc_ids.len(), 2);
-    for &nid in &wave1_npc_ids {
-        assert!(sys_handle.get_ball_snapshot(nid).await.ok().flatten().is_some());
-    }
+    // Initially redacted until scanned to 100% via scanMgr.RequestScans
+    let scan_pre = rpc(&ctx, &mut sess, "scanMgr", "GetSystemScanMgr", &[PyRep::Integer(i64::from(JITA))])
+        .await
+        .expect("GetSystemScanMgr");
+    let PyRep::List(pre_sigs) = scan_pre.dict_get("signatures").expect("signatures") else {
+        panic!("Expected signatures list");
+    };
+    let dsg_pre = pre_sigs
+        .iter()
+        .find(|s| s.dict_get("signatureID") == Some(&PyRep::String("DSG-30000142".into())))
+        .expect("DSG-30000142 signature entry");
+    assert_eq!(dsg_pre.dict_get("x"), Some(&PyRep::None));
 
-    // When far from gate (> 2500m), activating it fails with OutsideGateActivationRange
-    let range_err = try_activate_dungeon_runtime_gate(
+    let probes: Vec<PyRep> = (0..8)
+        .map(|_| PyRep::List(vec![PyRep::Real(dsg_pos[0]), PyRep::Real(dsg_pos[1]), PyRep::Real(dsg_pos[2])]))
+        .collect();
+    rpc(
         &ctx,
         &mut sess,
-        JITA,
-        &[PyRep::Integer(room1_gate_id)],
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)],
     )
     .await
-    .expect("gate handler result")
-    .expect_err("far gate activation must fail range check");
+    .expect("RequestScans pinpoints DSG-30000142");
+
+    // 2. Warp to scanned deadspace entry gate via live beyonce.CmdWarpToStuff
+    rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("scan".into()), PyRep::String("DSG-30000142".into())],
+    )
+    .await
+    .expect("CmdWarpToStuff to DSG-30000142");
+    step_until_warp_landed_at(&ctx, &mut sess, JITA, ship_id).await;
+
+    let sys_handle = ctx.systems.get_or_spawn(JITA);
+    let inst_state0 = get_dungeon_instance_state(&ctx, dsg_inst_id).expect("dungeon instance state");
+    let entry_gate_id = inst_state0.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
+    assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.ok().flatten().is_some());
+
+    // 3. Activate entry acceleration gate via live keeper.ActivateAccelerationGate -> enters Room 1
+    let gate1_rep = rpc(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(entry_gate_id)],
+    )
+    .await
+    .expect("ActivateAccelerationGate entry gate");
+    assert_eq!(gate1_rep.dict_get("success"), Some(&PyRep::Bool(true)));
+    assert_eq!(gate1_rep.dict_get("roomIndex"), Some(&PyRep::Integer(1)));
+    assert_eq!(gate1_rep.dict_get("disallowMWD"), Some(&PyRep::Bool(true)));
+    let r1_gate_id = gate1_rep.dict_get("nextGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::List(r1_objs) = gate1_rep.dict_get("objectBallIDs").expect("objectBallIDs") else {
+        panic!("Expected objectBallIDs");
+    };
+    let r1_beacon_id = r1_objs[0].as_i64().unwrap();
+    let PyRep::List(r1_wave1) = gate1_rep.dict_get("npcBallIDs").expect("npcBallIDs") else {
+        panic!("Expected npcBallIDs");
+    };
+    assert!(!r1_wave1.is_empty(), "Room 1 SDE wave must spawn");
+
+    // Range & lock checks via live RPCs
+    let range_err = rpc(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(r1_gate_id)],
+    )
+    .await
+    .expect_err("far Room 1 gate must fail range check");
     assert_eq!(range_err.code, "OutsideGateActivationRange");
 
-    // Move within range of locked gate
-    let gate_snap0 = sys_handle
-        .get_ball_snapshot(room1_gate_id)
-        .await
-        .ok()
-        .flatten()
-        .expect("gate ball");
-    let _ = sys_handle
-        .set_ball_position(ship_id, gate_snap0.1.position + DVec3::new(500.0, 0.0, 0.0))
-        .await;
-
-    // Acceleration gate starts locked: activating within range fails with GateLocked
-    let gate_locked_err = try_activate_dungeon_runtime_gate(
+    follow_until_within(&ctx, &mut sess, JITA, ship_id, r1_gate_id, 2_000.0).await;
+    let locked_err = rpc(
         &ctx,
         &mut sess,
-        JITA,
-        &[PyRep::Integer(room1_gate_id)],
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(r1_gate_id)],
     )
     .await
-    .expect("gate handler result")
-    .expect_err("locked gate activation must fail");
-    assert_eq!(gate_locked_err.code, "GateLocked");
+    .expect_err("locked Room 1 gate must fail before defenders are cleared");
+    assert_eq!(locked_err.code, "GateLocked");
 
-    // 3. Test OnApproach trigger on container object
-    let approach_pos = DVec3::new(120_001_500.0, 0.0, 80_000_000.0);
-    let _ = sys_handle.set_ball_position(ship_id, approach_pos).await;
-    let fired_approach = on_dungeon_approach(&ctx, PILOT_A, JITA, ship_id, Some(cont_ball_id)).await;
-    assert!(fired_approach >= 1, "OnApproach trigger must fire");
+    // 4. Approach Deadspace Relay Beacon via live CmdFollowBall + UpdateStateRequest -> fires OnApproach spawn
+    let r1_npcs_pre = r1_wave1.len();
+    follow_until_within(&ctx, &mut sess, JITA, ship_id, r1_beacon_id, 2_200.0).await;
+    let inst_after_approach = get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
+    let PyRep::List(rooms_post_app) = inst_after_approach.dict_get("rooms").unwrap() else {
+        panic!();
+    };
+    let PyRep::List(r1_all_npcs) = rooms_post_app[0].dict_get("npcBallIDs").unwrap() else {
+        panic!();
+    };
+    assert!(
+        r1_all_npcs.len() > r1_npcs_pre,
+        "Approaching Room 1 relay beacon via CmdFollowBall must trigger reinforcement spawn"
+    );
 
-    // 4. Test OnLoot trigger on container: looting spawns Wave 2 NPCs
-    on_dungeon_item_looted(&ctx, PILOT_A, Some(JITA), cont_ball_id, 34).await;
-    let wave2_npc_ids = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.instances[&inst_id].rooms[0].npc_groups[1].npc_ball_ids.clone()
-    });
-    assert_eq!(wave2_npc_ids.len(), 1, "Wave 2 NPC must spawn from loot trigger");
-    assert!(sys_handle.get_ball_snapshot(wave2_npc_ids[0]).await.ok().flatten().is_some());
-
-    // 5. Test OnKill triggers & Acceleration Gate unlock
-    for &nid in &wave1_npc_ids {
-        on_dungeon_npc_killed(&ctx, JITA, nid, PILOT_A).await;
+    // 5. Destroy all Room 1 defenders through combat pipeline -> unlocks Room 1 -> Room 2 gate
+    for n in r1_all_npcs {
+        let _ = sys_handle
+            .apply_damage_with_attacker(n.as_i64().unwrap(), lethal, Some(PILOT_A))
+            .await;
     }
-    on_dungeon_npc_killed(&ctx, JITA, wave2_npc_ids[0], PILOT_A).await;
-
-    let is_unlocked = ctx.db.with_snapshot(|snap| {
-        !snap.dungeon_runtime.instances[&inst_id].rooms[0].gate_locked
+    let gate_unlocked = ctx.db.with_snapshot(|snap| {
+        !snap.dungeon_runtime.instances[&dsg_inst_id].rooms[0].gate_locked
     });
-    assert!(is_unlocked, "Room 1 acceleration gate must unlock when NPCs are killed");
+    assert!(gate_unlocked, "Clearing Room 1 NPCs via combat must unlock acceleration gate");
 
-    // 6. Test authentic Room Transition through acceleration gate
-    // Position ship within activation range (<= 2500m of gate)
-    let gate_snap = sys_handle
-        .get_ball_snapshot(room1_gate_id)
-        .await
-        .ok()
-        .flatten()
-        .expect("gate ball");
-    let near_gate_pos = gate_snap.1.position + DVec3::new(500.0, 0.0, 0.0);
-    let _ = sys_handle.set_ball_position(ship_id, near_gate_pos).await;
-
-    let gate_activate_rep = try_activate_dungeon_runtime_gate(
+    follow_until_within(&ctx, &mut sess, JITA, ship_id, r1_gate_id, 2_000.0).await;
+    let gate2_rep = rpc(
         &ctx,
         &mut sess,
-        JITA,
-        &[PyRep::Integer(room1_gate_id)],
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(r1_gate_id)],
     )
     .await
-    .expect("gate handler result")
-    .expect("gate activation must succeed");
-    assert_eq!(
-        gate_activate_rep.dict_get("success").and_then(|v| v.as_bool()),
-        Some(true)
+    .expect("Activate Room 1 -> Room 2 gate");
+    assert_eq!(gate2_rep.dict_get("success"), Some(&PyRep::Bool(true)));
+    assert_eq!(gate2_rep.dict_get("roomIndex"), Some(&PyRep::Integer(2)));
+    let dest_x = gate2_rep.dict_get("destinationX").and_then(|v| v.as_f64()).unwrap();
+    let ship_r2_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().unwrap().1.position;
+    assert!((ship_r2_pos.x - dest_x).abs() < 10.0, "Ship must move to Room 2 landing");
+
+    let PyRep::List(r2_objs) = gate2_rep.dict_get("objectBallIDs").unwrap() else { panic!() };
+    let strongbox_id = r2_objs[0].as_i64().unwrap();
+    let PyRep::List(r2_npcs_pre) = gate2_rep.dict_get("npcBallIDs").unwrap() else { panic!() };
+
+    // 6. Approach & loot Overseer Strongbox via live invbroker.LootAll -> fires OnLoot ambush wave
+    let ship_inv_oid = ctx.bind_object(&sess, "invbroker", ship_id).unwrap();
+    follow_until_within(&ctx, &mut sess, JITA, ship_id, strongbox_id, 2_200.0).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        Some(ship_inv_oid),
+        "LootAll",
+        &[PyRep::Integer(strongbox_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("LootAll on Room 2 Overseer Strongbox");
+
+    let inst_post_loot = get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
+    let PyRep::List(rooms_post_loot) = inst_post_loot.dict_get("rooms").unwrap() else { panic!() };
+    let PyRep::List(r2_all_npcs) = rooms_post_loot[1].dict_get("npcBallIDs").unwrap() else { panic!() };
+    assert!(
+        r2_all_npcs.len() > r2_npcs_pre.len(),
+        "invbroker.LootAll on Overseer Strongbox must spawn OnLoot ambush wave"
     );
-    assert_eq!(
-        gate_activate_rep.dict_get("roomIndex").and_then(|v| v.as_i64()),
-        Some(2)
+
+    // 7. Destroy Room 2 boss & ambush via combat -> fires CompleteDungeon + ballpark cleanup
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    for n in r2_all_npcs {
+        let _ = sys_handle
+            .apply_damage_with_attacker(n.as_i64().unwrap(), lethal, Some(PILOT_A))
+            .await;
+    }
+    let st_final = get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
+    assert_eq!(st_final.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(st_final.dict_get("despawned").and_then(|v| v.as_bool()), Some(true));
+    assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.ok().flatten().is_none());
+    assert!(sys_handle.get_ball_snapshot(r1_gate_id).await.ok().flatten().is_none());
+    assert!(sys_handle.get_ball_snapshot(r1_beacon_id).await.ok().flatten().is_none());
+    assert!(sys_handle.get_ball_snapshot(strongbox_id).await.ok().flatten().is_none());
+    let done_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(
+        done_notifs.iter().any(|n| n.event == "OnDungeonCompleted"),
+        "OnDungeonCompleted must fire upon clearing Room 2 overseer"
     );
 
-    // Verify pilot was translated to Room 2 coordinates
-    let dest_x = gate_activate_rep.dict_get("destinationX").and_then(|v| v.as_f64()).unwrap();
-    let ship_post_warp = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().unwrap().1.position;
-    assert!((ship_post_warp.x - dest_x).abs() < 10.0, "Ship ball must move to Room 2 landing");
+    // 8. Clear a CombatAnomaly via CmdWarpToStuff + combat with positive escalation RNG -> verify GetMyEscalatingPathDetails + epinstance warp
+    let esc_seed = (1_u64..100_000)
+        .find(|&s| {
+            let r = eve_server::rng::MechanicRng::seeded(s);
+            (0..5).all(|_| r.roll(0.20))
+        })
+        .expect("escalation RNG seed");
+    let PyRep::List(anoms) = rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("scanSvc.GetCombatAnomalyInstances")
+    else {
+        panic!("Expected List from GetCombatAnomalyInstances");
+    };
+    let anom_site_id = anoms
+        .iter()
+        .filter_map(|a| a.dict_get("siteID").or_else(|| a.dict_get("id")).and_then(|v| v.as_str()))
+        .find(|sid| !sid.starts_with("dng-"))
+        .expect("non-seasonal CombatAnomaly in Jita")
+        .to_string();
 
-    // Verify Room 2 objects & boss NPC spawned in ballpark
-    let (room2_obj_id, room2_boss_id) = ctx.db.with_snapshot(|snap| {
-        let r2 = &snap.dungeon_runtime.instances[&inst_id].rooms[1];
-        (r2.objects[0].ball_id, r2.npc_groups[0].npc_ball_ids[0])
-    });
-    assert!(sys_handle.get_ball_snapshot(room2_obj_id).await.ok().flatten().is_some());
-    assert!(sys_handle.get_ball_snapshot(room2_boss_id).await.ok().flatten().is_some());
-
-    // 7. Test Dungeon Completion & Despawn mechanics
-    let st_before = get_dungeon_instance_state(&ctx, inst_id).expect("state before");
-    assert_eq!(st_before.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(st_before.dict_get("despawned").and_then(|v| v.as_bool()), Some(false));
+    rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("dungeon".into()), PyRep::String(anom_site_id.clone())],
+    )
+    .await
+    .expect("CmdWarpToStuff to CombatAnomaly");
+    step_until_warp_landed_at(&ctx, &mut sess, JITA, ship_id).await;
 
     let _ = ctx.drain_notifications_for_char(PILOT_A);
-    // Destroying the Room 2 Boss in combat removes its ball and fires CompleteDungeon
-    let _ = sys_handle.remove_ball(room2_boss_id).await;
-    on_dungeon_npc_killed(&ctx, JITA, room2_boss_id, PILOT_A).await;
+    for _ in 0..10 {
+        let wave_ids: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system
+                .get(&JITA)
+                .and_then(|l| l.iter().find(|s| s.site_id == anom_site_id))
+                .filter(|s| !s.cleared)
+                .map(|s| s.active_npc_ball_ids.clone())
+                .unwrap_or_default()
+        });
+        if wave_ids.is_empty() {
+            break;
+        }
+        ctx.set_mechanic_rng_seed(Some(esc_seed));
+        for bid in wave_ids {
+            let _ = sys_handle.apply_damage_with_attacker(bid, lethal, Some(PILOT_A)).await;
+        }
+    }
 
-    let st_after = get_dungeon_instance_state(&ctx, inst_id).expect("state after");
-    assert_eq!(st_after.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(st_after.dict_get("despawned").and_then(|v| v.as_bool()), Some(true));
+    let esc_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(esc_notifs.iter().any(|n| n.event == "OnEscalatingPathChange"));
+    let esc_rep = rpc(&ctx, &mut sess, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[])
+        .await
+        .expect("GetMyEscalatingPathDetails");
+    let (esc_cols, esc_rows) = extract_rowset(&esc_rep);
+    assert_eq!(esc_rows.len(), 1, "Clearing combat anomaly with positive roll must trigger escalation");
+    let esc_inst_id = row_field(&esc_cols, &esc_rows[0], "instanceID").and_then(|v| v.as_i64()).unwrap();
+    let esc_dest_sys = row_field(&esc_cols, &esc_rows[0], "destinationSolarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    assert_eq!(row_field(&esc_cols, &esc_rows[0], "stepIndex").and_then(|v| v.as_i64()), Some(1));
+    assert!(row_field(&esc_cols, &esc_rows[0], "totalSteps").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
 
-    // Verify all dungeon entities are despawned from ballpark
-    assert!(sys_handle.get_ball_snapshot(room1_gate_id).await.ok().flatten().is_none());
-    assert!(sys_handle.get_ball_snapshot(cont_ball_id).await.ok().flatten().is_none());
-    assert!(sys_handle.get_ball_snapshot(room2_obj_id).await.ok().flatten().is_none());
-    assert!(sys_handle.get_ball_snapshot(room2_boss_id).await.ok().flatten().is_none());
+    if esc_dest_sys != JITA {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+                ch.solar_system_id = esc_dest_sys;
+            }
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = i64::from(esc_dest_sys);
+            }
+        });
+        sess.solar_system_id = Some(esc_dest_sys);
+        let dest_h = ctx.systems.get_or_spawn(esc_dest_sys);
+        let _ = dest_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: ship_id,
+                    type_id: 587,
+                    position: DVec3::new(100_000_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 2.0,
+                    mass: 1_000_000.0,
+                    radius: 100.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_ship_combat_state(PILOT_A, ship_id, 587),
+            )
+            .await;
+    }
+    rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[PyRep::String("epinstance".into()), PyRep::Integer(esc_inst_id)],
+    )
+    .await
+    .expect("CmdWarpToStuff epinstance to escalation pocket");
+    step_until_warp_landed_at(&ctx, &mut sess, esc_dest_sys, ship_id).await;
+    let entered = rpc(
+        &ctx,
+        &mut sess,
+        "dungeonExplorationMgr",
+        "GetEscalatingPathDungeonsEntered",
+        &[PyRep::Integer(esc_inst_id)],
+    )
+    .await
+    .expect("GetEscalatingPathDungeonsEntered");
+    let PyRep::List(entered_list) = entered else { panic!("Expected List") };
+    assert!(!entered_list.is_empty(), "Escalation entry must record dungeon visit");
+}
 
-    // Verify OnDungeonCompleted notification was emitted
-    let notifs = ctx.drain_notifications_for_char(PILOT_A);
-    assert!(
-        notifs.iter().any(|n| n.event == "OnDungeonCompleted"),
-        "OnDungeonCompleted must be dispatched upon completion"
-    );
+#[tokio::test]
+async fn test_deadspace_fleet_warp_and_warp_to_member_blocked() {
+    let ctx = new_ctx();
+    crate::common::pin_clock(&ctx);
+    ensure_system_pve_sites_seeded(&ctx, JITA).await;
+    let dsg_inst_id = with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system[&JITA]
+            .iter()
+            .find(|s| s.site_id == "DSG-30000142" && s.site_category == "Deadspace")
+            .and_then(|s| s.expedition_instance_id)
+            .expect("DSG-30000142 instance")
+    });
+    let inst_state = get_dungeon_instance_state(&ctx, dsg_inst_id).expect("dungeon instance state");
+    let PyRep::List(rooms) = inst_state.dict_get("rooms").expect("rooms") else { panic!() };
+    let extract_pos = |r: &PyRep| -> [f64; 3] {
+        let Some(PyRep::Tuple(t)) = r.dict_get("position") else { panic!("room position") };
+        [t[0].as_f64().unwrap(), t[1].as_f64().unwrap(), t[2].as_f64().unwrap()]
+    };
+    let r1_pos = extract_pos(&rooms[0]);
+    let r2_pos = extract_pos(&rooms[1]);
+    assert_eq!(rooms[1].dict_get("gated"), Some(&PyRep::Bool(true)));
+
+    let ext_a = DVec3::new(r2_pos[0] + 10_000_000.0, r2_pos[1], r2_pos[2]);
+    let (mut sess_a, ship_a) = setup_pilot(&ctx, PILOT_A, JITA).await;
+    let sys_handle = ctx.systems.get_or_spawn(JITA);
+    let _ = sys_handle.set_ball_position(ship_a, ext_a).await;
+
+    let pilot_b: i64 = 90_000_002;
+    let ship_b: i64 = 750_990_002;
+    let mut sess_b = SessionState::new(pilot_b as u64);
+    crate::common::login_pilot(&ctx, &mut sess_b, "other", "other-secret").await;
+    rpc(&ctx, &mut sess_b, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(pilot_b)])
+        .await
+        .expect("SelectCharacterID p2");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_b) {
+            ch.solar_system_id = JITA;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_b;
+        }
+        snap.items.insert(
+            ship_b,
+            eve_db::InventoryItemRecord {
+                item_id: ship_b,
+                type_id: 587,
+                owner_id: pilot_b,
+                location_id: i64::from(JITA),
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_b, r2_pos);
+    });
+    sess_b.solar_system_id = Some(JITA);
+    sess_b.station_id = None;
+    sess_b.ship_id = Some(ship_b);
+    let _ = sys_handle.spawn_ball(eve_destiny::Ball {
+        id: ship_b,
+        type_id: 587,
+        radius: 100.0,
+        position: DVec3::from_array(r2_pos),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_A);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, pilot_b);
+    let fleet_id = rpc(&ctx, &mut sess_a, "fleetObjectHandler", "CreateFleet", &[])
+        .await.expect("CreateFleet").as_i64().expect("fleetID");
+    sess_a.fleet_id = Some(fleet_id);
+    rpc(&ctx, &mut sess_a, "fleetObjectHandler", "Invite", &[PyRep::Integer(pilot_b), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)]).await.expect("Invite");
+    rpc(&ctx, &mut sess_b, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fleet_id), PyRep::Integer(587)]).await.expect("AcceptInvite");
+    sess_b.fleet_id = Some(fleet_id);
+    rpc(&ctx, &mut sess_b, "fleetObjectHandler", "SetTakesFleetWarp", &[PyRep::Bool(true)]).await.expect("SetTakesFleetWarp");
+
+    let wtm_err = rpc(&ctx, &mut sess_a, "fleetMgr", "WarpToMember", &[PyRep::Integer(pilot_b), PyRep::Real(0.0)])
+        .await
+        .expect_err("WarpToMember into gated deadspace room must be blocked");
+    assert_eq!(wtm_err.code, "NaturalPhenomenaDisruptingWarp");
+    let (_, ball_a) = sys_handle.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+    assert!(!matches!(ball_a.mode, MovementMode::Warp { .. }));
+
+    let fw_err = rpc(&ctx, &mut sess_a, "fleetObjectHandler", "FleetWarp", &[PyRep::Real(r2_pos[0]), PyRep::Real(r2_pos[1]), PyRep::Real(r2_pos[2]), PyRep::Real(0.0)])
+        .await
+        .expect_err("FleetWarp into gated deadspace room must be blocked");
+    assert_eq!(fw_err.code, "NaturalPhenomenaDisruptingWarp");
+
+    let _ = sys_handle.set_ball_position(ship_a, DVec3::from_array(r1_pos)).await;
+    let cross_err = rpc(&ctx, &mut sess_a, "fleetObjectHandler", "WarpToMember", &[PyRep::Integer(pilot_b), PyRep::Real(0.0)])
+        .await
+        .expect_err("Cross-pocket WarpToMember between Room 1 and Room 2 must be blocked");
+    assert_eq!(cross_err.code, "NaturalPhenomenaDisruptingWarp");
+
+    let _ = sys_handle.set_ball_position(ship_a, ext_a).await;
+    let _ = sys_handle.set_ball_position(ship_b, ext_a + DVec3::new(5_000.0, 0.0, 0.0)).await;
+    let ext_dest = ext_a + DVec3::new(20_000_000.0, 0.0, 0.0);
+    let fw_ok = rpc(&ctx, &mut sess_a, "fleetObjectHandler", "FleetWarp", &[PyRep::Real(ext_dest.x), PyRep::Real(ext_dest.y), PyRep::Real(ext_dest.z), PyRep::Real(0.0)])
+        .await
+        .expect("FleetWarp in open space must succeed");
+    assert_eq!(fw_ok.dict_get("warpedMembers"), Some(&PyRep::Integer(2)));
 }
 
 #[tokio::test]
@@ -5206,98 +5557,230 @@ async fn test_pve_seasonal_event_sites_and_loot_tables() {
     eve_testkit::attest(&["feat:pve.events-sites"]);
 
     let ctx = new_ctx();
-    let (mut sess, _) = setup_pilot(&ctx, PILOT_A, JITA).await;
-    let _ = &mut sess;
+    crate::common::pin_clock(&ctx);
+    let (mut sess, ship_id) = setup_pilot(&ctx, PILOT_A, JITA).await;
+    equip_data_analyzer_and_hacking(&ctx, PILOT_A, JITA, ship_id, 587);
+    let lethal = DamageVector {
+        em: 100_000_000.0,
+        thermal: 100_000_000.0,
+        kinetic: 100_000_000.0,
+        explosive: 100_000_000.0,
+    };
 
-    // 1. Establish active seasonal event window
+    // 1. Configure active Crimson Harvest window and discover site via live dungeonInstanceCacheMgr RPC
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let season_cfg = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         let mut cfg = load_season_config(snap);
+        cfg.season_id = 1;
+        cfg.season_name = "Crimson Harvest".into();
         cfg.start_time_ft = now_ft - 3_600 * 10_000_000;
         cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
-        snap.seasons_and_campaigns.season_configuration = Some(cfg.clone());
-        cfg
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
     });
 
-    // 2. Spawn seasonal event site in Jita
-    let active_sites = ensure_seasonal_event_sites_for_system(&ctx, JITA).await;
-    assert_eq!(active_sites.len(), 1, "Seasonal event site must spawn in active window");
-    let site = &active_sites[0];
-    let boss_bid = site.boss_npc_ball_id;
-    let escort_bids = site.escort_ball_ids.clone();
+    let PyRep::Dict(anom_dict) = rpc(
+        &ctx,
+        &mut sess,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomalyInstances",
+        &[],
+    )
+    .await
+    .expect("GetCombatAnomalyInstances")
+    else {
+        panic!("Expected Dict from GetCombatAnomalyInstances");
+    };
+    let (_, PyRep::Dict(jita_by_dng)) = anom_dict
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(i64::from(JITA)))
+        .expect("Jita entries in GetCombatAnomalyInstances")
+    else {
+        panic!("Expected inner Dict for Jita");
+    };
 
-    // Verify event NPCs are spawned in ballpark with combat AI
+    let (crimson_did, crimson_iid) = ctx.db.with_snapshot(|snap| {
+        let a = snap
+            .cosmic_anomalies
+            .get(&JITA)
+            .into_iter()
+            .flatten()
+            .find(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+            .expect("SeasonalEventSite anomaly");
+        let rest = a.anomaly_id.strip_prefix("dng-").expect("dng prefix");
+        let (d, i) = rest.split_once('-').expect("dng-did-iid");
+        (d.parse::<u32>().unwrap(), i.parse::<i64>().unwrap())
+    });
+    assert_ne!(crimson_did, 47, "Seasonal event site must not use hardcoded dungeon_id 47");
+    assert!(
+        matches!(crimson_did, 8923 | 8926 | 9238 | 9241 | 8933),
+        "Crimson Harvest must select an authentic SDE seasonal dungeon (got {crimson_did})"
+    );
+    assert!(
+        jita_by_dng.iter().any(|(d, ids)| {
+            d.as_i64() == Some(i64::from(crimson_did))
+                && matches!(ids, PyRep::List(l) if l.contains(&PyRep::Integer(crimson_iid)))
+        }),
+        "dungeonInstanceCacheMgr.GetCombatAnomalyInstances must expose active seasonal event site"
+    );
+
+    let details = get_seasonal_site_details(&ctx, crimson_iid).expect("SeasonalSiteDetails");
+    assert_eq!(details.season_theme, "Crimson Harvest");
+    assert!(details.relay_ball_id != 0, "Seasonal site must spawn hackable relay ball");
+    assert!(
+        !details.crate_loot_pool.is_empty(),
+        "Seasonal site must resolve FSD crate loot table entries"
+    );
+
+    // 2. Warp to the seasonal site via live custom_agency_provider.warp_to_content
+    let content_key = format!("dng-{crimson_did}-{crimson_iid}");
+    rpc(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([
+            ("contentID", PyRep::String(content_key.clone())),
+            ("instanceID", PyRep::Integer(crimson_iid)),
+            ("dungeonID", PyRep::Integer(i64::from(crimson_did))),
+        ])],
+    )
+    .await
+    .expect("custom_agency_provider.warp_to_content to seasonal site");
+    step_until_warp_landed_at(&ctx, &mut sess, JITA, ship_id).await;
+
+    let (boss_bid, escort_bids, expected_isk, expected_pts) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.seasonal_event_sites[&JITA]
+            .iter()
+            .find(|s| s.instance_id == crimson_iid)
+            .expect("seasonal site record");
+        (s.boss_npc_ball_id, s.escort_ball_ids.clone(), s.reward_isk, s.reward_points)
+    });
+    let fsd_challenges = eve_server::services::season_fsd::fsd_challenge_definitions(&ctx.sde);
+    assert!(
+        expected_pts > 0 && fsd_challenges.iter().any(|d| d.points == expected_pts),
+        "Seasonal challenge points ({expected_pts}) must come directly from FSD definitions"
+    );
+    assert_eq!(escort_bids.len(), 2);
     let sys_handle = ctx.systems.get_or_spawn(JITA);
     assert!(sys_handle.get_ball_snapshot(boss_bid).await.ok().flatten().is_some());
-    for &ebid in &escort_bids {
-        assert!(sys_handle.get_ball_snapshot(ebid).await.ok().flatten().is_some());
+    assert!(sys_handle.get_ball_snapshot(details.relay_ball_id).await.ok().flatten().is_some());
+
+    // 3. Approach & hack seasonal Data relay via live hackingMgr RPCs
+    let boss_shield_pre = sys_handle
+        .get_combat_state(boss_bid)
+        .await
+        .ok()
+        .flatten()
+        .expect("boss combat state pre-hack")
+        .shield_hp;
+    follow_until_within(&ctx, &mut sess, JITA, ship_id, details.relay_ball_id, 1_800.0).await;
+    let hack_win = hack_container_to_win_for_char(&ctx, &mut sess, PILOT_A, details.relay_ball_id).await;
+    assert_eq!(hack_win.dict_get("status").and_then(|v| v.as_str()), Some("Won"));
+    assert!(
+        get_seasonal_site_details(&ctx, crimson_iid).is_some_and(|d| d.relay_hacked),
+        "Winning SHK relay hack must mark relay_hacked = true"
+    );
+    let boss_shield_post = sys_handle
+        .get_combat_state(boss_bid)
+        .await
+        .ok()
+        .flatten()
+        .expect("boss combat state post-hack")
+        .shield_hp;
+    if boss_shield_pre > 20.0 {
+        assert!(
+            boss_shield_post < boss_shield_pre,
+            "Hacking SHK relay must weaken seasonal boss shield ({boss_shield_pre} -> {boss_shield_post})"
+        );
     }
 
-    // Verify cosmic anomaly registered
-    let has_anom = ctx.db.with_snapshot(|snap| {
-        snap.cosmic_anomalies
-            .get(&JITA)
-            .is_some_and(|l| l.iter().any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared))
-    });
-    assert!(has_anom, "Cosmic anomaly must be present for event site");
-
-    // 3. Destroy event boss NPC and verify authentic seasonal loot tables, ISK, and points
+    // 4. Destroy seasonal boss via live combat destruction pipeline -> verify FSD loot, ISK, points & cleanup
     let bal_before = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
-    let pts_before = ctx
-        .db
-        .with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
-
-    let changes = on_special_site_npc_destroyed_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        JITA,
-        boss_bid,
-        Some(PILOT_A),
-    )
-    .await;
-    assert!(!changes.is_empty(), "Account balance change must be returned");
+    let pts_before = ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
+    let (_, boss_dead, _) = sys_handle
+        .apply_damage_with_attacker(boss_bid, lethal, Some(PILOT_A))
+        .await
+        .expect("damage")
+        .expect("seasonal boss exists");
+    assert!(boss_dead);
 
     let bal_after = ctx.db.with_snapshot(|s| s.characters[&PILOT_A].balance.0);
-    let pts_after = ctx
-        .db
-        .with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
-    assert_eq!(bal_after - bal_before, 750_000 * 100, "Event site must award 750k ISK");
-    assert_eq!(pts_after - pts_before, 25, "Event site must award 25 season points");
+    let pts_after = ctx.db.with_snapshot(|s| load_season_state_from_blobs(s, PILOT_A).season_points);
+    assert_eq!(bal_after - bal_before, expected_isk * 100);
+    assert_eq!(pts_after - pts_before, expected_pts);
 
-    // Verify journal entry for bounty prize
     let has_journal = ctx.db.with_snapshot(|snap| {
         snap.wallet_journal
             .iter()
-            .any(|e| e.character_id == PILOT_A && e.entry_type == "BountyPrizes" && e.reason.contains("Seasonal Event Site"))
+            .any(|e| e.character_id == PILOT_A && e.entry_type == "BountyPrizes" && e.reason.contains("Seasonal Event"))
     });
-    assert!(has_journal, "Bounty prize journal entry must be recorded");
+    assert!(has_journal, "Seasonal boss bounty journal entry must be recorded");
 
-    // Verify seasonal event loot items deposited into container or cargo
-    let loot_present = ctx.db.with_snapshot(|snap| {
+    let crate_deposited = ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
-            .any(|it| it.owner_id == PILOT_A && (it.type_id == 2838 || it.type_id == 9950 || it.type_id == 2048))
+            .any(|it| it.owner_id == PILOT_A && it.type_id == details.crate_type_id)
     });
-    assert!(loot_present, "Seasonal event loot (Cerebral Accelerator / Booster) must be deposited");
+    assert!(crate_deposited, "Seasonal FSD crate must be awarded to pilot");
+    if !details.crate_loot_pool.is_empty() {
+        let bonus_pool_deposited = ctx.db.with_snapshot(|snap| {
+            details.crate_loot_pool.iter().any(|&(ptid, _)| {
+                snap.items.values().any(|it| it.owner_id == PILOT_A && it.type_id == ptid)
+            })
+        });
+        assert!(
+            bonus_pool_deposited,
+            "Hacked SHK relay must unlock bonus FSD pool loot drops upon boss destruction"
+        );
+    }
 
-    // Verify escorts cleaned up and anomaly cleared
     for &ebid in &escort_bids {
         assert!(sys_handle.get_ball_snapshot(ebid).await.ok().flatten().is_none());
     }
-    let anom_cleared = ctx.db.with_snapshot(|snap| {
+    assert!(sys_handle.get_ball_snapshot(details.relay_ball_id).await.ok().flatten().is_none());
+
+    // 5. Switch season to Winter Nexus, verify distinct SDE archetype spawns, then expire window & verify despawn via live RPC
+    let now_ft2 = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cfg = load_season_config(snap);
+        cfg.season_id = 2;
+        cfg.season_name = "Winter Nexus".into();
+        cfg.start_time_ft = now_ft2 - 1_800 * 10_000_000;
+        cfg.end_time_ft = now_ft2 + 1_800 * 10_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+    let _ = rpc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("Winter Nexus GetCombatAnomalyInstances");
+    let winter_did = ctx.db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .get(&JITA)
-            .is_some_and(|l| l.iter().all(|a| a.anomaly_type != "SeasonalEventSite" || a.cleared))
+            .into_iter()
+            .flatten()
+            .filter(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+            .filter_map(|a| a.anomaly_id.strip_prefix("dng-").and_then(|r| r.split_once('-')))
+            .filter_map(|(d, _)| d.parse::<u32>().ok())
+            .next()
+            .expect("Winter Nexus seasonal site spawned")
     });
-    assert!(anom_cleared, "Cosmic anomaly must be marked cleared");
+    assert!(
+        matches!(winter_did, 9030 | 9046 | 9047 | 9029),
+        "Winter Nexus must spawn Winter Nexus SDE dungeon (got {winter_did})"
+    );
+    assert_ne!(winter_did, crimson_did);
 
-    // 4. Verify despawn mechanics outside seasonal window
-    let past_end_unix = ((season_cfg.end_time_ft - 116_444_736_000_000_000) / 10_000_000) as u64 + 60;
-    let delta = past_end_unix.saturating_sub(ctx.now_unix());
-    ctx.db.clock().advance_secs(delta);
-    let expired_sites = ensure_seasonal_event_sites_for_system(&ctx, JITA).await;
-    assert!(expired_sites.is_empty(), "Event sites must despawn outside active window");
+    ctx.db.clock().advance_secs(7_200);
+    let _ = rpc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[])
+        .await
+        .expect("Expired GetCombatAnomalyInstances");
+    let any_active = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&JITA)
+            .into_iter()
+            .flatten()
+            .any(|a| a.anomaly_type == "SeasonalEventSite" && !a.cleared)
+    });
+    assert!(!any_active, "Expired seasonal event sites must despawn outside active window");
 }
 
 #[tokio::test]

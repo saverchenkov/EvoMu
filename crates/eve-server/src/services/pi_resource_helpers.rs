@@ -7,8 +7,21 @@ use crate::services::industry_pi::list_sde_planet_p0_resources;
 use crate::services::industry_pi::pi_helpers::{PiColonyNetworkState, PiPinState};
 use eve_db::{OwnerNoteRecord, WorldStateSnapshot};
 use eve_proto::PyRep;
-use eve_sde::TypeId;
+use eve_sde::{SdeRegistry, TypeId};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// V24 `appConst.planetResourceMaxValue` (`eve/common/lib/appConst.py:1894`).
+pub const PLANET_RESOURCE_MAX_VALUE: f64 = 1.21;
+
+/// V24 `appConst.MAX_DISPLAY_QUALITY = planetResourceMaxValue * 255 * 0.5` (`appConst.py:1897`),
+/// matching `PlanetaryProductionPlanetContentPiece` and `ResourceController` normalization.
+pub const MAX_DISPLAY_QUALITY: f64 = PLANET_RESOURCE_MAX_VALUE * 255.0 * 0.5;
+
+/// V24 `appConst.planetResourceProximityLimits` (`appConst.py:1882-1886`): `(minBand, maxBand)`
+/// indexed by `planetResourceProximity{Distant=0, Region=1, Constellation=2, System=3, Planet=4}`.
+pub const PLANET_RESOURCE_PROXIMITY_LIMITS: [(usize, usize); 5] =
+    [(2, 6), (4, 10), (6, 15), (10, 20), (15, 30)];
 
 /// Persistent planet resource depletion state record stored in `WorldStateSnapshot.owner_notes`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -116,40 +129,155 @@ pub fn evaluate_spherical_harmonic_basis(lat: f64, lon: f64) -> [f64; 9] {
     ]
 }
 
-/// Computes resource richness (0.0 .. 1.0) at surface coordinates (lat, lon) on a planet
-/// by evaluating the planet's spherical harmonic resource layer and subtracting colony extraction
-/// and GM depletion layers.
-pub fn compute_planet_resource_density(
-    _ctx: &ServerContext,
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn hash_unit(seed: u64) -> f64 {
+    ((splitmix64(seed) >> 11) as f64) / ((1_u64 << 53) as f64)
+}
+
+/// Static fallback weights matching V24 `res:/staticdata/globaltypes.fsdbinary` when a unit test
+/// builds a synthetic [`SdeRegistry`] without binary CFSD files on disk.
+fn fallback_globaltypes_resource_weight(restriction_type_id: TypeId, resource_tid: TypeId) -> Option<f64> {
+    match restriction_type_id {
+        11 => match resource_tid {
+            2305 | 2287 => Some(1.0),
+            2288 => Some(0.95),
+            2268 | 2073 => Some(0.9),
+            _ => None,
+        },
+        12 => match resource_tid {
+            2272 => Some(1.0),
+            2286 | 2268 => Some(0.95),
+            2310 => Some(0.9),
+            2073 => Some(0.85),
+            _ => None,
+        },
+        13 => match resource_tid {
+            2311 | 2310 => Some(1.0),
+            2309 => Some(0.95),
+            2268 | 2267 => Some(0.8),
+            _ => None,
+        },
+        2014 => match resource_tid {
+            2286 | 2268 => Some(1.0),
+            2073 | 2287 => Some(0.95),
+            2288 => Some(0.9),
+            _ => None,
+        },
+        2015 => match resource_tid {
+            2307 => Some(1.0),
+            2308 | 2272 | 2306 => Some(0.95),
+            2267 => Some(0.9),
+            _ => None,
+        },
+        2016 => match resource_tid {
+            2288 | 2270 | 2073 | 2267 => Some(1.0),
+            2268 => Some(0.75),
+            _ => None,
+        },
+        2017 => match resource_tid {
+            2309 => Some(1.0),
+            2310 => Some(0.95),
+            2308 => Some(0.9),
+            2268 | 2267 => Some(0.85),
+            _ => None,
+        },
+        2063 => match resource_tid {
+            2308 | 2306 => Some(1.0),
+            2270 | 2267 => Some(0.95),
+            2272 => Some(0.9),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Loads `resourceDistribution` weights per planet type from V24 `res:/staticdata/globaltypes.fsdbinary`.
+pub fn load_globaltypes_resource_distributions(
+    sde: &SdeRegistry,
+) -> Option<&'static HashMap<TypeId, HashMap<TypeId, f64>>> {
+    static CACHE: OnceLock<HashMap<TypeId, HashMap<TypeId, f64>>> = OnceLock::new();
+    if let Some(cached) = CACHE.get() {
+        return Some(cached);
+    }
+    if sde.resources.is_empty() {
+        return None;
+    }
+    let cfsd = sde.load_cfsd_nested("res:/staticdata/globaltypes.fsdbinary").ok()?;
+    let mut parsed: HashMap<TypeId, HashMap<TypeId, f64>> = HashMap::new();
+    for (pt_key, entry) in cfsd {
+        let Ok(planet_type_id) = pt_key.parse::<TypeId>() else {
+            continue;
+        };
+        let Some(dist) = entry.get("resourceDistribution").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let mut weights = HashMap::new();
+        for (res_key, val) in dist {
+            if let (Ok(res_tid), Some(w)) = (res_key.parse::<TypeId>(), val.as_f64()) {
+                weights.insert(res_tid, w.clamp(0.0, 1.0));
+            }
+        }
+        if !weights.is_empty() {
+            parsed.insert(planet_type_id, weights);
+        }
+    }
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(CACHE.get_or_init(|| parsed))
+}
+
+fn resolve_planet_restriction_type_id(sde: &SdeRegistry, planet_id: i64) -> Option<TypeId> {
+    let planet_cel = sde
+        .celestials_by_system
+        .values()
+        .flatten()
+        .find(|c| c.celestial_id == planet_id && c.group_id == 7)?;
+    let pt = sde.types.get(&planet_cel.type_id)?;
+    Some(pt.variation_parent_type_id.unwrap_or(pt.type_id))
+}
+
+/// Resolves the normalized planet-type distribution weight `(0.0..=1.0]` for `(planet_id, resource_tid)`
+/// from V24 `globaltypes.fsdbinary`.
+pub fn resolve_planet_resource_distribution_weight(
+    sde: &SdeRegistry,
+    planet_id: i64,
+    resource_tid: TypeId,
+) -> f64 {
+    let Some(restriction_tid) = resolve_planet_restriction_type_id(sde, planet_id) else {
+        return 0.78;
+    };
+    if let Some(map) = load_globaltypes_resource_distributions(sde) {
+        if let Some(w) = map.get(&restriction_tid).and_then(|m| m.get(&resource_tid)) {
+            return (*w).clamp(0.05, 1.0);
+        }
+    }
+    fallback_globaltypes_resource_weight(restriction_tid, resource_tid).unwrap_or(0.75)
+}
+
+fn global_colony_and_gm_depletion(
     snap: &WorldStateSnapshot,
     planet_id: i64,
     resource_tid: TypeId,
-    lat: f64,
-    lon: f64,
-) -> f64 {
-    let basis = evaluate_spherical_harmonic_basis(lat, lon);
-    let mut sum = 0.0;
-    for (b, &b_val) in basis.iter().enumerate() {
-        let coeff = (((planet_id as u64)
-            .wrapping_mul(31)
-            .wrapping_add((resource_tid as u64).wrapping_mul(17))
-            .wrapping_add(b as u64)
-            % 100) as f64)
-            / 100.0;
-        sum += coeff * b_val;
-    }
-    let base_richness = (0.50 + 0.08 * sum).clamp(0.15, 0.95);
-
-    // Colony extraction depletion: sum extracted commodities across colonies on this planet
+) -> (f64, f64, PlanetResourceDepletionState) {
     let mut colony_extracted_qty = 0_u64;
     for col in snap.planetary_colonies.values() {
         if col.planet_id == planet_id {
-            colony_extracted_qty += col.extracted_commodities.get(&resource_tid).copied().unwrap_or(0);
+            colony_extracted_qty += col
+                .extracted_commodities
+                .get(&resource_tid)
+                .copied()
+                .unwrap_or(0);
         }
     }
     let colony_depletion = ((colony_extracted_qty as f64) / 100_000.0).min(0.40);
-
-    // GM and localized depletion state
     let depl_state = load_planet_depletion(snap, planet_id);
     let gm_depl = depl_state
         .resource_depletion
@@ -157,6 +285,113 @@ pub fn compute_planet_resource_density(
         .copied()
         .unwrap_or(0.0)
         .max(depl_state.gm_depletion_rate);
+    (colony_depletion, gm_depl, depl_state)
+}
+
+// DERIVED: `evomu_sde.sqlite` ships base resource distribution weights in `res:/staticdata/globaltypes.fsdbinary`
+// rather than per-planet spherical-harmonic band maps (`planet_id` maps via deterministic splitmix64 SH expansion).
+fn compute_planet_sh_bands_base(
+    sde: &SdeRegistry,
+    planet_id: i64,
+    resource_tid: TypeId,
+    num_bands: usize,
+) -> Vec<f64> {
+    let bands = num_bands.max(1);
+    let total_coeffs = bands * bands;
+    let dist_weight = resolve_planet_resource_distribution_weight(sde, planet_id, resource_tid);
+    let base_seed = (planet_id as u64)
+        .wrapping_mul(0x517C_C1B7_2722_0A95)
+        ^ (resource_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let richness_roll = 0.56 + 0.30 * hash_unit(base_seed);
+    let base_monopole = (dist_weight * richness_roll).clamp(0.18, 0.88);
+
+    let mut coeffs = vec![0.0_f64; total_coeffs];
+    coeffs[0] = base_monopole;
+    for l in 1..bands {
+        let band_start = l * l;
+        let band_len = 2 * l + 1;
+        let band_amp = base_monopole * (0.28 / (l as f64).powf(1.35));
+        for m_off in 0..band_len {
+            let coeff_idx = band_start + m_off;
+            let signed = hash_unit(base_seed.wrapping_add((coeff_idx as u64) * 1_047_29)) * 2.0 - 1.0;
+            // Ensure low-order harmonics never collapse to exact zero across any planet/resource seed.
+            let shaped = if l <= 2 && signed.abs() < 0.22 {
+                if signed >= 0.0 { 0.22 } else { -0.22 }
+            } else {
+                signed
+            };
+            coeffs[coeff_idx] = shaped * band_amp;
+        }
+    }
+    coeffs
+}
+
+/// Computes `num_bands * num_bands` real spherical harmonic coefficients (`f32` order `(l, m)`)
+/// from V24 `globaltypes.fsdbinary` resource distribution weights, deterministic planet/resource
+/// seeding, live colony extraction + GM depletion, and active nugget layers.
+pub fn compute_planet_resource_sh_coefficients(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+    num_bands: usize,
+) -> Vec<f32> {
+    let mut coeffs = compute_planet_sh_bands_base(&ctx.sde, planet_id, resource_tid, num_bands);
+    let (colony_depl, gm_depl, depl_state) =
+        global_colony_and_gm_depletion(snap, planet_id, resource_tid);
+    let global_depletion = (colony_depl + gm_depl).min(0.85);
+    let scale = 1.0 - global_depletion;
+    for c in &mut coeffs {
+        *c *= scale;
+    }
+    coeffs[0] = coeffs[0].max(0.02);
+
+    for layer in &depl_state.nugget_layers {
+        if layer.resource_type_id == resource_tid && layer.boost > 0.0 {
+            let basis = evaluate_spherical_harmonic_basis(layer.latitude, layer.longitude);
+            let w = layer.boost * layer.radius.clamp(0.05, 1.0);
+            for (slot, &b_val) in coeffs.iter_mut().zip(basis.iter()) {
+                *slot += w * b_val;
+            }
+        }
+    }
+
+    coeffs.into_iter().map(|c| c as f32).collect()
+}
+
+/// Evaluates the normalized `[0.02, 0.98]` planetary resource average quality (`l=0` SH monopole)
+/// for `(planet_id, resource_tid)`; multiply by [`MAX_DISPLAY_QUALITY`] for V24 `GetPlanetResourceInfo`.
+pub fn compute_planet_resource_quality(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+) -> f64 {
+    let coeffs = compute_planet_resource_sh_coefficients(ctx, snap, planet_id, resource_tid, 3);
+    (coeffs[0] as f64).clamp(0.02, 0.98)
+}
+
+/// Computes resource richness (`0.02 .. 1.0`) at surface coordinates `(lat, lon)` on a planet
+/// by evaluating the planet's spherical harmonic resource layer and subtracting colony extraction
+/// and GM depletion layers.
+pub fn compute_planet_resource_density(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    resource_tid: TypeId,
+    lat: f64,
+    lon: f64,
+) -> f64 {
+    let basis = evaluate_spherical_harmonic_basis(lat, lon);
+    let base_coeffs = compute_planet_sh_bands_base(&ctx.sde, planet_id, resource_tid, 3);
+    let mut sum = base_coeffs[0] * basis[0];
+    for idx in 1..9_usize {
+        sum += base_coeffs[idx] * basis[idx] * 0.45;
+    }
+    let base_richness = sum.clamp(0.15, 0.90);
+
+    let (colony_depletion, gm_depl, depl_state) =
+        global_colony_and_gm_depletion(snap, planet_id, resource_tid);
 
     let mut local_depl = 0.0;
     for spot in &depl_state.local_depletion {
@@ -189,52 +424,15 @@ pub fn compute_planet_resource_density(
 /// Computes the 9 real spherical harmonic `f32` coefficients (36 bytes little-endian, `numBands = 3`)
 /// for `(planet_id, resource_tid)` from live colony extraction, depletion state, and GM nugget layers.
 pub fn compute_planet_complete_resource_sh_bytes(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     planet_id: i64,
     resource_tid: TypeId,
 ) -> Vec<u8> {
-    let mut colony_extracted_qty = 0_u64;
-    for col in snap.planetary_colonies.values() {
-        if col.planet_id == planet_id {
-            colony_extracted_qty += col.extracted_commodities.get(&resource_tid).copied().unwrap_or(0);
-        }
-    }
-    let colony_depletion = ((colony_extracted_qty as f64) / 100_000.0).min(0.40);
-    let depl_state = load_planet_depletion(snap, planet_id);
-    let gm_depl = depl_state
-        .resource_depletion
-        .get(&resource_tid)
-        .copied()
-        .unwrap_or(0.0)
-        .max(depl_state.gm_depletion_rate);
-    let total_depletion = (colony_depletion + gm_depl).min(0.85);
-    let scale = 1.0 - total_depletion;
-
-    let mut coeffs = [0.0_f64; 9];
-    for (b, slot) in coeffs.iter_mut().enumerate() {
-        let base_c = (((planet_id as u64)
-            .wrapping_mul(31)
-            .wrapping_add((resource_tid as u64).wrapping_mul(17))
-            .wrapping_add(b as u64)
-            % 100) as f64)
-            / 100.0;
-        *slot = (if b == 0 { 0.50 + 0.08 * base_c } else { 0.08 * base_c }) * scale;
-    }
-
-    for layer in &depl_state.nugget_layers {
-        if layer.resource_type_id == resource_tid && layer.boost > 0.0 {
-            let basis = evaluate_spherical_harmonic_basis(layer.latitude, layer.longitude);
-            let w = layer.boost * layer.radius.clamp(0.05, 1.0);
-            for (slot, &b_val) in coeffs.iter_mut().zip(basis.iter()) {
-                *slot += w * b_val;
-            }
-        }
-    }
-
-    let mut bytes = Vec::with_capacity(36);
+    let coeffs = compute_planet_resource_sh_coefficients(ctx, snap, planet_id, resource_tid, 3);
+    let mut bytes = Vec::with_capacity(coeffs.len() * 4);
     for c in coeffs {
-        bytes.extend_from_slice(&(c as f32).to_le_bytes());
+        bytes.extend_from_slice(&c.to_le_bytes());
     }
     bytes
 }

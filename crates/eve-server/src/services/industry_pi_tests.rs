@@ -261,7 +261,12 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     for (k, v) in &res_entries {
         assert!(k.as_i64().unwrap_or(0) > 0);
         let q = v.as_f64().unwrap_or(0.0);
-        assert!(q > 0.0 && q <= 1.0, "unexpected quality {q}");
+        assert!(
+            q > 0.0 && q <= MAX_DISPLAY_QUALITY,
+            "unexpected V24 wire quality {q} (expected (0, {MAX_DISPLAY_QUALITY}])"
+        );
+        let norm = q / MAX_DISPLAY_QUALITY;
+        assert!(norm > 0.0 && norm <= 1.0, "normalized quality {norm} out of bounds");
     }
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -324,6 +329,20 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     .unwrap();
     assert_eq!(res_data.dict_get("numBands").unwrap().as_i64(), Some(6));
     assert_eq!(res_data.dict_get("proximity").unwrap().as_i64(), Some(3));
+    let Some(PyRep::Bytes(sh_bytes)) = res_data.dict_get("data") else {
+        panic!("GetResourceData must include binary SH float buffer");
+    };
+    assert_eq!(sh_bytes.len(), 6 * 6 * 4);
+    let sh_coeffs: Vec<f32> = sh_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(sh_coeffs.iter().all(|v| v.is_finite()));
+    assert!(sh_coeffs[0] > 0.0, "l=0 monopole coefficient must be positive");
+    assert!(
+        sh_coeffs[1..4].iter().any(|c| c.abs() > 1e-5),
+        "l=1 spherical harmonic dipole band must be non-degenerate"
+    );
 
     let planets_rep = handle(
         &ctx,

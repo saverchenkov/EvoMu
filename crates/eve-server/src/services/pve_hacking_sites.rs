@@ -239,7 +239,30 @@ pub async fn handle_pve_hacking(
                     client_error: None,
                 }));
             };
+            // Preserve previously spawned Seasonal (`SHK-`) hackables across initial
+            // exploration seeding, which only retains `Expedition` sites.
+            let preserved_special_hackables: Vec<_> = with_pve_exploration_reg(ctx, |reg| {
+                reg.sites_by_system
+                    .get(&sys_id)
+                    .map(|list| {
+                        list.iter()
+                            .filter(|s| s.site_id.starts_with("SHK-"))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            if !preserved_special_hackables.is_empty() {
+                with_pve_exploration_reg(ctx, |reg| {
+                    let list = reg.sites_by_system.entry(sys_id).or_default();
+                    for site in preserved_special_hackables {
+                        if !list.iter().any(|x| x.site_id == site.site_id) {
+                            list.push(site);
+                        }
+                    }
+                });
+            }
             let container_id = if args.len() == 1 && matches!(args.first(), Some(PyRep::None)) {
                 0
             } else if let Some(explicit_id) = args
@@ -433,7 +456,7 @@ pub async fn handle_pve_hacking(
             };
             let container_type_id = ctx
                 .db
-                .with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id));
+                .with_snapshot(|s| s.get_any_item(container_id).map(|i| i.type_id));
             let sde_tier = container_type_id
                 .and_then(|tid| ctx.sde.get_type(tid))
                 .and_then(|t| t.default_attributes.get(&1919).copied())
@@ -662,7 +685,10 @@ pub async fn handle_pve_hacking(
                     game.status = "Failed".into();
                 } else if core_destroyed {
                     game.status = "Won".into();
-                    if !already_hacked && !game.site_id.starts_with("STRUCTURE_") {
+                    if !already_hacked
+                        && !game.site_id.starts_with("STRUCTURE_")
+                        && !game.site_id.starts_with("SHK-")
+                    {
                         let center = reg
                             .sites_by_system
                             .get(&game.solar_system_id)
@@ -753,6 +779,15 @@ pub async fn handle_pve_hacking(
                 );
             }
             if status == "Won" && !already_hacked {
+                if site_id.starts_with("SHK-") {
+                    crate::services::pve_special_sites_combat::on_seasonal_relay_hacked(
+                        ctx,
+                        sys_id,
+                        &site_id,
+                        char_id,
+                    )
+                    .await;
+                }
                 ctx.db.with_mut_snapshot(|s| {
                     let entry = s
                         .seasons_and_campaigns

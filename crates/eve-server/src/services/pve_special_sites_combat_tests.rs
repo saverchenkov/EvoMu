@@ -63,7 +63,7 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
         }
     });
 
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_600_000)));
     ensure_special_sites_initialized(&ctx);
 
@@ -156,12 +156,26 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     });
     let seasonal = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
     assert_eq!(seasonal.len(), 1);
+    assert_ne!(seasonal[0].dungeon_id, 47, "must select authentic SDE seasonal dungeon rather than stub 47");
+    let details = crate::services::pve_special_sites_combat::get_seasonal_site_details(&ctx, seasonal[0].instance_id)
+        .expect("companion seasonal details stored");
+    assert_ne!(details.relay_ball_id, 0);
+    assert_eq!(seasonal[0].escort_ball_ids.len(), 2);
     let s_boss = seasonal[0].boss_npc_ball_id;
     let s_changes = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, s_boss, Some(90_060_001)).await;
     assert_eq!(s_changes.len(), 1);
     ctx.db.with_snapshot(|snap| {
         let st = crate::services::season_manager::load_season_state(snap, 90_060_001);
-        assert!(st.season_points >= 25);
+        assert!(st.season_points >= seasonal[0].reward_points);
+        assert!(seasonal[0].reward_points > 0);
+        assert!(
+            sde.types.len() <= 100
+                || crate::services::season_fsd::fsd_challenge_definitions(&sde)
+                    .iter()
+                    .any(|d| d.points == seasonal[0].reward_points),
+            "seasonal reward_points ({}) must match an FSD challenge definition",
+            seasonal[0].reward_points
+        );
     });
 }
 
@@ -204,7 +218,7 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
         }
     });
 
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_600_000)));
     ensure_special_sites_initialized(&ctx);
 

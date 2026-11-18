@@ -94,6 +94,42 @@ pub fn with_pve_special_reg<R>(
     with_pve_special_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
+/// Loads a JSON-serialized helper map stored in `snap.owner_notes`.
+pub(crate) fn load_json_owner_note<T: Default + serde::de::DeserializeOwned>(
+    snap: &eve_db::WorldStateSnapshot,
+    note_id: i64,
+) -> T {
+    snap.owner_notes
+        .get(&note_id)
+        .and_then(|rec| serde_json::from_str(&rec.note).ok())
+        .unwrap_or_default()
+}
+
+/// Saves or removes a JSON-serialized helper map in `snap.owner_notes`.
+pub(crate) fn save_json_owner_note<T: serde::Serialize>(
+    snap: &mut eve_db::WorldStateSnapshot,
+    note_id: i64,
+    label: &str,
+    empty: bool,
+    val: &T,
+) {
+    if empty {
+        snap.owner_notes.remove(&note_id);
+    } else if let Ok(json) = serde_json::to_string(val) {
+        snap.owner_notes.insert(
+            note_id,
+            eve_db::OwnerNoteRecord {
+                note_id,
+                character_id: -1,
+                item_id: note_id,
+                label: label.to_string(),
+                note: json,
+                timestamp_unix: 0,
+            },
+        );
+    }
+}
+
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }

@@ -18,7 +18,7 @@ use eve_server::formulas::compute_pi_link_cost;
 use eve_server::router::ServerContext;
 use eve_server::services::industry_pi::{
     advance_colony_simulation, simulate_planet_depletion, PiColonyNetworkState, PiLinkState,
-    PiPinState, PiRouteState,
+    PiPinState, PiRouteState, MAX_DISPLAY_QUALITY,
 };
 use std::collections::HashMap;
 
@@ -126,6 +126,13 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo");
     let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
     assert!(!res_entries.is_empty(), "Planet must have P0 resources");
+    for (_, v) in &res_entries {
+        let q = v.as_f64().unwrap_or(0.0);
+        assert!(
+            q > 0.0 && q <= MAX_DISPLAY_QUALITY && (q / MAX_DISPLAY_QUALITY) <= 1.0,
+            "V24 quality {q} out of (0, MAX_DISPLAY_QUALITY]"
+        );
+    }
     let first_p0_tid = res_entries[0].0.as_i64().unwrap();
 
     // Survey fails without Remote Sensing
@@ -141,7 +148,14 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     ])]).await.expect("GetResourceData with Remote Sensing");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
     assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(9)));
-    assert!(matches!(rd_kv.get("data"), Some(PyRep::Bytes(b)) if !b.is_empty()));
+    let Some(PyRep::Bytes(sh_b)) = rd_kv.get("data") else { panic!("Expected Bytes SH buffer"); };
+    assert_eq!(sh_b.len(), 9 * 9 * 4);
+    let sh_vals: Vec<f32> = sh_b
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(sh_vals.iter().all(|v| v.is_finite()));
+    assert!(sh_vals[0] > 0.0 && sh_vals[1..9].iter().any(|v| v.abs() > 1e-5));
     assert_eq!(rd_kv.get("proximity"), Some(&PyRep::Integer(5)));
 
     // 2. feat:pi.command-center: Deployment rules, errors, upgrade mechanics
@@ -364,6 +378,11 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
     ])]).await.expect("Deploy network");
 
     // 1. feat:pi.pi-depletion: Depletion calculation & Flush depletion effect
+    let initial_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo before Flush");
+    let PyRep::Dict(initial_entries) = initial_info else { panic!("Expected Dict"); };
+    let initial_aq_qual = initial_entries.iter().find_map(|(k, v)| {
+        (k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64)).then(|| v.as_f64()).flatten()
+    }).expect("initial Aqueous Liquids quality before Flush");
     let (base_rate, curve) = ctx.db.with_mut_snapshot(|snap| {
         let net = PiColonyNetworkState {
             pins: vec![PiPinState {
@@ -392,7 +411,14 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
     let depleted_qual = res_entries.iter().find_map(|(k, v)| {
         (k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64)).then(|| v.as_f64()).flatten()
     }).unwrap();
-    assert!(depleted_qual < 0.85, "Harvested resource quality must be depleted");
+    assert!(
+        depleted_qual > 0.0 && depleted_qual < initial_aq_qual,
+        "Harvested resource quality must strictly deplete: before={initial_aq_qual}, after={depleted_qual}"
+    );
+    assert!(
+        (depleted_qual / MAX_DISPLAY_QUALITY) < (initial_aq_qual / MAX_DISPLAY_QUALITY),
+        "Normalized V24 quality must strictly decrease after Flush extraction"
+    );
 
     // 2. feat:pi.factory-cycles: Factory consumes inputs and produces output per schematic
     let water_schem = ctx.sde.planet_schematics.iter().find(|(_, s)| s.types.iter().any(|t| !t.is_input && t.type_id == WATER_P1_TYPE)).map(|(&id, _)| id).expect("Water P1 schematic");

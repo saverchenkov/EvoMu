@@ -287,6 +287,28 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
         (0.0, 0.0)
     );
 
+    // Verify spherical harmonic binary coefficients across planet types and depletion
+    assert!((MAX_DISPLAY_QUALITY - 1.21 * 255.0 * 0.5).abs() < 1e-9);
+    assert_eq!(
+        PLANET_RESOURCE_PROXIMITY_LIMITS,
+        [(2, 6), (4, 10), (6, 15), (10, 20), (15, 30)]
+    );
+    let (sh_before, sh_after_depl) = ctx.db.with_snapshot(|snap| {
+        let b = compute_planet_resource_sh_coefficients(&ctx, snap, planet_id, 2268, 6);
+        let q = compute_planet_resource_quality(&ctx, snap, planet_id, 2268);
+        assert_eq!(b.len(), 36);
+        assert!(b.iter().all(|v| v.is_finite()));
+        assert!(b[0] > 0.0 && (q - f64::from(b[0])).abs() < 1e-6);
+        assert!(b[1..9].iter().any(|c| c.abs() > 1e-5));
+        (b, compute_planet_complete_resource_sh_bytes(&ctx, snap, custom_planet_id, 2268))
+    });
+    assert_eq!(sh_after_depl.len(), 36);
+    assert_ne!(
+        sh_after_depl[0..4],
+        sh_before[0].to_le_bytes(),
+        "depleted custom planet SH monopole must differ from fresh planet"
+    );
+
     // Suppress unused mut warning if ctx wasn't mutated directly
     let _ = &mut ctx;
 }
