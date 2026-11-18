@@ -512,6 +512,8 @@ fn handle_get_tier_durations(
         .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))
 }
 
+// DERIVED: linear 15-minute ceiling rate (ceil(remaining_secs / 900) * 100 PLEX cents, min 200); V24
+// documents the tier/bucket structure but does not publish exact PLEX early-completion rates in client static data.
 pub fn early_completion_plex_cents(remaining_secs: u64) -> u64 {
     if remaining_secs == 0 {
         0
@@ -521,6 +523,7 @@ pub fn early_completion_plex_cents(remaining_secs: u64) -> u64 {
 }
 
 fn handle_get_early_completion_pricing(req_type: &str) -> HandlerResult {
+    // DERIVED: server pricing bracket boundaries (15m..=22d) paired with early_completion_plex_cents above.
     let bounds = [
         (0u64, 900u64), (900, 1_800), (1_800, 3_600), (3_600, 10_800), (10_800, 25_200),
         (25_200, 43_200), (43_200, 86_400), (86_400, 259_200), (259_200, 604_800), (604_800, 1_915_200),
@@ -602,6 +605,42 @@ fn queue_job_failed_notice(character_id: u32, uuid: &[u8; 16], reason_enum: u32,
     }
 }
 
+fn validate_component_in_slot(
+    state: &SkinrCosmeticsState,
+    slot_id: u32,
+    comp_id: u32,
+    is_pattern: bool,
+    kind_label: &str,
+) -> Result<(), (u32, String)> {
+    let Some(comp_def) = state.catalog.components.get(&comp_id) else {
+        return Err((STATUS_BAD_REQUEST, format!("Unknown {kind_label} {comp_id}")));
+    };
+    if comp_def.is_pattern() != is_pattern {
+        return Err((
+            STATUS_BAD_REQUEST,
+            format!("Component {comp_id} kind does not match slot {slot_id} configuration"),
+        ));
+    }
+    if comp_def.disallowed_slots.contains(&slot_id) {
+        return Err((
+            STATUS_BAD_REQUEST,
+            format!("Component {comp_id} is disallowed in slot {slot_id}"),
+        ));
+    }
+    if let Some(allowed_cats) = state.catalog.slot_allowed_categories.get(&slot_id) {
+        if !allowed_cats.is_empty() && !allowed_cats.contains(&comp_def.category) {
+            return Err((
+                STATUS_BAD_REQUEST,
+                format!(
+                    "Component {comp_id} category {} not allowed in slot {slot_id}",
+                    comp_def.category
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_initiate_slots(
     state: &SkinrCosmeticsState,
     layout_msg: &DynamicQuasarMessage,
@@ -639,21 +678,19 @@ fn parse_initiate_slots(
                 return Err((STATUS_BAD_REQUEST, format!("Empty slot configuration for slot {slot_id}")));
             };
 
-            let Some(comp_def) = state.catalog.components.get(&comp_id) else {
-                return Err((STATUS_BAD_REQUEST, format!("Unknown SKINR component {comp_id}")));
-            };
-            if comp_def.is_pattern() != is_pattern {
-                return Err((STATUS_BAD_REQUEST, format!("Component {comp_id} kind does not match slot configuration")));
-            }
-            if comp_def.disallowed_slots.contains(&slot_id) {
-                return Err((STATUS_BAD_REQUEST, format!("Component {comp_id} is disallowed in slot {slot_id}")));
-            }
-            if let Some(allowed_cats) = state.catalog.slot_allowed_categories.get(&slot_id) {
-                if !allowed_cats.is_empty() && !allowed_cats.contains(&comp_def.category) {
-                    return Err((
-                        STATUS_BAD_REQUEST,
-                        format!("Component {comp_id} category {} not allowed in slot {slot_id}", comp_def.category),
-                    ));
+            validate_component_in_slot(state, slot_id, comp_id, is_pattern, "SKINR component")?;
+            for (coat_slot_id, maybe_coat) in [(6u32, p_coat), (8u32, s_coat)] {
+                if let Some(extra_coat) = maybe_coat {
+                    validate_component_in_slot(
+                        state,
+                        coat_slot_id,
+                        extra_coat,
+                        false,
+                        "pattern coating component",
+                    )?;
+                    if !required_comps.contains(&(extra_coat, false)) {
+                        required_comps.push((extra_coat, false));
+                    }
                 }
             }
             slots.push(SkinLayoutSlot {
@@ -666,17 +703,124 @@ fn parse_initiate_slots(
             if !required_comps.contains(&(comp_id, is_pattern)) {
                 required_comps.push((comp_id, is_pattern));
             }
-            for extra_coat in [p_coat, s_coat].into_iter().flatten() {
-                if !state.catalog.components.contains_key(&extra_coat) {
-                    return Err((STATUS_BAD_REQUEST, format!("Unknown pattern coating component {extra_coat}")));
-                }
-                if !required_comps.contains(&(extra_coat, false)) {
-                    required_comps.push((extra_coat, false));
-                }
-            }
         }
     }
     Ok((slots, required_comps))
+}
+
+fn plan_sequencing_binders_in_snap(
+    s: &eve_db::WorldStateSnapshot,
+    cid: u32,
+    required_binders: &BTreeMap<u32, u64>,
+) -> Result<Vec<(u32, eve_db::ConsumeExactOptions, i32)>, String> {
+    if required_binders.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (current_dock, current_ship) = s
+        .characters
+        .get(&(cid as i64))
+        .map(|ch| {
+            let dock = ch.station_id.or(ch.structure_id).filter(|&id| id > 0);
+            let ship = (ch.active_ship_id > 0).then_some(ch.active_ship_id);
+            (dock, ship)
+        })
+        .unwrap_or((None, None));
+    let mut location_opts: Vec<eve_db::ConsumeExactOptions> = Vec::with_capacity(2);
+    if let Some(dock_id) = current_dock {
+        let mut hangar_opts = eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
+        hangar_opts.required_location_id = Some(dock_id);
+        hangar_opts.required_flag = Some(InventoryFlag::Hangar);
+        hangar_opts.active_ship_id = current_ship;
+        location_opts.push(hangar_opts);
+    }
+    if let Some(ship_id) = current_ship.filter(|&sid| {
+        !s.is_item_locked_in_contract_or_job(sid)
+            && !s.is_item_or_ancestor_locked_or_impounded(sid)
+            && s.is_ship_colocated_with_character(cid as i64, sid, current_dock)
+    }) {
+        let mut cargo_opts = eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
+        cargo_opts.required_location_id = Some(ship_id);
+        cargo_opts.required_flag = Some(InventoryFlag::Cargo);
+        cargo_opts.active_ship_id = current_ship;
+        location_opts.push(cargo_opts);
+    }
+
+    let mut binder_plan: Vec<(u32, eve_db::ConsumeExactOptions, i32)> =
+        Vec::with_capacity(required_binders.len() * 2);
+    for (&btid, &need) in required_binders {
+        if need == 0 {
+            continue;
+        }
+        let Ok(need_i32) = i32::try_from(need) else {
+            return Err("Insufficient sequence binders for unlimited SKINR component license".into());
+        };
+        let mut remaining = i64::from(need_i32);
+        for opts in &location_opts {
+            if remaining <= 0 {
+                break;
+            }
+            let avail_loc: i64 = s
+                .items
+                .values()
+                .filter(|it| {
+                    it.owner_id == cid as i64
+                        && it.type_id == btid
+                        && s.validate_item_for_consumption(it, opts).is_ok()
+                })
+                .map(|it| i64::from(it.quantity))
+                .sum();
+            let take = avail_loc.min(remaining) as i32;
+            if take > 0 {
+                binder_plan.push((btid, *opts, take));
+                remaining -= i64::from(take);
+            }
+        }
+        if remaining > 0 {
+            return Err("Insufficient sequence binders for unlimited SKINR component license".into());
+        }
+    }
+    Ok(binder_plan)
+}
+
+pub(super) fn debit_sequencing_binders_and_plex_in_snap(
+    s: &mut eve_db::WorldStateSnapshot,
+    cid: u32,
+    total_plex_cost: i64,
+    binder_plan: &[(u32, eve_db::ConsumeExactOptions, i32)],
+) -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), String> {
+    let Some(uid) = s.account_of_character(cid as i64) else {
+        return Err("Insufficient PLEX for SKINR sequencing".into());
+    };
+    let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
+        return Err("Insufficient PLEX for SKINR sequencing".into());
+    };
+    let mut item_events = Vec::new();
+    for &(btid, opts, take_i32) in binder_plan {
+        let pre_stacks: std::collections::HashMap<i64, (eve_db::InventoryItemRecord, String)> = s
+            .items
+            .iter()
+            .filter(|(_, it)| it.owner_id == cid as i64 && it.type_id == btid)
+            .map(|(&iid, it)| {
+                let cname = s.item_custom_names.get(&iid).cloned().unwrap_or_default();
+                (iid, (it.clone(), cname))
+            })
+            .collect();
+        // On mid-loop failure, returning Err aborts `try_with_mut_snapshot` and rolls back PLEX + prior stacks atomically.
+        let touched_ids = s.consume_owner_items(btid, take_i32, opts).map_err(|_| {
+            "Insufficient sequence binders for unlimited SKINR component license".to_string()
+        })?;
+        for iid in touched_ids {
+            if let Some((old_it, cname)) = pre_stacks.get(&iid) {
+                item_events.push(ItemChangeEvent {
+                    old: Some(old_it.clone()),
+                    new: s.items.get(&iid).cloned(),
+                    custom_name: cname.clone(),
+                });
+            }
+        }
+    }
+    s.next_entity_id += 1;
+    Ok((uid, s.next_entity_id as u64, rem_plex, item_events))
 }
 
 fn handle_job_initiate(
@@ -883,108 +1027,12 @@ fn handle_job_initiate(
     };
 
     // Atomically validate sequence binders (via ConsumeExactOptions inventory invariants bound to
-    // the pilot's current dock hangar / co-located active ship cargo) + PLEX before consuming either.
-    let debit_res = state.db.with_mut_snapshot(
-        |s| -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), &'static str> {
-            let (current_dock, current_ship) = s
-                .characters
-                .get(&(cid as i64))
-                .map(|ch| {
-                    let dock = ch.station_id.or(ch.structure_id).filter(|&id| id > 0);
-                    let ship = (ch.active_ship_id > 0).then_some(ch.active_ship_id);
-                    (dock, ship)
-                })
-                .unwrap_or((None, None));
-            let mut location_opts: Vec<eve_db::ConsumeExactOptions> = Vec::with_capacity(2);
-            if let Some(dock_id) = current_dock {
-                let mut hangar_opts =
-                    eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
-                hangar_opts.required_location_id = Some(dock_id);
-                hangar_opts.required_flag = Some(InventoryFlag::Hangar);
-                hangar_opts.active_ship_id = current_ship;
-                location_opts.push(hangar_opts);
-            }
-            if let Some(ship_id) = current_ship.filter(|&sid| {
-                !s.is_item_locked_in_contract_or_job(sid)
-                    && !s.is_item_or_ancestor_locked_or_impounded(sid)
-                    && s.is_ship_colocated_with_character(cid as i64, sid, current_dock)
-            }) {
-                let mut cargo_opts =
-                    eve_db::ConsumeExactOptions::for_character_commodity(cid as i64);
-                cargo_opts.required_location_id = Some(ship_id);
-                cargo_opts.required_flag = Some(InventoryFlag::Cargo);
-                cargo_opts.active_ship_id = current_ship;
-                location_opts.push(cargo_opts);
-            }
-
-            let mut binder_plan: Vec<(u32, eve_db::ConsumeExactOptions, i32)> =
-                Vec::with_capacity(required_binders.len() * 2);
-            for (&btid, &need) in &required_binders {
-                if need == 0 {
-                    continue;
-                }
-                let Ok(need_i32) = i32::try_from(need) else {
-                    return Err("Insufficient sequence binders for unlimited SKINR component license");
-                };
-                let mut remaining = i64::from(need_i32);
-                for opts in &location_opts {
-                    if remaining <= 0 {
-                        break;
-                    }
-                    let avail_loc: i64 = s
-                        .items
-                        .values()
-                        .filter(|it| {
-                            it.owner_id == cid as i64
-                                && it.type_id == btid
-                                && s.validate_item_for_consumption(it, opts).is_ok()
-                        })
-                        .map(|it| i64::from(it.quantity))
-                        .sum();
-                    let take = avail_loc.min(remaining) as i32;
-                    if take > 0 {
-                        binder_plan.push((btid, *opts, take));
-                        remaining -= i64::from(take);
-                    }
-                }
-                if remaining > 0 {
-                    return Err("Insufficient sequence binders for unlimited SKINR component license");
-                }
-            }
-            let Some(uid) = s.account_of_character(cid as i64) else {
-                return Err("Insufficient PLEX for SKINR sequencing");
-            };
-            let Some(rem_plex) = s.adjust_unified_plex(cid as i64, -total_plex_cost) else {
-                return Err("Insufficient PLEX for SKINR sequencing");
-            };
-            let mut item_events = Vec::new();
-            for (btid, opts, take_i32) in binder_plan {
-                let pre_stacks: std::collections::HashMap<i64, (eve_db::InventoryItemRecord, String)> = s
-                    .items
-                    .iter()
-                    .filter(|(_, it)| it.owner_id == cid as i64 && it.type_id == btid)
-                    .map(|(&iid, it)| {
-                        let cname = s.item_custom_names.get(&iid).cloned().unwrap_or_default();
-                        (iid, (it.clone(), cname))
-                    })
-                    .collect();
-                let Ok(touched_ids) = s.consume_owner_items(btid, take_i32, opts) else {
-                    // Refund PLEX if consumption validation fails unexpectedly; all quantities were preflight-validated above.
-                    let _ = s.adjust_unified_plex(cid as i64, total_plex_cost);
-                    return Err("Insufficient sequence binders for unlimited SKINR component license");
-                };
-                for iid in touched_ids {
-                    if let Some((old_it, cname)) = pre_stacks.get(&iid) {
-                        item_events.push(ItemChangeEvent {
-                            old: Some(old_it.clone()),
-                            new: s.items.get(&iid).cloned(),
-                            custom_name: cname.clone(),
-                        });
-                    }
-                }
-            }
-            s.next_entity_id += 1;
-            Ok((uid, s.next_entity_id as u64, rem_plex, item_events))
+    // the pilot's current dock hangar / co-located active ship cargo) + PLEX inside one WAL
+    // transaction so any mid-loop binder consumption failure rolls back both PLEX and prior stacks.
+    let debit_res = state.db.try_with_mut_snapshot(
+        |s| -> Result<(u64, u64, i64, Vec<ItemChangeEvent>), String> {
+            let binder_plan = plan_sequencing_binders_in_snap(s, cid, &required_binders)?;
+            debit_sequencing_binders_and_plex_in_snap(s, cid, total_plex_cost, &binder_plan)
         },
     );
     if let Ok((uid, tx_id, rem_plex, item_events)) = debit_res {
@@ -1013,7 +1061,7 @@ fn handle_job_initiate(
             }
         }
         queue_job_failed_notice(cid, &job_uuid, 3, now);
-        return Err((STATUS_BAD_REQUEST, err_msg.to_string()));
+        return Err((STATUS_BAD_REQUEST, err_msg));
     }
     state.save();
     queue_job_started_notice(cid, &job_uuid, now);

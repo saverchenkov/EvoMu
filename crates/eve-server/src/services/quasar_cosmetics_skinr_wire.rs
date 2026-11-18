@@ -234,6 +234,9 @@ pub(crate) fn parse_license_identifier(
     Some((char_id, cid, is_pat))
 }
 
+/// Returns base PLEX cost (in cents) per SKIN license by tier (`1..=20`).
+/// Tiers `1..=9` (`25, 30, 35, 40, 50, 60, 75, 90, 110` PLEX) match documented EVE SKINR wiki/client costs;
+/// // DERIVED: Tiers `10..=20` linearly extrapolate at `+20` PLEX per tier (`130..=330` PLEX) where exact tier data is absent.
 pub(crate) fn tier_base_plex_cents(tier: u32) -> u64 {
     let plex = match tier {
         0 | 1 => 25,
@@ -245,11 +248,15 @@ pub(crate) fn tier_base_plex_cents(tier: u32) -> u64 {
         7 => 75,
         8 => 90,
         9 => 110,
+        // DERIVED: linear +20 PLEX/tier extrapolation for Tiers 10..=20
         t => 110 + u64::from(t - 9) * 20,
     };
     plex * 100
 }
 
+/// Returns base sequencing duration (in seconds) per SKIN license by tier (`1..=20`).
+/// Tiers `1..=18` (`3..=532` hours) match documented EVE SKINR tier durations;
+/// // DERIVED: Tiers `19..=20` extrapolate linearly (`+80h` per tier: `612h`, `692h`).
 pub(crate) fn tier_base_duration_secs(tier: u32) -> u64 {
     let hours = match tier {
         0 | 1 => 3,
@@ -269,6 +276,7 @@ pub(crate) fn tier_base_duration_secs(tier: u32) -> u64 {
         15 => 325,
         16 => 386,
         17 => 455,
+        // DERIVED: linear +80h/tier extrapolation beyond Tier 18 (`532h`)
         t => 532 + u64::from(t - 18) * 80,
     };
     hours * 3_600

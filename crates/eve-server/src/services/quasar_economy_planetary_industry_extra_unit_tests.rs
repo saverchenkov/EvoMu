@@ -134,10 +134,12 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
                 grantable_roles_at_other: 0,
             },
         );
-        // Add a journal entry matched via wallet_journal_meta.first_party_id == corp_id
+        // Authentic corporation journal entry (`character_id == corp_id`), plus a personal
+        // counterparty row (`character_id == ceo_id`) with `first_party_id == corp_id` that
+        // GetCorporationEntriesRequest must NOT include or leak.
         snap.wallet_journal.push(WalletJournalEntry {
             entry_id: 901,
-            character_id: ceo_id,
+            character_id: corp_id,
             entry_type: "Contract".into(),
             amount: IskCents::from_isk(50_000),
             balance_after: IskCents::from_isk(950_000),
@@ -153,6 +155,26 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
                 context: Default::default(),
                 account_key: 1000,
                 date_unix: 1_760_000_000,
+            },
+        );
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 902,
+            character_id: ceo_id,
+            entry_type: "Contract".into(),
+            amount: IskCents::from_isk(-50_000),
+            balance_after: IskCents::from_isk(1_234_567),
+            reason: "Personal counterparty entry".into(),
+        });
+        snap.wallet_journal_meta.insert(
+            902,
+            JournalMeta {
+                ref_type_id: 0,
+                first_party_id: corp_id,
+                second_party_id: ceo_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_760_000_001,
             },
         );
     });
@@ -180,6 +202,8 @@ fn nested_extract_u64_and_corp_journal_role_assignments_and_starter_corp_overrid
     let ctx_trader = make_ctx(Some(1), Some(trader_id as u32), Some(corp_id as u32), 0);
     let rsp_trader = dispatch_dyn(&router, &ctx_trader, rpc, &d_nested).expect("trader access");
     assert!(!rsp_trader.value.is_empty());
+    assert!(rsp_trader.value.windows(b"Corp first party".len()).any(|w| w == b"Corp first party"));
+    assert!(!rsp_trader.value.windows(b"Personal counterparty entry".len()).any(|w| w == b"Personal counterparty entry"));
 
     // 3. Starter corp (1_000_009) overridden by ctx_corp (corp_id) + ctx role bitmask ROLE_JUNIOR_ACCOUNTANT
     let ctx_starter = make_ctx(

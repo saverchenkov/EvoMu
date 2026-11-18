@@ -510,18 +510,26 @@ fn next_uuid(data: &mut CosmeticsMarketData, prefix: &[u8; 8]) -> [u8; 16] {
     uuid
 }
 
-// V24 `trading_const.pyj` / `tradingUtil.pyj` duration floors & bps (50% branded target discount).
+/// Computes the Paragon Hub base broker fee floor (in ISK) for `duration_secs` and `target`.
+/// Duration options (`1, 3, 7, 14, 30, 90` days in `LISTING_DURATIONS_SECS`) come from V24 `tradingUtil.pyj`,
+/// and branded targets halve fees (`50%` discount).
+// DERIVED: Base ISK floor amounts (`100_000..=2_500_000` ISK and fallback `50_000` ISK/day, min `100_000` ISK) are server-synthesized.
 fn broker_fee_for(duration_secs: u64, target: &ListingTargetRecord) -> u64 {
     let base = LISTING_DURATIONS_SECS
         .iter()
         .find(|(d, _)| *d == duration_secs)
         .map(|(_, fee)| *fee)
+        // DERIVED: linear 50,000 ISK/day fallback (min 100,000 ISK) for non-standard durations
         .unwrap_or_else(|| ((duration_secs.max(86_400) / 86_400) * 50_000).max(100_000));
     if target.is_branded() { base / 2 } else { base }
 }
 
+/// Computes the Paragon Hub broker fee for `listing_value_isk` over `duration_secs`, taking the
+/// maximum of the duration floor and valuation bps (`50%` discount for branded targets).
+// DERIVED: Valuation bps schedule (`200/250/300/400/500` bps for `<=1d/3d/7d/30d/>30d`) is server-synthesized.
 fn broker_fee_for_valuation(listing_value_isk: u64, duration_secs: u64, target: &ListingTargetRecord) -> u64 {
     let floor = broker_fee_for(duration_secs, target);
+    // DERIVED: server-synthesized bps schedule across V24 duration tiers
     let bps = match duration_secs {
         d if d <= 86_400 => 200,
         d if d <= 259_200 => 250,

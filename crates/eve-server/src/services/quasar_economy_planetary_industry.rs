@@ -490,12 +490,13 @@ pub fn register_economy_planetary_industry_handlers(
                 let list: Vec<_> = snap
                     .wallet_journal
                     .iter()
+                    .rev()
                     .filter(|e| e.character_id == target_cid)
+                    .take(200)
                     .cloned()
                     .collect();
                 let ts: BTreeMap<i64, u64> = list
                     .iter()
-                    .take(200)
                     .map(|e| {
                         let date = snap
                             .wallet_journal_meta
@@ -513,7 +514,7 @@ pub fn register_economy_planetary_industry_handlers(
             let mut resp = pb::message(
                 "eve.accounting.character.journal.GetCharacterEntriesResponse",
             );
-            for e in entries.iter().take(200) {
+            for e in &entries {
                 let date_unix = timestamps.get(&e.entry_id).copied().unwrap_or(0) as i64;
                 resp = resp.add_with("entries", |entry| {
                     entry
@@ -542,21 +543,19 @@ pub fn register_economy_planetary_industry_handlers(
             let req_corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
             let (entries, timestamps) = db_clone.with_snapshot(|snap| {
                 let target_corp = authorize_corp_financial_access(ctx, snap, req_corp_id)?;
+                // Filter strictly by owning corporation (`e.character_id == target_corp`, matching
+                // `wallet_ledger.rs`): never include counterparty pilot rows via `wallet_journal_meta`,
+                // which would duplicate transfers and leak personal `balance_after` values.
                 let list: Vec<_> = snap
                     .wallet_journal
                     .iter()
-                    .filter(|e| {
-                        e.character_id == target_corp
-                            || snap.wallet_journal_meta.get(&e.entry_id).is_some_and(|m| {
-                                m.first_party_id == target_corp
-                                    || m.second_party_id == target_corp
-                            })
-                    })
+                    .rev()
+                    .filter(|e| e.character_id == target_corp)
+                    .take(200)
                     .cloned()
                     .collect();
                 let ts: BTreeMap<i64, u64> = list
                     .iter()
-                    .take(200)
                     .map(|e| {
                         let date = snap
                             .wallet_journal_meta
@@ -574,7 +573,7 @@ pub fn register_economy_planetary_industry_handlers(
             let mut resp = pb::message(
                 "eve.accounting.corporation.journal.GetCorporationEntriesResponse",
             );
-            for e in entries.iter().take(200) {
+            for e in &entries {
                 let date_unix = timestamps.get(&e.entry_id).copied().unwrap_or(0) as i64;
                 resp = resp.add_with("entries", |entry| {
                     entry

@@ -824,6 +824,212 @@ fn industry_planets_pi_moons_belts_bloodlines_wallet_and_id_handlers() {
     );
 }
 
+fn decode_journal_entries_in_order(
+    descriptors: &QuasarDescriptorRegistry,
+    resp_full_name: &str,
+    payload: &[u8],
+) -> Vec<(u64, String)> {
+    let field_num = |msg: &str, field: &str| -> (u32, String) {
+        let d = descriptors
+            .messages_by_full_name
+            .get(msg.trim_start_matches('.'))
+            .unwrap_or_else(|| panic!("missing descriptor {msg}"));
+        let f = d
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .unwrap_or_else(|| panic!("missing field {field} on {msg}"));
+        (f.number as u32, f.type_name.trim_start_matches('.').to_string())
+    };
+    let (entries_num, entry_msg_name) = field_num(resp_full_name, "entries");
+    let (id_num, id_msg_name) = field_num(&entry_msg_name, "id");
+    let (tx_num, _) = field_num(&id_msg_name, "transaction");
+    let (attrs_num, attrs_msg_name) = field_num(&entry_msg_name, "attributes");
+    let (desc_num, _) = field_num(&attrs_msg_name, "description");
+
+    let dyn_resp = descriptors
+        .decode_dynamic_or_wire(resp_full_name, payload)
+        .expect("decode journal response");
+    let Some(DynamicValue::Repeated(items)) = dyn_resp.get(entries_num) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let DynamicValue::Message(entry) = item else { return None };
+            let DynamicValue::Message(id_msg) = entry.get(id_num)? else { return None };
+            let tx_id = match id_msg.get(tx_num) {
+                Some(DynamicValue::Uint64(v)) => *v,
+                Some(DynamicValue::Uint32(v)) => u64::from(*v),
+                Some(DynamicValue::Int64(v)) => *v as u64,
+                _ => 0,
+            };
+            let desc = match entry.get(attrs_num) {
+                Some(DynamicValue::Message(am)) => match am.get(desc_num) {
+                    Some(DynamicValue::String(s)) => s.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            Some((tx_id, desc))
+        })
+        .collect()
+}
+
+#[test]
+fn accounting_journal_filters_strictly_and_returns_newest_200_first() {
+    let (router, db, _sde) = make_router_and_db();
+    let cid = 211200150i64;
+    let corp_id = 98000150i64;
+    seed_char(&db, cid, corp_id, 7_777_777);
+
+    db.try_with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "JournalFilterCorp".to_string();
+        corp.ticker = "JFC".to_string();
+        corp.ceo_id = cid;
+        corp.hq_station_id = Some(60003760);
+        corp.members = HashSet::from([cid]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for i in 1i64..=205 {
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: i,
+                character_id: cid,
+                entry_type: "Bounty".to_string(),
+                amount: IskCents::from_isk(1_000 + i),
+                balance_after: IskCents::from_isk(7_000_000 + i),
+                reason: format!("char_entry_{i:03}"),
+            });
+            snap.wallet_journal_timestamps.insert(i, 1_770_000_000 + i as u64);
+        }
+        for i in 1i64..=205 {
+            let eid = 1000 + i;
+            snap.wallet_journal.push(WalletJournalEntry {
+                entry_id: eid,
+                character_id: corp_id,
+                entry_type: "Tax".to_string(),
+                amount: IskCents::from_isk(500 + i),
+                balance_after: IskCents::from_isk(100_000 + i),
+                reason: format!("corp_entry_{i:03}"),
+            });
+            snap.wallet_journal_meta.insert(
+                eid,
+                JournalMeta {
+                    ref_type_id: 85,
+                    first_party_id: cid,
+                    second_party_id: corp_id,
+                    context_id: 0,
+                    context: Default::default(),
+                    account_key: 1000,
+                    date_unix: 1_775_000_000 + i as u64,
+                },
+            );
+        }
+        // Cross-party pair: one row owned by corp_id and one row owned by personal character cid
+        // whose JournalMeta still names corp_id as second_party_id.
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 2000,
+            character_id: corp_id,
+            entry_type: "Donation".to_string(),
+            amount: IskCents::from_isk(5_000),
+            balance_after: IskCents::from_isk(555_555),
+            reason: "corp_cross_party".to_string(),
+        });
+        snap.wallet_journal_meta.insert(
+            2000,
+            JournalMeta {
+                ref_type_id: 10,
+                first_party_id: cid,
+                second_party_id: corp_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_776_000_000,
+            },
+        );
+        snap.wallet_journal.push(WalletJournalEntry {
+            entry_id: 2001,
+            character_id: cid,
+            entry_type: "Donation".to_string(),
+            amount: IskCents::from_isk(-5_000),
+            balance_after: IskCents::from_isk(999_888_777),
+            reason: "personal_counterparty_balance_secret".to_string(),
+        });
+        snap.wallet_journal_meta.insert(
+            2001,
+            JournalMeta {
+                ref_type_id: 10,
+                first_party_id: cid,
+                second_party_id: corp_id,
+                context_id: 0,
+                context: Default::default(),
+                account_key: 1000,
+                date_unix: 1_776_000_001,
+            },
+        );
+        Ok::<(), String>(())
+    })
+    .unwrap();
+
+    let ceo = make_ctx(Some(cid as u32), 0);
+    let corp_req = encode_id_req(
+        "eve.accounting.corporation.journal.GetCorporationEntriesRequest",
+        corp_id as u64,
+    );
+    let corp_resp = router
+        .dispatch(&ceo, &corp_req)
+        .expect("CEO GetCorporationEntriesRequest");
+    let corp_entries = decode_journal_entries_in_order(
+        &router.descriptors,
+        "eve.accounting.corporation.journal.GetCorporationEntriesResponse",
+        &corp_resp.value,
+    );
+    assert_eq!(corp_entries.len(), 200, "corp journal should cap at newest 200 entries");
+    assert_eq!(corp_entries[0], (2000, "corp_cross_party".to_string()));
+    assert_eq!(corp_entries[1], (1205, "corp_entry_205".to_string()));
+    assert_eq!(corp_entries[199], (1007, "corp_entry_007".to_string()));
+    assert_eq!(
+        corp_entries.iter().filter(|(id, _)| *id == 2000).count(),
+        1,
+        "corp cross-party row must not be duplicated"
+    );
+    assert!(
+        !corp_entries
+            .iter()
+            .any(|(id, desc)| *id == 2001 || desc.contains("personal_counterparty_balance_secret")),
+        "corp journal must never return counterparty personal entries or leak personal balances"
+    );
+    assert!(!corp_resp
+        .value
+        .windows(b"personal_counterparty_balance_secret".len())
+        .any(|w| w == b"personal_counterparty_balance_secret"));
+
+    let char_req = GoogleAny {
+        type_url: format!(
+            "{TYPE_GOOGLEAPIS_PREFIX}eve.accounting.character.journal.GetCharacterEntriesRequest"
+        ),
+        value: vec![],
+    };
+    let char_resp = router
+        .dispatch(&ceo, &char_req)
+        .expect("GetCharacterEntriesRequest");
+    let char_entries = decode_journal_entries_in_order(
+        &router.descriptors,
+        "eve.accounting.character.journal.GetCharacterEntriesResponse",
+        &char_resp.value,
+    );
+    assert_eq!(char_entries.len(), 200, "character journal should cap at newest 200 entries");
+    assert_eq!(
+        char_entries[0],
+        (2001, "personal_counterparty_balance_secret".to_string())
+    );
+    assert_eq!(char_entries[1], (205, "char_entry_205".to_string()));
+    assert_eq!(char_entries[199], (7, "char_entry_007".to_string()));
+}
+
 #[cfg(test)]
 #[path = "quasar_economy_planetary_industry_extra_unit_tests.rs"]
 mod quasar_economy_planetary_industry_extra_unit_tests;
