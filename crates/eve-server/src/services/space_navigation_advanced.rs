@@ -534,9 +534,93 @@ pub fn process_zarzakh_gate_toll(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ZarzakhTrackEntry {
+    next_damage_tick: u64,
+    ticks_applied: u32,
+    last_seen_tick: u64,
+}
+
+fn zarzakh_tracking_map(
+) -> &'static std::sync::Mutex<HashMap<(usize, u32, i64), ZarzakhTrackEntry>> {
+    static TRACKING: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(usize, u32, i64), ZarzakhTrackEntry>>,
+    > = std::sync::OnceLock::new();
+    TRACKING.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn zarzakh_safe_zones(
+    ballpark: &eve_destiny::Ballpark,
+    sde: Option<&eve_sde::SdeRegistry>,
+    cfg: &eve_sde::ZarzakhDeathzoneConfig,
+) -> Vec<(glam::DVec3, f64)> {
+    let mut zones = Vec::new();
+    let default_r = cfg.default_safe_zone_radius_m;
+
+    // 1. Explicit `deathzoneImmunityGenerator` beacons (78485: 150km, 78486: 250km, 78487: 125km).
+    for b in ballpark.balls.values() {
+        if let Some(&r) = cfg.immunity_ranges_m.get(&b.type_id) {
+            zones.push((b.position, r));
+        }
+    }
+
+    // 2. Canonical Zarzakh SDE safe-zone anchors (stargates, The Fulcrum 60015187, Shipcaster 79018).
+    // NOTE: `spacecomponentsbytype.fsdbinary` provides exact immunity radii (`78485..=78487`), while
+    // `solarsystemcontent` omits beacon scene coordinates; anchor 150 km (`78485`) on gates/Fulcrum/Shipcaster
+    // unless an explicit immunity beacon ball supplies another radius at that site.
+    if let Some(sde) = sde {
+        for sg in sde
+            .stargates()
+            .values()
+            .filter(|g| g.from_solar_system_id == 30_100_000)
+        {
+            zones.push((sg.position, default_r));
+        }
+        if let Some(st) = sde.stations.get(&60_015_187) {
+            zones.push((st.position, default_r));
+        }
+    }
+    for b in ballpark.balls.values() {
+        let is_safe_anchor = sde
+            .and_then(|s| s.types.get(&b.type_id))
+            .is_some_and(|t| {
+                matches!(t.group_id, 10 | 15 | 4549 | 4736)
+                    || t.name.contains("Shipcaster")
+                    || t.name.contains("Fulcrum")
+            });
+        if is_safe_anchor {
+            zones.push((b.position, default_r));
+        }
+    }
+    zones
+}
+
+fn is_zarzakh_hazard_eligible(
+    ball: &eve_destiny::Ball,
+    ballpark: &eve_destiny::Ballpark,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> bool {
+    if let Some(sde) = sde {
+        let Some(ty) = sde.types.get(&ball.type_id) else {
+            return false;
+        };
+        if let Some(list) = sde.type_lists.get(&573) {
+            return list.contains(ty);
+        }
+        return matches!(ty.category_id, 6 | 18) || ty.group_id == 12;
+    }
+    ballpark
+        .ball_slim_meta
+        .get(&ball.id)
+        .is_some_and(|m| matches!(m.category_id, 6 | 18) || m.group_id == 12)
+}
+
 /// Zarzakh Jovian gravity hazard (`feat:navigation.gravity-hazard-safe-zones`):
-/// Ships in Zarzakh (`30_100_000`) outside the Jovian safe zones (stargates, The Fulcrum, Shipcaster)
-/// take periodic hull damage; inside a safe zone no hazard damage is applied.
+/// Eligible entities (`sde_type_lists[573]`: Ships `6`, Drones `18`, Cargo Containers `group 12`) in
+/// Zarzakh (`30_100_000`) outside `deathzoneImmunityGenerator` safe zones receive a `10s` safety
+/// grace period (`safetyDuration`) followed by `2s` (`damageTickPeriod`) ramping hull damage ticks
+/// of `+0.5%` `max_structure_hp` per tick (`hullDamageFractionIncreasePerTick = 0.005`, capped at
+/// `5.0`), destroying any unprotected hull at `t = 50s`. Entering a safe zone resets the timer.
 pub fn step_zarzakh_gravity_hazard_in_ballpark(
     ballpark: &mut eve_destiny::Ballpark,
     sde: Option<&eve_sde::SdeRegistry>,
@@ -545,44 +629,94 @@ pub fn step_zarzakh_gravity_hazard_in_ballpark(
     if sys_id != 30_100_000 {
         return Vec::new();
     }
-    let mut safe_centers = Vec::new();
-    if let Some(sde) = sde {
-        for sg in sde.stargates().values().filter(|g| g.from_solar_system_id == 30_100_000) {
-            safe_centers.push(sg.position);
-        }
-        if let Some(st) = sde.stations.get(&60015187) {
-            safe_centers.push(st.position);
-        }
-    }
-    for b in ballpark.balls.values() {
-        let is_safe_anchor = sde
-            .and_then(|s| s.types.get(&b.type_id))
-            .is_some_and(|t| matches!(t.group_id, 10 | 15 | 4736) || t.name.contains("Shipcaster") || t.name.contains("Fulcrum"));
-        if is_safe_anchor {
-            safe_centers.push(b.position);
-        }
-    }
-    // DERIVED: 150 km Jovian safe-zone radius around Zarzakh stargates, The Fulcrum, and the Shipcaster.
-    let safe_radius = 150_000.0;
-    // DERIVED: 50 HP/s unresisted environmental hull/structure bleed outside Jovian safe zones (`apply_direct_structure_damage_to_ball`).
-    let hazard_hull_dmg = 50.0;
-    let mut destroyed = Vec::new();
-    let ship_ids: Vec<i64> = ballpark
+    let cfg = sde
+        .map(eve_sde::SdeRegistry::zarzakh_deathzone_config)
+        .unwrap_or_default();
+    let safe_zones = zarzakh_safe_zones(ballpark, sde, &cfg);
+    let bp_key = (ballpark as *const eve_destiny::Ballpark) as usize;
+    let now_tick = ballpark.current_tick;
+    let safety_secs = u64::from(cfg.damage_generator.safety_duration_secs);
+    let period_secs = u64::from(cfg.damage_generator.damage_tick_period_secs.max(1));
+    let inc_frac = cfg.damage_generator.hull_damage_fraction_increase_per_tick;
+    let peak_frac = cfg.damage_generator.peak_hull_damage_fraction_per_tick;
+
+    let eligible_ids: Vec<i64> = ballpark
         .balls
         .values()
-        .filter(|b| {
-            sde.and_then(|s| s.types.get(&b.type_id))
-                .is_some_and(|t| t.category_id == 6)
-        })
+        .filter(|b| is_zarzakh_hazard_eligible(b, ballpark, sde))
         .map(|b| b.id)
         .collect();
-    for bid in ship_ids {
-        let Some(pos) = ballpark.balls.get(&bid).map(|b| b.position) else { continue };
-        if safe_centers.iter().any(|&c| pos.distance(c) <= safe_radius) {
-            continue;
+
+    let mut pending_damage: Vec<(i64, f64)> = Vec::new();
+    {
+        let mut guard = zarzakh_tracking_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Prune stale tracking entries for removed balls or recycled ballpark addresses.
+        let eligible_set: std::collections::HashSet<i64> = eligible_ids.iter().copied().collect();
+        guard.retain(|&(k_bp, k_sys, k_bid), _| {
+            !(k_bp == bp_key && k_sys == sys_id && !eligible_set.contains(&k_bid))
+        });
+
+        for &bid in &eligible_ids {
+            let Some(pos) = ballpark.balls.get(&bid).map(|b| b.position) else {
+                continue;
+            };
+            let in_safe_zone = safe_zones
+                .iter()
+                .any(|&(center, radius)| pos.distance(center) <= radius);
+            if in_safe_zone {
+                guard.remove(&(bp_key, sys_id, bid));
+                continue;
+            }
+
+            let entry = guard.entry((bp_key, sys_id, bid)).or_insert(ZarzakhTrackEntry {
+                next_damage_tick: now_tick.saturating_add(safety_secs).saturating_add(period_secs),
+                ticks_applied: 0,
+                last_seen_tick: now_tick,
+            });
+            if now_tick < entry.last_seen_tick {
+                // Ballpark clock restarted on a reused address/reset simulation.
+                *entry = ZarzakhTrackEntry {
+                    next_damage_tick: now_tick
+                        .saturating_add(safety_secs)
+                        .saturating_add(period_secs),
+                    ticks_applied: 0,
+                    last_seen_tick: now_tick,
+                };
+            }
+            entry.last_seen_tick = now_tick;
+
+            let Some(cs) = ballpark.combat_states.get(&bid) else {
+                continue;
+            };
+            let max_hull = cs.max_structure_hp.max(cs.structure_hp);
+            if max_hull <= 0.0 {
+                continue;
+            }
+
+            let mut total_frac = 0.0;
+            while entry.next_damage_tick <= now_tick {
+                entry.ticks_applied = entry.ticks_applied.saturating_add(1);
+                let tick_frac = (f64::from(entry.ticks_applied) * inc_frac).min(peak_frac);
+                total_frac += tick_frac;
+                entry.next_damage_tick = entry.next_damage_tick.saturating_add(period_secs);
+            }
+            if total_frac > 0.0 {
+                pending_damage.push((bid, total_frac * max_hull));
+            }
         }
-        if let Some((_, is_destroyed, _)) = ballpark.apply_direct_structure_damage_to_ball(bid, hazard_hull_dmg) {
+    }
+
+    let mut destroyed = Vec::new();
+    for (bid, raw_hull_dmg) in pending_damage {
+        if let Some((_, is_destroyed, _)) =
+            ballpark.apply_direct_structure_damage_to_ball(bid, raw_hull_dmg)
+        {
             if is_destroyed {
+                if let Ok(mut guard) = zarzakh_tracking_map().lock() {
+                    guard.remove(&(bp_key, sys_id, bid));
+                }
                 destroyed.push(bid);
             }
         }

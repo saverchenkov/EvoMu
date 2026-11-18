@@ -259,19 +259,34 @@ async fn test_b35_14_gravity_hazard_safe_zones() {
     let safe_before = z_sys.get_combat_state(s_safe).await.unwrap().unwrap();
     let haz_before = z_sys.get_combat_state(s_haz).await.unwrap().unwrap();
 
-    // Step 1 live server tick via `try_step_full_tick(1.0)`
-    let _ = z_sys.try_step_full_tick(1.0);
-    tokio::task::yield_now().await;
+    // First 12 ticks cover the 10s CFSD safetyDuration + initial 2s damagePeriod lead-in (0 damage)
+    for _ in 0..12 {
+        let _ = z_sys.try_step_full_tick(1.0);
+        tokio::task::yield_now().await;
+    }
+    let haz_grace = z_sys.get_combat_state(s_haz).await.unwrap().unwrap();
+    assert_eq!(haz_grace.structure_hp, haz_before.structure_hp, "Ship outside Zarzakh safe zone must take 0 damage during 10s safety grace");
+
+    // Next 3 ticks cross 2s damage ticks at +12s (0.5% max_hull) and +14s (1.0% max_hull) = 1.5% total
+    for _ in 0..3 {
+        let _ = z_sys.try_step_full_tick(1.0);
+        tokio::task::yield_now().await;
+    }
 
     let safe_after = z_sys.get_combat_state(s_safe).await.unwrap().unwrap();
     let haz_after = z_sys.get_combat_state(s_haz).await.unwrap().unwrap();
     assert_eq!(safe_after.structure_hp, safe_before.structure_hp, "Ship inside Zarzakh safe zone must take 0 hull damage");
     assert_eq!(haz_after.shield_hp, haz_before.shield_hp, "Zarzakh gravity hazard must leave shield HP untouched");
     assert_eq!(haz_after.armor_hp, haz_before.armor_hp, "Zarzakh gravity hazard must leave armor HP untouched");
-    assert!((haz_before.structure_hp - haz_after.structure_hp - 50.0).abs() < 1e-3, "Zarzakh gravity hazard must deal periodic hull damage");
+    let expected_ramp_dmg = 0.015 * haz_before.max_structure_hp;
+    assert!(
+        (haz_before.structure_hp - haz_after.structure_hp - expected_ramp_dmg).abs() < 1e-3,
+        "Zarzakh gravity hazard must deal periodic percentage hull damage (expected {expected_ramp_dmg}, got {} -> {})",
+        haz_before.structure_hp, haz_after.structure_hp
+    );
 
-    // Step live ticks until hull reaches 0 -> full death pipeline spawns wreck, capsule, and killmail!
-    for _ in 0..10 {
+    // Step live ticks until hull reaches 0 (~50s total exposure) -> full death pipeline spawns wreck, capsule, and killmail!
+    for _ in 0..45 {
         let _ = z_sys.try_step_full_tick(1.0);
         tokio::task::yield_now().await;
     }

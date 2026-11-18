@@ -230,7 +230,50 @@ pub struct SecondarySunInfo {
     pub position: [f64; 3],
 }
 
+/// Parameters of a `deathzoneDamageGenerator` space component (`type_id = 78484` in Zarzakh)
+/// decoded from `res:/staticdata/spacecomponentsbytype.fsdbinary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeathzoneDamageComponent {
+    pub damage_tick_period_secs: u32,
+    pub safety_duration_secs: u32,
+    pub warning_duration_secs: u32,
+    pub hull_damage_fraction_increase_per_tick: f64,
+    pub peak_hull_damage_fraction_per_tick: f64,
+}
+
+/// Zarzakh deathzone damage & safe-zone immunity radii decoded from
+/// `res:/staticdata/spacecomponentsbytype.fsdbinary` (`deathzoneDamageGenerator` &
+/// `deathzoneImmunityGenerator`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZarzakhDeathzoneConfig {
+    pub damage_generator: DeathzoneDamageComponent,
+    pub immunity_ranges_m: HashMap<TypeId, f64>,
+    pub default_safe_zone_radius_m: f64,
+}
+
+impl Default for ZarzakhDeathzoneConfig {
+    fn default() -> Self {
+        let mut immunity_ranges_m = HashMap::new();
+        // V24.02 `deathzoneImmunityGenerator` ranges for Zarzakh beacon types (`78485..=78487`).
+        immunity_ranges_m.insert(78_485, 150_000.0);
+        immunity_ranges_m.insert(78_486, 250_000.0);
+        immunity_ranges_m.insert(78_487, 125_000.0);
+        Self {
+            damage_generator: DeathzoneDamageComponent {
+                damage_tick_period_secs: 2,
+                safety_duration_secs: 10,
+                warning_duration_secs: 5,
+                hull_damage_fraction_increase_per_tick: 0.005,
+                peak_hull_damage_fraction_per_tick: 5.0,
+            },
+            immunity_ranges_m,
+            default_safe_zone_radius_m: 150_000.0,
+        }
+    }
+}
+
 static SECONDARY_SUNS_CACHE: OnceLock<HashMap<SolarSystemId, SecondarySunInfo>> = OnceLock::new();
+static ZARZAKH_DEATHZONE_CACHE: OnceLock<ZarzakhDeathzoneConfig> = OnceLock::new();
 
 fn u32_le(buf: &[u8], pos: usize) -> u32 {
     pos.checked_add(4)
@@ -1308,6 +1351,76 @@ impl SdeRegistry {
     pub fn secondary_sun_for_system(&self, solar_system_id: SolarSystemId) -> Option<SecondarySunInfo> {
         let map = SECONDARY_SUNS_CACHE.get_or_init(|| self.load_secondary_suns().unwrap_or_default());
         map.get(&solar_system_id).copied()
+    }
+
+    /// Loads Zarzakh `deathzoneDamageGenerator` and `deathzoneImmunityGenerator` parameters
+    /// from `res:/staticdata/spacecomponentsbytype.fsdbinary`.
+    pub fn load_zarzakh_deathzone_config(&self) -> Result<ZarzakhDeathzoneConfig, SdeError> {
+        const RES_PATH: &str = "res:/staticdata/spacecomponentsbytype.fsdbinary";
+        let path = self.cdn_resource_path(RES_PATH)?;
+        let raw = std::fs::read(&path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
+        let buf = crate::cfsd_nested_tables::CfsdBuf(&raw);
+
+        let mut cfg = ZarzakhDeathzoneConfig::default();
+        let mut found_any = false;
+        for rec in buf.dict_entries(56, 1824)? {
+            let tid = buf.u32(rec)?;
+            let comps = self.space_components_by_type.get(&tid);
+            let is_dmg = comps
+                .is_some_and(|c| c.iter().any(|s| s == "deathzoneDamageGenerator"))
+                || (comps.is_none() && tid == 78_484);
+            let is_imm = comps
+                .is_some_and(|c| c.iter().any(|s| s == "deathzoneImmunityGenerator"))
+                || (comps.is_none() && matches!(tid, 78_485..=78_487));
+
+            if is_dmg {
+                let tick_period = u32_le(&raw, rec + 1292);
+                let inc_per_tick = f64::from(f32_le(&raw, rec + 1296));
+                let peak_per_tick = f64::from(f32_le(&raw, rec + 1300));
+                let safety_secs = u32_le(&raw, rec + 1304);
+                let warn_secs = u32_le(&raw, rec + 1308);
+                if tick_period > 0 && inc_per_tick > 0.0 && peak_per_tick > 0.0 {
+                    cfg.damage_generator = DeathzoneDamageComponent {
+                        damage_tick_period_secs: tick_period,
+                        safety_duration_secs: safety_secs,
+                        warning_duration_secs: warn_secs,
+                        hull_damage_fraction_increase_per_tick: inc_per_tick,
+                        peak_hull_damage_fraction_per_tick: peak_per_tick,
+                    };
+                    found_any = true;
+                }
+            }
+            if is_imm {
+                let range_m = f64::from(u32_le(&raw, rec + 1312));
+                if range_m > 0.0 {
+                    cfg.immunity_ranges_m.insert(tid, range_m);
+                    if tid == 78_485 {
+                        cfg.default_safe_zone_radius_m = range_m;
+                    }
+                    found_any = true;
+                }
+            }
+        }
+        if !found_any {
+            return Err(SdeError::InvalidSchema(format!(
+                "{RES_PATH}: missing deathzone components"
+            )));
+        }
+        Ok(cfg)
+    }
+
+    /// Returns cached Zarzakh `deathzone` configuration when `spacecomponentsbytype.fsdbinary` is
+    /// available on disk, or the pinned V24.02 fallback when ResFiles are unavailable.
+    pub fn zarzakh_deathzone_config(&self) -> ZarzakhDeathzoneConfig {
+        if let Some(cached) = ZARZAKH_DEATHZONE_CACHE.get() {
+            return cached.clone();
+        }
+        if let Ok(loaded) = self.load_zarzakh_deathzone_config() {
+            let _ = ZARZAKH_DEATHZONE_CACHE.set(loaded.clone());
+            return loaded;
+        }
+        ZarzakhDeathzoneConfig::default()
     }
 }
 

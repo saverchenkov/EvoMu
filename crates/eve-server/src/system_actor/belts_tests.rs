@@ -1042,3 +1042,79 @@ fn fx_floor_keeps_uniform_batch_stamp_for_mixed_and_standalone_damage_state() {
         Some((Some(15), "OnDamageStateChange"))
     );
 }
+
+#[test]
+fn belt_asteroid_seeding_uses_portion_aligned_units_finite_mass_and_belt_coordinates() {
+    let mut sde = (*make_test_belt_sde()).clone();
+    let test_sys = 30_999_142_u32;
+    sde.solar_systems.insert(
+        test_sys,
+        SolarSystem {
+            solar_system_id: test_sys,
+            constellation_id: 20_999_001,
+            region_id: 10_000_002,
+            name: "BeltTestSys".into(),
+            security_status: 1.0,
+            radius: 1.0e12,
+            galactic_pos_ly: [0.0; 3],
+            planet_ids: Vec::new(),
+            stations: Vec::new(),
+            wormhole_class_id: None,
+        },
+    );
+
+    // Scordite (0.15 m3, portion 100, sentinel mass 1e35) & Mercoxit (40.0 m3, portion 100)
+    // plus asteroid belt counts on synthetic belt celestial 40_000_001.
+    let mut scord = make_inv_type(1228, 460, 25, 1.0, 1.0e35, 0.15);
+    scord.portion_size = 100;
+    sde.types.insert(1228, scord);
+    let mut merc = make_inv_type(11396, 468, 25, 1.0, 1.0e35, 40.0);
+    merc.portion_size = 100;
+    sde.types.insert(11396, merc);
+    let mut veld = make_inv_type(1230, 462, 25, 1.0, 4_000.0, 0.1);
+    veld.portion_size = 100;
+    sde.types.insert(1230, veld);
+
+    let belt_pos = DVec3::new(1.2e9, -3.4e8, 5.6e8);
+    sde.insert_celestial(eve_sde::CelestialInfo {
+        celestial_id: 40_000_001,
+        solar_system_id: test_sys,
+        type_id: 15,
+        group_id: 9,
+        name: "BeltTestSys I - Asteroid Belt 1".into(),
+        radius: 1_500.0,
+        position: belt_pos,
+        orbit_id: None,
+        orbit_index: None,
+        celestial_index: Some(1),
+    });
+    let mut counts = HashMap::new();
+    counts.insert(1230, 3);
+    counts.insert(1228, 2);
+    counts.insert(11396, 1);
+    std::sync::Arc::make_mut(&mut sde.asteroid_counts_by_belt).insert(40_000_001, counts);
+    let sde = Arc::new(sde);
+
+    // Call standalone without populate_system_celestials -> belt celestial ball + 6 rocks spawn at belt_pos
+    let mut bp = Ballpark::new(test_sys);
+    let states = populate_asteroid_belt_entities(&mut bp, test_sys, &sde);
+    assert_eq!(states.len(), 6);
+    let belt_ball = bp.balls.get(&40_000_001).expect("belt celestial ball added");
+    assert_eq!(belt_ball.position, belt_pos);
+    assert_eq!(bp.ball_slim_meta.get(&40_000_001).map(|m| m.group_id), Some(9));
+
+    let mut volumes_m3 = Vec::new();
+    for st in &states {
+        let portion = sde.types[&st.type_id].portion_size.max(1);
+        assert_eq!(st.initial_units % portion, 0, "portion-size aligned units");
+        let ball = bp.balls.get(&st.asteroid_id).expect("asteroid ball in ballpark");
+        assert!(ball.radius >= 60.0 && ball.radius <= 2_500.0);
+        assert!(ball.mass >= 1.0e6 && ball.mass < 1.0e20, "finite rock mass, never 1e35 sentinel");
+        let dist = ball.position.distance(belt_pos);
+        assert!(dist >= 100.0 && dist <= 9_000.0, "asteroid placed around SDE belt coordinates");
+        volumes_m3.push((st.initial_units as f64) * st.unit_volume);
+    }
+    let min_v = volumes_m3.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_v = volumes_m3.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!(max_v > min_v, "deterministic rock volumes must vary across rocks");
+}

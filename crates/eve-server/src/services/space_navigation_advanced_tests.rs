@@ -274,7 +274,7 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         mode: MovementMode::Rigid,
     });
 
-    // Ship inside 150 km safe zone (at 50 km) vs ship outside safe zone (at 500 km) with 40 hull HP
+    // Ship inside 150 km safe zone (at 50 km), ship outside safe zone (at 500 km), and drone (category 18) outside safe zone
     bp.add_ball(Ball {
         id: 80_001,
         type_id: 587,
@@ -287,6 +287,7 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     });
+    bp.combat_states.get_mut(&80_001).unwrap().max_structure_hp = 100.0;
     bp.combat_states.get_mut(&80_001).unwrap().structure_hp = 100.0;
     bp.add_ball(Ball {
         id: 80_002,
@@ -300,15 +301,106 @@ fn zarzakh_gravity_hazard_respects_safe_zones_and_damages_exposed_ships() {
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     });
-    bp.combat_states.get_mut(&80_002).unwrap().structure_hp = 40.0;
+    bp.combat_states.get_mut(&80_002).unwrap().max_structure_hp = 1_000.0;
+    bp.combat_states.get_mut(&80_002).unwrap().structure_hp = 1_000.0;
+
+    // 250 km immunity beacon (`78486`) protects a ship at 200 km (`150 km < 200 km <= 250 km`),
+    // while `78487` (`125 km` safe zone) does NOT protect a ship at 135 km.
+    bp.add_ball(Ball {
+        id: 70_250,
+        type_id: 78_486,
+        position: DVec3::new(10_000_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e9,
+        radius: 1.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    });
+    bp.add_ball(Ball {
+        id: 80_003,
+        type_id: 587,
+        position: DVec3::new(10_200_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1e6,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&80_003).unwrap().max_structure_hp = 500.0;
+    bp.combat_states.get_mut(&80_003).unwrap().structure_hp = 500.0;
+
+    // Drone (`type_list 573`, category 18) outside all safe zones is eligible for deathzone damage.
+    let drone_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 18 && t.published)
+        .map(|t| t.type_id)
+        .unwrap_or(2454);
+    bp.add_ball(Ball {
+        id: 80_004,
+        type_id: drone_tid,
+        position: DVec3::new(505_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 400.0,
+        inertia: 1.0,
+        mass: 1e3,
+        radius: 5.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    bp.combat_states.get_mut(&80_004).unwrap().max_structure_hp = 200.0;
+    bp.combat_states.get_mut(&80_004).unwrap().structure_hp = 200.0;
 
     // Non-Zarzakh system does nothing
     assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_000_142).is_empty());
 
-    // Zarzakh system destroys exposed 40 HP hull and leaves safe-zone ship unharmed
-    let destroyed = step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000);
-    assert_eq!(destroyed, vec![80_002]);
+    // First 10s safety grace period (`current_tick` 1..=12): 0 damage at tick 1..=12
+    for t in 1..=12u64 {
+        bp.current_tick = t;
+        let dead = step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000);
+        assert!(dead.is_empty());
+    }
+    assert!((bp.combat_states[&80_002].structure_hp - 1_000.0).abs() < 1e-6);
+
+    // At tick 13 (+12s = 10s safety + 2s period), first tick deals 0.5% max_structure_hp (5.0 HP on 1,000 HP hull)
+    bp.current_tick = 13;
+    assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    assert!((bp.combat_states[&80_002].structure_hp - 995.0).abs() < 1e-6);
+    assert!((bp.combat_states[&80_004].structure_hp - 199.0).abs() < 1e-6);
+
+    // Moving 80_002 briefly inside safe zone at tick 14 resets its grace timer
+    bp.balls.get_mut(&80_002).unwrap().position = DVec3::new(10_000.0, 0.0, 0.0);
+    bp.current_tick = 14;
+    assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    bp.balls.get_mut(&80_002).unwrap().position = DVec3::new(500_000.0, 0.0, 0.0);
+    for t in 15..=26u64 {
+        bp.current_tick = t;
+        assert!(step_zarzakh_gravity_hazard_in_ballpark(&mut bp, Some(&ctx.sde), 30_100_000).is_empty());
+    }
+    assert!(
+        (bp.combat_states[&80_002].structure_hp - 995.0).abs() < 1e-6,
+        "safe-zone re-entry must reset the 10s grace timer"
+    );
+
+    // Sustained exposure through t=70 destroys exposed 80_002 & 80_004 while safe-zone ships stay unharmed
+    let mut destroyed_all = Vec::new();
+    for t in 27..=70u64 {
+        bp.current_tick = t;
+        destroyed_all.extend(step_zarzakh_gravity_hazard_in_ballpark(
+            &mut bp,
+            Some(&ctx.sde),
+            30_100_000,
+        ));
+    }
+    assert!(destroyed_all.contains(&80_002), "exposed ship must be destroyed at ~50s");
+    assert!(destroyed_all.contains(&80_004), "exposed eligible drone must be destroyed");
     assert!((bp.combat_states[&80_001].structure_hp - 100.0).abs() < 1e-6);
+    assert!((bp.combat_states[&80_003].structure_hp - 500.0).abs() < 1e-6);
 
     // Verify `nav_attr_ids` / `max_velocity_cloak_attr_id` resolves primary and fallback attributes on both full and synthetic SdeRegistry
     assert!(max_velocity_cloak_attr_id(&ctx.sde).is_some());

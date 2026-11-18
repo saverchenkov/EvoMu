@@ -196,14 +196,14 @@ async fn test_live_e2e_mining_belts_ore_distribution_and_mn02() {
     let high_null_sys = find_belt_sys(&|s| (-0.40..0.0).contains(&s.security_status) && s.region_id != 10_000_070);
     let deep_null_sys = find_belt_sys(&|s| s.security_status <= -0.50 && s.region_id != 10_000_070);
 
-    // Pochven regions have Triglavian anomaly ores rather than static group 9 belts.
+    // Pochven regions have Triglavian anomaly ores (Spodumain, Talassonite, Rakovene, Bezdnacine).
     let pochven_ores: BTreeSet<u32> = ctx
         .sde
         .belt_ores_for_security_and_region(-0.5, 10_000_070)
         .iter()
         .map(|o| o.type_id)
         .collect();
-    assert_eq!(pochven_ores.len(), 3);
+    assert_eq!(pochven_ores.len(), 4);
 
     for (label, sys_id) in [
         ("1.0 highsec Perimeter", PERIMETER_SYS),
@@ -613,7 +613,7 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
         safe_anchors.push(st.position);
     }
 
-    // 1. Spawn a Praxis at the star (outside all 150 km safe zones): ticks apply 50 HP/s structure damage.
+    // 1. Spawn a Praxis at the star (outside all 150 km safe zones): 10s safety grace period, then 2s ramping % hull damage ticks.
     let mut pilot = common::gm_pilot_in_space(&ctx, 61, 90_000_461, 47466, ZARZAKH_SYS).await;
     let zk_handle = ctx.systems.get_or_spawn(ZARZAKH_SYS);
     let (_, start_ball) = zk_handle.get_ball_snapshot(pilot.ship_id).await.unwrap().unwrap();
@@ -623,13 +623,26 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
     );
     let cs_before = zk_handle.get_combat_state(pilot.ship_id).await.unwrap().unwrap();
     let max_hull = cs_before.max_structure_hp;
-    for _ in 0..10 {
+    for _ in 0..12 {
+        zk_handle.step_manual(1.0).await.unwrap();
+    }
+    let cs_grace = zk_handle.get_combat_state(pilot.ship_id).await.unwrap().unwrap();
+    assert!(
+        (cs_grace.structure_hp - cs_before.structure_hp).abs() < 1e-6,
+        "First 10s safetyDuration + 2s lead-in must deal 0 hull damage (got {} -> {})",
+        cs_before.structure_hp,
+        cs_grace.structure_hp
+    );
+    for _ in 0..3 {
         zk_handle.step_manual(1.0).await.unwrap();
     }
     let cs_damaged = zk_handle.get_combat_state(pilot.ship_id).await.unwrap().unwrap();
+    let expected_dmg = 0.015 * max_hull;
+    assert_eq!(cs_damaged.shield_hp, cs_before.shield_hp);
+    assert_eq!(cs_damaged.armor_hp, cs_before.armor_hp);
     assert!(
-        (cs_damaged.structure_hp - (cs_before.structure_hp - 500.0)).abs() < 1.0,
-        "Outside safe zone must apply 50 HP/s structure damage (expected -500, got {} -> {})",
+        (cs_damaged.structure_hp - (cs_before.structure_hp - expected_dmg)).abs() < 1e-2,
+        "Outside safe zone must apply progressive % hull damage (expected -{expected_dmg}, got {} -> {})",
         cs_before.structure_hp,
         cs_damaged.structure_hp
     );
@@ -669,10 +682,10 @@ async fn test_live_e2e_zarzakh_gravity_hazard_safe_zones() {
         .expect("ship survives inside Fulcrum safe zone");
     assert_eq!(cs_safe_after.structure_hp, max_hull, "Safe zone inside 150 km of Fulcrum must take 0 hazard damage");
 
-    // 3. Sustained exposure outside safe zones destroys a Rifter cleanly.
+    // 3. Sustained exposure (~50s total) outside safe zones destroys a Rifter cleanly.
     let doomed = common::gm_pilot_in_space(&ctx, 62, 90_000_462, 587, ZARZAKH_SYS).await;
     let mut destroyed = false;
-    for _ in 0..40 {
+    for _ in 0..60 {
         zk_handle.step_manual(1.0).await.unwrap();
         if zk_handle.get_combat_state(doomed.ship_id).await.unwrap().is_none() {
             destroyed = true;

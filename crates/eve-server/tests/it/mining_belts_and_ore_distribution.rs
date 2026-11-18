@@ -174,30 +174,36 @@ async fn test_belt_ore_distribution_across_security_bands() {
         ctx.sde.belt_ores_for_security_and_region(sec, reg).into_iter().map(|t| t.type_id).collect()
     };
 
-    // 1. High-sec belts: contain Veldspar and Scordite (volume <= 0.35 m3)
-    let hs_ores = ctx.sde.belt_ores_for_security_and_region(0.9, 10_000_002);
-    let hs_ids: Vec<u32> = hs_ores.iter().map(|t| t.type_id).collect();
-    assert_eq!(hs_ids, vec![1230, 1228], "0.9 high-sec must contain Veldspar and Scordite");
-    assert!(hs_ores.iter().all(|t| t.volume <= 0.35));
+    // 1. Core 1.0 belts: Veldspar + Scordite only; 0.9–0.5 belts add Empire Quarter ores
+    let core_ores = ctx.sde.belt_ores_for_security_and_region(1.0, 10_000_002);
+    let core_ids: Vec<u32> = core_ores.iter().map(|t| t.type_id).collect();
+    assert_eq!(core_ids, vec![1230, 1228], "1.0 high-sec must contain only Veldspar and Scordite");
+    assert!(core_ores.iter().all(|t| t.volume <= 0.15));
+
+    let hs_09_ids = ores_for(0.9, 10_000_002);
+    assert!(hs_09_ids.contains(&1230) && hs_09_ids.contains(&1228) && hs_09_ids.contains(&1224));
 
     // Regional empire distributions in 0.7 high-sec:
     let amarr_ids = ores_for(0.7, 10_000_043);
     assert!(amarr_ids.contains(&1224) && !amarr_ids.contains(&18), "0.7 Amarr has Pyroxeres, no Plagioclase");
 
     let caldari_ids = ores_for(0.7, 10_000_002);
-    assert!(caldari_ids.contains(&18) && !caldari_ids.contains(&1224), "0.7 Caldari has Plagioclase, no Pyroxeres");
+    assert!(caldari_ids.contains(&1224) && caldari_ids.contains(&18), "0.7 Caldari has Pyroxeres & Plagioclase");
 
     let gallente_ids = ores_for(0.7, 10_000_032);
-    assert!(gallente_ids.contains(&18));
+    assert!(gallente_ids.contains(&18) && !gallente_ids.contains(&1224), "0.7 Gallente has Plagioclase, no Pyroxeres");
 
     let minmatar_ids = ores_for(0.7, 10_000_042);
-    assert!(minmatar_ids.contains(&1224) && minmatar_ids.contains(&18), "0.7 Minmatar has both Pyroxeres & Plagioclase");
+    assert!(minmatar_ids.contains(&18) && !minmatar_ids.contains(&1224), "0.7 Minmatar has Plagioclase, no Pyroxeres");
 
-    // 2. Low-sec belts: Jaspet, Hemorphite, Hedbergite, Kernite, Omber (no Veldspar or Scordite)
-    let ls_ids = ores_for(0.3, 10_000_030);
-    assert!(ls_ids.contains(&1226) && ls_ids.contains(&1231) && ls_ids.contains(&21));
-    assert!(ls_ids.contains(&20) && ls_ids.contains(&1227));
-    assert!(!ls_ids.contains(&1230) && !ls_ids.contains(&1228));
+    // 2. Low-sec belts: Empire Quarter lowsec progression (Minmatar 0.3 has Omber + Kernite; <=0.2 adds Hedbergite; Amarr/Gallente add Jaspet + Hemorphite)
+    let minm_ls_03 = ores_for(0.3, 10_000_030);
+    assert!(minm_ls_03.contains(&20) && minm_ls_03.contains(&1227));
+    assert!(!minm_ls_03.contains(&1230) && !minm_ls_03.contains(&1228));
+    let minm_ls_01 = ores_for(0.15, 10_000_030);
+    assert!(minm_ls_01.contains(&21) && minm_ls_01.contains(&20) && minm_ls_01.contains(&1227));
+    let gal_ls_01 = ores_for(0.15, 10_000_032);
+    assert!(gal_ls_01.contains(&1227) && gal_ls_01.contains(&1226) && gal_ls_01.contains(&1231) && !gal_ls_01.contains(&20));
 
     let amamake_handle = ctx.systems.get_or_spawn(AMAMAKE_SYS);
     let low_states = amamake_handle
@@ -208,17 +214,18 @@ async fn test_belt_ore_distribution_across_security_bands() {
     assert!(low_states.iter().all(|s| s.type_id != 1230 && s.type_id != 1228));
     assert!(low_states.iter().any(|s| matches!(s.type_id, 20 | 21 | 1226 | 1227 | 1231)));
 
-    // 3. Null-sec belts: Bistot, Arkonor, Spodumain, Dark Ochre, Gneiss, Crokite, Mercoxit
-    let deep_null = ctx.sde.belt_ores_for_security_and_region(-0.8, 10_000_050);
-    let deep_ids: Vec<u32> = deep_null.iter().map(|t| t.type_id).collect();
-    for null_ore in [1223, 22, 19, 1229, 1232, 1225, 11396] {
-        assert!(deep_ids.contains(&null_ore), "Deep null-sec must contain {null_ore}");
+    // 3. Null-sec belts: Nullsec classes (G = Querious/Delve Bistot+Kernite+Pyroxeres+Mercoxit, F = Detorid Arkonor+Bistot+Pyroxeres+Mercoxit)
+    let querious_deep = ctx.sde.belt_ores_for_security_and_region(-0.8, 10_000_050);
+    let querious_ids: Vec<u32> = querious_deep.iter().map(|t| t.type_id).collect();
+    for g_ore in [1224, 20, 1223, 11396] {
+        assert!(querious_ids.contains(&g_ore), "Querious (G6) -0.8 must contain {g_ore}");
     }
-    assert!(!deep_ids.contains(&1230) && !deep_ids.contains(&1228));
-    assert!(deep_null.iter().all(|t| t.volume > 3.0), "Null-sec ores have large volume");
+    assert!(!querious_ids.contains(&1230) && !querious_ids.contains(&1228) && !querious_ids.contains(&22));
+    let detorid_deep = ores_for(-0.8, 10_000_005);
+    assert!(detorid_deep.contains(&22) && detorid_deep.contains(&1223) && detorid_deep.contains(&11396));
 
-    let high_ids = ores_for(-0.2, 10_000_014);
-    assert!(high_ids.contains(&19) && !high_ids.contains(&1223) && !high_ids.contains(&22));
+    let high_ids = ores_for(-0.2, 10_000_060);
+    assert!(high_ids.contains(&20) && !high_ids.contains(&1223) && !high_ids.contains(&22));
 
     let lz6su_handle = ctx.systems.get_or_spawn(LZ6SU_SYS);
     let null_states = lz6su_handle
@@ -228,10 +235,12 @@ async fn test_belt_ore_distribution_across_security_bands() {
     assert!(!null_states.is_empty(), "LZ-6SU must generate belt asteroids");
     assert!(null_states.iter().all(|s| s.type_id != 1230 && s.type_id != 1228));
 
-    // 4. Pochven: Bezdnacine, Rakovene, Talassonite
+    // 4. Pochven (Spodumain, Talassonite, Rakovene, Bezdnacine) + Wormhole J-space (6 ABC/mid ores)
     let pochven = ctx.sde.belt_ores_for_security_and_region(-0.5, 10_000_070);
-    assert!(!pochven.is_empty());
-    assert!(pochven.iter().all(|t| matches!(t.group_id, 4029 | 4030 | 4031)));
+    assert_eq!(pochven.len(), 4);
+    assert!(pochven.iter().all(|t| matches!(t.group_id, 461 | 4029 | 4030 | 4031)));
+    let jspace_ores = ores_for(-1.0, 11_000_001);
+    assert_eq!(jspace_ores, vec![1224, 1227, 20, 1229, 22, 1223]);
 }
 
 #[tokio::test]

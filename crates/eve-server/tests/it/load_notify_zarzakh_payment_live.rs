@@ -236,13 +236,21 @@ async fn test_zarzakh_gravity_hazard_safe_zones_and_killmail_pipeline_live() {
 
     assert!(zarzakh_space.set_ball_position(ship_id, DVec3::new(500_000_000.0, 0.0, 0.0)).await);
     let haz_before = zarzakh_space.get_combat_state(ship_id).await.expect("haz before").expect("combat state");
+    for _ in 0..12 { let _ = zarzakh_space.try_step_full_tick(1.0); tokio::task::yield_now().await; }
+    let haz_grace = zarzakh_space.get_combat_state(ship_id).await.expect("haz grace").expect("combat state");
+    assert_eq!(haz_grace.structure_hp, haz_before.structure_hp, "zero hazard damage during 10s safety grace period");
     for _ in 0..3 { let _ = zarzakh_space.try_step_full_tick(1.0); tokio::task::yield_now().await; }
     let haz_after = zarzakh_space.get_combat_state(ship_id).await.expect("haz after").expect("combat state");
     assert_eq!(haz_after.shield_hp, haz_before.shield_hp);
     assert_eq!(haz_after.armor_hp, haz_before.armor_hp);
-    assert!((haz_before.structure_hp - haz_after.structure_hp - 150.0).abs() < 1e-2);
+    let expected_ramp_dmg = 0.015 * haz_before.max_structure_hp;
+    assert!(
+        (haz_before.structure_hp - haz_after.structure_hp - expected_ramp_dmg).abs() < 1e-2,
+        "expected {expected_ramp_dmg} ramping hull dmg after 2s*2 ticks, got {} -> {}",
+        haz_before.structure_hp, haz_after.structure_hp
+    );
 
-    for _ in 0..40 {
+    for _ in 0..60 {
         if ctx.db.with_snapshot(|s| !s.items.contains_key(&ship_id)) { break; }
         let _ = zarzakh_space.try_step_full_tick(1.0);
         tokio::task::yield_now().await;

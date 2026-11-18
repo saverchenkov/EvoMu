@@ -158,16 +158,19 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
     );
     let sample_asteroid = &belt_asteroids[0];
     let sample_id = sample_asteroid.asteroid_id;
+    let sample_init_units = sample_asteroid.initial_units;
     assert_eq!(sample_asteroid.type_id, 1230); // Veldspar
-    assert_eq!(sample_asteroid.initial_units, 20_000);
-    assert_eq!(sample_asteroid.remaining_units, 20_000);
+    assert!(sample_init_units >= 18_000 && sample_init_units % 100 == 0);
+    assert_eq!(sample_asteroid.remaining_units, sample_init_units);
 
-    // Verify asteroid ball exists in live Ballpark
+    // Verify asteroid ball exists in live Ballpark with realistic volume-scaled radius and finite bulk mass
     let (_, ast_ball) = perim.get_ball_snapshot(sample_id).await.unwrap().unwrap();
     assert_eq!(ast_ball.id, sample_id);
+    assert!(ast_ball.radius >= 60.0);
+    assert!(ast_ball.mass >= 1.0e6 && ast_ball.mass < 1.0e20);
 
     // 2. Physical elastic collision bounce test:
-    // Spawn ship 1 near sample asteroid positioned with overlap (radii 40m + 60m = 100m, distance 70m -> 30m overlap)
+    // Spawn ship 1 near sample asteroid positioned with overlap (ship 40m + asteroid radius >= 60m -> overlap at 70m)
     let ship_col_id = 100_700_001;
     let ship_pos = ast_ball.position - DVec3::new(70.0, 0.0, 0.0);
     perim.spawn_ball(Ball {
@@ -208,8 +211,8 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 
     // 3. Asteroid depletion and downtime respawn cycle:
     // Extract remaining units to deplete asteroid
-    let ext1 = perim.mine_asteroid(sample_id, 20_000, 0.0).await.unwrap();
-    assert_eq!(ext1.mined_units, 20_000);
+    let ext1 = perim.mine_asteroid(sample_id, sample_init_units, 0.0).await.unwrap();
+    assert_eq!(ext1.mined_units, sample_init_units);
     assert_eq!(ext1.remaining_units, 0);
     assert!(ext1.depleted, "Asteroid must be marked depleted when units reach 0");
 
@@ -236,7 +239,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
 
     // Verify asteroid ball restored in Ballpark with initial units
     let restored_state = perim.get_asteroid_state(sample_id).await.unwrap().unwrap();
-    assert_eq!(restored_state.remaining_units, 20_000);
+    assert_eq!(restored_state.remaining_units, sample_init_units);
     assert!(!restored_state.depleted);
     let restored_snap = perim.get_ball_snapshot(sample_id).await.unwrap();
     assert!(
@@ -3215,15 +3218,30 @@ async fn test_parity_mining_belts_as_balls_and_ore_distribution() {
         null_types.contains(&1223) && null_types.contains(&22) && null_types.contains(&11396),
         "Deep nullsec OEG-K9 must spawn Bistot, Arkonor, and Mercoxit"
     );
-    let deep_null_ores: HashSet<u32> = ctx
+    let delve_null_ores: HashSet<u32> = ctx
         .sde
         .belt_ores_for_security_and_region(-0.8, 10_000_060)
         .into_iter()
         .map(|t| t.type_id)
         .collect();
     assert!(
-        deep_null_ores.contains(&1223) && deep_null_ores.contains(&22) && deep_null_ores.contains(&11396),
-        "Deep nullsec (-0.8) must distribute Bistot, Arkonor, and Mercoxit"
+        delve_null_ores.contains(&1223)
+            && delve_null_ores.contains(&11396)
+            && delve_null_ores.contains(&20)
+            && !delve_null_ores.contains(&22),
+        "Delve (Class G6, -0.8) must distribute Bistot, Mercoxit, Kernite, Pyroxeres (no Arkonor)"
+    );
+    let detorid_null_ores: HashSet<u32> = ctx
+        .sde
+        .belt_ores_for_security_and_region(-0.8, 10_000_005)
+        .into_iter()
+        .map(|t| t.type_id)
+        .collect();
+    assert!(
+        detorid_null_ores.contains(&1223)
+            && detorid_null_ores.contains(&22)
+            && detorid_null_ores.contains(&11396),
+        "Detorid (Class F6, -0.8) must distribute Bistot, Arkonor, and Mercoxit"
     );
 
     let pochven_ores: HashSet<u32> = ctx

@@ -8,8 +8,8 @@ fn populate_synthetic_ore_sde() -> SdeRegistry {
     let ore_groups = [
         (450, "Arkonor", 16.0),
         (451, "Bistot", 16.0),
-        (452, "Dark Ochre", 8.0),
-        (453, "Gneiss", 5.0),
+        (452, "Crokite", 16.0),
+        (453, "Dark Ochre", 8.0),
         (454, "Hedbergite", 3.0),
         (455, "Hemorphite", 3.0),
         (456, "Jaspet", 2.0),
@@ -19,12 +19,12 @@ fn populate_synthetic_ore_sde() -> SdeRegistry {
         (460, "Scordite", 0.15),
         (461, "Spodumain", 16.0),
         (462, "Veldspar", 0.1),
-        (467, "Crokite", 16.0),
+        (467, "Gneiss", 5.0),
         (468, "Mercoxit", 40.0),
         (469, "Omber", 0.6),
-        (4029, "Bezdnacine", 16.0),
+        (4029, "Talassonite", 16.0),
         (4030, "Rakovene", 16.0),
-        (4031, "Talassonite", 16.0),
+        (4031, "Bezdnacine", 16.0),
     ];
 
     for (idx, (gid, name, vol)) in ore_groups.into_iter().enumerate() {
@@ -175,99 +175,114 @@ fn belt_ores_security_bands_factions_pochven_and_sorting() {
             .collect()
     };
 
-    // 1. Pochven (region 10_000_070) ignores security_status and sorts equal-volume ores by type_id
+    // 1. Pochven (region 10_000_070) ignores security_status and includes Spodumain + Triglavian ores
     assert_eq!(
         names(0.9, 10_000_070),
-        vec!["Bezdnacine", "Rakovene", "Talassonite"]
+        vec!["Spodumain", "Talassonite", "Rakovene", "Bezdnacine"]
     );
     assert_eq!(
         names(-1.0, 10_000_070),
-        vec!["Bezdnacine", "Rakovene", "Talassonite"]
+        vec!["Spodumain", "Talassonite", "Rakovene", "Bezdnacine"]
     );
 
-    // 2. High-sec >= 0.85 boundary (0.85 vs 0.849)
-    assert_eq!(names(0.85, 10), vec!["Veldspar", "Scordite"]);
-    assert_eq!(names(1.0, 10), vec!["Veldspar", "Scordite"]);
-
-    // 3. 0.65..0.85 empire faction variations (sorted by volume ascending)
-    assert_eq!(names(0.849, 10), vec!["Veldspar", "Scordite", "Pyroxeres"]); // Amarr
-    assert_eq!(names(0.65, 20), vec!["Veldspar", "Scordite", "Plagioclase"]); // Caldari
-    assert_eq!(names(0.70, 30), vec!["Veldspar", "Scordite", "Plagioclase"]); // Gallente
+    // 1b. Yasna Zakh / Zarzakh (10_001_000) has no belts; Wormhole J-space (11_000_001) has J-space ores
+    assert!(names(-1.0, 10_001_000).is_empty());
     assert_eq!(
-        names(0.65, 40),
+        names(-1.0, 11_000_001),
+        vec![
+            "Pyroxeres",
+            "Omber",
+            "Kernite",
+            "Gneiss",
+            "Arkonor",
+            "Bistot"
+        ]
+    );
+
+    // 2. Core 1.0 highsec (`>= 0.95`) spawns only Veldspar & Scordite across all quarters
+    assert_eq!(names(0.95, 10), vec!["Veldspar", "Scordite"]);
+    assert_eq!(names(1.0, 20), vec!["Veldspar", "Scordite"]);
+    assert_eq!(names(1.0, 30), vec!["Veldspar", "Scordite"]);
+
+    // 3. Highsec 0.9..0.5 (`0.45..0.95`) Empire Quarter distributions
+    assert_eq!(names(0.949, 10), vec!["Veldspar", "Scordite", "Pyroxeres"]); // Amarr 0.9
+    assert_eq!(names(0.45, 10), vec!["Veldspar", "Scordite", "Pyroxeres"]); // Amarr 0.5
+    assert_eq!(names(0.85, 20), vec!["Veldspar", "Scordite", "Pyroxeres"]); // Caldari 0.9..0.8 (Class B)
+    assert_eq!(
+        names(0.749, 20),
         vec!["Veldspar", "Scordite", "Pyroxeres", "Plagioclase"]
-    ); // Minmatar
+    ); // Caldari 0.7..0.5 (Class C)
+    assert_eq!(names(0.85, 30), vec!["Veldspar", "Scordite", "Plagioclase"]); // Gallente 0.9..0.5
+    assert_eq!(names(0.45, 30), vec!["Veldspar", "Scordite", "Plagioclase"]);
+    assert_eq!(names(0.85, 40), vec!["Veldspar", "Scordite", "Plagioclase"]); // Minmatar 0.9..0.5
+    assert_eq!(names(0.45, 40), vec!["Veldspar", "Scordite", "Plagioclase"]);
     assert_eq!(
         names(0.65, 999),
         vec!["Veldspar", "Scordite", "Pyroxeres", "Plagioclase"]
-    ); // Unknown faction fallback
+    ); // Unknown Empire fallback
 
-    // 4. 0.45..0.65 boundary
+    // 4. Lowsec 0.4..0.1 (`0.0 < sec < 0.45`) by Empire Quarter & sub-band (no Veldspar/Scordite)
+    assert_eq!(names(0.449, 10), vec!["Pyroxeres", "Kernite", "Jaspet"]); // Amarr B2
     assert_eq!(
-        names(0.649, 10),
-        vec!["Veldspar", "Scordite", "Pyroxeres", "Plagioclase"]
-    );
-    assert_eq!(
-        names(0.45, 10),
-        vec!["Veldspar", "Scordite", "Pyroxeres", "Plagioclase"]
-    );
+        names(0.249, 10),
+        vec!["Pyroxeres", "Kernite", "Jaspet", "Hemorphite"]
+    ); // Amarr B3
+    assert_eq!(names(0.449, 20), vec!["Pyroxeres", "Kernite"]); // Caldari C1
+    assert_eq!(names(0.249, 20), vec!["Pyroxeres", "Kernite", "Hedbergite"]); // Caldari C2
+    assert_eq!(names(0.449, 30), vec!["Omber", "Jaspet"]); // Gallente D2
+    assert_eq!(names(0.249, 30), vec!["Omber", "Jaspet", "Hemorphite"]); // Gallente D3
+    assert_eq!(names(0.449, 40), vec!["Omber", "Kernite"]); // Minmatar E
+    assert_eq!(names(0.249, 40), vec!["Omber", "Kernite", "Hedbergite"]); // Minmatar E1
 
-    // 5. Low-sec 0.05..0.45 boundary (sorted by volume: Pyroxeres 0.3, Omber 0.6, Kernite 1.2, Jaspet 2.0, Hedbergite 3.0, Hemorphite 3.0)
+    // 5. Nullsec (`<= 0.0`) by Security Class F..K
+    assert!(names(-0.2, 10_000_005).is_empty()); // F..F2 Detorid
+    assert_eq!(names(-0.5, 10_000_005), vec!["Bistot"]); // F3
+    assert_eq!(names(-0.6, 10_000_005), vec!["Arkonor", "Bistot"]); // F4
     assert_eq!(
-        names(0.449, 10),
-        vec![
-            "Pyroxeres",
-            "Omber",
-            "Kernite",
-            "Jaspet",
-            "Hedbergite",
-            "Hemorphite"
-        ]
-    );
+        names(-0.8, 10_000_005),
+        vec!["Pyroxeres", "Arkonor", "Bistot", "Mercoxit"]
+    ); // F6..F7
+    assert_eq!(names(-0.2, 10_000_050), vec!["Kernite"]); // G..G1 Querious
     assert_eq!(
-        names(0.05, 10),
-        vec![
-            "Pyroxeres",
-            "Omber",
-            "Kernite",
-            "Jaspet",
-            "Hedbergite",
-            "Hemorphite"
-        ]
-    );
+        names(-0.8, 10_000_050),
+        vec!["Pyroxeres", "Kernite", "Bistot", "Mercoxit"]
+    ); // G6
+    assert_eq!(
+        names(-0.9, 10_000_039),
+        vec!["Pyroxeres", "Kernite", "Arkonor", "Bistot", "Mercoxit"]
+    ); // G7 Esoteria rare Arkonor
+    assert_eq!(names(-0.2, 10_000_010), vec!["Pyroxeres"]); // H..H2 Tribute
+    assert_eq!(
+        names(-0.8, 10_000_010),
+        vec!["Pyroxeres", "Kernite", "Mercoxit"]
+    ); // H6
+    assert_eq!(
+        names(-0.9, 10_000_010),
+        vec!["Pyroxeres", "Kernite", "Bistot", "Mercoxit"]
+    ); // H7
+    assert!(names(-0.5, 10_000_014).is_empty()); // I..I4 Catch
+    assert_eq!(names(-0.7, 10_000_014), vec!["Arkonor"]); // I5
+    assert_eq!(names(-0.8, 10_000_014), vec!["Arkonor", "Mercoxit"]); // I6
+    assert_eq!(names(-0.2, 10_000_058), vec!["Pyroxeres"]); // J..J2 Fountain
+    assert_eq!(names(-0.5, 10_000_058), vec!["Pyroxeres", "Bistot"]); // J3..J5
+    assert_eq!(
+        names(-0.9, 10_000_058),
+        vec!["Pyroxeres", "Arkonor", "Bistot", "Mercoxit"]
+    ); // J7
+    assert_eq!(names(-0.4, 10_000_013), vec!["Bistot"]); // K4 Malpais
+    assert_eq!(
+        names(-0.8, 10_000_013),
+        vec!["Arkonor", "Bistot", "Mercoxit"]
+    ); // K6..K7
 
-    // 6. High null-sec -0.45..0.05 boundary (Gneiss 5, Dark Ochre 8, Spodumain 16, Crokite 16, Mercoxit 40)
-    assert_eq!(
-        names(0.049, 10),
-        vec!["Gneiss", "Dark Ochre", "Spodumain", "Crokite", "Mercoxit"]
-    );
-    assert_eq!(
-        names(-0.45, 10),
-        vec!["Gneiss", "Dark Ochre", "Spodumain", "Crokite", "Mercoxit"]
-    );
-
-    // 7. Deep null-sec < -0.45 boundary (adds Arkonor & Bistot at volume 16.0)
-    assert_eq!(
-        names(-0.451, 10),
-        vec![
-            "Gneiss",
-            "Dark Ochre",
-            "Arkonor",
-            "Bistot",
-            "Spodumain",
-            "Crokite",
-            "Mercoxit"
-        ]
-    );
-
-    // 8. belt_ores_for_system found vs missing
+    // 6. belt_ores_for_system found vs missing
     assert!(sde.belt_ores_for_system(99_999_999).is_empty());
     let jita_ores: Vec<&str> = sde
         .belt_ores_for_system(30000142)
         .into_iter()
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(jita_ores, vec!["Veldspar", "Scordite"]);
+    assert_eq!(jita_ores, vec!["Veldspar", "Scordite", "Pyroxeres"]);
 }
 
 #[test]
@@ -296,7 +311,7 @@ fn belt_ores_tiebreaks_filtering_and_region_constellation_mutants() {
     sde.types.insert(500, omber_tie);
 
     let low_ids: Vec<u32> = sde
-        .belt_ores_for_security_and_region(0.3, 10)
+        .belt_ores_for_security_and_region(0.3, 30)
         .into_iter()
         .map(|t| t.type_id)
         .collect();
@@ -354,12 +369,10 @@ fn belt_ores_tiebreaks_filtering_and_region_constellation_mutants() {
 #[test]
 fn belt_ores_for_system_filters_unpublished_and_non_asteroid_types() {
     let mut sde = populate_synthetic_ore_sde();
-    // Override type 9001 in populate_synthetic_ore_sde? In populate_synthetic_ore_sde:
-    // 9001 was (cat 25, pub false), 9002 was (cat 6, pub true), 1012 is Veldspar (cat 25, pub true).
-    // Include an unpublished cat-25 ore and a published non-cat-25 item alongside valid Veldspar (1012).
+    // 9001 = (cat 25, pub false), 9002 = (cat 6, pub true), 1012 = Veldspar (cat 25, pub true).
     std::sync::Arc::make_mut(&mut sde.asteroid_types_by_system).insert(
         30000142,
-        vec![9001, 9002, 1012],
+        vec![9001, 9002, 1012, 1012],
     );
     let ids: Vec<u32> = sde
         .belt_ores_for_system(30000142)

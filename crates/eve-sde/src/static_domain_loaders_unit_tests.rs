@@ -868,5 +868,19 @@ fn domain_loaders_partial_masks_localization_and_error_fallbacks() {
     line.details_per_group.clear();
     assert!(line.accepts_product(6, 999));
     assert!(!line.accepts_product(99, 25));
+
+    // 7. Zarzakh deathzone configuration default & error handling when ResFiles absent
+    let empty_sde = SdeRegistry::default();
+    assert!(empty_sde.load_zarzakh_deathzone_config().is_err());
+    let dz = empty_sde.zarzakh_deathzone_config();
+    assert_eq!(dz.damage_generator.damage_tick_period_secs, 2);
+    assert_eq!(dz.damage_generator.safety_duration_secs, 10);
+    assert_eq!(dz.damage_generator.warning_duration_secs, 5);
+    assert!((dz.damage_generator.hull_damage_fraction_increase_per_tick - 0.005).abs() < 1e-6);
+    assert!((dz.damage_generator.peak_hull_damage_fraction_per_tick - 5.0).abs() < 1e-6);
+    assert_eq!(dz.immunity_ranges_m.get(&78_485), Some(&150_000.0));
+    assert_eq!(dz.immunity_ranges_m.get(&78_486), Some(&250_000.0));
+    assert_eq!(dz.immunity_ranges_m.get(&78_487), Some(&125_000.0));
+    assert_eq!(dz.default_safe_zone_radius_m, 150_000.0);
 }
 
