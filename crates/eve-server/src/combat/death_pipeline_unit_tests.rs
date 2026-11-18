@@ -2414,7 +2414,7 @@ async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto
         );
     }
 
-    let bal_before = ctx.db.with_mut_snapshot(|snap| {
+    let (bal_before, npc_kills_before) = ctx.db.with_mut_snapshot(|snap| {
         for (mto_bid, act_hex, uuid_byte) in [
             (mto_ball_sync, &act_hex_1, 0xCDu8),
             (mto_ball_weapon, &act_hex_2, 0xEFu8),
@@ -2473,7 +2473,13 @@ async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto
                 next_activity_generation_unix: now + 3_600,
             },
         );
-        snap.characters[&attacker].balance
+        let npc_kills_before: u32 = snap
+            .system_kill_events
+            .iter()
+            .filter(|e| e.solar_system_id == sys_id)
+            .map(|e| e.npc_kills)
+            .sum();
+        (snap.characters[&attacker].balance, npc_kills_before)
     });
 
     assert_eq!(
@@ -2517,6 +2523,14 @@ async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto
         assert_eq!(den.development_level, 50);
         assert_eq!(den.anarchy_level, 30);
         assert!(snap.killmails.values().all(|km| km.victim_character_id != 500_010));
+        // Physical removal happens BEFORE `on_space_entity_destroyed`, crediting military index (`HF1304-P2-1`).
+        let npc_kills_mid: u32 = snap
+            .system_kill_events
+            .iter()
+            .filter(|e| e.solar_system_id == sys_id)
+            .map(|e| e.npc_kills)
+            .sum();
+        assert_eq!(npc_kills_mid, npc_kills_before + 1);
     });
 
     // 2. Weapon destruction path (`handle_ship_or_npc_destruction`) completes the second MTO.
@@ -2562,6 +2576,13 @@ async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto
                 .unwrap()
         );
         assert!(snap.killmails.values().all(|km| km.victim_character_id != 500_010));
+        let npc_kills_after: u32 = snap
+            .system_kill_events
+            .iter()
+            .filter(|e| e.solar_system_id == sys_id)
+            .map(|e| e.npc_kills)
+            .sum();
+        assert_eq!(npc_kills_after, npc_kills_before + 2);
     });
 
     // 3. Unpiloted character-owned hull (`#835`) still routes through `execute_death_pipeline`.
@@ -2575,5 +2596,198 @@ async fn mto_site_ball_destruction_bypasses_capsuleer_pipeline_and_completes_mto
             snap.killmails[&unpiloted_res.killmail_id].victim_character_id,
             victim
         );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpiloted_corp_ship_and_non_mto_npc_hull_destroy_cleanly() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142u32;
+    let attacker = 90_000_001i64;
+    let attacker_ship = 1_990_000_930i64;
+    let corp_id = 98_000_099i64;
+    let ally_id = 99_000_099i64;
+    let corp_ship = 1_990_000_931i64;
+    let corp_cargo = 1_990_000_932i64;
+    let expired_mto_hull = 1_990_000_933i64;
+    let now = ctx.now_unix();
+    let pos = DVec3::new(12_000.0, 0.0, 0.0);
+
+    spawn_ship(&ctx, sys_id, attacker_ship, attacker, 587, DVec3::ZERO, 0.0);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    for (bid, tid) in [(corp_ship, 587u32), (expired_mto_hull, 24_690u32)] {
+        sys_handle.try_spawn_ball_with_combat(
+            Ball {
+                id: bid,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(tid),
+        );
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Target Corp".to_string();
+        corp.ticker = "TCORP".to_string();
+        corp.alliance_id = Some(ally_id);
+        snap.corporations.insert(corp_id, corp);
+        snap.items.insert(
+            corp_ship,
+            make_item(
+                corp_ship,
+                587,
+                corp_id,
+                i64::from(sys_id),
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+        snap.item_positions.insert(corp_ship, [pos.x, pos.y, pos.z]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(corp_ship, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(corp_ship, eve_db::PersistedCombatHp::default());
+        snap.items.insert(
+            corp_cargo,
+            make_item(
+                corp_cargo,
+                34,
+                corp_id,
+                corp_ship,
+                InventoryFlag::Cargo,
+                100,
+                0.0,
+            ),
+        );
+
+        // Non-MTO / expired-MTO `category_id == 6` NPC hull (`owner_id = 500_010`, not in `mto_site_balls`).
+        snap.items.insert(
+            expired_mto_hull,
+            make_item(
+                expired_mto_hull,
+                24_690,
+                500_010,
+                i64::from(sys_id),
+                InventoryFlag::None,
+                1,
+                0.0,
+            ),
+        );
+        snap.item_positions
+            .insert(expired_mto_hull, [pos.x, pos.y, pos.z]);
+        snap.sp6_lifecycle
+            .space_object_meta
+            .insert(expired_mto_hull, eve_db::PersistedSpaceObjectMeta::default());
+        snap.sp6_lifecycle
+            .ship_combat_hp
+            .insert(expired_mto_hull, eve_db::PersistedCombatHp::default());
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            resolve_capsuleer_ship_char_in_snap(snap, &ctx.sde, corp_ship),
+            None
+        );
+        assert_eq!(
+            resolve_corp_ship_owner_in_snap(snap, &ctx.sde, corp_ship),
+            Some(corp_id)
+        );
+        assert_eq!(
+            resolve_corp_ship_owner_in_snap(snap, &ctx.sde, expired_mto_hull),
+            None
+        );
+    });
+
+    // 1. Unpiloted corp-owned ship produces wreck + loot + corporate killmail without pod ejection or zombie ball.
+    let corp_res = on_ball_destroyed_sync(&ctx, sys_id, corp_ship, Some(attacker_ship), pos)
+        .expect("corp ship kill succeeds")
+        .expect("corp ship produces DeathPipelineResult");
+    assert_eq!(corp_res.ejected_capsule_id, None);
+    assert!(sys_handle.get_ball_snapshot(corp_ship).await.unwrap().is_none());
+    let wreck_slim = sys_handle
+        .get_ball_slim_item(corp_res.wreck_item_id)
+        .await
+        .unwrap()
+        .expect("corp ship wreck spawned in Ballpark");
+    assert_eq!(
+        wreck_slim.dict_get("ownerID").and_then(eve_proto::PyRep::as_i64),
+        Some(corp_id)
+    );
+    assert_eq!(
+        wreck_slim.dict_get("corpID").and_then(eve_proto::PyRep::as_i64),
+        Some(corp_id)
+    );
+    assert_eq!(
+        wreck_slim
+            .dict_get("allianceID")
+            .and_then(eve_proto::PyRep::as_i64),
+        Some(ally_id)
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&corp_ship));
+        assert!(!snap.item_positions.contains_key(&corp_ship));
+        assert!(!snap.sp6_lifecycle.space_object_meta.contains_key(&corp_ship));
+        assert!(!snap.sp6_lifecycle.ship_combat_hp.contains_key(&corp_ship));
+        assert_eq!(snap.items[&corp_res.wreck_item_id].owner_id, corp_id);
+        let km = &snap.killmails[&corp_res.killmail_id];
+        assert_eq!(km.victim_character_id, 0);
+        assert_eq!(km.victim_corp_id, corp_id);
+        assert_eq!(km.victim_alliance_id, Some(ally_id));
+        assert_eq!(km.attacker_character_id, attacker);
+        assert_eq!(snap.characters[&attacker].active_ship_id, attacker_ship);
+    });
+    crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let dkm = rt
+            .detailed_killmails
+            .get(&corp_res.killmail_id)
+            .expect("DetailedKillmail recorded for corp ship");
+        assert_eq!(dkm.victim_character_id, 0);
+        assert_eq!(dkm.victim_corporation_id, corp_id);
+        assert_eq!(dkm.victim_alliance_id, Some(ally_id));
+    });
+
+    // 2. Non-MTO / expired-MTO `category_id == 6` NPC hull cleans up cleanly instead of stranding at 0 HP.
+    let km_count_before = ctx.db.with_snapshot(|snap| snap.killmails.len());
+    let npc_res = on_ball_destroyed_sync(&ctx, sys_id, expired_mto_hull, Some(attacker_ship), pos)
+        .expect("non-MTO NPC hull cleanup succeeds");
+    assert!(npc_res.is_none());
+    assert!(
+        sys_handle
+            .get_ball_snapshot(expired_mto_hull)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&expired_mto_hull));
+        assert!(!snap.item_positions.contains_key(&expired_mto_hull));
+        assert!(
+            !snap
+                .sp6_lifecycle
+                .space_object_meta
+                .contains_key(&expired_mto_hull)
+        );
+        assert!(
+            !snap
+                .sp6_lifecycle
+                .ship_combat_hp
+                .contains_key(&expired_mto_hull)
+        );
+        assert_eq!(snap.killmails.len(), km_count_before);
+        let _ = now;
     });
 }

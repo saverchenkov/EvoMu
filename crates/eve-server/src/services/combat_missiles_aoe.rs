@@ -29,6 +29,22 @@ pub(crate) fn active_ship_victim_char_id(ctx: &ServerContext, ball_id: i64) -> O
     })
 }
 
+/// Returns `true` if `ball_id` is an unpiloted player-corporation ship (`category_id == 6`)
+/// tracked in `snap.items` and owned by a corporation in `snap.corporations`.
+pub(crate) fn is_corp_owned_ship_ball(ctx: &ServerContext, ball_id: i64) -> bool {
+    if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&ball_id)) {
+        return false;
+    }
+    ctx.db.with_snapshot(|snap| {
+        crate::combat::death_pipeline::resolve_corp_ship_owner_in_snap(
+            snap,
+            &ctx.sde,
+            ball_id,
+        )
+        .is_some()
+    })
+}
+
 /// Cleans up a destroyed non-ship ball in space (drone, wreck, jetcan, container, or corpse)
 /// without invoking the capsuleer ship death pipeline, failing any courier contracts inside
 /// and deleting all nested descendant items so no orphans remain (`feat:lifecycle.courier-package-destroyed`).
@@ -44,6 +60,7 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     with_mut_combat_runtime(ctx, |rt| {
         rt.active_drone_miners.remove(&ball_id);
         rt.container_lifetimes.remove(&ball_id);
+        rt.record_destroyed_item_id(ball_id);
     });
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -102,7 +119,7 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
     if ctx.db.with_snapshot(|s| s.structures.contains_key(&ball_id)) {
         return;
     }
-    if active_ship_victim_char_id(ctx, ball_id).is_some() {
+    if active_ship_victim_char_id(ctx, ball_id).is_some() || is_corp_owned_ship_ball(ctx, ball_id) {
         let _ = crate::combat::death_pipeline::on_ball_destroyed(
             ctx,
             sys_id,
@@ -129,7 +146,10 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
         )
         .await;
     } else {
-        // Complete any sovereign MTO site ball objective before non-ship cleanup removes the ball.
+        // Remove non-ship / MTO ball & item state BEFORE calling `on_space_entity_destroyed` so
+        // `record_rat_kill_military_index` sees no remaining `category_id == 6` item and credits
+        // the MTO kill.
+        cleanup_destroyed_non_ship_ball(ctx, sys_id, ball_id).await;
         let killer_opt = (attacker_char_id > 0).then_some(attacker_char_id);
         crate::services::sov_gameplay::on_space_entity_destroyed(
             ctx,
@@ -138,7 +158,6 @@ pub async fn handle_destroyed_ball_from_missile_or_aoe(
             ball_id,
             ball_type_id,
         );
-        cleanup_destroyed_non_ship_ball(ctx, sys_id, ball_id).await;
     }
 }
 
