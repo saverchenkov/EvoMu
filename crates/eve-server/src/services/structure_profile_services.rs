@@ -254,6 +254,15 @@ pub fn evaluate_domain_acl_on_profile(
     None
 }
 
+fn is_dockable_upwell_hull(ctx: &ServerContext, st: &eve_db::UpwellStructureRecord) -> bool {
+    !matches!(
+        st.type_id,
+        35_840 | 35_841 | 37_534 | 81_826 | 2_233 | 3_962 | 46_363 | 46_364 | 32_226
+    ) && ctx.sde.types.get(&st.type_id).is_some_and(|t| {
+        t.category_id == life::CATEGORY_STRUCTURE && matches!(t.group_id, 1404 | 1406 | 1657)
+    })
+}
+
 /// Checks whether `service_id` (supporting both V24 `structures/services.pyj` constants and EvoMu
 /// module/legacy IDs) is online at `structure_id`.
 pub fn is_v24_or_legacy_service_online(
@@ -273,6 +282,10 @@ pub fn is_v24_or_legacy_service_online(
     }
     let online = life::online_service_type_ids(ctx, snap, structure_id);
     match service_id {
+        SERVICE_DOCKING => is_dockable_upwell_hull(ctx, st),
+        SERVICE_FITTING | SERVICE_OFFICES | SERVICE_REPAIR | 13 => {
+            st.quantum_core_installed && is_dockable_upwell_hull(ctx, st)
+        }
         SERVICE_MARKET => online.contains(&35_892),
         SERVICE_REPROCESSING => online.contains(&35_899),
         SERVICE_MEDICAL | SERVICE_JUMP_CLONE => online.contains(&35_894),
@@ -283,7 +296,6 @@ pub fn is_v24_or_legacy_service_online(
         }
         SERVICE_CYNO_BEACON => st.type_id == 35_840 && st.quantum_core_installed && st.fuel_blocks > 0,
         SERVICE_AUTOMOONMINING => st.type_id == 81_826 && st.quantum_core_installed && st.fuel_blocks > 0,
-        SERVICE_REPAIR | 13 => st.quantum_core_installed && !matches!(st.type_id, 35_840 | 35_841 | 37_534 | 81_826),
         SERVICE_INDUSTRY => online.iter().any(|&t| matches!(t, 35_878 | 35_891 | 35_886 | 45_537..=45_539)),
         SERVICE_MANUFACTURING | SERVICE_MANUFACTURING_BASIC | SERVICE_MANUFACTURING_CAPITAL | SERVICE_MANUFACTURING_SUPERCAPITAL => {
             online.contains(&35_878)
@@ -472,6 +484,14 @@ pub fn evaluate_character_service_bps(
             if let Some(&bps) = prof.service_settings.get(&fk) {
                 return Some(bps);
             }
+        }
+        // Align domain 20 (Corporation Offices) with `resolve_upwell_office_access_and_quote_in_snap`
+        // and `evaluate_character_setting`: deny when a profile is explicitly attached with
+        // domain 20 unconfigured (neither ACL rules, flat fee, nor `general_settings[&20] = true`).
+        if service_id == SERVICE_OFFICES
+            && prof.general_settings.get(&SETTING_CORP_RENT_OFFICE) != Some(&true)
+        {
+            return None;
         }
     } else if is_external_flex
         && !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now))
@@ -747,7 +767,7 @@ pub fn require_structure_service_access_in_snap(
             }
             let ext = load_ext_state(snap);
             if let Some(prof) = effective_profile_for_structure(&ext, structure_id, now_opt) {
-                if prof.general_settings.get(&2) == Some(&false)
+                if prof.general_settings.get(&SETTING_CLONINGBAY_TAX) == Some(&false)
                     || prof.general_settings.get(&35_894) == Some(&false)
                 {
                     return Err(err(
@@ -762,7 +782,7 @@ pub fn require_structure_service_access_in_snap(
                 snap,
                 structure_id,
                 char_id,
-                &[SETTING_CLONINGBAY_TAX, 35_894, 2, 10, 6],
+                &[SETTING_CLONINGBAY_TAX, 35_894],
                 false,
                 now_opt,
                 "StructureAccessDenied",

@@ -1443,24 +1443,41 @@ fn parse_struct_svc_args(session: &SessionState, args: &[PyRep], m: &str) -> Res
 }
 
 pub(crate) fn handle_character_get_services(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    use crate::services::structure_profile_services as prof_svc;
+
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "CharacterGetServices requires structureID"))?;
     ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        if !life::is_operational(&st.state) || !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(ctx.now_unix())) {
+        if !life::is_operational(&st.state) {
             return Ok(PyRep::Dict(Vec::new()));
         }
-        let mut entries = Vec::new();
+        let mut entries: Vec<(PyRep, PyRep)> = Vec::new();
+        let mut push_if_accessible = |svc_id: i64| {
+            if entries.iter().any(|(k, _)| k == &PyRep::Integer(svc_id)) {
+                return;
+            }
+            if let Some(bps) = prof_svc::evaluate_character_service_bps(
+                ctx, snap, structure_id, char_id, svc_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
+            ) {
+                entries.push((PyRep::Integer(svc_id), PyRep::Real(bps as f64 / 10_000.0)));
+            }
+        };
+        for svc_id in [
+            prof_svc::SERVICE_DOCKING,
+            prof_svc::SERVICE_FITTING,
+            prof_svc::SERVICE_OFFICES,
+            prof_svc::SERVICE_REPAIR,
+            prof_svc::SERVICE_JUMP_BRIDGE,
+            prof_svc::SERVICE_CYNO_BEACON,
+            prof_svc::SERVICE_AUTOMOONMINING,
+        ] {
+            push_if_accessible(svc_id);
+        }
         for tid in life::online_service_type_ids(ctx, snap, structure_id) {
             if let Some(svc_id) = ops::service_id_for_module_type(tid) {
-                if !entries.iter().any(|(k, _)| k == &PyRep::Integer(svc_id)) {
-                    if let Some(bps) = crate::services::structure_profile_services::evaluate_character_service_bps(
-                        ctx, snap, structure_id, char_id, svc_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
-                    ) {
-                        entries.push((PyRep::Integer(svc_id), PyRep::Real(bps as f64 / 10_000.0)));
-                    }
-                }
+                push_if_accessible(svc_id);
             }
         }
         Ok(PyRep::Dict(entries))

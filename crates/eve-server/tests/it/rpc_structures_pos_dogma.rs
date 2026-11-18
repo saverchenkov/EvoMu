@@ -137,8 +137,9 @@ async fn test_structure_settings_parity() {
         "ShieldVulnerable",
     );
 
-    // 1. Initial state: structure has no online service modules
-    let s_empty = rpc(
+    // 1. Initial state: cored operational Astrahus has built-in Upwell services (1, 2, 3, 8)
+    //    and no fitted service module services (e.g. 5 = Market Hub).
+    let s_initial = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
@@ -146,13 +147,19 @@ async fn test_structure_settings_parity() {
         &[PyRep::Integer(structure_id)],
     )
     .await
-    .expect("CharacterGetServices empty structure");
-    let PyRep::Dict(entries) = s_empty else {
+    .expect("CharacterGetServices initial structure");
+    let PyRep::Dict(entries) = s_initial else {
         panic!("expected Dict");
     };
-    assert!(entries.is_empty(), "Unfitted structure must report 0 services");
+    let initial_ids: std::collections::BTreeSet<i64> =
+        entries.iter().filter_map(|(k, _)| k.as_i64()).collect();
+    assert_eq!(
+        initial_ids,
+        std::collections::BTreeSet::from([1, 2, 3, 8]),
+        "Cored operational unfitted Astrahus must report built-in services 1, 2, 3, 8"
+    );
 
-    let has_svc = rpc(
+    let has_docking = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
@@ -160,29 +167,43 @@ async fn test_structure_settings_parity() {
         &[PyRep::Integer(structure_id), PyRep::Integer(1)],
     )
     .await
-    .expect("CharacterHasService");
-    assert_eq!(has_svc, PyRep::Bool(false));
+    .expect("CharacterHasService docking");
+    assert_eq!(has_docking, PyRep::Bool(true));
 
-    let check_svc = rpc(
+    let has_market_unfitted = rpc(
+        &ctx,
+        &mut sess,
+        "structureSettings",
+        "CharacterHasService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(5)],
+    )
+    .await
+    .expect("CharacterHasService unfitted market");
+    assert_eq!(has_market_unfitted, PyRep::Bool(false));
+
+    let check_market_unfitted = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
         "CharacterCheckService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+        &[PyRep::Integer(structure_id), PyRep::Integer(5)],
     )
     .await;
-    assert_eq!(check_svc.unwrap_err().code, "StructureServiceAccessDenied");
+    assert_eq!(
+        check_market_unfitted.unwrap_err().code,
+        "StructureServiceAccessDenied"
+    );
 
-    let get_svc = rpc(
+    let get_market_unfitted = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
         "CharacterGetService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+        &[PyRep::Integer(structure_id), PyRep::Integer(5)],
     )
     .await
-    .expect("CharacterGetService");
-    assert_eq!(get_svc, PyRep::None);
+    .expect("CharacterGetService unfitted market");
+    assert_eq!(get_market_unfitted, PyRep::None);
 
     let has_setting = rpc(
         &ctx,
@@ -195,7 +216,7 @@ async fn test_structure_settings_parity() {
     .expect("CharacterHasSetting");
     assert_eq!(has_setting, PyRep::Bool(true));
 
-    // 2. Install and online Standup Market Hub I (service_id = 1, type_id = 35892)
+    // 2. Install and online Standup Market Hub I (service_id = 5, type_id = 35892)
     let module_item_id = 20_000_000_001_i64;
     seed_test_item(
         &ctx,
@@ -215,7 +236,14 @@ async fn test_structure_settings_parity() {
         .await
         .expect("CharacterGetServices with market hub");
     let PyRep::Dict(active_entries) = s_active else { panic!("expected Dict"); };
-    assert_eq!(active_entries.len(), 1, "Expected only mapped service ID in Dict (no module typeIDs)");
+    let active_ids: std::collections::BTreeSet<i64> =
+        active_entries.iter().filter_map(|(k, _)| k.as_i64()).collect();
+    assert_eq!(
+        active_ids,
+        std::collections::BTreeSet::from([1, 2, 3, 5, 8]),
+        "Expected built-in services plus mapped SERVICE_MARKET (no module typeIDs)"
+    );
+    assert!(!active_ids.contains(&(STANDUP_MARKET_TYPE_ID as i64)));
     assert_eq!(active_entries.iter().find(|(k, _)| k == &PyRep::Integer(5)).map(|(_, v)| v), Some(&PyRep::Real(0.01)));
 
     let has_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
@@ -422,9 +450,11 @@ async fn test_structure_settings_parity() {
     sess.structure_id = None;
 
     // 5. Test non-operational structure behavior
+    let anchor_until = ctx.now_unix() + 900;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.structures.get_mut(&structure_id) {
             st.state = "AnchorVulnerable".to_string();
+            st.reinforced_until_unix = anchor_until;
         }
     });
     let non_op_services = rpc(
