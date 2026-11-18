@@ -1461,8 +1461,11 @@ def _present_user_error_dialog(exc, inv_mod=None):
     ):
         dialog_fn = getattr(mod, attr, None) if mod is not None else None
         if callable(dialog_fn):
-            dialog_fn(msg, err_dict)
-            return True
+            try:
+                dialog_fn(msg, err_dict)
+                return True
+            except Exception:
+                continue
     return False
 
 

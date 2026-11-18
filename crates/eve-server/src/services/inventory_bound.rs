@@ -236,6 +236,20 @@ pub fn handle(
                 Ok(_) => false,
                 Err(e) => return Some(Err(e)),
             };
+            let foreign_ship_pos_pair = if docked.is_none() {
+                session.solar_system_id.and_then(|sys_id| {
+                    let caller_ship = session.ship_id.unwrap_or(0);
+                    ctx.systems
+                        .get_or_spawn_if_runtime(sys_id)
+                        .and_then(|sys_handle| {
+                            sys_handle
+                                .get_ball_position_sync(caller_ship)
+                                .zip(sys_handle.get_ball_position_sync(item_id))
+                        })
+                })
+            } else {
+                None
+            };
             let accessible = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
@@ -251,14 +265,70 @@ pub fn handle(
                         return docked_here || corp_in_sys;
                     }
                     snap.items.get(&item_id).is_some_and(|it| {
+                        let t_opt = ctx.sde.types.get(&it.type_id);
                         let has_inventory = crab_allowed
-                            || ctx
-                                .sde
-                                .types
-                                .get(&it.type_id)
-                                .is_some_and(|t| t.capacity > 0.0 || matches!(t.category_id, 6 | 23));
+                            || t_opt.is_some_and(|t| t.capacity > 0.0 || matches!(t.category_id, 6 | 23));
                         if !has_inventory {
                             return false;
+                        }
+                        let is_foreign_ship_bay_reachable = t_opt.is_some_and(|t| {
+                            if t.category_id != 6 || it.owner_id == char_id {
+                                return false;
+                            }
+                            let has_sma = t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
+                            let has_fh = t.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0;
+                            if !has_sma && !has_fh {
+                                return false;
+                            }
+                            let acl_ok = (has_sma
+                                && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                                    snap, char_id, it.item_id, it.owner_id, true, None,
+                                ))
+                                || (has_fh
+                                    && crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                                        snap, char_id, it.item_id, it.owner_id, false, None,
+                                    ))
+                                || {
+                                    let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
+                                    st.ship_configs.get(&it.item_id).is_some_and(|cfg| {
+                                        let in_same_fleet = snap.fleets.values().any(|fl| fl.members.contains(&char_id) && fl.members.contains(&it.owner_id));
+                                        let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
+                                        let c2 = snap.characters.get(&it.owner_id).map(|c| c.corporation_id);
+                                        let same_corp = c1.is_some_and(|cid| cid > 0 && (cid == it.owner_id || c2 == Some(cid)));
+                                        cfg.password.as_deref().is_some_and(|p| !p.is_empty())
+                                            && ((has_sma && ((in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)))
+                                                || (has_fh && ((in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar))))
+                                    })
+                                };
+                            if !acl_ok {
+                                return false;
+                            }
+                            if docked.is_some() {
+                                at_location && it.location_id == hangar_loc_id
+                            } else if let Some(sys_id) = session.solar_system_id {
+                                if !at_location || it.location_id != i64::from(sys_id) {
+                                    return false;
+                                }
+                                let caller_ship = session.ship_id.unwrap_or(0);
+                                let ship_r = t.radius.max(0.0);
+                                let caller_r = snap.items.get(&caller_ship)
+                                    .and_then(|s| ctx.sde.types.get(&s.type_id))
+                                    .map(|ct| ct.radius.max(0.0))
+                                    .unwrap_or(0.0);
+                                let pos_pair = foreign_ship_pos_pair.or_else(|| {
+                                    snap.item_positions.get(&caller_ship)
+                                        .zip(snap.item_positions.get(&it.item_id))
+                                        .map(|(&a, &b)| (glam::DVec3::from(a), glam::DVec3::from(b)))
+                                });
+                                pos_pair
+                                    .map(|(a, b)| (a.distance(b) - ship_r - caller_r).max(0.0) <= 2_500.0)
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            }
+                        });
+                        if is_foreign_ship_bay_reachable {
+                            return true;
                         }
                         let is_corp_owned = session
                             .corporation_id
@@ -803,6 +873,156 @@ pub(crate) fn validate_corp_source_item_take_access_in_snap(
     })
 }
 
+/// Rejects ship-only bay/hold flags when the resolved destination is not a `category_id == 6` ship.
+pub(crate) fn validate_ship_only_bay_target_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    new_loc: i64,
+    flag_u16: u16,
+) -> Result<(), BridgeRpcError> {
+    let dest_is_structure = snap.structures.contains_key(&new_loc);
+    let ship_only = matches!(
+        flag_u16,
+        87 | 90 | 134..=151 | 155 | 177 | 179 | 181 | 182 | 185
+    ) || (!dest_is_structure && matches!(flag_u16, 133 | 158));
+    if !ship_only {
+        return Ok(());
+    }
+    let dest_is_ship = snap
+        .items
+        .get(&new_loc)
+        .and_then(|d| ctx.sde.types.get(&d.type_id))
+        .is_some_and(|t| t.category_id == 6);
+    if !dest_is_ship {
+        return Err(BridgeRpcError {
+            code: "InvalidInventoryFlag".into(),
+            message: format!("Inventory flag {flag_u16} requires a ship destination"),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+/// Walks container/ship ancestors up to 8 hops and enforces ship bay ACL + password for any
+/// foreign `category_id == 6` ship encountered (both direct bay moves and nested containers).
+/// Returns the first foreign ship ID whose shared bay (`90 | 138 | 155`) authorized the hop.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_foreign_ship_bay_ancestor_chain_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    start_loc: i64,
+    child_flag_u16: u16,
+    supplied_pw: Option<&str>,
+    is_destination: bool,
+) -> Result<Option<i64>, BridgeRpcError> {
+    if session.has_gm_role() {
+        return Ok(None);
+    }
+    let mut cur_loc = start_loc;
+    let mut cur_flag = child_flag_u16;
+    let mut authorized_foreign_ship: Option<i64> = None;
+    for _ in 0..8 {
+        let Some(parent) = snap.items.get(&cur_loc) else {
+            break;
+        };
+        let p_cat = ctx
+            .sde
+            .types
+            .get(&parent.type_id)
+            .map(|t| t.category_id)
+            .unwrap_or(0);
+        if p_cat == 6 && parent.owner_id != char_id {
+            if !matches!(cur_flag, 90 | 138 | 155) {
+                return Err(BridgeRpcError {
+                    code: if is_destination {
+                        "DestinationAccessDenied"
+                    } else {
+                        "ItemOwnershipViolation"
+                    }
+                    .into(),
+                    message: format!(
+                        "Character {char_id} cannot access non-shared bay {cur_flag} on foreign ship {}",
+                        parent.item_id
+                    ),
+                    client_error: None,
+                });
+            }
+            let is_sma = matches!(cur_flag, 90 | 138);
+            if !crate::services::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                snap,
+                char_id,
+                parent.item_id,
+                parent.owner_id,
+                is_sma,
+                supplied_pw,
+            ) {
+                return Err(BridgeRpcError {
+                    code: if is_sma {
+                        "SMAAccessDenied"
+                    } else {
+                        "FleetHangarAccessDenied"
+                    }
+                    .into(),
+                    message: if is_sma {
+                        "Ship Maintenance Bay access denied by ship configuration or password"
+                    } else {
+                        "Fleet Hangar access denied by ship configuration or password"
+                    }
+                    .into(),
+                    client_error: None,
+                });
+            }
+            if authorized_foreign_ship.is_none() {
+                authorized_foreign_ship = Some(parent.item_id);
+            }
+        }
+        cur_flag = parent.flag as u16;
+        cur_loc = parent.location_id;
+    }
+    Ok(authorized_foreign_ship)
+}
+
+/// Returns the destination ship's `owner_id` when depositing/moving into a ship's shared bay (`90 | 138 | 155`).
+pub(crate) fn ship_bay_target_owner_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    new_loc: i64,
+    flag_u16: u16,
+) -> Option<i64> {
+    if !matches!(flag_u16, 90 | 138 | 155) {
+        return None;
+    }
+    let dest = snap.items.get(&new_loc)?;
+    let is_ship = ctx
+        .sde
+        .types
+        .get(&dest.type_id)
+        .is_some_and(|t| t.category_id == 6);
+    is_ship.then_some(dest.owner_id).filter(|&o| o > 0)
+}
+
+/// Returns a foreign ship owner ID (`!= char_id`) when interacting directly with a foreign ship's shared bay (`90 | 138 | 155`).
+pub(crate) fn foreign_ship_owner_at_loc_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    loc_id: i64,
+    flag_u16: u16,
+    char_id: i64,
+) -> Option<i64> {
+    if !matches!(flag_u16, 90 | 138 | 155) {
+        return None;
+    }
+    let ship = snap.items.get(&loc_id)?;
+    let is_ship = ctx
+        .sde
+        .types
+        .get(&ship.type_id)
+        .is_some_and(|t| t.category_id == 6);
+    (is_ship && ship.owner_id > 0 && ship.owner_id != char_id).then_some(ship.owner_id)
+}
+
 /// Re-verifies source ownership, corporation take roles, container locks/passwords, and destination
 /// ownership inside `invbroker.Add`'s write transaction (`#885`).
 #[allow(clippy::too_many_arguments)]
@@ -883,6 +1103,20 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
     let src_is_struct_fuel = is_struct_loc
         && !is_core_item
         && crate::services::structure_acl_defense_rules::is_structure_fuel_flag(orig_item.flag);
+    let supplied_pw = kwargs
+        .get("password")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.iter().find_map(|a| a.as_str()));
+    let src_foreign_ship_opt = check_foreign_ship_bay_ancestor_chain_in_snap(
+        ctx,
+        snap,
+        session,
+        char_id,
+        orig_item.location_id,
+        orig_item.flag as u16,
+        supplied_pw,
+        false,
+    )?;
     if src_is_deed_bay && !session.has_gm_role() {
         return Err(BridgeRpcError {
             code: "ItemLocked".into(),
@@ -934,7 +1168,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             .items
             .get(&orig_item.location_id)
             .is_some_and(|p| p.type_id == 23 || p.owner_id == 0);
-        if !src_is_public_wreck_or_free_cont && !session.has_gm_role() {
+        if !src_is_public_wreck_or_free_cont && src_foreign_ship_opt.is_none() && !session.has_gm_role() {
             return Err(BridgeRpcError {
                 code: "ItemOwnershipViolation".into(),
                 message: format!(
@@ -1044,6 +1278,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
     let dest_is_fuel_flag = dest_flag_u16 == 133
         || flag == InventoryFlag::SpecializedFuelBay
         || ((dest_flag_u16 == 172 || flag == InventoryFlag::StructureFuel) && !dest_is_core_item);
+    validate_ship_only_bay_target_in_snap(ctx, snap, new_loc, dest_flag_u16)?;
     if let Some(st_dest) = snap.structures.get(&new_loc) {
         if st_dest.state == "Destroyed" {
             return Err(BridgeRpcError {
@@ -1119,6 +1354,16 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             });
         }
     } else if let Some(dest) = snap.items.get(&new_loc) {
+        let dst_foreign_ship_opt = check_foreign_ship_bay_ancestor_chain_in_snap(
+            ctx,
+            snap,
+            session,
+            char_id,
+            new_loc,
+            flag as u16,
+            supplied_pw,
+            true,
+        )?;
         let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
         let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
         if dest.owner_id != char_id && !session.has_gm_role() {
@@ -1127,10 +1372,6 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                     && !st.unlocked_containers.contains(&(dest.item_id, char_id))
                     && !st.unlocked_containers.contains(&(char_id, dest.item_id))
                 {
-                    let supplied_pw = kwargs
-                        .get("password")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| args.iter().find_map(|a| a.as_str()));
                     if supplied_pw != Some(req_pw.as_str()) {
                         return Err(BridgeRpcError {
                             code: "ALSCPasswordRequired".into(),
@@ -1148,13 +1389,15 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
                 || dest.owner_id == char_id
                 || dest.owner_id == 0
                 || dest.type_id == 23
-                || (live_corp_id > 0 && dest.owner_id == live_corp_id)
+                || (live_corp_id > 0 && dest.owner_id == live_corp_id && d_cat != 6)
                 || (crate::services::fitting_containers_ships::is_container_group(
                     d_grp,
                     dest.type_id,
                 ) && in_space_container)
                 || d_grp == 186
-                || (d_cat == 6 && matches!(flag as u16, 5 | 90 | 138 | 155));
+                || (d_cat == 6
+                    && matches!(flag as u16, 90 | 138 | 155)
+                    && dst_foreign_ship_opt == Some(dest.item_id));
             if !dest_owner_ok {
                 return Err(BridgeRpcError {
                     code: "DestinationAccessDenied".into(),
@@ -1392,10 +1635,28 @@ pub(crate) fn resolve_inv_target_location(
     // `invbroker` handle together with a ship-only flag (fitting slot, ship bay/cargo, or
     // `flagAutoFit` on fittable modules/rigs), `args[1]` is `sourceLocationID` from the
     // V24 client rather than a station destination, so redirect to `session.ship_id`.
+    let a1_is_upwell_structure = a1.is_some_and(|a1_id| {
+        ctx.db.with_snapshot(|snap| snap.structures.contains_key(&a1_id))
+    });
     let target_is_ship_only_flag = matches!(
         raw_flag_opt,
-        Some(5 | 11..=34 | 87 | 90 | 92..=94 | 125..=132 | 134..=151 | 158)
-    ) || (items_are_fittable_modules && matches!(raw_flag_opt, Some(0) | None));
+        Some(
+            5 | 11..=34
+                | 87
+                | 90
+                | 92..=94
+                | 125..=132
+                | 134..=151
+                | 155
+                | 158
+                | 177
+                | 179
+                | 181
+                | 182
+                | 185
+        )
+    ) || (raw_flag_opt == Some(133) && !a1_is_upwell_structure)
+        || (items_are_fittable_modules && matches!(raw_flag_opt, Some(0) | None));
     let redirect_source_station_to_ship = |a1_opt: Option<i64>| -> Option<i64> {
         let a1_id = a1_opt?;
         if target_is_ship_only_flag
@@ -1429,11 +1690,25 @@ pub(crate) fn resolve_inv_target_location(
     };
     let resolved = match (a1, bid) {
         (a1_opt, Some(bid_val)) => {
-            let bound_is_container_or_struct = ctx.db.with_snapshot(|snap| {
-                snap.items.contains_key(&bid_val) || snap.structures.contains_key(&bid_val)
+            let (bound_is_item, bound_is_struct) = ctx.db.with_snapshot(|snap| {
+                (
+                    snap.items.contains_key(&bid_val),
+                    snap.structures.contains_key(&bid_val),
+                )
             });
-            if bound_is_container_or_struct {
+            if bound_is_item {
                 Some(bid_val)
+            } else if bound_is_struct {
+                if a1_opt == Some(bid_val)
+                    && matches!(
+                        raw_flag_opt,
+                        Some(5 | 87 | 90 | 134..=151 | 155 | 177 | 179 | 181 | 182 | 185)
+                    )
+                {
+                    redirect_source_station_to_ship(a1_opt).or(Some(bid_val))
+                } else {
+                    Some(bid_val)
+                }
             } else if a1_opt.is_some() && a1_opt == src_loc_opt && a1_opt != Some(bid_val) {
                 Some(bid_val)
             } else if let Some(ship_id) = redirect_source_station_to_ship(a1_opt) {

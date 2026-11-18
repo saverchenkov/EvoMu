@@ -1499,6 +1499,131 @@ async fn avatar_upwell_keepstar_and_venture_station_overfilled_cargo_and_bays() 
     assert_eq!(int(&sma_rep, "flagID"), 90);
     assert_eq!(item(&ctx, stored_rifter).unwrap().flag, InventoryFlag::ShipHangar);
 
+    // Non-ship destinations reject ship-only bay flags with InvalidInventoryFlag.
+    let bad_flag_box = 790_007i64;
+    seed(&ctx, bad_flag_box, 3293, C1, keepstar_id, InventoryFlag::Hangar, 1, true);
+    let err_non_ship = call(
+        &ctx,
+        &mut s1,
+        "invbroker",
+        "Add",
+        vec![PyRep::Integer(fh_stack_1), PyRep::Integer(bad_flag_box), PyRep::Integer(155)],
+    )
+    .await
+    .expect_err("ship-only bay flag on container rejects");
+    assert_eq!(err_non_ship.code, "InvalidInventoryFlag");
+
+    // FleetHangars and SMAs return NotEnoughSpecialBaySpace when full (via bound avatar_inv too).
+    let huge_fh_block = 790_008i64;
+    seed(&ctx, huge_fh_block, 34, C1, keepstar_id, InventoryFlag::Hangar, 10_500_000, false); // 105,000 m3 > 100,000 m3 FH
+    let err_avatar_fh = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "invbroker",
+            Some(avatar_inv),
+            "Add",
+            &[PyRep::Integer(huge_fh_block), PyRep::Integer(keepstar_id), PyRep::Integer(155)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Avatar FleetHangar overflow rejects");
+    assert_eq!(decode_user_error(&err_avatar_fh).0, "NotEnoughSpecialBaySpace");
+
+    // Cross-pilot fleet access at Keepstar via GetInventoryFromId(avatar_id) + Add + ListByFlags, then kick enforcement.
+    let mut s2 = pilot(&ctx, C2, 6131).await;
+    let c2_deposit = 790_009i64;
+    let c2_corp = ctx.db.with_snapshot(|snap| snap.characters[&C2].corporation_id + 90_000);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch2 = snap.characters.get_mut(&C2).unwrap();
+        ch2.corporation_id = c2_corp;
+        ch2.station_id = None;
+        ch2.structure_id = Some(keepstar_id);
+        snap.fleets.insert(
+            777_790,
+            eve_db::FleetRecord {
+                fleet_id: 777_790,
+                boss_id: C1,
+                members: vec![C1, C2],
+                ..Default::default()
+            },
+        );
+    });
+    s2.corporation_id = Some(c2_corp);
+    s2.station_id = None;
+    s2.structure_id = Some(keepstar_id);
+    seed(&ctx, c2_deposit, 34, C2, keepstar_id, InventoryFlag::Hangar, 250, false);
+
+    let ks_bind_2 = call(
+        &ctx,
+        &mut s2,
+        "invbroker",
+        "MachoBindObject",
+        vec![PyRep::Tuple(vec![PyRep::Integer(keepstar_id), PyRep::Integer(1404)]), PyRep::None],
+    )
+    .await
+    .expect("bind structure invbroker for C2");
+    let PyRep::Tuple(ks2_parts) = &ks_bind_2 else { panic!("MachoBindObject tuple") };
+    let ks_mgr_2 = ks2_parts[0].as_i64().unwrap() as u64;
+    let avatar_inv_2 = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "invbroker",
+            Some(ks_mgr_2),
+            "GetInventoryFromId",
+            &[PyRep::Integer(avatar_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("fleetmate GetInventoryFromId(Avatar)")
+        .as_i64()
+        .unwrap() as u64;
+    ctx.dispatch_rpc(
+        &mut s2,
+        "invbroker",
+        Some(avatar_inv_2),
+        "Add",
+        &[PyRep::Integer(c2_deposit), PyRep::Integer(keepstar_id), PyRep::Integer(155)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("fleetmate deposits into Avatar FleetHangar");
+    assert_eq!(item(&ctx, fh_stack_1).unwrap().owner_id, C1);
+    assert_eq!(item(&ctx, fh_stack_1).unwrap().quantity, 1_750);
+
+    // Kicked from fleet: C2 loses FleetHangar ListByFlags & Add/extract access immediately.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.get_mut(&777_790).unwrap().members.retain(|&m| m != C2);
+    });
+    let kicked_list_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "invbroker",
+            Some(avatar_inv_2),
+            "ListByFlags",
+            &[PyRep::List(vec![PyRep::Integer(155)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("kicked pilot ListByFlags([155]) denied");
+    assert_eq!(kicked_list_err.code, "FleetHangarAccessDenied");
+    let kicked_extract_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "invbroker",
+            Some(ks_mgr_2),
+            "Add",
+            &[PyRep::Integer(fh_stack_1), PyRep::Integer(keepstar_id), PyRep::Integer(4)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("kicked pilot extract denied");
+    assert_eq!(kicked_extract_err.code, "FleetHangarAccessDenied");
+
     // --- Scenario #1301: Venture (32880, 50 m3 cargo) at NPC Station with overfilled Cargo (flag 5) ---
     let venture_id = 790_010i64;
     let venture_overfill_id = 790_011i64;

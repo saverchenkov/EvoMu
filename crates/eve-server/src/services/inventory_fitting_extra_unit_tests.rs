@@ -1182,9 +1182,92 @@ async fn invbroker_add_preserves_native_ship_hangar_and_fleet_hangar_flags_and_c
     )
     .await
     .unwrap_err();
-    assert_eq!(err_fh.code, "CapacityExceeded");
+    let (fh_key, fh_kv) = decode_user_error(&err_fh);
+    assert_eq!(fh_key, "NotEnoughSpecialBaySpace");
+    assert_eq!(fh_kv.get("volume").copied(), Some(100.0));
+    assert_eq!(fh_kv.get("available").copied(), Some(0.0));
 
-    // 2. Add(..., 90) persists InventoryFlag::ShipHangar (90) and counts 90 | 138 against SMA capacity (5,000,000 m3).
+    // Bound `GetInventoryFromId(titan_id)` + `Add(fh_overflow, station_id, 155)` also enforces NotEnoughSpecialBaySpace.
+    let titan_bound = BoundObjectEntry {
+        bound_id: 901,
+        session_id: session.session_id,
+        user_id: char_id as u64,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: titan_id,
+        oid_str: format!("N=901:{titan_id}"),
+        ref_id: 1,
+    };
+    let bound_fh_err = handle(
+        &ctx,
+        &mut session,
+        Some(&titan_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(fh_overflow), PyRep::Integer(station_id), PyRep::Integer(155)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let (bfh_key, bfh_kv) = decode_user_error(&bound_fh_err);
+    assert_eq!(bfh_key, "NotEnoughSpecialBaySpace");
+    assert_eq!(bfh_kv.get("volume").copied(), Some(100.0));
+    assert_eq!(bfh_kv.get("available").copied(), Some(0.0));
+
+    // 2. Add(..., 90) persists InventoryFlag::ShipHangar (90), enforces atomic SMA rules,
+    //    and counts 90 | 138 against SMA capacity (5,000,000 m3) with NotEnoughSpecialBaySpace.
+    assert_eq!(
+        call_add(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(fh_overflow), PyRep::Integer(titan_id), PyRep::Integer(90)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CannotStoreCargoInSMA"
+    );
+    let unpackaged_hull = 96_620_008i64;
+    let loaded_hull = 96_620_009i64;
+    let loaded_cargo = 96_620_010i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            unpackaged_hull,
+            mk_item(unpackaged_hull, shuttle_tid, char_id, station_id, InventoryFlag::Hangar, 1, false),
+        );
+        snap.items.insert(
+            loaded_hull,
+            mk_item(loaded_hull, shuttle_tid, char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            loaded_cargo,
+            mk_item(loaded_cargo, isotope_tid, char_id, loaded_hull, InventoryFlag::Cargo, 1, false),
+        );
+    });
+    assert_eq!(
+        call_add(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(unpackaged_hull), PyRep::Integer(titan_id), PyRep::Integer(90)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "OnlyAssembledShipsInSMA"
+    );
+    assert_eq!(
+        call_add(
+            &ctx,
+            &mut session,
+            &[PyRep::Integer(loaded_hull), PyRep::Integer(titan_id), PyRep::Integer(90)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipHasNonChargeCargo"
+    );
+
     let rep_sma = call_add(
         &ctx,
         &mut session,
@@ -1204,5 +1287,669 @@ async fn invbroker_add_preserves_native_ship_hangar_and_fleet_hangar_flags_and_c
     )
     .await
     .unwrap_err();
-    assert_eq!(err_sma.code, "CapacityExceeded");
+    let (sma_key, sma_kv) = decode_user_error(&err_sma);
+    assert_eq!(sma_key, "NotEnoughSpecialBaySpace");
+    assert_eq!(sma_kv.get("volume").copied(), Some(2_800_000.0));
+    assert_eq!(sma_kv.get("available").copied(), Some(2_200_000.0));
+}
+
+fn decode_user_error(err: &BridgeRpcError) -> (String, HashMap<String, f64>) {
+    let PyRep::Tuple(parts) = err.to_client_error("invbroker", "Add").to_macho_error_body(1) else {
+        panic!("expected ErrorResponse tuple");
+    };
+    let PyRep::Tuple(inner) = &parts[2] else {
+        panic!("expected inner tuple");
+    };
+    let PyRep::Bytes(raw) = &inner[0] else {
+        panic!("expected marshaled bytes");
+    };
+    let PyRep::ObjectEx { header, .. } = eve_proto::marshal::decode(raw).expect("decode UserError") else {
+        panic!("expected ObjectEx");
+    };
+    let PyRep::Tuple(hdr) = *header else {
+        panic!("expected header tuple");
+    };
+    assert_eq!(hdr[0], PyRep::Token("eveexceptions.UserError".into()));
+    let PyRep::Tuple(u_args) = &hdr[1] else {
+        panic!("expected UserError args tuple");
+    };
+    let key = u_args[0].as_str().expect("UserError key").to_string();
+    let PyRep::Dict(entries) = &u_args[1] else {
+        panic!("expected UserError dict");
+    };
+    let kv = entries
+        .iter()
+        .map(|(k, v)| (k.as_str().expect("dict key").to_string(), v.as_f64().expect("real arg")))
+        .collect();
+    (key, kv)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invbroker_add_enforces_foreign_ship_bay_acl_transfers_owner_and_notifies() {
+    use crate::services::inventory_fitting::fitting_containers_ships::{
+        read_container_ship_state, save_container_ship_state, ShipAccessConfig,
+    };
+    use eve_db::FleetRecord;
+
+    let (mut ctx, _owner_sess, owner_id, _owner_corp, station_id, _default_ship) = setup_inv_ctx();
+    let mate_id = 96_630_002i64;
+    let mate_corp = 98_630_002i64;
+    let carrier_tid = 999_630u32;
+    let shuttle_tid = 999_631u32;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        let mut carrier = sde_mut.types[&587].clone();
+        carrier.type_id = carrier_tid;
+        carrier.group_id = 30;
+        carrier.category_id = 6;
+        carrier.name = "Synthetic Carrier".into();
+        carrier.capacity = 5_000.0;
+        carrier.volume = 100_000_000.0;
+        carrier.default_attributes.insert(908, 10_000_000.0);
+        carrier.default_attributes.insert(912, 10_000.0);
+        sde_mut.types.insert(carrier_tid, carrier);
+
+        let mut shuttle = sde_mut.types[&587].clone();
+        shuttle.type_id = shuttle_tid;
+        shuttle.group_id = 31;
+        shuttle.category_id = 6;
+        shuttle.name = "Synthetic Shuttle".into();
+        shuttle.volume = 50_000.0;
+        sde_mut.types.insert(shuttle_tid, shuttle);
+    }
+
+    let owner_carrier = 96_630_100i64;
+    let mate_carrier = 96_630_101i64;
+    let owner_fh_trit = 96_630_201i64;
+    let mate_hangar_trit = 96_630_202i64;
+    let mate_hangar_pyerite = 96_630_203i64;
+    let mate_hangar_mex = 96_630_204i64;
+    let mate_legacy_fh_item = 96_630_205i64;
+    let mate_legacy_sma_hull = 96_630_206i64;
+    let sma_box = 96_630_207i64;
+    let nested_sma_item = 96_630_208i64;
+    let pub_can = 96_630_209i64;
+    let foreign_can_item = 96_630_210i64;
+
+    let mut mate_uid = 2u64;
+    let mut owner_uid = 1u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut mate = snap.characters[&owner_id].clone();
+        owner_uid = mate.user_id;
+        mate_uid = if owner_uid == 2 { 22 } else { 2 };
+        mate.character_id = mate_id;
+        mate.user_id = mate_uid;
+        mate.name = "FleetMate".into();
+        mate.corporation_id = mate_corp;
+        mate.station_id = Some(station_id);
+        mate.structure_id = None;
+        mate.active_ship_id = mate_carrier;
+        snap.characters.insert(mate_id, mate);
+
+        let mut c2 = CorporationRecord::default();
+        c2.corporation_id = mate_corp;
+        c2.name = "Mate Corp".into();
+        c2.ticker = "MATE".into();
+        c2.ceo_id = mate_id;
+        c2.members = [mate_id].into_iter().collect();
+        snap.corporations.insert(mate_corp, c2);
+
+        snap.fleets.insert(
+            777_630,
+            FleetRecord {
+                fleet_id: 777_630,
+                boss_id: owner_id,
+                members: vec![owner_id, mate_id],
+                ..Default::default()
+            },
+        );
+
+        snap.items.insert(owner_carrier, mk_item(owner_carrier, carrier_tid, owner_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(mate_carrier, mk_item(mate_carrier, carrier_tid, mate_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(owner_fh_trit, mk_item(owner_fh_trit, 34, owner_id, owner_carrier, InventoryFlag::FleetHangar, 10, false));
+        snap.items.insert(mate_hangar_trit, mk_item(mate_hangar_trit, 34, mate_id, station_id, InventoryFlag::Hangar, 5, false));
+        snap.items.insert(mate_hangar_pyerite, mk_item(mate_hangar_pyerite, 35, mate_id, station_id, InventoryFlag::Hangar, 20, false));
+        snap.items.insert(mate_hangar_mex, mk_item(mate_hangar_mex, 36, mate_id, station_id, InventoryFlag::Hangar, 15, false));
+        // Deliberately owned by `mate_id` inside `owner_carrier`'s bays to verify ACL/password cannot be bypassed by `item.owner_id`.
+        snap.items.insert(mate_legacy_fh_item, mk_item(mate_legacy_fh_item, 37, mate_id, owner_carrier, InventoryFlag::FleetHangar, 4, false));
+        snap.items.insert(mate_legacy_sma_hull, mk_item(mate_legacy_sma_hull, shuttle_tid, mate_id, owner_carrier, InventoryFlag::ShipHangar, 1, true));
+        snap.items.insert(sma_box, mk_item(sma_box, 17_366, mate_id, owner_carrier, InventoryFlag::ShipHangar, 1, true));
+        snap.items.insert(nested_sma_item, mk_item(nested_sma_item, 34, mate_id, sma_box, InventoryFlag::Cargo, 6, false));
+        snap.items.insert(pub_can, mk_item(pub_can, 23, 0, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(foreign_can_item, mk_item(foreign_can_item, 38, owner_id, pub_can, InventoryFlag::Cargo, 9, false));
+    });
+    let now_ts = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(owner_uid, 1_001, Some(owner_id), true, now_ts)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(mate_uid, 1_002, Some(mate_id), true, now_ts)
+        .unwrap();
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.ship_configs.insert(
+            owner_carrier,
+            ShipAccessConfig {
+                allow_fleet_smb: true,
+                allow_corp_smb: false,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("bay-pw".into()),
+            },
+        );
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let mut mate_sess = SessionState::new(2);
+    mate_sess.user_id = Some(mate_uid);
+    mate_sess.character_id = Some(mate_id);
+    mate_sess.corporation_id = Some(mate_corp);
+    mate_sess.station_id = Some(station_id);
+    mate_sess.solar_system_id = Some(30_000_142);
+    mate_sess.ship_id = Some(mate_carrier);
+
+    let mut pw_kw = HashMap::new();
+    pw_kw.insert("password".into(), PyRep::String("bay-pw".into()));
+
+    // 1. Foreign ship Cargo (flag 5) is NEVER writable even by a fleetmate with bay password.
+    assert!(handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(mate_hangar_trit), PyRep::Integer(owner_carrier), PyRep::Integer(5)],
+        &pw_kw,
+    )
+    .await
+    .unwrap()
+    .is_err());
+
+    // 2. Missing password rejects both deposit and own-item extraction in FleetHangar/SMA.
+    assert_eq!(
+        call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_hangar_trit), PyRep::Integer(owner_carrier), PyRep::Integer(155)])
+            .await
+            .unwrap_err()
+            .code,
+        "FleetHangarAccessDenied"
+    );
+    assert_eq!(
+        call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_legacy_fh_item), PyRep::Integer(station_id), PyRep::Integer(4)])
+            .await
+            .unwrap_err()
+            .code,
+        "FleetHangarAccessDenied"
+    );
+    assert_eq!(
+        call_add(&ctx, &mut mate_sess, &[PyRep::Integer(mate_legacy_sma_hull), PyRep::Integer(station_id), PyRep::Integer(4)])
+            .await
+            .unwrap_err()
+            .code,
+        "SMAAccessDenied"
+    );
+    assert_eq!(
+        call_add(&ctx, &mut mate_sess, &[PyRep::Integer(nested_sma_item), PyRep::Integer(station_id), PyRep::Integer(4)])
+            .await
+            .unwrap_err()
+            .code,
+        "SMAAccessDenied"
+    );
+
+    // 3. Cross-pilot deposit (full stack merge, direct move, and qty split) transfers owner_id = owner_id & notifies owner_id.
+    let _ = ctx.drain_notifications_for_char(owner_id);
+    let merged_rep = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(mate_hangar_trit), PyRep::Integer(owner_carrier), PyRep::Integer(155)],
+        &pw_kw,
+    )
+    .await
+    .unwrap()
+    .expect("merge into owner fleet hangar stack");
+    assert_eq!(merged_rep.dict_get("itemID").and_then(|v| v.as_i64()), Some(owner_fh_trit));
+    assert_eq!(merged_rep.dict_get("quantity").and_then(|v| v.as_i64()), Some(15));
+
+    let moved_rep = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(mate_hangar_mex), PyRep::Integer(owner_carrier), PyRep::Integer(155)],
+        &pw_kw,
+    )
+    .await
+    .unwrap()
+    .expect("direct move into owner fleet hangar");
+    let moved_id = moved_rep.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+
+    let mut split_pw_kw = pw_kw.clone();
+    split_pw_kw.insert("qty".into(), PyRep::Integer(7));
+    let split_rep = handle(
+        &ctx,
+        &mut mate_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(mate_hangar_pyerite), PyRep::Integer(owner_carrier), PyRep::Integer(155)],
+        &split_pw_kw,
+    )
+    .await
+    .unwrap()
+    .expect("split move into owner fleet hangar");
+    let split_id = split_rep.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&owner_fh_trit].owner_id, owner_id);
+        assert_eq!(snap.items[&owner_fh_trit].quantity, 15);
+        assert_eq!(snap.items[&moved_id].owner_id, owner_id);
+        assert_eq!(snap.items[&split_id].owner_id, owner_id);
+        assert_eq!(snap.items[&split_id].quantity, 7);
+        assert_eq!(snap.items[&mate_hangar_pyerite].owner_id, mate_id);
+        assert_eq!(snap.items[&mate_hangar_pyerite].quantity, 13);
+    });
+    let owner_notifs = ctx.drain_notifications_for_char(owner_id);
+    assert!(owner_notifs.iter().any(|n| n.event == "OnItemChange"), "missing OnItemChange for {owner_id}: {owner_notifs:?}");
+    assert!(owner_notifs.iter().any(|n| n.event == "ProcessInventoryChange"), "missing ProcessInventoryChange for {owner_id}");
+
+    // 4. Moving foreign-owned item from public container into own FleetHangar transfers owner_id = mate_id.
+    call_add(
+        &ctx,
+        &mut mate_sess,
+        &[PyRep::Integer(foreign_can_item), PyRep::Integer(mate_carrier), PyRep::Integer(155)],
+    )
+    .await
+    .expect("public container item moves into own FleetHangar");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&foreign_can_item].owner_id, mate_id);
+        assert_eq!(snap.items[&foreign_can_item].location_id, mate_carrier);
+        assert_eq!(snap.items[&foreign_can_item].flag, InventoryFlag::FleetHangar);
+    });
+
+    // 5. Kicked out of fleet: Pilot B cannot extract own legacy items even WITH bay password.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.get_mut(&777_630).unwrap().members.retain(|&m| m != mate_id);
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(mate_legacy_fh_item), PyRep::Integer(station_id), PyRep::Integer(4)],
+            &pw_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FleetHangarAccessDenied"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut mate_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(mate_legacy_sma_hull), PyRep::Integer(station_id), PyRep::Integer(4)],
+            &pw_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "SMAAccessDenied"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn venture_station_hangar_and_active_cargo_capacity_for_issue_1301() {
+    let (mut ctx, mut session, char_id, _corp_id, orig_station_id, default_rifter) = setup_inv_ctx();
+    let npc_station = 60_004_423i64;
+    let kw = HashMap::new();
+
+    let venture_tid = 32_880u32;
+    let probe_tid = 30_013u32;
+    let veldspar_tid = 1_230u32;
+    let filler_tid = 999_302u32;
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        let mut venture = sde_mut.types[&587].clone();
+        venture.type_id = venture_tid;
+        venture.group_id = 25;
+        venture.category_id = 6;
+        venture.name = "Venture".into();
+        venture.capacity = 50.0;
+        venture.volume = 29_500.0;
+        venture.default_attributes.remove(&38);
+        venture.default_attributes.insert(1556, 5_000.0);
+        sde_mut.types.insert(venture_tid, venture);
+
+        let mut probe = sde_mut.types[&34].clone();
+        probe.type_id = probe_tid;
+        probe.group_id = 479;
+        probe.category_id = 8;
+        probe.name = "Core Scanner Probe I".into();
+        probe.volume = 0.1;
+        probe.capacity = 0.0;
+        sde_mut.types.insert(probe_tid, probe);
+
+        let trit_proto = sde_mut.types[&34].clone();
+        sde_mut.types.entry(veldspar_tid).or_insert_with(|| {
+            let mut ore = trit_proto.clone();
+            ore.type_id = veldspar_tid;
+            ore.group_id = 462;
+            ore.category_id = 25;
+            ore.name = "Veldspar".into();
+            ore.volume = 0.1;
+            ore.capacity = 0.0;
+            ore
+        });
+
+        let mut filler = sde_mut.types[&34].clone();
+        filler.type_id = filler_tid;
+        filler.group_id = 18;
+        filler.category_id = 4;
+        filler.name = "Cargo Filler".into();
+        filler.volume = 0.1;
+        filler.capacity = 0.0;
+        sde_mut.types.insert(filler_tid, filler);
+
+        if !sde_mut.stations.contains_key(&npc_station) {
+            if let Some(mut st) = sde_mut
+                .stations
+                .get(&orig_station_id)
+                .cloned()
+                .or_else(|| sde_mut.stations.values().next().cloned())
+            {
+                st.station_id = npc_station;
+                sde_mut.stations.insert(npc_station, st);
+            }
+        }
+    }
+
+    let active_venture = 96_640_100i64;
+    let spare_venture = 96_640_101i64;
+    let probes_active = 96_640_201i64;
+    let filler_active = 96_640_202i64;
+    let probes_overflow = 96_640_203i64;
+    let veldspar_fit = 96_640_204i64;
+    let veldspar_overflow = 96_640_205i64;
+    let hull_for_sma = 96_640_206i64;
+    let probes_spare = 96_640_207i64;
+    let filler_spare = 96_640_208i64;
+    let probes_spare_overflow = 96_640_209i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(npc_station);
+            ch.structure_id = None;
+            ch.active_ship_id = active_venture;
+        }
+        snap.items.insert(
+            active_venture,
+            mk_item(active_venture, venture_tid, char_id, npc_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            spare_venture,
+            mk_item(spare_venture, venture_tid, char_id, npc_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            probes_active,
+            mk_item(probes_active, probe_tid, char_id, npc_station, InventoryFlag::Hangar, 16, false),
+        );
+        snap.items.insert(
+            filler_active,
+            mk_item(filler_active, filler_tid, char_id, npc_station, InventoryFlag::Hangar, 484, false),
+        );
+        snap.items.insert(
+            probes_overflow,
+            mk_item(probes_overflow, probe_tid, char_id, npc_station, InventoryFlag::Hangar, 16, false),
+        );
+        snap.items.insert(
+            veldspar_fit,
+            mk_item(veldspar_fit, veldspar_tid, char_id, npc_station, InventoryFlag::Hangar, 50_000, false),
+        );
+        snap.items.insert(
+            veldspar_overflow,
+            mk_item(veldspar_overflow, veldspar_tid, char_id, npc_station, InventoryFlag::Hangar, 10, false),
+        );
+        snap.items.insert(
+            hull_for_sma,
+            mk_item(hull_for_sma, 587, char_id, npc_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            probes_spare,
+            mk_item(probes_spare, probe_tid, char_id, npc_station, InventoryFlag::Hangar, 16, false),
+        );
+        snap.items.insert(
+            filler_spare,
+            mk_item(filler_spare, filler_tid, char_id, npc_station, InventoryFlag::Hangar, 500, false),
+        );
+        snap.items.insert(
+            probes_spare_overflow,
+            mk_item(probes_spare_overflow, probe_tid, char_id, npc_station, InventoryFlag::Hangar, 16, false),
+        );
+    });
+    session.station_id = Some(npc_station);
+    session.structure_id = None;
+    session.ship_id = Some(active_venture);
+
+    let station_bound = BoundObjectEntry {
+        bound_id: 950,
+        session_id: session.session_id,
+        user_id: char_id as u64,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: npc_station,
+        oid_str: format!("N=950:{npc_station}"),
+        ref_id: 1,
+    };
+
+    // Active Venture bound via GetInventoryFromId(active_venture, 0) + Add(probes, 60004423) (#1301):
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut session,
+        Some(&station_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(active_venture), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_ok());
+
+    let active_bound = BoundObjectEntry {
+        bound_id: 951,
+        session_id: session.session_id,
+        user_id: char_id as u64,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: active_venture,
+        oid_str: format!("N=951:{active_venture}"),
+        ref_id: 1,
+    };
+
+    // 1. Empty active Venture has 50.0 m3 main cargo -> moving 1.6 m3 Core Scanner Probe I succeeds.
+    let ok_active = handle(
+        &ctx,
+        &mut session,
+        Some(&active_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(probes_active), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("1.6 m3 probes must fit in empty 50.0 m3 Venture Cargo");
+    assert_eq!(ok_active.dict_get("locationID").and_then(|v| v.as_i64()), Some(active_venture));
+    assert_eq!(ok_active.dict_get("flagID").and_then(|v| v.as_i64()), Some(5));
+
+    // Fill remaining 48.4 m3 cleanly (total 50.0 / 50.0 m3 used, 0.0 m3 free).
+    handle(
+        &ctx,
+        &mut session,
+        Some(&active_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(filler_active), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("exact 50.0 m3 fill in Venture Cargo must succeed");
+
+    // 2. Full Venture cargo returns NotEnoughCargoSpace(volume=1.6, available=0.0) without partial move (#1301).
+    let full_err = handle(
+        &ctx,
+        &mut session,
+        Some(&active_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(probes_overflow), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let (full_key, full_kv) = decode_user_error(&full_err);
+    assert_eq!(full_key, "NotEnoughCargoSpace");
+    assert!((full_kv["volume"] - 1.6).abs() < 1e-6);
+    assert!((full_kv["available"] - 0.0).abs() < 1e-6);
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&probes_overflow].location_id), npc_station);
+
+    // 3. Venture Mining Hold (flag 134, 5,000 m3) rejects probes and holds exactly 5,000 m3 of Veldspar.
+    assert_eq!(
+        call_add(&ctx, &mut session, &[PyRep::Integer(probes_overflow), PyRep::Integer(active_venture), PyRep::Integer(134)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidItemTypeForHold"
+    );
+    let ok_ore = call_add(&ctx, &mut session, &[PyRep::Integer(veldspar_fit), PyRep::Integer(active_venture), PyRep::Integer(134)])
+        .await
+        .expect("5,000 m3 Veldspar fits Venture Mining Hold");
+    assert_eq!(ok_ore.dict_get("flagID").and_then(|v| v.as_i64()), Some(134));
+    let ore_err = call_add(&ctx, &mut session, &[PyRep::Integer(veldspar_overflow), PyRep::Integer(active_venture), PyRep::Integer(134)])
+        .await
+        .unwrap_err();
+    let (ore_key, ore_kv) = decode_user_error(&ore_err);
+    assert_eq!(ore_key, "NotEnoughSpecialBaySpace");
+    assert!((ore_kv["available"] - 0.0).abs() < 1e-6);
+
+    // 4. Venture has no Ship Maintenance Bay (flag 90): both probes and hulls return NoShipMaintenanceBay (never NotEnoughCargoSpace).
+    assert_eq!(
+        call_add(&ctx, &mut session, &[PyRep::Integer(probes_overflow), PyRep::Integer(active_venture), PyRep::Integer(90)])
+            .await
+            .unwrap_err()
+            .code,
+        "NoShipMaintenanceBay"
+    );
+    assert_eq!(
+        call_add(&ctx, &mut session, &[PyRep::Integer(hull_for_sma), PyRep::Integer(active_venture), PyRep::Integer(90)])
+            .await
+            .unwrap_err()
+            .code,
+        "NoShipMaintenanceBay"
+    );
+
+    // 5. Non-active spare Venture sitting in station Ship Hangar (while active ship is another hull)
+    //    must accept Add via bound GetInventoryFromId(spare_venture) onto spare_venture Cargo (NOT redirected to active ship).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = default_rifter;
+        }
+    });
+    session.ship_id = Some(default_rifter);
+    assert!(crate::services::inventory_bound::handle(
+        &ctx,
+        &mut session,
+        Some(&station_bound),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(spare_venture), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .is_ok());
+    let spare_bound = BoundObjectEntry {
+        bound_id: 952,
+        session_id: session.session_id,
+        user_id: char_id as u64,
+        character_id: char_id,
+        service: "invbroker".into(),
+        object_id: spare_venture,
+        oid_str: format!("N=952:{spare_venture}"),
+        ref_id: 1,
+    };
+    let ok_spare = handle(
+        &ctx,
+        &mut session,
+        Some(&spare_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(probes_spare), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("empty non-active Venture in station hangar accepts 1.6 m3 probes");
+    assert_eq!(ok_spare.dict_get("locationID").and_then(|v| v.as_i64()), Some(spare_venture));
+    assert_eq!(ok_spare.dict_get("flagID").and_then(|v| v.as_i64()), Some(5));
+
+    // Overfilling the non-active Venture reports NotEnoughCargoSpace cleanly.
+    let spare_full = handle(
+        &ctx,
+        &mut session,
+        Some(&spare_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(filler_spare), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let (sf_key, sf_kv) = decode_user_error(&spare_full);
+    assert_eq!(sf_key, "NotEnoughCargoSpace");
+    assert!((sf_kv["volume"] - 50.0).abs() < 1e-6);
+    assert!((sf_kv["available"] - (50.0 - 1.6)).abs() < 1e-6);
+
+    // Bring spare_venture to 50.0 m3 full and check 0.0 available for extra probes.
+    let mut split_kw = HashMap::new();
+    split_kw.insert("qty".into(), PyRep::Integer(484));
+    handle(
+        &ctx,
+        &mut session,
+        Some(&spare_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(filler_spare), PyRep::Integer(npc_station)],
+        &split_kw,
+    )
+    .await
+    .unwrap()
+    .expect("exact 48.4 m3 split fills remaining space in non-active Venture");
+    let spare_zero = handle(
+        &ctx,
+        &mut session,
+        Some(&spare_bound),
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(probes_spare_overflow), PyRep::Integer(npc_station)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    let (sz_key, sz_kv) = decode_user_error(&spare_zero);
+    assert_eq!(sz_key, "NotEnoughCargoSpace");
+    assert!((sz_kv["volume"] - 1.6).abs() < 1e-6);
+    assert!((sz_kv["available"] - 0.0).abs() < 1e-6);
 }

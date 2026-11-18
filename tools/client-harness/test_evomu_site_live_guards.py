@@ -1113,7 +1113,35 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         self.assertEqual(log_mod_calls, [])
         self.assertEqual(blinks, [])
 
-        # Fallback to logmodule.uiMessageFunc works when invWindow.prompt_player_fsd_dialog is unavailable.
+        # Fallback to logmodule.uiMessageFunc works when prompt_player_fsd_dialog raises or is unavailable.
+        def failing_fsd_dialog(_msg, _err_dict=None):
+            raise KeyError("missing_static_dialog")
+
+        inv_mod.prompt_player_fsd_dialog = failing_fsd_dialog
+        ui_msg_mod.prompt_player_fsd_dialog = failing_fsd_dialog
+        self.assertIsNone(wnd._MoveItems(mk_entry("avatar_1290"), [object()]))
+        self.assertEqual(
+            shown_dialogs[-1],
+            ("logui", "NotEnoughCargoSpace", {"volume": 750.0, "available": 0.0}),
+        )
+
+        # Fallback also reaches eve.Message when logmodule.uiMessageFunc fails, and recovers when primary is absent.
+        eve_calls = []
+        builtins.eve = types.SimpleNamespace(
+            Message=lambda msg, err_dict=None: eve_calls.append((msg, err_dict))
+        )
+        orig_ui_msg = log_mod.uiMessageFunc
+        try:
+            log_mod.uiMessageFunc = failing_fsd_dialog
+            self.assertIsNone(wnd._MoveItems(mk_entry("venture_1301"), [object()]))
+            self.assertEqual(
+                eve_calls,
+                [("NotEnoughCargoSpace", {"volume": 1.6, "available": 0.0})],
+            )
+        finally:
+            log_mod.uiMessageFunc = orig_ui_msg
+            delattr(builtins, "eve")
+
         delattr(inv_mod, "prompt_player_fsd_dialog")
         sys.modules.pop("player_messaging.client.ui_message", None)
         self.assertIsNone(wnd._MoveItems(mk_entry("avatar_1290"), [object()]))
