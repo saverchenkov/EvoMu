@@ -648,6 +648,14 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(ehe_mod_id, true);
         snap.module_online_states.insert(mwd_mod_id, true);
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
     });
     ctx.invalidate_ship_fitting(ship_id);
 

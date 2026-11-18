@@ -94,6 +94,16 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .await
     .unwrap();
     ctx.dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(100_000_003), PyRep::Integer(100_000_001), PyRep::Integer(19)], &empty, None).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
     ctx.dispatch_rpc(&mut session, "dogmaIM", None, "Overload", &[PyRep::Integer(100_000_003)], &empty, None).await.unwrap();
     ctx.dispatch_rpc(&mut session, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(100_000_001), PyRep::Real(1.0)], &empty, None).await.unwrap();
 

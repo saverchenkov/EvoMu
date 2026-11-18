@@ -161,6 +161,20 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
                 980
             });
 
+        let cat5_eid = sde
+            .effects
+            .values()
+            .find(|e| e.effect_category == 5)
+            .map(|e| e.effect_id)
+            .unwrap_or_else(|| {
+                let mut eff = sde.effects.values().next().cloned().expect("seed effects");
+                eff.effect_id = 981;
+                eff.name = "testOverloadEffect".into();
+                eff.effect_category = 5;
+                sde.effects.insert(981, eff);
+                981
+            });
+
         sde.types.insert(
             custom_gun_tid,
             custom_inv_type(
@@ -170,7 +184,7 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
                 7,
                 "Test Autocannon",
                 &[(6, 10.0), (51, 2000.0), (eve_sde::attr_ids::HP_STRUCT, 40.0)],
-                &[12],
+                &[12, cat5_eid],
             ),
         );
         sde.types.insert(
@@ -484,6 +498,16 @@ async fn activate_auth_offline_burnout_nanite_reactivation_and_overload_edges() 
     );
 
     // 9. Overload toggle (enable and disable) + nanite repair blocks online & Activate
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
     let ov_on = handle_module_cycles(
         &ctx,
         &mut sess,

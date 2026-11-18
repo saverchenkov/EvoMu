@@ -1781,6 +1781,7 @@ async fn edge_targeting_ammo_loading_and_weapon_overload_errors() {
     );
 
     // Overload / StopOverload toggles module overload state cleanly
+    slash_cmd(&ctx, &mut p1.sess, "/giveskill 28164 5").await;
     let ov_rep = rpc(
         &ctx,
         &mut p1.sess,

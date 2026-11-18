@@ -254,40 +254,10 @@ pub(crate) async fn handle_module_cycles(
             if sys.has_active_nanite_repair_sync(ship_id, module_id) {
                 return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {module_id} cannot be activated or overloaded while undergoing nanite repair"), client_error: None }));
             }
-            let is_burned = m.damage_hp >= m.max_hp - 1e-6
-                || ctx.db.with_snapshot(|s| {
-                    let it = s.items.get(&module_id);
-                    let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
-                    let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-                        .or_else(|| ctx.sde.types.get(&m.type_id).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
-                        .unwrap_or(40.0);
-                    dmg >= hp - 1e-6
-                });
-            if is_burned {
-                return Some(Err(BridgeRpcError { code: "ModuleBurnedOut".into(), message: format!("Module {module_id} is burned out and cannot be activated"), client_error: None }));
-            }
-            // Disables any module group / weapon bank it belongs to until repaired or ungrouped (`feat:modules.overheat-burnout-state`)
-            let group_burned = ctx.db.with_snapshot(|snap| {
-                if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&module_id)) {
-                    for &tid in bank {
-                        let it = snap.items.get(&tid);
-                        let dmg = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied()).unwrap_or(0.0);
-                        let hp = it.and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-                            .or_else(|| it.and_then(|i| ctx.sde.types.get(&i.type_id)).and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied()))
-                            .unwrap_or(40.0);
-                        if dmg >= hp - 1e-6 {
-                            return Some(tid);
-                        }
-                    }
-                }
-                None
-            });
-            if let Some(b_mod_id) = group_burned {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleBurnedOut".into(),
-                    message: format!("Module group contains burned-out module {b_mod_id} and is disabled until repaired or ungrouped"),
-                    client_error: None,
-                }));
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_module_or_bank_not_burned_out(
+                ctx, ship_id, module_id, &m,
+            ) {
+                return Some(Err(e));
             }
             if m.state == eve_dogma::ModuleState::Offline
                 || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
@@ -364,6 +334,39 @@ pub(crate) async fn handle_module_cycles(
                     message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
                     client_error: None,
                 }));
+            }
+            if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
+                let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.modified_system_securities.get(&sys_id).copied()
+                })
+                .unwrap_or_else(|| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(1.0)
+                });
+                let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.safety_levels
+                        .get(&char_id)
+                        .copied()
+                        .unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
+                });
+                if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
+                    return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
+                }
+            }
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
+                &sys, ship_id, module_id, method, m.state,
+            ) {
+                return Some(Err(e));
+            }
+            if method == "Overload" {
+                if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(
+                    ctx, char_id, m.type_id,
+                ) {
+                    return Some(Err(e));
+                }
             }
 
             // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
@@ -832,19 +835,18 @@ pub(crate) async fn handle_module_cycles(
                     .reconcile_module_cycle_before_activate(ship_id, module_id, ctx.now_unix_secs())
                     .await;
                 let in_actor_cycle = actor_cycle_state.is_some();
-                if cleaned_stale
-                    || (is_weapon && !ctx.is_module_in_reactivation_delay(ship_id, module_id) && !in_actor_cycle)
-                {
-                    ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&module_id); });
+                let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
+                if cleaned_stale || (is_weapon && !in_delay && !in_actor_cycle) {
+                    ctx.db.with_mut_snapshot(|s| {
+                        s.module_active_states.remove(&module_id);
+                    });
                 }
                 let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
                 let mut m_effective_state = m.state;
+                // Why: Only clear stale Active state; pre-overloaded idle modules must keep Overloaded across failed activations.
                 if !in_db_active
                     && !in_actor_cycle
-                    && matches!(
-                        m_effective_state,
-                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                    )
+                    && m_effective_state == eve_dogma::ModuleState::Active
                 {
                     m_effective_state = eve_dogma::ModuleState::Online;
                     if let Some(fm) = fit.modules.get_mut(&module_id) {
@@ -854,15 +856,17 @@ pub(crate) async fn handle_module_cycles(
                     ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
                     ctx.invalidate_and_push_fit(ship_id);
                 }
-                let already_active = matches!(
-                    m_effective_state,
-                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                ) || in_db_active
-                    || in_actor_cycle;
-                if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
-                    &sys, ship_id, module_id, method, m.state,
-                ) {
-                    return Some(Err(e));
+                let already_active = m_effective_state == eve_dogma::ModuleState::Active
+                    || in_db_active
+                    || in_actor_cycle
+                    || in_delay;
+                let is_entropic = mod_type.group_id == 1986;
+                if method == "Overload" && (in_delay || already_active) && (!in_actor_cycle || is_entropic) {
+                    return Some(Err(module_already_active_rpc_error(
+                        ctx,
+                        Some(m.type_id),
+                        format!("Module {module_id} cannot overload while active or in reactivation delay"),
+                    )));
                 }
                 if method == "Overload"
                     && (already_active
@@ -872,22 +876,15 @@ pub(crate) async fn handle_module_cycles(
                                 291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=512 | 524 | 771 | 862 | 1245 | 1674 | 4500 | 4805 | 4807
                             )))
                 {
-                    let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                        ctx, &sys, char_id, ship_id, module_id, fit, already_active,
-                    ).await;
+                    let rep = crate::router::box_fut(|| {
+                        crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                            ctx, &sys, char_id, ship_id, module_id, fit, already_active,
+                        )
+                    })
+                    .await;
                     return Some(Ok(rep));
                 }
-                if matches!(mod_type.group_id, 72 | 80 | 353 | 842) {
-                    let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.modified_system_securities.get(&sys_id).copied())
-                        .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
-                    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red)
-                    });
-                    if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
-                        return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
-                    }
-                }
-                if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+                if in_delay {
                     if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
                         return Some(Err(module_already_active_rpc_error(
                             ctx,

@@ -184,6 +184,16 @@ async fn dogma_overheat_nanite_online_and_session_edges() {
     for tid in [439u32, 484, 523, 2046, 11370, 28668] {
         grant_skills_for_type(&ctx, CHAR1_ID, tid);
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(CHAR1_ID).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
     seed_item(&ctx, mod_ab, 439, CHAR1_ID, ship_id, InventoryFlag::MedSlot0, 1, true);
     seed_item(&ctx, mod_rep, 523, CHAR1_ID, ship_id, InventoryFlag::LoSlot0, 1, true);
     seed_item(&ctx, mod_dc, 2046, CHAR1_ID, ship_id, InventoryFlag::LoSlot1, 1, true);
@@ -493,13 +503,18 @@ async fn dogma_overheat_nanite_online_and_session_edges() {
     .await
     .expect("Deactivate mod_rep");
 
-    // Damage Control Overload succeeds & can deactivate
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_dc)], &kw, None)
+    // Non-overloadable Damage Control rejects Overload with CannotOverloadModule; overloadable Afterburner toggles cleanly
+    let dc_ovl_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_dc)], &kw, None)
         .await
-        .expect("Overload Damage Control");
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_dc)], &kw, None)
+        .expect_err("non-overloadable Damage Control must reject Overload");
+    assert_eq!(dc_ovl_err.code, "CannotOverloadModule");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_ab)], &kw, None)
         .await
-        .expect("Deactivate Damage Control");
+        .expect("Overload Afterburner");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_ab)], &kw, None)
+        .await
+        .expect("Deactivate Afterburner");
 
     // Tethered guard on offensive module Activate
     combat.is_tethered = true;

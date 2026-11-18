@@ -2881,7 +2881,16 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     }).await.unwrap();
 
     // 1. Seeded probabilistic heat damage: cold vs hot rack, non-wrapping distance attenuation, cross-rack isolation,
-    // Thermodynamics L0 vs L5 (-25%), and Online Slots / Total Slots reduction (`feat:modules.overheat-damage-propagation`)
+    // Thermodynamics L0 rejection -> L1 vs L5 (-25%), and Online Slots / Total Slots reduction (`feat:modules.overheat-damage-propagation`)
+    assert_eq!(
+        rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
+            PyRep::Integer(mod_0), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1),
+        ]).await.unwrap_err().code,
+        "DontHaveThermoDynamicsSkillz",
+        "Overload at Thermodynamics L0 must fail with DontHaveThermoDynamicsSkillz"
+    );
+    set_skill_level(&ctx, char_a, 28_164, 1); // Thermodynamics L1 (-5% heat damage -> 0.95x)
+
     ctx.set_mechanic_rng_seed(Some(2026));
     set_ship_rack_heat(&ctx, ship_a, 1175, 0.0);
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
@@ -2910,20 +2919,20 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
         sys.step_manual(1.0).await.unwrap();
     }
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(mod_0)]).await.unwrap();
-    let d0_l0 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_0)]).await.unwrap(), 3);
-    let d1_l0 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_1)]).await.unwrap(), 3);
-    let d2_l0 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_2)]).await.unwrap(), 3);
-    let d6_l0 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_6)]).await.unwrap(), 3);
+    let d0_l1 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_0)]).await.unwrap(), 3);
+    let d1_l1 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_1)]).await.unwrap(), 3);
+    let d2_l1 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_2)]).await.unwrap(), 3);
+    let d6_l1 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_6)]).await.unwrap(), 3);
     let d_med = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(med_0)]).await.unwrap(), 3);
     let d_low = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(low_0)]).await.unwrap(), 3);
 
-    assert!(d0_l0 > dmg_cold, "Hot rack (0.85) must produce more heat hits than cold rack: {d0_l0} vs {dmg_cold}");
-    assert!(d0_l0 > 0.0 && d0_l0 < 60.0 * 0.8, "Heat hits must be probabilistic (0 < hits < N): d0={d0_l0}");
-    assert!(d0_l0 > d1_l0 && d1_l0 > d2_l0 && d2_l0 > d6_l0, "Non-wrapping slot distance attenuation: d0={d0_l0}, d1={d1_l0}, d2={d2_l0}, d6={d6_l0}");
+    assert!(d0_l1 > dmg_cold, "Hot rack (0.85) must produce more heat hits than cold rack: {d0_l1} vs {dmg_cold}");
+    assert!(d0_l1 > 0.0 && d0_l1 < 60.0 * 0.8, "Heat hits must be probabilistic (0 < hits < N): d0={d0_l1}");
+    assert!(d0_l1 > d1_l1 && d1_l1 > d2_l1 && d2_l1 > d6_l1, "Non-wrapping slot distance attenuation: d0={d0_l1}, d1={d1_l1}, d2={d2_l1}, d6={d6_l1}");
     assert_eq!(d_med, 0.0, "High rack heat must not bleed into MedSlot0");
     assert_eq!(d_low, 0.0, "High rack heat must not bleed into LoSlot0");
 
-    // Thermodynamics L5 (-25% per-hit damage) under identical seed 7 -> exact 0.75x damage!
+    // Thermodynamics L5 (-25% per-hit damage = 0.75x) vs L1 (0.95x) under identical seed 7 -> exact (0.75 / 0.95)x damage!
     set_skill_level(&ctx, char_a, 28_164, 5);
     for &mid in &[mod_0, mod_1, mod_2, mod_6] { set_item_dyn_attr(&ctx, mid, 3, 0.0); }
     set_ship_rack_heat(&ctx, ship_a, 1175, 0.85);
@@ -2937,7 +2946,8 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     }
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(mod_0)]).await.unwrap();
     let d0_l5 = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_0)]).await.unwrap(), 3);
-    assert!((d0_l5 - d0_l0 * 0.75).abs() < 1e-4, "Thermodynamics L5 must scale heat damage by 0.75x: {d0_l5} vs {}", d0_l0 * 0.75);
+    let expected_d0_l5 = d0_l1 * (0.75 / 0.95);
+    assert!((d0_l5 - expected_d0_l5).abs() < 1e-4, "Thermodynamics L5 (0.75x) vs L1 (0.95x) must scale heat damage by 0.75/0.95: {d0_l5} vs {expected_d0_l5}");
 
     // Online Slots / Total Slots reduction: offlining 12 non-weapon modules drops slot_ratio from 16/19 to 4/19 -> fewer hits under seed 7!
     ctx.db.with_mut_snapshot(|snap| {

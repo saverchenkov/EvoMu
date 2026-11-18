@@ -10,6 +10,44 @@ use eve_proto::PyRep;
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub(in crate::services) fn enable_test_overload(
+    sde: &mut eve_sde::SdeRegistry,
+    ctx: &ServerContext,
+    char_id: i64,
+    type_ids: &[u32],
+) {
+    let cat5_eid = sde
+        .effects
+        .values()
+        .find(|e| e.effect_category == 5)
+        .map(|e| e.effect_id)
+        .unwrap_or_else(|| {
+            let mut eff = sde.effects.values().next().cloned().expect("seed effects");
+            eff.effect_id = 998;
+            eff.name = "testOverloadEffect".into();
+            eff.effect_category = 5;
+            sde.effects.insert(998, eff);
+            998
+        });
+    for tid in type_ids {
+        if let Some(t) = sde.types.get_mut(tid) {
+            if !t.effect_ids.contains(&cat5_eid) {
+                t.effect_ids.push(cat5_eid);
+            }
+        }
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+}
+
 #[tokio::test]
 async fn ewar_target_painter_safety_gates_and_signature_bloom() {
     let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
@@ -218,6 +256,7 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
             vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 50_000.0)],
         ),
     );
+    enable_test_overload(&mut sde, &ctx, char_id, &[53_001]);
     ctx.sde = std::sync::Arc::new(sde);
 
     let laser_id = 820_001_i64;
@@ -356,6 +395,7 @@ async fn laser_capacitor_crystal_volatility_shatter_and_fof_auto_target() {
         Some(&PyRep::Bool(false))
     );
 
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let shot2 = handle_weapons(
         &ctx,
         &mut session,
@@ -513,6 +553,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     if !sde.types.contains_key(&670) {
         sde.types.insert(670, make_fighter_type(670, 29, 6, 100.0, vec![]));
     }
+    enable_test_overload(&mut sde, &ctx, char_id, &[55_001, 53_002, 19_861]);
     ctx.sde = std::sync::Arc::new(sde);
 
     let tp_id = 830_000_i64;
@@ -690,6 +731,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
             .await.unwrap().unwrap_err().code,
         "ModuleAlreadyActive"
     );
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let proj_shot2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(proj_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     let hit_stat = proj_shot2.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
@@ -711,6 +753,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
     let fac_shot1 = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(fac_laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fac_shot1.dict_get("crystalShattered"), Some(&PyRep::Bool(false)));
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let fac_shot2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(fac_laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(fac_shot2.dict_get("crystalShattered"), Some(&PyRep::Bool(true)));
@@ -735,6 +778,7 @@ async fn combat_weapons_turret_families_crystal_stack_entropic_and_vorton_arcs()
         entry.current_multiplier = 1.21;
     });
     ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&ent_id); });
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let ent2 = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(ent_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_primary_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(ent2.dict_get("spoolCycles"), Some(&PyRep::Integer(0)));
@@ -768,6 +812,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     if !sde.types.contains_key(&670) {
         sde.types.insert(670, make_fighter_type(670, 29, 6, 100.0, vec![]));
     }
+    enable_test_overload(&mut sde, &ctx, char_id, &[37_903, 53_003]);
     ctx.sde = std::sync::Arc::new(sde);
 
     let tp_id = 840_001_i64;
@@ -887,6 +932,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     assert!(ctx.drain_notifications_for_char(susp_char).iter().any(|n| n.event == "OnCrimewatchEngagementCreated"));
 
     // 4. Red safety shooting neutral pod in lowsec (0.0 < 0.30 < 0.45) escalates to Criminal (suspect cleared!)
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let pod_shot = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(pod_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(pod_shot.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap() > 0.0);
@@ -898,6 +944,7 @@ async fn combat_weapons_lowsec_pod_criminal_suspect_engagement_and_npc_timers() 
     }
 
     // 5. Laser attack on NPC sets 300s NPC timer
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let npc_shot = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(npc_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(npc_shot.dict_get("targetID"), Some(&PyRep::Integer(npc_id)));
@@ -922,6 +969,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
     if !sde.types.contains_key(&35_832) {
         sde.types.insert(35_832, make_fighter_type(35_832, 1657, 65, 10_000.0, vec![(263, 1_000_000.0), (265, 1_000_000.0), (9, 1_000_000.0)]));
     }
+    enable_test_overload(&mut sde, &ctx, char_id, &[53_004]);
     ctx.sde = std::sync::Arc::new(sde);
 
     let laser_id = 850_001_i64;
@@ -1068,10 +1116,12 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
             .await.unwrap().unwrap_err().code,
         "ModuleAlreadyActive"
     );
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let can_hit = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(can_hit.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap() > 0.0);
 
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let st_hit = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(structure_id)], &kwargs)
         .await.unwrap().unwrap();
     assert_eq!(st_hit.dict_get("targetID"), Some(&PyRep::Integer(structure_id)));
@@ -1091,6 +1141,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
             .await.unwrap().unwrap_err().code,
         "ModuleNotFound"
     );
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     let crys_read = handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
         .await.unwrap().unwrap();
     assert!(crys_read.dict_get("crystalDamageFraction").and_then(|v| v.as_f64()).unwrap() >= 0.0);
@@ -1107,6 +1158,7 @@ async fn combat_weapons_auto_target_fof_destruction_upwell_and_salvager_edges() 
         let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
         sys_handle.spawn_ball_with_combat(ball, cs).await.unwrap();
     }
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
     assert!(
         handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id), PyRep::String("targetAttack".into()), PyRep::Integer(corp_can_id)], &kwargs)
             .await.unwrap().is_err()
@@ -2767,6 +2819,526 @@ async fn handle_weapons_special_target_ewar_surface_range_gate_1247() {
             .unwrap()
             .get(&cont_in)
             .is_some_and(|list| list.len() == 1 && (list[0].distance - 34_650.0).abs() < 1e-3)
+    );
+}
+
+#[tokio::test]
+async fn handle_weapons_burnout_thermo_delay_preoverload_and_heat_branches() {
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_000, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        53_009,
+        make_fighter_type(
+            53_009,
+            53,
+            7,
+            5.0,
+            vec![
+                (6, 50.0),
+                (9, 40.0),
+                (51, 5_000.0),
+                (54, 25_000.0),
+                (64, 1.0),
+                (158, 5_000.0),
+                (160, 1.0),
+                (604, 86.0),
+            ],
+        ),
+    );
+    sde.types.insert(
+        86_009,
+        make_fighter_type(86_009, 86, 8, 1.0, vec![(114, 100.0), (786, 0.0)]),
+    );
+    sde.types.insert(
+        50_909,
+        make_fighter_type(
+            50_909,
+            509,
+            7,
+            5.0,
+            vec![(6, 10.0), (9, 40.0), (51, 5_000.0), (604, 384.0)],
+        ),
+    );
+    sde.types.insert(
+        38_409,
+        make_fighter_type(
+            38_409,
+            384,
+            8,
+            0.015,
+            vec![
+                (37, 4_000.0),
+                (281, 2_000.0),
+                (9, 75.0),
+                (117, 150.0),
+                (653, 170.0),
+                (654, 40.0),
+                (1353, 0.6),
+            ],
+        ),
+    );
+    sde.types.insert(
+        37_909,
+        make_fighter_type(
+            37_909,
+            379,
+            7,
+            5.0,
+            vec![(6, 10.0), (9, 40.0), (54, 25_000.0), (158, 5_000.0), (554, 30.0)],
+        ),
+    );
+    sde.types.insert(
+        72_009,
+        make_fighter_type(
+            72_009,
+            72,
+            7,
+            5.0,
+            vec![(6, 10.0), (9, 40.0), (51, 5_000.0), (73, 5_000.0), (99, 3_000.0), (114, 50.0)],
+        ),
+    );
+    sde.types.insert(
+        45_009,
+        make_fighter_type(45_009, 4500, 7, 5.0, vec![(6, 10.0), (9, 40.0), (51, 5_000.0), (604, 4070.0)]),
+    );
+    sde.types.insert(
+        40_709,
+        make_fighter_type(
+            40_709,
+            4070,
+            8,
+            0.1,
+            vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (5735, 10_000.0), (5736, 100.0), (5737, 5.0)],
+        ),
+    );
+    sde.types.insert(
+        10_050,
+        make_fighter_type(10_050, 182, 11, 1_000.0, vec![(eve_sde::attr_ids::SIGNATURE_RADIUS, 200.0)]),
+    );
+    if let Some(ship_t) = sde.types.get_mut(&23_915) {
+        for (k, v) in [
+            (11, 50_000.0),
+            (12, 4.0),
+            (13, 4.0),
+            (14, 8.0),
+            (48, 50_000.0),
+            (101, 8.0),
+            (102, 8.0),
+        ] {
+            ship_t.default_attributes.insert(k, v);
+        }
+    }
+    for (tid, effs) in [
+        (53_009, vec![12_u16, 42]),
+        (50_909, vec![12_u16, 40]),
+        (37_909, vec![13_u16]),
+        (72_009, vec![12_u16]),
+        (45_009, vec![12_u16, 40]),
+    ] {
+        if let Some(t) = sde.types.get_mut(&tid) {
+            t.effect_ids.extend(effs);
+        }
+    }
+    enable_test_overload(&mut sde, &ctx, char_id, &[53_009, 50_909, 37_909, 72_009]);
+    ctx.sde = std::sync::Arc::new(sde);
+
+    // Clear Thermodynamics L1 so L0 rejection can be verified first.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sk) = snap.skills.get_mut(&char_id) {
+            sk.remove(&28_164);
+        }
+    });
+
+    let laser_id = 880_001_i64;
+    let crystal_id = 880_002_i64;
+    let lml_id = 880_003_i64;
+    let missile_id = 880_004_i64;
+    let tp_id = 880_005_i64;
+    let sb_id = 880_006_i64;
+    let breacher_id = 880_007_i64;
+    let breacher_ammo_id = 880_008_i64;
+    let npc_id = 980_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(laser_id, make_fighter_item(laser_id, 53_009, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(crystal_id, make_fighter_item(crystal_id, 86_009, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        snap.items.insert(lml_id, make_fighter_item(lml_id, 50_909, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+        snap.items.insert(missile_id, make_fighter_item(missile_id, 38_409, char_id, ship_id, InventoryFlag::HiSlot1, 20));
+        snap.items.insert(sb_id, make_fighter_item(sb_id, 72_009, char_id, ship_id, InventoryFlag::HiSlot2, 1));
+        snap.items.insert(breacher_id, make_fighter_item(breacher_id, 45_009, char_id, ship_id, InventoryFlag::HiSlot3, 1));
+        snap.items.insert(breacher_ammo_id, make_fighter_item(breacher_ammo_id, 40_709, char_id, ship_id, InventoryFlag::HiSlot3, 10));
+        snap.items.insert(tp_id, make_fighter_item(tp_id, 37_909, char_id, ship_id, InventoryFlag::MedSlot0, 1));
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos, hp, cap) in [
+        (ship_id, 23_915_u32, DVec3::ZERO, 5_000.0, 1_000.0),
+        (npc_id, 10_050_u32, DVec3::new(2_000.0, 0.0, 0.0), 5_000.0, 0.0),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: hp,
+                    max_shield_hp: hp,
+                    armor_hp: hp,
+                    max_armor_hp: hp,
+                    structure_hp: hp,
+                    max_structure_hp: hp,
+                    capacitor: cap,
+                    max_capacitor: cap,
+                    signature_radius: 200.0,
+                    base_signature_radius: Some(200.0),
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    lock_target_1247(&sys_handle, ship_id, npc_id).await;
+
+    // 1. Non-overloadable Breacher Pod rejects Overload cleanly (both targetless and targeted)
+    assert_eq!(
+        handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(breacher_id)], &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CannotOverloadModule"
+    );
+    assert_eq!(
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(breacher_id), PyRep::Integer(npc_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotOverloadModule"
+    );
+
+    // 2. Without Thermodynamics, targetless & targeted Overload reject without mutating state or cap
+    assert_eq!(
+        handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id)], &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+    assert_eq!(
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(laser_id), PyRep::Integer(npc_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "DontHaveThermoDynamicsSkillz"
+    );
+    assert!((sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 1_000.0).abs() < 1e-6);
+
+    // Grant Thermodynamics L1
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
+    });
+
+    // 3. Burned-out weapon rejects BEFORE ModuleOffline even when offlined
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(laser_id, false);
+        snap.items
+            .get_mut(&laser_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 40.0);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    assert_eq!(
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(laser_id), PyRep::Integer(npc_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ModuleBurnedOut"
+    );
+    assert_eq!(
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(laser_id), PyRep::Integer(npc_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ModuleBurnedOut"
+    );
+    // Repair and re-online laser_id
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(laser_id, true);
+        snap.items
+            .get_mut(&laser_id)
+            .unwrap()
+            .dynamic_attributes
+            .insert(eve_sde::attr_ids::DAMAGE, 0.0);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 4. Reactivation delay (in_delay && !in_cycle) rejects both targetless and targeted Overload cleanly
+    ctx.record_module_reactivation_delay(ship_id, laser_id, 10.0);
+    assert_eq!(
+        handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id)], &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ModuleAlreadyActive"
+    );
+    assert_eq!(
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(laser_id), PyRep::Integer(npc_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ModuleAlreadyActive"
+    );
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+
+    // 5. Pre-overloaded weapon preserves ModuleState::Overloaded across failed Activate
+    handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(laser_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect("pre-overload idle weapon");
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&laser_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+    let not_locked_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_id), PyRep::Integer(999_999_888)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(not_locked_err.code, "TargetNotLocked");
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&laser_id].state,
+        eve_dogma::ModuleState::Overloaded,
+        "Failed Activate on unlocked target must preserve ModuleState::Overloaded"
+    );
+    sys_handle.set_capacitor(ship_id, 1.0).await.unwrap();
+    let no_cap_err = handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(laser_id), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(no_cap_err.code, "NotEnoughCapacitor");
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&laser_id].state,
+        eve_dogma::ModuleState::Overloaded,
+        "Failed Activate on low capacitor must preserve ModuleState::Overloaded"
+    );
+    assert!(
+        ctx.db.with_snapshot(|s| {
+            s.ship_fit_inputs
+                .get(&ship_id)
+                .is_some_and(|fi| fi.overloaded_modules.contains(&laser_id))
+        }),
+        "DB ship_fit_inputs.overloaded_modules must retain laser_id after failed Activate"
+    );
+    sys_handle.set_capacitor(ship_id, 1_000.0).await.unwrap();
+
+    // 6. Missile, EWAR, and AoE Smartbomb Overload + pre-overloaded Activate all emit OnHeatAdded
+    let assert_heat_added = |mid: i64, expected_heat_id: i64| {
+        let notes = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            notes.iter().any(|n| {
+                n.event == "OnHeatAdded"
+                    && n.args == vec![PyRep::Integer(expected_heat_id), PyRep::Integer(mid)]
+            }),
+            "expected OnHeatAdded([{expected_heat_id}, {mid}]), got: {notes:?}"
+        );
+    };
+    let reset_and_preoverload = |mid: i64| {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.remove(&mid);
+            if let Some(fi) = snap.ship_fit_inputs.get_mut(&ship_id) {
+                fi.overloaded_modules.remove(&mid);
+            }
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        ctx.module_reactivation_cooldowns.write().unwrap().clear();
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap()
+    };
+
+    // Missile Overload -> OnHeatAdded([1175, lml_id]), then reset/pre-overload & Activate -> OnHeatAdded([1175, lml_id])
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(lml_id), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("Missile Overload");
+    assert_heat_added(lml_id, 1175);
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&lml_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    // Pre-overload idle missile launcher via handle_active_overload_toggle, clear cooldown, Activate -> OnHeatAdded
+    let lml_fit = reset_and_preoverload(lml_id);
+    let _ = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+        &ctx, &sys_handle, char_id, ship_id, lml_id, lml_fit, false,
+    )
+    .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(lml_id), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("Pre-overloaded Missile Activate");
+    assert_heat_added(lml_id, 1175);
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&lml_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    // EWAR Target Painter Overload & pre-overloaded Activate -> OnHeatAdded([1176, tp_id])
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(tp_id), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("EWAR Overload");
+    assert_heat_added(tp_id, 1176);
+
+    let tp_fit = reset_and_preoverload(tp_id);
+    let _ = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+        &ctx, &sys_handle, char_id, ship_id, tp_id, tp_fit, false,
+    )
+    .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(tp_id), PyRep::Integer(npc_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("Pre-overloaded EWAR Activate");
+    assert_heat_added(tp_id, 1176);
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&tp_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    // AoE Smartbomb Overload & pre-overloaded Activate -> OnHeatAdded([1175, sb_id]) and eff_m.state == Overloaded
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(&ctx, &mut session, "dogmaIM", "Overload", &[PyRep::Integer(sb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect("AoE Smartbomb Overload");
+    assert_heat_added(sb_id, 1175);
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&sb_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    let sb_fit = reset_and_preoverload(sb_id);
+    let _ = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+        &ctx, &sys_handle, char_id, ship_id, sb_id, sb_fit, false,
+    )
+    .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect("Pre-overloaded AoE Smartbomb Activate");
+    assert_heat_added(sb_id, 1175);
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&sb_id].state,
+        eve_dogma::ModuleState::Overloaded
     );
 }
 

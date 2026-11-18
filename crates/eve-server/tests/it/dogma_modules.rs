@@ -1525,6 +1525,14 @@ async fn test_r2_track2_dogma_fitting_overload_targeters_and_weapons() {
                 skill_points: 100_000.0,
             },
         );
+        s.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 1,
+                skill_points: 250.0,
+            },
+        );
     });
     ctx.invalidate_ship_fitting(ship_id);
     ctx.dispatch_rpc(

@@ -95,6 +95,7 @@ async fn ewar_target_painter_npc_overload_tether_and_non_weapon_dispatch() {
         56_004,
         make_fighter_type(56_004, 512, 7, 5.0, vec![(54, 10_000.0)]),
     );
+    super::combat_weapons_tests::enable_test_overload(&mut sde, &ctx, char_id, &[56_001]);
     ctx.sde = Arc::new(sde);
 
     spawn_ball(&ctx, sys_id, ship_id, 23_915, DVec3::ZERO, 1_000.0, 500.0).await;
@@ -238,6 +239,7 @@ async fn weapon_range_cap_fof_entropic_spool_and_player_ewar_safety_branches() {
         56_105,
         make_fighter_type(56_105, 65, 7, 5.0, vec![(6, 5.0), (54, 20_000.0)]),
     );
+    super::combat_weapons_tests::enable_test_overload(&mut sde, &ctx, char_id, &[56_102]);
     ctx.sde = Arc::new(sde);
 
     // Give ship only 10 cap (not enough for hybrid's 50)
