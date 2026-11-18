@@ -23,12 +23,31 @@ use eve_sde::SdeRegistry;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-fn is_skyhook(snap: &WorldStateSnapshot, id: i64) -> bool {
-    snap.structures.get(&id).is_some_and(|s| s.type_id == TYPE_ORBITAL_SKYHOOK)
+fn is_active_skyhook_struct(s: &eve_db::UpwellStructureRecord) -> bool {
+    s.type_id == TYPE_ORBITAL_SKYHOOK && !s.state.eq_ignore_ascii_case("destroyed")
 }
 
-/// `(start, end)` of the skyhook's scheduled theft window when it is open at `now`.
+fn is_skyhook(snap: &WorldStateSnapshot, id: i64) -> bool {
+    snap.structures.get(&id).is_some_and(is_active_skyhook_struct)
+}
+
+fn advance_skyhook_state_in_snap(
+    snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
+    id: i64,
+    now: u64,
+) {
+    let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, sde, id, now);
+    let _ = super::sov_gameplay::sov_gameplay_skyhook::advance_skyhook_theft_window_in_snap(
+        snap, id, now,
+    );
+}
+
+/// `(start, end)` of the skyhook's scheduled theft window when active and open at `now`.
 fn open_window(snap: &WorldStateSnapshot, id: i64, now: u64) -> Option<(u64, u64)> {
+    if !is_skyhook(snap, id) {
+        return None;
+    }
     snap.sov_runtime
         .skyhook_theft_windows
         .get(&id)
@@ -36,44 +55,63 @@ fn open_window(snap: &WorldStateSnapshot, id: i64, now: u64) -> Option<(u64, u64
         .filter(|(start, end)| *start <= now && now < *end)
 }
 
-/// Base V24 hourly reagent harvest yield by planet `type_id` prior to radius scaling.
+/// Nominal hourly reagent harvest yield by planet `type_id` prior to radius scaling.
+///
+/// `// DERIVED:` Calibrated directly to V24 client `orbitalSkyhook/resourceRichness.pyj`
+/// `PLANET_ICE = (36, 40)` and `PLANET_LAVA = (763, 946)` average cutoffs; non-reagent planets yield `0`.
 pub fn planet_type_base_hourly_reagent_yield(type_id: u32) -> u64 {
     match type_id {
-        12 => 1_200,
-        2015 => 1_000,
-        2014 | 2063 => 600,
-        2017 | 13 => 400,
-        _ => super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD,
+        12 => 36,
+        2015 => 763,
+        _ => 0,
     }
 }
 
-/// Computes V24 per-planet-type hourly reagent harvest yield from SDE celestial type and radius.
+/// Computes radius-scaled V24 hourly reagent harvest rate directly from `(type_id, radius_m)`.
+///
+/// `// DERIVED:` Log-radius curve fitted to V24 client `orbitalSkyhook/const.pyj` size classes
+/// (`ICE`: `1.048M`..`18.9M`; `LAVA`: `1.46M`..`4.16M`) and `resourceRichness.pyj` cutoffs
+/// (`PLANET_ICE = (36, 40)`, `PLANET_LAVA = (763, 946)`), falling back to nominal averages when
+/// `radius_m <= 0`. Non-reagent planets (including Oceanic `2014`) yield `0`.
+pub fn planet_hourly_reagent_yield_for_planet(type_id: u32, radius_m: f64) -> u64 {
+    if radius_m <= 0.0 || !radius_m.is_finite() {
+        return planet_type_base_hourly_reagent_yield(type_id);
+    }
+    match type_id {
+        12 => {
+            let t = ((radius_m.ln() - 1_048_577.0f64.ln())
+                / (18_900_000.0f64.ln() - 1_048_577.0f64.ln()))
+            .clamp(0.0, 1.35);
+            (22.0 + 18.0 * t).round() as u64
+        }
+        2015 => {
+            let t = ((radius_m.ln() - 1_460_000.0f64.ln())
+                / (4_160_000.0f64.ln() - 1_460_000.0f64.ln()))
+            .clamp(0.0, 1.4);
+            (520.0 + 426.0 * t).round() as u64
+        }
+        _ => 0,
+    }
+}
+
+/// Computes V24 per-planet hourly reagent harvest yield from SDE celestial type and radius.
 pub fn planet_hourly_reagent_yield(
     sde: &SdeRegistry,
     planet_id: Option<i64>,
     sys_id: Option<u32>,
     _reagent_type: u32,
 ) -> u64 {
-    let fallback = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
     let (Some(pid), Some(sys)) = (planet_id, sys_id) else {
-        return fallback;
+        return 0;
     };
-    let Some(planet) = sde.celestials_in_system(sys).into_iter().find(|c| c.celestial_id == pid) else {
-        return fallback;
+    let Some(planet) = sde
+        .celestials_in_system_slice(sys)
+        .iter()
+        .find(|c| c.celestial_id == pid)
+    else {
+        return 0;
     };
-    let (base, min_y, max_y) = match planet.type_id {
-        12 => (1_200.0, 900, 1_800),     // Ice -> Superionic Ice
-        2015 => (1_000.0, 750, 1_500),   // Lava -> Magmatic Gas
-        2014 | 2063 => (600.0, 450, 900),
-        2017 | 13 => (400.0, 300, 600),
-        _ => return planet_type_base_hourly_reagent_yield(planet.type_id),
-    };
-    if planet.radius > 0.0 {
-        let factor = (planet.radius / 5_000_000.0).clamp(0.75, 1.5);
-        ((base * factor).round() as u64).clamp(min_y, max_y)
-    } else {
-        planet_type_base_hourly_reagent_yield(planet.type_id)
-    }
+    planet_hourly_reagent_yield_for_planet(planet.type_id, planet.radius)
 }
 
 fn wire_submsg_u64(field_number: u32, value: u64) -> WireField {
@@ -91,9 +129,32 @@ fn wire_submsg_u64(field_number: u32, value: u64) -> WireField {
     }
 }
 
-/// Encodes the shared skyhook body: `skyhook(1)`, `reagent_simulations(2)`, `active(3)`,
-/// `theft_vulnerability(5)` and `workforce(7)`.
+#[derive(Clone, Copy)]
+enum SkyhookWireMode {
+    /// `skyhook.api.GetResponse`: `ReagentSimulation(1=reagent, 5=reagent_type)`, `ReagentDefinition(1=reagent, 5=reagent_type)`.
+    GetResponse,
+    /// `skyhook.api.GetAllLocalResponse`: `ReagentSimulation(1=reagent, 5=reagent_type)`, `ReagentDefinition(1=reagent, 3=reagent_type)`.
+    GetAllLocal,
+    /// `skyhook.api.GetAllByCorporationResponse`: `ReagentSimulation(1=reagent_type)`, `ReagentDefinition(1=reagent_type)`.
+    GetAllByCorporation,
+}
+
+/// Encodes the shared skyhook body using `GetResponse` field numbers (`quasar_sov_skyhook` tests).
 fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u64) -> Vec<u8> {
+    encode_skyhook_with_mode(snap, sde, id, now, SkyhookWireMode::GetResponse)
+}
+
+/// Encodes a `Skyhook` proto body matching the response-specific descriptor field tags in
+/// `eve_public.sovereignty.skyhook.api.requests_pb2`:
+/// `skyhook(1)`, `reagent_simulations(2)`, `active(3)`, `reagent_definitions(4)`,
+/// `theft_vulnerability(5)`, `workforce(7)`, and `planet_resources_definitions_version(8)`.
+fn encode_skyhook_with_mode(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    id: i64,
+    now: u64,
+    mode: SkyhookWireMode,
+) -> Vec<u8> {
     let mut fields = vec![wire_submsg_u64(1, id as u64)];
     let planet_id = snap.sov_runtime.skyhook_planets.get(&id).copied();
     let sys_id = snap.structures.get(&id).map(|s| s.solar_system_id);
@@ -104,7 +165,7 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
             .get(&id)
             .copied()
             .map(|(_, sec, insec, ts)| (sec, insec, if ts > 0 { ts } else { now }))
-            .unwrap_or((stock, stock / 2, now));
+            .unwrap_or((stock, 0, now));
         let sim = WireMessage {
             fields: vec![
                 WireField {
@@ -119,20 +180,37 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
             ],
         }
         .encode();
-        let r = WireMessage {
-            fields: vec![
-                wire_submsg_u64(1, u64::from(reagent_type)),
-                WireField {
-                    field_number: 2,
-                    value: WireValue::LengthDelimited(sim.clone()),
-                },
-                WireField {
-                    field_number: 4,
-                    value: WireValue::LengthDelimited(sim),
-                },
-            ],
+        let maturation_or_harvest = |amt: u64| {
+            WireMessage {
+                fields: vec![
+                    WireField {
+                        field_number: 1,
+                        value: WireValue::Varint(amt),
+                    },
+                    wire_submsg_u64(2, sim_ts),
+                ],
+            }
+            .encode()
+        };
+        let mut sim_fields = vec![
+            wire_submsg_u64(1, u64::from(reagent_type)),
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(maturation_or_harvest(insec_stock)),
+            },
+            WireField {
+                field_number: 3,
+                value: WireValue::LengthDelimited(maturation_or_harvest(sec_stock)),
+            },
+            WireField {
+                field_number: 4,
+                value: WireValue::LengthDelimited(sim),
+            },
+        ];
+        if !matches!(mode, SkyhookWireMode::GetAllByCorporation) {
+            sim_fields.push(wire_submsg_u64(5, u64::from(reagent_type)));
         }
-        .encode();
+        let r = WireMessage { fields: sim_fields }.encode();
         fields.push(WireField {
             field_number: 2,
             value: WireValue::LengthDelimited(r),
@@ -149,31 +227,50 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
                     field_number: 2,
                     value: WireValue::Varint(3_600),
                 },
-            ],
-        }
-        .encode();
-        let r_def = WireMessage {
-            fields: vec![
-                wire_submsg_u64(1, u64::from(reagent_type)),
                 WireField {
-                    field_number: 2,
-                    value: WireValue::LengthDelimited(amt),
+                    field_number: 3,
+                    value: WireValue::Varint(super::sov_gameplay::REAGENT_SECURED_PERCENTAGE),
+                },
+                WireField {
+                    field_number: 4,
+                    value: WireValue::Varint(super::sov_gameplay::SKYHOOK_REAGENT_BAY_CAPACITY),
+                },
+                WireField {
+                    field_number: 5,
+                    value: WireValue::Varint(super::sov_gameplay::SKYHOOK_REAGENT_BAY_CAPACITY),
                 },
             ],
         }
         .encode();
+        let mut def_fields = vec![
+            wire_submsg_u64(1, u64::from(reagent_type)),
+            WireField {
+                field_number: 2,
+                value: WireValue::LengthDelimited(amt),
+            },
+        ];
+        match mode {
+            SkyhookWireMode::GetResponse => def_fields.push(wire_submsg_u64(5, u64::from(reagent_type))),
+            SkyhookWireMode::GetAllLocal => def_fields.push(wire_submsg_u64(3, u64::from(reagent_type))),
+            SkyhookWireMode::GetAllByCorporation => {}
+        }
+        let r_def = WireMessage { fields: def_fields }.encode();
         fields.push(WireField {
             field_number: 4,
             value: WireValue::LengthDelimited(r_def),
         });
     }
-    let active = snap.sov_runtime.skyhook_active.get(&id).copied().unwrap_or(true);
+    let is_destroyed = snap
+        .structures
+        .get(&id)
+        .is_some_and(|s| s.state.eq_ignore_ascii_case("destroyed"));
+    let active = !is_destroyed && snap.sov_runtime.skyhook_active.get(&id).copied().unwrap_or(true);
     fields.push(WireField {
         field_number: 3,
         value: WireValue::Varint(u64::from(active)),
     });
     let theft_fields = match snap.sov_runtime.skyhook_theft_windows.get(&id).copied() {
-        Some((start, end)) => vec![
+        Some((start, end)) if !is_destroyed => vec![
             WireField {
                 field_number: 1,
                 value: WireValue::Varint(u64::from(start <= now && now < end)),
@@ -181,7 +278,7 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
             wire_submsg_u64(2, start),
             wire_submsg_u64(3, end),
         ],
-        None => vec![WireField {
+        _ => vec![WireField {
             field_number: 1,
             value: WireValue::Varint(0),
         }],
@@ -190,15 +287,33 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
         field_number: 5,
         value: WireValue::LengthDelimited(WireMessage { fields: theft_fields }.encode()),
     });
-    if let Some(pid) = planet_id {
-        fields.push(wire_submsg_u64(6, pid as u64));
-    }
     let wf_amount = match (planet_id, sys_id) {
         (Some(pid), Some(sys_id)) if active => sde
-            .celestials_in_system(sys_id)
-            .into_iter()
+            .celestials_in_system_slice(sys_id)
+            .iter()
             .find(|c| c.celestial_id == pid)
-            .map(|c| super::quasar_sov_hub::planet_yield(c.type_id).1)
+            .map(|c| {
+                let mut w = super::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius).1;
+                if w > 0 {
+                    let siphoned: u64 = snap
+                        .sov_runtime
+                        .mercenary_dens
+                        .values()
+                        .filter(|d| {
+                            d.solar_system_id == sys_id && d.enabled && d.planet_id == pid
+                        })
+                        .map(|d| {
+                            let stage = super::quasar_sov_mercden::stage_for_level(d.anarchy_level);
+                            let pct = super::quasar_sov_mercden::anarchy_workforce_disruption_pct(
+                                stage,
+                            );
+                            (w * pct) / 100
+                        })
+                        .sum();
+                    w = w.saturating_sub(siphoned);
+                }
+                w
+            })
             .unwrap_or(0),
         _ => 0,
     };
@@ -217,6 +332,9 @@ fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u6
         field_number: 7,
         value: WireValue::LengthDelimited(WireMessage { fields: vec![wf] }.encode()),
     });
+    if planet_id.is_some() {
+        fields.push(wire_submsg_u64(8, 1));
+    }
     WireMessage { fields }.encode()
 }
 
@@ -224,7 +342,7 @@ fn sorted_skyhooks(snap: &WorldStateSnapshot, pred: impl Fn(&eve_db::UpwellStruc
     let mut ids: Vec<i64> = snap
         .structures
         .values()
-        .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && pred(s))
+        .filter(|s| is_active_skyhook_struct(s) && pred(s))
         .map(|s| s.structure_id)
         .collect();
     ids.sort_unstable();
@@ -245,7 +363,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                     if !is_skyhook(snap, id) {
                         return Err::<Vec<u8>, RpcError>((STATUS_NOT_FOUND, format!("Skyhook {id} not found")));
                     }
-                    let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
+                    advance_skyhook_state_in_snap(snap, &sde, id, now);
                     Ok(encode_skyhook(snap, &sde, id, now))
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetResponse", body))
@@ -273,10 +391,16 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                     )
                     .set("solar_system.sequential", u64::from(sys));
                     for id in sorted_skyhooks(snap, |s| s.solar_system_id == sys) {
-                        let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
+                        advance_skyhook_state_in_snap(snap, &sde, id, now);
                         builder = builder.add(
                             "skyhooks",
-                            eve_proto::pb::raw_message(encode_skyhook(snap, &sde, id, now)),
+                            eve_proto::pb::raw_message(encode_skyhook_with_mode(
+                                snap,
+                                &sde,
+                                id,
+                                now,
+                                SkyhookWireMode::GetAllLocal,
+                            )),
                         );
                     }
                     builder.encode_or_internal_err()
@@ -314,10 +438,16 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                         "eve_public.sovereignty.skyhook.api.GetAllByCorporationResponse",
                     );
                     for id in sorted_skyhooks(snap, |s| s.owner_corp_id == corp) {
-                        let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, &sde, id, now);
+                        advance_skyhook_state_in_snap(snap, &sde, id, now);
                         builder = builder.add(
                             "skyhooks",
-                            eve_proto::pb::raw_message(encode_skyhook(snap, &sde, id, now)),
+                            eve_proto::pb::raw_message(encode_skyhook_with_mode(
+                                snap,
+                                &sde,
+                                id,
+                                now,
+                                SkyhookWireMode::GetAllByCorporation,
+                            )),
                         );
                     }
                     builder.encode_or_internal_err()
@@ -328,13 +458,17 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
     }
     {
         let db = Arc::clone(&db);
+        let sde = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetSolarSystemsWithTheftVulnerableSkyhooksRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let now = ctx.now_unix();
-                let systems: BTreeSet<u32> = db.with_snapshot(|snap| {
-                    sorted_skyhooks(snap, |_| true)
-                        .into_iter()
+                let systems: BTreeSet<u32> = db.with_mut_snapshot(|snap| {
+                    let ids = sorted_skyhooks(snap, |_| true);
+                    for &id in &ids {
+                        advance_skyhook_state_in_snap(snap, &sde, id, now);
+                    }
+                    ids.into_iter()
                         .filter(|id| open_window(snap, *id, now).is_some())
                         .filter_map(|id| snap.structures.get(&id).map(|s| s.solar_system_id))
                         .collect()
@@ -349,16 +483,18 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
     }
     {
         let db = Arc::clone(&db);
+        let sde = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let sys = required_id(dyn_msg, 1, "Solar system")? as u32;
                 let now = ctx.now_unix();
-                db.with_snapshot(|snap| {
+                db.with_mut_snapshot(|snap| {
                     let mut builder = eve_proto::pb::message(
                         "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemResponse",
                     );
                     for id in sorted_skyhooks(snap, |s| s.solar_system_id == sys) {
+                        advance_skyhook_state_in_snap(snap, &sde, id, now);
                         if let Some((start, end)) = open_window(snap, id, now) {
                             builder = builder.add_with("skyhooks", |v| {
                                 v.set("skyhook.sequential", id as u64)

@@ -65,7 +65,7 @@ pub(super) fn find_null_system_with_reagent_planet(ctx: &ServerContext) -> (u32,
 #[test]
 fn sub_unit_remainder_conservation_inactive_skyhook_and_extract_extra_var_edges() {
     assert_eq!(planet_reagent_type(12), Some(TYPE_SUPERIONIC_ICE));
-    assert_eq!(planet_reagent_type(2014), Some(TYPE_SUPERIONIC_ICE));
+    assert_eq!(planet_reagent_type(2014), None);
     assert_eq!(planet_reagent_type(2015), Some(TYPE_MAGMATIC_GAS));
     assert_eq!(planet_reagent_type(13), None);
     assert_eq!(planet_reagent_type(2016), None);

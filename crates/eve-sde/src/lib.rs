@@ -1420,6 +1420,32 @@ impl SdeRegistry {
         self.stars.get(&star_id)
     }
 
+    /// Looks up the primary star (`sde_stars`) belonging to `solar_system_id`.
+    /// Checks system celestials (`group_id == 6`) first for $O(1)$ indexed lookup, then scans
+    /// `stars` as fallback for synthetic test registries populated only via `insert_star`.
+    pub fn star_for_system(&self, solar_system_id: SolarSystemId) -> Option<&StarInfo> {
+        self.celestials_in_system_slice(solar_system_id)
+            .iter()
+            .find(|c| c.group_id == 6)
+            .and_then(|c| self.stars.get(&c.celestial_id))
+            .or_else(|| {
+                self.stars
+                    .values()
+                    .find(|s| s.solar_system_id == solar_system_id)
+            })
+    }
+
+    /// Returns all dungeon templates matching `archetype_id` sorted deterministically by `dungeon_id`.
+    pub fn dungeons_by_archetype(&self, archetype_id: u32) -> Vec<&DungeonTemplate> {
+        let mut out: Vec<&DungeonTemplate> = self
+            .dungeons
+            .values()
+            .filter(|d| d.archetype_id == Some(archetype_id))
+            .collect();
+        out.sort_by_key(|d| d.dungeon_id);
+        out
+    }
+
     /// Inserts or updates a star record in the in-memory `SdeRegistry` star index.
     pub fn insert_star(&mut self, star: StarInfo) {
         Arc::make_mut(&mut self.stars).insert(star.star_id, star);

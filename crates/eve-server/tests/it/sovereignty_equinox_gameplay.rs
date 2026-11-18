@@ -1035,7 +1035,7 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
 
     let sk_proto = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, lava_skyhook as u64))
         .await.payload.unwrap().value;
-    let sim = field(&field(&sk_proto, 2).unwrap(), 2).unwrap();
+    let sim = field(&field(&sk_proto, 2).unwrap(), 4).unwrap();
     assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(exp_lava_sec12), Some(exp_lava_insec12)));
 
     // 3. Live Orbital Skyhook Reagent Silo ship-link theft (`dogmaIM.Activate` -> `<= 10%` shield -> `InitiateLink` -> 600s tick).
@@ -1132,10 +1132,56 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
 
     ctx.advance_secs(SKYHOOK_SILO_LINK_DURATION_SECS + 1);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"));
+    let assert_reagent_sim_notice = |notices: Vec<(String, Vec<u8>)>, exp_sec: u64, exp_insec: u64| {
+        let bytes = notices
+            .into_iter()
+            .rev()
+            .find_map(|(t, b)| (t == "eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice").then_some(b))
+            .expect("eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice");
+        let decoded = ctx
+            .quasar_gateway
+            .descriptors
+            .decode_dynamic("eve_public.sovereignty.skyhook.api.ReagentSimulationsNotice", &bytes)
+            .expect("ReagentSimulationsNotice must decode cleanly against V24 descriptor");
+        let dyn_u = |m: &eve_proto::quasar::DynamicQuasarMessage, f: u32| match m.get(f) {
+            Some(eve_proto::quasar::DynamicValue::Uint64(v)) => Some(*v),
+            Some(eve_proto::quasar::DynamicValue::Uint32(v)) => Some(u64::from(*v)),
+            _ => None,
+        };
+        let sky_seq = match decoded.get(1) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(sky_seq, Some(lava_skyhook as u64));
+        let pl_seq = match decoded.get(2) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(pl_seq, Some(lava_planet as u64));
+        let sims = match decoded.get(3) {
+            Some(eve_proto::quasar::DynamicValue::Repeated(list)) => list,
+            other => panic!("expected repeated simulations, got {other:?}"),
+        };
+        let entry = match sims.first() {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
+            other => panic!("expected ReagentSimulation message, got {other:?}"),
+        };
+        let rtype_seq = match entry.get(6) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => dyn_u(m, 1),
+            _ => None,
+        };
+        assert_eq!(rtype_seq, Some(u64::from(TYPE_MAGMATIC_GAS)));
+        let (sec, insec) = match entry.get(4) {
+            Some(eve_proto::quasar::DynamicValue::Message(m)) => (dyn_u(m, 1), dyn_u(m, 2)),
+            _ => (None, None),
+        };
+        assert_eq!((sec, insec), (Some(exp_sec), Some(exp_insec)));
+    };
+    let theft_notices = drain_quasar(&mut rx);
     let (_, final_sec, final_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     assert_eq!(final_insec, 0);
     assert!(final_sec > exp_lava_sec12);
+    assert_reagent_sim_notice(theft_notices, final_sec, 0);
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
@@ -1168,11 +1214,13 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.remove(&full_cargo_item_id);
     });
+    let _ = drain_quasar(&mut rx);
     let ext_rep = rpc_call(
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
     assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(final_sec as i64));
+    assert_reagent_sim_notice(drain_quasar(&mut rx), 0, 0);
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);
@@ -1321,7 +1369,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         "MercenaryDenCapExceeded"
     );
 
-    // 2. Anarchy rises over 8 days (+5/24h -> Anarchy 40, stage 3 / UI level 2), siphoning 10% of host Temperate Skyhook workforce (150 of 1,500).
+    // 2. Anarchy rises over 8 days (+5/24h -> Anarchy 40, stage 3 / UI level 2), siphoning 10% of host Temperate Skyhook workforce.
     let base_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
     ctx.advance_secs(8 * 86_400);
     assert_eq!(
@@ -1329,7 +1377,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         STATUS_OK
     );
     let siphoned_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(siphoned_wf + 150, base_wf);
+    assert_eq!(siphoned_wf + (base_wf * 10) / 100, base_wf);
 
     // 3. Quasar MTO requests spawn live MTO combat target ball (`24690`), completed via live `dogmaIM.AddTarget` + `Activate`!
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest", Vec::new()).await.status_code, STATUS_OK);
@@ -1663,7 +1711,7 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
                 .celestials_in_system(sys)
                 .into_iter()
                 .filter(|c| c.group_id == 7)
-                .map(|c| eve_server::services::quasar_sov_hub::planet_yield(c.type_id).1)
+                .map(|c| eve_server::services::quasar_sov_hub::planet_yield_for_planet(c.type_id, c.radius).1)
                 .sum::<u64>()
                 >= 5_000
         })
@@ -1729,7 +1777,13 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let star_rsp = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(star_rsp.status_code, STATUS_OK);
     let star_cfgs = fields(&star_rsp.payload.unwrap().value, 1);
-    assert!(!star_cfgs.is_empty() && varint(&star_cfgs[0], 2).unwrap_or(0) >= 200);
+    assert!(!star_cfgs.is_empty());
+    assert!(star_cfgs.iter().all(|c| (120..=800).contains(&varint(c, 2).unwrap_or(0))));
+    let null_star_id = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 6).unwrap().celestial_id as u64;
+    let expected_star_p = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, null_sys);
+    assert!(star_cfgs.iter().any(|c| {
+        field(c, 1).and_then(|id| varint(&id, 1)) == Some(null_star_id) && varint(c, 2) == Some(expected_star_p)
+    }));
 
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_a), PyRep::Integer(42_001)])
@@ -2781,13 +2835,7 @@ async fn test_sov_hub_anchor_upgrades_power_and_fuel() {
     );
 
     // Anchor Skyhooks on all planets so system power/workforce are harvested, and verify star power.
-    let expected_star_power: u64 = ctx
-        .sde
-        .celestials_in_system(null_sys)
-        .into_iter()
-        .filter(|c| c.group_id == 6)
-        .map(|c| star_power(&ctx.sde, c.type_id))
-        .sum();
+    let expected_star_power: u64 = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, null_sys);
     let (mut startup_ice, mut startup_gas) = (0u64, 0u64);
     for tid in [87_703u32, UPGRADE_MAJOR_THREAT_DETECTION, UPGRADE_PROSPECTING_ARRAY, 87_948] {
         if let Some(d) = eve_server::services::quasar_sov_hub::upgrade_definition(&ctx.sde, tid) {

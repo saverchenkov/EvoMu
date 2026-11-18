@@ -46,6 +46,78 @@ pub(crate) fn authorize_skyhook(
     Ok(sys)
 }
 
+fn register_skyhook_activation_handler(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
+    pending: super::quasar_sov_hub::PendingNotices,
+    active: bool,
+) {
+    let (rpc_name, resp_name, log_tag, action, err_state) = if active {
+        (
+            "eve_public.sovereignty.skyhook.api.ActivateRequest",
+            "eve_public.sovereignty.skyhook.api.ActivateResponse",
+            "quasar_sov_services.skyhook_activate",
+            "activate skyhook",
+            "active",
+        )
+    } else {
+        (
+            "eve_public.sovereignty.skyhook.api.DeactivateRequest",
+            "eve_public.sovereignty.skyhook.api.DeactivateResponse",
+            "quasar_sov_services.skyhook_deactivate",
+            "deactivate skyhook",
+            "inactive",
+        )
+    };
+    router.register_handler(
+        rpc_name,
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
+            let (sys_id, planet_id) = transact(&db, |snap| {
+                let sys = authorize_skyhook(ctx, snap, structure_id, action)?;
+                if snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) == active {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("Skyhook {structure_id} is already {err_state}"),
+                    ));
+                }
+                super::quasar_sov_workforce::with_system_hub_network_reconcile(
+                    snap,
+                    &sde,
+                    &pending,
+                    sys,
+                    ctx.now_unix(),
+                    |snap| {
+                        snap.sov_runtime.skyhook_active.insert(structure_id, active);
+                        let pid = snap.sov_runtime.skyhook_planets.get(&structure_id).copied();
+                        Ok::<_, (u32, String)>((sys, pid))
+                    },
+                )
+            })?;
+
+            if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
+                log_tag,
+                pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
+                    .set("solar_system.sequential", sys_id)
+                    .with(|b| match planet_id {
+                        Some(pid) => b.set("planet.sequential", pid as u64),
+                        None => b,
+                    })
+                    .set("skyhook.sequential", structure_id as u64)
+                    .set("active", active),
+            ) {
+                pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                    NoticeScope::SolarSystem(sys_id),
+                    notice,
+                ));
+            }
+
+            pb::message(resp_name).to_any_or_internal_err()
+        }),
+    );
+}
+
 /// Registers all Q-8 sovereignty, faction warfare, and operations service handlers on the gateway router.
 pub fn register_handlers(
     router: &PublicGatewayRouter,
@@ -56,84 +128,20 @@ pub fn register_handlers(
 
     // 1. eve_public.sovereignty.skyhook.api handlers
     super::quasar_sov_skyhook::register_query_handlers(router, Arc::clone(&db), Arc::clone(&sde));
-    {
-        let db_act = Arc::clone(&db);
-        let pending = Arc::clone(&router.pending_notices);
-        router.register_handler(
-            "eve_public.sovereignty.skyhook.api.ActivateRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
-                let (sys_id, planet_id) = transact(&db_act, |snap| {
-                    let sys = authorize_skyhook(ctx, snap, structure_id, "activate skyhook")?;
-                    if snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
-                        return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already active")));
-                    }
-                    snap.sov_runtime.skyhook_active.insert(structure_id, true);
-                    let pid = snap.sov_runtime.skyhook_planets.get(&structure_id).copied();
-                    Ok::<_, (u32, String)>((sys, pid))
-                })?;
-
-                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
-                    "quasar_sov_services.skyhook_activate",
-                    pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
-                        .set("solar_system.sequential", sys_id)
-                        .with(|b| match planet_id {
-                            Some(pid) => b.set("planet.sequential", pid as u64),
-                            None => b,
-                        })
-                        .set("skyhook.sequential", structure_id as u64)
-                        .set("active", true),
-                ) {
-                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                        NoticeScope::SolarSystem(sys_id),
-                        notice,
-                    ));
-                }
-
-                pb::message("eve_public.sovereignty.skyhook.api.ActivateResponse")
-                    .to_any_or_internal_err()
-            }),
-        );
-    }
-    {
-        let db_deact = Arc::clone(&db);
-        let pending = Arc::clone(&router.pending_notices);
-        router.register_handler(
-            "eve_public.sovereignty.skyhook.api.DeactivateRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
-                let (sys_id, planet_id) = transact(&db_deact, |snap| {
-                    let sys = authorize_skyhook(ctx, snap, structure_id, "deactivate skyhook")?;
-                    if !snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
-                        return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already inactive")));
-                    }
-                    snap.sov_runtime.skyhook_active.insert(structure_id, false);
-                    let pid = snap.sov_runtime.skyhook_planets.get(&structure_id).copied();
-                    Ok::<_, (u32, String)>((sys, pid))
-                })?;
-
-                if let Some(notice) = crate::quasar_gateway::pb_to_any_or_log(
-                    "quasar_sov_services.skyhook_deactivate",
-                    pb::message("eve_public.sovereignty.skyhook.api.ActivationNotice")
-                        .set("solar_system.sequential", sys_id)
-                        .with(|b| match planet_id {
-                            Some(pid) => b.set("planet.sequential", pid as u64),
-                            None => b,
-                        })
-                        .set("skyhook.sequential", structure_id as u64)
-                        .set("active", false),
-                ) {
-                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                        NoticeScope::SolarSystem(sys_id),
-                        notice,
-                    ));
-                }
-
-                pb::message("eve_public.sovereignty.skyhook.api.DeactivateResponse")
-                    .to_any_or_internal_err()
-            }),
-        );
-    }
+    register_skyhook_activation_handler(
+        router,
+        Arc::clone(&db),
+        Arc::clone(&sde),
+        Arc::clone(&router.pending_notices),
+        true,
+    );
+    register_skyhook_activation_handler(
+        router,
+        Arc::clone(&db),
+        Arc::clone(&sde),
+        Arc::clone(&router.pending_notices),
+        false,
+    );
 
     // 6. eve.faction.api & eve.faction.activity handlers
     {

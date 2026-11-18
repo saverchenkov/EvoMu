@@ -3,9 +3,10 @@
 #![forbid(unsafe_code)]
 
 use super::structures_pos_deep_extra_unit_tests::*;
+use crate::services::quasar_sov_skyhook::planet_hourly_reagent_yield;
 use crate::services::sov_gameplay::sov_gameplay_skyhook::{
     advance_skyhook_reagents_in_snap, apply_skyhook_weapon_damage, handle_skyhook_component_call,
-    planet_reagent_type, tick_skyhooks, SKYHOOK_SILO_LINK_DURATION_SECS,
+    planet_reagent_type, tick_skyhooks, REAGENT_SECURED_PERCENTAGE, SKYHOOK_SILO_LINK_DURATION_SECS,
     SKYHOOK_SILO_LINK_MAX_SPEED_MS,
 };
 use crate::services::sov_services::{
@@ -174,7 +175,7 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now)));
 
     assert_eq!(planet_reagent_type(12), Some(TYPE_SUPERIONIC_ICE));
-    assert_eq!(planet_reagent_type(2014), Some(TYPE_SUPERIONIC_ICE));
+    assert_eq!(planet_reagent_type(2014), None);
     assert_eq!(planet_reagent_type(2015), Some(TYPE_MAGMATIC_GAS));
     assert_eq!(planet_reagent_type(11), None);
 
@@ -188,13 +189,19 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
                 && s.security_status <= 0.0
                 && !s.planet_ids.is_empty()
         })
-        .min_by_key(|s| s.solar_system_id)
-        .and_then(|s| {
-            let pid = s.planet_ids[0];
-            let ppos = ctx.sde.celestials_in_system(s.solar_system_id).into_iter().find(|c| c.celestial_id == pid).map(|c| c.position).unwrap_or(DVec3::ZERO);
-            Some((s.solar_system_id, pid, ppos))
+        .filter_map(|s| {
+            let lava_planet = ctx
+                .sde
+                .celestials_in_system_slice(s.solar_system_id)
+                .iter()
+                .find(|c| s.planet_ids.contains(&c.celestial_id) && c.type_id == 2015)?;
+            Some((s.solar_system_id, lava_planet.celestial_id, lava_planet.position))
         })
-        .expect("nullsec planet");
+        .min_by_key(|(sid, ..)| *sid)
+        .expect("nullsec lava planet");
+    let expected_hourly_yield =
+        planet_hourly_reagent_yield(&ctx.sde, Some(planet_id), Some(null_sys), TYPE_MAGMATIC_GAS);
+    assert!(expected_hourly_yield >= 520);
 
     let (char_id, thief_id, corp_id, ally_id) = (90_301i64, 90_302i64, 98_300_001i64, 99_300_001i64);
     let (gantry_id, skyhook_id, ship_id, cruiser_id) = (88_301i64, 88_302i64, 88_310i64, 88_311i64);
@@ -262,6 +269,7 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
             state: STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 100,
             shield_hp: 10_000.0, armor_hp: 10_000.0, hull_hp: 10_000.0, ..Default::default()
         });
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
         snap.sov_runtime.skyhook_reagent_bays.insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 400, now));
         snap.sov_runtime.skyhook_theft_windows.insert(skyhook_id, (now, now + 7_200));
 
@@ -269,8 +277,10 @@ async fn pos_mgr_orbital_anchoring_gantry_upgrade_and_skyhook_reagent_siphon_mat
             advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, now + step);
         }
         let (_, sec_qty, insec_qty, _) = snap.sov_runtime.skyhook_reagent_bays[&skyhook_id];
+        let to_secure = (expected_hourly_yield * REAGENT_SECURED_PERCENTAGE) / 100;
         assert!(sec_qty > 125);
-        assert_eq!(sec_qty + insec_qty, 550);
+        assert_eq!(sec_qty, 116 + to_secure);
+        assert_eq!(sec_qty + insec_qty, 500 + expected_hourly_yield);
     });
 
     let dmg_rep = apply_skyhook_weapon_damage(&ctx, skyhook_id, 11_875.0).expect("damage inside window");

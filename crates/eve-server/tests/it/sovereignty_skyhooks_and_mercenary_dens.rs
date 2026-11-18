@@ -172,8 +172,10 @@ async fn test_mercenary_den_anchoring_skill_cap_distance_and_sov_tax() {
     ).await.expect("extract_infomorphs_to_ship");
     let owner_share = ext_rep.dict_get("ownerShare").and_then(|v| v.as_i64()).unwrap();
     let tax_share = ext_rep.dict_get("taxShare").and_then(|v| v.as_i64()).unwrap();
+    let total_infomorphs = owner_share + tax_share;
     assert!(owner_share > 0);
-    assert_eq!(tax_share * 4, owner_share);
+    assert_eq!(tax_share, (total_infomorphs * 20) / 100);
+    assert_eq!(owner_share, total_infomorphs - tax_share);
 }
 
 #[tokio::test]
@@ -248,11 +250,11 @@ async fn test_mercenary_den_development_anarchy_mto_workforce_siphon() {
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
     // 2. Advance 8 days: Development +40, Anarchy +40 (UI Anarchy level 2 / Stage 3)
-    // Den siphons 10% of host Skyhook's planetary workforce (150 of 1,500)
+    // Den siphons 10% of host Skyhook's planetary workforce.
     ctx.advance_secs(8 * 86_400 - 3_600);
     let _ = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
     let siphoned_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(siphoned_wf + 150, base_wf);
+    assert_eq!(siphoned_wf + (base_wf * 10) / 100, base_wf);
 
     // Higher development raises hourly IDK yield (Stage 3 = 71 IDK/hr)
     let d_day8 = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64))

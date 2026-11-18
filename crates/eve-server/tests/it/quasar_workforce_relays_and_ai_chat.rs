@@ -11,21 +11,22 @@ use eve_server::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_
 const PILOT: i64 = 90_000_001;
 const CORP: i64 = 98_000_001;
 const JITA: u32 = 30_000_142;
-const PERIMETER: u32 = 30_000_144;
-const URLEN: u32 = 30_000_138;
+const NULL_A: u32 = 30_000_669; // N3-JBX
+const NULL_B: u32 = 30_000_671; // GN-PDU (1j from N3-JBX)
+const NULL_C: u32 = 30_000_697; // 8Q-T7B (1j from GN-PDU)
 
-fn anchor_jita_skyhooks(ctx: &ServerContext) {
-    let jita_planets: Vec<i64> = ctx
+fn anchor_null_a_skyhooks(ctx: &ServerContext) {
+    let null_planets: Vec<i64> = ctx
         .sde
-        .celestials_in_system(JITA)
+        .celestials_in_system(NULL_A)
         .into_iter()
         .filter(|c| c.group_id == 7)
         .map(|c| c.celestial_id)
         .collect();
     ctx.db.with_mut_snapshot(|snap| {
-        for (idx, pid) in jita_planets.into_iter().enumerate() {
+        for (idx, pid) in null_planets.into_iter().enumerate() {
             let sh_id = 1_020_000_200 + idx as i64;
-            snap.structures.insert(sh_id, structure(sh_id, CORP, JITA, TYPE_ORBITAL_SKYHOOK));
+            snap.structures.insert(sh_id, structure(sh_id, CORP, NULL_A, TYPE_ORBITAL_SKYHOOK));
             snap.sov_runtime.skyhook_planets.insert(sh_id, pid);
             snap.sov_runtime.skyhook_active.insert(sh_id, true);
         }
@@ -34,23 +35,22 @@ fn anchor_jita_skyhooks(ctx: &ServerContext) {
 
 #[tokio::test]
 async fn test_sov_hub_and_star_resource_configurations() {
-    // Kept untagged (open): client sovereignty star/planet resource tables are not in the SDE.
     let ctx = ServerContext::new();
-    let mut s = sess(92_001, PILOT, CORP, JITA, corp_roles::ROLE_STATION_MANAGER);
+    let mut s = sess(92_001, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
 
     let hub_id = 1_020_000_051;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(hub_id, structure(hub_id, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_id, structure(hub_id, CORP, NULL_A, TYPE_SOVEREIGNTY_HUB));
     });
-    anchor_jita_skyhooks(&ctx);
+    anchor_null_a_skyhooks(&ctx);
 
     let res = rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_id as u64)).await;
     assert_eq!(res.status_code, STATUS_OK);
     let payload = res.payload.expect("GetResourcesResponse payload").value;
     let power = field(&payload, 1).expect("power pair");
     let workforce = field(&payload, 2).expect("workforce pair");
-    assert!(varint(&power, 1).unwrap_or(0) > 0, "Jita star power > 0");
-    assert!(varint(&workforce, 1).unwrap_or(0) > 0, "Jita planet workforce > 0");
+    assert!(varint(&power, 1).unwrap_or(0) > 0, "N3-JBX star power > 0");
+    assert!(varint(&workforce, 1).unwrap_or(0) > 0, "N3-JBX planet workforce > 0");
 
     let star_res = rpc(
         &ctx,
@@ -78,22 +78,23 @@ async fn test_sov_hub_and_star_resource_configurations() {
 
 #[tokio::test]
 async fn test_sov_hub_workforce_transit_relay_network() {
-
     let ctx = ServerContext::new();
-    let mut s = sess(92_002, PILOT, CORP, JITA, corp_roles::ROLE_STATION_MANAGER);
-    let mut rx = subscribe(&ctx, &mut s).await;
-
     let (hub_a, hub_b, hub_c) = (1_020_000_061, 1_020_000_062, 1_020_000_063);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(hub_a, structure(hub_a, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
-        snap.structures.insert(hub_b, structure(hub_b, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));
-        snap.structures.insert(hub_c, structure(hub_c, CORP, URLEN, TYPE_SOVEREIGNTY_HUB));
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.solar_system_id = NULL_A;
+        }
+        snap.structures.insert(hub_a, structure(hub_a, CORP, NULL_A, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_b, structure(hub_b, CORP, NULL_B, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_c, structure(hub_c, CORP, NULL_C, TYPE_SOVEREIGNTY_HUB));
     });
-    anchor_jita_skyhooks(&ctx);
+    let mut s = sess(92_002, PILOT, CORP, NULL_A, corp_roles::ROLE_STATION_MANAGER);
+    let mut rx = subscribe(&ctx, &mut s).await;
+    anchor_null_a_skyhooks(&ctx);
 
-    // Export 1000 from Jita to Perimeter, and Import in Urlen from Jita.
+    // Export 1000 from N3-JBX to GN-PDU, and Import in 8Q-T7B from N3-JBX.
     let mut exp = Vec::new();
-    encode_bytes_field(3, &idm(PERIMETER as u64), &mut exp);
+    encode_bytes_field(3, &idm(NULL_B as u64), &mut exp);
     encode_varint_field(2, 1_000, &mut exp);
     let mut exp_cfg = Vec::new();
     encode_bytes_field(3, &exp, &mut exp_cfg);
@@ -107,7 +108,7 @@ async fn test_sov_hub_workforce_transit_relay_network() {
     );
 
     let mut imp = Vec::new();
-    encode_bytes_field(1, &id_req(1, JITA as u64), &mut imp);
+    encode_bytes_field(1, &id_req(1, NULL_A as u64), &mut imp);
     let mut imp_cfg = Vec::new();
     encode_bytes_field(2, &imp, &mut imp_cfg);
     let mut cfg_req_c = id_req(1, hub_c as u64);
@@ -120,7 +121,7 @@ async fn test_sov_hub_workforce_transit_relay_network() {
     );
     drain(&mut rx);
 
-    // Configure Perimeter hub as Transit relay (field 4 = true).
+    // Configure GN-PDU hub as Transit relay (field 4 = true).
     let mut transit_cfg = Vec::new();
     encode_varint_field(4, 1, &mut transit_cfg);
     let mut cfg_req_b = id_req(1, hub_b as u64);
@@ -140,7 +141,7 @@ async fn test_sov_hub_workforce_transit_relay_network() {
         "Transit configuration must emit StateChangedNotice"
     );
 
-    // Verify Urlen hub now imports 1000 workforce via Perimeter Transit relay.
+    // Verify 8Q-T7B hub now imports 1000 workforce via GN-PDU Transit relay.
     let st_res = rpc(
         &ctx,
         &mut s,
@@ -157,12 +158,12 @@ async fn test_sov_hub_workforce_transit_relay_network() {
 
     // (a) Negative test: two importers competing for the same export -> only lowest hub ID receives it.
     let hub_d = 1_020_000_064;
-    let ikuchi: u32 = 30_000_137; // 1 jump from Perimeter
+    let null_d: u32 = 30_000_670; // 1 jump from N3-JBX
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(hub_d, structure(hub_d, CORP, ikuchi, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_d, structure(hub_d, CORP, null_d, TYPE_SOVEREIGNTY_HUB));
     });
     let mut imp_d = Vec::new();
-    encode_bytes_field(1, &id_req(1, JITA as u64), &mut imp_d);
+    encode_bytes_field(1, &id_req(1, NULL_A as u64), &mut imp_d);
     let mut imp_cfg_d = Vec::new();
     encode_bytes_field(2, &imp_d, &mut imp_cfg_d);
     let mut cfg_req_d = id_req(1, hub_d as u64);
@@ -215,14 +216,14 @@ async fn test_sov_hub_workforce_transit_relay_network() {
         }
     });
 
-    // (c) Negative test: out-of-range (> 2 jumps / > WORKFORCE_TRANSFER_MAX_JUMPS) -> rejected & 0 imported.
+    // (c) Negative test: out-of-range (> WORKFORCE_TRANSFER_MAX_JUMPS) -> rejected & 0 imported.
     let hub_far = 1_020_000_065;
-    let amarr: u32 = 30_002_187; // > 5 jumps from Jita and Perimeter
+    let null_far: u32 = 30_004_759; // > 5 jumps from both N3-JBX and GN-PDU
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(hub_far, structure(hub_far, CORP, amarr, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_far, structure(hub_far, CORP, null_far, TYPE_SOVEREIGNTY_HUB));
     });
     let mut imp_far = Vec::new();
-    encode_bytes_field(1, &id_req(1, JITA as u64), &mut imp_far);
+    encode_bytes_field(1, &id_req(1, NULL_A as u64), &mut imp_far);
     let mut imp_cfg_far = Vec::new();
     encode_bytes_field(2, &imp_far, &mut imp_cfg_far);
     let mut cfg_req_far = id_req(1, hub_far as u64);

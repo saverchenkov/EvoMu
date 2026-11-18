@@ -29,6 +29,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 pub const STATUS_OK: u32 = 200;
+pub const STATUS_NOT_MODIFIED: u32 = 304;
 pub const STATUS_BAD_REQUEST: u32 = 400;
 pub const STATUS_UNAUTHORIZED: u32 = 401;
 pub const STATUS_FORBIDDEN: u32 = 403;

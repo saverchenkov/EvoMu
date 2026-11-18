@@ -50,13 +50,9 @@ fn find_nullsec_system_with_power(ctx: &ServerContext) -> (u32, i64) {
     sys_ids.sort_unstable();
     for sys in sys_ids {
         let cels = ctx.sde.celestials_in_system(sys);
-        let star_p: u64 = cels
-            .iter()
-            .filter(|c| c.group_id == 6)
-            .map(|c| eve_server::services::quasar_sov_hub::star_power(&ctx.sde, c.type_id))
-            .sum();
+        let star_p = eve_server::services::quasar_sov_hub::star_power_for_system(&ctx.sde, sys);
         let temp = cels.iter().find(|c| c.type_id == 11).map(|c| c.celestial_id);
-        if star_p >= 700 && temp.is_some() {
+        if star_p >= 650 && temp.is_some() {
             return (sys, temp.unwrap());
         }
     }

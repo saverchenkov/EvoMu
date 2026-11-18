@@ -178,12 +178,12 @@ fn owned_den_disabled_reinforcement_activity_completion_and_partial_refresh() {
         assert_eq!(snap.sov_runtime.mercenary_dens[&den_id].next_activity_generation_unix, 3_000 + ACTIVITY_GENERATION_SECS);
 
         let act_sub100 = mk_act(vec![0xA9; 16], den_id, sys, true, cid, 9_000, 15, -25, 10);
-        complete_mercenary_activity_in_snap(snap, &pending, &act_sub100, den_id, sys);
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act_sub100, den_id, sys);
         let d = &snap.sov_runtime.mercenary_dens[&den_id];
-        assert_eq!((d.development_level, d.anarchy_level, d.infomorphs), (25, 0, 100));
+        assert_eq!((d.development_level, d.anarchy_level, d.infomorphs), (25, 0, 50));
 
         let before_bal = snap.characters[&cid].balance;
-        complete_mercenary_activity_in_snap(snap, &pending, &act_sub100, 999_999_999, sys);
+        complete_mercenary_activity_in_snap(snap, &pending, None, &act_sub100, 999_999_999, sys);
         assert_eq!(snap.characters[&cid].balance, before_bal.checked_add(IskCents::from_isk(7_500_000)).unwrap());
     });
 }
@@ -281,10 +281,12 @@ fn rpc_get_as_owner_evolution_notice_get_all_expiry_capacity_and_start_positions
         snap.characters.get_mut(&owner_id).unwrap().structure_id = None;
     });
 
-    for (u, expected_pos) in [
-        (u_gt1, [25_000.0, 25_000.0, 30_000.0]),
-        (u_gt2, [65_000.0, 65_000.0, -10_000.0]),
-        (u_gt3, [265_000.0, 5_000.0, 0.0]),
+    let cel = sde.celestial(planet_id).expect("planet in test SDE");
+    let expected_offset = (cel.radius * 0.005).clamp(15_000.0, 45_000.0);
+    for (u, den_pos) in [
+        (u_gt1, [10_000.0_f64, 20_000.0, 30_000.0]),
+        (u_gt2, [50_000.0, 60_000.0, -10_000.0]),
+        (u_gt3, [250_000.0, 0.0, 0.0]),
     ] {
         let h = hex(&u);
         call_rpc(&router, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", &owner_ctx, &start_req(u)).unwrap();
@@ -293,6 +295,8 @@ fn rpc_get_as_owner_evolution_notice_get_all_expiry_capacity_and_start_positions
             let _: &InventoryItemRecord = &snap.items[&bid];
             snap.item_positions[&bid]
         });
-        assert_eq!(pos, expected_pos);
+        let planar = (pos[0] - den_pos[0]).hypot(pos[1] - den_pos[1]);
+        assert!((planar - expected_offset).abs() < 1e-6, "planar {planar} != {expected_offset} for den_pos {den_pos:?}");
+        assert!(((pos[2] - den_pos[2]) - expected_offset * 0.1).abs() < 1e-6);
     }
 }

@@ -31,12 +31,12 @@ const CORP_ID: i64 = 98_000_001;
 const OTHER_CORP: i64 = 98_000_002;
 const PILOT_ID: i64 = 2_115_300_001;
 const PILOT_SHIP: i64 = 2_115_350_001;
-const HUB_JITA: i64 = 1_000_900_001;
-const HUB_PERIMETER: i64 = 1_000_900_002;
-const HUB_SOBAS: i64 = 1_000_900_003;
-const JITA: u32 = 30_000_142;
-const PERIMETER: u32 = 30_000_144;
-const SOBAS: u32 = 30_001_363;
+const HUB_A: i64 = 1_000_900_001;
+const HUB_B: i64 = 1_000_900_002;
+const HUB_C: i64 = 1_000_900_003;
+const SYS_A: u32 = 30_000_669; // N3-JBX (connected sovereign null-sec)
+const SYS_B: u32 = 30_000_671; // GN-PDU (1 jump from N3-JBX)
+const SYS_C: u32 = 30_000_697; // 8Q-T7B (2 jumps from N3-JBX via GN-PDU)
 const TYPE_SOV_HUB: u32 = 32_458;
 const TYPE_SKYHOOK: u32 = eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK;
 const TYPE_MERC_DEN: u32 = 85_230;
@@ -131,13 +131,28 @@ fn id_req(field: u32, v: u64) -> Vec<u8> {
 // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
+    ]);
     let db_path = std::env::temp_dir().join(format!("evomu_shard4_sov_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
     let db = Arc::new(WorldRepository::open_sqlite(&db_path).expect("sqlite open"));
     let ctx = ServerContext::with_repository(Arc::clone(&db));
     common::pin_clock(&ctx);
 
-    let jita_planet = ctx.sde.celestials_in_system(JITA).into_iter().find(|c| c.group_id == 7).map(|c| c.celestial_id).unwrap_or(40_009_080);
+    let temp_planet = ctx
+        .sde
+        .celestials_in_system(SYS_A)
+        .into_iter()
+        .find(|c| c.type_id == 11)
+        .map(|c| c.celestial_id)
+        .unwrap_or(40_042_173);
 
     db.with_mut_snapshot(|snap| {
         snap.accounts.insert("sov_dir".into(), AccountRecord {
@@ -157,9 +172,9 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
             war_faction_id: None,
             station_id: None,
             structure_id: None,
-            solar_system_id: JITA,
-            constellation_id: 20_000_020,
-            region_id: 10_000_002,
+            solar_system_id: SYS_A,
+            constellation_id: 20_000_097,
+            region_id: 10_000_007,
             active_ship_id: PILOT_SHIP,
             balance: IskCents(10_000_000_00),
             plex_balance: 50,
@@ -192,17 +207,17 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
         snap.corporations.entry(CORP_ID).or_default().ceo_id = PILOT_ID;
         snap.corporations.entry(CORP_ID).or_default().members.insert(PILOT_ID);
         snap.corporations.entry(CORP_ID).or_default().member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
-        snap.structures.insert(HUB_JITA, structure(HUB_JITA, CORP_ID, JITA, TYPE_SOV_HUB));
-        snap.structures.insert(HUB_PERIMETER, structure(HUB_PERIMETER, CORP_ID, PERIMETER, TYPE_SOV_HUB));
-        snap.structures.insert(HUB_SOBAS, structure(HUB_SOBAS, CORP_ID, SOBAS, TYPE_SOV_HUB));
-        snap.structures.insert(1_000_910_001, structure(1_000_910_001, CORP_ID, JITA, TYPE_SKYHOOK));
-        snap.sov_runtime.skyhook_planets.insert(1_000_910_001, jita_planet);
+        snap.structures.insert(HUB_A, structure(HUB_A, CORP_ID, SYS_A, TYPE_SOV_HUB));
+        snap.structures.insert(HUB_B, structure(HUB_B, CORP_ID, SYS_B, TYPE_SOV_HUB));
+        snap.structures.insert(HUB_C, structure(HUB_C, CORP_ID, SYS_C, TYPE_SOV_HUB));
+        snap.structures.insert(1_000_910_001, structure(1_000_910_001, CORP_ID, SYS_A, TYPE_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(1_000_910_001, temp_planet);
         snap.sov_runtime.skyhook_active.insert(1_000_910_001, true);
 
         for (id, ty, qty, loc) in [
             (991_001, TYPE_MAGMATIC_GAS, 200, PILOT_SHIP),
-            (991_002, STABILITY_GEN, 1, HUB_JITA),
-            (991_003, MINOR_THREAT, 1, HUB_JITA),
+            (991_002, STABILITY_GEN, 1, HUB_A),
+            (991_003, MINOR_THREAT, 1, HUB_A),
         ] {
             snap.items.insert(id, InventoryItemRecord {
                 item_id: id,
@@ -225,14 +240,14 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
     assert_eq!(unfueled_def.fuel_per_hour, 0);
     assert_eq!(unfueled_def.fuel_startup, 0);
 
-    let mut dir = sess(30, PILOT_ID, CORP_ID, JITA, corp_roles::ROLE_DIRECTOR);
+    let mut dir = sess(30, PILOT_ID, CORP_ID, SYS_A, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut dir).await;
 
-    // 2. Add 100 Magmatic Gas to HUB_JITA and configure STABILITY_GEN online (consumes 14 startup fuel)
+    // 2. Add 100 Magmatic Gas to HUB_A and configure STABILITY_GEN online (consumes 14 startup fuel)
     let mut fuel_add = Vec::new();
     encode_bytes_field(1, &idm(991_001), &mut fuel_add);
     encode_varint_field(2, 100, &mut fuel_add);
-    encode_bytes_field(3, &idm(HUB_JITA as u64), &mut fuel_add);
+    encode_bytes_field(3, &idm(HUB_A as u64), &mut fuel_add);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add).await.status_code, STATUS_OK);
 
     let mut cfg_online = Vec::new();
@@ -241,12 +256,12 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
     encode_varint_field(2, 1, &mut up_cfg);
     encode_bytes_field(1, &idm(991_002), &mut cfg_online);
     encode_bytes_field(2, &up_cfg, &mut cfg_online);
-    encode_bytes_field(3, &idm(HUB_JITA as u64), &mut cfg_online);
+    encode_bytes_field(3, &idm(HUB_A as u64), &mut cfg_online);
     let up_rsp = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", cfg_online).await;
     assert_eq!(up_rsp.status_code, STATUS_OK, "ProcessConfigurationRequest failed: {}", up_rsp.status_message);
 
     // 100 added - 14 startup fuel = 86 remaining immediately after online transition
-    let fuel_get = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_req(1, HUB_JITA as u64)).await;
+    let fuel_get = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.fuel.api.GetRequest", id_req(1, HUB_A as u64)).await;
     assert_eq!(fuel_get.status_code, STATUS_OK);
     let fg_wm = WireMessage::decode(&fuel_get.payload.unwrap().value).unwrap();
     let gas_rem = fg_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| {
@@ -255,54 +270,54 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
     assert_eq!(gas_rem, 86, "startup fuel of 14 units must be deducted when upgrade comes online");
 
     // 3. Configure multi-hop workforce Export -> Transit relay -> Import
-    let hops = systems_within_jumps(&ctx.sde, JITA, 2);
-    assert!(hops.contains_key(&PERIMETER));
+    let hops = systems_within_jumps(&ctx.sde, SYS_A, 2);
+    assert!(hops.contains_key(&SYS_B));
     db.with_snapshot(|snap| {
-        let reachable = networkable_hubs(snap, &ctx.sde, HUB_JITA);
-        assert!(reachable.iter().any(|&(hid, _)| hid == HUB_PERIMETER));
+        let reachable = networkable_hubs(snap, &ctx.sde, HUB_A);
+        assert!(reachable.iter().any(|&(hid, _)| hid == HUB_B));
     });
 
     let mut exp = Vec::new();
-    encode_bytes_field(3, &idm(u64::from(PERIMETER)), &mut exp);
+    encode_bytes_field(3, &idm(u64::from(SYS_B)), &mut exp);
     encode_varint_field(2, 500, &mut exp);
     let mut exp_mode = Vec::new();
     encode_bytes_field(3, &exp, &mut exp_mode);
     let mut wf_req = Vec::new();
-    encode_bytes_field(1, &idm(HUB_JITA as u64), &mut wf_req);
+    encode_bytes_field(1, &idm(HUB_A as u64), &mut wf_req);
     encode_bytes_field(2, &exp_mode, &mut wf_req);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", wf_req).await.status_code, STATUS_OK);
 
     let mut transit = Vec::new();
-    encode_bytes_field(1, &idm(u64::from(JITA)), &mut transit);
-    encode_bytes_field(2, &idm(u64::from(SOBAS)), &mut transit);
+    encode_bytes_field(1, &idm(u64::from(SYS_A)), &mut transit);
+    encode_bytes_field(2, &idm(u64::from(SYS_C)), &mut transit);
     let mut tr_mode = Vec::new();
     encode_bytes_field(4, &transit, &mut tr_mode);
     let mut tr_req = Vec::new();
-    encode_bytes_field(1, &idm(HUB_PERIMETER as u64), &mut tr_req);
+    encode_bytes_field(1, &idm(HUB_B as u64), &mut tr_req);
     encode_bytes_field(2, &tr_mode, &mut tr_req);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", tr_req).await.status_code, STATUS_OK);
 
     let mut imp_src = Vec::new();
-    encode_bytes_field(1, &idm(u64::from(JITA)), &mut imp_src);
+    encode_bytes_field(1, &idm(u64::from(SYS_A)), &mut imp_src);
     let mut imp_cfg = Vec::new();
     encode_bytes_field(1, &imp_src, &mut imp_cfg);
     let mut imp_mode = Vec::new();
     encode_bytes_field(2, &imp_cfg, &mut imp_mode);
     let mut imp_req = Vec::new();
-    encode_bytes_field(1, &idm(HUB_SOBAS as u64), &mut imp_req);
+    encode_bytes_field(1, &idm(HUB_C as u64), &mut imp_req);
     encode_bytes_field(2, &imp_mode, &mut imp_req);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", imp_req).await.status_code, STATUS_OK);
     db.with_snapshot(|snap| {
         assert_eq!(
-            eve_server::services::quasar_sov_workforce::imports(snap, &ctx.sde, HUB_SOBAS),
-            vec![(JITA, 500)],
+            eve_server::services::quasar_sov_workforce::imports(snap, &ctx.sde, HUB_C),
+            vec![(SYS_A, 500)],
         );
     });
 
     let planet_ver = qrpc(&ctx, &mut dir, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
     assert_eq!(planet_ver.status_code, STATUS_OK);
     assert!(planet_ver.payload.unwrap().value.len() >= 2);
-    let hub_res = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_JITA as u64)).await;
+    let hub_res = qrpc(&ctx, &mut dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await;
     assert_eq!(hub_res.status_code, STATUS_OK);
     assert!(hub_res.payload.unwrap().value.len() >= 2);
 
@@ -315,11 +330,12 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
     drop(db);
     let reopened = WorldRepository::open_sqlite(&db_path).expect("reopen sqlite");
     reopened.with_snapshot(|snap| {
-        assert!(snap.sov_runtime.sov_hubs.contains_key(&HUB_JITA));
+        assert!(snap.sov_runtime.sov_hubs.contains_key(&HUB_A));
     });
     let _ = std::fs::remove_file(&db_path);
 }
 
+// parity: feat:sovereignty.skyhook-reagent-maturity
 // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
 // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
@@ -329,21 +345,35 @@ async fn sovereignty_hub_startup_fuel_workforce_relay_and_planet_resources() {
 // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
+    eve_testkit::attest(&[
+        "feat:sovereignty.skyhook-reagent-maturity",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
+    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
     let skyhook_id = 1_000_920_001i64;
     let den_id = 1_000_920_010i64;
-    let mut jita_planets: Vec<i64> = ctx.sde.celestials_in_system(JITA).into_iter().filter(|c| c.group_id == 7).map(|c| c.celestial_id).collect();
-    jita_planets.sort_unstable();
-    let planet_a = *jita_planets.first().unwrap_or(&40_009_080);
+    let sys_cels = ctx.sde.celestials_in_system(SYS_A);
+    let lava_planet = sys_cels.iter().find(|c| c.type_id == 2015).map(|c| c.celestial_id).expect("N3-JBX Lava planet");
+    let ice_planet = sys_cels.iter().find(|c| c.type_id == 12).map(|c| c.celestial_id).expect("N3-JBX Ice planet");
+    let oceanic_planet = sys_cels.iter().find(|c| c.type_id == 2014).map(|c| c.celestial_id).expect("N3-JBX Oceanic planet");
 
-    let y_default = planet_hourly_reagent_yield(&ctx.sde, Some(planet_a), Some(JITA), 81_143);
-    assert!(y_default >= 40, "skyhook yield must reflect planet resource richness & radius");
+    let y_lava = planet_hourly_reagent_yield(&ctx.sde, Some(lava_planet), Some(SYS_A), 81_143);
+    assert!((520..=1_116).contains(&y_lava), "Lava yield must follow V24 curve: {y_lava}");
+    let y_ice = planet_hourly_reagent_yield(&ctx.sde, Some(ice_planet), Some(SYS_A), 81_144);
+    assert!((22..=46).contains(&y_ice), "Ice yield must follow V24 curve: {y_ice}");
+    assert_eq!(planet_hourly_reagent_yield(&ctx.sde, Some(oceanic_planet), Some(SYS_A), 81_144), 0, "Oceanic produces 0 reagents");
 
     assert_eq!(stage_infomorph_band(1), (65, 100));
     assert_eq!(stage_infomorph_band(5), (78, 120));
-    let id_rate = planet_scaled_infomorphs_per_hour(Some(&ctx.sde), JITA, planet_a, 1);
+    let id_rate = planet_scaled_infomorphs_per_hour(Some(&ctx.sde), SYS_A, lava_planet, 1);
     assert!((65..=100).contains(&id_rate));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -356,9 +386,9 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
             war_faction_id: None,
             station_id: None,
             structure_id: None,
-            solar_system_id: JITA,
-            constellation_id: 20_000_020,
-            region_id: 10_000_002,
+            solar_system_id: SYS_A,
+            constellation_id: 20_000_097,
+            region_id: 10_000_007,
             active_ship_id: 1_000_920_050,
             balance: eve_db::IskCents(10_000_000_00),
             plex_balance: 0,
@@ -391,18 +421,19 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
         snap.corporations.entry(CORP_ID).or_default().ceo_id = PILOT_ID;
         snap.corporations.entry(CORP_ID).or_default().members.insert(PILOT_ID);
         snap.corporations.entry(CORP_ID).or_default().member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
-        snap.structures.insert(skyhook_id, structure(skyhook_id, CORP_ID, JITA, TYPE_SKYHOOK));
-        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_a);
+        snap.structures.insert(skyhook_id, structure(skyhook_id, CORP_ID, SYS_A, TYPE_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, lava_planet);
         snap.sov_runtime.skyhook_active.insert(skyhook_id, false);
+        snap.sov_runtime.skyhook_reagents.insert(skyhook_id, (TYPE_MAGMATIC_GAS, 0));
 
-        snap.structures.insert(den_id, structure(den_id, CORP_ID, JITA, TYPE_MERC_DEN));
+        snap.structures.insert(den_id, structure(den_id, CORP_ID, SYS_A, TYPE_MERC_DEN));
         snap.sov_runtime.mercenary_dens.insert(den_id, PersistedMercenaryDen {
             den_id,
             type_id: TYPE_MERC_DEN,
             owner_char_id: PILOT_ID,
             skyhook_id,
-            solar_system_id: JITA,
-            planet_id: planet_a,
+            solar_system_id: SYS_A,
+            planet_id: lava_planet,
             enabled: true,
             cargo_extraction_enabled: false,
             development_level: 1,
@@ -413,15 +444,24 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
         });
     });
 
-    let mut dir = sess(31, PILOT_ID, CORP_ID, JITA, corp_roles::ROLE_DIRECTOR);
-    let mut outsider = sess(32, PILOT_ID + 1, OTHER_CORP, JITA, corp_roles::ROLE_DIRECTOR);
+    let mut dir = sess(31, PILOT_ID, CORP_ID, SYS_A, corp_roles::ROLE_DIRECTOR);
+    let mut outsider = sess(32, PILOT_ID + 1, OTHER_CORP, SYS_A, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut dir).await;
 
     assert_eq!(qrpc(&ctx, &mut outsider, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_FORBIDDEN);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
     let sky_get = qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await;
     assert_eq!(sky_get.status_code, STATUS_OK);
-    assert!(sky_get.payload.unwrap().value.len() >= 2);
+    let sky_wm = WireMessage::decode(&sky_get.payload.unwrap().value).unwrap();
+    assert!(sky_wm.fields.iter().all(|f| f.field_number != 6), "skyhook field 6 must not emit planet ID");
+    let ver_bytes = sky_wm
+        .fields
+        .iter()
+        .find(|f| f.field_number == 8)
+        .and_then(|f| f.value.as_bytes())
+        .expect("skyhook field 8 SemanticVersion");
+    let ver_wm = WireMessage::decode(ver_bytes).unwrap();
+    assert_eq!(ver_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
     assert_eq!(qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_FORBIDDEN);
 
@@ -437,11 +477,23 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
     let acts_rsp = qrpc(&ctx, &mut dir, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
     assert_eq!(acts_rsp.status_code, STATUS_OK);
     let acts_wm = WireMessage::decode(&acts_rsp.payload.unwrap().value).unwrap();
-    let act_uuid = acts_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| {
-        let entry = WireMessage::decode(f.value.as_bytes()?).ok()?;
-        let id_m = WireMessage::decode(entry.fields.iter().find(|ef| ef.field_number == 1)?.value.as_bytes()?).ok()?;
-        id_m.fields.first()?.value.as_bytes().map(|b| b.to_vec())
-    }).expect("mercenary den activity uuid");
+    let act_entry = acts_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| WireMessage::decode(f.value.as_bytes()?).ok()).expect("mercenary den activity entry");
+    let act_uuid = WireMessage::decode(act_entry.fields.iter().find(|ef| ef.field_number == 1).unwrap().value.as_bytes().unwrap())
+        .unwrap()
+        .fields[0]
+        .value
+        .as_bytes()
+        .unwrap()
+        .to_vec();
+    let act_attrs = WireMessage::decode(act_entry.fields.iter().find(|ef| ef.field_number == 2).unwrap().value.as_bytes().unwrap()).unwrap();
+    let act_tmpl = WireMessage::decode(act_attrs.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let dungeon_id = WireMessage::decode(act_tmpl.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_bytes().unwrap())
+        .unwrap()
+        .fields[0]
+        .value
+        .as_varint()
+        .unwrap();
+    assert!(matches!(dungeon_id, 12_367 | 12_368 | 12_369), "activity must use real SDE archetype-80 dungeon ID, got {dungeon_id}");
     let mut s_act = Vec::new();
     let mut uuid_m = Vec::new();
     encode_bytes_field(1, &act_uuid, &mut uuid_m);
@@ -458,6 +510,60 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
             simulate_den_for_planet(den, &mut rem, Some(&ctx.sde), ctx.now_unix() + 7_200);
             assert!(den.infomorphs > 0);
         }
+        let now = ctx.now_unix();
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 50, now));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 150));
+        snap.sov_runtime.skyhook_maturity_rem.insert(skyhook_id, (50, 123));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, now);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_id, (now, now + 3_600));
+        snap.sov_runtime.skyhook_hackable.insert(skyhook_id, true);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(skyhook_id, (PILOT_ID, PILOT_SHIP, now + 600, 200.0));
+        snap.structures.get_mut(&skyhook_id).unwrap().state = "Destroyed".into();
+    });
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64))
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
+    let local_after_destroy = qrpc(&ctx, &mut dir, "eve_public.sovereignty.skyhook.api.GetAllLocalRequest", Vec::new()).await;
+    assert_eq!(local_after_destroy.status_code, STATUS_OK);
+    let local_wm = WireMessage::decode(&local_after_destroy.payload.unwrap().value).unwrap();
+    assert!(
+        local_wm.fields.iter().all(|f| f.field_number != 2),
+        "destroyed Skyhook must not be listed in GetAllLocalResponse"
+    );
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&skyhook_id));
     });
 }
 
@@ -469,6 +575,7 @@ async fn sovereignty_skyhook_reagent_scaling_and_mercenary_den() {
 // parity: quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pirate_insurgency_corruption_suppression_and_space_cdn() {
+    const JITA: u32 = 30_000_142;
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -533,4 +640,413 @@ async fn pirate_insurgency_corruption_suppression_and_space_cdn() {
     let cdn_url = std::str::from_utf8(cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("CDN URL")).unwrap();
     assert!(cdn_url.contains("/maptags/v24.2."));
     assert!(cdn_url.ends_with("/universe.fb"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skyhook_live_combat_destruction_lifecycle_and_hub_reconciliation() {
+    use eve_db::{PersistedHubUpgrade, PersistedSovHubData, PersistedWorkforceMode};
+    use eve_destiny::{Ball, DamageVector, MovementMode};
+    use eve_server::services::quasar_sov_hub::{planet_yield_for_planet, star_power_for_system};
+    use eve_server::services::quasar_sov_workforce::exported_amount;
+    use eve_server::services::sov_gameplay::sov_gameplay_skyhook::{
+        SKYHOOK_BASE_ARMOR_HP, SKYHOOK_BASE_HULL_HP, SKYHOOK_BASE_SHIELD_HP,
+    };
+    use eve_server::services::station_structure::structure_lifecycle_rpc::apply_live_combat_damage_to_upwell_structure;
+    use glam::DVec3;
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let (sys_a, planet_id, _planet_wf, sys_b) = std::iter::once(SYS_A)
+        .chain(systems_within_jumps(&ctx.sde, SYS_A, 6).into_keys())
+        .filter(|&sa| star_power_for_system(&ctx.sde, sa) >= 250)
+        .find_map(|sa| {
+            let planet = ctx
+                .sde
+                .celestials_in_system_slice(sa)
+                .iter()
+                .filter(|c| c.group_id == 7)
+                .find_map(|c| {
+                    let (_, wf) = planet_yield_for_planet(c.type_id, c.radius);
+                    (wf >= 3_000).then_some((c.celestial_id, wf))
+                })?;
+            let nb = systems_within_jumps(&ctx.sde, sa, 1)
+                .into_iter()
+                .find(|&(sb, hops)| {
+                    hops == 1 && sb != sa && star_power_for_system(&ctx.sde, sb) >= 250
+                })?
+                .0;
+            Some((sa, planet.0, planet.1, nb))
+        })
+        .expect("null-sec system pair with >=3000 workforce planet and neighbor");
+
+    let attacker_id = PILOT_ID + 2;
+    let skyhook_id = 1_000_950_001_i64;
+    let hub_a = 1_000_950_010_i64;
+    let hub_b = 1_000_950_011_i64;
+    let export_amt = 1_500_u64;
+    let pos = [200_000.0, 0.0, 0.0];
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let now = ctx.now_unix();
+        for (cid, corp, sys) in [
+            (PILOT_ID, CORP_ID, sys_a),
+            (attacker_id, OTHER_CORP, sys_a),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Pilot {cid}"),
+                    corporation_id: corp,
+                    solar_system_id: sys,
+                    constellation_id: 20_000_097,
+                    region_id: 10_000_007,
+                    active_ship_id: PILOT_SHIP + cid - PILOT_ID,
+                    balance: IskCents(10_000_000_00),
+                    security_status: 0.0,
+                    clone_grade: 2,
+                    home_station_id: 60_003_760,
+                    race_id: 1,
+                    bloodline_id: 1,
+                    ancestry_id: 11,
+                    school_id: 17,
+                    neural: NeuralAttributes::default(),
+                    skill_points: 5_000_000.0,
+                    create_date_unix: 1_704_067_200,
+                    version: 1,
+                    system_epoch: 1,
+                    ..Default::default()
+                },
+            );
+            snap.corporations.entry(corp).or_default().corporation_id = corp;
+            snap.corporations.entry(corp).or_default().ceo_id = cid;
+            snap.corporations.entry(corp).or_default().members.insert(cid);
+            snap.corporations
+                .entry(corp)
+                .or_default()
+                .member_roles
+                .insert(cid, corp_roles::ROLE_DIRECTOR);
+        }
+
+        let mut sh = structure(skyhook_id, CORP_ID, sys_a, TYPE_SKYHOOK);
+        sh.position = pos;
+        sh.shield_hp = SKYHOOK_BASE_SHIELD_HP;
+        sh.armor_hp = SKYHOOK_BASE_ARMOR_HP;
+        sh.hull_hp = SKYHOOK_BASE_HULL_HP;
+        snap.structures.insert(skyhook_id, sh);
+        snap.structures
+            .insert(hub_a, structure(hub_a, CORP_ID, sys_a, TYPE_SOV_HUB));
+        snap.structures
+            .insert(hub_b, structure(hub_b, CORP_ID, sys_b, TYPE_SOV_HUB));
+
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 50, now));
+        snap.sov_runtime
+            .skyhook_reagents
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 150));
+        snap.sov_runtime.skyhook_maturity_rem.insert(skyhook_id, (25, 10));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, now);
+        snap.sov_runtime
+            .skyhook_theft_windows
+            .insert(skyhook_id, (now + 50_000, now + 57_200));
+        snap.sov_runtime.skyhook_hackable.insert(skyhook_id, false);
+        snap.sov_runtime
+            .skyhook_silo_links
+            .insert(skyhook_id, (attacker_id, PILOT_SHIP + 2, now + 600, 1_000.0));
+
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: export_amt,
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_h = ctx.systems.get_or_spawn(sys_a);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: skyhook_id,
+                type_id: TYPE_SKYHOOK,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e8,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            },
+            ctx.build_type_combat_state(TYPE_SKYHOOK),
+            eve_destiny::SlimItemMeta::default(),
+        )
+        .await;
+
+    let mut dir = sess(40, PILOT_ID, CORP_ID, sys_a, corp_roles::ROLE_DIRECTOR);
+    let mut rx = subscribe(&ctx, &mut dir).await;
+    drain_notices(&mut rx);
+
+    // 1. Deplete shield outside theft window -> ArmorReinforced; further hit rejected.
+    let s_hit = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 20_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("shield combat hit")
+    .expect("skyhook outcome");
+    assert!(!s_hit.destroyed);
+    assert!(s_hit.became_invulnerable);
+    assert_eq!(s_hit.shield_ratio, 0.0);
+    assert_eq!(s_hit.armor_ratio, 1.0);
+    assert_eq!(s_hit.hull_ratio, 1.0);
+    assert!(s_hit.applied_damage > 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ArmorReinforced");
+    });
+    assert_eq!(
+        apply_live_combat_damage_to_upwell_structure(
+            &ctx,
+            &sys_h,
+            sys_a,
+            attacker_id,
+            skyhook_id,
+            DamageVector {
+                em: 1_000.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+            1.0,
+            ctx.now_unix(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "StructureInvulnerable"
+    );
+
+    // 2. Advance past 24h reinforcement -> partial armor damage, then armor depletion -> HullVulnerable.
+    ctx.advance_secs(86_400);
+    let a_hit_1 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 5_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("armor hit 1")
+    .expect("armor outcome 1");
+    assert!(!a_hit_1.destroyed);
+    assert!(!a_hit_1.became_invulnerable);
+    assert_eq!(a_hit_1.shield_ratio, 0.0);
+    assert!(a_hit_1.armor_ratio > 0.0 && a_hit_1.armor_ratio < 1.0);
+    assert_eq!(a_hit_1.hull_ratio, 1.0);
+    assert!(a_hit_1.applied_damage > 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "ArmorVulnerable");
+    });
+
+    let a_hit_2 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 50_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("armor hit 2")
+    .expect("armor outcome 2");
+    assert!(!a_hit_2.destroyed);
+    assert_eq!(a_hit_2.armor_ratio, 0.0);
+    assert_eq!(a_hit_2.hull_ratio, 1.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.structures[&skyhook_id].state, "HullVulnerable");
+    });
+
+    // 3. Partial hull damage then lethal hull damage -> Destroyed + wreck + killmail + Hub/workforce cascade.
+    let h_hit_1 = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 4_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("hull hit 1")
+    .expect("hull outcome 1");
+    assert!(!h_hit_1.destroyed);
+    assert_eq!(h_hit_1.armor_ratio, 0.0);
+    assert!(h_hit_1.hull_ratio > 0.0 && h_hit_1.hull_ratio < 1.0);
+
+    drain_notices(&mut rx);
+    let h_kill = apply_live_combat_damage_to_upwell_structure(
+        &ctx,
+        &sys_h,
+        sys_a,
+        attacker_id,
+        skyhook_id,
+        DamageVector {
+            em: 50_000.0,
+            thermal: 0.0,
+            kinetic: 0.0,
+            explosive: 0.0,
+        },
+        1.0,
+        ctx.now_unix(),
+    )
+    .await
+    .expect("lethal hull hit")
+    .expect("kill outcome");
+    assert!(h_kill.destroyed);
+    assert!(h_kill.became_invulnerable);
+    assert_eq!(h_kill.shield_ratio, 0.0);
+    assert_eq!(h_kill.armor_ratio, 0.0);
+    assert_eq!(h_kill.hull_ratio, 0.0);
+    assert!(h_kill.applied_damage > 0.0);
+
+    let balls = sys_h.list_balls().await.expect("list balls");
+    assert!(
+        !balls.iter().any(|b| b.id == skyhook_id),
+        "destroyed Skyhook ball must leave space"
+    );
+    let expected_wreck_type = ctx
+        .sde
+        .resolve_wreck_type_id(TYPE_SKYHOOK, None)
+        .unwrap_or(26557);
+    ctx.db.with_snapshot(|snap| {
+        let st = &snap.structures[&skyhook_id];
+        assert_eq!(st.state, "Destroyed");
+        assert_eq!(st.shield_hp, 0.0);
+        assert_eq!(st.armor_hp, 0.0);
+        assert_eq!(st.hull_hp, 0.0);
+
+        assert!(!snap.sov_runtime.skyhook_planets.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_active.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_reagents.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_maturity_rem.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_last_harvest_unix.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_theft_windows.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_hackable.contains_key(&skyhook_id));
+        assert!(!snap.sov_runtime.skyhook_silo_links.contains_key(&skyhook_id));
+
+        assert!(
+            snap.killmails.values().any(|km| km.ship_type_id == TYPE_SKYHOOK
+                && km.attacker_character_id == attacker_id
+                && km.victim_corp_id == CORP_ID),
+            "destroyed Skyhook must emit a killmail"
+        );
+        let wreck_item = snap
+            .items
+            .values()
+            .find(|it| it.type_id == expected_wreck_type && it.location_id == i64::from(sys_a))
+            .expect("Skyhook wreck item spawned in system");
+        assert!(
+            balls.iter().any(|b| b.id == wreck_item.item_id),
+            "Skyhook wreck ball must exist in space"
+        );
+
+        assert!(snap.sov_runtime.sov_hubs[&hub_a].upgrades[0].low_power);
+        assert_eq!(exported_amount(snap, hub_a), 0);
+        assert!(snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power);
+    });
+
+    let notices = drain_notices(&mut rx);
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice"));
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice"));
+    assert!(notices
+        .iter()
+        .any(|n| n == "eve_public.sovereignty.resource.transfer.workforce.api.StateChangedNotice"));
+
+    assert_eq!(
+        apply_live_combat_damage_to_upwell_structure(
+            &ctx,
+            &sys_h,
+            sys_a,
+            attacker_id,
+            skyhook_id,
+            DamageVector {
+                em: 1_000.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+            1.0,
+            ctx.now_unix(),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "StructureAlreadyDestroyed"
+    );
 }

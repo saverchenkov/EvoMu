@@ -837,27 +837,43 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
 
     let defs_wm = wm(&payload.value);
     let planet_defs = fields(&defs_wm, 1);
-    assert_eq!(planet_defs.len(), 8, "Expected 8 planetary definition entries");
+    assert!(
+        planet_defs.len() >= 1_000,
+        "Expected null-sec celestial planet definitions (got {})",
+        planet_defs.len()
+    );
 
+    let mut reagent_planet_count = 0usize;
     for pdef in &planet_defs {
         let id_sub = field_msg(pdef, 1).expect("Identifier submessage");
-        let type_id = varint(&id_sub, 1).expect("type_id") as u32;
-        let expected = eve_server::services::quasar_sov_hub::PLANET_RESOURCE_TABLE.iter().find(|row| row.0 == type_id).expect("known planet type");
+        let planet_id = varint(&id_sub, 1).expect("planet celestial_id") as i64;
+        let cel = ctx.sde.celestial(planet_id).expect("known null-sec SDE planet celestial");
+        let (exp_power, exp_workforce) =
+            eve_server::services::quasar_sov_hub::planet_yield_for_planet(cel.type_id, cel.radius);
         let power = varint(pdef, 2).unwrap_or(0);
         let workforce = varint(pdef, 3).unwrap_or(0);
-        assert_eq!(power, expected.2);
-        assert_eq!(workforce, expected.3);
+        assert_eq!(power, exp_power);
+        assert_eq!(workforce, exp_workforce);
 
-        // If reagent definition (field 4) is present, check nested configuration
+        // If reagent definition (field 4) is present, check nested configuration (Ice/Lava only)
         if let Some(r_def) = field_msg(pdef, 4) {
+            reagent_planet_count += 1;
             let r_id = field_msg(&r_def, 1).expect("reagent Identifier");
             let reagent_type_id = varint(&r_id, 1).expect("reagent type_id");
-            assert!(reagent_type_id > 0);
+            assert!(matches!(reagent_type_id as u32, 81_143 | 81_144));
             let amt = field_msg(&r_def, 2).expect("reagent yield amount");
             let rate = varint(&amt, 1).expect("hourly yield");
-            assert_eq!(rate, eve_server::services::quasar_sov_skyhook::planet_type_base_hourly_reagent_yield(type_id));
+            assert_eq!(
+                rate,
+                eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield_for_planet(
+                    cel.type_id,
+                    cel.radius
+                )
+            );
+            assert_eq!(varint(&amt, 3), Some(50));
         }
     }
+    assert!(reagent_planet_count >= 100);
 
     // Specification version in field 2: major = 1, minor = 0, patch = 0
     let ver_spec = field_msg(&defs_wm, 2).expect("Specification version");
@@ -865,7 +881,7 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     assert_eq!(varint(&ver_spec, 2), Some(0)); // minor
     assert_eq!(varint(&ver_spec, 3), Some(0)); // patch
 
-    // 1b. Cache negotiation: when client supplies known version (1.0.0), definitions list is omitted
+    // 1b. Cache negotiation: when client supplies matching known version (1.0.0), returns 304 Not Modified
     let mut known_req = Vec::new();
     let mut ver_buf = Vec::new();
     encode_varint_field(1, 1, &mut ver_buf); // major
@@ -874,32 +890,28 @@ async fn test_quasar_sovereignty_resource_planet_requests() {
     encode_bytes_field(1, &ver_buf, &mut known_req); // field 1: known_version
 
     let cache_hit_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", known_req).await;
-    assert_eq!(cache_hit_resp.status_code, STATUS_OK);
-    let cache_hit_payload = cache_hit_resp.payload.expect("payload on cache hit");
-    let cache_wm = wm(&cache_hit_payload.value);
-    assert!(fields(&cache_wm, 1).is_empty(), "Cached definitions must be omitted on version match");
-    assert!(field_msg(&cache_wm, 2).is_some(), "Specification version still returned");
+    assert_eq!(cache_hit_resp.status_code, eve_server::quasar_gateway::STATUS_NOT_MODIFIED);
 
-    // 1c. Explicit no_known_version = true in oneof -> returns all 8 definitions
+    // 1c. Explicit no_known_version = true in oneof -> returns all definitions
     let mut no_known_req = Vec::new();
     encode_varint_field(2, 1, &mut no_known_req); // field 2: no_known_version = true
     let no_known_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetAllDefinitionsRequest", no_known_req).await;
     assert_eq!(no_known_resp.status_code, STATUS_OK);
     let no_known_payload = no_known_resp.payload.expect("payload present");
     let no_known_wm = wm(&no_known_payload.value);
-    assert_eq!(fields(&no_known_wm, 1).len(), 8, "All definitions returned when no_known_version is true");
+    assert_eq!(fields(&no_known_wm, 1).len(), planet_defs.len(), "All definitions returned when no_known_version is true");
 
     // =========================================================================
     // 2. GetDefinitionsVersionRequest
     // =========================================================================
-    // 2a. Default request (empty payload) -> returns STATUS_OK, GetDefinitionsVersionResponse, 8 definitions
+    // 2a. Default request (empty payload) -> returns STATUS_OK, GetDefinitionsVersionResponse, matching definitions count
     let ver_req_resp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionRequest", Vec::new()).await;
     assert_eq!(ver_req_resp.status_code, STATUS_OK);
     let ver_payload = ver_req_resp.payload.expect("payload present");
     assert_eq!(ver_payload.type_url, format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.planet.api.GetDefinitionsVersionResponse"));
     assert!(!ver_payload.value.is_empty(), "version response payload must not be empty");
     let ver_wm = wm(&ver_payload.value);
-    assert_eq!(fields(&ver_wm, 1).len(), 8, "Expected 8 definitions in version response");
+    assert_eq!(fields(&ver_wm, 1).len(), planet_defs.len(), "Expected matching definitions count in version response");
 
     // 2b. Explicit valid specification version { major: 1, minor: 0, patch: 0 } -> STATUS_OK
     let mut valid_spec_req = Vec::new();

@@ -32,25 +32,55 @@ pub const TYPE_INFOMORPH_DECRYPTION_KEY: u32 = 85_746;
 /// V24 SDE & Wiki (`Mercenary_Den_Guide.md`): absolute number of dens a character may own.
 pub const MERCENARY_DEN_ABSOLUTE_MAX: u64 = 5;
 /// Hourly Infomorph Decryption Key generation tick (`3,600 s`).
+/// `// DERIVED:` Evolution, MTO cooldowns, rewards, and hourly IDK bands are server-side V24 parameters
+/// (absent from client `.fsdbinary` tables); static capacities/dungeons/planet radii come from SDE.
 pub const INFOMORPH_UNIT_SECS: u64 = 3_600;
-/// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development / Anarchy evolution tick (`+5` points per `86,400 s`).
+/// `// DERIVED:` Passive Development / Anarchy evolution tick (`+5` points per `86,400 s`).
 pub const EVOLUTION_UNIT_SECS: u64 = 86_400;
-/// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development and Anarchy gain per 24h cycle.
+/// `// DERIVED:` Passive Development and Anarchy gain per 24h cycle (`Mercenary_Tactical_Operation.md:26,39`).
 pub const EVOLUTION_DELTA_PER_DAY: u32 = 5;
-/// Wiki (`Mercenary_Tactical_Operation.md:14`, "MTOs spawn approximately every 3 days from the time
-/// they are onlined"): seconds between MTO generation passes (`72h`).
+/// `// DERIVED:` MTO generation pass interval (`72h` per `Mercenary_Tactical_Operation.md:14`).
 pub const ACTIVITY_GENERATION_SECS: u64 = 3 * 86_400;
-/// Wiki (`Mercenary_Tactical_Operation.md:14`): lifetime of a generated (unstarted) operation (`3` days).
+/// `// DERIVED:` Lifetime of an unstarted operation (`3` days per `Mercenary_Tactical_Operation.md:14`).
 pub const ACTIVITY_LIFETIME_SECS: u64 = 3 * 86_400;
 const MAX_LEVEL: u32 = 100;
-/// V24 SDE (`type_id = 85230` Mercenary Den `capacity = 3000.0`): infomorph bay capacity.
+/// Fallback Mercenary Den bay capacity when an SDE instance is unavailable (`sde_types[85230].capacity = 3000.0`).
 pub const INFOMORPH_CARGO_CAPACITY: u32 = 3_000;
-/// Wiki (`Mercenary_Tactical_Operation.md:28-34,41-47`): Development / Anarchy progress bounds per level (`0..=4` -> proto enum `1..=5`).
+/// `// DERIVED:` Development / Anarchy progress bounds per level (`0..=4` -> proto enum `1..=5`).
 pub const STAGE_BOUNDS: [(u32, u32); 5] = [(0, 19), (20, 39), (40, 69), (70, 99), (100, 100)];
+/// SDE `archetype_id` for Equinox Mercenary Tactical Operation dungeons (`sde_dungeons`).
+const MTO_DUNGEON_ARCHETYPE_ID: u32 = 80;
+/// SDE dungeon `12356` (`Mercenary Meeting Point`) is the fixed den hub template, not a spawnable MTO site.
+const MTO_DEN_HUB_DUNGEON_ID: u32 = 12_356;
+
+/// Reads Mercenary Den (`type_id = 85230`) bay capacity from SDE `sde_types.capacity` (`3,000` m³).
+pub fn den_cargo_capacity(sde: Option<&eve_sde::SdeRegistry>) -> u32 {
+    sde.and_then(|reg| reg.types.get(&super::sov_gameplay::TYPE_MERCENARY_DEN))
+        .and_then(|t| (t.capacity > 0.0).then_some(t.capacity.round() as u32))
+        .unwrap_or(INFOMORPH_CARGO_CAPACITY)
+}
 
 /// Infomorph bay capacity (`3,000` units from V24 SDE `type_id = 85230`).
 pub fn infomorph_cargo_capacity(_dev_stage: u32) -> u32 {
     INFOMORPH_CARGO_CAPACITY
+}
+
+/// Selects a real MTO site template `dungeon_id` from `sde_dungeons` (`archetype_id == 80`:
+/// `12367 Rogue Drone Emergence`, `12368 Drifter Muster`, `12369 Sansha Raiding Party`).
+pub fn mto_dungeon_id(sde: Option<&eve_sde::SdeRegistry>, seq: u64) -> u32 {
+    if let Some(reg) = sde {
+        let templates: Vec<u32> = reg
+            .dungeons_by_archetype(MTO_DUNGEON_ARCHETYPE_ID)
+            .into_iter()
+            .map(|d| d.dungeon_id)
+            .filter(|&id| id != MTO_DEN_HUB_DUNGEON_ID)
+            .collect();
+        if !templates.is_empty() {
+            return templates[(seq as usize) % templates.len()];
+        }
+    }
+    const FALLBACK_MTO_DUNGEONS: [u32; 3] = [12_367, 12_368, 12_369];
+    FALLBACK_MTO_DUNGEONS[(seq as usize) % FALLBACK_MTO_DUNGEONS.len()]
 }
 
 const EVOLUTION_NOTICE: &str = "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice";
@@ -77,7 +107,7 @@ pub fn infomorphs_per_hour(dev_stage: u32) -> u32 {
     }
 }
 
-/// V24 stage band `(min_idk_per_hr, max_idk_per_hr)` from `Mercenary_Tactical_Operation.md:28-34`.
+/// `// DERIVED:` V24 stage band `(min_idk_per_hr, max_idk_per_hr)` from `Mercenary_Tactical_Operation.md:28-34`.
 pub fn stage_infomorph_band(dev_stage: u32) -> (u32, u32) {
     match dev_stage {
         1 => (65, 100),
@@ -89,19 +119,15 @@ pub fn stage_infomorph_band(dev_stage: u32) -> (u32, u32) {
 }
 
 /// Planet-scaled V24 hourly Infomorph Decryption Key yield (`65..=120` IDK/hr across stages `1..=5`),
-/// scaling within each stage's V24 band by the temperate planet's SDE radius (`sde.celestials_in_system`).
+/// scaling within each stage's V24 band by the temperate planet's SDE radius (`sde.celestial`).
 pub fn planet_scaled_infomorphs_per_hour(
     sde: Option<&eve_sde::SdeRegistry>,
-    solar_system_id: u32,
+    _solar_system_id: u32,
     planet_id: i64,
     dev_stage: u32,
 ) -> u32 {
     let (min_r, max_r) = stage_infomorph_band(dev_stage);
-    let Some(planet) = sde.and_then(|reg| {
-        reg.celestials_in_system(solar_system_id)
-            .into_iter()
-            .find(|c| c.celestial_id == planet_id)
-    }) else {
+    let Some(planet) = sde.and_then(|reg| reg.celestial(planet_id)) else {
         return min_r;
     };
     let r_km = (planet.radius / 1_000.0).clamp(2_000.0, 12_000.0);
@@ -351,7 +377,12 @@ fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) 
     }
 }
 
-pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
+pub fn push_definitions_updated_notice_with_sde(
+    pending: &PendingNotices,
+    sde: Option<&eve_sde::SdeRegistry>,
+    den: &PersistedMercenaryDen,
+) {
+    let cap = den_cargo_capacity(sde);
     if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
         "quasar_sov_mercden.push_definitions_updated_notice",
         pb::message("eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice")
@@ -360,8 +391,8 @@ pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &Persisted
             .set_with("infomorphs", |i| {
                 fill_infomorphs_gen_definition(
                     i,
-                    INFOMORPH_CARGO_CAPACITY,
-                    None,
+                    cap,
+                    sde,
                     den.solar_system_id,
                     den.planet_id,
                 )
@@ -369,6 +400,10 @@ pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &Persisted
     ) {
         push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
     }
+}
+
+pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
+    push_definitions_updated_notice_with_sde(pending, None, den);
 }
 
 pub fn push_activity_completed_notice(
@@ -425,10 +460,6 @@ fn tick_den_with_sde(
     }
 }
 
-fn tick_den(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
-    tick_den_with_sde(snap, None, pending, den_id, now);
-}
-
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -461,11 +492,13 @@ pub fn encode_activity_attributes(a: &PersistedMercenaryActivity) -> Vec<u8> {
 pub(crate) fn complete_mercenary_activity_in_snap(
     snap: &mut WorldStateSnapshot,
     pending: &PendingNotices,
+    sde: Option<&eve_sde::SdeRegistry>,
     a: &PersistedMercenaryActivity,
     den_id: i64,
     solar_system_id: u32,
 ) {
     let mut applied_dev_impact = 0i32;
+    let mut applied_anarchy_impact = 0i32;
     let mut applied_infomorph_bonus = 0u32;
     let mut reward_char_id = a.started_by;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
@@ -473,28 +506,28 @@ pub(crate) fn complete_mercenary_activity_in_snap(
             reward_char_id = den_mut.owner_char_id;
         }
         // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
-        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo at max Development 100)
-        // and reduces Anarchy, awarding infomorph and ISK rewards.
-        applied_infomorph_bonus = if den_mut.development_level >= MAX_LEVEL {
-            a.infomorph_bonus.max(350)
+        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo if already
+        // at max Development 100) and reduces Anarchy, awarding infomorph and ISK rewards.
+        let pre_dev = den_mut.development_level;
+        if pre_dev >= MAX_LEVEL {
+            applied_infomorph_bonus = a.infomorph_bonus.max(350);
+            let cap = den_cargo_capacity(sde);
+            den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
         } else {
-            a.infomorph_bonus.max(50)
-        };
-        let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
-        den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
-
-        if den_mut.development_level < MAX_LEVEL {
-            applied_dev_impact = if a.development_impact != 0 { a.development_impact } else { 10 };
-            den_mut.development_level = (den_mut.development_level as i32 + applied_dev_impact)
-                .clamp(0, MAX_LEVEL as i32) as u32;
+            let raw_dev = if a.development_impact != 0 { a.development_impact } else { 10 };
+            den_mut.development_level = (pre_dev as i32 + raw_dev).clamp(0, MAX_LEVEL as i32) as u32;
+            applied_dev_impact = den_mut.development_level as i32 - pre_dev as i32;
         }
-        let applied_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
+        let pre_anarchy = den_mut.anarchy_level;
+        let raw_anarchy = if a.anarchy_impact != 0 { a.anarchy_impact } else { -10 };
         den_mut.anarchy_level =
-            (den_mut.anarchy_level as i32 + applied_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
+            (pre_anarchy as i32 + raw_anarchy).clamp(0, MAX_LEVEL as i32) as u32;
+        applied_anarchy_impact = den_mut.anarchy_level as i32 - pre_anarchy as i32;
         push_evolution_notice(pending, den_mut);
     }
     // Award MTO ISK reward to completing pilot
     if reward_char_id > 0 {
+        // DERIVED: Calibrated MTO completion ISK payout (no static payout column in V24 SDE/FSD).
         let isk_reward = 7_500_000_i64;
         if let Some(ch) = snap.characters.get_mut(&reward_char_id) {
             ch.balance = ch
@@ -527,7 +560,7 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         den_id,
         &a.uuid,
         applied_dev_impact,
-        a.anarchy_impact,
+        applied_anarchy_impact,
         applied_infomorph_bonus,
     );
 }
@@ -535,8 +568,14 @@ pub(crate) fn complete_mercenary_activity_in_snap(
 /// Expires stale operations (including timed-out started operations without completion rewards)
 /// and, when the generation timer elapsed, fills the den up to its capacity — emitting
 /// `RemovedNotice` / `AddedNotice` for each change.
-pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
-    tick_den(snap, pending, den_id, now);
+pub(crate) fn refresh_activities_with_sde(
+    snap: &mut WorldStateSnapshot,
+    sde: Option<&eve_sde::SdeRegistry>,
+    pending: &PendingNotices,
+    den_id: i64,
+    now: u64,
+) {
+    tick_den_with_sde(snap, sde, pending, den_id, now);
     let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id).cloned() else { return };
     let expired: Vec<String> = snap
         .sov_runtime
@@ -579,18 +618,25 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
         let seq = snap.sov_runtime.next_mercenary_activity_seq;
         let mut uuid = (den_id as u64).to_be_bytes().to_vec();
         uuid.extend_from_slice(&seq.to_be_bytes());
+        // `Mercenary_Tactical_Operation.md:24`: +10 Development while below max level 4 (`MAX_LEVEL`),
+        // or +350 bonus Encrypted Infomorphs if already at max Development.
+        let (development_impact, infomorph_bonus) = if den.development_level >= MAX_LEVEL {
+            (0, 350)
+        } else {
+            (10, 0)
+        };
         let a = PersistedMercenaryActivity {
             uuid: uuid.clone(),
             den_id,
             solar_system_id: den.solar_system_id,
-            dungeon_id: 0,
+            dungeon_id: mto_dungeon_id(sde, seq),
             started: false,
             started_by: 0,
             expiry_unix: now + ACTIVITY_LIFETIME_SECS,
-            development_impact: 10,
-            // MTO completion reduces Anarchy by 10 points (`Mercenary_Tactical_Operation.md`)
+            development_impact,
+            // DERIVED: MTO completion reduces Anarchy by 10 points (`Mercenary_Tactical_Operation.md`)
             anarchy_impact: -10,
-            infomorph_bonus: 350,
+            infomorph_bonus,
         };
         if let Some(n) = crate::quasar_gateway::pb_encode_or_log(
             "quasar_sov_mercden.refresh_activities.added",
@@ -606,6 +652,11 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
     if let Some(d) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
         d.next_activity_generation_unix = now + ACTIVITY_GENERATION_SECS;
     }
+}
+
+#[cfg(test)]
+pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
+    refresh_activities_with_sde(snap, None, pending, den_id, now);
 }
 
 fn owned_den_ids(snap: &WorldStateSnapshot, cid: i64) -> Vec<i64> {
@@ -627,7 +678,11 @@ fn modify_level_handler(
     rsp: &'static str,
     development: bool,
 ) {
-    let (db, pending) = (Arc::clone(db), Arc::clone(&router.pending_notices));
+    let (db, sde, pending) = (
+        Arc::clone(db),
+        Arc::clone(&router.sde),
+        Arc::clone(&router.pending_notices),
+    );
     router.register_handler(
         req,
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -638,7 +693,7 @@ fn modify_level_handler(
                 return Err((STATUS_BAD_REQUEST, format!("Level must be within 0..={MAX_LEVEL}")));
             }
             let sim = transact(&db, |snap| {
-                tick_den(snap, &pending, den_id, ctx.now_unix());
+                tick_den_with_sde(snap, Some(&sde), &pending, den_id, ctx.now_unix());
                 let den = snap
                     .sov_runtime
                     .mercenary_dens
@@ -650,7 +705,7 @@ fn modify_level_handler(
                     den.anarchy_level = level as u32;
                 }
                 push_evolution_notice(&pending, den);
-                push_definitions_updated_notice(&pending, den);
+                push_definitions_updated_notice_with_sde(&pending, Some(&sde), den);
                 Ok::<_, RpcError>(encode_evolution_simulation(den))
             })?;
             pb::message(rsp).set_raw_message("simulation", sim).to_any_or_internal_err()
@@ -711,7 +766,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     let owner = snap.structures.get(&den.skyhook_id).map(|s| s.owner_corp_id);
                     Ok::<_, RpcError>((den, owner))
                 })?;
-                let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
+                let cap = den_cargo_capacity(Some(&sde));
                 pb::message("eve_public.sovereignty.mercenaryden.api.GetAsOwnerResponse")
                     .set_with("attributes", |attrs| {
                         attrs
@@ -767,7 +822,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         false,
     );
     {
-        let (db, pending) = (Arc::clone(&db), Arc::clone(&router.pending_notices));
+        let (db, sde, pending) = (Arc::clone(&db), Arc::clone(&router.sde), Arc::clone(&router.pending_notices));
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -775,7 +830,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 let den_id = required_id(dyn_msg, 1, "Mercenary den")?;
                 let (acts, next_gen) = transact(&db, |snap| {
                     owned_den(snap, cid, den_id)?;
-                    refresh_activities(snap, &pending, den_id, ctx.now_unix());
+                    refresh_activities_with_sde(snap, Some(&sde), &pending, den_id, ctx.now_unix());
                     let acts: Vec<PersistedMercenaryActivity> =
                         snap.sov_runtime.mercenary_activities.values().filter(|a| a.den_id == den_id).cloned().collect();
                     Ok::<_, RpcError>((acts, owned_den(snap, cid, den_id)?.next_activity_generation_unix))
@@ -823,7 +878,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         );
     }
     {
-        let (db, pending) = (Arc::clone(&db), Arc::clone(&router.pending_notices));
+        let (db, sde, pending) = (Arc::clone(&db), Arc::clone(&router.sde), Arc::clone(&router.pending_notices));
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.activity.api.StartRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -847,7 +902,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         .get(&key)
                         .cloned()
                         .ok_or((STATUS_NOT_FOUND, format!("Activity {key} not found")))?;
-                    owned_den(snap, cid, a.den_id)?;
+                    let den = owned_den(snap, cid, a.den_id)?;
                     let ch = snap
                         .characters
                         .get(&cid)
@@ -870,6 +925,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                     if a.expiry_unix <= now {
                         return Err((STATUS_CONFLICT, format!("Activity {key} has expired")));
                     }
+                    let cap = activity_capacity(stage_for_level(den.development_level)) as usize;
+                    let active_started = snap
+                        .sov_runtime
+                        .mercenary_activities
+                        .values()
+                        .filter(|m| m.den_id == a.den_id && m.started && m.expiry_unix > now)
+                        .count();
+                    if active_started >= cap {
+                        return Err((
+                            STATUS_CONFLICT,
+                            format!("Mercenary den {} reached active operation capacity ({cap})", a.den_id),
+                        ));
+                    }
                     snap.next_entity_id += 1;
                     let site_ball_id = snap.next_entity_id;
                     let sys_id_u32 = a.solar_system_id;
@@ -885,21 +953,36 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                             ..Default::default()
                         },
                     );
-                    // Compute MTO tactical site position relative to the host den/skyhook anchor in space.
+                    // Compute MTO tactical site position relative to the host den/skyhook anchor in space,
+                    // offsetting along planet orbit when the host planet celestial exists in SDE.
                     let den_pos = snap
                         .item_positions
                         .get(&a.den_id)
                         .copied()
                         .or_else(|| snap.structures.get(&a.den_id).map(|s| s.position))
                         .unwrap_or([250_000.0, 0.0, 0.0]);
-                    let mto_pos = [den_pos[0] + 15_000.0, den_pos[1] + 5_000.0, den_pos[2]];
+                    let mto_pos = if let Some(cel) = sde.celestial(den.planet_id) {
+                        let orbit_offset = (cel.radius * 0.005).clamp(15_000.0, 45_000.0);
+                        let angle = ((site_ball_id as u64).wrapping_mul(2_654_435_761) % 360) as f64
+                            * std::f64::consts::TAU
+                            / 360.0;
+                        [
+                            den_pos[0] + orbit_offset * angle.cos(),
+                            den_pos[1] + orbit_offset * angle.sin(),
+                            den_pos[2] + (orbit_offset * 0.1),
+                        ]
+                    } else {
+                        [den_pos[0] + 15_000.0, den_pos[1] + 5_000.0, den_pos[2]]
+                    };
                     snap.item_positions.insert(site_ball_id, mto_pos);
                     snap.sov_runtime.mto_site_balls.insert(site_ball_id, key.clone());
                     let entry = snap.sov_runtime.mercenary_activities.get_mut(&key).ok_or((STATUS_NOT_FOUND, key.clone()))?;
                     let previous_expiry = entry.expiry_unix;
                     entry.started = true;
                     entry.started_by = cid;
-                    entry.dungeon_id = (site_ball_id as u64 & 0x7FFF_FFFF) as u32;
+                    if entry.dungeon_id == 0 {
+                        entry.dungeon_id = mto_dungeon_id(Some(&sde), site_ball_id as u64);
+                    }
                     entry.expiry_unix = now + 1_800;
                     push_activity_expiry_changed_notice(&pending, entry.solar_system_id, entry, previous_expiry);
                     let attrs = encode_activity_attributes(entry);

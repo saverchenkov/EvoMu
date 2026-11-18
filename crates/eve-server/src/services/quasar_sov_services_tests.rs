@@ -138,6 +138,211 @@ fn skyhook_activation_and_stargate_lock_notices() {
 }
 
 #[test]
+fn skyhook_deactivate_and_activate_reconcile_sov_hub_network_and_notices() {
+    use super::super::quasar_sov_hub::{
+        compute_hub_resources, planet_yield_for_planet, star_power_for_system, PendingNotices,
+    };
+    use super::super::quasar_sov_workforce::{exported_amount, systems_within_jumps};
+    use super::super::sov_services::TYPE_SOVEREIGNTY_HUB;
+    use eve_db::{PersistedHubUpgrade, PersistedSovHubData, PersistedWorkforceMode};
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = QuasarDescriptorRegistry::open_default_or_empty();
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+    super::super::quasar_sov_hub::register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+    super::super::quasar_sov_workforce::register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+
+    let (sys_a, planet_id, planet_wf, sys_b) = [30_000_669_u32, 30_000_142_u32]
+        .into_iter()
+        .flat_map(|seed| systems_within_jumps(&sde, seed, 8).into_keys())
+        .filter(|&sa| star_power_for_system(&sde, sa) >= 250)
+        .find_map(|sa| {
+            let planet = sde
+                .celestials_in_system_slice(sa)
+                .iter()
+                .filter(|c| c.group_id == 7)
+                .find_map(|c| {
+                    let (_, wf) = planet_yield_for_planet(c.type_id, c.radius);
+                    (wf >= 3_000).then_some((c.celestial_id, wf))
+                })?;
+            let nb = systems_within_jumps(&sde, sa, 1)
+                .into_iter()
+                .find(|&(sb, hops)| {
+                    hops == 1 && sb != sa && star_power_for_system(&sde, sb) >= 250
+                })?
+                .0;
+            Some((sa, planet.0, planet.1, nb))
+        })
+        .expect("system pair with >=3000 workforce planet and neighbor system");
+
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let hub_a = 88_100_001_i64;
+    let hub_b = 88_100_002_i64;
+    let skyhook_id = 88_200_001_i64;
+    let export_amt = 1_500_u64;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_a;
+        }
+        let mut c = eve_db::CorporationRecord::default();
+        c.corporation_id = corp_id;
+        c.ceo_id = cid;
+        c.ensure_wallet_divisions();
+        c.members.insert(cid);
+        snap.corporations.insert(corp_id, c);
+
+        for (id, ty, sys) in [
+            (hub_a, TYPE_SOVEREIGNTY_HUB, sys_a),
+            (hub_b, TYPE_SOVEREIGNTY_HUB, sys_b),
+            (skyhook_id, TYPE_ORBITAL_SKYHOOK, sys_a),
+        ] {
+            snap.structures.insert(
+                id,
+                UpwellStructureRecord {
+                    structure_id: id,
+                    type_id: ty,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys,
+                    name: format!("SyncStruct {id}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, planet_id);
+        snap.sov_runtime.skyhook_active.insert(skyhook_id, true);
+        snap.sov_runtime.sov_hubs.insert(
+            hub_a,
+            PersistedSovHubData {
+                hub_id: hub_a,
+                workforce: PersistedWorkforceMode::Export {
+                    destination: Some(sys_b),
+                    amount: export_amt,
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615, // 250 power, 1,500 workforce
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_b,
+            PersistedSovHubData {
+                hub_id: hub_b,
+                workforce: PersistedWorkforceMode::Import {
+                    sources: vec![sys_a],
+                },
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: 81_615, // 250 power, 1,500 workforce (fed by Hub A export)
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        let res_a = compute_hub_resources(snap, &sde, hub_a).expect("hub A resources");
+        assert!(res_a.workforce_local >= planet_wf);
+        assert_eq!(res_a.workforce_available, res_a.workforce_local - export_amt);
+        let res_b = compute_hub_resources(snap, &sde, hub_b).expect("hub B resources");
+        assert_eq!(res_b.workforce_available, export_amt);
+    });
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let dir_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+
+    // 1. Deactivating the Skyhook drops local hub upgrade into low_power, clamps export to 0,
+    //    starves the downstream importing hub into low_power, and emits all three Quasar notices.
+    router.pending_notices.write().unwrap().clear();
+    handlers["eve_public.sovereignty.skyhook.api.DeactivateRequest"](
+        &dir_ctx,
+        &dummy_any,
+        &id_msg(1, skyhook_id),
+    )
+    .expect("DeactivateRequest");
+
+    db.with_snapshot(|snap| {
+        assert!(!snap.sov_runtime.skyhook_active[&skyhook_id]);
+        assert!(
+            snap.sov_runtime.sov_hubs[&hub_a].upgrades[0].low_power,
+            "local Sov Hub overloaded upgrade must drop to low_power on Skyhook DeactivateRequest"
+        );
+        assert_eq!(exported_amount(snap, hub_a), 0);
+        assert!(
+            snap.sov_runtime.sov_hubs[&hub_b].upgrades[0].low_power,
+            "downstream importing Sov Hub upgrade must drop to low_power on Skyhook DeactivateRequest"
+        );
+        let res_a = compute_hub_resources(snap, &sde, hub_a).expect("hub A post-deactivate");
+        assert_eq!(res_a.workforce_local, 0);
+    });
+    {
+        let notices: &PendingNotices = &router.pending_notices;
+        let list = notices.read().unwrap();
+        assert!(list.iter().any(|(_, a)| a.type_url.ends_with("skyhook.api.ActivationNotice")));
+        assert!(
+            list.iter().any(|(sc, a)| *sc == crate::quasar_gateway::NoticeScope::SolarSystem(sys_a)
+                && a.type_url.ends_with("hub.api.ResourcesSimulatedNotice")),
+            "expected ResourcesSimulatedNotice for local system"
+        );
+        assert!(
+            list.iter().any(|(sc, a)| *sc == crate::quasar_gateway::NoticeScope::SolarSystem(sys_b)
+                && a.type_url.ends_with("hub.api.ResourcesSimulatedNotice")),
+            "expected ResourcesSimulatedNotice for downstream importing system"
+        );
+        assert!(
+            list.iter().any(|(sc, a)| *sc == crate::quasar_gateway::NoticeScope::SolarSystem(sys_a)
+                && a.type_url.ends_with("hub.upgrade.api.HubUpgradesSimulatedNotice")),
+            "expected HubUpgradesSimulatedNotice for local system"
+        );
+        assert!(
+            list.iter().any(|(sc, a)| *sc == crate::quasar_gateway::NoticeScope::SolarSystem(sys_b)
+                && a.type_url.ends_with("hub.upgrade.api.HubUpgradesSimulatedNotice")),
+            "expected HubUpgradesSimulatedNotice for downstream importing system"
+        );
+        assert!(
+            list.iter().any(|(_, a)| a.type_url.ends_with("workforce.api.StateChangedNotice")),
+            "expected workforce StateChangedNotice"
+        );
+    }
+
+    // 2. Reactivating the Skyhook restores local workforce and emits ResourcesSimulatedNotice.
+    router.pending_notices.write().unwrap().clear();
+    handlers["eve_public.sovereignty.skyhook.api.ActivateRequest"](
+        &dir_ctx,
+        &dummy_any,
+        &id_msg(1, skyhook_id),
+    )
+    .expect("ActivateRequest");
+    db.with_snapshot(|snap| {
+        assert!(snap.sov_runtime.skyhook_active[&skyhook_id]);
+        let res_a = compute_hub_resources(snap, &sde, hub_a).expect("hub A post-activate");
+        assert!(res_a.workforce_local >= planet_wf);
+    });
+    {
+        let list = router.pending_notices.read().unwrap();
+        assert!(list.iter().any(|(_, a)| a.type_url.ends_with("skyhook.api.ActivationNotice")));
+        assert!(list.iter().any(|(sc, a)| {
+            *sc == crate::quasar_gateway::NoticeScope::SolarSystem(sys_a)
+                && a.type_url.ends_with("hub.api.ResourcesSimulatedNotice")
+        }));
+    }
+}
+
+#[test]
 fn faction_warfare_activity_and_operation_recommendation_rpc_handlers() {
     let sde = shared_sde();
     let db = Arc::new(WorldRepository::with_demo_seed());

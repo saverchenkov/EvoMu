@@ -62,7 +62,7 @@ fn find_null_system_with_reagent_planet(ctx: &ServerContext) -> (u32, u32, u32, 
 #[test]
 fn planet_reagent_mapping_and_linear_reagent_maturity_math() {
     assert_eq!(planet_reagent_type(12), Some(TYPE_SUPERIONIC_ICE));
-    assert_eq!(planet_reagent_type(2014), Some(TYPE_SUPERIONIC_ICE));
+    assert_eq!(planet_reagent_type(2014), None);
     assert_eq!(planet_reagent_type(2015), Some(TYPE_MAGMATIC_GAS));
     assert_eq!(planet_reagent_type(11), None);
 
@@ -76,27 +76,57 @@ fn planet_reagent_mapping_and_linear_reagent_maturity_math() {
     assert_eq!(extract_extra_var(None, "planetID"), None);
 
     let ctx = test_ctx();
+    let (ice_sys, ice_planet_id, ice_hourly) = find_null_system_with_ice_planet(&ctx);
     let skyhook_id = 1_070_000_001_i64;
+    let unlinked_id = 1_070_000_099_i64;
     let t0 = 1_750_000_000_u64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                solar_system_id: ice_sys,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime
+            .skyhook_planets
+            .insert(skyhook_id, ice_planet_id);
         snap.sov_runtime
             .skyhook_reagent_bays
-            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 100, 240, t0));
+            .insert(skyhook_id, (TYPE_SUPERIONIC_ICE, 100, 240, t0));
         snap.sov_runtime.skyhook_last_harvest_unix.insert(skyhook_id, t0);
 
+        // Unlinked skyhook without a bound planet harvests 0/hr and only matures existing stock.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(unlinked_id, (TYPE_SUPERIONIC_ICE, 100, 240, t0));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(unlinked_id, t0);
+        let (_, u_sec, u_insec) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, unlinked_id, t0 + 12 * 3_600).unwrap();
+        assert_eq!((u_sec, u_insec), (220, 120));
+
         // Advance 12 hours (half of 24h cycle): 120 insecure units mature -> 220 secure, 120 insecure
-        // PLUS 12 hours * 50/hr = 600 harvested (300 to secure, 300 to insecure)
+        // PLUS 12 hours * ice_hourly harvested (50/50 split)
+        let h12 = 12 * ice_hourly;
+        let h12_sec = (h12 * REAGENT_SECURED_PERCENTAGE) / 100;
+        let h12_insec = h12 - h12_sec;
         let (_, sec1, insec1) =
             advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 12 * 3_600).unwrap();
-        assert_eq!(sec1, 100 + 120 + 300);
-        assert_eq!(insec1, 120 + 300);
+        assert_eq!(sec1, 100 + 120 + h12_sec);
+        assert_eq!(insec1, 120 + h12_insec);
 
-        // Advance another 24 hours: all 420 insecure mature + 1200 harvested (600 sec, 600 insec)
+        // Advance another 24 hours: all insec1 matures + 24 * ice_hourly harvested (50/50 split)
+        let h24 = 24 * ice_hourly;
+        let h24_sec = (h24 * REAGENT_SECURED_PERCENTAGE) / 100;
+        let h24_insec = h24 - h24_sec;
         let (_, sec2, insec2) =
             advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 36 * 3_600).unwrap();
-        assert_eq!(sec2, sec1 + 420 + 600);
-        assert_eq!(insec2, 600);
+        assert_eq!(sec2, sec1 + insec1 + h24_sec);
+        assert_eq!(insec2, h24_insec);
     });
 }
 
@@ -1023,5 +1053,88 @@ async fn next_skyhook_theft_window_and_tick_boundaries_are_exact() {
         let (new_s, new_e) = s.sov_runtime.skyhook_theft_windows[&sh_rf];
         assert!(new_s > w_end);
         assert_eq!(new_e - new_s, 7_200);
+    });
+}
+
+fn find_null_system_with_ice_planet(ctx: &ServerContext) -> (u32, i64, u64) {
+    ctx.sde
+        .solar_systems
+        .keys()
+        .filter(|&&sid| crate::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sid))
+        .flat_map(|&sid| {
+            ctx.sde
+                .celestials_in_system_slice(sid)
+                .iter()
+                .filter(|p| p.group_id == 7 && p.type_id == 12)
+                .map(move |p| {
+                    (
+                        sid,
+                        p.celestial_id,
+                        crate::services::quasar_sov_skyhook::planet_hourly_reagent_yield_for_planet(
+                            p.type_id, p.radius,
+                        ),
+                    )
+                })
+        })
+        .min_by_key(|&(sid, cid, _)| (sid, cid))
+        .expect("nullsec ice planet")
+}
+
+#[test]
+fn reagent_bay_capacity_cap_and_bidirectional_overflow_spill() {
+    let ctx = test_ctx();
+    let (ice_sys, ice_planet_id, ice_hourly) = find_null_system_with_ice_planet(&ctx);
+    let t0 = 1_750_000_000_u64;
+    let sh_sec_full = 1_070_900_001_i64;
+    let sh_insec_full = 1_070_900_002_i64;
+    let sh_both_full = 1_070_900_003_i64;
+    let h10 = 10 * ice_hourly;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for sh in [sh_sec_full, sh_insec_full, sh_both_full] {
+            snap.structures.insert(
+                sh,
+                UpwellStructureRecord {
+                    structure_id: sh,
+                    solar_system_id: ice_sys,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.skyhook_planets.insert(sh, ice_planet_id);
+        }
+
+        // Case 1: secure full (25_000) -> harvest & maturation spill into insecure bay.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(sh_sec_full, (TYPE_SUPERIONIC_ICE, SKYHOOK_REAGENT_BAY_CAPACITY, 100, t0));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(sh_sec_full, t0);
+        let (_, sec1, insec1) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, sh_sec_full, t0 + 10 * 3_600).unwrap();
+        assert_eq!(sec1, SKYHOOK_REAGENT_BAY_CAPACITY);
+        assert_eq!(insec1, 100 + h10);
+
+        // Case 2: insecure near full (24_900), secure at 20_000 with 1s elapsed & 10h due harvest
+        // -> 0 matured, excess insecure harvest (> 100 room) spills back into secure bay.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(sh_insec_full, (TYPE_SUPERIONIC_ICE, 20_000, 24_900, t0));
+        snap.sov_runtime
+            .skyhook_last_harvest_unix
+            .insert(sh_insec_full, t0 - 10 * 3_600 + 1);
+        let (_, sec2, insec2) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, sh_insec_full, t0 + 1).unwrap();
+        assert_eq!(sec2, 20_000 + h10 - 100);
+        assert_eq!(insec2, SKYHOOK_REAGENT_BAY_CAPACITY);
+
+        // Case 3: both full -> strictly capped at 25_000 / 25_000 regardless of elapsed harvest.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(sh_both_full, (TYPE_SUPERIONIC_ICE, SKYHOOK_REAGENT_BAY_CAPACITY, SKYHOOK_REAGENT_BAY_CAPACITY, t0));
+        snap.sov_runtime.skyhook_last_harvest_unix.insert(sh_both_full, t0);
+        let (_, sec3, insec3) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, sh_both_full, t0 + 10 * 3_600).unwrap();
+        assert_eq!((sec3, insec3), (SKYHOOK_REAGENT_BAY_CAPACITY, SKYHOOK_REAGENT_BAY_CAPACITY));
     });
 }

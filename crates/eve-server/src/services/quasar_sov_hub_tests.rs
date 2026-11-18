@@ -37,8 +37,8 @@ fn upgrade_definitions_celestial_yields_and_fuel_simulation() {
     assert!(is_hub_fuel_type(TYPE_SUPERIONIC_ICE));
     assert!(!is_hub_fuel_type(34));
 
-    assert_eq!(planet_yield(11), (0, 1_500));
-    assert_eq!(planet_yield(2063), (200, 0));
+    assert_eq!(planet_yield(11), (0, 5_000));
+    assert_eq!(planet_yield(2063), (420, 0));
     assert_eq!(planet_yield(999_999), (0, 0));
 
     let sys_y = system_yield(&sde, 30_000_142);
@@ -279,4 +279,153 @@ fn sov_hub_resources_fuel_and_upgrade_rpc_handlers() {
     assert!(uninst
         .type_url
         .ends_with("eve_public.sovereignty.hub.upgrade.api.UninstallResponse"));
+}
+
+#[test]
+fn destroyed_sov_hub_rejects_queries_and_mutations_without_consuming_items() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let descriptors = Arc::new(QuasarDescriptorRegistry::empty_with_builtins());
+    let router = PublicGatewayRouter::new(descriptors, Arc::clone(&db), Arc::clone(&sde));
+    register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+    crate::services::quasar_sov_workforce::register_handlers(&router, Arc::clone(&db), Arc::clone(&sde));
+
+    let cid = 90_000_001_i64;
+    let corp_id = 1_000_009_i64;
+    let hub_id = 77_100_001_i64;
+    let sys_id = 30_000_142_u32;
+    let fuel_item_id = 88_100_001_i64;
+    let upg_item_id = 88_100_002_i64;
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+        }
+        let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = cid;
+        corp.members.insert(cid);
+        corp.member_roles.insert(cid, corp_roles::ROLE_DIRECTOR);
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Destroyed Hub".into(),
+                state: "Destroyed".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fuel_item_id,
+            InventoryItemRecord {
+                item_id: fuel_item_id,
+                type_id: TYPE_SUPERIONIC_ICE,
+                owner_id: cid,
+                location_id: hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: Default::default(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        snap.items.insert(
+            upg_item_id,
+            InventoryItemRecord {
+                item_id: upg_item_id,
+                type_id: 82_499,
+                owner_id: cid,
+                location_id: hub_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: Default::default(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    let handlers = router.handlers.read().unwrap();
+    let dummy_any = GoogleAny::default();
+    let dir_ctx = AuthoritativeContext::for_session(
+        Some(1),
+        Some(cid as u32),
+        Some(corp_id as u32),
+        corp_roles::ROLE_DIRECTOR,
+        "tranquility",
+        vec![1],
+    );
+
+    let mut add_fuel = id_msg(1, fuel_item_id);
+    add_fuel.fields.insert(2, DynamicValue::Int64(200));
+    let mut hub_inner = DynamicQuasarMessage::new("Identifier");
+    hub_inner.fields.insert(1, DynamicValue::Int64(hub_id));
+    add_fuel.fields.insert(3, DynamicValue::Message(Box::new(hub_inner)));
+
+    let mut new_up_msg = DynamicQuasarMessage::new("NewUpgrade");
+    new_up_msg.fields.insert(1, DynamicValue::Int64(upg_item_id));
+    let mut cfg_entry = id_msg(1, 82_499);
+    cfg_entry.fields.insert(2, DynamicValue::Bool(true));
+    let mut proc_msg = id_msg(3, hub_id);
+    proc_msg
+        .fields
+        .insert(1, DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(new_up_msg))]));
+    proc_msg
+        .fields
+        .insert(2, DynamicValue::Repeated(vec![DynamicValue::Message(Box::new(cfg_entry))]));
+
+    let mut upg_id_inner = id_msg(1, hub_id);
+    upg_id_inner.fields.insert(2, DynamicValue::Int64(82_499));
+    let mut upg_req = DynamicQuasarMessage::new("UpgReq");
+    upg_req
+        .fields
+        .insert(1, DynamicValue::Message(Box::new(upg_id_inner)));
+
+    let mut wf_cfg = DynamicQuasarMessage::new("Configuration");
+    wf_cfg.fields.insert(4, DynamicValue::Bool(true));
+    let mut wf_cfg_req = id_msg(1, hub_id);
+    wf_cfg_req.fields.insert(2, DynamicValue::Message(Box::new(wf_cfg)));
+
+    let hub_id_req = id_msg(1, hub_id);
+    for (ep, req) in [
+        ("eve_public.sovereignty.hub.api.GetResourcesRequest", &hub_id_req),
+        ("eve_public.sovereignty.hub.fuel.api.GetRequest", &hub_id_req),
+        ("eve_public.sovereignty.hub.fuel.api.AddRequest", &add_fuel),
+        ("eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest", &hub_id_req),
+        ("eve_public.sovereignty.hub.upgrade.api.GetRequest", &upg_req),
+        ("eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", &proc_msg),
+        ("eve_public.sovereignty.hub.upgrade.api.UninstallRequest", &upg_req),
+        ("eve_public.sovereignty.hub.workforce.api.GetStateRequest", &hub_id_req),
+        ("eve_public.sovereignty.hub.workforce.api.GetConfigurationRequest", &hub_id_req),
+        ("eve_public.sovereignty.hub.workforce.api.ConfigureRequest", &wf_cfg_req),
+        ("eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", &hub_id_req),
+    ] {
+        assert_eq!(
+            handlers[ep](&dir_ctx, &dummy_any, req).unwrap_err().0,
+            STATUS_NOT_FOUND,
+            "{ep} must reject destroyed Sovereignty Hub with STATUS_NOT_FOUND"
+        );
+    }
+
+    assert!(
+        router.pending_notices.read().unwrap().is_empty(),
+        "rejected destroyed-hub RPCs must emit zero notices"
+    );
+    db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&fuel_item_id).map(|i| i.quantity), Some(500));
+        assert_eq!(snap.items.get(&upg_item_id).map(|i| i.quantity), Some(1));
+        assert!(!snap.sov_runtime.sov_hubs.contains_key(&hub_id));
+    });
 }

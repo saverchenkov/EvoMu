@@ -502,6 +502,7 @@ pub struct DisposalOutcome {
     pub dropped_item_ids: Vec<i64>,
     pub destroyed_item_ids: Vec<i64>,
     pub pending_signal_tracker_notifs: Vec<(i64, Vec<eve_proto::PyRep>)>,
+    pub pending_quasar_notices: Vec<(crate::quasar_gateway::NoticeScope, eve_proto::quasar::GoogleAny)>,
 }
 
 /// Moves a structure's contents out: rigs are destroyed; in J-space or when an Abandoned
@@ -724,7 +725,55 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
     out.pending_signal_tracker_notifs.extend(crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_structure_removed_with_snap(ctx, snap, st.solar_system_id, st.structure_id));
 }
 
-fn cleanup_sov_hub_on_leave_space(ctx: &ServerContext, snap: &mut WorldStateSnapshot, st: &UpwellStructureRecord) {
+type PreLeaveWorkforce = (
+    crate::services::quasar_sov_hub::PendingNotices,
+    Vec<i64>,
+    std::collections::BTreeMap<i64, crate::services::quasar_sov_hub::HubView>,
+);
+
+/// Flushes buffered Equinox Hub/workforce Quasar notices recorded during structure disposal.
+pub(crate) fn flush_disposal_quasar_notices(
+    ctx: &ServerContext,
+    out: &DisposalOutcome,
+    now_unix: u64,
+) {
+    crate::services::sov_gameplay::flush_quasar_notice_items(
+        ctx,
+        &out.pending_quasar_notices,
+        now_unix,
+    );
+}
+
+fn prepare_sov_leave_space_workforce(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    st: &UpwellStructureRecord,
+    now: u64,
+) -> Option<PreLeaveWorkforce> {
+    if st.type_id != crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
+        && st.type_id != crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+    {
+        return None;
+    }
+    let pending: crate::services::quasar_sov_hub::PendingNotices = Default::default();
+    let (extra, before) =
+        crate::services::quasar_sov_workforce::begin_system_hub_network_reconcile(
+            snap,
+            &ctx.sde,
+            &pending,
+            st.solar_system_id,
+            now,
+        );
+    Some((pending, extra, before))
+}
+
+fn cleanup_sov_hub_on_leave_space(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    st: &UpwellStructureRecord,
+    pre_workforce: Option<PreLeaveWorkforce>,
+    out: &mut DisposalOutcome,
+) {
     if st.type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB {
         snap.sov_runtime.sov_claimed_since_unix.remove(&st.solar_system_id);
         if let Some(sys_st) = snap.system_states.get_mut(&st.solar_system_id) {
@@ -733,6 +782,22 @@ fn cleanup_sov_hub_on_leave_space(ctx: &ServerContext, snap: &mut WorldStateSnap
         }
         snap.sov_runtime.sov_hubs.remove(&st.structure_id);
         ctx.invalidate_cached_method("stationSvc", "GetAllianceSystems");
+    } else if st.type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK {
+        crate::services::sov_gameplay::sov_gameplay_skyhook::cleanup_destroyed_skyhook_in_snap(
+            snap,
+            st.structure_id,
+        );
+    }
+    if let Some((pending, extra, before)) = pre_workforce {
+        crate::services::quasar_sov_workforce::reconcile_hub_workforce_network_and_emit(
+            snap,
+            &ctx.sde,
+            &pending,
+            &before,
+            &extra,
+        );
+        let mut drained = pending.write().unwrap_or_else(|e| e.into_inner());
+        out.pending_quasar_notices.extend(drained.drain(..));
     }
 }
 
@@ -1082,6 +1147,7 @@ fn evacuate_structure_on_leave_space(
 pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, attacker_char_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
+    let sov_pre_workforce = prepare_sov_leave_space_workforce(ctx, snap, &st, now);
     evacuate_structure_on_leave_space(ctx, snap, ext, &st);
     dispose_contents(ctx, snap, ext, &st, true, now, &mut out);
     let wreck_type_id = ctx.sde.resolve_wreck_type_id(st.type_id, None).unwrap_or(26557);
@@ -1125,7 +1191,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(ctx, snap, &st);
+    cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
@@ -1187,6 +1253,7 @@ pub fn prepare_home_station_respawn(ctx: &ServerContext, char_id: i64) {
 pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
+    let sov_pre_workforce = prepare_sov_leave_space_workforce(ctx, snap, &st, now);
     evacuate_structure_on_leave_space(ctx, snap, ext, &st);
     dispose_contents(ctx, snap, ext, &st, false, now, &mut out);
     if st.quantum_core_installed {
@@ -1201,7 +1268,7 @@ pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.active_pilot_by_structure.remove(&structure_id); ext.previous_ship_by_structure.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
-    cleanup_sov_hub_on_leave_space(ctx, snap, &st);
+    cleanup_sov_hub_on_leave_space(ctx, snap, &st, sov_pre_workforce, &mut out);
     // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
     relocate_structure_clones_to_home(ctx, snap, &st);
     emit_structure_left_space_and_spawn_drops(ctx, snap, &st, &mut out);
@@ -1741,6 +1808,7 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     for (_, out) in &gone {
         crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(ctx, out.pending_signal_tracker_notifs.clone());
+        flush_disposal_quasar_notices(ctx, out, now);
     }
     for (sys_id, aid, corp_id, hub_id) in sov_claims {
         let _ = crate::services::sov_services::claim_system_sovereignty(ctx, sys_id, aid, corp_id, hub_id);

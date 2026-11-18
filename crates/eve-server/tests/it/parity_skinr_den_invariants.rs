@@ -379,11 +379,11 @@ async fn test_mercenary_den_development_anarchy_and_skyhook_workforce() {
     assert_eq!(ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available), base_wf);
 
     // Advance to Day 8 (Dev 40, Anarchy 40 -> UI Anarchy level 2 / proto stage 3):
-    // Den siphons 10% of host Skyhook's planetary workforce (150 of 1,500)
+    // Den siphons 10% of host Skyhook's planetary workforce
     ctx.advance_secs(8 * 86_400 - 3_600);
     let _ = q_sov_rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
     let wf_day8 = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(wf_day8 + 150, base_wf);
+    assert_eq!(wf_day8 + (base_wf * 10 / 100), base_wf);
 
     // Fetch generated Mercenary Tactical Operations, start one, and complete it in space:
     // Raises Development (+10 -> 50) and lowers Anarchy (-10 -> 30, back to stage 2 = 0% disruption)
@@ -450,7 +450,7 @@ async fn test_mercenary_den_development_anarchy_and_skyhook_workforce() {
         base_wf
     );
 
-    // Advance to Day 16 (Anarchy 70 -> stage 4, -300 workforce), then destroy den and verify workforce restores
+    // Advance to Day 16 (Anarchy 70 -> stage 4, -20% workforce), then destroy den and verify workforce restores
     ctx.advance_secs(8 * 86_400);
     let _ = q_sov_rpc(
         &ctx,
@@ -462,7 +462,7 @@ async fn test_mercenary_den_development_anarchy_and_skyhook_workforce() {
     assert_eq!(
         ctx.db
             .with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available)
-            + 300,
+            + (base_wf * 20 / 100),
         base_wf
     );
     ctx.db.with_mut_snapshot(|snap| {
