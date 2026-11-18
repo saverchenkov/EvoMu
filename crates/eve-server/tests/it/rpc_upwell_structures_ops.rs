@@ -523,6 +523,8 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
 
 #[tokio::test]
 async fn structure_control_wire_tcp_rejects_unauthorized_and_roundtrips_authorized() {
+    // parity: notify:OnAssumeStructureControl
+    // parity: notify:OnRelinquishStructureControl
     use eve_db::corp_roles;
     use eve_machonet::{
         placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,

@@ -15,6 +15,40 @@ pub fn jump_clone_install_fee_cents() -> IskCents {
     IskCents::from_isk(900_000)
 }
 
+/// Resolves Upwell structure clone bay access and installation fee in cents (`0.0` ISK inclusive)
+/// across per-service ACL rules (`23` / `35_894`), flat scalar `SETTING_CLONINGBAY_TAX` (`23`),
+/// legacy `35_894` override, or the `900,000 ISK` canonical default when unconfigured.
+fn resolve_structure_clone_install_fee_cents_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<IskCents, BridgeRpcError> {
+    if let Some(custom_fee) =
+        crate::services::character_clone_jump_rules::check_structure_clone_bay_access_at(
+            snap,
+            structure_id,
+            char_id,
+            Some(now_unix),
+        )?
+    {
+        return Ok(custom_fee);
+    }
+    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+    if let Some(prof) =
+        crate::services::structure_profile_services::effective_profile_for_structure(
+            &ext,
+            structure_id,
+            Some(now_unix),
+        )
+    {
+        if let Some(&legacy_isk) = prof.service_settings.get(&35_894) {
+            return Ok(IskCents(legacy_isk.saturating_mul(100).max(0)));
+        }
+    }
+    Ok(jump_clone_install_fee_cents())
+}
+
 /// Builds the V24.01 `paperDollServer.GetPaperDollData` / `GetPaperDollDataBatch` KeyVal (`#1014`).
 ///
 /// Both `corpse.GetCorpseColor` (`GetSkinTypeOrToneColorVariation`) and
@@ -495,13 +529,13 @@ pub fn handle_clones_and_sheet(
                 }
                 // Enforce NPC station owner standing check (`feat:clones.jump-clone-install`)
                 crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
-                let custom_acl_fee = if is_structure {
-                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access_at(
+                let resolved_structure_fee = if is_structure {
+                    Some(resolve_structure_clone_install_fee_cents_in_snap(
                         snap,
                         station_id,
                         char_id,
-                        Some(ctx.now_unix()),
-                    )?
+                        ctx.now_unix(),
+                    )?)
                 } else {
                     None
                 };
@@ -580,8 +614,8 @@ pub fn handle_clones_and_sheet(
                     });
                 }
 
-                // Deduct canonical 900,000 ISK clone installation fee (`Jump_clones.md:20, 54`), or per-ACL-group fee on structures
-                let install_fee = custom_acl_fee.unwrap_or_else(jump_clone_install_fee_cents);
+                // Deduct canonical 900,000 ISK clone installation fee (`Jump_clones.md:20, 54`), or resolved structure clone bay fee
+                let install_fee = resolved_structure_fee.unwrap_or_else(jump_clone_install_fee_cents);
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -681,12 +715,12 @@ pub fn handle_clones_and_sheet(
                         client_error: None,
                     });
                 }
-                let custom_acl_fee =
-                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access_at(
+                let resolved_structure_fee =
+                    resolve_structure_clone_install_fee_cents_in_snap(
                         snap,
                         structure_id,
                         char_id,
-                        Some(ctx.now_unix()),
+                        ctx.now_unix(),
                     )?;
 
                 let skill_map = snap.skills.get(&char_id);
@@ -737,7 +771,7 @@ pub fn handle_clones_and_sheet(
                     });
                 }
 
-                let install_fee = custom_acl_fee.unwrap_or_else(jump_clone_install_fee_cents);
+                let install_fee = resolved_structure_fee;
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -892,7 +926,7 @@ pub fn handle_clones_and_sheet(
         }
 
         ("jumpCloneSvc", "GetPriceForClone") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -904,27 +938,38 @@ pub fn handle_clones_and_sheet(
                     client_error: None,
                 }));
             };
-            let valid_facility = ctx
+            let is_npc_clone_station = ctx
                 .sde
                 .solar_systems
                 .values()
                 .flat_map(|s| s.stations.iter())
-                .any(|st| st.station_id == docked_loc_id && st.has_clone_bay)
-                || ctx.db.with_snapshot(|snap| {
-                    crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
-                        snap,
-                        docked_loc_id,
-                    )
-                });
-            if !valid_facility {
-                return Some(Err(BridgeRpcError {
-                    code: "StationHasNoCloneBay".into(),
-                    message: format!("Facility {docked_loc_id} does not have an active clone bay"),
-                    client_error: None,
-                }));
-            }
-            let price = jump_clone_install_fee_cents().to_wire_f64();
-            Some(Ok(PyRep::Real(price)))
+                .any(|st| st.station_id == docked_loc_id && st.has_clone_bay);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.with_snapshot(|snap| -> Result<f64, BridgeRpcError> {
+                if is_npc_clone_station {
+                    return Ok(jump_clone_install_fee_cents().to_wire_f64());
+                }
+                if !crate::services::character_clone_jump_rules::structure_has_online_clone_bay(
+                    snap,
+                    docked_loc_id,
+                ) {
+                    return Err(BridgeRpcError {
+                        code: "StationHasNoCloneBay".into(),
+                        message: format!(
+                            "Facility {docked_loc_id} does not have an active clone bay"
+                        ),
+                        client_error: None,
+                    });
+                }
+                let fee = resolve_structure_clone_install_fee_cents_in_snap(
+                    snap,
+                    docked_loc_id,
+                    char_id,
+                    now_unix,
+                )?;
+                Ok(fee.to_wire_f64())
+            });
+            Some(res.map(PyRep::Real))
         }
 
         ("jumpCloneSvc", "CloneJump") => {

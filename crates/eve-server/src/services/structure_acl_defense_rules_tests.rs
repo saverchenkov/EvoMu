@@ -1064,6 +1064,161 @@ fn character_get_services_includes_builtin_upwell_services_and_agrees_with_singl
     );
 }
 
+#[test]
+fn abandoned_repair_services_and_fitting_profile_disablement_work() {
+    use crate::services::structure_profile_services as prof_svc;
+
+    let ctx = test_ctx();
+    let owner_corp = 98_755_001_i64;
+    let owner_id = 755_001_i64;
+    let sys_id = 30_000_142_u32;
+    let sid = 1_000_000_755_001_i64;
+    seed_char_and_corp(&ctx, owner_id, owner_corp, sys_id, true);
+
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: owner_corp,
+                solar_system_id: sys_id,
+                name: "AbnRepairCitadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(sid).or_default().low_power_since_unix = Some(now - 60);
+        save_ext_state(snap, &ext);
+    });
+
+    let mut owner_sess = make_session(owner_id, owner_corp, sys_id, Some(sid), 0);
+    let get_services_map = |sess: &mut SessionState| -> HashMap<i64, f64> {
+        let rep = handle_character_get_services(&ctx, sess, &[PyRep::Integer(sid)])
+            .expect("CharacterGetServices ok");
+        match rep {
+            PyRep::Dict(entries) => entries
+                .into_iter()
+                .filter_map(|(k, v)| match (k.as_i64(), v) {
+                    (Some(id), PyRep::Real(tax)) => Some((id, tax)),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected Dict, got {other:?}"),
+        }
+    };
+
+    // Before abandonment (LowPower): CharacterGetServices exposes V24 SERVICE_REPAIR (8), and
+    // HasService/CheckService/GetService expose both SERVICE_REPAIR (8) and legacy 13.
+    let low_map = get_services_map(&mut owner_sess);
+    assert!(
+        low_map.contains_key(&prof_svc::SERVICE_REPAIR),
+        "LowPower should expose SERVICE_REPAIR (8)"
+    );
+    for svc in [prof_svc::SERVICE_REPAIR, 13] {
+        assert_eq!(
+            handle_character_has_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap(),
+            PyRep::Bool(true)
+        );
+        assert_eq!(
+            handle_character_check_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap(),
+            PyRep::None
+        );
+        assert!(matches!(
+            handle_character_get_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap(),
+            PyRep::Real(_)
+        ));
+    }
+
+    // Once Abandoned: CharacterGetServices / HasService / CheckService / GetService reject SERVICE_REPAIR | 13,
+    // agreeing with StructureServiceKind::Repair -> "StructureAbandoned", while keeping SERVICE_DOCKING online.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(sid).or_default().low_power_since_unix =
+            Some(now.saturating_sub(life::ABANDON_AFTER_LOW_POWER_SECS + 60));
+        save_ext_state(snap, &ext);
+    });
+    let abn_map = get_services_map(&mut owner_sess);
+    assert!(abn_map.contains_key(&prof_svc::SERVICE_DOCKING));
+    for svc in [prof_svc::SERVICE_REPAIR, 13] {
+        assert!(!abn_map.contains_key(&svc), "Abandoned must omit service {svc}");
+        assert_eq!(
+            handle_character_has_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap(),
+            PyRep::Bool(false)
+        );
+        assert_eq!(
+            handle_character_check_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap_err()
+                .code,
+            "StructureServiceAccessDenied"
+        );
+        assert_eq!(
+            handle_character_get_service(&ctx, &mut owner_sess, &[PyRep::Integer(sid), PyRep::Integer(svc)])
+                .unwrap(),
+            PyRep::None
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            prof_svc::require_structure_service_access_in_snap(
+                Some(&ctx),
+                snap,
+                sid,
+                owner_id,
+                prof_svc::StructureServiceKind::Repair,
+                ctx.now_unix(),
+            )
+            .unwrap_err()
+            .code,
+            "StructureAbandoned"
+        );
+        assert!(validate_docked_ship_fitting_facility_in_snap(&ctx, snap, sid).is_ok());
+    });
+
+    // P2-1: general_settings[&SERVICE_FITTING] = false / SETTING_HOUSING_CAN_DOCK = false
+    // disables docked fitting cleanly without breaking unconfigured structures.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let mut prof = StructureAccessProfile {
+            profile_id: 755_101,
+            owner_corp_id: owner_corp,
+            corp_only: false,
+            ..Default::default()
+        };
+        prof.general_settings.insert(prof_svc::SETTING_HOUSING_CAN_DOCK, true);
+        prof.general_settings.insert(prof_svc::SERVICE_FITTING, false);
+        ext.structure_profile_id.insert(sid, 755_101);
+        ext.profiles_by_id.insert(755_101, prof.clone());
+        ext.access_profiles.insert(sid, prof);
+        save_ext_state(snap, &ext);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            validate_docked_ship_fitting_facility_in_snap(&ctx, snap, sid)
+                .unwrap_err()
+                .code,
+            "StructureServiceAccessDenied"
+        );
+    });
+    assert_eq!(
+        handle_character_has_service(
+            &ctx,
+            &mut owner_sess,
+            &[PyRep::Integer(sid), PyRep::Integer(prof_svc::SERVICE_FITTING)]
+        )
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;
