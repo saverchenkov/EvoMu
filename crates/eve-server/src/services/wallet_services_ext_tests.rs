@@ -1154,3 +1154,157 @@ async fn store_manager_dispatch_rpc_enforces_weekly_sp_eligibility_station_and_o
         ch.home_station_id = orig_home;
     });
 }
+
+#[tokio::test]
+async fn store_manager_rejects_real_money_and_untagged_sp_and_hides_cash_offers_from_catalog() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+    let expected_invalid = "InvalidOffer";
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.free_skill_points = 1_000.0;
+        }
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.extend([
+            StoreProduct {
+                id: 7201,
+                name: "250,000 Skill Points".into(),
+                description: "Real-money SP pack".into(),
+                type_id: 0,
+                quantity: 250_000,
+            },
+            StoreProduct {
+                id: 7202,
+                name: "250,000 Skill Points".into(),
+                description: "Unpriced untagged SP offer".into(),
+                type_id: 0,
+                quantity: 250_000,
+            },
+            StoreProduct {
+                id: 7203,
+                name: "Weekly SP Pack".into(),
+                description: "Real-money SP offer with weekly tag".into(),
+                type_id: 0,
+                quantity: 15_000,
+            },
+            StoreProduct {
+                id: 7204,
+                name: "Public PLEX SKIN".into(),
+                description: "Regular PLEX offer".into(),
+                type_id: 34_599,
+                quantity: 1,
+            },
+        ]);
+        cat.offers.extend([
+            StoreOffer {
+                id: 7201,
+                name: "250,000 Skill Points Pack".into(),
+                description: "Cash SP pack".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7201],
+                targeted: false,
+                price_cents: Some(1_999),
+                currency: Some("USD".into()),
+            },
+            StoreOffer {
+                id: 7202,
+                name: "250,000 Skill Points".into(),
+                description: "Free unpriced SP without weekly tag".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7202],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            },
+            StoreOffer {
+                id: 7203,
+                name: "Omega Weekly Free SP Cash Mistake".into(),
+                description: "Weekly tag with cash price".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7203],
+                targeted: false,
+                price_cents: Some(499),
+                currency: Some("USD".into()),
+            },
+            StoreOffer {
+                id: 7204,
+                name: "Public PLEX SKIN".into(),
+                description: "Visible PLEX SKIN".into(),
+                category_id: 2,
+                price_plex: 110,
+                product_ids: vec![7204],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            },
+        ]);
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(7203, vec!["omega-weekly-free-sp".into()]);
+    });
+
+    // 1. storeManager.get_offers must exclude price_cents > 0 / price_plex == 0 offers while keeping PLEX offers.
+    let offers_rep = ctx
+        .dispatch_rpc(&mut session, "storeManager", None, "get_offers", &[], &kw, None)
+        .await
+        .expect("get_offers succeeds");
+    let PyRep::List(offers) = offers_rep else {
+        panic!("expected PyRep::List from get_offers");
+    };
+    let offer_ids: Vec<i64> = offers
+        .iter()
+        .filter_map(|o| match o.dict_get("id") {
+            Some(PyRep::Integer(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(offer_ids.contains(&7204), "expected PLEX offer 7204 in get_offers: {offer_ids:?}");
+    assert!(!offer_ids.contains(&7201), "real-money offer 7201 leaked into get_offers: {offer_ids:?}");
+    assert!(!offer_ids.contains(&7203), "real-money weekly offer 7203 leaked into get_offers: {offer_ids:?}");
+
+    // 2. can_purchase_offer & buy_offer must reject real-money and unpriced untagged SP offers without granting SP.
+    for oid in [7201_i64, 7202, 7203] {
+        let can_err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "storeManager",
+                None,
+                "can_purchase_offer",
+                &[PyRep::Integer(oid)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(can_err.code, expected_invalid, "offer {oid} can_purchase_offer mismatch");
+
+        let buy_err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "storeManager",
+                None,
+                "buy_offer",
+                &[PyRep::Integer(oid)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(buy_err.code, expected_invalid, "offer {oid} buy_offer mismatch");
+    }
+
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.free_skill_points)),
+        Some(1_000.0)
+    );
+}

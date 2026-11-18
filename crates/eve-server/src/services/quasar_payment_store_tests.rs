@@ -1655,6 +1655,89 @@ fn targeted_fail_closed_string_offer_id_multi_month_omega_and_item_notifications
     });
 }
 
+#[test]
+fn plex_vault_purchase_allows_virtual_omega_without_char_or_station_and_blocks_physical() {
+    let router = new_router();
+    let db = Arc::clone(&router.db);
+    seed_catalog(&db);
+    let now = 1_700_000_000u64;
+
+    let uid_charless = 43_001u64;
+    let uid_nostat = 43_002u64;
+    let cid_nostat = 94_300_002i64;
+
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid_charless, 2_000);
+        snap.account_plex_vault.insert(uid_nostat, 2_000);
+        let mut ch = snap.characters.get(&90_000_001).cloned().expect("template char");
+        ch.character_id = cid_nostat;
+        ch.user_id = uid_nostat;
+        ch.clone_grade = 1;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.home_station_id = 0;
+        snap.characters.insert(cid_nostat, ch);
+    });
+
+    let sess_charless = make_sess(Some(uid_charless), None, 0);
+    let mut sess_nostat = make_sess(Some(uid_nostat), Some(cid_nostat), 0);
+    sess_nostat.station_id = None;
+
+    let purch_virtual_omega = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(1001) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+    let purch_physical_skin = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(1002) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+
+    // 1. Charless user: physical offer 1002 fails 400 without PLEX deduction; virtual Omega 1001 succeeds.
+    assert_eq!(
+        call(&router, &sess_charless, "eve_public.plex.vault.api.PurchaseRequest", purch_physical_skin.clone(), now).status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid_charless).copied()), Some(2_000));
+
+    assert_eq!(
+        call(&router, &sess_charless, "eve_public.plex.vault.api.PurchaseRequest", purch_virtual_omega.clone(), now).status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault.get(&uid_charless).copied(), Some(1_500));
+        let id_note = s.owner_notes.values().find(|n| n.label == "S:QUASAR_IDENTITY_STORE").expect("identity store");
+        let st: crate::services::quasar_auth_user::QuasarIdentityStore = serde_json::from_str(&id_note.note).unwrap();
+        let expiry = st.omega_subscriptions.get(&uid_charless).copied().unwrap_or(0);
+        assert!(expiry >= now + 30 * 86_400, "expected >= 30d Omega for charless account, got {expiry}");
+    });
+
+    // 2. Stationless character: physical offer 1002 fails 400 without PLEX deduction; virtual Omega 1001 succeeds.
+    assert_eq!(
+        call(&router, &sess_nostat, "eve_public.plex.vault.api.PurchaseRequest", purch_physical_skin, now).status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid_nostat).copied()), Some(2_000));
+
+    assert_eq!(
+        call(&router, &sess_nostat, "eve_public.plex.vault.api.PurchaseRequest", purch_virtual_omega, now).status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault.get(&uid_nostat).copied(), Some(1_500));
+        assert_eq!(s.characters.get(&cid_nostat).map(|c| c.clone_grade), Some(2));
+        let id_note = s.owner_notes.values().find(|n| n.label == "S:QUASAR_IDENTITY_STORE").expect("identity store");
+        let st: crate::services::quasar_auth_user::QuasarIdentityStore = serde_json::from_str(&id_note.note).unwrap();
+        let expiry = st.omega_subscriptions.get(&uid_nostat).copied().unwrap_or(0);
+        assert!(expiry >= now + 30 * 86_400, "expected >= 30d Omega for stationless char, got {expiry}");
+    });
+}
+
 
 #[cfg(test)]
 #[path = "quasar_payment_store_extra_unit_tests.rs"]

@@ -414,13 +414,16 @@ pub fn is_omega_weekly_sp_offer(
     catalog: &StoreCatalog,
     offer_tags: &[String],
 ) -> bool {
-    if offer.price_plex != 0 {
+    if offer.price_plex != 0 || offer.price_cents.is_some_and(|c| c > 0) {
         return false;
     }
     if !offer_tags.is_empty() {
         return offer_tags.iter().any(|t| {
             let lc = t.to_ascii_lowercase();
-            lc == "omega-weekly-free-sp" || lc == "omega-weekly"
+            matches!(
+                lc.as_str(),
+                "omega-weekly-free-sp" | "omega-weekly" | "omega_weekly_sp" | "weekly-free-sp"
+            )
         });
     }
     let offer_lc = offer.name.to_ascii_lowercase();
@@ -433,7 +436,7 @@ pub fn is_omega_weekly_sp_offer(
             && p.quantity > 1
             && {
                 let plc = p.name.to_ascii_lowercase();
-                plc.contains("skill point") || plc.contains(" sp") || plc.contains("weekly")
+                plc.contains("weekly") && (plc.contains("skill point") || plc.contains(" sp"))
             }
     })
 }
@@ -1121,7 +1124,22 @@ pub fn register_plex_vault_extra_handlers(
                     }
                     let total_cost = offer.price_plex.saturating_mul(qty as i64);
 
-                    // Validate recipient character and station BEFORE deducting PLEX
+                    let mut items_to_deliver = Vec::new();
+                    for pid in &offer.product_ids {
+                        if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
+                            if prod.type_id > 0 && prod.quantity > 0 {
+                                let deliver_qty = prod
+                                    .quantity
+                                    .checked_mul(qty)
+                                    .and_then(|q| i32::try_from(q).ok())
+                                    .ok_or_else(|| {
+                                        format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow")
+                                    })?;
+                                items_to_deliver.push((prod.type_id, deliver_qty));
+                            }
+                        }
+                    }
+                    // Validate recipient character and station BEFORE deducting PLEX when delivering physical items
                     let recipient_cid = active_cid.or_else(|| {
                         let mut chars: Vec<_> = snap
                             .characters
@@ -1132,27 +1150,21 @@ pub fn register_plex_vault_extra_handlers(
                         chars.sort_unstable();
                         chars.first().copied()
                     });
-                    let delivery_target = if !offer.product_ids.is_empty() {
+                    let delivery_target = if !items_to_deliver.is_empty() {
                         let Some(cid) = recipient_cid else {
                             return Err(format!("{STATUS_BAD_REQUEST}:No valid recipient character for store delivery"));
                         };
                         let Some(ch) = snap.characters.get(&cid).cloned() else {
                             return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
                         };
-                        let target_station = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
-                        if target_station <= 0 {
+                        let Some(target_station) = ch
+                            .station_id
+                            .filter(|&st| st > 0)
+                            .or_else(|| ch.structure_id.filter(|&st| st > 0))
+                            .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id))
+                        else {
                             return Err(format!("{STATUS_BAD_REQUEST}:Target character {cid} has no valid delivery station"));
-                        }
-                        let mut items_to_deliver = Vec::new();
-                        for pid in &offer.product_ids {
-                            if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                                if prod.type_id > 0 && prod.quantity > 0 {
-                                    let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
-                                        .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
-                                    items_to_deliver.push((prod.type_id, deliver_qty));
-                                }
-                            }
-                        }
+                        };
                         Some((cid, target_station, items_to_deliver))
                     } else if let Some(cid) = active_cid {
                         if !snap.characters.contains_key(&cid) {

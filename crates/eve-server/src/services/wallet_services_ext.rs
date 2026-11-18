@@ -232,7 +232,7 @@ fn handle_store_get_offers(
     let offers: Vec<PyRep> = catalog
         .offers
         .into_iter()
-        .filter(|o| !o.targeted)
+        .filter(|o| !o.targeted && !(o.price_plex == 0 && o.price_cents.is_some_and(|c| c > 0)))
         .map(|o| {
             let prod_reps: Vec<PyRep> = o
                 .product_ids

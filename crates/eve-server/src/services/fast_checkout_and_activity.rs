@@ -130,9 +130,11 @@ fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
 }
 
 fn fc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    let mut err = BridgeRpcError::user_error(code);
-    err.message = message.into();
-    err
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
 }
 
 fn is_synthetic_default_free_pack(o: &FastCheckoutOfferRecord) -> bool {
