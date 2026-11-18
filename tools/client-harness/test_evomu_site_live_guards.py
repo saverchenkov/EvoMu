@@ -44,6 +44,8 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "spaceMgrWreck",
             "slotsContainer",
             "sensorGfxHandler",
+            "skillPlanPanel",
+            "viewStateSvc",
         })
 
     def tearDown(self):
@@ -1616,6 +1618,387 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             cap_cam._configureCameraStartLocations(19720, wasOrbiting=True)
         with self.assertRaises(AttributeError):
             cap_cam.CapitalOrbitUpdateThread()
+
+    def _setup_fake_skill_plan_modules(self):
+        import inspect
+        import weakref
+
+        class FakeCCPSignal(object):
+            """Faithful replica of CCP packages/signals/signal.py Signal."""
+
+            def __init__(self, signalName=None):
+                self._signalName = signalName
+                self._functions = weakref.WeakSet()
+                self._methods = weakref.WeakKeyDictionary()
+
+            def __len__(self):
+                return len(self._functions) + sum(len(x) for x in self._methods.values())
+
+            def __iter__(self):
+                callables = []
+                callables.extend(self._functions)
+                for obj, funcs in self._methods.items():
+                    callables.extend(func.__get__(obj) for func in funcs)
+                return iter(callables)
+
+            def __call__(self, *args, **kwargs):
+                for call in self:
+                    call(*args, **kwargs)
+
+            def connect(self, slot):
+                if inspect.ismethod(slot):
+                    if slot.__self__ not in self._methods:
+                        self._methods[slot.__self__] = weakref.WeakSet()
+                    self._methods[slot.__self__].add(slot.__func__)
+                elif inspect.isfunction(slot):
+                    self._functions.add(slot)
+                else:
+                    raise TypeError("Signal connect requires a callable slot")
+
+            def disconnect(self, slot):
+                if inspect.ismethod(slot):
+                    if slot.__self__ in self._methods:
+                        self._methods[slot.__self__].discard(slot.__func__)
+                else:
+                    self._functions.discard(slot)
+
+        sp_signals = types.ModuleType("skills.skillplan.skillPlanSignals")
+        sp_signals.on_created = FakeCCPSignal("skillplansignals.on_created")
+        sp_signals.on_saved = FakeCCPSignal("skillplansignals.on_saved")
+        sp_signals.on_deleted = FakeCCPSignal("skillplansignals.on_deleted")
+
+        sp_pkg = types.ModuleType("skills.skillplan")
+        sp_pkg.skillPlanSignals = sp_signals
+
+        sp_ui_signals = types.ModuleType("eve.client.script.ui.skillPlan.skillPlanUISignals")
+        for sig_name in (
+            "on_create_new_personal_button",
+            "on_create_new_corp_button",
+            "on_edit_button",
+            "on_delete_button",
+            "on_close_new_button",
+            "on_selected",
+            "on_close_button",
+            "on_show_multi_training_msg",
+            "on_show_alpha_training_msg",
+        ):
+            setattr(sp_ui_signals, sig_name, FakeCCPSignal(sig_name))
+
+        ui_sp_pkg = types.ModuleType("eve.client.script.ui.skillPlan")
+        ui_sp_pkg.skillPlanUISignals = sp_ui_signals
+
+        events = []
+        plans = {"53504348-055d-4a81-0000-0000000000c2"}
+        close_raise = [None]
+
+        class FakeSkillPlanService(object):
+            def Delete(self, skill_plan_id):
+                events.append(("svc.Delete", skill_plan_id))
+                if skill_plan_id not in plans:
+                    raise KeyError(f"Unable to delete skill plan with id: {skill_plan_id} as it's not found")
+                plans.remove(skill_plan_id)
+                sp_signals.on_deleted(skill_plan_id)
+                return ("deleted", skill_plan_id)
+
+        svc = FakeSkillPlanService()
+        panel_mod = types.ModuleType("eve.client.script.ui.skillPlan.skillPlanPanel")
+        panel_mod.skillPlanSignals = sp_signals
+        panel_mod.skillPlanUISignals = sp_ui_signals
+
+        class SkillPlanPanel(object):
+            def __init__(self, label):
+                self.label = label
+                self.destroyed = False
+                self.closed_calls = 0
+                # Cyclic reference simulating V24 child button callback keeping closed panel alive.
+                self.child_btn = types.SimpleNamespace(func=self.OnDeleteSkillPlanButton, parent=self)
+                self.ApplyAttributes({})
+
+            def ApplyAttributes(self, attributes):
+                sp_signals.on_created.connect(self.OnSkillPlanCreated)
+                sp_signals.on_saved.connect(self.OnSkillPlanSaved)
+                sp_signals.on_deleted.connect(self.OnSkillPlanDeleted)
+                sp_ui_signals.on_create_new_personal_button.connect(self.OnCreateNewPersonalSkillPlanButton)
+                sp_ui_signals.on_create_new_corp_button.connect(self.OnCreateNewCorpSkillPlanButton)
+                sp_ui_signals.on_edit_button.connect(self.OnEditSkillPlanButton)
+                sp_ui_signals.on_delete_button.connect(self.OnDeleteSkillPlanButton)
+                sp_ui_signals.on_close_new_button.connect(self.OnCloseNewSkillPlanButton)
+                sp_ui_signals.on_selected.connect(self.OnSkillPlanSelected)
+                sp_ui_signals.on_close_button.connect(self.OnSkillPlanCloseButton)
+                sp_ui_signals.on_show_multi_training_msg.connect(self.OnShowMultiTrainingMessage)
+                sp_ui_signals.on_show_alpha_training_msg.connect(self.OnShowAlphaTrainingMessage)
+
+            def OnSkillPlanCreated(self, skillPlanID):
+                events.append((self.label, "OnSkillPlanCreated", skillPlanID))
+                return ("created", self.label, skillPlanID)
+
+            def OnSkillPlanSaved(self, skillPlan):
+                events.append((self.label, "OnSkillPlanSaved", skillPlan))
+                return ("saved", self.label, skillPlan)
+
+            def OnSkillPlanDeleted(self, skillPlanID):
+                events.append((self.label, "OnSkillPlanDeleted", skillPlanID))
+                return ("deleted_ui", self.label, skillPlanID)
+
+            def OnCreateNewPersonalSkillPlanButton(self):
+                events.append((self.label, "OnCreateNewPersonalSkillPlanButton"))
+                return ("new_personal", self.label)
+
+            def OnCreateNewCorpSkillPlanButton(self):
+                events.append((self.label, "OnCreateNewCorpSkillPlanButton"))
+                return ("new_corp", self.label)
+
+            def OnEditSkillPlanButton(self, skillPlan):
+                events.append((self.label, "OnEditSkillPlanButton", skillPlan))
+                return ("edit", self.label, skillPlan)
+
+            def OnDeleteSkillPlanButton(self, skillPlan):
+                events.append((self.label, "OnDeleteSkillPlanButton", skillPlan))
+                return svc.Delete(skillPlan)
+
+            def OnCloseNewSkillPlanButton(self):
+                events.append((self.label, "OnCloseNewSkillPlanButton"))
+                return ("close_new", self.label)
+
+            def OnSkillPlanSelected(self, skillPlan):
+                if self.destroyed:
+                    return None
+                events.append((self.label, "OnSkillPlanSelected", skillPlan))
+                return ("selected", self.label, skillPlan)
+
+            def OnSkillPlanCloseButton(self):
+                events.append((self.label, "OnSkillPlanCloseButton"))
+                return ("close_btn", self.label)
+
+            def OnShowMultiTrainingMessage(self):
+                events.append((self.label, "OnShowMultiTrainingMessage"))
+                return ("multi_msg", self.label)
+
+            def OnShowAlphaTrainingMessage(self, message):
+                events.append((self.label, "OnShowAlphaTrainingMessage", message))
+                return ("alpha_msg", self.label, message)
+
+            def Close(self):
+                # Reproduces CCP V24 SkillPlanPanel.Close without disconnecting global signals.
+                self.closed_calls += 1
+                self.destroyed = True
+                if close_raise[0] is not None:
+                    raise close_raise[0]
+                return ("closed", self.label)
+
+        panel_mod.SkillPlanPanel = SkillPlanPanel
+
+        sys.modules["skills.skillplan"] = sp_pkg
+        sys.modules["skills.skillplan.skillPlanSignals"] = sp_signals
+        sys.modules["eve.client.script.ui.skillPlan"] = ui_sp_pkg
+        sys.modules["eve.client.script.ui.skillPlan.skillPlanUISignals"] = sp_ui_signals
+        sys.modules["eve.client.script.ui.skillPlan.skillPlanPanel"] = panel_mod
+
+        all_signals = [
+            sp_signals.on_created,
+            sp_signals.on_saved,
+            sp_signals.on_deleted,
+            sp_ui_signals.on_create_new_personal_button,
+            sp_ui_signals.on_create_new_corp_button,
+            sp_ui_signals.on_edit_button,
+            sp_ui_signals.on_delete_button,
+            sp_ui_signals.on_close_new_button,
+            sp_ui_signals.on_selected,
+            sp_ui_signals.on_close_button,
+            sp_ui_signals.on_show_multi_training_msg,
+            sp_ui_signals.on_show_alpha_training_msg,
+        ]
+        return types.SimpleNamespace(
+            sp_signals=sp_signals,
+            sp_ui_signals=sp_ui_signals,
+            panel_mod=panel_mod,
+            SkillPlanPanel=SkillPlanPanel,
+            all_signals=all_signals,
+            events=events,
+            plans=plans,
+            close_raise=close_raise,
+        )
+
+    def test_1332_skill_plan_panel_close_disconnects_all_12_signals_and_prevents_zombie_delete(self):
+        fx = self._setup_fake_skill_plan_modules()
+        self.assertTrue(evomu_site._install_skill_plan_panel_signal_guard())
+        # Second install call is an idempotent no-op.
+        self.assertFalse(evomu_site._install_skill_plan_panel_signal_guard())
+
+        # Keep explicit strong references (in addition to cyclic refs) so GC never masks leaked slots.
+        retained_closed_panels = []
+        for idx in (1, 2):
+            panel = fx.SkillPlanPanel(f"panel_{idx}")
+            self.assertEqual(panel.Close(), ("closed", f"panel_{idx}"))
+            self.assertTrue(panel.destroyed)
+            # Idempotent second Close() must also remain safe.
+            self.assertEqual(panel.Close(), ("closed", f"panel_{idx}"))
+            retained_closed_panels.append(panel)
+
+        active_panel = fx.SkillPlanPanel("panel_3")
+
+        for sig in fx.all_signals:
+            self.assertEqual(len(sig), 1, msg=sig._signalName)
+            self.assertNotIn(retained_closed_panels[0], sig._methods)
+            self.assertNotIn(retained_closed_panels[1], sig._methods)
+            self.assertIn(active_panel, sig._methods)
+
+        # Trigger the exact #1332 delete signal: must fire ONLY once on active panel_3.
+        plan_id = "53504348-055d-4a81-0000-0000000000c2"
+        fx.sp_ui_signals.on_delete_button(plan_id)
+        self.assertEqual(
+            fx.events,
+            [
+                ("panel_3", "OnDeleteSkillPlanButton", plan_id),
+                ("svc.Delete", plan_id),
+                ("panel_3", "OnSkillPlanDeleted", plan_id),
+            ],
+        )
+
+        # Trigger all remaining 10 global signals: each fires ONLY on active_panel.
+        fx.events.clear()
+        fx.sp_signals.on_created("plan_new")
+        fx.sp_signals.on_saved("plan_saved")
+        fx.sp_ui_signals.on_create_new_personal_button()
+        fx.sp_ui_signals.on_create_new_corp_button()
+        fx.sp_ui_signals.on_edit_button("plan_edit")
+        fx.sp_ui_signals.on_close_new_button()
+        fx.sp_ui_signals.on_selected("plan_sel")
+        fx.sp_ui_signals.on_close_button()
+        fx.sp_ui_signals.on_show_multi_training_msg()
+        fx.sp_ui_signals.on_show_alpha_training_msg("alpha_msg")
+        self.assertEqual(
+            fx.events,
+            [
+                ("panel_3", "OnSkillPlanCreated", "plan_new"),
+                ("panel_3", "OnSkillPlanSaved", "plan_saved"),
+                ("panel_3", "OnCreateNewPersonalSkillPlanButton"),
+                ("panel_3", "OnCreateNewCorpSkillPlanButton"),
+                ("panel_3", "OnEditSkillPlanButton", "plan_edit"),
+                ("panel_3", "OnCloseNewSkillPlanButton"),
+                ("panel_3", "OnSkillPlanSelected", "plan_sel"),
+                ("panel_3", "OnSkillPlanCloseButton"),
+                ("panel_3", "OnShowMultiTrainingMessage"),
+                ("panel_3", "OnShowAlphaTrainingMessage", "alpha_msg"),
+            ],
+        )
+
+        # Even direct calls on a destroyed panel's slots no-op cleanly.
+        fx.events.clear()
+        zombie = retained_closed_panels[0]
+        self.assertIsNone(zombie.OnSkillPlanCreated("x"))
+        self.assertIsNone(zombie.OnSkillPlanSaved("x"))
+        self.assertIsNone(zombie.OnSkillPlanDeleted("x"))
+        self.assertIsNone(zombie.OnCreateNewPersonalSkillPlanButton())
+        self.assertIsNone(zombie.OnCreateNewCorpSkillPlanButton())
+        self.assertIsNone(zombie.OnEditSkillPlanButton("x"))
+        self.assertIsNone(zombie.OnDeleteSkillPlanButton("missing-plan-id"))
+        self.assertIsNone(zombie.OnCloseNewSkillPlanButton())
+        self.assertIsNone(zombie.OnSkillPlanSelected("x"))
+        self.assertIsNone(zombie.OnSkillPlanCloseButton())
+        self.assertIsNone(zombie.OnShowMultiTrainingMessage())
+        self.assertIsNone(zombie.OnShowAlphaTrainingMessage("msg"))
+        self.assertEqual(fx.events, [])
+
+        # Negative assertions: active panel propagates real errors unmasked, and Close()
+        # still disconnects all slots in `finally:` even when original Close() raises or signals are missing.
+        with self.assertRaises(KeyError):
+            active_panel.OnDeleteSkillPlanButton("missing-plan-id")
+
+        fx.sp_signals.on_deleted = None
+        orig_disconnect = fx.sp_ui_signals.on_edit_button.disconnect
+        fx.sp_ui_signals.on_edit_button.disconnect = lambda _slot: (_ for _ in ()).throw(RuntimeError("boom"))
+        fx.close_raise[0] = RuntimeError("close_failed")
+        with self.assertRaises(RuntimeError) as ctx:
+            active_panel.Close()
+        self.assertEqual(str(ctx.exception), "close_failed")
+        fx.sp_ui_signals.on_edit_button.disconnect = orig_disconnect
+        for sig in fx.all_signals:
+            if sig._signalName == "skillplansignals.on_deleted":
+                continue
+            self.assertEqual(len(sig), 0, msg=sig._signalName)
+            self.assertNotIn(active_panel, sig._methods)
+
+    def test_1332_late_import_meta_hook_view_state_and_preexisting_panel_migration(self):
+        fx = self._setup_fake_skill_plan_modules()
+
+        # Construct panels BEFORE the guard is installed (simulating first-import race):
+        # pre_closed already leaked into Signal._methods; pre_live is still open.
+        pre_closed = fx.SkillPlanPanel("pre_closed")
+        pre_closed.Close()
+        pre_live = fx.SkillPlanPanel("pre_live")
+        for sig in fx.all_signals:
+            self.assertEqual(len(sig), 2)
+            self.assertIn(pre_closed, sig._methods)
+            self.assertIn(pre_live, sig._methods)
+
+        # 1. _EvomuMetaHook schedules _install_skill_plan_panel_signal_guard on lazy skillPlanPanel import.
+        saved_panel_mod = sys.modules.pop("eve.client.script.ui.skillPlan.skillPlanPanel")
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        evomu_site._EvomuMetaHook().find_module("eve.client.script.ui.skillPlan.skillPlanPanel")
+        self.assertEqual(scheduled, [evomu_site._install_skill_plan_panel_signal_guard])
+        sys.modules["eve.client.script.ui.skillPlan.skillPlanPanel"] = saved_panel_mod
+        self.assertTrue(scheduled[0]())
+        self.assertIn("skillPlanPanel", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        for sig in fx.all_signals:
+            self.assertEqual(len(sig), 1, msg=sig._signalName)
+            self.assertNotIn(pre_closed, sig._methods)
+            self.assertIn(pre_live, sig._methods)
+        pre_live.Close()
+        for sig in fx.all_signals:
+            self.assertEqual(len(sig), 0, msg=sig._signalName)
+
+        # Reset to verify ViewStateSvc._OpenView also installs the guard and migrates pre-existing panels.
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS.discard("skillPlanPanel")
+        evomu_site._HOOKED_CAMERA_GUARD_TARGETS.discard("viewStateSvc")
+        sys.modules.pop("eve.client.script.ui.skillPlan.skillPlanPanel", None)
+
+        vss_mod = types.ModuleType("eve.client.script.ui.services.viewStateSvc")
+
+        class ViewStateSvc(object):
+            def _OpenView(self, viewInfo, reopen=False, cameraID=None, **kwargs):
+                return "opened"
+
+            def ActivateView(self, name, **kwargs):
+                return "activated"
+
+        vss_mod.ViewStateSvc = ViewStateSvc
+        sys.modules["eve.client.script.ui.services.viewStateSvc"] = vss_mod
+
+        evomu_site._install_camera_dock_guard()
+        self.assertNotIn("skillPlanPanel", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        fx2 = self._setup_fake_skill_plan_modules()
+        pre_closed_2 = fx2.SkillPlanPanel("pre_closed_2")
+        pre_closed_2.Close()
+        pre_live_2 = fx2.SkillPlanPanel("pre_live_2")
+
+        self.assertEqual(ViewStateSvc()._OpenView(types.SimpleNamespace(name="skillplan")), "opened")
+        self.assertIn("skillPlanPanel", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        # Pre-existing destroyed panel was purged immediately; pre_live_2 was migrated cleanly.
+        for sig in fx2.all_signals:
+            self.assertEqual(len(sig), 1, msg=sig._signalName)
+            self.assertNotIn(pre_closed_2, sig._methods)
+            self.assertIn(pre_live_2, sig._methods)
+
+        plan_id = "53504348-055d-4a81-0000-0000000000c2"
+        fx2.sp_ui_signals.on_delete_button(plan_id)
+        self.assertEqual(
+            fx2.events,
+            [
+                ("pre_live_2", "OnDeleteSkillPlanButton", plan_id),
+                ("svc.Delete", plan_id),
+                ("pre_live_2", "OnSkillPlanDeleted", plan_id),
+            ],
+        )
+
+        # Closing pre_live_2 disconnects its migrated wrapped slots cleanly as well.
+        pre_live_2.Close()
+        for sig in fx2.all_signals:
+            self.assertEqual(len(sig), 0)
+            self.assertNotIn(pre_live_2, sig._methods)
 
 
 if __name__ == "__main__":
