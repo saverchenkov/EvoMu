@@ -6,17 +6,22 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use eve_db::types::{FleetMemberRecord, FleetRole, KillmailRecord};
 use eve_db::{
-    service_roles, AllianceRecord, BookmarkRecord, CharacterRecord, ContractRecord, CorpGovState,
-    CorporationRecord, FleetRecord, IndustryJobRecord, InventoryFlag, InventoryItemRecord,
-    IskCents, MailRecord, MarketOrderRecord, PlanetaryColonyRecord, SavedFittingRecord,
-    TrainedSkillRecord, UpwellStructureRecord, WarRecord, WorldRepository, WorldTablesSnapshot,
+    service_roles, AllianceRecord, BookmarkRecord, CharacterRecord, CorpProjectRecord,
+    ContractRecord, CorpGovState, CorporationRecord, FleetRecord, IndustryJobRecord, InventoryFlag,
+    InventoryItemRecord, IskCents, MailRecord, MarketOrderRecord, PlanetaryColonyRecord,
+    SavedFittingRecord, TrainedSkillRecord, UpwellStructureRecord, WarRecord, WorldRepository,
+    WorldTablesSnapshot,
 };
 use eve_destiny::{Ball, BallId, CombatState, WarpBubbleMgr};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use eve_server::router::{BoundObjectEntry, ServerContext};
+use eve_server::services::industry_pi::industry_facilities_bps::{
+    save_job_cost_meta, IndustryJobCostMeta,
+};
 use eve_testkit::client_harness::ContractValidationMode;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
@@ -46,13 +51,26 @@ const CHAR_A_CEO_ID: i64 = 2_199_007;
 
 const CORP_A_ID: i64 = 98_099_001;
 const CORP_B_ID: i64 = 98_099_002;
+const CORP_D_ID: i64 = 98_099_004;
+const CORP_E_ID: i64 = 98_099_005;
+const CORP_F_ID: i64 = 98_099_006;
 const ALLIANCE_B_ID: i64 = 99_099_002;
 
 const CORP_A_OFFICE_ID: i64 = 9_199_001;
 const CORP_A_OFFICE_ITEM_ID: i64 = 9_199_002;
 const CORP_A_STRUCTURE_ID: i64 = 1_099_001_000_001;
 const CORP_B_OFFICE_ID: i64 = 9_199_011;
+const CORP_B_OFFICE_ITEM_ID: i64 = 9_199_012;
 const CORP_B_STRUCTURE_ID: i64 = 1_099_002_000_001;
+const CORP_D_OFFICE_ID: i64 = 9_199_041;
+const CORP_D_OFFICE_ITEM_ID: i64 = 9_199_042;
+const CORP_D_STRUCTURE_ID: i64 = 1_099_004_000_001;
+const CORP_E_OFFICE_ID: i64 = 9_199_051;
+const CORP_E_OFFICE_ITEM_ID: i64 = 9_199_052;
+const CORP_E_STRUCTURE_ID: i64 = 1_099_005_000_001;
+const CORP_F_OFFICE_ID: i64 = 9_199_061;
+const CORP_F_OFFICE_ITEM_ID: i64 = 9_199_062;
+const CORP_F_STRUCTURE_ID: i64 = 1_099_006_000_001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Situation {
@@ -518,9 +536,13 @@ fn split_guard(pat: &str) -> (&str, &str) {
 }
 
 fn extract_ident_strings(s: &str) -> Vec<String> {
+    extract_ident_strings_with_consts(s, &HashMap::new())
+}
+
+fn extract_ident_strings_with_consts(s: &str, consts: &HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
     let bytes = s.as_bytes();
     let n = bytes.len();
-    let mut out = Vec::new();
     let mut i = 0;
     while i < n {
         if bytes[i] == b'"' {
@@ -545,12 +567,97 @@ fn extract_ident_strings(s: &str) -> Vec<String> {
             i = j + 1;
             continue;
         }
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            let mut j = i + 1;
+            while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if let Some(val) = consts.get(&s[start..j]) {
+                out.push(val.clone());
+            }
+            i = j;
+            continue;
+        }
         i += 1;
     }
     out
 }
 
-fn expand_tuple_or_pattern(pat: &str) -> Vec<(String, String)> {
+fn extract_file_str_consts(code: &str) -> HashMap<String, String> {
+    let mut consts = HashMap::new();
+    let bytes = code.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if !code.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        if let Some(next_i) = skip_string_or_char(bytes, i) {
+            i = next_i;
+            continue;
+        }
+        let ok_boundary =
+            i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        if ok_boundary && code[i..].starts_with("const") {
+            let mut p = i + "const".len();
+            if p < n && bytes[p].is_ascii_whitespace() {
+                while p < n && bytes[p].is_ascii_whitespace() {
+                    p += 1;
+                }
+                if p < n && (bytes[p].is_ascii_alphabetic() || bytes[p] == b'_') {
+                    let id_start = p;
+                    while p < n && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+                        p += 1;
+                    }
+                    let ident = &code[id_start..p];
+                    if !matches!(ident, "fn" | "unsafe" | "extern") {
+                        while p < n && bytes[p].is_ascii_whitespace() {
+                            p += 1;
+                        }
+                        if p < n && bytes[p] == b':' {
+                            let ty_start = p + 1;
+                            p += 1;
+                            while p < n
+                                && !matches!(bytes[p], b'=' | b';' | b'{' | b'}')
+                            {
+                                if let Some(nx) = skip_string_or_char(bytes, p) {
+                                    p = nx;
+                                    continue;
+                                }
+                                p += 1;
+                            }
+                            if p < n && bytes[p] == b'=' {
+                                let ty_slice = code[ty_start..p].trim();
+                                let is_str_ty = ty_slice.starts_with('&') && ty_slice.ends_with("str");
+                                if is_str_ty {
+                                    let rhs = code[p + 1..].trim_start();
+                                    if let Some(inner) = rhs.strip_prefix('"') {
+                                        if let Some(end) = inner.find('"') {
+                                            let val = &inner[..end];
+                                            let after_val = inner[end + 1..].trim_start();
+                                            if after_val.starts_with(';')
+                                                && !val.is_empty()
+                                                && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                                            {
+                                                consts.insert(ident.to_string(), val.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    consts
+}
+
+fn expand_tuple_or_pattern(pat: &str, consts: &HashMap<String, String>) -> Vec<(String, String)> {
     let bytes = pat.as_bytes();
     let n = bytes.len();
     let mut pairs = Vec::new();
@@ -588,8 +695,8 @@ fn expand_tuple_or_pattern(pat: &str) -> Vec<(String, String)> {
                     if let Some(stripped) = right.strip_suffix(',') {
                         right = stripped;
                     }
-                    let svcs = extract_ident_strings(left);
-                    let meths = extract_ident_strings(right);
+                    let svcs = extract_ident_strings_with_consts(left, consts);
+                    let meths = extract_ident_strings_with_consts(right, consts);
                     if !svcs.is_empty() && !meths.is_empty() {
                         for s in &svcs {
                             for m in &meths {
@@ -738,6 +845,7 @@ fn scan_match_headers_and_extract(
     code: &str,
     rpcs: &mut BTreeSet<(String, String)>,
 ) {
+    let consts = extract_file_str_consts(code);
     let bytes = code.as_bytes();
     let n = bytes.len();
     let mut i = 0;
@@ -793,16 +901,26 @@ fn scan_match_headers_and_extract(
                                     matches!(l_clean, "effective_service" | "service" | "svc");
                                 let is_meth_var =
                                     matches!(r_clean, "method" | "action" | "m" | "meth");
-                                let is_fixed_svc = l.starts_with('"') && l.ends_with('"');
-                                if (is_svc_var || is_fixed_svc) && is_meth_var {
+                                let fixed_svc = if l.starts_with('"') && l.ends_with('"') {
+                                    Some(l[1..l.len() - 1].to_string())
+                                } else {
+                                    consts.get(l_clean).cloned()
+                                };
+                                if (is_svc_var || fixed_svc.is_some()) && is_meth_var {
                                     let (block, _) = brace_block(code, k + 1);
                                     for (lhs, _) in parse_top_arms(block) {
                                         let pat = split_guard(lhs).0;
-                                        for (s, m) in expand_tuple_or_pattern(pat) {
-                                            if s == "_" && rel == "services/fleet_social_chat.rs" {
-                                                rpcs.insert(("LSC".into(), m.clone()));
-                                                rpcs.insert(("XmppChatMgr".into(), m));
-                                            } else if s != "_" && m != "_" {
+                                        for (s, m) in expand_tuple_or_pattern(pat, &consts) {
+                                            if s == "_" {
+                                                if let Some(ref fsvc) = fixed_svc {
+                                                    if m != "_" {
+                                                        rpcs.insert((fsvc.clone(), m));
+                                                    }
+                                                } else if rel == "services/fleet_social_chat.rs" {
+                                                    rpcs.insert(("LSC".into(), m.clone()));
+                                                    rpcs.insert(("XmppChatMgr".into(), m));
+                                                }
+                                            } else if m != "_" {
                                                 rpcs.insert((s, m));
                                             }
                                         }
@@ -828,7 +946,7 @@ fn scan_match_headers_and_extract(
                                     let (block, _) = brace_block(code, k + 1);
                                     for (lhs, _) in parse_top_arms(block) {
                                         let pat = split_guard(lhs).0;
-                                        for meth in extract_ident_strings(pat) {
+                                        for meth in extract_ident_strings_with_consts(pat, &consts) {
                                             for &svc in svcs {
                                                 rpcs.insert((svc.to_string(), meth.clone()));
                                             }
@@ -841,11 +959,13 @@ fn scan_match_headers_and_extract(
                 }
             }
         } else if bytes[i] == b'(' {
-            // `(service, method) == ("svc", "meth")`
+            // `(service, method) == ("svc", "meth")` (supports const bindings)
             if let Some(close_l) = code[i + 1..].find(')') {
                 let lhs_tup = &code[i + 1..i + 1 + close_l];
                 if let Some((a, b)) = lhs_tup.split_once(',') {
-                    if a.trim() == "service" && b.trim() == "method" {
+                    if matches!(a.trim(), "service" | "effective_service" | "svc")
+                        && matches!(b.trim(), "method" | "action")
+                    {
                         let after_l = code[i + 2 + close_l..].trim_start();
                         if let Some(after_eq) = after_l.strip_prefix("==") {
                             let after_eq = after_eq.trim_start();
@@ -853,9 +973,9 @@ fn scan_match_headers_and_extract(
                                 if let Some(close_r) = after_open.find(')') {
                                     let rhs_tup = &after_open[..close_r];
                                     if let Some((rs, rm)) = rhs_tup.split_once(',') {
-                                        if let (Some(s), Some(m)) = (
-                                            extract_leading_ident_str(rs.trim()),
-                                            extract_leading_ident_str(rm.trim()),
+                                        if let (Some((s, _)), Some((m, _))) = (
+                                            extract_leading_str_or_const(rs.trim(), &consts),
+                                            extract_leading_str_or_const(rm.trim(), &consts),
                                         ) {
                                             rpcs.insert((s, m));
                                         }
@@ -869,7 +989,7 @@ fn scan_match_headers_and_extract(
         } else if ok_boundary
             && (code[i..].starts_with("effective_service") || code[i..].starts_with("service"))
         {
-            // `(effective_service|service) == "svc" && method == "meth"`
+            // `(effective_service|service) == ("svc"|CONST) && method == ("meth"|CONST)`
             let kw_len = if code[i..].starts_with("effective_service") {
                 "effective_service".len()
             } else {
@@ -878,14 +998,16 @@ fn scan_match_headers_and_extract(
             let rest = code[i + kw_len..].trim_start();
             if let Some(after_eq) = rest.strip_prefix("==") {
                 let after_eq = after_eq.trim_start();
-                if let Some(s) = extract_leading_ident_str(after_eq) {
-                    let tail = after_eq[s.len() + 2..].trim_start();
+                if let Some((s, after_s)) = extract_leading_str_or_const(after_eq, &consts) {
+                    let tail = after_s.trim_start();
                     if let Some(after_amp) = tail.strip_prefix("&&") {
                         let after_amp = after_amp.trim_start();
                         if let Some(after_m) = after_amp.strip_prefix("method") {
                             let after_m = after_m.trim_start();
                             if let Some(after_meq) = after_m.strip_prefix("==") {
-                                if let Some(m) = extract_leading_ident_str(after_meq.trim_start()) {
+                                if let Some((m, _)) =
+                                    extract_leading_str_or_const(after_meq.trim_start(), &consts)
+                                {
                                     rpcs.insert((s, m));
                                 }
                             }
@@ -898,15 +1020,28 @@ fn scan_match_headers_and_extract(
     }
 }
 
-fn extract_leading_ident_str(s: &str) -> Option<String> {
-    let inner = s.strip_prefix('"')?;
-    let end = inner.find('"')?;
-    let val = &inner[..end];
-    if !val.is_empty() && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-        Some(val.to_string())
-    } else {
-        None
+fn extract_leading_str_or_const<'a>(
+    s: &'a str,
+    consts: &HashMap<String, String>,
+) -> Option<(String, &'a str)> {
+    if let Some(inner) = s.strip_prefix('"') {
+        let end = inner.find('"')?;
+        let val = &inner[..end];
+        if !val.is_empty() && val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Some((val.to_string(), &inner[end + 1..]));
+        }
+        return None;
     }
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+        return None;
+    }
+    let mut end = 1usize;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    let ident = &s[..end];
+    consts.get(ident).map(|v| (v.clone(), &s[end..]))
 }
 
 fn discover_registered_rpcs(root: &Path) -> (BTreeSet<(String, String)>, BTreeSet<String>) {
@@ -1128,25 +1263,88 @@ struct MatrixFixture {
     b_space_ship_id: i64,
     c_ship_id: i64,
     d_ship_id: i64,
+    d_space_ship_id: i64,
     e_ship_id: i64,
+    e_space_ship_id: i64,
     f_ship_id: i64,
+    f_space_ship_id: i64,
     a_ore_id: i64,
     c_ore_id: i64,
     d_ore_id: i64,
+    e_ore_id: i64,
+    f_ore_id: i64,
+    c_module_id: i64,
     d_module_id: i64,
+    e_module_id: i64,
+    f_module_id: i64,
     b_item_id: i64,
     b_cont_id: i64,
+    d_item_id: i64,
+    d_cont_id: i64,
+    e_item_id: i64,
+    e_cont_id: i64,
+    f_item_id: i64,
+    f_cont_id: i64,
     b_order_id: i64,
+    d_order_id: i64,
+    e_order_id: i64,
+    f_order_id: i64,
     b_contract_id: i64,
+    d_contract_id: i64,
+    e_contract_id: i64,
+    f_contract_id: i64,
     b_job_id: i64,
+    corp_a_job_id: i64,
+    d_job_id: i64,
+    e_job_id: i64,
+    f_job_id: i64,
+    b_blueprint_id: i64,
+    corp_a_blueprint_id: i64,
+    d_blueprint_id: i64,
+    e_blueprint_id: i64,
+    f_blueprint_id: i64,
     b_fitting_id: i64,
+    d_fitting_id: i64,
+    e_fitting_id: i64,
+    f_fitting_id: i64,
     b_mail_id: i64,
+    d_mail_id: i64,
+    e_mail_id: i64,
+    f_mail_id: i64,
     b_bookmark_id: i64,
+    d_bookmark_id: i64,
+    e_bookmark_id: i64,
+    f_bookmark_id: i64,
     b_fleet_id: i64,
+    d_fleet_id: i64,
+    e_fleet_id: i64,
+    f_fleet_id: i64,
     b_war_id: i64,
+    d_war_id: i64,
+    e_war_id: i64,
+    f_war_id: i64,
+    b_killmail_id: i64,
+    d_killmail_id: i64,
+    e_killmail_id: i64,
+    f_killmail_id: i64,
     b_pos_id: i64,
+    d_pos_id: i64,
+    e_pos_id: i64,
+    f_pos_id: i64,
     b_planet_id: i64,
+    d_planet_id: i64,
+    e_planet_id: i64,
+    f_planet_id: i64,
     b_corp_project_id: i64,
+    corp_a_project_id: i64,
+    d_corp_project_id: i64,
+    e_corp_project_id: i64,
+    f_corp_project_id: i64,
+    b_petition_id: i64,
+    c_petition_id: i64,
+    d_petition_id: i64,
+    e_petition_id: i64,
+    f_petition_id: i64,
     sess_by_sit: [SessionState; 6],
     actor_bounds: [HashMap<String, u64>; 6],
     b_bounds: Vec<(String, u64)>,
@@ -1564,15 +1762,25 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let other_constellation = other_sys.constellation_id;
     let other_region = other_sys.region_id;
     let other_station_id = other_sys.stations[0].station_id;
+    let b_planet_id = jita_sys.planet_ids.first().copied().unwrap_or(40_009_001);
+    let d_planet_id = jita_sys.planet_ids.get(1).copied().unwrap_or(b_planet_id);
+    let e_planet_id = other_sys.planet_ids.first().copied().unwrap_or(40_009_002);
+    let f_planet_id = jita_sys.planet_ids.get(2).copied().unwrap_or(b_planet_id);
+    let bp_type_id = *ctx
+        .sde
+        .blueprints
+        .keys()
+        .min()
+        .expect("at least one blueprint in SDE");
 
     // Provision strictly non-GM player accounts (`role = ROLE_PLAYER_DEFAULT`).
     let actor_specs = [
         ("neg_a", USER_A_ID, CHAR_A_ID, "Neg Pilot A", 1_000_009, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
         ("neg_b", USER_B_ID, CHAR_B_ID, "Neg Pilot B", CORP_B_ID, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
         ("neg_c", USER_C_ID, CHAR_C_ID, "Neg Pilot C", CORP_A_ID, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
-        ("neg_d", USER_D_ID, CHAR_D_ID, "Neg Pilot D", 1_000_009, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
-        ("neg_e", USER_E_ID, CHAR_E_ID, "Neg Pilot E", 1_000_009, Some(other_station_id), other_sys_id, other_constellation, other_region),
-        ("neg_f", USER_F_ID, CHAR_F_ID, "Neg Pilot F", 1_000_009, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
+        ("neg_d", USER_D_ID, CHAR_D_ID, "Neg Pilot D", CORP_D_ID, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
+        ("neg_e", USER_E_ID, CHAR_E_ID, "Neg Pilot E", CORP_E_ID, Some(other_station_id), other_sys_id, other_constellation, other_region),
+        ("neg_f", USER_F_ID, CHAR_F_ID, "Neg Pilot F", CORP_F_ID, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
         ("neg_ceo_a", USER_A_CEO_ID, CHAR_A_CEO_ID, "Neg CEO A", CORP_A_ID, Some(NPC_STATION_ID), SYS_JITA, jita_constellation, jita_region),
     ];
 
@@ -1587,26 +1795,80 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let b_space_ship_id = next_id();
     let c_ship_id = next_id();
     let d_ship_id = next_id();
+    let d_space_ship_id = next_id();
     let e_ship_id = next_id();
+    let e_space_ship_id = next_id();
     let f_ship_id = next_id();
+    let f_space_ship_id = next_id();
     let ceo_ship_id = next_id();
     let a_ore_id = next_id();
     let c_ore_id = next_id();
     let d_ore_id = next_id();
+    let e_ore_id = next_id();
+    let f_ore_id = next_id();
+    let c_module_id = next_id();
     let d_module_id = next_id();
+    let e_module_id = next_id();
+    let f_module_id = next_id();
     let b_item_id = next_id();
     let b_cont_id = next_id();
+    let d_item_id = next_id();
+    let d_cont_id = next_id();
+    let e_item_id = next_id();
+    let e_cont_id = next_id();
+    let f_item_id = next_id();
+    let f_cont_id = next_id();
     let b_order_id = next_id();
+    let d_order_id = next_id();
+    let e_order_id = next_id();
+    let f_order_id = next_id();
     let b_contract_id = next_id();
+    let d_contract_id = next_id();
+    let e_contract_id = next_id();
+    let f_contract_id = next_id();
     let b_job_id = next_id();
+    let corp_a_job_id = next_id();
+    let d_job_id = next_id();
+    let e_job_id = next_id();
+    let f_job_id = next_id();
+    let b_blueprint_id = next_id();
+    let corp_a_blueprint_id = next_id();
+    let d_blueprint_id = next_id();
+    let e_blueprint_id = next_id();
+    let f_blueprint_id = next_id();
     let b_fitting_id = next_id();
+    let d_fitting_id = next_id();
+    let e_fitting_id = next_id();
+    let f_fitting_id = next_id();
     let b_mail_id = next_id();
+    let d_mail_id = next_id();
+    let e_mail_id = next_id();
+    let f_mail_id = next_id();
     let b_bookmark_id = next_id();
+    let d_bookmark_id = next_id();
+    let e_bookmark_id = next_id();
+    let f_bookmark_id = next_id();
     let b_fleet_id = next_id();
+    let d_fleet_id = next_id();
+    let e_fleet_id = next_id();
+    let f_fleet_id = next_id();
     let b_war_id = next_id();
+    let d_war_id = next_id();
+    let e_war_id = next_id();
+    let f_war_id = next_id();
+    let b_killmail_id = next_id();
+    let d_killmail_id = next_id();
+    let e_killmail_id = next_id();
+    let f_killmail_id = next_id();
     let b_pos_id = next_id();
+    let d_pos_id = next_id();
+    let e_pos_id = next_id();
+    let f_pos_id = next_id();
     let b_corp_project_id = next_id();
-    let b_planet_id = 40_009_001i64;
+    let corp_a_project_id = next_id();
+    let d_corp_project_id = next_id();
+    let e_corp_project_id = next_id();
+    let f_corp_project_id = next_id();
 
     let ship_ids = [
         (CHAR_A_ID, a_ship_id, NPC_STATION_ID),
@@ -1630,13 +1892,20 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
             corp_a.hq_station_id = Some(NPC_STATION_ID);
             snap.corporations.insert(CORP_A_ID, corp_a);
 
-            let mut corp_b = CorporationRecord::new(CORP_B_ID, "Neg Corp B", "NCB", CHAR_B_ID)
-                .with_master_wallet(IskCents(100_000_000_00));
-            corp_b.alliance_id = Some(ALLIANCE_B_ID);
-            corp_b.members.insert(CHAR_B_ID);
-            corp_b.member_roles.insert(CHAR_B_ID, u64::MAX);
-            corp_b.hq_station_id = Some(NPC_STATION_ID);
-            snap.corporations.insert(CORP_B_ID, corp_b);
+            for (corp_id, name, ticker, ceo_id, hq_st_id, alliance_opt) in [
+                (CORP_B_ID, "Neg Corp B", "NCB", CHAR_B_ID, NPC_STATION_ID, Some(ALLIANCE_B_ID)),
+                (CORP_D_ID, "Neg Corp D", "NCD", CHAR_D_ID, NPC_STATION_ID, None),
+                (CORP_E_ID, "Neg Corp E", "NCE", CHAR_E_ID, other_station_id, None),
+                (CORP_F_ID, "Neg Corp F", "NCF", CHAR_F_ID, NPC_STATION_ID, None),
+            ] {
+                let mut corp = CorporationRecord::new(corp_id, name, ticker, ceo_id)
+                    .with_master_wallet(IskCents(100_000_000_00));
+                corp.alliance_id = alliance_opt;
+                corp.members.insert(ceo_id);
+                corp.member_roles.insert(ceo_id, u64::MAX);
+                corp.hq_station_id = Some(hq_st_id);
+                snap.corporations.insert(corp_id, corp);
+            }
 
             snap.alliances.insert(
                 ALLIANCE_B_ID,
@@ -1688,7 +1957,13 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                         ancestry_id: 1,
                         school_id: 11,
                         clone_grade: 2,
-                        fleet_id: (cid == CHAR_B_ID).then_some(b_fleet_id),
+                        fleet_id: match cid {
+                            CHAR_B_ID => Some(b_fleet_id),
+                            CHAR_D_ID => Some(d_fleet_id),
+                            CHAR_E_ID => Some(e_fleet_id),
+                            CHAR_F_ID => Some(f_fleet_id),
+                            _ => None,
+                        },
                         version: 1,
                         ..CharacterRecord::default()
                     },
@@ -1724,52 +1999,68 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                 );
             }
 
-            // Character B secondary space ship in Jita + cargo item + station container
-            snap.items.insert(
-                b_space_ship_id,
-                InventoryItemRecord {
-                    item_id: b_space_ship_id,
-                    type_id: 587,
-                    owner_id: CHAR_B_ID,
-                    location_id: SYS_JITA as i64,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    ..InventoryItemRecord::default()
-                },
-            );
-            snap.items.insert(
-                b_cont_id,
-                InventoryItemRecord {
-                    item_id: b_cont_id,
-                    type_id: 17366, // Station Container
-                    owner_id: CHAR_B_ID,
-                    location_id: NPC_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    ..InventoryItemRecord::default()
-                },
-            );
-            snap.items.insert(
-                b_item_id,
-                InventoryItemRecord {
-                    item_id: b_item_id,
-                    type_id: 34, // Tritanium
-                    owner_id: CHAR_B_ID,
-                    location_id: NPC_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1_000,
-                    singleton: false,
-                    ..InventoryItemRecord::default()
-                },
-            );
+            // Secondary in-space ships, personal containers, cargo items, ores, modules, and blueprints
+            for (ship_id, owner_id, sys_loc) in [
+                (b_space_ship_id, CHAR_B_ID, SYS_JITA as i64),
+                (d_space_ship_id, CHAR_D_ID, SYS_JITA as i64),
+                (e_space_ship_id, CHAR_E_ID, other_sys_id as i64),
+                (f_space_ship_id, CHAR_F_ID, SYS_JITA as i64),
+            ] {
+                snap.items.insert(
+                    ship_id,
+                    InventoryItemRecord {
+                        item_id: ship_id,
+                        type_id: 587,
+                        owner_id,
+                        location_id: sys_loc,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: true,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+            }
+            for (cont_id, item_id, owner_id, st_loc) in [
+                (b_cont_id, b_item_id, CHAR_B_ID, NPC_STATION_ID),
+                (d_cont_id, d_item_id, CHAR_D_ID, NPC_STATION_ID),
+                (e_cont_id, e_item_id, CHAR_E_ID, other_station_id),
+                (f_cont_id, f_item_id, CHAR_F_ID, NPC_STATION_ID),
+            ] {
+                snap.items.insert(
+                    cont_id,
+                    InventoryItemRecord {
+                        item_id: cont_id,
+                        type_id: 17366, // Station Container
+                        owner_id,
+                        location_id: st_loc,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: true,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
+                        item_id,
+                        type_id: 34, // Tritanium
+                        owner_id,
+                        location_id: st_loc,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1_000,
+                        singleton: false,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+            }
 
-            // Reprocessable Veldspar (1230) in personal hangars for A, C, D + Civilian Gatling Railgun module (3634)
-            for (item_id, owner_id) in [
-                (a_ore_id, CHAR_A_ID),
-                (c_ore_id, CHAR_C_ID),
-                (d_ore_id, CHAR_D_ID),
+            // Reprocessable Veldspar (1230) in personal hangars + fitted Civilian Gatling Railgun (3634) + SDE blueprints
+            for (item_id, owner_id, st_loc) in [
+                (a_ore_id, CHAR_A_ID, NPC_STATION_ID),
+                (c_ore_id, CHAR_C_ID, NPC_STATION_ID),
+                (d_ore_id, CHAR_D_ID, NPC_STATION_ID),
+                (e_ore_id, CHAR_E_ID, other_station_id),
+                (f_ore_id, CHAR_F_ID, NPC_STATION_ID),
             ] {
                 snap.items.insert(
                     item_id,
@@ -1777,7 +2068,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                         item_id,
                         type_id: 1230, // Veldspar (portion 100)
                         owner_id,
-                        location_id: NPC_STATION_ID,
+                        location_id: st_loc,
                         flag: InventoryFlag::Hangar,
                         quantity: 500,
                         singleton: false,
@@ -1785,37 +2076,94 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                     },
                 );
             }
-            snap.items.insert(
-                d_module_id,
-                InventoryItemRecord {
-                    item_id: d_module_id,
-                    type_id: 3634,
-                    owner_id: CHAR_D_ID,
-                    location_id: d_ship_id,
-                    flag: InventoryFlag::HiSlot0,
-                    quantity: 1,
-                    singleton: true,
-                    ..InventoryItemRecord::default()
-                },
-            );
+            for (mod_id, owner_id, ship_loc) in [
+                (c_module_id, CHAR_C_ID, c_ship_id),
+                (d_module_id, CHAR_D_ID, d_ship_id),
+                (e_module_id, CHAR_E_ID, e_ship_id),
+                (f_module_id, CHAR_F_ID, f_ship_id),
+            ] {
+                snap.items.insert(
+                    mod_id,
+                    InventoryItemRecord {
+                        item_id: mod_id,
+                        type_id: 3634,
+                        owner_id,
+                        location_id: ship_loc,
+                        flag: InventoryFlag::HiSlot0,
+                        quantity: 1,
+                        singleton: true,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+            }
+            for (bp_id, owner_id, loc_id, flag) in [
+                (b_blueprint_id, CHAR_B_ID, NPC_STATION_ID, InventoryFlag::Hangar),
+                (corp_a_blueprint_id, CORP_A_ID, CORP_A_OFFICE_ID, InventoryFlag::CorpSAG2),
+                (d_blueprint_id, CHAR_D_ID, NPC_STATION_ID, InventoryFlag::Hangar),
+                (e_blueprint_id, CHAR_E_ID, other_station_id, InventoryFlag::Hangar),
+                (f_blueprint_id, CHAR_F_ID, NPC_STATION_ID, InventoryFlag::Hangar),
+            ] {
+                snap.items.insert(
+                    bp_id,
+                    InventoryItemRecord {
+                        item_id: bp_id,
+                        type_id: bp_type_id,
+                        owner_id,
+                        location_id: loc_id,
+                        flag,
+                        quantity: 1,
+                        singleton: true,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+            }
 
-            // Corp offices & structures for Corp A (roleless C target) and Corp B (A target)
-            for (office_id, item_id, corp_id, struct_id, struct_name, pos_x) in [
+            // Corp offices & structures for Corp A (roleless C target), Corp B (A target), and Corp D/E/F (self-owned)
+            for (office_id, item_id, corp_id, office_st_id, struct_id, struct_name, pos_x) in [
                 (
                     CORP_A_OFFICE_ID,
                     CORP_A_OFFICE_ITEM_ID,
                     CORP_A_ID,
+                    NPC_STATION_ID,
                     CORP_A_STRUCTURE_ID,
                     "Neg Structure A",
                     120_000.0,
                 ),
                 (
                     CORP_B_OFFICE_ID,
-                    b_pos_id + 900, // dummy unique
+                    CORP_B_OFFICE_ITEM_ID,
                     CORP_B_ID,
+                    NPC_STATION_ID,
                     CORP_B_STRUCTURE_ID,
                     "Neg Structure B",
                     -120_000.0,
+                ),
+                (
+                    CORP_D_OFFICE_ID,
+                    CORP_D_OFFICE_ITEM_ID,
+                    CORP_D_ID,
+                    NPC_STATION_ID,
+                    CORP_D_STRUCTURE_ID,
+                    "Neg Structure D",
+                    180_000.0,
+                ),
+                (
+                    CORP_E_OFFICE_ID,
+                    CORP_E_OFFICE_ITEM_ID,
+                    CORP_E_ID,
+                    other_station_id,
+                    CORP_E_STRUCTURE_ID,
+                    "Neg Structure E",
+                    -180_000.0,
+                ),
+                (
+                    CORP_F_OFFICE_ID,
+                    CORP_F_OFFICE_ITEM_ID,
+                    CORP_F_ID,
+                    NPC_STATION_ID,
+                    CORP_F_STRUCTURE_ID,
+                    "Neg Structure F",
+                    350_000.0,
                 ),
             ] {
                 snap.items.insert(
@@ -1824,7 +2172,7 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                         item_id: office_id,
                         type_id: 27, // Office
                         owner_id: corp_id,
-                        location_id: NPC_STATION_ID,
+                        location_id: office_st_id,
                         flag: InventoryFlag::Hangar,
                         quantity: 1,
                         singleton: true,
@@ -1832,24 +2180,22 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                     },
                 );
                 let mut gov = CorpGovState::default();
-                gov.offices.insert(NPC_STATION_ID, office_id);
+                gov.offices.insert(office_st_id, office_id);
                 snap.corp_governance.insert(corp_id, gov);
 
-                if corp_id == CORP_A_ID {
-                    snap.items.insert(
+                snap.items.insert(
+                    item_id,
+                    InventoryItemRecord {
                         item_id,
-                        InventoryItemRecord {
-                            item_id,
-                            type_id: 34,
-                            owner_id: corp_id,
-                            location_id: office_id,
-                            flag: InventoryFlag::CorpSAG2,
-                            quantity: 500,
-                            singleton: false,
-                            ..InventoryItemRecord::default()
-                        },
-                    );
-                }
+                        type_id: 34,
+                        owner_id: corp_id,
+                        location_id: office_id,
+                        flag: InventoryFlag::CorpSAG2,
+                        quantity: 500,
+                        singleton: false,
+                        ..InventoryItemRecord::default()
+                    },
+                );
 
                 snap.structures.insert(
                     struct_id,
@@ -1881,140 +2227,306 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
                 );
             }
 
-            // POS tower, market order, contract, industry job, fitting, mail, bookmark, fleet, war, planet, corp project
-            snap.items.insert(
-                b_pos_id,
-                InventoryItemRecord {
-                    item_id: b_pos_id,
-                    type_id: 12235,
-                    owner_id: CORP_B_ID,
-                    location_id: SYS_JITA as i64,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: true,
-                    ..InventoryItemRecord::default()
-                },
-            );
-            snap.market_orders.insert(
-                b_order_id,
-                MarketOrderRecord {
-                    order_id: b_order_id,
-                    owner_id: CHAR_B_ID,
-                    station_id: NPC_STATION_ID,
-                    region_id: jita_region,
-                    type_id: 34,
-                    is_bid: false,
-                    price: IskCents(1_000),
-                    vol_entered: 100,
-                    vol_remaining: 100,
-                    min_volume: 1,
-                    is_npc: false,
-                    escrow: IskCents(0),
-                },
-            );
-            snap.contracts.insert(
-                b_contract_id,
-                ContractRecord {
-                    contract_id: b_contract_id,
-                    issuer_id: CHAR_B_ID,
-                    issuer_corp_id: CORP_B_ID,
-                    contract_type: "ItemExchange".into(),
-                    status: "Outstanding".into(),
-                    start_station_id: NPC_STATION_ID,
-                    end_station_id: NPC_STATION_ID,
-                    price: IskCents(50_000_00),
-                    availability: "Personal".into(),
-                    assignee_id: CHAR_B_ID,
-                    expiration_unix: 2_000_000_000,
-                    ..ContractRecord::default()
-                },
-            );
+            // Per-actor POS tower, market order, contract, industry job, fitting, mail, bookmark, fleet, war, killmail, planet, corp project
+            for (
+                char_id,
+                corp_id,
+                st_id,
+                sys_id,
+                region_id,
+                pos_id,
+                order_id,
+                contract_id,
+                job_id,
+                bp_id,
+                fitting_id,
+                mail_id,
+                bookmark_id,
+                fleet_id,
+                war_id,
+                killmail_id,
+                planet_id,
+                corp_project_id,
+            ) in [
+                (
+                    CHAR_B_ID,
+                    CORP_B_ID,
+                    NPC_STATION_ID,
+                    SYS_JITA,
+                    jita_region,
+                    b_pos_id,
+                    b_order_id,
+                    b_contract_id,
+                    b_job_id,
+                    b_blueprint_id,
+                    b_fitting_id,
+                    b_mail_id,
+                    b_bookmark_id,
+                    b_fleet_id,
+                    b_war_id,
+                    b_killmail_id,
+                    b_planet_id,
+                    b_corp_project_id,
+                ),
+                (
+                    CHAR_D_ID,
+                    CORP_D_ID,
+                    NPC_STATION_ID,
+                    SYS_JITA,
+                    jita_region,
+                    d_pos_id,
+                    d_order_id,
+                    d_contract_id,
+                    d_job_id,
+                    d_blueprint_id,
+                    d_fitting_id,
+                    d_mail_id,
+                    d_bookmark_id,
+                    d_fleet_id,
+                    d_war_id,
+                    d_killmail_id,
+                    d_planet_id,
+                    d_corp_project_id,
+                ),
+                (
+                    CHAR_E_ID,
+                    CORP_E_ID,
+                    other_station_id,
+                    other_sys_id,
+                    other_region,
+                    e_pos_id,
+                    e_order_id,
+                    e_contract_id,
+                    e_job_id,
+                    e_blueprint_id,
+                    e_fitting_id,
+                    e_mail_id,
+                    e_bookmark_id,
+                    e_fleet_id,
+                    e_war_id,
+                    e_killmail_id,
+                    e_planet_id,
+                    e_corp_project_id,
+                ),
+                (
+                    CHAR_F_ID,
+                    CORP_F_ID,
+                    NPC_STATION_ID,
+                    SYS_JITA,
+                    jita_region,
+                    f_pos_id,
+                    f_order_id,
+                    f_contract_id,
+                    f_job_id,
+                    f_blueprint_id,
+                    f_fitting_id,
+                    f_mail_id,
+                    f_bookmark_id,
+                    f_fleet_id,
+                    f_war_id,
+                    f_killmail_id,
+                    f_planet_id,
+                    f_corp_project_id,
+                ),
+            ] {
+                snap.items.insert(
+                    pos_id,
+                    InventoryItemRecord {
+                        item_id: pos_id,
+                        type_id: 12235,
+                        owner_id: corp_id,
+                        location_id: SYS_JITA as i64,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: true,
+                        ..InventoryItemRecord::default()
+                    },
+                );
+                snap.market_orders.insert(
+                    order_id,
+                    MarketOrderRecord {
+                        order_id,
+                        owner_id: char_id,
+                        station_id: st_id,
+                        region_id,
+                        type_id: 34,
+                        is_bid: false,
+                        price: IskCents(1_000),
+                        vol_entered: 100,
+                        vol_remaining: 100,
+                        min_volume: 1,
+                        is_npc: false,
+                        escrow: IskCents(0),
+                    },
+                );
+                snap.contracts.insert(
+                    contract_id,
+                    ContractRecord {
+                        contract_id,
+                        issuer_id: char_id,
+                        issuer_corp_id: corp_id,
+                        contract_type: "ItemExchange".into(),
+                        status: "Outstanding".into(),
+                        start_station_id: st_id,
+                        end_station_id: st_id,
+                        price: IskCents(50_000_00),
+                        availability: "Personal".into(),
+                        assignee_id: char_id,
+                        expiration_unix: 2_000_000_000,
+                        ..ContractRecord::default()
+                    },
+                );
+                snap.industry_jobs.insert(
+                    job_id,
+                    IndustryJobRecord {
+                        job_id,
+                        installer_id: char_id,
+                        facility_id: st_id,
+                        blueprint_item_id: bp_id,
+                        blueprint_type_id: bp_type_id,
+                        activity_id: 1,
+                        runs: 1,
+                        product_type_id: 587,
+                        status: "Active".into(),
+                        duration_seconds: 3600,
+                        blueprint_location_id: st_id,
+                        output_location_id: st_id,
+                        ..IndustryJobRecord::default()
+                    },
+                );
+                snap.saved_fittings.insert(
+                    fitting_id,
+                    SavedFittingRecord {
+                        fitting_id,
+                        owner_id: char_id,
+                        name: format!("Fit {char_id}"),
+                        ship_type_id: 587,
+                        description: "".into(),
+                        items: vec![],
+                    },
+                );
+                snap.mails.push(MailRecord {
+                    message_id: mail_id,
+                    sender_id: char_id,
+                    recipient_id: char_id,
+                    subject: "Secret".into(),
+                    body: "Private mail".into(),
+                });
+                snap.bookmarks.insert(
+                    bookmark_id,
+                    BookmarkRecord {
+                        bookmark_id,
+                        owner_id: char_id,
+                        label: format!("Safe {char_id}"),
+                        solar_system_id: sys_id,
+                        x: 1000.0,
+                        y: 0.0,
+                        z: 0.0,
+                        item_id: Some(st_id),
+                        memo: String::new(),
+                        folder_id: None,
+                        is_shared: false,
+                    },
+                );
+                snap.fleets.insert(
+                    fleet_id,
+                    FleetRecord {
+                        fleet_id,
+                        boss_id: char_id,
+                        members: vec![char_id],
+                        member_details: [(
+                            char_id,
+                            FleetMemberRecord {
+                                character_id: char_id,
+                                role: FleetRole::FleetCommander,
+                                ..FleetMemberRecord::default()
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..FleetRecord::default()
+                    },
+                );
+                snap.wars.insert(
+                    war_id,
+                    WarRecord {
+                        war_id,
+                        aggressor_corp_id: corp_id,
+                        defender_corp_id: 1_000_009,
+                        active: true,
+                        ..WarRecord::default()
+                    },
+                );
+                snap.killmails.insert(
+                    killmail_id,
+                    KillmailRecord {
+                        kill_id: killmail_id,
+                        victim_character_id: char_id,
+                        attacker_character_id: 9_000_001,
+                        solar_system_id: sys_id,
+                        ship_type_id: 587,
+                        total_value_isk: 500_000.0,
+                        killed_unix: 1_700_000_000,
+                        victim_corp_id: corp_id,
+                        attacker_corp_id: 98_099_099,
+                        ..KillmailRecord::default()
+                    },
+                );
+                snap.planetary_colonies.insert(
+                    (char_id, planet_id),
+                    PlanetaryColonyRecord {
+                        planet_id,
+                        owner_id: char_id,
+                        solar_system_id: sys_id,
+                        command_center_level: 1,
+                        pins_count: 1,
+                        ..PlanetaryColonyRecord::default()
+                    },
+                );
+                snap.corp_projects.insert(
+                    corp_project_id,
+                    CorpProjectRecord {
+                        project_id: corp_project_id,
+                        corporation_id: corp_id,
+                        name: format!("Corp Project {corp_id}"),
+                        target_quantity: 100,
+                        ..Default::default()
+                    },
+                );
+            }
+
+            // Corp A corp-owned industry job & project (Situation C targets)
             snap.industry_jobs.insert(
-                b_job_id,
+                corp_a_job_id,
                 IndustryJobRecord {
-                    job_id: b_job_id,
-                    installer_id: CHAR_B_ID,
-                    facility_id: NPC_STATION_ID,
-                    blueprint_item_id: b_item_id,
-                    blueprint_type_id: 587,
+                    job_id: corp_a_job_id,
+                    installer_id: CHAR_A_CEO_ID,
+                    facility_id: CORP_A_STRUCTURE_ID,
+                    blueprint_item_id: corp_a_blueprint_id,
+                    blueprint_type_id: bp_type_id,
                     activity_id: 1,
                     runs: 1,
                     product_type_id: 587,
                     status: "Active".into(),
                     duration_seconds: 3600,
-                    blueprint_location_id: NPC_STATION_ID,
-                    output_location_id: NPC_STATION_ID,
+                    blueprint_location_id: CORP_A_OFFICE_ID,
+                    output_location_id: CORP_A_OFFICE_ID,
                     ..IndustryJobRecord::default()
                 },
             );
-            snap.saved_fittings.insert(
-                b_fitting_id,
-                SavedFittingRecord {
-                    fitting_id: b_fitting_id,
-                    owner_id: CHAR_B_ID,
-                    name: "B Secret Fit".into(),
-                    ship_type_id: 587,
-                    description: "".into(),
-                    items: vec![],
-                },
-            );
-            snap.mails.push(MailRecord {
-                message_id: b_mail_id,
-                sender_id: CHAR_B_ID,
-                recipient_id: CHAR_B_ID,
-                subject: "Secret".into(),
-                body: "Private mail".into(),
-            });
-            snap.bookmarks.insert(
-                b_bookmark_id,
-                BookmarkRecord {
-                    bookmark_id: b_bookmark_id,
-                    owner_id: CHAR_B_ID,
-                    label: "B Safe".into(),
-                    solar_system_id: SYS_JITA,
-                    x: 1000.0,
-                    y: 0.0,
-                    z: 0.0,
-                    item_id: Some(NPC_STATION_ID),
-                    memo: String::new(),
-                    folder_id: None,
-                    is_shared: false,
-                },
-            );
-            snap.fleets.insert(
-                b_fleet_id,
-                FleetRecord {
-                    fleet_id: b_fleet_id,
-                    boss_id: CHAR_B_ID,
-                    members: vec![CHAR_B_ID],
-                    ..FleetRecord::default()
-                },
-            );
-            snap.wars.insert(
-                b_war_id,
-                WarRecord {
-                    war_id: b_war_id,
-                    aggressor_corp_id: CORP_B_ID,
-                    defender_corp_id: 1_000_009,
-                    active: true,
-                    ..WarRecord::default()
-                },
-            );
-            snap.planetary_colonies.insert(
-                (CHAR_B_ID, b_planet_id),
-                PlanetaryColonyRecord {
-                    planet_id: b_planet_id,
-                    owner_id: CHAR_B_ID,
-                    solar_system_id: SYS_JITA,
-                    command_center_level: 1,
-                    pins_count: 1,
-                    ..PlanetaryColonyRecord::default()
+            save_job_cost_meta(
+                snap,
+                corp_a_job_id,
+                &IndustryJobCostMeta {
+                    use_corp: true,
+                    owner_id: CORP_A_ID,
+                    ..Default::default()
                 },
             );
             snap.corp_projects.insert(
-                b_corp_project_id,
-                eve_db::types::CorpProjectRecord {
-                    project_id: b_corp_project_id,
+                corp_a_project_id,
+                CorpProjectRecord {
+                    project_id: corp_a_project_id,
                     corporation_id: CORP_A_ID,
                     name: "Corp Project".into(),
                     target_quantity: 100,
@@ -2069,6 +2581,42 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         assert!(sel.result.is_ok(), "SelectCharacterID failed for {cid}: {:?}", sel.result);
     }
 
+    // Seed per-actor petitions over the wire before undocking / notification reset
+    let mut b_petition_id = 0i64;
+    let mut c_petition_id = 0i64;
+    let mut d_petition_id = 0i64;
+    let mut e_petition_id = 0i64;
+    let mut f_petition_id = 0i64;
+    for (sess, pet_out) in [
+        (&mut sess_b, &mut b_petition_id),
+        (&mut sess_c, &mut c_petition_id),
+        (&mut sess_d, &mut d_petition_id),
+        (&mut sess_e, &mut e_petition_id),
+        (&mut sess_f, &mut f_petition_id),
+    ] {
+        let mut h =
+            common::borrow_wire_harness(&ctx, sess).with_mode(ContractValidationMode::ReportOnly);
+        let res = h
+            .call_exchange(
+                "petitioner",
+                None,
+                "CreatePetition",
+                &[
+                    PyRep::String("Neg Support Ticket".into()),
+                    PyRep::String("Negative matrix seeded petition".into()),
+                    PyRep::Integer(1),
+                ],
+                &kw,
+            )
+            .await;
+        *pet_out = res
+            .result
+            .expect("CreatePetition should succeed")
+            .dict_get("petitionID")
+            .and_then(PyRep::as_i64)
+            .expect("petitionID in CreatePetition result");
+    }
+
     // Undock E (into SYS_OTHER) and F (into SYS_JITA) via wire
     ctx.advance_secs(31);
     {
@@ -2087,34 +2635,62 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     ctx.session_change_timers.lock().expect("timers").clear();
     ctx.location_change_invuln.lock().expect("invuln").clear();
 
-    // Position E 500 km from SYS_OTHER station and initialize combat baseline.
+    let make_ball = |id: i64, type_id: u32, position: DVec3| Ball {
+        id,
+        type_id,
+        position,
+        velocity: DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 3.0,
+        mass: 1_000_000.0,
+        radius: 30.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    };
+
+    // Position E 500 km from SYS_OTHER station (where e_space_ship_id sits) and initialize combat baseline.
     let e_ship_pos = other_st_pos + DVec3::new(500_000.0, 0.0, 0.0);
     let sys_other = ctx.systems.get_or_spawn(other_sys_id);
     assert!(
         sys_other.set_ball_position(e_ship_id, e_ship_pos).await,
         "set E position"
     );
+    {
+        let mut bp = sys_other.ballpark.write().expect("write other bp");
+        bp.balls
+            .insert(e_space_ship_id, make_ball(e_space_ship_id, 587, other_st_pos));
+        bp.combat_states
+            .insert(e_space_ship_id, CombatState::default());
+    }
     let _ = sys_other.set_warp_core_strength(e_ship_id, 1).await;
 
-    // Seed B's space ship ball in Jita BEFORE scramble reconciliation so baseline combat_states already reflect tackle reconciliation.
+    // Place Corp F's Upwell structure > 250 km from F's gate position before tackle reconciliation.
+    let f_struct_pos = jita_gate_pos + DVec3::new(350_000.0, 0.0, 0.0);
+    ctx.db
+        .try_with_mut_snapshot(|snap| {
+            if let Some(st) = snap.structures.get_mut(&CORP_F_STRUCTURE_ID) {
+                st.position = [f_struct_pos.x, f_struct_pos.y, f_struct_pos.z];
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("position Corp F structure");
+
+    // Seed space balls in Jita BEFORE scramble reconciliation so baseline combat_states already reflect tackle reconciliation.
     let sys_jita = ctx.systems.get_or_spawn(SYS_JITA);
     {
         let mut bp = sys_jita.ballpark.write().expect("write jita bp");
-        let b_ball = Ball {
-            id: b_space_ship_id,
-            type_id: 587,
-            position: jita_gate_pos + DVec3::new(10_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 350.0,
-            inertia: 3.0,
-            mass: 1_000_000.0,
-            radius: 30.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        };
-        bp.balls.insert(b_space_ship_id, b_ball);
-        bp.combat_states
-            .insert(b_space_ship_id, CombatState::default());
+        if let Some(st_ball) = bp.balls.get_mut(&CORP_F_STRUCTURE_ID) {
+            st_ball.position = f_struct_pos;
+        }
+        for (ball_id, type_id, pos) in [
+            (b_space_ship_id, 587u32, jita_gate_pos + DVec3::new(10_000.0, 0.0, 0.0)),
+            (d_space_ship_id, 587, jita_gate_pos + DVec3::new(20_000.0, 0.0, 0.0)),
+            (f_space_ship_id, 587, jita_gate_pos + DVec3::new(300_000.0, 0.0, 0.0)),
+            (f_pos_id, 12235, f_struct_pos),
+        ] {
+            bp.balls.insert(ball_id, make_ball(ball_id, type_id, pos));
+            bp.combat_states.insert(ball_id, CombatState::default());
+        }
     }
 
     // Position F 1.2 km from Jita gate and scram + cloak it.
@@ -2133,14 +2709,24 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         })
         .await;
 
+    sess_b.fleet_id = Some(b_fleet_id);
+    sess_d.fleet_id = Some(d_fleet_id);
+    sess_e.fleet_id = Some(e_fleet_id);
+    sess_f.fleet_id = Some(f_fleet_id);
+
     // Bind legitimate own objects per actor B..F
     let bind_specs_for = |sys_id: SolarSystemId,
                           st_id: i64,
                           cid: i64,
                           corp_id: i64,
-                          ship_id: i64|
+                          ship_id: i64,
+                          fleet_opt: Option<i64>,
+                          planet_id: i64,
+                          struct_id: i64,
+                          pos_id: i64,
+                          war_id: i64|
      -> Vec<(&'static str, i64)> {
-        vec![
+        let mut specs = vec![
             ("beyonce", sys_id as i64),
             ("scanMgr", sys_id as i64),
             ("entity", sys_id as i64),
@@ -2166,16 +2752,25 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
             ("agentMgr", 3_018_600),
             ("devIndexManager", sys_id as i64),
             ("planetOrbitalRegistryBroker", sys_id as i64),
-        ]
+        ];
+        if let Some(fleet_id) = fleet_opt {
+            specs.push(("fleetObjectHandler", fleet_id));
+            specs.push(("planetMgr", planet_id));
+            specs.push(("structure", struct_id));
+            specs.push(("posMgr", pos_id));
+            specs.push(("warRegistry", corp_id));
+            specs.push(("warStatisticMgr", war_id));
+        }
+        specs
     };
 
     let mut actor_bounds: [HashMap<String, u64>; 6] = Default::default();
     let actor_setup = [
-        (1usize, SYS_JITA, NPC_STATION_ID, CHAR_A_ID, 1_000_009i64, a_ship_id),
-        (2, SYS_JITA, NPC_STATION_ID, CHAR_C_ID, CORP_A_ID, c_ship_id),
-        (3, SYS_JITA, NPC_STATION_ID, CHAR_D_ID, 1_000_009, d_ship_id),
-        (4, other_sys_id, 0, CHAR_E_ID, 1_000_009, e_ship_id),
-        (5, SYS_JITA, 0, CHAR_F_ID, 1_000_009, f_ship_id),
+        (1usize, SYS_JITA, NPC_STATION_ID, CHAR_A_ID, 1_000_009i64, a_ship_id, None, 0i64, 0i64, 0i64, 0i64),
+        (2, SYS_JITA, NPC_STATION_ID, CHAR_C_ID, CORP_A_ID, c_ship_id, None, 0, 0, 0, 0),
+        (3, SYS_JITA, NPC_STATION_ID, CHAR_D_ID, CORP_D_ID, d_ship_id, Some(d_fleet_id), d_planet_id, CORP_D_STRUCTURE_ID, d_pos_id, d_war_id),
+        (4, other_sys_id, 0, CHAR_E_ID, CORP_E_ID, e_ship_id, Some(e_fleet_id), e_planet_id, CORP_E_STRUCTURE_ID, e_pos_id, e_war_id),
+        (5, SYS_JITA, 0, CHAR_F_ID, CORP_F_ID, f_ship_id, Some(f_fleet_id), f_planet_id, CORP_F_STRUCTURE_ID, f_pos_id, f_war_id),
     ];
 
     let sess_a_ptr = &mut sess_a;
@@ -2185,10 +2780,12 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
     let sess_f_ptr = &mut sess_f;
     let sess_muts = [sess_a_ptr, sess_c_ptr, sess_d_ptr, sess_e_ptr, sess_f_ptr];
 
-    for ((idx, sys_id, st_id, cid, corp_id, sid), sess_ref) in
+    for ((idx, sys_id, st_id, cid, corp_id, sid, fleet_opt, planet_id, struct_id, pos_id, war_id), sess_ref) in
         actor_setup.into_iter().zip(sess_muts.into_iter())
     {
-        for (svc, obj_id) in bind_specs_for(sys_id, st_id, cid, corp_id, sid) {
+        for (svc, obj_id) in bind_specs_for(
+            sys_id, st_id, cid, corp_id, sid, fleet_opt, planet_id, struct_id, pos_id, war_id,
+        ) {
             if obj_id > 0 {
                 if let Some(bid) = bind_service_for_session(&ctx, sess_ref, svc, obj_id).await {
                     actor_bounds[idx].insert(svc.to_string(), bid);
@@ -2286,25 +2883,88 @@ async fn setup_fixture(sde: Arc<SdeRegistry>) -> MatrixFixture {
         b_space_ship_id,
         c_ship_id,
         d_ship_id,
+        d_space_ship_id,
         e_ship_id,
+        e_space_ship_id,
         f_ship_id,
+        f_space_ship_id,
         a_ore_id,
         c_ore_id,
         d_ore_id,
+        e_ore_id,
+        f_ore_id,
+        c_module_id,
         d_module_id,
+        e_module_id,
+        f_module_id,
         b_item_id,
         b_cont_id,
+        d_item_id,
+        d_cont_id,
+        e_item_id,
+        e_cont_id,
+        f_item_id,
+        f_cont_id,
         b_order_id,
+        d_order_id,
+        e_order_id,
+        f_order_id,
         b_contract_id,
+        d_contract_id,
+        e_contract_id,
+        f_contract_id,
         b_job_id,
+        corp_a_job_id,
+        d_job_id,
+        e_job_id,
+        f_job_id,
+        b_blueprint_id,
+        corp_a_blueprint_id,
+        d_blueprint_id,
+        e_blueprint_id,
+        f_blueprint_id,
         b_fitting_id,
+        d_fitting_id,
+        e_fitting_id,
+        f_fitting_id,
         b_mail_id,
+        d_mail_id,
+        e_mail_id,
+        f_mail_id,
         b_bookmark_id,
+        d_bookmark_id,
+        e_bookmark_id,
+        f_bookmark_id,
         b_fleet_id,
+        d_fleet_id,
+        e_fleet_id,
+        f_fleet_id,
         b_war_id,
+        d_war_id,
+        e_war_id,
+        f_war_id,
+        b_killmail_id,
+        d_killmail_id,
+        e_killmail_id,
+        f_killmail_id,
         b_pos_id,
+        d_pos_id,
+        e_pos_id,
+        f_pos_id,
         b_planet_id,
+        d_planet_id,
+        e_planet_id,
+        f_planet_id,
         b_corp_project_id,
+        corp_a_project_id,
+        d_corp_project_id,
+        e_corp_project_id,
+        f_corp_project_id,
+        b_petition_id,
+        c_petition_id,
+        d_petition_id,
+        e_petition_id,
+        f_petition_id,
         sess_by_sit,
         actor_bounds,
         b_bounds,
@@ -2330,6 +2990,14 @@ fn build_call_args(
         Situation::E => CHAR_E_ID,
         Situation::F => CHAR_F_ID,
     };
+    let own_corp = match sit {
+        Situation::A => 0,
+        Situation::B => 1_000_009,
+        Situation::C => CORP_A_ID,
+        Situation::D => CORP_D_ID,
+        Situation::E => CORP_E_ID,
+        Situation::F => CORP_F_ID,
+    };
     let own_ship = match sit {
         Situation::A => 0,
         Situation::B => fix.a_ship_id,
@@ -2341,6 +3009,151 @@ fn build_call_args(
     let own_sys = match sit {
         Situation::A | Situation::B | Situation::C | Situation::D | Situation::F => SYS_JITA as i64,
         Situation::E => fix.other_sys_id as i64,
+    };
+    let own_station = match sit {
+        Situation::E => fix.other_station_id,
+        _ => NPC_STATION_ID,
+    };
+    let own_structure = match sit {
+        Situation::C => CORP_A_STRUCTURE_ID,
+        Situation::D => CORP_D_STRUCTURE_ID,
+        Situation::E => CORP_E_STRUCTURE_ID,
+        Situation::F => CORP_F_STRUCTURE_ID,
+        _ => CORP_B_STRUCTURE_ID,
+    };
+    let own_office = match sit {
+        Situation::C => CORP_A_OFFICE_ID,
+        Situation::D => CORP_D_OFFICE_ID,
+        Situation::E => CORP_E_OFFICE_ID,
+        Situation::F => CORP_F_OFFICE_ID,
+        _ => CORP_B_OFFICE_ID,
+    };
+    let own_corp_item = match sit {
+        Situation::C => CORP_A_OFFICE_ITEM_ID,
+        Situation::D => CORP_D_OFFICE_ITEM_ID,
+        Situation::E => CORP_E_OFFICE_ITEM_ID,
+        Situation::F => CORP_F_OFFICE_ITEM_ID,
+        _ => CORP_B_OFFICE_ITEM_ID,
+    };
+    let own_space_ship = match sit {
+        Situation::D => fix.d_space_ship_id,
+        Situation::E => fix.e_space_ship_id,
+        Situation::F => fix.f_space_ship_id,
+        _ => fix.b_space_ship_id,
+    };
+    let own_ore = match sit {
+        Situation::C => fix.c_ore_id,
+        Situation::D => fix.d_ore_id,
+        Situation::E => fix.e_ore_id,
+        Situation::F => fix.f_ore_id,
+        _ => fix.a_ore_id,
+    };
+    let own_module = match sit {
+        Situation::C => fix.c_module_id,
+        Situation::D => fix.d_module_id,
+        Situation::E => fix.e_module_id,
+        Situation::F => fix.f_module_id,
+        _ => fix.b_item_id,
+    };
+    let own_item = match sit {
+        Situation::D => fix.d_item_id,
+        Situation::E => fix.e_item_id,
+        Situation::F => fix.f_item_id,
+        _ => fix.b_item_id,
+    };
+    let own_cont = match sit {
+        Situation::D => fix.d_cont_id,
+        Situation::E => fix.e_cont_id,
+        Situation::F => fix.f_cont_id,
+        _ => fix.b_cont_id,
+    };
+    let own_order = match sit {
+        Situation::D => fix.d_order_id,
+        Situation::E => fix.e_order_id,
+        Situation::F => fix.f_order_id,
+        _ => fix.b_order_id,
+    };
+    let own_contract = match sit {
+        Situation::D => fix.d_contract_id,
+        Situation::E => fix.e_contract_id,
+        Situation::F => fix.f_contract_id,
+        _ => fix.b_contract_id,
+    };
+    let own_job = match sit {
+        Situation::C => fix.corp_a_job_id,
+        Situation::D => fix.d_job_id,
+        Situation::E => fix.e_job_id,
+        Situation::F => fix.f_job_id,
+        _ => fix.b_job_id,
+    };
+    let own_blueprint = match sit {
+        Situation::C => fix.corp_a_blueprint_id,
+        Situation::D => fix.d_blueprint_id,
+        Situation::E => fix.e_blueprint_id,
+        Situation::F => fix.f_blueprint_id,
+        _ => fix.b_blueprint_id,
+    };
+    let own_fitting = match sit {
+        Situation::D => fix.d_fitting_id,
+        Situation::E => fix.e_fitting_id,
+        Situation::F => fix.f_fitting_id,
+        _ => fix.b_fitting_id,
+    };
+    let own_mail = match sit {
+        Situation::D => fix.d_mail_id,
+        Situation::E => fix.e_mail_id,
+        Situation::F => fix.f_mail_id,
+        _ => fix.b_mail_id,
+    };
+    let own_bookmark = match sit {
+        Situation::D => fix.d_bookmark_id,
+        Situation::E => fix.e_bookmark_id,
+        Situation::F => fix.f_bookmark_id,
+        _ => fix.b_bookmark_id,
+    };
+    let own_fleet = match sit {
+        Situation::D => fix.d_fleet_id,
+        Situation::E => fix.e_fleet_id,
+        Situation::F => fix.f_fleet_id,
+        _ => fix.b_fleet_id,
+    };
+    let own_war = match sit {
+        Situation::D => fix.d_war_id,
+        Situation::E => fix.e_war_id,
+        Situation::F => fix.f_war_id,
+        _ => fix.b_war_id,
+    };
+    let own_killmail = match sit {
+        Situation::D => fix.d_killmail_id,
+        Situation::E => fix.e_killmail_id,
+        Situation::F => fix.f_killmail_id,
+        _ => fix.b_killmail_id,
+    };
+    let own_pos = match sit {
+        Situation::D => fix.d_pos_id,
+        Situation::E => fix.e_pos_id,
+        Situation::F => fix.f_pos_id,
+        _ => fix.b_pos_id,
+    };
+    let own_planet = match sit {
+        Situation::D => fix.d_planet_id,
+        Situation::E => fix.e_planet_id,
+        Situation::F => fix.f_planet_id,
+        _ => fix.b_planet_id,
+    };
+    let own_corp_project = match sit {
+        Situation::C => fix.corp_a_project_id,
+        Situation::D => fix.d_corp_project_id,
+        Situation::E => fix.e_corp_project_id,
+        Situation::F => fix.f_corp_project_id,
+        _ => fix.b_corp_project_id,
+    };
+    let own_petition = match sit {
+        Situation::C => fix.c_petition_id,
+        Situation::D => fix.d_petition_id,
+        Situation::E => fix.e_petition_id,
+        Situation::F => fix.f_petition_id,
+        _ => fix.b_petition_id,
     };
 
     if meth == "MachoResolveObject" {
@@ -2367,8 +3180,8 @@ fn build_call_args(
                 "charMgr" | "skillMgr2" | "jumpCloneSvc" | "contractProxy" | "voucher"
                 | "populationCap" => CHAR_B_ID,
                 "beyonce" | "scanMgr" | "entity" | "devIndexManager"
-                | "planetOrbitalRegistryBroker" => SYS_JITA as i64,
-                _ => NPC_STATION_ID,
+                | "planetOrbitalRegistryBroker" => fix.other_sys_id as i64,
+                _ => CORP_B_STRUCTURE_ID,
             },
             Situation::C => match svc {
                 "corpRegistry" | "corpmgr" | "warRegistry" | "officeManager" | "voucher" => CORP_A_ID,
@@ -2380,12 +3193,25 @@ fn build_call_args(
                 "beyonce" | "scanMgr" | "entity" | "devIndexManager"
                 | "planetOrbitalRegistryBroker" => own_sys,
                 "ship" | "dogmaIM" | "crimewatch" | "invbroker" => own_ship,
-                _ => NPC_STATION_ID,
+                "corpRegistry" | "corpmgr" | "warRegistry" => own_corp,
+                "fleetObjectHandler" => own_fleet,
+                "planetMgr" => own_planet,
+                "structure" => own_structure,
+                "posMgr" => own_pos,
+                "warStatisticMgr" => own_war,
+                "station" | "stationSvc" => NPC_STATION_ID,
+                _ => own_char,
             },
             _ => match svc {
                 "beyonce" | "scanMgr" | "entity" | "devIndexManager"
                 | "planetOrbitalRegistryBroker" => own_sys,
                 "ship" | "dogmaIM" | "crimewatch" => own_ship,
+                "corpRegistry" | "corpmgr" | "warRegistry" => own_corp,
+                "fleetObjectHandler" => own_fleet,
+                "planetMgr" => own_planet,
+                "structure" => own_structure,
+                "posMgr" => own_pos,
+                "warStatisticMgr" => own_war,
                 "station" | "stationSvc" | "corpStationMgr" | "repairSvc"
                 | "reprocessingSvc" | "insuranceSvc" | "invbroker" | "officeManager" => {
                     NPC_STATION_ID
@@ -2408,7 +3234,7 @@ fn build_call_args(
                 let fac = match sit {
                     Situation::B => NPC_STATION_ID, // #1182 NPC station tax target
                     Situation::C => CORP_A_STRUCTURE_ID, // roleless corp member on own corp structure
-                    _ => CORP_B_STRUCTURE_ID,
+                    _ => own_structure,
                 };
                 vec![
                     PyRep::Integer(fac),
@@ -2418,7 +3244,7 @@ fn build_call_args(
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => CORP_B_STRUCTURE_ID,
                 Situation::C => CORP_A_STRUCTURE_ID,
-                _ => NPC_STATION_ID,
+                _ => own_station,
             })],
         },
         "reprocessingSvc" => match meth {
@@ -2441,17 +3267,17 @@ fn build_call_args(
                     PyRep::List(vec![PyRep::Integer(fix.d_ore_id)]),
                     PyRep::Integer(NPC_STATION_ID),
                     PyRep::Integer(CHAR_D_ID),
-                    PyRep::Integer(NPC_STATION_ID),
+                    PyRep::Integer(fix.d_cont_id),
                     PyRep::Integer(4),
                 ],
                 _ => vec![
-                    PyRep::List(vec![PyRep::Integer(fix.d_ore_id)]),
-                    PyRep::Integer(NPC_STATION_ID),
+                    PyRep::List(vec![PyRep::Integer(own_ore)]),
+                    PyRep::Integer(own_station),
                 ],
             },
             _ => vec![
-                PyRep::List(vec![PyRep::Integer(fix.a_ore_id)]),
-                PyRep::Integer(NPC_STATION_ID),
+                PyRep::List(vec![PyRep::Integer(own_ore)]),
+                PyRep::Integer(own_station),
             ],
         },
         // rpc-lint: allow covers both client invbroker and server-registered internal i2 handler
@@ -2473,12 +3299,12 @@ fn build_call_args(
                 PyRep::Integer(match sit {
                     Situation::B => fix.b_item_id,
                     Situation::C => CORP_A_OFFICE_ITEM_ID,
-                    _ => fix.d_ore_id,
+                    _ => own_item,
                 }),
                 PyRep::Integer(match sit {
                     Situation::B => fix.b_cont_id,
                     Situation::C => CORP_A_OFFICE_ID,
-                    _ => own_ship,
+                    _ => own_cont,
                 }),
             ],
             "TrashItems" | "SplitStack" | "SetLabel" | "AssembleCargoContainer" => {
@@ -2486,38 +3312,35 @@ fn build_call_args(
                     PyRep::List(vec![PyRep::Integer(match sit {
                         Situation::B => fix.b_item_id,
                         Situation::C => CORP_A_OFFICE_ITEM_ID,
-                        _ => fix.d_ore_id,
+                        _ => own_item,
                     })]),
                     PyRep::Integer(match sit {
                         Situation::B => fix.b_cont_id,
                         Situation::C => CORP_A_OFFICE_ID,
-                        _ => NPC_STATION_ID,
+                        _ => own_cont,
                     }),
                 ]
             }
             "DeliverToCorpHangar" | "DeliverToCorpMember" => vec![
-                PyRep::Integer(CORP_A_OFFICE_ID),
-                PyRep::Integer(NPC_STATION_ID),
-                PyRep::List(vec![PyRep::Integer(CORP_A_OFFICE_ITEM_ID)]),
+                PyRep::Integer(own_office),
+                PyRep::Integer(own_station),
+                PyRep::List(vec![PyRep::Integer(own_corp_item)]),
                 PyRep::Integer(116),
-                PyRep::Integer(CORP_A_ID),
+                PyRep::Integer(if sit == Situation::B { CORP_B_ID } else { own_corp }),
             ],
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_item_id,
                 Situation::C => CORP_A_OFFICE_ITEM_ID,
-                _ => own_ship,
+                _ => own_item,
             })],
         },
         "beyonce" => match meth {
             "CmdWarpToStuff" | "CmdWarpToStuffAutopilot" => vec![
                 PyRep::String("item".into()),
-                PyRep::Integer(NPC_STATION_ID),
+                PyRep::Integer(own_station),
                 PyRep::Real(0.0),
             ],
-            "CmdDock" | "CmdTurboDock" => vec![PyRep::Integer(match sit {
-                Situation::E => fix.other_station_id,
-                _ => NPC_STATION_ID,
-            })],
+            "CmdDock" | "CmdTurboDock" => vec![PyRep::Integer(own_station)],
             "CmdStargateJump" | "StargateJump" | "ActivateAccelerationGate" => {
                 vec![PyRep::Integer(match sit {
                     Situation::E => fix.other_gate_id,
@@ -2527,8 +3350,9 @@ fn build_call_args(
             "CmdOrbit" | "CmdFollowBall" | "CmdKeepAtRange" | "CmdAlignTo" | "CmdAttackTarget"
             | "CmdMineRepeatedly" | "CmdAbandonLoot" => vec![
                 PyRep::Integer(match sit {
-                    Situation::E => fix.b_space_ship_id,
                     Situation::B => fix.b_space_ship_id,
+                    Situation::E => fix.e_space_ship_id,
+                    Situation::F => fix.f_space_ship_id,
                     _ => fix.jita_gate_id,
                 }),
                 PyRep::Real(1_000.0),
@@ -2537,22 +3361,33 @@ fn build_call_args(
             "CmdGotoPoint" | "CmdGotoDirection" | "CmdSteerDirection" => {
                 vec![PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)]
             }
+            "CallComponentFromClient" => vec![
+                PyRep::Integer(match sit {
+                    Situation::B => fix.b_space_ship_id,
+                    Situation::C => CORP_A_STRUCTURE_ID,
+                    _ => own_space_ship,
+                }),
+                PyRep::String("itemTrader".into()),
+                PyRep::String("ProcessTrade".into()),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+            ],
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_space_ship_id,
                 Situation::C => CORP_A_STRUCTURE_ID,
                 Situation::E => fix.other_station_id,
+                Situation::F => fix.f_space_ship_id,
                 _ => fix.jita_gate_id,
             })],
         },
         "stationSvc" | "structureDocking" => match meth {
             "Undock" => vec![],
-            "Dock" => vec![PyRep::Integer(match sit {
-                Situation::E => fix.other_station_id,
-                Situation::B | Situation::C if svc == "structureDocking" => CORP_B_STRUCTURE_ID,
-                _ if svc == "structureDocking" => CORP_A_STRUCTURE_ID,
-                _ => NPC_STATION_ID,
+            "Dock" => vec![PyRep::Integer(if svc == "structureDocking" {
+                own_structure
+            } else {
+                own_station
             })],
-            _ => vec![PyRep::Integer(NPC_STATION_ID)],
+            _ => vec![PyRep::Integer(own_station)],
         },
         "ship" => match meth {
             "Board" | "BoardStoredShip" | "AssembleShip" | "ConfigureShip" | "FitShips"
@@ -2564,9 +3399,8 @@ fn build_call_args(
             "Scoop" | "ScoopDrone" | "ScoopToDroneBay" | "ScoopToFleetHangar"
             | "ScoopToInfrastructureHold" | "ScoopToMobileDepotHold" | "ScoopToSMA"
             | "StoreVessel" => vec![PyRep::Integer(match sit {
-                Situation::E => fix.other_station_id,
-                Situation::B => fix.b_space_ship_id,
-                _ => fix.b_space_ship_id,
+                Situation::B | Situation::C => fix.b_space_ship_id,
+                _ => own_space_ship,
             })],
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_ship_id,
@@ -2576,16 +3410,10 @@ fn build_call_args(
         "dogmaIM" => match meth {
             "Activate" | "Deactivate" | "Overload" | "StopOverload" | "OverloadRack"
             | "StopOverloadRack" | "SetModuleOnline" | "TakeModuleOffline" => vec![
-                PyRep::Integer(match sit {
-                    Situation::B => fix.b_item_id,
-                    _ => fix.d_module_id,
-                }),
+                PyRep::Integer(own_module),
                 PyRep::String("online".into()),
             ],
-            "AddTarget" | "AddTargetOBO" | "RemoveTarget" => vec![PyRep::Integer(match sit {
-                Situation::E => fix.b_space_ship_id,
-                _ => fix.b_space_ship_id,
-            })],
+            "AddTarget" | "AddTargetOBO" | "RemoveTarget" => vec![PyRep::Integer(own_space_ship)],
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => fix.b_ship_id,
                 _ => own_ship,
@@ -2596,17 +3424,26 @@ fn build_call_args(
                 PyRep::Integer(if sit == Situation::B {
                     CORP_B_ID
                 } else {
-                    CORP_A_ID
+                    own_corp
                 }),
-                PyRep::Integer(CHAR_A_ID),
+                PyRep::Integer(if sit == Situation::B { CHAR_A_ID } else { own_char }),
                 PyRep::Real(1_000.0),
                 PyRep::String("test".into()),
             ],
             "GiveCash" => vec![
-                PyRep::Integer(CHAR_B_ID),
+                PyRep::Integer(if sit == Situation::B {
+                    CHAR_B_ID
+                } else {
+                    CHAR_A_CEO_ID
+                }),
                 PyRep::Real(1_000.0),
                 PyRep::String("test".into()),
             ],
+            "GetWalletDivisionsInfo" => vec![PyRep::Integer(if sit == Situation::B {
+                CORP_B_ID
+            } else {
+                own_corp
+            })],
             "GetCashBalance" | "GetTransactions" => vec![
                 PyRep::Integer(match sit {
                     Situation::B => CHAR_B_ID,
@@ -2619,11 +3456,11 @@ fn build_call_args(
         },
         "marketProxy" => match meth {
             "CancelCharOrder" | "ModifyCharOrder" => vec![
-                PyRep::Integer(fix.b_order_id),
+                PyRep::Integer(own_order),
                 PyRep::Real(100.0),
             ],
             "PlaceBuyOrder" | "PlaceMultiSellOrder" | "BuyMultipleItems" => vec![
-                PyRep::Integer(NPC_STATION_ID),
+                PyRep::Integer(own_station),
                 PyRep::Integer(34),
                 PyRep::Real(10.0),
                 PyRep::Integer(1),
@@ -2635,7 +3472,7 @@ fn build_call_args(
         "contractProxy" => match meth {
             "GetContract" | "AcceptContract" | "DeleteContract" | "CompleteContract"
             | "RejectContract" | "FailContract" | "PlaceBid" => {
-                vec![PyRep::Integer(fix.b_contract_id)]
+                vec![PyRep::Integer(own_contract)]
             }
             _ => vec![PyRep::Integer(match sit {
                 Situation::B => CHAR_B_ID,
@@ -2643,46 +3480,59 @@ fn build_call_args(
                 _ => own_char,
             })],
         },
-        "industryManager" | "blueprintManager" | "industryMonitor" => vec![PyRep::Integer(
-            match sit {
-                Situation::B => fix.b_job_id,
-                Situation::C => CORP_A_STRUCTURE_ID,
-                _ => fix.b_job_id,
-            },
-        )],
+        "blueprintManager" => match meth {
+            "GetBlueprintDataByOwner" => vec![PyRep::Integer(match sit {
+                Situation::B => CHAR_B_ID,
+                Situation::C => CORP_A_ID,
+                _ => own_char,
+            })],
+            _ => vec![PyRep::Integer(own_blueprint)],
+        },
+        "industryManager" | "industryMonitor" => match meth {
+            "GetJobsByOwner" => vec![PyRep::Integer(match sit {
+                Situation::B => CHAR_B_ID,
+                Situation::C => CORP_A_ID,
+                _ => own_char,
+            })],
+            _ => vec![PyRep::Integer(own_job)],
+        },
         "officeManager" => vec![PyRep::Integer(match sit {
             Situation::B => CORP_B_ID,
             Situation::C => match meth {
                 "RentOffice" | "UnrentOffice" => NPC_STATION_ID,
                 _ => CORP_A_ID,
             },
-            _ => NPC_STATION_ID,
+            _ => own_station,
         })],
         "corpmgr" | "corporationSvc" | "corpRegistry" | "corpStationMgr" | "voteManager"
-        | "corpFittingMgr" | "corpMiningLedger" | "corpProjects" => {
-            vec![PyRep::Integer(match sit {
-                Situation::B => CORP_B_ID,
-                Situation::C => CORP_A_ID,
-                _ => fix.b_corp_project_id,
-            })]
-        }
+        | "corpFittingMgr" | "corpMiningLedger" => vec![PyRep::Integer(if sit == Situation::B {
+            CORP_B_ID
+        } else {
+            own_corp
+        })],
+        "corpProjects" => vec![PyRep::Integer(own_corp_project)],
         "structureDirectory" | "structureSettings" | "structureProfiles" | "structureGuests"
         | "structureHangarViewMgr" | "structureControl" | "structureDeployment" | "structure"
         | "structureAssetSafety" | "structureCompressionMgr" | "structureCynoBeaconMgr"
-        | "structureJumpBridgeMgr" => vec![PyRep::Integer(match sit {
-            Situation::C => CORP_A_STRUCTURE_ID,
-            _ => CORP_B_STRUCTURE_ID,
-        })],
-        "mailMgr" | "mailingListsMgr" => vec![PyRep::Integer(fix.b_mail_id)],
-        "bookmark" | "accessGroupBookmarkMgr" => vec![PyRep::Integer(fix.b_bookmark_id)],
-        "charFittingMgr" => vec![PyRep::Integer(fix.b_fitting_id)],
+        | "structureJumpBridgeMgr" => vec![PyRep::Integer(own_structure)],
+        "mailMgr" | "mailingListsMgr" => vec![PyRep::Integer(own_mail)],
+        "bookmark" | "accessGroupBookmarkMgr" => vec![PyRep::Integer(own_bookmark)],
+        "charFittingMgr" => match meth {
+            "GetFittings" => vec![PyRep::Integer(match sit {
+                Situation::B => CHAR_B_ID,
+                _ => own_char,
+            })],
+            _ => vec![PyRep::Integer(own_fitting)],
+        },
         "fleetMgr" | "fleetProxy" | "fleetObjectHandler" | "fleetSvc" => {
-            vec![PyRep::Integer(fix.b_fleet_id)]
+            vec![PyRep::Integer(own_fleet)]
         }
+        "warStatisticMgr" if meth == "GetKillMail" => vec![PyRep::Integer(own_killmail)],
         "warRegistry" | "warStatisticMgr" | "warsInfoMgr" | "mutualWarInviteMgr"
-        | "peaceTreatyMgr" => vec![PyRep::Integer(fix.b_war_id)],
-        "planetMgr" | "planetOrbitalRegistryBroker" => vec![PyRep::Integer(fix.b_planet_id)],
-        "posMgr" => vec![PyRep::Integer(fix.b_pos_id)],
+        | "peaceTreatyMgr" => vec![PyRep::Integer(own_war)],
+        "planetMgr" | "planetOrbitalRegistryBroker" => vec![PyRep::Integer(own_planet)],
+        "posMgr" => vec![PyRep::Integer(own_pos)],
+        "petitioner" => vec![PyRep::Integer(own_petition)],
         "itemLocking" => vec![PyRep::Integer(match sit {
             Situation::B => fix.b_ship_id,
             Situation::C => CORP_A_OFFICE_ID,
@@ -2692,7 +3542,10 @@ fn build_call_args(
             vec![PyRep::Integer(1)]
         }
         "charUnboundMgr" => match meth {
-            "SelectCharacterID" => vec![PyRep::Integer(CHAR_B_ID)],
+            "SelectCharacterID" => vec![PyRep::Integer(match sit {
+                Situation::A | Situation::B | Situation::C => CHAR_B_ID,
+                _ => own_char,
+            })],
             "GetCharacterInfo" | "GetCharacterToSelect" | "DeleteCharacter"
             | "PrepareCharacterForDelete" | "CancelCharacterDeletePrepare" => {
                 vec![PyRep::Integer(match sit {
@@ -2752,23 +3605,21 @@ async fn evaluate_negative_call(
         check_runtime_changed(fix, runtime_baseline);
     let world_mutated = db_dirty || runtime_dirty;
 
-    if !is_allowlisted {
-        if out.result.is_ok() {
-            observed.insert(MatrixViolation {
-                situation: sit_label.to_string(),
-                service: svc.to_string(),
-                method: meth.to_string(),
-                kind: "unexpected_allow".to_string(),
-            });
-        }
-        if world_mutated {
-            observed.insert(MatrixViolation {
-                situation: sit_label.to_string(),
-                service: svc.to_string(),
-                method: meth.to_string(),
-                kind: "world_mutated".to_string(),
-            });
-        }
+    if !is_allowlisted && out.result.is_ok() {
+        observed.insert(MatrixViolation {
+            situation: sit_label.to_string(),
+            service: svc.to_string(),
+            method: meth.to_string(),
+            kind: "unexpected_allow".to_string(),
+        });
+    }
+    if world_mutated && (!is_allowlisted || matches!(sit, Situation::A | Situation::B)) {
+        observed.insert(MatrixViolation {
+            situation: sit_label.to_string(),
+            service: svc.to_string(),
+            method: meth.to_string(),
+            kind: "world_mutated".to_string(),
+        });
     }
 
     if db_counter_bumped || runtime_dirty {
@@ -2970,23 +3821,26 @@ async fn rpc_negative_test_matrix_and_ratchet() {
         return;
     }
 
-    // Enforce shrinking ratchet: no new violations vs committed baseline
+    // Enforce shrinking ratchet: no new violations and no stale fixed entries vs committed baseline
     let new_violations: Vec<&MatrixViolation> =
         observed_violations.difference(&baseline_ratchet).collect();
-    let fixed_count = baseline_ratchet.difference(&observed_violations).count();
-    if fixed_count > 0 {
-        eprintln!(
-            "Negative matrix improved: {fixed_count} baseline violations are now fixed (remaining {} <= {}).",
-            observed_violations.len(),
-            baseline_ratchet.len()
-        );
-    }
-
     assert!(
         new_violations.is_empty(),
         "Negative test matrix discovered {} new unratcheted violation(s) out of {} RPCs:\n{:#?}",
         new_violations.len(),
         discovered.len(),
         &new_violations[..new_violations.len().min(40)]
+    );
+
+    let fixed_violations: Vec<&MatrixViolation> =
+        baseline_ratchet.difference(&observed_violations).collect();
+    let fixed_count = fixed_violations.len();
+    assert_eq!(
+        fixed_count, 0,
+        "Negative test matrix baseline is stale: {fixed_count} baseline violation(s) are now fixed \
+         (remaining {} vs committed {}). Re-run with EVOMU_UPDATE_NEG_MATRIX_BASELINE=1 to tighten the baseline:\n{:#?}",
+        observed_violations.len(),
+        baseline_ratchet.len(),
+        &fixed_violations[..fixed_count.min(20)]
     );
 }
