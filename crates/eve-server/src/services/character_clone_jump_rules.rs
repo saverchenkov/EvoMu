@@ -578,18 +578,18 @@ pub fn handle_clone_jump(
                 new_bal
             };
 
-            snap.append_journal(
-                char_id,
-                "CloneJumpFee",
-                IskCents(-leave_behind_fee.0),
-                balance_after,
-                if departure_loc_id >= 1_000_000_000_000 {
-                    format!("Clone jump leave-behind fee at structure {departure_loc_id}")
-                } else {
-                    "Clone jump leave-behind body fee at NPC station".into()
-                },
-            );
             if leave_behind_fee.0 > 0 {
+                snap.append_journal(
+                    char_id,
+                    "CloneJumpFee",
+                    IskCents(-leave_behind_fee.0),
+                    balance_after,
+                    if departure_loc_id >= 1_000_000_000_000 {
+                        format!("Clone jump leave-behind fee at structure {departure_loc_id}")
+                    } else {
+                        "Clone jump leave-behind body fee at NPC station".into()
+                    },
+                );
                 wallet_debit_after = Some(balance_after);
             }
             if departure_loc_id >= 1_000_000_000_000 {

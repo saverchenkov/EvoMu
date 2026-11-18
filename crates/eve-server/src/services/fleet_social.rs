@@ -305,13 +305,13 @@ fn resolve_upwell_office_access_and_quote_in_snap(
         return Ok(fallback_office_fee_isk(snap, st.structure_id));
     };
 
-    if prof.general_settings.get(&prof_svc::SETTING_CORP_RENT_OFFICE) == Some(&false)
-        || prof.general_settings.get(&prof_svc::SERVICE_OFFICES) == Some(&false)
-    {
+    // `StructureAccessProfile` setting maps are keyed by `settingID` (`structures/settings.pyj`),
+    // where `3` is `SETTING_REPROCESSING_TAX` — never check `SERVICE_OFFICES` (`3` in services.pyj).
+    if prof.general_settings.get(&prof_svc::SETTING_CORP_RENT_OFFICE) == Some(&false) {
         return Err(BridgeRpcError {
             code: "StructureServiceAccessDenied".into(),
             message: format!(
-                "Office rental service on structure {} is disabled by access profile",
+                "Office rental setting (20) on structure {} is disabled by access profile",
                 st.structure_id
             ),
             client_error: None,
@@ -341,9 +341,7 @@ fn resolve_upwell_office_access_and_quote_in_snap(
 
     let office_enabled = prof.general_settings.get(&prof_svc::SETTING_CORP_RENT_OFFICE)
         == Some(&true)
-        || prof.general_settings.get(&prof_svc::SERVICE_OFFICES) == Some(&true)
-        || prof.service_settings.contains_key(&prof_svc::SETTING_CORP_RENT_OFFICE)
-        || prof.service_settings.contains_key(&prof_svc::SERVICE_OFFICES);
+        || prof.service_settings.contains_key(&prof_svc::SETTING_CORP_RENT_OFFICE);
     if !office_enabled {
         return Err(BridgeRpcError {
             code: "StructureServiceAccessDenied".into(),
@@ -358,7 +356,6 @@ fn resolve_upwell_office_access_and_quote_in_snap(
     Ok(prof
         .service_settings
         .get(&prof_svc::SETTING_CORP_RENT_OFFICE)
-        .or_else(|| prof.service_settings.get(&prof_svc::SERVICE_OFFICES))
         .copied()
         .map(|bps| (bps.max(0) as f64) / 10_000.0)
         .unwrap_or_else(|| fallback_office_fee_isk(snap, st.structure_id)))

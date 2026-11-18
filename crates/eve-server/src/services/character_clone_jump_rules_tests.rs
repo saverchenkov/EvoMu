@@ -1022,6 +1022,88 @@ fn clone_jump_emits_wallet_and_clone_update_notifications_and_credits_upwell_own
             PyRep::Real(owner_after.to_wire_f64()),
         ]]
     );
+
+    // 5. Leaving Upwell structure with a 0 ISK custom ACL fee must NOT append a 0.0 ISK CloneJumpFee
+    // personal journal entry or emit OnAccountChange.
+    let (free_struct_jc_id, off_struct_jc_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().last_clone_jump_unix = 0;
+        let mut ext = structure_upwell_ops::load_ext_state(snap);
+        ext.owner_groups.insert(
+            96_100,
+            crate::services::station_structure::structure_upwell_ops::AccessGroupRecord {
+                group_id: 96_100,
+                creator_id: owner_cid,
+                owner_corp_id: owner_corp,
+                name: "Free Clone Access".into(),
+                description: String::new(),
+                members: [(jumper_corp, 1)].into_iter().collect(),
+            },
+        );
+        ext.access_profiles
+            .get_mut(&struct_dep)
+            .unwrap()
+            .service_acl_rules
+            .insert(
+                crate::services::structure_profile_services::SETTING_CLONINGBAY_TAX,
+                vec![(96_100, 0)],
+            );
+        save_ext_state(snap, &ext);
+        let clones = snap.jump_clones.get_mut(&jumper_cid).unwrap();
+        let in_struct = clones
+            .iter()
+            .find(|jc| jc.location_id == struct_dep)
+            .expect("struct jump clone")
+            .jump_clone_id;
+        clones.push(JumpCloneRecord {
+            jump_clone_id: 9604,
+            character_id: jumper_cid,
+            location_id: station_b,
+            implants: Vec::new(),
+        });
+        (in_struct, 9604_i64)
+    });
+    crate::services::space_destiny::clear_session_change_timer(&ctx, jumper_cid);
+    let _ = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(free_struct_jc_id)])
+        .unwrap()
+        .expect("re-enter struct_dep for 0 ISK departure test");
+    let _ = ctx.drain_notifications_for_char(jumper_cid);
+    let _ = ctx.drain_notifications_for_char(owner_cid);
+
+    let (journal_before, jumper_before_free, owner_before_free) = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&jumper_cid).unwrap().last_clone_jump_unix = 0;
+        let j_cnt = snap
+            .wallet_journal
+            .iter()
+            .filter(|j| j.character_id == jumper_cid && j.entry_type == "CloneJumpFee")
+            .count();
+        (
+            j_cnt,
+            snap.characters[&jumper_cid].balance,
+            snap.corporations[&owner_corp].division_balance(1),
+        )
+    });
+    crate::services::space_destiny::clear_session_change_timer(&ctx, jumper_cid);
+    let free_dep_ok = handle_clone_jump(&ctx, &mut sess, &[PyRep::Integer(off_struct_jc_id)])
+        .unwrap()
+        .expect("0 ISK ACL departure from struct_dep must succeed");
+    assert_ne!(free_dep_ok.dict_get("locationID"), Some(&PyRep::Integer(struct_dep)));
+    let (journal_after, jumper_after_free, owner_after_free) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.wallet_journal
+                .iter()
+                .filter(|j| j.character_id == jumper_cid && j.entry_type == "CloneJumpFee")
+                .count(),
+            snap.characters[&jumper_cid].balance,
+            snap.corporations[&owner_corp].division_balance(1),
+        )
+    });
+    assert_eq!(journal_after, journal_before, "0 ISK custom ACL jump must not append 0.0 ISK CloneJumpFee journal row");
+    assert_eq!(jumper_after_free, jumper_before_free);
+    assert_eq!(owner_after_free, owner_before_free);
+    let free_notifs = ctx.drain_notifications_for_char(jumper_cid);
+    assert!(free_notifs.iter().any(|n| n.event == "OnCloneJumpUpdate"));
+    assert!(!free_notifs.iter().any(|n| n.event == "OnAccountChange"));
+    assert!(!ctx.drain_notifications_for_char(owner_cid).iter().any(|n| n.event == "OnAccountChange"));
 }
 
 #[cfg(test)]
