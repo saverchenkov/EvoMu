@@ -150,11 +150,143 @@ pub(super) fn cleanup_ship_modules_and_cyno_on_despawn(
     crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, ship_id);
 }
 
+/// Returns `true` if a `disconnected_ships` record for `cid` is still backed by an offline
+/// pilot undocked in the recorded solar system aboard `disc.ship_id`. When `require_char_record`
+/// is `true`, missing character rows are pruned; `finalize_expired_disconnected_ship` passes
+/// `false` so every character invariant still applies when a pilot record exists while synthetic
+/// item-only finalization fixtures continue to work.
+///
+/// `prelogoff_session` carries the `(session_id, connected_at_unix)` snapshot recorded at
+/// `build_disconnected_ship_entry_sync` time for direct/pre-release logoffs so an uncleaned test
+/// or pre-lock-release `OnlineSession` from before disconnect does not prematurely prune a live hold.
+/// `reconnecting_session` carries the `session_id` of a `SelectCharacterID` reconnect currently in
+/// flight so `reconnect_character_in_space_sync`'s internal `on_advance_secs(0)` does not prune a
+/// hold whose return-warp state it is about to consume.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn is_disconnected_ship_valid(
+    has_ship_item: bool,
+    char_rec: Option<&eve_db::CharacterRecord>,
+    sessions: &std::collections::HashMap<u64, eve_db::OnlineSessionRecord>,
+    online_check: Option<&ServerContext>,
+    prelogoff_session: Option<(u64, u64)>,
+    reconnecting_session: Option<u64>,
+    cid: i64,
+    disc: &DisconnectedShipEntry,
+    require_char_record: bool,
+) -> bool {
+    let is_hold_exempt_session = |os: &eve_db::OnlineSessionRecord| {
+        prelogoff_session == Some((os.session_id, os.connected_at_unix))
+            || reconnecting_session == Some(os.session_id)
+    };
+    let pilot_ok = |c: &eve_db::CharacterRecord| {
+        let runtime_online = online_check.is_some_and(|ctx| {
+            ctx.db
+                .get_online_session(c.user_id)
+                .is_some_and(|os| os.character_id == Some(cid) && !is_hold_exempt_session(&os))
+        });
+        let snap_online = sessions
+            .get(&c.user_id)
+            .is_some_and(|os| os.character_id == Some(cid) && !is_hold_exempt_session(os));
+        c.active_ship_id == disc.ship_id
+            && c.station_id.is_none()
+            && c.structure_id.is_none()
+            && c.solar_system_id == disc.solar_system_id
+            && !runtime_online
+            && !snap_online
+    };
+    has_ship_item
+        && if require_char_record {
+            char_rec.is_some_and(pilot_ok)
+        } else {
+            char_rec.is_none_or(pilot_ok)
+        }
+}
+
+fn disc_entry_matches(d: &DisconnectedShipEntry, disc: &DisconnectedShipEntry) -> bool {
+    d.solar_system_id == disc.solar_system_id && d.ship_id == disc.ship_id
+}
+
+/// Verifies pre-despawn that `disc` is still the live disconnected hold entry and is neither
+/// stale nor actively held by an in-flight `SelectCharacterID` reconnect.
+fn pre_despawn_gate(
+    ctx: &ServerContext,
+    disc: &DisconnectedShipEntry,
+) -> (bool, Option<(u64, u64)>) {
+    let prelogoff_session = ctx.prelogoff_hold_session(disc.char_id);
+    let reconnecting_session = ctx.reconnect_hold_session(disc.char_id);
+    let (entry_matches, still_valid) = ctx.db.with_snapshot(|snap| {
+        let entry_matches = snap
+            .sp6_lifecycle
+            .disconnected_ships
+            .get(&disc.char_id)
+            .is_some_and(|d| disc_entry_matches(d, disc));
+        // Apply `reconnecting_session` exemption only while `disc` itself still sits in `disconnected_ships`.
+        let effective_reconnecting = entry_matches.then_some(reconnecting_session).flatten();
+        let valid = entry_matches
+            && is_disconnected_ship_valid(
+                snap.items.contains_key(&disc.ship_id),
+                snap.characters.get(&disc.char_id),
+                &*snap.sessions,
+                Some(ctx),
+                prelogoff_session,
+                effective_reconnecting,
+                disc.char_id,
+                disc,
+                false,
+            );
+        (entry_matches, valid)
+    });
+    if !entry_matches {
+        return (false, None);
+    }
+    if !still_valid {
+        let mut removed_stale = false;
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+            let matches_stale = snap
+                .sp6_lifecycle
+                .disconnected_ships
+                .get(&disc.char_id)
+                .is_some_and(|d| disc_entry_matches(d, disc));
+            if matches_stale {
+                snap.sp6_lifecycle.disconnected_ships.remove(&disc.char_id);
+                removed_stale = true;
+            }
+            Ok(())
+        });
+        if removed_stale {
+            if let Some(pair) = prelogoff_session {
+                ctx.clear_prelogoff_hold_session_if_matches(disc.char_id, pair);
+            }
+        }
+        return (false, None);
+    }
+    if reconnecting_session.is_some() {
+        // Re-arm collection in case the reconnecting session aborts before consuming `disc`.
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+            if let Some(d) = snap
+                .sp6_lifecycle
+                .disconnected_ships
+                .get_mut(&disc.char_id)
+                .filter(|d| disc_entry_matches(d, disc))
+            {
+                d.removed_from_space = false;
+            }
+            Ok(())
+        });
+        return (false, None);
+    }
+    (true, prelogoff_session)
+}
+
 /// Removes an expired disconnected ship from space after cleaning up active modules and cyno state.
 pub(super) fn finalize_expired_disconnected_ship(
     ctx: &ServerContext,
     disc: DisconnectedShipEntry,
 ) {
+    let (proceed_initial, _) = pre_despawn_gate(ctx, &disc);
+    if !proceed_initial {
+        return;
+    }
     let handle = ctx.systems.get_or_spawn(disc.solar_system_id);
     let final_pos = handle
         .get_ball_position_sync(disc.ship_id)
@@ -165,13 +297,23 @@ pub(super) fn finalize_expired_disconnected_ship(
         .read()
         .ok()
         .and_then(|bp| bp.combat_states.get(&disc.ship_id).cloned());
+    let (proceed_despawn, prelogoff_session) = pre_despawn_gate(ctx, &disc);
+    if !proceed_despawn {
+        return;
+    }
     cleanup_ship_modules_and_cyno_on_despawn(ctx, disc.char_id, disc.ship_id);
     handle.try_remove_ball(disc.ship_id);
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
-        if let Some(d) = snap.sp6_lifecycle.disconnected_ships.get_mut(&disc.char_id) {
-            d.last_position = final_pos;
-            d.removed_from_space = true;
-        }
+        let Some(d) = snap
+            .sp6_lifecycle
+            .disconnected_ships
+            .get_mut(&disc.char_id)
+            .filter(|d| disc_entry_matches(d, &disc))
+        else {
+            return Ok(());
+        };
+        d.last_position = final_pos;
+        d.removed_from_space = true;
         super::leave_space_in_snap(
             snap,
             disc.ship_id,
@@ -181,6 +323,9 @@ pub(super) fn finalize_expired_disconnected_ship(
         );
         Ok(())
     });
+    if let Some(pair) = prelogoff_session {
+        ctx.clear_prelogoff_hold_session_if_matches(disc.char_id, pair);
+    }
 }
 
 /// Evaluates logoff hold timers and emergency-warp vs mid-tunnel-warp preservation for an ungraceful disconnect (`#851` / `B13`).
@@ -310,6 +455,14 @@ pub(super) fn build_disconnected_ship_entry_sync(
     let last_velocity = sys_handle
         .and_then(|h| h.get_ball_velocity_sync(ship_id))
         .unwrap_or([0.0, 0.0, 0.0]);
+
+    let prelogoff_session = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .and_then(|uid| ctx.db.get_online_session(uid))
+        .filter(|os| os.character_id == Some(char_id))
+        .map(|os| (os.session_id, os.connected_at_unix));
+    ctx.record_prelogoff_hold_session(char_id, prelogoff_session);
 
     DisconnectedShipEntry {
         char_id,

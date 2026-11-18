@@ -2013,3 +2013,690 @@ async fn gm_heal_uses_system_sim_clock_after_advancetime_for_attr_changes() {
     }
     assert!(checked >= 2, "expected capacitor + shield attr changes from /heal");
 }
+
+#[tokio::test]
+async fn select_character_id_switch_logs_off_prev_character_and_expires_space_hold() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let char_a = 90_000_001_i64;
+    let ship_a = 100_000_001_i64;
+    let char_b = 90_099_171_i64;
+    let ship_b = 100_099_171_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch_a) = snap.characters.get_mut(&char_a) {
+            ch_a.user_id = user_id;
+            ch_a.solar_system_id = sys_id;
+            ch_a.station_id = None;
+            ch_a.structure_id = None;
+            ch_a.active_ship_id = ship_a;
+        }
+        if let Some(sh_a) = snap.items.get_mut(&ship_a) {
+            sh_a.owner_id = char_a;
+            sh_a.location_id = i64::from(sys_id);
+            sh_a.flag = eve_db::InventoryFlag::None;
+        }
+
+        let mut ch_b = snap.characters[&char_a].clone();
+        ch_b.character_id = char_b;
+        ch_b.name = "Alt Char B".into();
+        ch_b.user_id = user_id;
+        ch_b.solar_system_id = sys_id;
+        ch_b.station_id = Some(station_id);
+        ch_b.structure_id = None;
+        ch_b.active_ship_id = ship_b;
+        snap.characters.insert(ch_b.character_id, ch_b);
+
+        let mut sh_b = snap.items[&ship_a].clone();
+        sh_b.item_id = ship_b;
+        sh_b.owner_id = char_b;
+        sh_b.location_id = station_id;
+        sh_b.flag = eve_db::InventoryFlag::Hangar;
+        snap.items.insert(sh_b.item_id, sh_b);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_a,
+            type_id: 587,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn char_a ship in space");
+
+    let mut sess = SessionState::new(71_171);
+    sess.user_id = Some(user_id);
+    ctx.db
+        .acquire_online_lock(user_id, sess.session_id, None, true, ctx.now_unix())
+        .expect("acquire session lock");
+
+    let kw = HashMap::new();
+    handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("SelectCharacterID handled")
+    .expect("select char_a succeeds");
+    assert_eq!(sess.character_id, Some(char_a));
+    assert!(sys_handle.get_ball_snapshot(ship_a).await.unwrap().is_some());
+
+    // Switch on the same session to char_b -> char_a must enter disconnect hold cleanly.
+    handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .expect("SelectCharacterID switch handled")
+    .expect("select char_b succeeds");
+
+    assert_eq!(sess.character_id, Some(char_b));
+    assert!(!ctx.is_character_online(char_a, user_id));
+    assert!(ctx.is_character_online(char_b, user_id));
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_a),
+        "switching character in SelectCharacterID must place prev_cid ship in disconnect hold"
+    );
+
+    // Advance virtual clock and step cluster ticks past disconnect hold + emergency warp.
+    for _ in 0..3 {
+        ctx.advance_secs(30);
+        crate::sp6_lifecycle::tick_background_cluster_with_step(&ctx, 30).await;
+    }
+
+    assert!(
+        sys_handle.get_ball_snapshot(ship_a).await.unwrap().is_none(),
+        "prev_cid ship ball must be removed from space once disconnect hold expires"
+    );
+}
+
+#[tokio::test]
+async fn select_character_id_reconnect_preserves_prelogoff_hold_return_warp() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let char_a = 90_000_001_i64;
+    let ship_a = 100_000_001_i64;
+    let char_b = 90_099_172_i64;
+    let ship_b = 100_099_172_i64;
+    let pre_pos = glam::DVec3::new(150_000.0, 20_000.0, -30_000.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch_a) = snap.characters.get_mut(&char_a) {
+            ch_a.user_id = user_id;
+            ch_a.solar_system_id = sys_id;
+            ch_a.station_id = None;
+            ch_a.structure_id = None;
+            ch_a.active_ship_id = ship_a;
+        }
+        if let Some(sh_a) = snap.items.get_mut(&ship_a) {
+            sh_a.owner_id = char_a;
+            sh_a.location_id = i64::from(sys_id);
+            sh_a.flag = eve_db::InventoryFlag::None;
+        }
+        let mut ch_b = snap.characters[&char_a].clone();
+        ch_b.character_id = char_b;
+        ch_b.name = "Alt Char B2".into();
+        ch_b.user_id = user_id;
+        ch_b.solar_system_id = sys_id;
+        ch_b.station_id = Some(station_id);
+        ch_b.structure_id = None;
+        ch_b.active_ship_id = ship_b;
+        snap.characters.insert(ch_b.character_id, ch_b);
+
+        let mut sh_b = snap.items[&ship_a].clone();
+        sh_b.item_id = ship_b;
+        sh_b.owner_id = char_b;
+        sh_b.location_id = station_id;
+        sh_b.flag = eve_db::InventoryFlag::Hangar;
+        snap.items.insert(sh_b.item_id, sh_b);
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_a,
+            type_id: 587,
+            position: pre_pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn char_a ship in space");
+
+    let mut sess = SessionState::new(71_172);
+    sess.user_id = Some(user_id);
+    ctx.db
+        .acquire_online_lock(user_id, sess.session_id, None, true, ctx.now_unix())
+        .expect("acquire session lock");
+
+    let kw = HashMap::new();
+    handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("SelectCharacterID handled")
+    .expect("select char_a");
+
+    // Switch away -> char_a enters disconnect emergency warp from `pre_pos`.
+    handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .expect("SelectCharacterID switch handled")
+    .expect("switch to char_b");
+
+    // Advance enough for outbound emergency warp to finish (~20s) while keeping the 60s hold active.
+    ctx.advance_secs(45);
+    crate::sp6_lifecycle::tick_background_cluster_with_step(&ctx, 45).await;
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_a),
+        "disconnect hold must remain active before 60s expiry"
+    );
+
+    // Switching back to char_a via SelectCharacterID must NOT lose `disconnected_ships[char_a]`
+    // during `reconnect_character_in_space_sync`'s internal `on_advance_secs(0)`.
+    handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("SelectCharacterID reconnect handled")
+    .expect("reconnect char_a");
+
+    assert!(ctx.is_character_online(char_a, user_id));
+    let recon_ball = sys_handle
+        .get_ball_snapshot(ship_a)
+        .await
+        .unwrap()
+        .expect("reconnected ball in space")
+        .1;
+    match recon_ball.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(pre_pos) < 1.0,
+                "reconnect via SelectCharacterID must preserve return warp to pre_warp_position {pre_pos:?}, got {destination:?}"
+            );
+        }
+        other => panic!("expected return Warp back to pre_warp_position, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn select_character_id_displaced_clears_all_session_identity_and_skips_reconnect() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let sys_id = 30_000_142_u32;
+    let station_id = 60_003_760_i64;
+    let char_a = 90_000_001_i64;
+    let ship_a = 100_000_001_i64;
+    let char_b = 90_099_181_i64;
+    let s1_id = 71_181_u64;
+    let s2_id = 71_182_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch_b = snap.characters[&char_a].clone();
+        ch_b.character_id = char_b;
+        ch_b.name = "Displaced Target Char".into();
+        ch_b.user_id = user_id;
+        ch_b.solar_system_id = sys_id;
+        ch_b.station_id = Some(station_id);
+        snap.characters.insert(ch_b.character_id, ch_b);
+    });
+
+    ctx.db
+        .acquire_online_lock(user_id, s1_id, Some(char_a), true, ctx.now_unix())
+        .expect("s1 lock");
+    let displaced = ctx
+        .db
+        .acquire_online_lock(user_id, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1")
+        .expect("displaced record");
+    assert_eq!(displaced.session_id, s1_id);
+
+    let mut sess = SessionState::new(s1_id);
+    sess.user_id = Some(user_id);
+    sess.character_id = Some(char_a);
+    sess.corporation_id = Some(1_000_001);
+    sess.alliance_id = Some(99_000_001);
+    sess.war_faction_id = Some(500_001);
+    sess.corp_role = 7;
+    sess.fleet_id = Some(88_001);
+    sess.ship_id = Some(ship_a);
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = Some(station_id);
+
+    let kw = HashMap::new();
+    let err = handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("displaced session with s2 holding None must be rejected");
+
+    assert_eq!(err.code, "SessionKicked");
+    assert!(
+        matches!(
+            err.client_error.as_deref(),
+            Some(eve_proto::ClientError::SessionMismatch(_))
+        ),
+        "expected typed SessionMismatch client_error, got {:?}",
+        err.client_error
+    );
+    assert_eq!(sess.character_id, None);
+    assert_eq!(sess.corporation_id, None);
+    assert_eq!(sess.alliance_id, None);
+    assert_eq!(sess.war_faction_id, None);
+    assert_eq!(sess.corp_role, 0);
+    assert_eq!(sess.fleet_id, None);
+    assert_eq!(sess.ship_id, None);
+    assert_eq!(sess.solar_system_id, None);
+    assert_eq!(sess.station_id, None);
+    assert_eq!(sess.structure_id, None);
+
+    // Also when S2 has already selected char_b and queued notifications on char_b,
+    // direct SelectCharacterID returns CharacterAlreadyOnline, full dispatch_rpc returns
+    // SessionKicked, and neither drains char_b's notifications.
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, Some(char_b), false, ctx.now_unix())
+        .expect("s2 binds char_b");
+    let emitted = ctx.notify(
+        crate::router::NotificationTarget::Character(char_b),
+        "OnAccountChange",
+        "charid",
+        vec![PyRep::ascii_bytes("cash"), PyRep::Integer(1), PyRep::Real(2.0)],
+    );
+    assert_eq!(emitted.len(), 1);
+    let err2 = handle_char_unbound(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("direct SelectCharacterID on char already online on S2 must fail");
+    assert_eq!(err2.code, "CharacterAlreadyOnline");
+    let err2_rpc = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_b)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("displaced session dispatch_rpc must fail with SessionKicked");
+    assert_eq!(err2_rpc.code, "SessionKicked");
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_b).len(),
+        1,
+        "rejected displaced SelectCharacterID must not drain char_b notifications"
+    );
+}
+
+#[tokio::test]
+async fn select_character_id_displaced_vs_character_already_online_contracts() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_a = 90_000_001_i64;
+    let char_b = 90_099_182_i64;
+    let s1_id = 71_183_u64;
+    let s2_id = 71_184_u64;
+    let s_unrevoked_id = 71_185_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch_b = snap.characters[&char_a].clone();
+        ch_b.character_id = char_b;
+        ch_b.name = "Alt Online Contract".into();
+        ch_b.user_id = user_id;
+        ch_b.station_id = Some(60_003_760);
+        snap.characters.insert(ch_b.character_id, ch_b);
+    });
+
+    // Case 1: S1 owned lock and was displaced by S2 (which now holds char_a).
+    // Direct service handler enforces CharacterAlreadyOnline (clearing S1's stale selection
+    // identity), while full ctx.dispatch_rpc rejects displaced S1 with SessionKicked.
+    ctx.db
+        .acquire_online_lock(user_id, s1_id, Some(char_a), true, ctx.now_unix())
+        .expect("s1 lock");
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, Some(char_a), true, ctx.now_unix())
+        .expect("s2 displaces s1 and selects char_a");
+
+    let mut sess_s1 = SessionState::new(s1_id);
+    sess_s1.user_id = Some(user_id);
+    sess_s1.character_id = Some(char_a);
+    sess_s1.corporation_id = Some(1_000_001);
+    sess_s1.corp_role = 1;
+    let kw = HashMap::new();
+    let err1 = handle_char_unbound(
+        &ctx,
+        &mut sess_s1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("direct SelectCharacterID on char already online elsewhere must fail");
+    assert_eq!(err1.code, "CharacterAlreadyOnline");
+    assert_eq!(sess_s1.character_id, None);
+    assert_eq!(sess_s1.corporation_id, None);
+    assert_eq!(sess_s1.corp_role, 0);
+
+    let err_rpc = ctx
+        .dispatch_rpc(
+            &mut sess_s1,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(char_a)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("full dispatch_rpc on displaced S1 must fail with SessionKicked");
+    assert_eq!(err_rpc.code, "SessionKicked");
+
+    // Case 2: Unrevoked session trying to pick char_b when S2 holds (s2_id, Some(char_a))
+    // must get SessionKicked, while picking char_a keeps CharacterAlreadyOnline.
+    let mut sess_other = SessionState::new(s_unrevoked_id);
+    sess_other.user_id = Some(user_id);
+    let err_same = handle_char_unbound(
+        &ctx,
+        &mut sess_other,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("same-char conflict returns CharacterAlreadyOnline");
+    assert_eq!(err_same.code, "CharacterAlreadyOnline");
+
+    let err_diff = handle_char_unbound(
+        &ctx,
+        &mut sess_other,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_b)],
+        &kw,
+    )
+    .expect("handled")
+    .expect_err("different-char lock mismatch returns SessionKicked");
+    assert_eq!(err_diff.code, "SessionKicked");
+    assert!(matches!(
+        err_diff.client_error.as_deref(),
+        Some(eve_proto::ClientError::SessionMismatch(_))
+    ));
+}
+
+#[tokio::test]
+async fn displaced_s1_cleanup_and_cluster_tick_respect_s2_reconnect_hold_and_ownership() {
+    let ctx = Arc::new(test_ctx());
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let sys_id = 30_000_142_u32;
+    let char_a = 90_000_001_i64;
+    let ship_a = 100_000_001_i64;
+    let s1_id = 71_191_u64;
+    let s2_id = 71_192_u64;
+    let pos = glam::DVec3::new(120_000.0, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_a) {
+            ch.user_id = user_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_a;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_a) {
+            sh.owner_id = char_a;
+            sh.location_id = i64::from(sys_id);
+            sh.flag = eve_db::InventoryFlag::None;
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_a,
+            type_id: 587,
+            position: pos,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ball");
+
+    ctx.db
+        .acquire_online_lock(user_id, s1_id, Some(char_a), true, ctx.now_unix())
+        .expect("s1 acquires lock");
+    let displaced = ctx
+        .db
+        .acquire_online_lock(user_id, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1")
+        .expect("displaced record");
+    ctx.disconnect_displaced_session(s2_id, &displaced);
+
+    // S1 disconnects cleanly -> char_a enters disconnect hold while S2 prepares SelectCharacterID.
+    let mut sess_s1 = SessionState::new(s1_id);
+    sess_s1.user_id = Some(user_id);
+    sess_s1.character_id = Some(char_a);
+    ctx.cleanup_disconnected_client_session(&mut sess_s1).await;
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(
+        &ctx.db, char_a
+    ));
+
+    // Advance 30s so emergency warp ran, keeping disconnect hold alive.
+    ctx.advance_secs(30);
+    crate::sp6_lifecycle::tick_background_cluster_with_step(&ctx, 30).await;
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(
+        &ctx.db, char_a
+    ));
+
+    // Simulate active reconnect hold (S2 holds online_lock + reconnect_hold_sessions[char_a]) across cluster tick:
+    // the disconnect hold must NOT be pruned until reconnect consumes it and drops the guard.
+    let reconnect_guard =
+        crate::router::binding::ReconnectHoldGuard::acquire(&ctx, char_a, s2_id);
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, Some(char_a), false, ctx.now_unix())
+        .expect("s2 acquires char_a lock");
+    ctx.advance_secs(1);
+    crate::sp6_lifecycle::tick_background_cluster_with_step(&ctx, 1).await;
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_a),
+        "cluster_tick must preserve disconnect hold while ReconnectHoldGuard is held by S2"
+    );
+    drop(reconnect_guard);
+
+    // Now run S2 SelectCharacterID(char_a) and verify it restores return-warp cleanly.
+    let mut sess_s2 = SessionState::new(s2_id);
+    sess_s2.user_id = Some(user_id);
+    let kw = HashMap::new();
+    handle_char_unbound(
+        &ctx,
+        &mut sess_s2,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_a)],
+        &kw,
+    )
+    .expect("handled")
+    .expect("S2 selects char_a cleanly");
+    assert!(ctx.is_character_online(char_a, user_id));
+    assert!(!crate::sp6_lifecycle::has_active_disconnected_ship(
+        &ctx.db, char_a
+    ));
+    assert_eq!(ctx.reconnect_hold_session(char_a), None);
+
+    // Late S1 cleanup retry must NOT emergency-warp S2's ship or drop S2's ball.
+    ctx.cleanup_disconnected_client_session(&mut sess_s1).await;
+    assert!(!crate::sp6_lifecycle::has_active_disconnected_ship(
+        &ctx.db, char_a
+    ));
+    let ball = sys_handle
+        .get_ball_snapshot(ship_a)
+        .await
+        .unwrap()
+        .expect("ship remains in space under S2")
+        .1;
+    assert!(
+        matches!(ball.mode, eve_destiny::MovementMode::Warp { destination, .. } if destination.distance(pos) < 1.0),
+        "expected return Warp to original pos {pos:?}, got {:?}",
+        ball.mode
+    );
+}
+
+#[test]
+fn displaced_docked_character_selection_runs_logoff_teardown_only_when_offline() {
+    let ctx = test_ctx();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let s1_id = 71_291_u64;
+    let s2_id = 71_292_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = user_id;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires lock");
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1 while char_id is still offline");
+
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![],
+    );
+    let mut sess_s1 = SessionState::new(s1_id);
+    sess_s1.user_id = Some(user_id);
+    sess_s1.character_id = Some(char_id);
+    sess_s1.station_id = Some(60_003_760);
+
+    let err = super::finalize_displaced_character_selection(&ctx, &mut sess_s1, user_id, char_id);
+    assert_eq!(err.code, "SessionKicked");
+    assert_eq!(sess_s1.character_id, None);
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "P1-4: docked displaced mid-reconnect must invoke logoff_character_sync when offline"
+    );
+
+    // When S2 already brought char_id online, S1 teardown must NOT wipe S2's notifications.
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, Some(char_id), true, ctx.now_unix())
+        .expect("s2 owns char_id online");
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![],
+    );
+    let mut sess_s1_late = SessionState::new(s1_id);
+    sess_s1_late.user_id = Some(user_id);
+    let err2 =
+        super::finalize_displaced_character_selection(&ctx, &mut sess_s1_late, user_id, char_id);
+    assert_eq!(err2.code, "SessionKicked");
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id).len(),
+        1,
+        "P1-4: docked displaced teardown must skip logoff_character_sync if survivor is online"
+    );
+
+    // P2-5: active ban (`UserBanned`) on displaced character selection must be preserved, not masked as SessionKicked.
+    let banned_uid = 778_u64;
+    let banned_cid = 90_000_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "ban_select_target".into(),
+            eve_db::AccountRecord {
+                user_id: banned_uid,
+                username: "ban_select_target".into(),
+                password_token: String::new(),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&banned_cid) {
+            ch.user_id = banned_uid;
+        }
+    });
+    ctx.db
+        .ban_account("ban_select_target", ctx.now_unix() + 3_600, "policy ban")
+        .expect("ban account");
+    let mut sess_banned = SessionState::new(71_293);
+    sess_banned.user_id = Some(banned_uid);
+    sess_banned.character_id = Some(banned_cid);
+    let err_ban = super::finalize_displaced_character_selection(
+        &ctx,
+        &mut sess_banned,
+        banned_uid,
+        banned_cid,
+    );
+    assert_eq!(
+        err_ban.code, "UserBanned",
+        "banned session teardown must preserve UserBanned instead of SessionKicked"
+    );
+}

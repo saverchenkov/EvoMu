@@ -35,6 +35,192 @@ pub(crate) const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
 /// Zarzakh entry-gate lock duration: 6 hours (EVE wiki `Zarzakh.md`).
 const ZARZAKH_GATE_LOCK_SECS: u64 = 21_600;
 
+#[cfg(any(test, feature = "testkit"))]
+fn set_char_hook_in<T>(
+    slot: &OnceLock<Mutex<HashMap<(u64, i64), T>>>,
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<T>,
+) {
+    let map = slot.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (ctx.instance_id, char_id);
+    match hook {
+        Some(h) => {
+            guard.insert(key, h);
+        }
+        None => {
+            guard.remove(&key);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testkit"))]
+fn take_char_hook_from<T>(
+    slot: &OnceLock<Mutex<HashMap<(u64, i64), T>>>,
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<T> {
+    let map = slot.get()?;
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard.remove(&(ctx.instance_id, char_id))
+}
+
+#[cfg(any(test, feature = "testkit"))]
+pub type PreTakeBallHook = Box<
+    dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+>;
+
+#[cfg(any(test, feature = "testkit"))]
+static PRE_TAKE_BALL_HOOKS: OnceLock<Mutex<HashMap<(u64, i64), PreTakeBallHook>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+type PostZarzakhTollHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+static POST_ZARZAKH_TOLL_HOOKS: OnceLock<Mutex<HashMap<(u64, i64), PostZarzakhTollHook>>> =
+    OnceLock::new();
+
+/// Installs or clears a one-shot test barrier immediately before `old_handle.take_ball`
+/// inside `handle_cmd_stargate_jump`, scoped by `(ctx.instance_id, char_id)`.
+#[cfg(any(test, feature = "testkit"))]
+pub fn set_pre_take_ball_hook_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<PreTakeBallHook>,
+) {
+    set_char_hook_in(&PRE_TAKE_BALL_HOOKS, ctx, char_id, hook);
+}
+
+#[cfg(any(test, feature = "testkit"))]
+async fn run_pre_take_ball_hook_for_test(ctx: &ServerContext, char_id: i64) {
+    if let Some(h) = take_char_hook_from(&PRE_TAKE_BALL_HOOKS, ctx, char_id) {
+        h().await;
+    }
+}
+
+#[cfg(test)]
+fn set_post_zarzakh_toll_hook_for_test(
+    ctx: &ServerContext,
+    char_id: i64,
+    hook: Option<PostZarzakhTollHook>,
+) {
+    set_char_hook_in(&POST_ZARZAKH_TOLL_HOOKS, ctx, char_id, hook);
+}
+
+#[cfg(test)]
+fn run_post_zarzakh_toll_hook_for_test(ctx: &ServerContext, char_id: i64) {
+    if let Some(h) = take_char_hook_from(&POST_ZARZAKH_TOLL_HOOKS, ctx, char_id) {
+        h();
+    }
+}
+
+fn session_owns_online_lease(ctx: &ServerContext, session: &SessionState, char_id: i64) -> bool {
+    let Some(uid) = session.user_id else {
+        return false;
+    };
+    let now_unix = ctx.now_unix_secs();
+    if ctx
+        .db
+        .check_session_revoked(uid, session.session_id, now_unix)
+        .is_some()
+    {
+        return false;
+    }
+    ctx.db
+        .get_online_session(uid)
+        .is_some_and(|os| {
+            os.session_id == session.session_id
+                && os.character_id.is_none_or(|cid| cid == char_id)
+        })
+}
+
+fn check_jump_session_lease(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    entry_had_online_lease: bool,
+) -> Result<(), BridgeRpcError> {
+    let Some(uid) = session.user_id else {
+        if entry_had_online_lease {
+            return Err(crate::router::binding::session_kicked_error(
+                "Session lost account binding before stargate handoff committed",
+            ));
+        }
+        return Ok(());
+    };
+    let now_unix = ctx.now_unix_secs();
+    if let Some((code, message)) =
+        ctx.db
+            .check_session_revoked(uid, session.session_id, now_unix)
+    {
+        return Err(crate::router::binding::session_revoked_error(
+            code, message,
+        ));
+    }
+    let still_valid = match ctx.db.get_online_session(uid) {
+        Some(os) => {
+            os.session_id == session.session_id
+                && os.character_id.is_none_or(|cid| cid == char_id)
+        }
+        None => !entry_had_online_lease,
+    };
+    if !still_valid {
+        return Err(crate::router::binding::session_kicked_error(
+            "Session displaced or closed before stargate handoff committed",
+        ));
+    }
+    Ok(())
+}
+
+async fn restore_taken_ball_if_absent(
+    old_handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+    taken: crate::system_actor::TakenBall,
+) {
+    if old_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        let _ = old_handle.restore_ball(taken).await;
+    }
+}
+
+fn refund_zarzakh_gate_toll(
+    ctx: &ServerContext,
+    char_id: i64,
+    debited_cents: Option<eve_db::IskCents>,
+) {
+    let Some(refund_cents) = debited_cents.filter(|c| c.0 > 0) else {
+        return;
+    };
+    let bal_after_opt = ctx.db.with_mut_snapshot(|s| {
+        let c = s.characters.get_mut(&char_id)?;
+        let new_bal = c.balance.checked_add(refund_cents)?;
+        c.balance = new_bal;
+        s.next_entity_id += 1;
+        let j_id = s.next_entity_id;
+        s.wallet_journal.push(eve_db::WalletJournalEntry {
+            entry_id: j_id,
+            character_id: char_id,
+            entry_type: "zarzakh_gate_toll_refund".into(),
+            amount: refund_cents,
+            balance_after: new_bal,
+            reason: "Refund Zarzakh stargate transit toll after aborted stargate jump".into(),
+        });
+        Some(new_bal)
+    });
+    if let Some(bal_after) = bal_after_opt {
+        ctx.notify_wallet_balance(false, char_id, 1, bal_after);
+    }
+}
+
 pub(crate) async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -738,6 +924,120 @@ async fn handle_cmd_warp_to_stuff(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn commit_stargate_db_transition(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    dest_sys_id: u32,
+    entry_db_state: Option<(Option<i64>, Option<i64>, u32)>,
+    entry_had_online_lease: bool,
+) -> Result<eve_db::CharacterRecord, BridgeRpcError> {
+    let entry_db_undocked =
+        entry_db_state.is_some_and(|(st, sr, _)| st.is_none() && sr.is_none());
+    let entry_db_sys = entry_db_state.map(|(_, _, sys)| sys).unwrap_or(0);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(uid) = session.user_id {
+            if ctx.db.kicked_reason(uid).is_some() {
+                return Err(crate::router::binding::session_kicked_error(
+                    "Session kicked before stargate handoff committed",
+                ));
+            }
+            let still_valid = match ctx.db.get_online_session(uid) {
+                Some(os) => {
+                    os.session_id == session.session_id
+                        && os.character_id.is_none_or(|cid| cid == char_id)
+                }
+                None => !entry_had_online_lease,
+            };
+            if !still_valid {
+                return Err(crate::router::binding::session_kicked_error(
+                    "Session displaced or closed before stargate handoff committed",
+                ));
+            }
+        } else if entry_had_online_lease {
+            return Err(crate::router::binding::session_kicked_error(
+                "Session lost account binding before stargate handoff committed",
+            ));
+        }
+
+        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+            client_error: None,
+        })?;
+        if entry_db_undocked {
+            let err_msg = if ch.station_id.is_some() || ch.structure_id.is_some() {
+                Some(format!(
+                    "Character {char_id} is docked and cannot transition in space"
+                ))
+            } else if ch.solar_system_id != entry_db_sys {
+                Some(format!(
+                    "Character {char_id} moved to solar system {} concurrently",
+                    ch.solar_system_id
+                ))
+            } else {
+                None
+            };
+            if let Some(message) = err_msg {
+                return Err(BridgeRpcError {
+                    code: "SystemTransitionFailed".into(),
+                    message,
+                    client_error: None,
+                });
+            }
+        } else if entry_db_state.is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e) {
+            return Err(BridgeRpcError {
+                code: "SystemTransitionFailed".into(),
+                message: format!("Character {char_id} transitioned concurrently"),
+                client_error: None,
+            });
+        }
+        let (const_id, reg_id) = ctx
+            .sde
+            .solar_systems
+            .get(&dest_sys_id)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or_else(|| {
+                let c = if ch.constellation_id != 0 {
+                    ch.constellation_id
+                } else {
+                    20_000_020
+                };
+                let r = if ch.region_id != 0 {
+                    ch.region_id
+                } else {
+                    10_000_002
+                };
+                (c, r)
+            });
+        ch.solar_system_id = dest_sys_id;
+        ch.constellation_id = const_id;
+        ch.region_id = reg_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.version += 1;
+        ch.system_epoch += 1;
+        let active_ship_id = ch.active_ship_id;
+        let res = ch.clone();
+        if let Some(sh) = snap.items.get_mut(&active_ship_id) {
+            sh.location_id = dest_sys_id as i64;
+            if entry_db_undocked {
+                sh.flag = eve_db::InventoryFlag::None;
+            }
+            sh.version += 1;
+        }
+        if ship_id != active_ship_id {
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = dest_sys_id as i64;
+                sh.version += 1;
+            }
+        }
+        Ok(res)
+    })
+}
+
 async fn handle_cmd_stargate_jump(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -769,8 +1069,7 @@ async fn handle_cmd_stargate_jump(
             .get(&char_id)
             .map(|c| (c.station_id, c.structure_id, c.solar_system_id))
     });
-    let entry_db_sys = entry_db_state.map(|(_, _, sys)| sys).unwrap_or(old_sys);
-    let entry_db_undocked = entry_db_state.is_some_and(|(st, sr, _)| st.is_none() && sr.is_none());
+    let entry_had_online_lease = session_owns_online_lease(ctx, session, char_id);
     crate::services::space_nav_movement_guard::validate_pre_movement_locks(
         ctx,
         ship_id,
@@ -941,6 +1240,7 @@ async fn handle_cmd_stargate_jump(
         .unwrap_or(DVec3::ZERO);
     let arrival_pos = dest_gate_pos + DVec3::new(gate_radius + 1_500.0, 0.0, 0.0);
 
+    check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
     let _ = old_handle
         .emit_destiny_event(
             ship_id,
@@ -973,6 +1273,9 @@ async fn handle_cmd_stargate_jump(
         let _ = old_handle.force_stop_warp(ship_id);
         crate::services::space_destiny::clear_warp_tracking(ctx, Some(&old_handle), ship_id);
     }
+    #[cfg(any(test, feature = "testkit"))]
+    run_pre_take_ball_hook_for_test(ctx, char_id).await;
+    check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
     let Some(taken) = old_handle.take_ball(ship_id).await else {
         return Err(BridgeRpcError {
             code: "SystemTransitionFailed".into(),
@@ -982,10 +1285,18 @@ async fn handle_cmd_stargate_jump(
     };
     let prev_combat_state = taken.combat_state.clone();
 
+    if let Err(e) = check_jump_session_lease(ctx, session, char_id, entry_had_online_lease) {
+        restore_taken_ball_if_absent(&old_handle, ship_id, taken).await;
+        return Err(e);
+    }
+
     // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
-    // Validated and debited BEFORE mutating character solar system state (`P2` rollback safety).
+    // Validated and debited BEFORE mutating character solar system state (`P2` rollback safety),
+    // and immediately after the post-`take_ball` session-lease verification (`#1171` / `BF-05`),
+    // storing this session's exact debited amount instead of scanning shared `wallet_journal`.
+    let mut zarzakh_debited_toll: Option<eve_db::IskCents> = None;
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
-        if let Err(e) = crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
+        match crate::services::space_navigation_advanced::process_zarzakh_gate_toll_with_amount(
             ctx,
             char_id,
             ship_id,
@@ -995,66 +1306,37 @@ async fn handle_cmd_stargate_jump(
             args,
             kwargs,
         ) {
-            let _ = old_handle.restore_ball(taken).await;
+            Ok(debited) => {
+                zarzakh_debited_toll = debited;
+            }
+            Err(e) => {
+                restore_taken_ball_if_absent(&old_handle, ship_id, taken).await;
+                return Err(e);
+            }
+        }
+        #[cfg(test)]
+        run_post_zarzakh_toll_hook_for_test(ctx, char_id);
+        if let Err(e) = check_jump_session_lease(ctx, session, char_id, entry_had_online_lease) {
+            refund_zarzakh_gate_toll(ctx, char_id, zarzakh_debited_toll);
+            restore_taken_ball_if_absent(&old_handle, ship_id, taken).await;
             return Err(e);
         }
     }
 
-    let updated_ch_res = if entry_db_undocked {
-        ctx.db
-            .transition_character_solar_system_if_at(char_id, entry_db_sys, dest_sys_id, &ctx.sde)
-            .map_err(|e| BridgeRpcError {
-                code: "SystemTransitionFailed".into(),
-                message: e.to_string(),
-                client_error: None,
-            })
-    } else {
-        ctx.db
-            .try_with_mut_snapshot(|snap| {
-                let (const_id, reg_id) = ctx
-                    .sde
-                    .solar_systems
-                    .get(&dest_sys_id)
-                    .map(|s| (s.constellation_id, s.region_id))
-                    .unwrap_or((20_000_020, 10_000_002));
-                let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {char_id} not found"),
-                    client_error: None,
-                })?;
-                if entry_db_state.is_some_and(|e| (ch.station_id, ch.structure_id, ch.solar_system_id) != e) {
-                    return Err(BridgeRpcError {
-                        code: "SystemTransitionFailed".into(),
-                        message: format!("Character {char_id} transitioned concurrently"),
-                        client_error: None,
-                    });
-                }
-                ch.solar_system_id = dest_sys_id;
-                ch.constellation_id = const_id;
-                ch.region_id = reg_id;
-                ch.station_id = None;
-                ch.structure_id = None;
-                ch.version += 1;
-                ch.system_epoch += 1;
-                let active_ship_id = ch.active_ship_id;
-                let res = ch.clone();
-                if let Some(sh) = snap.items.get_mut(&active_ship_id) {
-                    sh.location_id = dest_sys_id as i64;
-                    sh.version += 1;
-                }
-                if ship_id != active_ship_id {
-                    if let Some(sh) = snap.items.get_mut(&ship_id) {
-                        sh.location_id = dest_sys_id as i64;
-                        sh.version += 1;
-                    }
-                }
-                Ok(res)
-            })
-    };
+    let updated_ch_res = commit_stargate_db_transition(
+        ctx,
+        session,
+        char_id,
+        ship_id,
+        dest_sys_id,
+        entry_db_state,
+        entry_had_online_lease,
+    );
     let updated_ch = match updated_ch_res {
         Ok(ch) => ch,
         Err(e) => {
-            let _ = old_handle.restore_ball(taken).await;
+            refund_zarzakh_gate_toll(ctx, char_id, zarzakh_debited_toll);
+            restore_taken_ball_if_absent(&old_handle, ship_id, taken).await;
             return Err(e);
         }
     };
@@ -2058,3 +2340,468 @@ pub(crate) async fn prepare_dock_warp_settle(
 pub use crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space;
 
 #[cfg(test)] #[path = "space_warp_jump_unit_tests.rs"] mod space_warp_jump_unit_tests;
+
+#[cfg(test)]
+mod jump_displacement_and_toll_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn jump_session_lease_returns_typed_session_kicked_client_error() {
+        let ctx = Arc::new(ServerContext::new());
+        let mut sess = SessionState::new(11_111);
+        sess.user_id = Some(1);
+        sess.character_id = Some(90_000_001);
+
+        ctx.db
+            .acquire_online_lock(1, 11_111, Some(90_000_001), true, ctx.now_unix())
+            .expect("lock by S1");
+        ctx.db
+            .acquire_online_lock(1, 22_222, Some(90_000_001), true, ctx.now_unix())
+            .expect("S2 displaces S1");
+
+        let err = check_jump_session_lease(&ctx, &sess, 90_000_001, true)
+            .expect_err("displaced session must fail jump lease check");
+        assert_eq!(err.code, "SessionKicked");
+        assert!(
+            matches!(
+                err.client_error.as_deref(),
+                Some(eve_proto::ClientError::SessionMismatch(_))
+            ),
+            "expected typed ClientError::SessionMismatch, got {:?}",
+            err.client_error
+        );
+
+        let unrevoked = SessionState::new(33_333);
+        let mut unrevoked_with_user = unrevoked;
+        unrevoked_with_user.user_id = Some(1);
+        unrevoked_with_user.character_id = Some(90_000_001);
+        let err_multi = check_jump_session_lease(&ctx, &unrevoked_with_user, 90_000_001, true)
+            .expect_err("non-owner session must fail jump lease check");
+        assert_eq!(err_multi.code, "MultiLoginBlocked");
+        assert!(
+            matches!(
+                err_multi.client_error.as_deref(),
+                Some(eve_proto::ClientError::SessionMismatch(_))
+            ),
+            "expected typed ClientError::SessionMismatch on MultiLoginBlocked, got {:?}",
+            err_multi.client_error
+        );
+    }
+
+    #[tokio::test]
+    async fn zarzakh_gate_jump_displaced_or_failed_preserves_isk_and_ball() {
+        let ctx = Arc::new(ServerContext::new());
+        let char_id = 90_000_001_i64;
+        let (old_sys, ship_id, zarzakh_gate_id, dest_gate_id) = ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&char_id];
+            let (gate_id, dest_gate_id) = ctx
+                .sde
+                .jumps
+                .iter()
+                .find(|(_, j)| j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH)
+                .map(|(&gid, j)| (gid, j.destination_stargate_id))
+                .expect("SDE must include a stargate leading to Zarzakh");
+            (ch.solar_system_id, ch.active_ship_id, gate_id, dest_gate_id)
+        });
+        let gate_from_sys = ctx.sde.jumps[&zarzakh_gate_id].from_solar_system_id;
+        let gate_pos = ctx.sde.jumps[&zarzakh_gate_id].position;
+        let start_isk = eve_db::IskCents::from_isk(500_000_000);
+        let trig_gate = if old_sys == gate_from_sys {
+            (zarzakh_gate_id, dest_gate_id)
+        } else {
+            ctx.db.with_mut_snapshot(|s| {
+                let ch = s.characters.get_mut(&char_id).unwrap();
+                ch.solar_system_id = gate_from_sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                if let Some(sh) = s.items.get_mut(&ship_id) {
+                    sh.location_id = i64::from(gate_from_sys);
+                    sh.flag = eve_db::InventoryFlag::None;
+                }
+            });
+            (zarzakh_gate_id, dest_gate_id)
+        };
+        let _ = trig_gate;
+
+        ctx.db.with_mut_snapshot(|s| {
+            let ch = s.characters.get_mut(&char_id).unwrap();
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = gate_from_sys;
+            ch.balance = start_isk;
+            if let Some(sh) = s.items.get_mut(&ship_id) {
+                sh.location_id = i64::from(gate_from_sys);
+                sh.flag = eve_db::InventoryFlag::None;
+            }
+        });
+        let sys_handle = ctx.systems.get_or_spawn(gate_from_sys);
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: gate_pos + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.5,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await
+            .expect("spawn ball near Zarzakh gate");
+
+        let mut sess = SessionState::new(33_001);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(gate_from_sys);
+        sess.ship_id = Some(ship_id);
+        ctx.db
+            .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix())
+            .expect("S1 online lock");
+
+        let ctx_displace = Arc::clone(&ctx);
+        let hook: PreTakeBallHook = Box::new(move || {
+            let ctx_d = Arc::clone(&ctx_displace);
+            Box::pin(async move {
+                let _ = ctx_d.db.acquire_online_lock(
+                    1,
+                    33_002,
+                    None,
+                    true,
+                    ctx_d.now_unix(),
+                );
+            })
+        });
+        set_pre_take_ball_hook_for_test(&ctx, char_id, Some(hook));
+
+        let mut kw = HashMap::new();
+        kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(zarzakh_gate_id)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("displaced Zarzakh jump must fail");
+        assert_eq!(err.code, "SessionKicked");
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.characters[&char_id].balance),
+            start_isk,
+            "displaced Zarzakh jump must not debit gate toll"
+        );
+        assert!(
+            sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "ship ball must remain in origin system after displaced jump"
+        );
+
+        // Also verify refund_zarzakh_gate_toll restores debited toll cleanly on rollback.
+        let half_isk = eve_db::IskCents::from_isk(499_990_000);
+        let toll_cents = eve_db::IskCents::from_isk(10_000);
+        ctx.db.with_mut_snapshot(|s| {
+            s.characters.get_mut(&char_id).unwrap().balance = half_isk;
+        });
+        refund_zarzakh_gate_toll(&ctx, char_id, Some(toll_cents));
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.characters[&char_id].balance),
+            start_isk,
+            "refund_zarzakh_gate_toll must restore exact debited ISK"
+        );
+        assert!(
+            ctx.db.with_snapshot(|s| {
+                s.wallet_journal
+                    .iter()
+                    .any(|j| j.character_id == char_id && j.entry_type == "zarzakh_gate_toll_refund" && j.amount == toll_cents)
+            }),
+        "refund must record a zarzakh_gate_toll_refund journal entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn displaced_jump_before_gate_activate_emits_no_gate_fx_or_stop_warp() {
+        let ctx = Arc::new(ServerContext::new());
+        let char_id = 90_000_001_i64;
+        let old_sys = 30_000_142_u32;
+        let gate = ctx
+            .sde
+            .jumps
+            .values()
+            .find(|j| j.from_solar_system_id == old_sys)
+            .cloned()
+            .expect("SDE stargate in 30000142");
+        let ship_id = ctx.db.with_mut_snapshot(|s| {
+            let ch = s.characters.get_mut(&char_id).unwrap();
+            ch.solar_system_id = old_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let ship_id = ch.active_ship_id;
+            if let Some(sh) = s.items.get_mut(&ship_id) {
+                sh.location_id = i64::from(old_sys);
+                sh.flag = eve_db::InventoryFlag::None;
+            }
+            ship_id
+        });
+        let sys_handle = ctx.systems.get_or_spawn(old_sys);
+        sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: gate.position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::new(100.0, 0.0, 0.0),
+                max_velocity: 350.0,
+                inertia: 2.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 1.0,
+                mode: eve_destiny::MovementMode::Warp {
+                    origin: gate.position + DVec3::new(200_000.0, 0.0, 0.0),
+                    destination: gate.position,
+                    warp_speed_au_s: 3.0,
+                    total_distance: 200_000.0,
+                    phase: eve_destiny::WarpPhase::Decelerating,
+                    elapsed_warp_time: 10.0,
+                },
+            })
+            .await
+            .expect("spawn warping ball");
+
+        ctx.advance_secs(12);
+        let mut sess = SessionState::new(34_001);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(old_sys);
+        sess.ship_id = Some(ship_id);
+        ctx.db
+            .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix())
+            .expect("S1 online lock");
+        ctx.db
+            .acquire_online_lock(1, 34_002, Some(char_id), true, ctx.now_unix())
+            .expect("S2 displaces S1");
+
+        let kw = HashMap::new();
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("displaced jump before GateActivate must fail");
+        assert_eq!(err.code, "SessionKicked");
+
+        let (_tick, evs, _updates, _seq) = sys_handle
+            .drain_observer_updates_with_seq(ship_id)
+            .await
+            .expect("drain observer updates");
+        assert!(
+            !evs.iter().any(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::OnClientControllerEvent { event_name, .. }
+                    if event_name == "GateActivate"
+            ) || matches!(
+                ev,
+                eve_destiny::DestinyEvent::OnSpecialFXTimed { guid, .. }
+                    if guid == "effects.JumpOut"
+            )),
+            "displaced jump must emit neither GateActivate nor effects.JumpOut: {evs:?}"
+        );
+        let (_, ball) = sys_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .expect("ball remains in old system");
+        assert!(
+            matches!(ball.mode, eve_destiny::MovementMode::Warp { .. }),
+            "displaced jump must not force-stop warp before GateActivate: {:?}",
+            ball.mode
+        );
+    }
+
+    #[test]
+    fn commit_stargate_db_transition_rejects_displaced_session_atomically() {
+        let ctx = ServerContext::new();
+        let char_id = 90_000_001_i64;
+        let old_sys = 30_000_142_u32;
+        let dest_sys = 30_000_144_u32;
+        let (ship_id, before_ver, before_epoch) = ctx.db.with_mut_snapshot(|s| {
+            let ch = s.characters.get_mut(&char_id).unwrap();
+            ch.solar_system_id = old_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            let ship_id = ch.active_ship_id;
+            if let Some(sh) = s.items.get_mut(&ship_id) {
+                sh.location_id = i64::from(old_sys);
+                sh.flag = eve_db::InventoryFlag::None;
+            }
+            (ship_id, ch.version, ch.system_epoch)
+        });
+
+        let mut sess = SessionState::new(35_001);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(old_sys);
+        sess.ship_id = Some(ship_id);
+        ctx.db
+            .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix())
+            .expect("S1 online lock");
+        // S2 takes online lock before atomic commit runs.
+        ctx.db
+            .acquire_online_lock(1, 35_002, Some(char_id), true, ctx.now_unix())
+            .expect("S2 displaces S1");
+
+        let err = commit_stargate_db_transition(
+            &ctx,
+            &sess,
+            char_id,
+            ship_id,
+            dest_sys,
+            Some((None, None, old_sys)),
+            true,
+        )
+        .expect_err("atomic commit must reject displaced session");
+        assert_eq!(err.code, "SessionKicked");
+
+        ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&char_id];
+            assert_eq!(ch.solar_system_id, old_sys);
+            assert_eq!(ch.version, before_ver);
+            assert_eq!(ch.system_epoch, before_epoch);
+            assert_eq!(s.items[&ship_id].location_id, i64::from(old_sys));
+        });
+    }
+
+    #[tokio::test]
+    async fn zarzakh_gate_jump_displaced_with_concurrent_toll_refunds_only_own_debit() {
+        let ctx = Arc::new(ServerContext::new());
+        let char_id = 90_000_001_i64;
+        let (zarzakh_gate_id, dest_gate_id) = ctx
+            .sde
+            .jumps
+            .iter()
+            .find(|(_, j)| j.to_solar_system_id == SOLAR_SYSTEM_ZARZAKH)
+            .map(|(&gid, j)| (gid, j.destination_stargate_id))
+            .expect("SDE must include a stargate leading to Zarzakh");
+        let gate_from_sys = ctx.sde.jumps[&zarzakh_gate_id].from_solar_system_id;
+        let gate_pos = ctx.sde.jumps[&zarzakh_gate_id].position;
+        let start_isk = eve_db::IskCents::from_isk(500_000_000);
+
+        let ship_id = ctx.db.with_mut_snapshot(|s| {
+            let ch = s.characters.get_mut(&char_id).unwrap();
+            ch.solar_system_id = gate_from_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.balance = start_isk;
+            let sh_id = ch.active_ship_id;
+            if let Some(sh) = s.items.get_mut(&sh_id) {
+                sh.location_id = i64::from(gate_from_sys);
+                sh.flag = eve_db::InventoryFlag::None;
+            }
+            sh_id
+        });
+        let ball = eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: gate_pos + DVec3::new(500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: eve_destiny::MovementMode::Stop,
+        };
+        let sys_handle = ctx.systems.get_or_spawn(gate_from_sys);
+        sys_handle
+            .spawn_ball(ball.clone())
+            .await
+            .expect("spawn ball near Zarzakh gate");
+
+        let mut sess = SessionState::new(34_001);
+        sess.user_id = Some(1);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(gate_from_sys);
+        sess.ship_id = Some(ship_id);
+        ctx.db
+            .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix())
+            .expect("S1 online lock");
+
+        let mut kw = HashMap::new();
+        kw.insert("confirmToll".to_string(), PyRep::Bool(true));
+
+        let ctx_hook = Arc::clone(&ctx);
+        let kw_hook = kw.clone();
+        set_post_zarzakh_toll_hook_for_test(
+            &ctx,
+            char_id,
+            Some(Box::new(move || {
+                // While S1 is paused right after paying its own Zarzakh toll, S2 displaces S1
+                // and debits a second concurrent Zarzakh toll for `char_id`.
+                let _ = ctx_hook.db.acquire_online_lock(
+                    1,
+                    34_002,
+                    Some(char_id),
+                    true,
+                    ctx_hook.now_unix(),
+                );
+                let s2_toll = crate::services::space_navigation_advanced::process_zarzakh_gate_toll_with_amount(
+                    &ctx_hook,
+                    char_id,
+                    ship_id,
+                    zarzakh_gate_id,
+                    dest_gate_id,
+                    &ball,
+                    &[],
+                    &kw_hook,
+                )
+                .expect("S2 Zarzakh toll succeeds")
+                .expect("S2 toll debited");
+                assert_eq!(s2_toll, eve_db::IskCents::from_isk(10_000));
+            })),
+        );
+
+        let err = handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdStargateJump",
+            &[PyRep::Integer(zarzakh_gate_id)],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect_err("displaced S1 jump must unwind cleanly");
+        assert_eq!(err.code, "SessionKicked");
+
+        // Total debits = S1 (10k) + S2 (10k); S1 rollback must refund ONLY its own 10k toll.
+        let expected_after_s2_debit_and_s1_refund = eve_db::IskCents::from_isk(499_990_000);
+        ctx.db.with_snapshot(|s| {
+            assert_eq!(
+                s.characters[&char_id].balance,
+                expected_after_s2_debit_and_s1_refund,
+                "displaced S1 must refund only its own 10k ISK toll, never S2's concurrent toll"
+            );
+            let refunds: Vec<_> = s
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == char_id && j.entry_type == "zarzakh_gate_toll_refund")
+                .collect();
+            assert_eq!(refunds.len(), 1);
+            assert_eq!(refunds[0].amount, eve_db::IskCents::from_isk(10_000));
+        });
+        assert!(
+            sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+            "ship ball must be restored cleanly in origin system"
+        );
+    }
+}

@@ -26,6 +26,35 @@ pub fn alloc_transport_session_id() -> u64 {
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 pub(crate) const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
 
+/// Constructs a typed session-displacement [`BridgeRpcError`] backed by
+/// [`eve_proto::ClientError::SessionMismatch`].
+pub(crate) fn session_kicked_error(message: impl Into<String>) -> BridgeRpcError {
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        "SessionKicked",
+        msg.clone(),
+        eve_proto::ClientError::SessionMismatch(msg),
+    )
+}
+
+/// Constructs a [`BridgeRpcError`] from a `check_session_revoked` pair, attaching
+/// [`eve_proto::ClientError::SessionMismatch`] for kick/multi-login displacement codes.
+pub(crate) fn session_revoked_error(code: String, message: String) -> BridgeRpcError {
+    if matches!(code.as_str(), "SessionKicked" | "MultiLoginBlocked") {
+        BridgeRpcError::with_client_error(
+            code,
+            message.clone(),
+            eve_proto::ClientError::SessionMismatch(message),
+        )
+    } else {
+        BridgeRpcError {
+            code,
+            message,
+            client_error: None,
+        }
+    }
+}
+
 /// Maximum concurrent bound objects retained per client session (`#882` / `C20`).
 pub const MAX_BOUND_OBJECTS_PER_SESSION: usize = 256;
 
@@ -97,6 +126,47 @@ struct ContextGraceStore {
     owner: Weak<RankedRwLock<HashMap<u64, BoundObjectEntry>, RANK_LEAF>>,
     entries: HashMap<u64, TransitionDisconnectedBinding>,
     departed_locations: HashMap<(u64, DepartedLocationKind, i64), TransitionDepartedLocation>,
+    pending_displaced_logoffs: HashMap<u64, (u64, i64)>,
+    prelogoff_hold_sessions: HashMap<i64, (u64, u64)>,
+    reconnect_hold_sessions: HashMap<i64, u64>,
+}
+
+/// RAII guard preserving an in-progress character reconnect against premature `on_advance_secs(0)`
+/// disconnect-hold pruning while the replacement session already holds the online lock (`#1171`).
+pub(crate) struct ReconnectHoldGuard<'a> {
+    ctx: &'a ServerContext,
+    char_id: i64,
+    session_id: u64,
+}
+
+impl<'a> ReconnectHoldGuard<'a> {
+    pub(crate) fn acquire(ctx: &'a ServerContext, char_id: i64, session_id: u64) -> Self {
+        ctx.with_context_grace_store_mut(|store| {
+            store.reconnect_hold_sessions.insert(char_id, session_id);
+        });
+        Self {
+            ctx,
+            char_id,
+            session_id,
+        }
+    }
+}
+
+impl Drop for ReconnectHoldGuard<'_> {
+    fn drop(&mut self) {
+        let matches = self.ctx.read_context_grace_store(|s| {
+            s.is_some_and(|st| {
+                st.reconnect_hold_sessions.get(&self.char_id) == Some(&self.session_id)
+            })
+        });
+        if matches {
+            self.ctx.with_existing_grace_store_mut_and_prune(|store| {
+                if store.reconnect_hold_sessions.get(&self.char_id) == Some(&self.session_id) {
+                    store.reconnect_hold_sessions.remove(&self.char_id);
+                }
+            });
+        }
+    }
 }
 
 static TRANSITION_DISCONNECT_GRACE: OnceLock<RwLock<HashMap<u64, ContextGraceStore>>> =
@@ -139,15 +209,27 @@ impl Drop for SessionCleanupGuard {
         self.ctx.release_session_bindings(self.session_id);
         self.ctx.release_session_rate_bucket(self.session_id);
         self.ctx.quasar_gateway.unsubscribe_session(self.session_id);
+        let pending_displaced = self.ctx.take_pending_displaced_logoff(self.session_id);
         let active_for_session = self.ctx.db.with_snapshot(|snap| {
             snap.sessions
                 .values()
                 .find(|os| os.session_id == self.session_id)
                 .map(|os| (os.user_id, os.character_id))
         });
+        let mut ran_active_release = false;
         if let Some((uid, char_opt)) = active_for_session {
             if self.ctx.db.release_online_lock(uid, self.session_id) {
+                ran_active_release = true;
                 if let Some(cid) = char_opt {
+                    self.ctx.logoff_character_sync(cid, None);
+                }
+            }
+        }
+        if !ran_active_release {
+            if let Some((uid, cid)) = pending_displaced {
+                if !crate::sp6_lifecycle::has_active_disconnected_ship(&self.ctx.db, cid)
+                    && !self.ctx.is_character_online(cid, uid)
+                {
                     self.ctx.logoff_character_sync(cid, None);
                 }
             }
@@ -211,6 +293,46 @@ impl ServerContext {
             }
         }
         sent_to_live
+    }
+
+    /// Signals closure and releases bound objects for a displaced online session, deferring
+    /// `logoff_character_sync` to that session's disconnect cleanup when a live closer is active
+    /// so in-flight RPC handoffs finish before logoff state is recorded.
+    pub fn disconnect_displaced_session(
+        &self,
+        current_session_id: u64,
+        displaced: &eve_db::OnlineSessionRecord,
+    ) {
+        if displaced.session_id == current_session_id {
+            return;
+        }
+        // Publish the deferred logoff obligation before signaling `close_tx` so a fast-unwinding
+        // displaced task entering `SessionCleanupGuard::drop` concurrently always observes it.
+        if let Some(disp_cid) = displaced.character_id {
+            self.record_pending_displaced_logoff(
+                displaced.session_id,
+                displaced.user_id,
+                disp_cid,
+            );
+        }
+        let sent_to_live = self.disconnect_session(
+            displaced.session_id,
+            "ACL_DISPLACED",
+            "Displaced by concurrent login on same account",
+        );
+        if !sent_to_live {
+            if let Some((uid, disp_cid)) = self.take_pending_displaced_logoff(displaced.session_id) {
+                let effective_uid = self
+                    .db
+                    .with_snapshot(|snap| snap.characters.get(&disp_cid).map(|c| c.user_id))
+                    .unwrap_or(uid);
+                if !self.is_character_online(disp_cid, effective_uid)
+                    && !crate::sp6_lifecycle::has_active_disconnected_ship(&self.db, disp_cid)
+                {
+                    self.logoff_character_sync(disp_cid, None);
+                }
+            }
+        }
     }
 
     /// Releases all bound objects associated with `session_id` (called on disconnect or re-login).
@@ -292,6 +414,7 @@ impl ServerContext {
     /// lifecycle, purges pending notifications, and notifies watchlist and fleet/social presence listeners.
     pub async fn cleanup_disconnected_client_session(&self, session: &mut SessionState) {
         let session_id = session.session_id;
+        let pending_displaced = self.take_pending_displaced_logoff(session_id);
         self.unregister_session_closer(session_id);
         if let Some(uid) = session.user_id {
             {
@@ -311,15 +434,39 @@ impl ServerContext {
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
             let released = self.db.release_online_lock(uid, session_id);
-            if let Some(cid) = session.character_id {
-                let needs_logoff = released
-                    || (!self.is_character_online(cid, uid)
-                        && !crate::sp6_lifecycle::has_active_disconnected_ship(&self.db, cid));
-                if needs_logoff {
-                    self.logoff_character_sync(cid, Some(session));
-                } else {
-                    self.clear_notifications_for_char(cid);
+            let is_displaced_revocation = !released
+                && pending_displaced.is_none()
+                && self.db.kicked_reason(uid).is_none()
+                && self
+                    .db
+                    .check_session_revoked(uid, session_id, self.now_unix())
+                    .is_some_and(|(code, _)| {
+                        matches!(code.as_str(), "SessionKicked" | "MultiLoginBlocked")
+                    });
+            if !is_displaced_revocation {
+                let effective_cid = session.character_id.or_else(|| {
+                    pending_displaced.and_then(|(pending_uid, pending_cid)| {
+                        (pending_uid == uid).then_some(pending_cid)
+                    })
+                });
+                if let Some(cid) = effective_cid {
+                    let char_owned_elsewhere = self.is_character_online(cid, uid);
+                    let needs_logoff = (released
+                        || !crate::sp6_lifecycle::has_active_disconnected_ship(&self.db, cid))
+                        && !char_owned_elsewhere;
+                    if needs_logoff {
+                        self.logoff_character_sync(cid, released.then_some(session));
+                    } else if !char_owned_elsewhere {
+                        self.clear_notifications_for_char(cid);
+                    }
                 }
+            }
+        } else if let Some((uid, cid)) = pending_displaced {
+            let char_owned_elsewhere = self.is_character_online(cid, uid);
+            if !crate::sp6_lifecycle::has_active_disconnected_ship(&self.db, cid)
+                && !char_owned_elsewhere
+            {
+                self.logoff_character_sync(cid, None);
             }
         }
     }
@@ -954,7 +1101,39 @@ impl ServerContext {
         }
     }
 
-    fn with_grace_store_mut<R>(&self, now_ticks: i64, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
+    fn read_context_grace_store<R>(&self, f: impl FnOnce(Option<&ContextGraceStore>) -> R) -> R {
+        let outer = transition_disconnect_grace()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        f(outer.get(&self.instance_id))
+    }
+
+    fn is_grace_store_empty(store: &ContextGraceStore) -> bool {
+        store.entries.is_empty()
+            && store.departed_locations.is_empty()
+            && store.pending_displaced_logoffs.is_empty()
+            && store.prelogoff_hold_sessions.is_empty()
+            && store.reconnect_hold_sessions.is_empty()
+    }
+
+    fn with_existing_grace_store_mut_and_prune<R>(
+        &self,
+        f: impl FnOnce(&mut ContextGraceStore) -> R,
+    ) -> Option<R> {
+        let lock = TRANSITION_DISCONNECT_GRACE.get()?;
+        let mut outer = lock.write().unwrap_or_else(|e| e.into_inner());
+        outer.retain(|_, store| store.owner.strong_count() > 0);
+        let res = outer.get_mut(&self.instance_id).map(f);
+        if outer
+            .get(&self.instance_id)
+            .is_some_and(Self::is_grace_store_empty)
+        {
+            outer.remove(&self.instance_id);
+        }
+        res
+    }
+
+    fn with_context_grace_store_mut<R>(&self, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
         let owner = Arc::downgrade(&self.bound_objects);
         let mut outer = transition_disconnect_grace()
             .write()
@@ -964,14 +1143,129 @@ impl ServerContext {
             owner,
             entries: HashMap::new(),
             departed_locations: HashMap::new(),
+            pending_displaced_logoffs: HashMap::new(),
+            prelogoff_hold_sessions: HashMap::new(),
+            reconnect_hold_sessions: HashMap::new(),
         });
-        store
-            .entries
-            .retain(|_, v| Self::is_grace_entry_active(v, now_ticks));
-        store
-            .departed_locations
-            .retain(|_, v| Self::is_grace_ticks_active(v.departed_ticks, now_ticks));
         f(store)
+    }
+
+    fn record_pending_displaced_logoff(&self, session_id: u64, user_id: u64, char_id: i64) {
+        self.with_context_grace_store_mut(|store| {
+            store
+                .pending_displaced_logoffs
+                .insert(session_id, (user_id, char_id));
+        });
+    }
+
+    pub(crate) fn take_pending_displaced_logoff(&self, session_id: u64) -> Option<(u64, i64)> {
+        let has_entry = self.read_context_grace_store(|s| {
+            s.is_some_and(|st| st.pending_displaced_logoffs.contains_key(&session_id))
+        });
+        if !has_entry {
+            return None;
+        }
+        self.with_existing_grace_store_mut_and_prune(|store| {
+            store.pending_displaced_logoffs.remove(&session_id)
+        })
+        .flatten()
+    }
+
+    pub(crate) fn clear_pending_displaced_logoffs_for_char(&self, user_id: u64, char_id: i64) {
+        let has_match = self.read_context_grace_store(|s| {
+            s.is_some_and(|st| {
+                st.pending_displaced_logoffs
+                    .values()
+                    .any(|&(uid, cid)| uid == user_id && cid == char_id)
+            })
+        });
+        if !has_match {
+            return;
+        }
+        self.with_existing_grace_store_mut_and_prune(|store| {
+            store
+                .pending_displaced_logoffs
+                .retain(|_, &mut (uid, cid)| !(uid == user_id && cid == char_id));
+        });
+    }
+
+    pub(crate) fn record_prelogoff_hold_session(
+        &self,
+        char_id: i64,
+        session: Option<(u64, u64)>,
+    ) {
+        match session {
+            Some(pair) => {
+                self.with_context_grace_store_mut(|store| {
+                    store.prelogoff_hold_sessions.insert(char_id, pair);
+                });
+            }
+            None => {
+                let has_entry = self.read_context_grace_store(|s| {
+                    s.is_some_and(|st| st.prelogoff_hold_sessions.contains_key(&char_id))
+                });
+                if has_entry {
+                    self.with_existing_grace_store_mut_and_prune(|store| {
+                        store.prelogoff_hold_sessions.remove(&char_id);
+                    });
+                }
+            }
+        }
+    }
+
+    pub(crate) fn prelogoff_hold_session(&self, char_id: i64) -> Option<(u64, u64)> {
+        self.read_context_grace_store(|s| {
+            s.and_then(|st| st.prelogoff_hold_sessions.get(&char_id).copied())
+        })
+    }
+
+    pub(crate) fn clear_prelogoff_hold_session_if_matches(
+        &self,
+        char_id: i64,
+        expected: (u64, u64),
+    ) {
+        let matches = self.read_context_grace_store(|s| {
+            s.is_some_and(|st| st.prelogoff_hold_sessions.get(&char_id) == Some(&expected))
+        });
+        if matches {
+            self.with_existing_grace_store_mut_and_prune(|store| {
+                if store.prelogoff_hold_sessions.get(&char_id) == Some(&expected) {
+                    store.prelogoff_hold_sessions.remove(&char_id);
+                }
+            });
+        }
+    }
+
+    pub(crate) fn snapshot_prelogoff_hold_sessions(&self) -> HashMap<i64, (u64, u64)> {
+        self.read_context_grace_store(|s| {
+            s.map(|st| st.prelogoff_hold_sessions.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    pub(crate) fn reconnect_hold_session(&self, char_id: i64) -> Option<u64> {
+        self.read_context_grace_store(|s| {
+            s.and_then(|st| st.reconnect_hold_sessions.get(&char_id).copied())
+        })
+    }
+
+    pub(crate) fn snapshot_reconnect_hold_sessions(&self) -> HashMap<i64, u64> {
+        self.read_context_grace_store(|s| {
+            s.map(|st| st.reconnect_hold_sessions.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn with_grace_store_mut<R>(&self, now_ticks: i64, f: impl FnOnce(&mut ContextGraceStore) -> R) -> R {
+        self.with_context_grace_store_mut(|store| {
+            store
+                .entries
+                .retain(|_, v| Self::is_grace_entry_active(v, now_ticks));
+            store
+                .departed_locations
+                .retain(|_, v| Self::is_grace_ticks_active(v.departed_ticks, now_ticks));
+            f(store)
+        })
     }
 
     fn departed_location_kind_for_entry(
@@ -1058,18 +1352,10 @@ impl ServerContext {
         FE: FnMut(&u64, &TransitionDisconnectedBinding) -> bool,
         FL: FnMut(&(u64, DepartedLocationKind, i64), &TransitionDepartedLocation) -> bool,
     {
-        let Some(lock) = TRANSITION_DISCONNECT_GRACE.get() else {
-            return;
-        };
-        let mut outer = lock.write().unwrap_or_else(|e| e.into_inner());
-        outer.retain(|_, store| store.owner.strong_count() > 0);
-        if let Some(store) = outer.get_mut(&self.instance_id) {
+        self.with_existing_grace_store_mut_and_prune(|store| {
             store.entries.retain(|bid, v| !entry_pred(bid, v));
             store.departed_locations.retain(|k, v| !loc_pred(k, v));
-            if store.entries.is_empty() && store.departed_locations.is_empty() {
-                outer.remove(&self.instance_id);
-            }
-        }
+        });
     }
 
     pub(crate) fn purge_transition_grace_for_session(&self, session_id: u64) {

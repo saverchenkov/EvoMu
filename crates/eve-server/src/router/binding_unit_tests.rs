@@ -1,6 +1,6 @@
 //! Unit and mutation-killing tests for `router::binding`.
 
-use crate::router::ServerContext;
+use crate::router::{ServerContext, SessionCleanupGuard};
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, WorldRepository};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_dogma::{DogmaItemState, ProjectedEwarEffect};
@@ -2035,6 +2035,340 @@ fn notification_sub_object_binding_isolates_quota_and_caps_offline_without_evict
         .bind_sub_object_for_notification(offline_char, Some(&synth_sess), trade_service, 89_999)
         .expect_err("synthetic session_id=0 cap must fail cleanly");
     assert_eq!(synth_err.code, "TooManyBoundSubObjects");
+}
+
+#[tokio::test]
+async fn cleanup_disconnected_client_session_preserves_notifications_when_live_session_owns_char() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let s1_id = 91_101_u64;
+    let s2_id = 91_102_u64;
+
+    ctx.db
+        .acquire_online_lock(uid, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires initial online lock");
+    ctx.db
+        .acquire_online_lock(uid, s2_id, Some(char_id), true, ctx.now_unix())
+        .expect("s2 displaces s1 and owns char_id");
+
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Real(42.0),
+        ],
+    );
+
+    let mut displaced_s1 = SessionState::new(s1_id);
+    displaced_s1.user_id = Some(uid);
+    displaced_s1.character_id = Some(char_id);
+    ctx.cleanup_disconnected_client_session(&mut displaced_s1)
+        .await;
+
+    let remaining = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        remaining.len(),
+        1,
+        "cleanup of displaced s1 must preserve live s2 pending notifications"
+    );
+    assert_eq!(remaining[0].event, "OnAccountChange");
+}
+
+#[tokio::test]
+async fn session_cleanup_guard_drop_runs_deferred_logoff_after_live_displacement() {
+    let ctx = Arc::new(test_ctx());
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let s1_id = 91_201_u64;
+    let s2_id = 91_202_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(sys_id);
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 606,
+        position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .expect("spawn ball");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(s1_id, tx);
+    ctx.db
+        .acquire_online_lock(uid, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires online lock");
+    let displaced = ctx
+        .db
+        .acquire_online_lock(uid, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1")
+        .expect("displaced record");
+    ctx.disconnect_displaced_session(s2_id, &displaced);
+    assert_eq!(rx.try_recv().ok().map(|(c, _)| c), Some("ACL_DISPLACED".into()));
+    assert!(
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "disconnect_displaced_session must defer logoff while live closer received ACL_DISPLACED"
+    );
+
+    // Simulate S1 panic/abort unwinding SessionCleanupGuard without cleanup_disconnected_client_session.
+    let guard = SessionCleanupGuard::new(Arc::clone(&ctx), s1_id);
+    drop(guard);
+
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "SessionCleanupGuard::drop must execute deferred logoff_character_sync after live displacement"
+    );
+
+    // Normal cleanup clears the obligation so a subsequent guard drop never re-logs off a later session.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+    });
+    let s3_id = 91_203_u64;
+    let s1_b_id = 91_204_u64;
+    let (tx3, _rx3) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(s1_b_id, tx3);
+    ctx.db
+        .acquire_online_lock(uid, s1_b_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1_b acquires online lock");
+    let displaced2 = ctx
+        .db
+        .acquire_online_lock(uid, s3_id, None, true, ctx.now_unix())
+        .expect("s3 displaces s1_b")
+        .expect("displaced2");
+    ctx.disconnect_displaced_session(s3_id, &displaced2);
+
+    let guard_normal = SessionCleanupGuard::new(Arc::clone(&ctx), s1_b_id);
+    let mut sess1 = SessionState::new(s1_b_id);
+    sess1.user_id = Some(uid);
+    sess1.character_id = Some(char_id);
+    ctx.cleanup_disconnected_client_session(&mut sess1).await;
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.disconnected_ships.remove(&char_id);
+    });
+    drop(guard_normal);
+    assert!(
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "drop after cleanup_disconnected_client_session must not double-trigger logoff"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_displaced_session_headless_runs_logoff_and_clears_pending_obligation() {
+    let ctx = Arc::new(test_ctx());
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let s1_id = 91_211_u64;
+    let s2_id = 91_212_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(sys_id);
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 606,
+        position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .expect("spawn ball");
+
+    ctx.db
+        .acquire_online_lock(uid, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires online lock");
+    let displaced = ctx
+        .db
+        .acquire_online_lock(uid, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1")
+        .expect("displaced record");
+
+    // No live closer is registered for s1 (!sent_to_live).
+    ctx.disconnect_displaced_session(s2_id, &displaced);
+
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "headless displacement (!sent_to_live) must synchronously trigger logoff_character_sync"
+    );
+    assert_eq!(
+        ctx.take_pending_displaced_logoff(s1_id),
+        None,
+        "headless displacement (!sent_to_live) must consume and clear pending_displaced_logoffs"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_displaced_session_records_pending_logoff_before_concurrent_guard_unwind() {
+    let ctx = Arc::new(test_ctx());
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let s1_id = 91_221_u64;
+    let s2_id = 91_222_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = i64::from(sys_id);
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 606,
+        position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .expect("spawn ball");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(s1_id, tx);
+    ctx.db
+        .acquire_online_lock(uid, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires online lock");
+
+    let ctx_task = Arc::clone(&ctx);
+    let unwinder = tokio::spawn(async move {
+        let guard = SessionCleanupGuard::new(ctx_task, s1_id);
+        let msg = rx.recv().await.expect("close signal");
+        assert_eq!(msg.0, "ACL_DISPLACED");
+        drop(guard);
+    });
+    tokio::task::yield_now().await;
+
+    let displaced = ctx
+        .db
+        .acquire_online_lock(uid, s2_id, None, true, ctx.now_unix())
+        .expect("s2 displaces s1")
+        .expect("displaced record");
+    ctx.disconnect_displaced_session(s2_id, &displaced);
+    unwinder.await.expect("unwinder task ok");
+
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "fast-unwinding guard woken immediately by ACL_DISPLACED must see pre-recorded pending logoff"
+    );
+    assert_eq!(
+        ctx.take_pending_displaced_logoff(s1_id),
+        None,
+        "unwound guard must consume pending_displaced_logoffs entry cleanly"
+    );
+}
+
+#[tokio::test]
+async fn displaced_docked_s1_delayed_cleanup_after_s2_relocation_does_not_overwrite_location() {
+    let ctx = Arc::new(test_ctx());
+    let uid = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let struct_a = 1_000_000_050_001_i64;
+    let struct_b = 1_000_000_050_002_i64;
+    let s1_id = 91_231_u64;
+    let s2_id = 91_232_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = uid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_a);
+        }
+    });
+    ctx.db
+        .acquire_online_lock(uid, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("S1 lock");
+
+    let mut sess_s1 = SessionState::new(s1_id);
+    sess_s1.user_id = Some(uid);
+    sess_s1.character_id = Some(char_id);
+    sess_s1.solar_system_id = Some(sys_id);
+    sess_s1.structure_id = Some(struct_a);
+
+    // S2 displaces S1, selects char_id (clearing pending_displaced_logoffs), moves char_id to struct_b, and logs off.
+    let displaced = ctx
+        .db
+        .acquire_online_lock(uid, s2_id, None, true, ctx.now_unix())
+        .expect("S2 displaces S1")
+        .expect("displaced S1");
+    ctx.disconnect_displaced_session(s2_id, &displaced);
+    ctx.db
+        .acquire_online_lock(uid, s2_id, Some(char_id), false, ctx.now_unix())
+        .expect("S2 selects char_id");
+    ctx.clear_pending_displaced_logoffs_for_char(uid, char_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(struct_b);
+            ch.station_id = None;
+        }
+    });
+    let mut sess_s2 = SessionState::new(s2_id);
+    sess_s2.user_id = Some(uid);
+    sess_s2.character_id = Some(char_id);
+    sess_s2.solar_system_id = Some(sys_id);
+    sess_s2.structure_id = Some(struct_b);
+    ctx.cleanup_disconnected_client_session(&mut sess_s2).await;
+
+    // Delayed cleanup of displaced S1 (still carrying stale `structure_id = struct_a`) must NOT overwrite struct_b.
+    ctx.cleanup_disconnected_client_session(&mut sess_s1).await;
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(
+            ch.structure_id,
+            Some(struct_b),
+            "displaced S1 delayed cleanup must not overwrite S2's docked structure_id back to struct_a"
+        );
+    });
 }
 
 #[cfg(test)]

@@ -391,7 +391,8 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
     }
 }
 
-pub fn process_zarzakh_gate_toll(
+/// Validates and debits any Zarzakh gate toll, returning the debited ISK cents (`None` for pirate free pass).
+pub fn process_zarzakh_gate_toll_with_amount(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -400,7 +401,7 @@ pub fn process_zarzakh_gate_toll(
     current_ball: &eve_destiny::Ball,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Result<(), BridgeRpcError> {
+) -> Result<Option<eve_db::IskCents>, BridgeRpcError> {
     let char_war_faction = ctx.db.with_snapshot(|s| {
         let ch = s.characters.get(&char_id);
         s.fw_runtime
@@ -422,7 +423,7 @@ pub fn process_zarzakh_gate_toll(
         crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
             st.zarzakh_toll_quotes.remove(&char_id);
         });
-        return Ok(());
+        return Ok(None);
     }
 
     let declined = kwargs.get("confirmToll") == Some(&PyRep::Bool(false))
@@ -531,7 +532,30 @@ pub fn process_zarzakh_gate_toll(
         Ok::<eve_db::IskCents, BridgeRpcError>(bal_after)
     })?;
     ctx.notify_account_change(char_id, "cash", char_id, bal_after.to_wire_f64());
-    Ok(())
+    Ok((effective_toll_cents.0 > 0).then_some(effective_toll_cents))
+}
+
+pub fn process_zarzakh_gate_toll(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    from_gate_id: i64,
+    to_gate_id: i64,
+    current_ball: &eve_destiny::Ball,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<(), BridgeRpcError> {
+    process_zarzakh_gate_toll_with_amount(
+        ctx,
+        char_id,
+        ship_id,
+        from_gate_id,
+        to_gate_id,
+        current_ball,
+        args,
+        kwargs,
+    )
+    .map(|_| ())
 }
 
 fn zarzakh_safe_zones(
