@@ -1638,7 +1638,7 @@ def _is_stale_inventory_controller_for_session(inv_cont, sess):
 
 
 def _install_inventory_transition_guard():
-    """Guard V24 Inventory/InvContCapacityGauge against stale structure polls after /moveme (#1267)."""
+    """Guard V24 Inventory/InvContCapacityGauge/invCacheContainer across transitions (#1267, #1333)."""
     changed = False
     inv_mod = sys.modules.get("eve.client.script.ui.shared.inventory.invWindow")
     inv_cls = getattr(inv_mod, "Inventory", None) if inv_mod is not None else None
@@ -1796,6 +1796,39 @@ def _install_inventory_transition_guard():
                 setattr(gauge_cls, meth_name, _make_gauge_guard(orig_meth))
         _HOOKED_CAMERA_GUARD_TARGETS.add("invContainer")
         changed = True
+
+    inv_cache_mod = sys.modules.get("eve.client.script.environment.invCache")
+    inv_container_cls = (
+        getattr(inv_cache_mod, "invCacheContainer", None)
+        if inv_cache_mod is not None
+        else None
+    )
+    if (
+        inv_container_cls is not None
+        and "invCacheContainer" not in _HOOKED_CAMERA_GUARD_TARGETS
+        and (isinstance(inv_container_cls, type) or hasattr(inv_container_cls, "__bases__"))
+    ):
+        orig_list = getattr(inv_container_cls, "List", None)
+        if callable(orig_list) and not getattr(orig_list, "_evomu_camera_guard", False):
+            orig_list_func = getattr(orig_list, "__func__", orig_list)
+
+            def _wrapped_inv_cache_container_list(self, *args, **kwargs):
+                if getattr(self, "moniker", None) is None:
+                    return []
+                try:
+                    return orig_list_func(self, *args, **kwargs)
+                except AttributeError:
+                    if getattr(self, "moniker", None) is None:
+                        return []
+                    raise
+
+            _wrapped_inv_cache_container_list.__name__ = getattr(
+                orig_list_func, "__name__", "List"
+            )
+            _wrapped_inv_cache_container_list._evomu_camera_guard = True
+            inv_container_cls.List = _wrapped_inv_cache_container_list
+            _HOOKED_CAMERA_GUARD_TARGETS.add("invCacheContainer")
+            changed = True
     return changed
 
 
@@ -2570,8 +2603,121 @@ def _install_skill_plan_panel_signal_guard():
     return hooked
 
 
+_PROBE_DATA_MISSING = object()
+
+
+def _extract_probe_id(item):
+    probe_id = getattr(item, "probeID", None)
+    if probe_id is not None:
+        return probe_id
+    if isinstance(item, dict):
+        return item.get("probeID")
+    return None
+
+
+def _is_unknown_probe_id(tracker, probe_id):
+    if probe_id is None:
+        return False
+    probe_data = getattr(tracker, "probeData", _PROBE_DATA_MISSING)
+    if probe_data is _PROBE_DATA_MISSING:
+        return False
+    if probe_data is None:
+        return True
+    try:
+        return probe_id not in probe_data
+    except Exception:
+        return False
+
+
+def _install_probe_tracker_guard():
+    """Guard ProbeTracker against unknown probeIDs on jump/reconnect notification races (#1334)."""
+    if "probeTracker" in _HOOKED_CAMERA_GUARD_TARGETS:
+        return False
+    pt_mod = sys.modules.get("probescanning.probeTracker")
+    pt_cls = getattr(pt_mod, "ProbeTracker", None) if pt_mod is not None else None
+    if pt_cls is None or not (isinstance(pt_cls, type) or hasattr(pt_cls, "__bases__")):
+        return False
+
+    hooked = False
+
+    orig_on_idle = getattr(pt_cls, "OnProbesIdle", None)
+    if callable(orig_on_idle) and not getattr(orig_on_idle, "_evomu_camera_guard", False):
+        orig_on_idle_func = getattr(orig_on_idle, "__func__", orig_on_idle)
+
+        def _wrapped_on_probes_idle(self, probes, *args, **kwargs):
+            probe_data = getattr(self, "probeData", _PROBE_DATA_MISSING)
+            filtered = probes
+            input_probe_ids = set()
+            if probes is not None:
+                try:
+                    seq = list(probes)
+                except Exception:
+                    seq = None
+                if seq is not None:
+                    kept = []
+                    for item in seq:
+                        pid = _extract_probe_id(item)
+                        if pid is not None:
+                            input_probe_ids.add(pid)
+                        if probe_data is _PROBE_DATA_MISSING or pid is None or not _is_unknown_probe_id(self, pid):
+                            kept.append(item)
+                    if probe_data is not _PROBE_DATA_MISSING:
+                        filtered = tuple(kept) if isinstance(probes, tuple) else kept
+            try:
+                return orig_on_idle_func(self, filtered, *args, **kwargs)
+            except KeyError as exc:
+                if (
+                    exc.args
+                    and exc.args[0] in input_probe_ids
+                    and _is_unknown_probe_id(self, exc.args[0])
+                ):
+                    return None
+                raise
+
+        _wrapped_on_probes_idle.__name__ = getattr(orig_on_idle_func, "__name__", "OnProbesIdle")
+        _wrapped_on_probes_idle._evomu_camera_guard = True
+        pt_cls.OnProbesIdle = _wrapped_on_probes_idle
+        hooked = True
+
+    for meth_name in ("SetProbeDestination", "UpdateProbeState"):
+        orig_meth = getattr(pt_cls, meth_name, None)
+        if callable(orig_meth) and not getattr(orig_meth, "_evomu_camera_guard", False):
+            orig_meth_func = getattr(orig_meth, "__func__", orig_meth)
+
+            def _make_probe_id_guard(orig_fn, name):
+                def _wrapped_probe_method(self, *args, **kwargs):
+                    probe_id = args[0] if args else kwargs.get("probeID")
+                    if _is_unknown_probe_id(self, probe_id):
+                        return None
+                    try:
+                        return orig_fn(self, *args, **kwargs)
+                    except KeyError as exc:
+                        if (
+                            exc.args
+                            and exc.args[0] == probe_id
+                            and _is_unknown_probe_id(self, exc.args[0])
+                        ):
+                            return None
+                        raise
+
+                _wrapped_probe_method.__name__ = name
+                _wrapped_probe_method._evomu_camera_guard = True
+                return _wrapped_probe_method
+
+            setattr(
+                pt_cls,
+                meth_name,
+                _make_probe_id_guard(orig_meth_func, getattr(orig_meth_func, "__name__", meth_name)),
+            )
+            hooked = True
+
+    if hooked:
+        _HOOKED_CAMERA_GUARD_TARGETS.add("probeTracker")
+    return hooked
+
+
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332, #1333, #1334)."""
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
     _install_hangar_view_teardown_guard()
@@ -2583,6 +2729,7 @@ def _install_live_client_sync_guards():
     _install_slots_container_sync_guard()
     _install_sensor_suite_gfx_guard()
     _install_skill_plan_panel_signal_guard()
+    _install_probe_tracker_guard()
 
 
 def _maybe_schedule_driver_on_main_thread():
@@ -2627,6 +2774,8 @@ class _EvomuMetaHook(object):
         for target_mod, target_key, install_fn in (
             ("eve.client.script.environment.spaceObject.wreck", "wreck", _install_wreck_rotation_guard),
             ("eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
+            ("eve.client.script.environment.invCache", "invCacheContainer", _install_inventory_transition_guard),
+            ("probescanning.probeTracker", "probeTracker", _install_probe_tracker_guard),
         ):
             if fullname == target_mod and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
                 uthread_mod = sys.modules.get("uthread")

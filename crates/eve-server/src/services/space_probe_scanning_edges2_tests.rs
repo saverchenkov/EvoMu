@@ -1749,3 +1749,413 @@ async fn reconnect_to_lost_probes_enforces_cap_filtering_expiry_and_idempotency_
     assert_eq!(noop_rep.dict_get("reconnectedProbeIDs"), Some(&PyRep::List(Vec::new())));
     assert!(ctx.drain_notifications_for_char(char_id).is_empty());
 }
+
+async fn insert_test_probe_with_ball(
+    ctx: &ServerContext,
+    probe_id: i64,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    use eve_destiny::{CombatState, SlimItemMeta};
+    let launched_unix = ctx.now_unix();
+    if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        map.insert(
+            probe_id,
+            make_test_probe(probe_id, char_id, ship_id, sys_id, 30_013, launched_unix),
+        );
+    }
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: probe_id,
+                type_id: 30_013,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 3_000.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta::default(),
+        )
+        .await;
+}
+
+fn scan_coords_dict(probe_ids: &[i64], dest_x: f64) -> PyRep {
+    PyRep::Dict(
+        probe_ids
+            .iter()
+            .map(|&pid| {
+                (
+                    PyRep::Integer(pid),
+                    PyRep::keyval([
+                        (
+                            "destination",
+                            PyRep::Tuple(vec![
+                                PyRep::Real(dest_x),
+                                PyRep::Real(0.0),
+                                PyRep::Real(0.0),
+                            ]),
+                        ),
+                        ("rangeStep", PyRep::Integer(2)),
+                    ]),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn pending_probe_scan_suppressed_after_stargate_jump_and_dock_gh1334() {
+    let char_id = 90_000_001_i64;
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_a);
+    let ship_id = sess.ship_id.unwrap();
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let kw = HashMap::new();
+    let pid = 96_811_001_i64;
+    insert_test_probe_with_ball(&ctx, pid, char_id, ship_id, sys_a).await;
+
+    // A. RequestScans -> warping probe -> CmdStargateJump transition into sys_b before warp/scan ends.
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 1_000_000_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_WARPING);
+    assert!(ctx.active_scanner_probes.read().unwrap()[&pid].warp_end_ft.is_some());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(&ctx, char_id, ship_id, sys_a);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_b;
+            ch.system_epoch += 1;
+        }
+    });
+    sess.solar_system_id = Some(sys_b);
+
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx);
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "stale scan across stargate jump must emit no OnProbeWarpEnd/OnProbeStateChanged/OnSystemScanStopped/OnProbesIdle"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.fleet_and_social_ops.pending_probe_scans.is_empty());
+    });
+    {
+        let pm = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(pm[&pid].state, PROBE_STATE_INACTIVE);
+        assert_eq!(pm[&pid].warp_end_ft, None);
+    }
+
+    // B. Docking while probe still active converges server probe state to IDLE without notifications.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_a;
+            ch.station_id = None;
+            ch.system_epoch += 1;
+        }
+    });
+    sess.solar_system_id = Some(sys_a);
+    {
+        let mut pm = ctx.active_scanner_probes.write().unwrap();
+        let p = pm.get_mut(&pid).unwrap();
+        p.state = PROBE_STATE_IDLE;
+        p.position = [0.0, 0.0, 0.0];
+        p.destination = [0.0, 0.0, 0.0];
+    }
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 50_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+            ch.system_epoch += 1;
+        }
+    });
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+    {
+        let pm = ctx.active_scanner_probes.read().unwrap();
+        assert_eq!(pm[&pid].state, PROBE_STATE_IDLE);
+        assert_eq!(pm[&pid].warp_end_ft, None);
+        assert_eq!(pm[&pid].position, [50_000.0, 0.0, 0.0]);
+    }
+
+    // C. GetSystemScanMgr in the new system prunes stale pending scans immediately before scan_end_ft.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_a;
+            ch.system_epoch += 1;
+        }
+    });
+    sess.station_id = None;
+    sess.solar_system_id = Some(sys_a);
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 25_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_b;
+            ch.system_epoch += 1;
+        }
+    });
+    sess.solar_system_id = Some(sys_b);
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "GetSystemScanMgr",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.fleet_and_social_ops.pending_probe_scans.is_empty());
+    });
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx);
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+}
+
+#[tokio::test]
+async fn pending_probe_scan_suppressed_across_session_reconnect_and_server_restart_gh1334() {
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (ctx, mut sess1) = make_ctx_and_session(char_id, sys_id);
+    let ship_id = sess1.ship_id.unwrap();
+    ctx.db
+        .acquire_online_lock(1, sess1.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock sess1");
+    let kw = HashMap::new();
+    let pid = 96_812_001_i64;
+    insert_test_probe_with_ball(&ctx, pid, char_id, ship_id, sys_id).await;
+
+    // 1. Client disconnects and reconnects with a new session_id before pending scan finishes.
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess1,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 12_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let _ = ctx.db.release_online_lock(1, sess1.session_id);
+    let mut sess2 = sess1.clone();
+    sess2.session_id = 9931;
+    ctx.db
+        .acquire_online_lock(1, sess2.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock sess2");
+
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx);
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "scan started on prior session_id must not emit notifications after reconnect"
+    );
+    assert_eq!(ctx.active_scanner_probes.read().unwrap()[&pid].state, PROBE_STATE_IDLE);
+
+    // 2. Persisted pending scan across server restart is suppressed even if ReconnectToLostProbes runs first.
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess2,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 15_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    sync_scanner_probes_to_db(&ctx);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let ctx2 = Arc::new(
+        ServerContext::with_sde_and_repository(shared_sde(), Arc::clone(&ctx.db))
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    ctx2.hydrate_server_runtime_from_db();
+    assert_eq!(
+        ctx2.active_scanner_probes.read().unwrap()[&pid].state,
+        PROBE_STATE_INACTIVE
+    );
+
+    let recon_rep = handle_scan_and_wormhole_extras(
+        &ctx2,
+        &mut sess2,
+        None,
+        "scanMgr",
+        "ReconnectToLostProbes",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ReconnectToLostProbes ok");
+    assert_eq!(recon_rep.dict_get("reconnectedCount"), Some(&PyRep::Integer(1)));
+    let _ = ctx2.drain_notifications_for_char(char_id);
+
+    ctx2.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx2);
+    assert!(
+        ctx2.drain_notifications_for_char(char_id).is_empty(),
+        "pre-restart pending scan must stay suppressed after ReconnectToLostProbes"
+    );
+
+    // 3. Persisted pending scan across server restart without ReconnectToLostProbes also suppresses notifications.
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx2,
+        &mut sess2,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid], 18_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    sync_scanner_probes_to_db(&ctx2);
+    let _ = ctx2.drain_notifications_for_char(char_id);
+
+    let ctx3 = Arc::new(
+        ServerContext::with_sde_and_repository(shared_sde(), Arc::clone(&ctx2.db))
+            .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED),
+    );
+    ctx3.hydrate_server_runtime_from_db();
+    ctx3.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx3);
+    assert!(
+        ctx3.drain_notifications_for_char(char_id).is_empty(),
+        "persisted pending scan across restart must not emit OnProbesIdle before ReconnectToLostProbes"
+    );
+    ctx3.db.with_snapshot(|snap| {
+        assert!(snap.fleet_and_social_ops.pending_probe_scans.is_empty());
+    });
+}
+
+#[tokio::test]
+async fn destroy_probe_mid_scan_prunes_probe_from_pending_scan_notifications_gh1334() {
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let (ctx, mut sess) = make_ctx_and_session(char_id, sys_id);
+    let ship_id = sess.ship_id.unwrap();
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let kw = HashMap::new();
+    let pid_removed = 96_813_001_i64;
+    let pid_kept = 96_813_002_i64;
+    insert_test_probe_with_ball(&ctx, pid_removed, char_id, ship_id, sys_id).await;
+    insert_test_probe_with_ball(&ctx, pid_kept, char_id, ship_id, sys_id).await;
+
+    assert!(handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "RequestScans",
+        &[scan_coords_dict(&[pid_removed, pid_kept], 10_000.0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let destroy_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(pid_removed)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("DestroyProbe ok");
+    assert_eq!(destroy_rep.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    ctx.advance_secs_without_sim_clock_rebase(60);
+    tick_probe_warp_end(&ctx);
+    let notifs = ctx.drain_notifications_for_char(char_id);
+
+    let state_events: Vec<(i64, i64)> = notifs
+        .iter()
+        .filter(|n| n.event == "OnProbeStateChanged")
+        .filter_map(|n| Some((n.args.first()?.as_i64()?, n.args.get(1)?.as_i64()?)))
+        .collect();
+    assert_eq!(
+        state_events,
+        vec![
+            (pid_kept, i64::from(PROBE_STATE_SCANNING)),
+            (pid_kept, i64::from(PROBE_STATE_IDLE)),
+        ]
+    );
+
+    let idle_notif = notifs
+        .iter()
+        .find(|n| n.event == "OnProbesIdle")
+        .expect("OnProbesIdle emitted for surviving probe");
+    let PyRep::List(idle_list) = &idle_notif.args[0] else {
+        panic!("expected list in OnProbesIdle");
+    };
+    let idle_pids: Vec<i64> = idle_list
+        .iter()
+        .filter_map(|kv| kv.dict_get("probeID").and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(idle_pids, vec![pid_kept]);
+}
