@@ -967,6 +967,18 @@ pub fn handle_industry_facilities_bps(
                     for it in owned {
                         let Some(bp) = ctx.sde.blueprints.get(&it.type_id) else { continue };
                         let (fac_opt, loc_type_id, sys_opt) = resolve_bp_facility_loc(ctx, snap, it.location_id);
+                        let Some(resolved_sys_id) = sys_opt
+                            .filter(|&sid| sid > 0)
+                            .or_else(|| session.solar_system_id.map(i64::from).filter(|&sid| sid > 0))
+                            .or_else(|| {
+                                snap.characters
+                                    .get(&char_id)
+                                    .map(|c| i64::from(c.solar_system_id))
+                                    .filter(|&sid| sid > 0)
+                            })
+                        else {
+                            continue;
+                        };
                         *counts.entry(fac_opt).or_insert(0) += 1;
                         if facility_filter.is_some_and(|fid| fac_opt != Some(fid)) || bps.len() >= 25_000 {
                             continue;
@@ -980,15 +992,6 @@ pub fn handle_industry_facilities_bps(
                         let runs = if it.is_blueprint_copy { i64::from(it.blueprint_runs_remaining.unwrap_or(1)) } else { -1 };
                         let qty_code = if it.is_blueprint_copy { -2 } else if it.singleton { -1 } else { i64::from(it.quantity.max(1)) };
                         let flag_i64 = it.flag as u16 as i64;
-                        let resolved_sys_id = sys_opt
-                            .or_else(|| session.solar_system_id.map(i64::from))
-                            .or_else(|| {
-                                snap.characters
-                                    .get(&char_id)
-                                    .map(|c| i64::from(c.solar_system_id))
-                                    .filter(|&sid| sid > 0)
-                            })
-                            .unwrap_or(0);
                         bps.push(BlueprintInstanceRep {
                             item_id: it.item_id,
                             type_id: i64::from(bp.blueprint_type_id),
@@ -1116,7 +1119,7 @@ pub fn handle_industry_facilities_bps(
                 .unwrap_or(if is_copy { 1 } else { -1 });
             let qty_code = if is_copy { -2_i64 } else { -1_i64 };
             let (cost_meta, loc_type_id, solar_system_id, active_job_id) =
-                ctx.db.with_snapshot(|snap| {
+                match ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
                     let cost_meta =
                         compute_industry_job_costs(ctx, snap, bp_type_id, act_id, 1, facility_id)
                             .unwrap_or_default();
@@ -1128,15 +1131,20 @@ pub fn handle_industry_facilities_bps(
                         .stations
                         .get(&facility_id)
                         .map(|st| i64::from(st.solar_system_id))
-                        .or(resolved_sys)
-                        .or_else(|| session.solar_system_id.map(i64::from))
+                        .filter(|&sid| sid > 0)
+                        .or_else(|| resolved_sys.filter(|&sid| sid > 0))
+                        .or_else(|| session.solar_system_id.map(i64::from).filter(|&sid| sid > 0))
                         .or_else(|| {
                             snap.characters
                                 .get(&char_id)
                                 .map(|c| i64::from(c.solar_system_id))
                                 .filter(|&sid| sid > 0)
                         })
-                        .unwrap_or(0);
+                        .ok_or_else(|| {
+                            BridgeRpcError::custom_info(format!(
+                                "Cannot resolve solar system for blueprint {raw_id}"
+                            ))
+                        })?;
                     let active_job_id = snap
                         .industry_jobs
                         .values()
@@ -1152,8 +1160,11 @@ pub fn handle_industry_facilities_bps(
                                 )
                         })
                         .map(|j| j.job_id);
-                    (cost_meta, loc_type_id, solar_system_id, active_job_id)
-                });
+                    Ok((cost_meta, loc_type_id, solar_system_id, active_job_id))
+                }) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let res = BlueprintInstanceRep {
                 item_id: bp_item_id,
                 type_id: i64::from(bp.blueprint_type_id),

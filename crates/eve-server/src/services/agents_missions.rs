@@ -658,9 +658,16 @@ pub async fn handle_with_bound(
                         .or_else(|| st.owner_faction_id.filter(|&f| f > 0))
                 })
             };
-            let fallback_corp_or_faction_id = agent_corp_id
+            let Some(fallback_corp_or_faction_id) = agent_corp_id
                 .or(agent_faction_id)
-                .unwrap_or(1_000_002);
+                .or_else(|| origin_sid_opt.and_then(station_owner_id))
+                .or_else(|| dest_sid_opt.and_then(station_owner_id))
+            else {
+                return Some(Err(BridgeRpcError::custom_info(format!(
+                    "Cannot resolve corporation or faction for agent {}",
+                    m.agent_id
+                ))));
+            };
             let pickup_owner_id = origin_sid_opt
                 .and_then(station_owner_id)
                 .unwrap_or(fallback_corp_or_faction_id);
@@ -668,7 +675,7 @@ pub async fn handle_with_bound(
                 .and_then(station_owner_id)
                 .unwrap_or(pickup_owner_id);
             let dungeons = if !is_courier && !is_trade {
-                let sde_dungeon_id = ctx
+                let sde_dungeon_id_opt = ctx
                     .sde
                     .missions
                     .get(&mission_id)
@@ -680,48 +687,61 @@ pub async fn handle_with_bound(
                             .contains_key(&mission_id)
                             .then_some(mission_id)
                     })
-                    .unwrap_or(213) as i64;
-                let dungeon_owner_id = u32::try_from(sde_dungeon_id)
-                    .ok()
-                    .and_then(|did| ctx.sde.dungeons.get(&did))
-                    .and_then(|d| d.faction_id)
-                    .map(i64::from)
-                    .filter(|&v| v > 0)
                     .or_else(|| {
+                        let af = agent_faction_id.and_then(|v| u32::try_from(v).ok());
                         ctx.sde
-                            .agents
-                            .get(&m.agent_id)
-                            .map(|a| a.corporation_id)
-                            .filter(|&v| v > 0)
-                    })
-                    .unwrap_or(1_000_002);
-                let mut dun_entries = vec![
-                    (PyRep::String("dungeonID".into()), PyRep::Integer(sde_dungeon_id)),
-                    (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
-                    (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
-                    (PyRep::String("locationID".into()), PyRep::Integer(origin_loc_id)),
-                    (
-                        PyRep::String("stationID".into()),
-                        origin_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ),
-                    (PyRep::String("typeID".into()), PyRep::Integer(1529)),
-                    (PyRep::String("location".into()), make_loc(origin_loc_id, "dungeon")),
-                    (PyRep::String("ownerID".into()), PyRep::Integer(dungeon_owner_id)),
-                    (PyRep::String("optional".into()), PyRep::Bool(false)),
-                    (
-                        PyRep::String("objectiveCompleted".into()),
-                        PyRep::Bool(completion_status > 0),
-                    ),
-                    (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
-                    (PyRep::String("completed".into()), PyRep::Bool(completion_status > 0)),
-                ];
-                if completion_status > 0 {
-                    dun_entries.push((
-                        PyRep::String("completionStatus".into()),
-                        PyRep::Integer(completion_status),
-                    ));
+                            .dungeons
+                            .values()
+                            .filter(|d| af.is_some() && d.faction_id == af)
+                            .min_by_key(|d| d.dungeon_id)
+                            .or_else(|| {
+                                ctx.sde
+                                    .dungeons
+                                    .values()
+                                    .filter(|d| d.faction_id.is_some())
+                                    .min_by_key(|d| d.dungeon_id)
+                            })
+                            .or_else(|| ctx.sde.dungeons.values().min_by_key(|d| d.dungeon_id))
+                            .map(|d| d.dungeon_id)
+                    });
+                if let Some(sde_dungeon_id) = sde_dungeon_id_opt.map(i64::from) {
+                    let dungeon_owner_id = u32::try_from(sde_dungeon_id)
+                        .ok()
+                        .and_then(|did| ctx.sde.dungeons.get(&did))
+                        .and_then(|d| d.faction_id)
+                        .map(i64::from)
+                        .filter(|&v| v > 0)
+                        .unwrap_or(fallback_corp_or_faction_id);
+                    let mut dun_entries = vec![
+                        (PyRep::String("dungeonID".into()), PyRep::Integer(sde_dungeon_id)),
+                        (PyRep::String("solarsystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
+                        (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id as i64)),
+                        (PyRep::String("locationID".into()), PyRep::Integer(origin_loc_id)),
+                        (
+                            PyRep::String("stationID".into()),
+                            origin_sid_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ),
+                        (PyRep::String("typeID".into()), PyRep::Integer(1529)),
+                        (PyRep::String("location".into()), make_loc(origin_loc_id, "dungeon")),
+                        (PyRep::String("ownerID".into()), PyRep::Integer(dungeon_owner_id)),
+                        (PyRep::String("optional".into()), PyRep::Bool(false)),
+                        (
+                            PyRep::String("objectiveCompleted".into()),
+                            PyRep::Bool(completion_status > 0),
+                        ),
+                        (PyRep::String("shipRestrictions".into()), PyRep::Integer(0)),
+                        (PyRep::String("completed".into()), PyRep::Bool(completion_status > 0)),
+                    ];
+                    if completion_status > 0 {
+                        dun_entries.push((
+                            PyRep::String("completionStatus".into()),
+                            PyRep::Integer(completion_status),
+                        ));
+                    }
+                    vec![PyRep::Dict(dun_entries)]
+                } else {
+                    Vec::new()
                 }
-                vec![PyRep::Dict(dun_entries)]
             } else {
                 Vec::new()
             };

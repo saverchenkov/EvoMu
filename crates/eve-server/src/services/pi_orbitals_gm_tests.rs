@@ -587,3 +587,99 @@ fn test_pi_orbitals_gm_edge_cases_bound_objects_and_error_branches() {
     assert_eq!(dist_bound.dict_get("planetID").and_then(|v| v.as_i64()), Some(planet_id));
     assert_eq!(dist_bound.dict_get("characterID").and_then(|v| v.as_i64()), Some(char_id));
 }
+
+#[test]
+fn resolve_gm_planet_picks_min_system_deterministically_and_fails_closed_without_p0_or_planets() {
+    let char_id = 90_000_001_i64;
+    let mut gm = SessionState::new(1);
+    gm.user_id = Some(1);
+    gm.character_id = Some(char_id);
+    gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
+    // 1. Empty SDE and empty colonies -> fail cleanly with InvalidPlanetID.
+    let mut empty_sde = SdeRegistry::with_canonical_seed();
+    let sample_sys = empty_sde
+        .solar_systems
+        .values()
+        .next()
+        .expect("canonical seed solar system")
+        .clone();
+    empty_sde.solar_systems.clear();
+    let empty_ctx = ServerContext::with_sde_and_repository(
+        Arc::new(empty_sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    empty_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = 0;
+        }
+        snap.planetary_colonies.clear();
+    });
+    let empty_err = handle_pi_orbitals_gm(
+        &empty_ctx,
+        &mut gm,
+        "planetMgr",
+        "GMCreateNuggetLayer",
+        &[],
+        &HashMap::new(),
+        None,
+    )
+    .expect("handled")
+    .expect_err("empty solar systems must fail closed");
+    assert_eq!(empty_err.code, "InvalidPlanetID");
+
+    // 2. Multiple SDE solar systems (inserted in descending and ascending orders) always resolve
+    //    to minimum solar_system_id and its minimum planet_id; absent P0 resources fail closed.
+    for insert_descending in [true, false] {
+        let mut sde = SdeRegistry::with_canonical_seed();
+        sde.solar_systems.clear();
+        sde.types.retain(|_, t| t.group_id != 1026);
+
+        let mut high_sys = sample_sys.clone();
+        high_sys.solar_system_id = 30_000_200;
+        high_sys.planet_ids = vec![40_090_002, 40_090_001];
+
+        let mut low_sys = sample_sys.clone();
+        low_sys.solar_system_id = 30_000_100;
+        low_sys.planet_ids = vec![40_050_002, 40_050_001];
+
+        if insert_descending {
+            sde.solar_systems.insert(high_sys.solar_system_id, high_sys);
+            sde.solar_systems.insert(low_sys.solar_system_id, low_sys);
+        } else {
+            sde.solar_systems.insert(low_sys.solar_system_id, low_sys);
+            sde.solar_systems.insert(high_sys.solar_system_id, high_sys);
+        }
+
+        let ctx = ServerContext::with_sde_and_repository(
+            Arc::new(sde),
+            Arc::new(WorldRepository::with_demo_seed()),
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = 0;
+            }
+            snap.planetary_colonies.clear();
+        });
+
+        let resolved = ctx
+            .db
+            .with_snapshot(|snap| resolve_gm_planet_and_resource(&ctx, snap, &gm, char_id, None, Some(2268)))
+            .expect("deterministic min system + explicit resource");
+        assert_eq!(resolved, (40_050_001, 30_000_100, 2268));
+
+        let no_p0_err = handle_pi_orbitals_gm(
+            &ctx,
+            &mut gm,
+            "planetMgr",
+            "GMCreateNuggetLayer",
+            &[PyRep::Integer(40_050_001)],
+            &HashMap::new(),
+            None,
+        )
+        .expect("handled")
+        .expect_err("missing SDE P0 resources must fail closed rather than defaulting to 2268");
+        assert_eq!(no_p0_err.code, "CustomInfo");
+        assert!(no_p0_err.message.contains("No P0 resources available on planet"));
+    }
+}

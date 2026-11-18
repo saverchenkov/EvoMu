@@ -840,11 +840,14 @@ fn validate_optional_self_destruct_pickid(
 ) -> Result<(), BridgeRpcError> {
     if let Some(target_ship_id) = RpcArgs::new(args, kwargs).opt_positive_i64(0, "pickid")? {
         if target_ship_id != expected_ship_id {
-            let mut err = BridgeRpcError::user_error("InvalidShip");
-            err.message = format!(
+            let message = format!(
                 "Self-destruct target ship {target_ship_id} does not match active ship {expected_ship_id}"
             );
-            return Err(err);
+            return Err(BridgeRpcError::with_client_error(
+                "InvalidShip",
+                message.clone(),
+                eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
+            ));
         }
     }
     Ok(())
