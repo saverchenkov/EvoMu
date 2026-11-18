@@ -2927,3 +2927,311 @@ async fn unpiloted_corp_ship_insured_payout_and_ceo_misattribution_guard() {
         assert_eq!(snap.characters[&ceo_id].active_ship_id, ceo_ship);
     });
 }
+
+#[tokio::test]
+async fn guarded_self_destruct_timer_expiry_emits_immediate_notices_and_aborted_or_docked_emits_none() {
+    use eve_db::ServerClock;
+
+    let ctx = test_ctx();
+    let vclock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_767_225_600));
+    ctx.set_clock(vclock.clone());
+    let now = ctx.now_unix();
+
+    let sys_id = 30_000_142_u32;
+    let victim = 90_000_001_i64;
+    let observer = 90_000_002_i64;
+    let ship_id = 100_231_001_i64;
+    let obs_ship_id = 100_231_002_i64;
+    let home_station_id = 60_003_760_i64;
+
+    spawn_ship(&ctx, sys_id, ship_id, victim, 587, DVec3::ZERO, 0.0);
+    spawn_ship(&ctx, sys_id, obs_ship_id, observer, 587, DVec3::new(2_500.0, 0.0, 0.0), 0.0);
+
+    let (pilot_uid, obs_uid, pilot_ch) = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&victim) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.home_station_id = home_station_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&observer) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = obs_ship_id;
+        }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+        snap.item_positions.insert(obs_ship_id, [2_500.0, 0.0, 0.0]);
+        (
+            snap.characters[&victim].user_id,
+            snap.characters[&observer].user_id,
+            snap.characters[&victim].clone(),
+        )
+    });
+    ctx.db
+        .acquire_online_lock(pilot_uid, 93_101, Some(victim), true, now)
+        .unwrap();
+    ctx.db
+        .acquire_online_lock(obs_uid, 93_102, Some(observer), true, now)
+        .unwrap();
+
+    let mut sess = eve_machonet::SessionState::new(93_101);
+    sess.user_id = Some(pilot_uid);
+    sess.character_id = Some(victim);
+    crate::router::apply_session_from_character(&mut sess, &pilot_ch, None, Some(&ctx.sde));
+    let empty = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(victim);
+    let _ = ctx.drain_notifications_for_char(observer);
+
+    // 1. Start non-instant 120s countdown via a single `ship.SelfDestruct([ship_id])` RPC.
+    let sd_start = crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(
+        &ctx,
+        &mut sess,
+        "ship",
+        "SelfDestruct",
+        &[eve_proto::PyRep::Integer(ship_id)],
+        &empty,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(sd_start.dict_get("countdownStarted"), Some(&eve_proto::PyRep::Bool(true)));
+    assert_eq!(sd_start.dict_get("remainingSeconds"), Some(&eve_proto::PyRep::Integer(120)));
+
+    let ship_gen = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_generation(ship_id)
+    });
+    let _ = ctx.drain_notifications_for_char(victim);
+    let _ = ctx.drain_notifications_for_char(observer);
+
+    // 2. Advance 120s and execute timer-expiry path directly (no second SelfDestruct RPC).
+    vclock.advance_secs(120);
+    let res = execute_guarded_self_destruct_sync(
+        &ctx,
+        sys_id,
+        victim,
+        ship_id,
+        DVec3::ZERO,
+        ctx.now_unix(),
+        Some(ship_gen),
+        true,
+    )
+    .expect("guarded expiry ok")
+    .expect("ship self-destruct must commit at expiry");
+    let cap_id = res.ejected_capsule_id.expect("ship self-destruct ejects capsule");
+
+    let pilot_notifs = ctx.drain_notifications_for_char(victim);
+    assert!(
+        pilot_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "OnSessionChanged must be emitted on pod ejection during countdown expiry"
+    );
+    assert!(
+        pilot_notifs.iter().any(|n| n.event == "OnShipDeath"),
+        "OnShipDeath must be emitted during countdown expiry"
+    );
+    let pilot_imm: Vec<_> = pilot_notifs
+        .iter()
+        .filter(|n| {
+            n.event == "OnRemoteMessage"
+                && n.args.first() == Some(&eve_proto::PyRep::String("SelfDestructImmediate".into()))
+        })
+        .collect();
+    assert_eq!(pilot_imm.len(), 1);
+    assert_eq!(
+        pilot_imm[0].args[1].dict_get("shipTypeID"),
+        Some(&eve_proto::PyRep::Integer(587))
+    );
+
+    let obs_imm: Vec<_> = ctx
+        .drain_notifications_for_char(observer)
+        .into_iter()
+        .filter(|n| {
+            n.event == "OnRemoteMessage"
+                && n.args.first()
+                    == Some(&eve_proto::PyRep::String("SelfDestructImmediateOther".into()))
+        })
+        .collect();
+    assert_eq!(obs_imm.len(), 1);
+    assert_eq!(
+        obs_imm[0].args[1].dict_get("charID"),
+        Some(&eve_proto::PyRep::Integer(victim))
+    );
+    assert_eq!(
+        obs_imm[0].args[1].dict_get("shipTypeID"),
+        Some(&eve_proto::PyRep::Integer(587))
+    );
+
+    // 3. Aborted countdown returning `Ok(None)` must emit zero detonation notices.
+    let cap_ch = ctx.db.get_character(victim).unwrap();
+    crate::router::apply_session_from_character(&mut sess, &cap_ch, None, Some(&ctx.sde));
+    assert_eq!(sess.ship_id, Some(cap_id));
+
+    let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(
+        &ctx,
+        &mut sess,
+        "ship",
+        "SelfDestruct",
+        &[eve_proto::PyRep::Integer(cap_id)],
+        &empty,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stale_cap_gen = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_generation(cap_id)
+    });
+    let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(
+        &ctx,
+        &mut sess,
+        "ship",
+        "AbortSelfDestruct",
+        &[eve_proto::PyRep::Integer(cap_id)],
+        &empty,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(victim);
+    let _ = ctx.drain_notifications_for_char(observer);
+
+    vclock.advance_secs(120);
+    assert!(
+        execute_guarded_self_destruct_sync(
+            &ctx,
+            sys_id,
+            victim,
+            cap_id,
+            DVec3::ZERO,
+            ctx.now_unix(),
+            Some(stale_cap_gen),
+            true,
+        )
+        .expect("aborted expiry ok")
+        .is_none()
+    );
+    for target in [victim, observer] {
+        assert!(
+            !ctx.drain_notifications_for_char(target)
+                .iter()
+                .any(|n| n.event == "OnRemoteMessage"
+                    && matches!(
+                        n.args.first(),
+                        Some(eve_proto::PyRep::String(s)) if s.starts_with("SelfDestructImmediate")
+                    )),
+            "aborted Ok(None) must emit zero SelfDestructImmediate* notices"
+        );
+    }
+
+    // 4. Docked guard returning `Ok(None)` emits zero detonation notices, and capsule self-destruct expiry
+    //    captures shipTypeID=670 + grid observers BEFORE pod respawn relocates pilot to home station.
+    let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(
+        &ctx,
+        &mut sess,
+        "ship",
+        "SelfDestruct",
+        &[eve_proto::PyRep::Integer(cap_id)],
+        &empty,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let active_cap_gen = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_generation(cap_id)
+    });
+    vclock.advance_secs(120);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&victim).unwrap().station_id = Some(home_station_id);
+    });
+    let _ = ctx.drain_notifications_for_char(victim);
+    let _ = ctx.drain_notifications_for_char(observer);
+    assert!(
+        execute_guarded_self_destruct_sync(
+            &ctx,
+            sys_id,
+            victim,
+            cap_id,
+            DVec3::ZERO,
+            ctx.now_unix(),
+            Some(active_cap_gen),
+            true,
+        )
+        .expect("docked guard ok")
+        .is_none()
+    );
+    for target in [victim, observer] {
+        assert!(
+            !ctx.drain_notifications_for_char(target)
+                .iter()
+                .any(|n| n.event == "OnRemoteMessage"
+                    && matches!(
+                        n.args.first(),
+                        Some(eve_proto::PyRep::String(s)) if s.starts_with("SelfDestructImmediate")
+                    )),
+            "docked Ok(None) must emit zero SelfDestructImmediate* notices"
+        );
+    }
+
+    // Re-undock and start a fresh capsule countdown to verify pod expiry captures shipTypeID=670
+    // and grid observers BEFORE pod respawn relocates the pilot to home station.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&victim).unwrap().station_id = None;
+    });
+    let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::handle_wrecks_killmails(
+        &ctx,
+        &mut sess,
+        "ship",
+        "SelfDestruct",
+        &[eve_proto::PyRep::Integer(cap_id)],
+        &empty,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fresh_cap_gen = crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.self_destruct_generation(cap_id)
+    });
+    let _ = ctx.drain_notifications_for_char(victim);
+    let _ = ctx.drain_notifications_for_char(observer);
+    vclock.advance_secs(120);
+    let pod_res = execute_guarded_self_destruct_sync(
+        &ctx,
+        sys_id,
+        victim,
+        cap_id,
+        DVec3::ZERO,
+        ctx.now_unix(),
+        Some(fresh_cap_gen),
+        true,
+    )
+    .expect("pod expiry ok")
+    .expect("capsule self-destruct must commit once undocked");
+    assert_eq!(pod_res.ejected_capsule_id, None);
+    let pod_pilot_imm: Vec<_> = ctx
+        .drain_notifications_for_char(victim)
+        .into_iter()
+        .filter(|n| {
+            n.event == "OnRemoteMessage"
+                && n.args.first() == Some(&eve_proto::PyRep::String("SelfDestructImmediate".into()))
+        })
+        .collect();
+    assert_eq!(pod_pilot_imm.len(), 1);
+    assert_eq!(
+        pod_pilot_imm[0].args[1].dict_get("shipTypeID"),
+        Some(&eve_proto::PyRep::Integer(670))
+    );
+    let pod_obs_imm: Vec<_> = ctx
+        .drain_notifications_for_char(observer)
+        .into_iter()
+        .filter(|n| {
+            n.event == "OnRemoteMessage"
+                && n.args.first()
+                    == Some(&eve_proto::PyRep::String("SelfDestructImmediateOther".into()))
+        })
+        .collect();
+    assert_eq!(pod_obs_imm.len(), 1);
+    assert_eq!(
+        pod_obs_imm[0].args[1].dict_get("shipTypeID"),
+        Some(&eve_proto::PyRep::Integer(670))
+    );
+}
