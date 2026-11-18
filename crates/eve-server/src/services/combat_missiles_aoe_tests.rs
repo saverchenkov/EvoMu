@@ -686,7 +686,9 @@ async fn mto_site_ball_excluded_from_capsuleer_death_and_completed_on_missile_or
         let den = snap.sov_runtime.mercenary_dens.get(&den_id).unwrap();
         assert_eq!(den.development_level, 50);
         assert_eq!(den.anarchy_level, 30);
-        assert!(den.infomorphs > 10);
+        // Sub-max Development (`40 < 100`) MTO completion grants +Development (`40 -> 50`) rather
+        // than bonus Encrypted Infomorphs (`#1233`).
+        assert_eq!(den.infomorphs, 10);
         assert_eq!(
             snap.characters[&char_id].balance,
             bal_before
