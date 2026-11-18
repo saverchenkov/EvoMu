@@ -354,20 +354,21 @@ async fn r6_t2_04_issue_373_destroy_skyhooks_guards_and_cleanup() {
         snap.sov_runtime.mercenary_dens.insert(den_id, PersistedMercenaryDen { den_id, owner_char_id: char_id, skyhook_id, solar_system_id: sys_id, planet_id: 40_009_080, type_id: 85_230, enabled: true, cargo_extraction_enabled: true, development_level: 10, anarchy_level: 10, infomorphs: 0, simulated_at_unix: 0, next_activity_generation_unix: 0 });
     });
 
-    let err_heist = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw).await.unwrap().unwrap_err();
+    let skyhook_list = [PyRep::List(vec![PyRep::Integer(skyhook_id)])];
+    let err_heist = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw).await.unwrap().unwrap_err();
     assert_eq!(err_heist.code, "ActiveReagentHeist");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.sov_runtime.skyhook_silo_links.remove(&skyhook_id);
         snap.structures.get_mut(&skyhook_id).unwrap().state = "Reinforced".into();
     });
-    let err_rf = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw).await.unwrap().unwrap_err();
+    let err_rf = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw).await.unwrap().unwrap_err();
     assert_eq!(err_rf.code, "StructureReinforcedOrDamaged");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.get_mut(&skyhook_id).unwrap().state = "ShieldVulnerable".into();
     });
-    let ok = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw).await.unwrap().unwrap();
+    let ok = crate::services::sov_services::handle(&ctx, &mut s, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw).await.unwrap().unwrap();
     assert_eq!(ok, PyRep::Integer(1));
     assert!(actor.get_ball_snapshot(skyhook_id).await.unwrap().is_none());
     assert!(actor.get_ball_snapshot(den_id).await.unwrap().is_none());

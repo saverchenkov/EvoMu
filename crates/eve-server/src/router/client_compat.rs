@@ -795,7 +795,9 @@ pub fn normalize_macho_rpc_reply_at(
                         row_field(&r, "solarSystemID").unwrap_or(loc),
                         row_field(&r, "allianceID").unwrap_or(PyRep::None),
                         row_field(&r, "corporationID").unwrap_or(PyRep::None),
-                        row_field(&r, "claimStructureID").unwrap_or(PyRep::None),
+                        row_field(&r, "claimStructureID")
+                            .or_else(|| row_field(&r, "infrastructureHubID"))
+                            .unwrap_or(PyRep::None),
                     ]
                 })
                 .collect();

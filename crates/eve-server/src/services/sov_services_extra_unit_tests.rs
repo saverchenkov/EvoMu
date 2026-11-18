@@ -309,7 +309,21 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
             .unwrap()
             .unwrap_err()
             .code,
-        "NoSolarSystem"
+        "InvalidArguments"
+    );
+    assert_eq!(
+        call_sov_rpc(
+            &ctx,
+            &mut sess_no_sys,
+            "sovMgr",
+            "DestroySkyhooks",
+            &[PyRep::Integer(i64::from(sys_id))],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArguments"
     );
     assert_eq!(
         call_sov_rpc(&ctx, &mut sess_no_sys, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[])
@@ -329,11 +343,17 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
         "CorpRoleDenied"
     );
     assert_eq!(
-        call_sov_rpc(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[])
-            .await
-            .unwrap()
-            .unwrap_err()
-            .code,
+        call_sov_rpc(
+            &ctx,
+            &mut sess,
+            "sovMgr",
+            "DestroySkyhooks",
+            &[PyRep::List(vec![PyRep::Integer(skyhook_id)])],
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
         "CorpRoleDenied"
     );
 
@@ -416,8 +436,10 @@ async fn sov_rpcs_dev_indices_map_beyonce_and_hub_hacks_kill_mutations() {
             .iter()
             .find(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_id))))
             .expect("sov row");
+        assert_eq!(row.dict_get("locationID"), Some(&PyRep::Integer(i64::from(sys_id))));
         assert_eq!(row.dict_get("allianceID"), Some(&PyRep::Integer(ally_id)));
         assert_eq!(row.dict_get("corporationID"), Some(&PyRep::Integer(corp_id)));
+        assert_eq!(row.dict_get("claimStructureID"), Some(&PyRep::Integer(hub_id)));
         assert_eq!(row.dict_get("infrastructureHubID"), Some(&PyRep::Integer(hub_id)));
     } else {
         panic!("expected List");

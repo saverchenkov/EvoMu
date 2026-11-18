@@ -99,6 +99,104 @@ pub(crate) fn resolve_sov_hub_id(
     session_sys.and_then(|sys_id| find_live_sov_hub_in_system(snap, sys_id))
 }
 
+fn caller_corp_and_alliance(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> (i64, Option<i64>) {
+    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let char_alliance = snap
+        .characters
+        .get(&char_id)
+        .and_then(|c| c.alliance_id)
+        .or_else(|| snap.corporations.get(&char_corp).and_then(|c| c.alliance_id));
+    (char_corp, char_alliance)
+}
+
+fn session_is_sov_hub_owner_manager(
+    snap: &eve_db::WorldStateSnapshot,
+    hub_id: i64,
+    char_id: i64,
+    session_corp_role: u64,
+    now_unix: u64,
+) -> bool {
+    let Some(st) = snap
+        .structures
+        .get(&hub_id)
+        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && !s.state.eq_ignore_ascii_case("destroyed"))
+    else {
+        return false;
+    };
+    let (char_corp, _) = caller_corp_and_alliance(snap, char_id);
+    if st.owner_corp_id != char_corp || !snap.corporations.contains_key(&char_corp) {
+        return false;
+    }
+    let (is_ceo, eff_roles) =
+        effective_contract_helper_corp_roles(snap, char_corp, char_id, session_corp_role, now_unix)
+            .unwrap_or((false, 0));
+    is_ceo
+        || (eff_roles
+            & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER))
+            != 0
+}
+
+fn caller_can_attach_fuel_access_group(
+    char_id: i64,
+    caller_corp: i64,
+    caller_alliance: i64,
+    grp: &crate::services::station_structure::structure_upwell_ops::AccessGroupRecord,
+) -> bool {
+    use crate::services::structure_acl_defense_rules::{
+        is_acl_creator_active_for_corp, is_acl_role_allowed, is_acl_role_excluded,
+    };
+    if grp.members.get(&char_id).copied().is_some_and(is_acl_role_excluded) {
+        return false;
+    }
+    is_acl_creator_active_for_corp(char_id, caller_corp, grp)
+        || (grp.members.get(&char_id).copied().is_some_and(is_acl_role_allowed)
+            && (grp.owner_corp_id == 0
+                || char_id != grp.creator_id
+                || grp.owner_corp_id == caller_corp))
+        || (caller_corp != 0
+            && grp.members.get(&caller_corp).copied().is_some_and(is_acl_role_allowed))
+        || (caller_alliance != 0
+            && grp
+                .members
+                .get(&caller_alliance)
+                .copied()
+                .is_some_and(is_acl_role_allowed))
+        || (grp.owner_corp_id != 0 && grp.owner_corp_id == caller_corp)
+        || grp.members.get(&0).copied().is_some_and(is_acl_role_allowed)
+}
+
+fn parse_skyhook_ids_arg(args: &[PyRep]) -> Result<Vec<i64>, BridgeRpcError> {
+    let invalid = || BridgeRpcError {
+        code: "InvalidArguments".into(),
+        message: "DestroySkyhooks requires a non-empty collection of positive skyhookIDs".into(),
+        client_error: None,
+    };
+    if args.len() != 1 {
+        return Err(invalid());
+    }
+    let items = match &args[0] {
+        PyRep::List(items)
+        | PyRep::Tuple(items)
+        | PyRep::PySet(items)
+        | PyRep::Set(items) => items,
+        _ => return Err(invalid()),
+    };
+    if items.is_empty() {
+        return Err(invalid());
+    }
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(id) = item.as_i64().filter(|&v| v > 0) else {
+            return Err(invalid());
+        };
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
 fn session_can_access_sov_hub_fuel(
     snap: &eve_db::WorldStateSnapshot,
     hub_id: i64,
@@ -106,12 +204,7 @@ fn session_can_access_sov_hub_fuel(
     session_corp_role: u64,
     now_unix: u64,
 ) -> bool {
-    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-    let char_alliance = snap
-        .characters
-        .get(&char_id)
-        .and_then(|c| c.alliance_id)
-        .or_else(|| snap.corporations.get(&char_corp).and_then(|c| c.alliance_id));
+    let (char_corp, char_alliance) = caller_corp_and_alliance(snap, char_id);
     let effective_roles =
         effective_contract_helper_corp_roles(snap, char_corp, char_id, session_corp_role, now_unix)
             .map(|(_, r)| r)
@@ -443,53 +536,75 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let arg0 = args.first().and_then(|a| a.as_i64());
-            let Some(hub_id) = ctx.db.with_snapshot(|snap| resolve_sov_hub_id(snap, arg0, session.solar_system_id)) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArguments".into(),
-                    message: "SetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
-                    client_error: None,
-                }));
+            let access_group_id = match args.get(1) {
+                None | Some(PyRep::None) => 0,
+                Some(v) => match v.as_i64() {
+                    Some(id) if id >= 0 => id,
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArguments".into(),
+                            message: "fuelAccessGroupID must be a non-negative integer or None"
+                                .into(),
+                            client_error: None,
+                        }));
+                    }
+                },
             };
-            let access_group_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
             let now_unix = ctx.now_unix();
             if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
                 crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
             }
-            let is_corp_director = ctx.db.with_snapshot(|snap| {
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if snap.corporations.contains_key(&corp_id) {
-                    let (is_ceo, eff_roles) =
-                        crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
-                            snap, corp_id, char_id, 0, now_unix,
-                        );
-                    let has_role = is_ceo
-                        || (eff_roles
-                            & (eve_db::corp_roles::ROLE_DIRECTOR
-                                | eve_db::corp_roles::ROLE_STATION_MANAGER))
-                            != 0;
-                    if !has_role {
-                        return false;
-                    }
-                } else {
-                    return false;
+            let validated = ctx.db.with_snapshot(|snap| {
+                let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArguments".into(),
+                        message: "SetSovHubFuelAccessGroup requires hubID or solarSystemID".into(),
+                        client_error: None,
+                    });
+                };
+                if !session_is_sov_hub_owner_manager(
+                    snap,
+                    hub_id,
+                    char_id,
+                    session.corp_role,
+                    now_unix,
+                ) {
+                    return Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Only owner corporation directors or station managers may set hub fuel access group".into(),
+                        client_error: None,
+                    });
                 }
-                snap.structures
-                    .get(&hub_id)
-                    .map(|st| {
-                        st.type_id == TYPE_SOVEREIGNTY_HUB
-                            && !st.state.eq_ignore_ascii_case("destroyed")
-                            && st.owner_corp_id == corp_id
-                    })
-                    .unwrap_or(false)
+                if access_group_id > 0 {
+                    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                    let Some(grp) = ext.owner_groups.get(&access_group_id) else {
+                        return Err(BridgeRpcError {
+                            code: "AccessGroupNotFound".into(),
+                            message: format!("Fuel access group {access_group_id} not found"),
+                            client_error: None,
+                        });
+                    };
+                    let (char_corp, char_alliance) = caller_corp_and_alliance(snap, char_id);
+                    if !caller_can_attach_fuel_access_group(
+                        char_id,
+                        char_corp,
+                        char_alliance.unwrap_or(0),
+                        grp,
+                    ) {
+                        return Err(BridgeRpcError {
+                            code: "AccessGroupAccessDenied".into(),
+                            message: "Caller does not have access to attach this fuel access group".into(),
+                            client_error: None,
+                        });
+                    }
+                }
+                Ok(hub_id)
             });
-            if !is_corp_director {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Only owner corporation directors or station managers may set hub fuel access group".into(),
-                    client_error: None,
-                }));
-            }
+            let hub_id = match validated {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
 
             with_sov_runtime(ctx, |rt| {
                 rt.fuel_access_groups.insert(hub_id, access_group_id);
@@ -504,6 +619,9 @@ pub async fn handle(
             };
             let arg0 = args.first().and_then(|a| a.as_i64());
             let now_unix = ctx.now_unix();
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let resolved = ctx.db.with_snapshot(|snap| {
                 let Some(hub_id) = resolve_sov_hub_id(snap, arg0, session.solar_system_id) else {
                     return Err(BridgeRpcError {
@@ -512,7 +630,19 @@ pub async fn handle(
                         client_error: None,
                     });
                 };
-                if !session_can_access_sov_hub_fuel(snap, hub_id, char_id, session.corp_role, now_unix) {
+                if !session_can_access_sov_hub_fuel(
+                    snap,
+                    hub_id,
+                    char_id,
+                    session.corp_role,
+                    now_unix,
+                ) && !session_is_sov_hub_owner_manager(
+                    snap,
+                    hub_id,
+                    char_id,
+                    session.corp_role,
+                    now_unix,
+                ) {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Only authorized hub fuel ACL members or owner corporation managers may read hub fuel access group".into(),
@@ -554,20 +684,15 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(sys_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "DestroySkyhooks requires a valid solarSystemID".into(),
-                    client_error: None,
-                }));
+            let requested_skyhook_ids = match parse_skyhook_ids_arg(args) {
+                Ok(ids) => ids,
+                Err(e) => return Some(Err(e)),
             };
 
             let now_unix = ctx.now_unix();
+            if let Some(cid) = session.corporation_id.filter(|&id| id > 0) {
+                crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, cid);
+            }
             let is_corp_director = ctx.db.with_snapshot(|snap| {
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 if snap.corporations.contains_key(&corp_id) {
@@ -600,28 +725,29 @@ pub async fn handle(
                 std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let targets: Vec<(i64, String, f64, f64, f64, u64)> = snap
-                    .structures
-                    .values()
-                    .filter(|s| {
-                        s.solar_system_id == sys_id
-                            && s.type_id == TYPE_ORBITAL_SKYHOOK
-                            && s.owner_corp_id == char_corp
+                let mut by_system: std::collections::BTreeMap<u32, Vec<i64>> =
+                    std::collections::BTreeMap::new();
+                for sid in requested_skyhook_ids {
+                    let Some(s) = snap.structures.get(&sid).filter(|s| {
+                        s.type_id == TYPE_ORBITAL_SKYHOOK
                             && !s.state.eq_ignore_ascii_case("destroyed")
-                    })
-                    .map(|s| {
-                        (
-                            s.structure_id,
-                            s.state.clone(),
-                            s.shield_hp,
-                            s.armor_hp,
-                            s.hull_hp,
-                            s.reinforced_until_unix,
-                        )
-                    })
-                    .collect();
-                for (sid, ref state, shield_hp, armor_hp, hull_hp, reinf_until) in &targets {
-                    if snap.sov_runtime.skyhook_silo_links.contains_key(sid) {
+                    }) else {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArguments".into(),
+                            message: format!("Structure {sid} is not a live Orbital Skyhook"),
+                            client_error: None,
+                        });
+                    };
+                    if s.owner_corp_id != char_corp {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!(
+                                "Cannot destroy Skyhook {sid} owned by another corporation"
+                            ),
+                            client_error: None,
+                        });
+                    }
+                    if snap.sov_runtime.skyhook_silo_links.contains_key(&sid) {
                         return Err(BridgeRpcError {
                             code: "ActiveReagentHeist".into(),
                             message: format!(
@@ -630,11 +756,11 @@ pub async fn handle(
                             client_error: None,
                         });
                     }
-                    let damaged_hp = *shield_hp < crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP
-                        || *armor_hp < crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP
-                        || *hull_hp < crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP;
+                    let damaged_hp = s.shield_hp < crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP
+                        || s.armor_hp < crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP
+                        || s.hull_hp < crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP;
                     if matches!(
-                        state.as_str(),
+                        s.state.as_str(),
                         "Reinforced"
                             | "ArmorReinforce"
                             | "ArmorReinforced"
@@ -642,51 +768,59 @@ pub async fn handle(
                             | "HullReinforce"
                             | "HullReinforced"
                             | "HullVulnerable"
-                    ) || *reinf_until > now_unix
+                    ) || s.reinforced_until_unix > now_unix
                         || damaged_hp
                     {
                         return Err(BridgeRpcError {
                             code: "StructureReinforcedOrDamaged".into(),
                             message: format!(
-                                "Cannot destroy Skyhook {sid} while reinforced or damaged (state={state})"
+                                "Cannot destroy Skyhook {sid} while reinforced or damaged (state={})",
+                                s.state
                             ),
                             client_error: None,
                         });
                     }
+                    by_system.entry(s.solar_system_id).or_default().push(sid);
                 }
-                let (skyhook_ids, removed_dens, removed_mto_balls) = if targets.is_empty() {
-                    (Vec::new(), Vec::new(), Vec::new())
-                } else {
-                    super::quasar_sov_workforce::with_system_hub_network_reconcile::<_, BridgeRpcError>(
-                        snap,
-                        &ctx.sde,
-                        &pending,
-                        sys_id,
-                        now_unix,
-                        |snap| {
-                            let mut skyhook_ids = Vec::with_capacity(targets.len());
-                            let mut removed_dens = Vec::new();
-                            let mut removed_mto_balls = Vec::new();
-                            for (sid, _, _, _, _, _) in targets {
-                                snap.structures.remove(&sid);
-                                let mut cleanup = crate::services::sov_gameplay::cleanup_skyhook_and_attached_dens_in_snap(
-                                    snap, sid,
-                                );
-                                removed_dens.append(&mut cleanup.removed_dens);
-                                removed_mto_balls.append(&mut cleanup.removed_mto_balls);
-                                skyhook_ids.push(sid);
-                            }
-                            Ok((skyhook_ids, removed_dens, removed_mto_balls))
-                        },
-                    )?
-                };
-                Ok::<_, BridgeRpcError>((skyhook_ids, removed_dens, removed_mto_balls))
+
+                let mut per_system = Vec::with_capacity(by_system.len());
+                for (sys_id, sids) in by_system {
+                    let (skyhook_ids, removed_dens, removed_mto_balls) =
+                        super::quasar_sov_workforce::with_system_hub_network_reconcile::<
+                            _,
+                            BridgeRpcError,
+                        >(
+                            snap,
+                            &ctx.sde,
+                            &pending,
+                            sys_id,
+                            now_unix,
+                            |snap| {
+                                let mut skyhook_ids = Vec::with_capacity(sids.len());
+                                let mut removed_dens = Vec::new();
+                                let mut removed_mto_balls = Vec::new();
+                                for sid in sids {
+                                    snap.structures.remove(&sid);
+                                    let mut cleanup = crate::services::sov_gameplay::cleanup_skyhook_and_attached_dens_in_snap(
+                                        snap, sid,
+                                    );
+                                    removed_dens.append(&mut cleanup.removed_dens);
+                                    removed_mto_balls.append(&mut cleanup.removed_mto_balls);
+                                    skyhook_ids.push(sid);
+                                }
+                                Ok((skyhook_ids, removed_dens, removed_mto_balls))
+                            },
+                        )?;
+                    per_system.push((sys_id, skyhook_ids, removed_dens, removed_mto_balls));
+                }
+                Ok::<_, BridgeRpcError>(per_system)
             });
-            let (destroyed_ids, removed_dens, removed_mto_balls) = match destroy_res {
+            let per_system = match destroy_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !destroyed_ids.is_empty() {
+            let mut total_destroyed: usize = 0;
+            for (sys_id, destroyed_ids, removed_dens, removed_mto_balls) in per_system {
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
                 for &sid in &destroyed_ids {
                     let _ = sys_handle.remove_ball(sid).await;
@@ -709,13 +843,14 @@ pub async fn handle(
                 for &bid in &removed_mto_balls {
                     let _ = sys_handle.remove_ball(bid).await;
                 }
-            }
 
-            let mut sov_updated_ids = destroyed_ids.clone();
-            sov_updated_ids.extend(removed_dens.iter().map(|(did, _)| *did));
-            emit_sov_structures_updated(ctx, sys_id, &sov_updated_ids);
+                let mut sov_updated_ids = destroyed_ids.clone();
+                sov_updated_ids.extend(removed_dens.iter().map(|(did, _)| *did));
+                emit_sov_structures_updated(ctx, sys_id, &sov_updated_ids);
+                total_destroyed += destroyed_ids.len();
+            }
             crate::services::sov_gameplay::flush_pending_quasar(ctx, &pending, now_unix);
-            Some(Ok(PyRep::Integer(destroyed_ids.len() as i64)))
+            Some(Ok(PyRep::Integer(total_destroyed as i64)))
         }
 
         ("colonyResourcesMgr", "GetMyCorporationSkyhooks") => {
@@ -866,10 +1001,35 @@ pub async fn handle(
         }
 
         ("map", "GetCurrentSovData") => {
+            let filter_loc_id = match args.first() {
+                None | Some(PyRep::None) => None,
+                Some(v) => match v.as_i64() {
+                    Some(0) => None,
+                    Some(id) if id > 0 => Some(u32::try_from(id).ok()),
+                    _ => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArguments".into(),
+                            message: "map.GetCurrentSovData locationID must be a positive integer or None".into(),
+                            client_error: None,
+                        }));
+                    }
+                },
+            };
             let sov_data = ctx.db.with_snapshot(|snap| {
+                if matches!(filter_loc_id, Some(None)) {
+                    return Vec::new();
+                }
+                let req_loc = filter_loc_id.flatten();
                 let list = snap
                     .system_states
                     .iter()
+                    .filter(|&(&sys_id, _)| match req_loc {
+                        None => true,
+                        Some(loc) if loc == sys_id => true,
+                        Some(loc) => ctx.sde.solar_system(sys_id).is_some_and(
+                            |sys| sys.constellation_id == loc || sys.region_id == loc,
+                        ),
+                    })
                     .filter_map(|(&sys_id, st)| {
                         st.sov_alliance_id.map(|aid| {
                             let hub_id = find_live_sov_hub_in_system(snap, sys_id).or_else(|| {
@@ -887,11 +1047,14 @@ pub async fn handle(
                                 .get(&aid)
                                 .map(|al| al.executor_corp_id)
                                 .unwrap_or(0);
+                            let hub_rep = hub_id.map(PyRep::Integer).unwrap_or(PyRep::None);
                             PyRep::keyval([
+                                ("locationID", PyRep::Integer(i64::from(sys_id))),
                                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                                 ("allianceID", PyRep::Integer(aid)),
                                 ("corporationID", PyRep::Integer(corp_id)),
-                                ("infrastructureHubID", hub_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("claimStructureID", hub_rep.clone()),
+                                ("infrastructureHubID", hub_rep),
                                 ("stationCount", PyRep::Integer(0)),
                             ])
                         })

@@ -1617,7 +1617,10 @@ async fn e2e_workforce_mecha_tooling_anti_duplication_and_export_cascade() {
             "sovMgr",
             None,
             "DestroySkyhooks",
-            &[PyRep::Integer(i64::from(SYS_A))],
+            &[PyRep::List(vec![
+                PyRep::Integer(skyhook_temp),
+                PyRep::Integer(skyhook_gas_a),
+            ])],
             &Default::default(),
             None,
         )
@@ -2459,7 +2462,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     returned_ids.sort_unstable();
     assert_eq!(returned_ids, vec![skyhook_b, skyhook_new]);
 
-    // GetCurrentSovData returns live HUB_A (never `old_hub_a` tombstone).
+    // GetCurrentSovData returns live HUB_A (never `old_hub_a` tombstone) both raw and via MachoNet wire Rowset normalization.
     let sov_data = ctx
         .dispatch_rpc(&mut dir, "map", None, "GetCurrentSovData", &[], &HashMap::new(), None)
         .await
@@ -2472,7 +2475,41 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
             _ => None,
         })
         .expect("SYS_A sov row");
+    assert!(sys_a_row.iter().any(|(k, v)| k == "locationID" && *v == PyRep::Integer(i64::from(SYS_A))));
+    assert!(sys_a_row.iter().any(|(k, v)| k == "claimStructureID" && *v == PyRep::Integer(HUB_A)));
     assert!(sys_a_row.iter().any(|(k, v)| k == "infrastructureHubID" && *v == PyRep::Integer(HUB_A)));
+
+    let wire_sov = ctx
+        .dispatch_rpc(
+            &mut dir,
+            "map",
+            None,
+            "GetCurrentSovData",
+            &[PyRep::Integer(i64::from(SYS_A))],
+            &HashMap::new(),
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("GetCurrentSovData MachoNet wire");
+    let PyRep::Rowset {
+        columns: sov_hdr,
+        rows: sov_lines,
+    } = wire_sov else {
+        panic!("expected Rowset from wire GetCurrentSovData");
+    };
+    assert_eq!(
+        sov_hdr,
+        vec![
+            "locationID",
+            "solarSystemID",
+            "allianceID",
+            "corporationID",
+            "claimStructureID",
+        ]
+    );
+    assert_eq!(sov_lines.len(), 1);
+    assert_eq!(sov_lines[0][0], PyRep::Integer(i64::from(SYS_A)));
+    assert_eq!(sov_lines[0][4], PyRep::Integer(HUB_A));
 
     // 2a. Pre-vuln_end tick clamps over-export to max_exp_full without overloading HUB_A or HUB_B.
     tick_sov_gameplay(&ctx, now + 10).await;
@@ -2508,20 +2545,38 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     let b_notices = drain_notices(&mut rx_b);
     assert!(b_notices.iter().any(|u| u.ends_with("upgrade.api.HubUpgradesSimulatedNotice")));
 
-    // 3. sovMgr.DestroySkyhooks succeeds (`== 2`) despite the `0.0` HP `skyhook_a` tombstone at the same planet!
-    let destroyed = ctx
+    // 3. sovMgr.DestroySkyhooks V24 list destroys only selected Skyhook(s) and ignores destroyed tombstones!
+    let destroyed_one = ctx
         .dispatch_rpc(
             &mut dir,
             "sovMgr",
             None,
             "DestroySkyhooks",
-            &[PyRep::Integer(i64::from(SYS_A))],
+            &[PyRep::List(vec![PyRep::Integer(skyhook_new)])],
             &HashMap::new(),
             None,
         )
         .await
-        .expect("DestroySkyhooks ignores destroyed tombstone");
-    assert_eq!(destroyed, PyRep::Integer(2));
+        .expect("DestroySkyhooks selective single skyhook");
+    assert_eq!(destroyed_one, PyRep::Integer(1));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&skyhook_new));
+        assert!(snap.structures.contains_key(&skyhook_b));
+    });
+
+    let destroyed_rest = ctx
+        .dispatch_rpc(
+            &mut dir,
+            "sovMgr",
+            None,
+            "DestroySkyhooks",
+            &[PyRep::List(vec![PyRep::Integer(skyhook_b)])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("DestroySkyhooks remaining skyhook ignoring destroyed tombstone");
+    assert_eq!(destroyed_rest, PyRep::Integer(1));
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.structures[&skyhook_a].state, STATE_DESTROYED);
         assert!(!snap.structures.contains_key(&skyhook_new));

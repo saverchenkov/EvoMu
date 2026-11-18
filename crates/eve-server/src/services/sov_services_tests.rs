@@ -274,6 +274,23 @@ async fn record_hub_hack_claim_system_sovereignty_and_sov_mgr_rpcs() {
     assert_eq!(conflict.code, "SovereigntyHeldByAnotherAlliance");
 
     // Set & get fuel access group via sovMgr RPC
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ext = load_ext_state(s);
+        let mut members = HashMap::new();
+        members.insert(char_id, 1);
+        ext.owner_groups.insert(
+            42,
+            AccessGroupRecord {
+                group_id: 42,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Test Fuel ACL".to_string(),
+                description: String::new(),
+                members,
+            },
+        );
+        save_ext_state(s, &ext);
+    });
     let mut sess = sov_session(char_id, corp_id, null_sys, None);
     let kw = HashMap::new();
     let set_grp = handle(
@@ -321,13 +338,13 @@ async fn record_hub_hack_claim_system_sovereignty_and_sov_mgr_rpcs() {
         );
     });
 
-    // DestroySkyhooks removes corp-owned skyhooks in system
+    // DestroySkyhooks removes selected corp-owned skyhook(s)
     let destroyed = handle(
         &ctx,
         &mut sess,
         "sovMgr",
         "DestroySkyhooks",
-        &[PyRep::Integer(i64::from(null_sys))],
+        &[PyRep::List(vec![PyRep::Integer(skyhook_id)])],
         &kw,
     )
     .await
@@ -655,8 +672,9 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
 
     // DestroySkyhooks guards: CorpRoleDenied -> ActiveReagentHeist -> StructureReinforcedOrDamaged -> success
     let mut unauth = sov_session(other_char, corp_id, sys_id, None);
+    let skyhook_list = [PyRep::List(vec![PyRep::Integer(skyhook_id)])];
     assert_eq!(
-        handle(&ctx, &mut unauth, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw)
+        handle(&ctx, &mut unauth, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -664,7 +682,7 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         "CorpRoleDenied"
     );
     assert_eq!(
-        handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw)
+        handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -676,7 +694,7 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
         s.structures.get_mut(&skyhook_id).unwrap().state = "ArmorReinforced".into();
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw)
+        handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw)
             .await
             .unwrap()
             .unwrap_err()
@@ -686,7 +704,7 @@ async fn sov_services_cyno_warp_clone_skyhook_guards_and_corp_contracts() {
     ctx.db.with_mut_snapshot(|s| {
         s.structures.get_mut(&skyhook_id).unwrap().state = "Online".into();
     });
-    let destroyed = handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &[PyRep::Integer(i64::from(sys_id))], &kw)
+    let destroyed = handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &skyhook_list, &kw)
         .await
         .unwrap()
         .unwrap();
@@ -972,7 +990,7 @@ async fn destroy_skyhooks_rejects_zero_or_damaged_hp_prunes_mto_and_reconciles_w
             &mut sess,
             "sovMgr",
             "DestroySkyhooks",
-            &[PyRep::Integer(i64::from(sys_a))],
+            &[PyRep::List(vec![PyRep::Integer(skyhook_id)])],
             &kw,
         )
         .await
@@ -994,7 +1012,7 @@ async fn destroy_skyhooks_rejects_zero_or_damaged_hp_prunes_mto_and_reconciles_w
         &mut sess,
         "sovMgr",
         "DestroySkyhooks",
-        &[PyRep::Integer(i64::from(sys_a))],
+        &[PyRep::List(vec![PyRep::Integer(skyhook_id)])],
         &kw,
     )
     .await
@@ -1235,6 +1253,44 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
         ));
     });
 
+    let outsider_id: i64 = 2_119_100_002;
+    let acl_member_id: i64 = 2_119_100_003;
+    let outsider_corp_id: i64 = 98_910_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        for cid in [outsider_id, acl_member_id] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: format!("Char {cid}"),
+                    corporation_id: outsider_corp_id,
+                    solar_system_id: sys_id,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.corporations.insert(
+            outsider_corp_id,
+            CorporationRecord::new(outsider_corp_id, "Outsider Corp", "OUT", outsider_id),
+        );
+        let mut ext = load_ext_state(snap);
+        let mut members = HashMap::new();
+        members.insert(acl_member_id, 0);
+        ext.owner_groups.insert(
+            42,
+            AccessGroupRecord {
+                group_id: 42,
+                creator_id: char_id,
+                owner_corp_id: corp_id,
+                name: "Hub Fuel ACL".into(),
+                description: String::new(),
+                members,
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
     let mut sess = sov_session(char_id, corp_id, sys_id, None);
     sess.corp_role = corp_roles::ROLE_DIRECTOR;
     let kw = std::collections::HashMap::new();
@@ -1322,43 +1378,6 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     assert_eq!(get_skyhook_err.code, "InvalidArguments");
 
     // Unauthorized caller is denied GetSovHubFuelAccessGroup unless present in the configured fuel ACL.
-    let outsider_id: i64 = 2_119_100_002;
-    let acl_member_id: i64 = 2_119_100_003;
-    let outsider_corp_id: i64 = 98_910_002;
-    ctx.db.with_mut_snapshot(|snap| {
-        for cid in [outsider_id, acl_member_id] {
-            snap.characters.insert(
-                cid,
-                CharacterRecord {
-                    character_id: cid,
-                    user_id: cid as u64,
-                    name: format!("Char {cid}"),
-                    corporation_id: outsider_corp_id,
-                    solar_system_id: sys_id,
-                    ..Default::default()
-                },
-            );
-        }
-        snap.corporations.insert(
-            outsider_corp_id,
-            CorporationRecord::new(outsider_corp_id, "Outsider Corp", "OUT", outsider_id),
-        );
-        let mut ext = load_ext_state(snap);
-        let mut members = HashMap::new();
-        members.insert(acl_member_id, 0);
-        ext.owner_groups.insert(
-            42,
-            AccessGroupRecord {
-                group_id: 42,
-                creator_id: char_id,
-                owner_corp_id: corp_id,
-                name: "Hub Fuel ACL".into(),
-                description: String::new(),
-                members,
-            },
-        );
-        save_ext_state(snap, &ext);
-    });
     let mut outsider_sess = sov_session(outsider_id, outsider_corp_id, sys_id, None);
     let get_denied = handle(
         &ctx,
@@ -1441,7 +1460,7 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
         &mut sess,
         "sovMgr",
         "DestroySkyhooks",
-        &[PyRep::Integer(i64::from(sys_id))],
+        &[PyRep::List(vec![PyRep::Integer(live_skyhook_id)])],
         &kw,
     )
     .await
@@ -1524,4 +1543,445 @@ fn resolve_sov_hub_id_prefers_sov_hubs_registered_live_hub_over_unregistered() {
             Some(unregistered_id)
         );
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fuel_acl_authorizes_other_owner_directors_and_validates_set_group_id() {
+    use eve_db::{corp_roles, CharacterRecord, CorporationRecord, UpwellStructureRecord};
+
+    let ctx = test_ctx();
+    let sys_id: u32 = 30_000_671;
+    let ceo_id: i64 = 2_119_200_001;
+    let second_dir_id: i64 = 2_119_200_002;
+    let line_member_id: i64 = 2_119_200_003;
+    let foreign_char_id: i64 = 2_119_200_004;
+    let corp_id: i64 = 98_920_001;
+    let foreign_corp_id: i64 = 98_920_002;
+    let hub_id: i64 = 1_093_000_001;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, coid, name) in [
+            (ceo_id, corp_id, "Owner CEO"),
+            (second_dir_id, corp_id, "Second Director"),
+            (line_member_id, corp_id, "Line Pilot"),
+            (foreign_char_id, foreign_corp_id, "Foreign CEO"),
+        ] {
+            snap.characters.insert(
+                cid,
+                CharacterRecord {
+                    character_id: cid,
+                    user_id: cid as u64,
+                    name: name.into(),
+                    corporation_id: coid,
+                    solar_system_id: sys_id,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut corp = CorporationRecord::new(corp_id, "Owner Corp", "OWN", ceo_id);
+        corp.members.insert(second_dir_id);
+        corp.members.insert(line_member_id);
+        corp.member_roles
+            .insert(second_dir_id, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(line_member_id, 0);
+        snap.corporations.insert(corp_id, corp);
+        snap.corporations.insert(
+            foreign_corp_id,
+            CorporationRecord::new(foreign_corp_id, "Foreign Corp", "FRN", foreign_char_id),
+        );
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Sov Hub".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.owner_groups.insert(
+            420,
+            AccessGroupRecord {
+                group_id: 420,
+                creator_id: ceo_id,
+                owner_corp_id: corp_id,
+                name: "Corp Fuel ACL".into(),
+                description: String::new(),
+                members: HashMap::new(),
+            },
+        );
+        ext.owner_groups.insert(
+            999,
+            AccessGroupRecord {
+                group_id: 999,
+                creator_id: foreign_char_id,
+                owner_corp_id: foreign_corp_id,
+                name: "Foreign Private ACL".into(),
+                description: String::new(),
+                members: HashMap::new(),
+            },
+        );
+        ext.owner_groups.insert(
+            998,
+            AccessGroupRecord {
+                group_id: 998,
+                creator_id: foreign_char_id,
+                owner_corp_id: 0,
+                name: "Foreign Personal ACL".into(),
+                description: String::new(),
+                members: HashMap::new(),
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let kw = HashMap::new();
+    let mut ceo_sess = sov_session(ceo_id, corp_id, sys_id, None);
+    let mut dir2_sess = sov_session(second_dir_id, corp_id, sys_id, None);
+    dir2_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    let mut line_sess = sov_session(line_member_id, corp_id, sys_id, None);
+
+    // Negative / missing / foreign private ACL IDs are rejected by SetSovHubFuelAccessGroup.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut ceo_sess,
+            "sovMgr",
+            "SetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id), PyRep::Integer(-7)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArguments"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut ceo_sess,
+            "sovMgr",
+            "SetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id), PyRep::Integer(888_888)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AccessGroupNotFound"
+    );
+    for foreign_gid in [999_i64, 998_i64] {
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut ceo_sess,
+                "sovMgr",
+                "SetSovHubFuelAccessGroup",
+                &[PyRep::Integer(hub_id), PyRep::Integer(foreign_gid)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "AccessGroupAccessDenied"
+        );
+    }
+
+    // Valid accessible ACL 420 succeeds.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut ceo_sess,
+            "sovMgr",
+            "SetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id), PyRep::Integer(420)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(420)
+    );
+
+    // Second owning-corp Director omitted from AccessGroupRecord(420) still reads GetSovHubFuelAccessGroup,
+    // while non-manager line member omitted from ACL 420 is denied.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut dir2_sess,
+            "sovMgr",
+            "GetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(420)
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut line_sess,
+            "sovMgr",
+            "GetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Clearing via None -> 0 succeeds cleanly.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut dir2_sess,
+            "sovMgr",
+            "SetSovHubFuelAccessGroup",
+            &[PyRep::Integer(hub_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        PyRep::Integer(0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroy_skyhooks_v24_list_selective_cross_system_and_map_sov_filtering() {
+    use eve_db::{
+        corp_roles, AllianceRecord, CharacterRecord, CorporationRecord, SystemDynamicState,
+        UpwellStructureRecord,
+    };
+
+    let ctx = test_ctx();
+    let mut null_systems: Vec<(u32, u32, u32)> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.security_status < 0.0 && s.solar_system_id < 31_000_000)
+        .map(|s| (s.solar_system_id, s.constellation_id, s.region_id))
+        .collect();
+    null_systems.sort_unstable();
+    let (sys_a, const_a, region_a) = null_systems[0];
+    let (sys_b, _, _) = *null_systems
+        .iter()
+        .find(|&&(_, _, r)| r != region_a)
+        .unwrap();
+
+    let char_id: i64 = 2_119_300_001;
+    let corp_id: i64 = 98_930_001;
+    let rival_corp_id: i64 = 98_930_002;
+    let ally_id: i64 = 99_930_001;
+    let hub_a: i64 = 1_094_000_001;
+    let hub_b: i64 = 1_094_000_002;
+    let sky_a1: i64 = 1_094_000_011;
+    let sky_a2: i64 = 1_094_000_012;
+    let sky_b1: i64 = 1_094_000_013;
+    let sky_rival: i64 = 1_094_000_014;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            char_id,
+            CharacterRecord {
+                character_id: char_id,
+                user_id: char_id as u64,
+                name: "Sov Director".into(),
+                corporation_id: corp_id,
+                alliance_id: Some(ally_id),
+                solar_system_id: sys_a,
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord::new(corp_id, "Exec Corp", "EXC", char_id),
+        );
+        snap.alliances.insert(
+            ally_id,
+            AllianceRecord {
+                alliance_id: ally_id,
+                name: "Sov Ally".into(),
+                short_name: "SOVA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+            },
+        );
+        for (sid, hid, cid) in [(sys_a, hub_a, corp_id), (sys_b, hub_b, corp_id)] {
+            snap.system_states.insert(
+                sid,
+                SystemDynamicState {
+                    solar_system_id: sid,
+                    sov_alliance_id: Some(ally_id),
+                    ..Default::default()
+                },
+            );
+            snap.structures.insert(
+                hid,
+                UpwellStructureRecord {
+                    structure_id: hid,
+                    type_id: TYPE_SOVEREIGNTY_HUB,
+                    owner_corp_id: cid,
+                    solar_system_id: sid,
+                    name: format!("Hub {sid}"),
+                    state: "ShieldVulnerable".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        for (id, sid, cid) in [
+            (sky_a1, sys_a, corp_id),
+            (sky_a2, sys_a, corp_id),
+            (sky_b1, sys_b, corp_id),
+            (sky_rival, sys_a, rival_corp_id),
+        ] {
+            snap.structures.insert(
+                id,
+                UpwellStructureRecord {
+                    structure_id: id,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: cid,
+                    solar_system_id: sid,
+                    name: format!("Skyhook {id}"),
+                    state: "Online".into(),
+                    shield_hp: crate::services::sov_gameplay::SKYHOOK_BASE_SHIELD_HP,
+                    armor_hp: crate::services::sov_gameplay::SKYHOOK_BASE_ARMOR_HP,
+                    hull_hp: crate::services::sov_gameplay::SKYHOOK_BASE_HULL_HP,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = sov_session(char_id, corp_id, sys_a, None);
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    let kw = HashMap::new();
+
+    // 1. V24 signature rejects missing args, scalar solarSystemID, empty list, non-positive IDs, and atomic rival mix.
+    for bad_args in [
+        vec![],
+        vec![PyRep::Integer(i64::from(sys_a))],
+        vec![PyRep::List(Vec::new())],
+        vec![PyRep::List(vec![PyRep::Integer(0)])],
+        vec![PyRep::List(vec![PyRep::Integer(hub_a)])],
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut sess, "sovMgr", "DestroySkyhooks", &bad_args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "InvalidArguments"
+        );
+    }
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "sovMgr",
+            "DestroySkyhooks",
+            &[PyRep::List(vec![PyRep::Integer(sky_a1), PyRep::Integer(sky_rival)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.structures.contains_key(&sky_a1));
+        assert!(snap.structures.contains_key(&sky_a2));
+        assert!(snap.structures.contains_key(&sky_b1));
+    });
+
+    // 2. Selecting only sky_a1 destroys only sky_a1; sky_a2 (same system) and sky_b1 (other system) survive!
+    let single = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "DestroySkyhooks",
+        &[PyRep::List(vec![PyRep::Integer(sky_a1)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(single, PyRep::Integer(1));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.structures.contains_key(&sky_a1));
+        assert!(snap.structures.contains_key(&sky_a2));
+        assert!(snap.structures.contains_key(&sky_b1));
+    });
+
+    // 3. Cross-system deduplicated collection destroys both remaining corp Skyhooks (`== 2`).
+    let batch = handle(
+        &ctx,
+        &mut sess,
+        "sovMgr",
+        "DestroySkyhooks",
+        &[PyRep::Tuple(vec![
+            PyRep::Integer(sky_a2),
+            PyRep::Integer(sky_b1),
+            PyRep::Integer(sky_b1),
+        ])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(batch, PyRep::Integer(2));
+
+    // 4. map.GetCurrentSovData filters by solarSystemID / constellationID / regionID and includes claimStructureID & locationID.
+    for filter_loc in [i64::from(sys_a), i64::from(const_a), i64::from(region_a)] {
+        let PyRep::List(rows) = handle(
+            &ctx,
+            &mut sess,
+            "map",
+            "GetCurrentSovData",
+            &[PyRep::Integer(filter_loc)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap() else {
+            panic!("expected List from filtered GetCurrentSovData");
+        };
+        assert!(rows
+            .iter()
+            .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a)))));
+        assert!(!rows
+            .iter()
+            .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_b)))));
+        let row_a = rows
+            .iter()
+            .find(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a))))
+            .unwrap();
+        assert_eq!(row_a.dict_get("locationID"), Some(&PyRep::Integer(i64::from(sys_a))));
+        assert_eq!(row_a.dict_get("claimStructureID"), Some(&PyRep::Integer(hub_a)));
+        assert_eq!(row_a.dict_get("infrastructureHubID"), Some(&PyRep::Integer(hub_a)));
+    }
+    let PyRep::List(all_rows) = handle(&ctx, &mut sess, "map", "GetCurrentSovData", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap() else {
+        panic!("expected List from unfiltered GetCurrentSovData");
+    };
+    assert!(all_rows
+        .iter()
+        .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_a)))));
+    assert!(all_rows
+        .iter()
+        .any(|r| r.dict_get("solarSystemID") == Some(&PyRep::Integer(i64::from(sys_b)))));
 }
