@@ -2,7 +2,7 @@
 """EvoMu independent adversarial review orchestrator.
 
 Collects evidence (git diff, honest test run, metrics, toolchain audit), then launches a
-headless Jetski/Antigravity CLI reviewer (`agy -p ... --model opus-5.5-medium --effort medium`)
+headless Jetski/Antigravity CLI reviewer (`agy -p ... --model auto`)
 with a structured-output schema, validates that the reviewer did not touch the workspace,
 and records the verdict in <repo>/.evomu-reviews/ (gitignored).
 
@@ -44,21 +44,21 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-4-carbon-high,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
-# Default reviewer mode (user decision 2026-11-03): `--model auto` tries each model in this order and uses the first
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-4-neon-high,fable-5.2-high").split(",") if m.strip()]
+# Default reviewer mode (user decision 2026-11-18): `--model auto` tries each model in this order and uses the first
 # one that has quota/capacity. Callers must not pin a weaker model; an explicit --model / EVOMU_REVIEW_MODEL other
 # than `auto` is ignored unless EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1 (set only on the user's instruction).
 AUTO_MODE = "auto"
 AUTO_CHAIN = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_AUTO_CHAIN", "gemini-pro-next,gemini-4-carbon-high,opus-5.5-medium,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
-# Final-acceptance reviewer chain (user decision 2026-11-03): `--final` claims reviews try Gemini Pro Next first,
+    "EVOMU_REVIEW_AUTO_CHAIN", "gemini-pro-next,gemini-4-neon-high,fable-5.2-high").split(",") if m.strip()]
+# Final-acceptance reviewer chain (user decision 2026-11-18): `--final` claims reviews try Gemini Pro Next first,
 # then fall back on quota/capacity errors only. final_gate.py only accepts a PASS recorded
 # with "final": true. Use it sparingly: one --final review per milestone tree that is otherwise ready for final_gate.py.
 FINAL_CHAIN = [m.strip() for m in os.environ.get(
-    "EVOMU_FINAL_REVIEW_CHAIN", "gemini-pro-next,gemini-4-carbon-high,opus-5.5-high,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+    "EVOMU_FINAL_REVIEW_CHAIN", "gemini-pro-next,gemini-4-neon-high,fable-5.2-high").split(",") if m.strip()]
 # Readable EvoMu model names -> agy model ids. agy's own id for Gemini Pro Next is literally "auto"; we never pass
 # EvoMu's AUTO_MODE to agy, only the resolved chain entries.
-AGY_MODEL_IDS = {"gemini-pro-next": "auto"}
+AGY_MODEL_IDS = {"gemini-pro-next": "auto", "gemini-neon-high": "gemini-4-neon-high"}
 # Models whose agy selection has no effort levels (passing --effort makes agy refuse to start).
 NO_EFFORT_MODELS = {m.strip() for m in os.environ.get(
     "EVOMU_REVIEW_NO_EFFORT_MODELS", "gemini-pro-next,gemini-flash-next,gemini-pro-coordinator").split(",") if m.strip()}
@@ -1154,9 +1154,9 @@ def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdi
         if model in NO_EFFORT_MODELS and "--effort" in cmd:
             j = cmd.index("--effort")
             del cmd[j:j + 2]  # agy rejects --effort for these models ("--effort is not supported for model ...")
-        elif "--effort" in cmd and re.search(r"-(low|medium|high|max)$", model):
-            # Effort is baked into the model id (e.g. opus-5.5-medium); agy rejects a conflicting --effort.
-            cmd[cmd.index("--effort") + 1] = re.search(r"-(low|medium|high|max)$", model).group(1)
+        elif "--effort" in cmd and re.search(r"-(low|medium|high|xhigh|max)$", model):
+            # Effort is baked into the model id (e.g. gemini-4-neon-high, fable-5.2-high); agy rejects a conflicting --effort.
+            cmd[cmd.index("--effort") + 1] = re.search(r"-(low|medium|high|xhigh|max)$", model).group(1)
         pfx = prefix if n == 0 else "%sfb%d_" % (prefix, n)
         verdict, so, conv, quota = _launch_one(cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, pfx,
                                                lock_name, check_tree)
