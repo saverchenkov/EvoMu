@@ -955,7 +955,7 @@ async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs
     use crate::services::quasar_sov_workforce::{exported_amount, imports};
     use crate::services::sov_gameplay::TYPE_MERCENARY_DEN;
     use crate::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
-    use crate::services::structure_upwell_ops::load_ext_state;
+    use crate::services::station_structure::structure_upwell_ops::load_ext_state;
     use eve_db::durable_domain_types::{
         PersistedHubUpgrade, PersistedMercenaryActivity, PersistedSovHubData,
     };
@@ -1182,7 +1182,7 @@ async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs
             );
         }
 
-        let act_key = "combat_skyhook_mto".to_string();
+        let act_key = "c3".repeat(16);
         snap.sov_runtime.mto_site_balls.insert(mto_ball_1, act_key.clone());
         snap.sov_runtime.mercenary_activities.insert(
             act_key,
@@ -1237,7 +1237,7 @@ async fn combat_skyhook_hub_and_mercden_destruction_cleans_dens_tax_balls_notifs
         assert_eq!(snap.structures[&den_1].state, STATE_DESTROYED);
         assert!(!snap.sov_runtime.mercenary_den_tax_pct.contains_key(&skyhook_1));
         assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_1));
-        assert!(!snap.sov_runtime.mercenary_activities.contains_key("combat_skyhook_mto"));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&"c3".repeat(16)));
         assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_1));
         assert!(!snap.items.contains_key(&mto_ball_1));
         assert!(!snap.item_positions.contains_key(&mto_ball_1));

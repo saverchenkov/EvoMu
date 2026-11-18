@@ -1080,10 +1080,7 @@ async fn apply_weapon_damage_after_vuln_expiry_reenables_den_and_reconciles_work
         .expect("SYS_A workforce planet");
     assert!(planet_wf >= 500, "expected positive workforce planet, got {planet_wf}");
 
-    let sys_b_power: u64 = {
-        let y = system_yield(&ctx.sde, sys_b);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
+    let sys_b_power: u64 = system_yield(&ctx.sde, sys_b).stars.iter().map(|(_, p)| *p).sum();
     let expected_disrupted_planet =
         planet_wf - (planet_wf * anarchy_workforce_disruption_pct(5)) / 100;
     let defs: Vec<UpgradeDefinition> = all_upgrade_definitions(&ctx.sde);

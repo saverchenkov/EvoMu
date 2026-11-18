@@ -769,14 +769,8 @@ async fn vuln_end_recovery_reenables_mercenary_den_and_reconciles_workforce_expo
         .expect("SYS_A must contain a workforce planet");
     assert!(planet_wf >= 500, "expected positive workforce planet, got {planet_wf}");
 
-    let sys_a_power: u64 = {
-        let y = system_yield(&sde, sys_a);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
-    let sys_b_power: u64 = {
-        let y = system_yield(&sde, sys_b);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
+    let sys_a_power: u64 = system_yield(&sde, sys_a).stars.iter().map(|(_, p)| *p).sum();
+    let sys_b_power: u64 = system_yield(&sde, sys_b).stars.iter().map(|(_, p)| *p).sum();
 
     let expected_disrupted_planet = planet_wf - (planet_wf * anarchy_workforce_disruption_pct(5)) / 100;
     // Optional local upgrade on Hub A whose demand stays strictly covered even under Stage 5 disruption.

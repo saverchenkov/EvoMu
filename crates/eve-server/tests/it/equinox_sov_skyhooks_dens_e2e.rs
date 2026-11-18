@@ -2027,6 +2027,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     common::pin_clock(&ctx);
 
     let alliance_id: i64 = 99_900_999;
+    let dir_b_id: i64 = PILOT_ID + 1;
     let den_owner: i64 = 2_115_300_099;
     let old_hub_a: i64 = 1_000_899_001;
     let skyhook_a: i64 = 1_000_910_101;
@@ -2057,14 +2058,8 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
         .expect("SYS_A secondary planet");
     assert_eq!(planet_2_wf, 0, "expected secondary planet to contribute zero workforce");
 
-    let sys_a_power: u64 = {
-        let y = system_yield(&ctx.sde, SYS_A);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
-    let sys_b_power: u64 = {
-        let y = system_yield(&ctx.sde, SYS_B);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
+    let sys_a_power: u64 = system_yield(&ctx.sde, SYS_A).stars.iter().map(|(_, p)| *p).sum();
+    let sys_b_power: u64 = system_yield(&ctx.sde, SYS_B).stars.iter().map(|(_, p)| *p).sum();
     let disrupted_planet =
         planet_wf - (planet_wf * anarchy_workforce_disruption_pct(5)) / 100;
     let defs: Vec<UpgradeDefinition> = all_upgrade_definitions(&ctx.sde);
@@ -2143,7 +2138,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
     }
 
     ctx.db.with_mut_snapshot(|snap| {
-        for (cid, uname) in [(PILOT_ID, "sov_dir"), (den_owner, "raider")] {
+        for (cid, uname) in [(PILOT_ID, "sov_dir"), (dir_b_id, "sov_dir_b"), (den_owner, "raider")] {
             snap.accounts.insert(
                 uname.into(),
                 AccountRecord {
@@ -2191,6 +2186,18 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
             },
         );
         snap.characters.insert(
+            dir_b_id,
+            CharacterRecord {
+                character_id: dir_b_id,
+                user_id: dir_b_id as u64,
+                name: "EquinoxDirectorB".into(),
+                corporation_id: CORP_ID,
+                alliance_id: Some(alliance_id),
+                solar_system_id: SYS_B,
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
             den_owner,
             CharacterRecord {
                 character_id: den_owner,
@@ -2204,6 +2211,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
         let mut corp_a = CorporationRecord::new(CORP_ID, "Equinox Corp", "EQX", PILOT_ID);
         corp_a.alliance_id = Some(alliance_id);
         corp_a.member_roles.insert(PILOT_ID, corp_roles::ROLE_DIRECTOR);
+        corp_a.member_roles.insert(dir_b_id, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(CORP_ID, corp_a);
         snap.corporations.insert(
             OTHER_CORP,
@@ -2313,7 +2321,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
                 },
             );
         }
-        let act_key = "e2e_skyhook_mto".to_string();
+        let act_key = "d4".repeat(16);
         snap.sov_runtime.mto_site_balls.insert(mto_ball_a, act_key.clone());
         snap.sov_runtime.mercenary_activities.insert(
             act_key,
@@ -2334,7 +2342,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
 
     let mut dir = sess(PILOT_ID as u64, PILOT_ID, CORP_ID, SYS_A, corp_roles::ROLE_DIRECTOR);
     let mut rx_dir = subscribe(&ctx, &mut dir).await;
-    let mut dir_b = sess(PILOT_ID as u64 + 1, PILOT_ID, CORP_ID, SYS_B, corp_roles::ROLE_DIRECTOR);
+    let mut dir_b = sess(dir_b_id as u64, dir_b_id, CORP_ID, SYS_B, corp_roles::ROLE_DIRECTOR);
     let mut rx_b = subscribe(&ctx, &mut dir_b).await;
 
     // 1. Combat destruction of SKYHOOK_A cleans tax, attached DEN_A, MTO/balls, emits notifications,
@@ -2352,7 +2360,7 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
         assert_eq!(snap.structures[&den_a].state, STATE_DESTROYED);
         assert!(!snap.sov_runtime.mercenary_den_tax_pct.contains_key(&skyhook_a));
         assert!(!snap.sov_runtime.mercenary_dens.contains_key(&den_a));
-        assert!(!snap.sov_runtime.mercenary_activities.contains_key("e2e_skyhook_mto"));
+        assert!(!snap.sov_runtime.mercenary_activities.contains_key(&"d4".repeat(16)));
         assert!(!snap.sov_runtime.mto_site_balls.contains_key(&mto_ball_a));
         assert_eq!(exported_amount(snap, HUB_A), 0);
         assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, 0)]);
@@ -2466,12 +2474,13 @@ async fn e2e_skyhook_tombstone_mercden_vuln_expiry_and_combat_hub_cleanup() {
         .expect("SYS_A sov row");
     assert!(sys_a_row.iter().any(|(k, v)| k == "infrastructureHubID" && *v == PyRep::Integer(HUB_A)));
 
-    // 2a. Pre-vuln_end tick clamps over-export to max_exp_full without overloading HUB_A local upgrade.
+    // 2a. Pre-vuln_end tick clamps over-export to max_exp_full without overloading HUB_A or HUB_B.
     tick_sov_gameplay(&ctx, now + 10).await;
     ctx.db.with_snapshot(|snap| {
         assert_eq!(exported_amount(snap, HUB_A), max_exp_full);
         assert!(!snap.sov_runtime.sov_hubs[&HUB_A].upgrades[0].low_power);
         assert_eq!(imports(snap, &ctx.sde, HUB_B), vec![(SYS_A, max_exp_full)]);
+        assert!(!snap.sov_runtime.sov_hubs[&HUB_B].upgrades.iter().any(|u| u.low_power));
     });
 
     // 2b. Advancing past vuln_end re-enables Stage 5 `den_new` AND reconciles workforce cascade.

@@ -1088,15 +1088,9 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
                 ..Default::default()
             },
         );
-        let mut corp = CorporationRecord {
-            corporation_id: corp_id,
-            name: "Sov Test Corp".into(),
-            ticker: "STC".into(),
-            ceo_id: char_id,
-            alliance_id: Some(alliance_id),
-            members: [char_id].into_iter().collect(),
-            ..Default::default()
-        };
+        let mut corp = CorporationRecord::new(corp_id, "Sov Test Corp", "STC", char_id);
+        corp.alliance_id = Some(alliance_id);
+        corp.members = [char_id].into_iter().collect();
         corp.member_roles.insert(char_id, corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);
         snap.alliances.insert(

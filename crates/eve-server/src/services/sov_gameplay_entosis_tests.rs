@@ -1244,14 +1244,8 @@ async fn tick_sov_gameplay_and_mto_kill_clamp_export_before_overload_and_reconci
         .map(|c| (c.celestial_id, planet_yield_for_planet(c.type_id, c.radius).1))
         .max_by_key(|&(_, wf)| wf)
         .expect("SYS_A workforce planet");
-    let sys_a_power: u64 = {
-        let y = system_yield(&ctx.sde, sys_a);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
-    let sys_b_power: u64 = {
-        let y = system_yield(&ctx.sde, sys_b);
-        y.stars.iter().map(|(_, p)| *p).sum::<u64>() + y.planet_power
-    };
+    let sys_a_power: u64 = system_yield(&ctx.sde, sys_a).stars.iter().map(|(_, p)| *p).sum();
+    let sys_b_power: u64 = system_yield(&ctx.sde, sys_b).stars.iter().map(|(_, p)| *p).sum();
 
     let disrupted_planet =
         planet_wf - (planet_wf * anarchy_workforce_disruption_pct(5)) / 100;
