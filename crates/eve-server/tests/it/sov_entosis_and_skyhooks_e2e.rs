@@ -9,12 +9,12 @@ use crate::sov_hub_and_upgrade_sites_e2e::{
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_proto::PyRep;
 use eve_server::services::sov_gameplay::{
-    advance_skyhook_reagents_in_snap, record_sov_system_activity, SKYHOOK_MATURITY_CYCLE_SECS,
+    advance_skyhook_reagents_in_snap, record_sov_system_activity, REAGENT_SECURED_PERCENTAGE,
+    SKYHOOK_MATURITY_CYCLE_SECS, SKYHOOK_REAGENT_BAY_CAPACITY,
 };
 use eve_server::router::ServerContext;
 use eve_server::services::sov_services::{
-    calculate_adm, TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
-    TYPE_SUPERIONIC_ICE,
+    calculate_adm, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
 };
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
@@ -469,20 +469,30 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
         setup_player_alliance(&ctx, &mut pilot, "Reagent Raiders", "REAG", "Outer Syndicate", "OSYN").await;
     ctx.advance_secs(8 * 86_400);
 
-    // Find a null-sec system with an Ice (12) or Lava (2015) planet
+    // Deterministically select the lowest (sys_id, planet_id) claimable null-sec system that has
+    // a star (for Warp Vector) and an Ice (12) planet so 51h of harvesting stays below
+    // SKYHOOK_REAGENT_BAY_CAPACITY (25,000) and exercises full surplus-to-secure maturity.
     let (sys_id, planet_id, planet_pos) = ctx
         .sde
         .solar_systems
-        .values()
-        .filter(|s| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, s.solar_system_id))
-        .find_map(|s| {
-            ctx.sde
-                .celestials_in_system(s.solar_system_id)
-                .into_iter()
-                .find(|c| matches!(c.type_id, 12 | 2014 | 2015))
-                .map(|c| (s.solar_system_id, c.celestial_id, c.position))
+        .keys()
+        .filter(|&&sid| {
+            eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sid)
+                && ctx
+                    .sde
+                    .celestials_in_system_slice(sid)
+                    .iter()
+                    .any(|c| c.group_id == 6)
         })
-        .expect("null-sec system with Ice/Lava/Oceanic planet");
+        .flat_map(|&sid| {
+            ctx.sde
+                .celestials_in_system_slice(sid)
+                .iter()
+                .filter(|c| c.group_id == 7 && c.type_id == 12)
+                .map(move |c| (sid, c.celestial_id, c.position))
+        })
+        .min_by_key(|&(sid, cid, _)| (sid, cid))
+        .expect("claimable null-sec system with star and Ice (12) planet");
 
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&pilot.char_id).unwrap().solar_system_id = sys_id;
@@ -567,9 +577,15 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
         .db
         .with_mut_snapshot(|s| advance_skyhook_reagents_in_snap(s, &ctx.sde, skyhook_id, after_maturity))
         .expect("reagent maturity elapsed");
-    assert!(rt_tid == TYPE_SUPERIONIC_ICE || rt_tid == TYPE_MAGMATIC_GAS);
-    let expected_sec_full = sec_2h + insec_2h + (((sec_full + insec_full) - (sec_2h + insec_2h)) / 2);
+    assert_eq!(rt_tid, TYPE_SUPERIONIC_ICE);
+    let newly_harvested_sec =
+        (((sec_full + insec_full) - (sec_2h + insec_2h)) * REAGENT_SECURED_PERCENTAGE) / 100;
+    let expected_sec_full = (sec_2h + insec_2h + newly_harvested_sec).min(SKYHOOK_REAGENT_BAY_CAPACITY);
     assert_eq!(sec_full, expected_sec_full, "Surplus reagents mature into Secure bay");
+    assert!(
+        sec_full <= SKYHOOK_REAGENT_BAY_CAPACITY && insec_full <= SKYHOOK_REAGENT_BAY_CAPACITY,
+        "Skyhook bays must respect SKYHOOK_REAGENT_BAY_CAPACITY (25,000)"
+    );
 
     let star_pos = ctx
         .sde
@@ -583,8 +599,9 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
         .sde
         .types
         .values()
-        .find(|t| t.group_id == 4599)
+        .filter(|t| t.group_id == 4599)
         .map(|t| t.type_id)
+        .min()
         .unwrap_or(77_825);
     let vec_item_id = ctx.db.with_mut_snapshot(|s| {
         s.next_entity_id += 1;
@@ -626,4 +643,21 @@ async fn test_e2e_skyhook_reagent_maturity_and_warp_vector() {
     let ctx2 = reload_fast_sqlite_ctx(&ctx, &db_path);
     let persisted_sec = ctx2.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays.get(&skyhook_id).map(|b| b.1).unwrap_or(0));
     assert_eq!(persisted_sec, sec_full, "Matured Skyhook Secure bay persists across SQLite reload");
+
+    let (_, cap_sec, cap_insec) = ctx2
+        .db
+        .with_mut_snapshot(|s| {
+            advance_skyhook_reagents_in_snap(
+                s,
+                &ctx2.sde,
+                skyhook_id,
+                after_maturity + 3_000 * 3_600,
+            )
+        })
+        .expect("saturated reagent bay tick");
+    assert_eq!(
+        (cap_sec, cap_insec),
+        (SKYHOOK_REAGENT_BAY_CAPACITY, SKYHOOK_REAGENT_BAY_CAPACITY),
+        "Both Secure and Surplus reagent bays must cap strictly at 25,000 units"
+    );
 }

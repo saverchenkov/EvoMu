@@ -2621,23 +2621,126 @@ async fn test_hacking_node_types_and_failure_outcome() {
 
 #[tokio::test]
 async fn test_skyhook_reagent_harvest_secure_surplus_split() {
+    use eve_db::UpwellStructureRecord;
+    use eve_server::services::quasar_sov_skyhook::planet_hourly_reagent_yield;
+    use eve_server::services::sov_gameplay::{
+        is_claimable_nullsec_system, REAGENT_SECURED_PERCENTAGE, SKYHOOK_REAGENT_BAY_CAPACITY,
+    };
+    use eve_server::services::sov_services::{TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK};
+
     let ctx = make_context();
     let skyhook_id = 1_040_000_001_i64;
+    let unlinked_skyhook_id = 1_040_000_002_i64;
     let t0 = 1_750_000_000_u64;
 
+    // Deterministically pick the lowest (sys_id, planet_id) claimable null-sec Lava (2015) and
+    // Oceanic (2014) planets from the SDE so the test never depends on HashMap iteration order.
+    let (lava_sys_id, lava_planet_id) = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .filter(|&&sid| is_claimable_nullsec_system(&ctx.sde, sid))
+        .flat_map(|&sid| {
+            ctx.sde
+                .celestials_in_system_slice(sid)
+                .iter()
+                .filter(|c| c.group_id == 7 && c.type_id == 2015)
+                .map(move |c| (sid, c.celestial_id))
+        })
+        .min()
+        .expect("claimable null-sec system with Lava (2015) planet");
+    let (oceanic_sys_id, oceanic_planet_id) = ctx
+        .sde
+        .solar_systems
+        .keys()
+        .filter(|&&sid| is_claimable_nullsec_system(&ctx.sde, sid))
+        .flat_map(|&sid| {
+            ctx.sde
+                .celestials_in_system_slice(sid)
+                .iter()
+                .filter(|c| c.group_id == 7 && c.type_id == 2014)
+                .map(move |c| (sid, c.celestial_id))
+        })
+        .min()
+        .expect("claimable null-sec system with Oceanic (2014) planet");
+
+    let hourly_yield = planet_hourly_reagent_yield(
+        &ctx.sde,
+        Some(lava_planet_id),
+        Some(lava_sys_id),
+        TYPE_MAGMATIC_GAS,
+    );
+    assert!(hourly_yield > 0, "Lava planet must harvest positive Magmatic Gas per hour");
+    assert_eq!(
+        planet_hourly_reagent_yield(
+            &ctx.sde,
+            Some(oceanic_planet_id),
+            Some(oceanic_sys_id),
+            TYPE_MAGMATIC_GAS,
+        ),
+        0,
+        "Oceanic (2014) planets harvest 0 reagents in V24"
+    );
+    assert_eq!(
+        planet_hourly_reagent_yield(&ctx.sde, None, None, TYPE_MAGMATIC_GAS),
+        0,
+        "Unlinked skyhooks without a planet or solar system harvest 0 reagents"
+    );
+
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                solar_system_id: lava_sys_id,
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime
+            .skyhook_planets
+            .insert(skyhook_id, lava_planet_id);
         snap.sov_runtime
             .skyhook_reagent_bays
-            .insert(skyhook_id, (81_143, 0, 0, t0));
+            .insert(skyhook_id, (TYPE_MAGMATIC_GAS, 0, 0, t0));
         snap.sov_runtime
             .skyhook_last_harvest_unix
             .insert(skyhook_id, t0);
-        let (_, sec_1h, sur_1h) =
+
+        let expected_sec_1h = (hourly_yield * REAGENT_SECURED_PERCENTAGE) / 100;
+        let expected_sur_1h = hourly_yield - expected_sec_1h;
+        let (reagent_tid, sec_1h, sur_1h) =
             advance_skyhook_reagents_in_snap(snap, &ctx.sde, skyhook_id, t0 + 3_600)
                 .expect("1h skyhook harvest");
+        assert_eq!(reagent_tid, TYPE_MAGMATIC_GAS);
         assert!(sec_1h > 0, "Newly harvested reagents must split into Secure bay");
         assert!(sur_1h > 0, "Newly harvested reagents must split into Surplus bay");
-        assert_eq!(sec_1h, sur_1h, "Harvested reagents split 50/50 between Secure and Surplus");
+        assert_eq!(
+            sec_1h, expected_sec_1h,
+            "Secure bay must receive REAGENT_SECURED_PERCENTAGE (50%) of 1h harvest"
+        );
+        assert_eq!(
+            sur_1h, expected_sur_1h,
+            "Surplus bay must receive remaining 50% of 1h harvest"
+        );
+        assert!(sec_1h <= SKYHOOK_REAGENT_BAY_CAPACITY && sur_1h <= SKYHOOK_REAGENT_BAY_CAPACITY);
+
+        // Negative path: unlinked skyhook (no structure/planet link) harvests 0 reagents.
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(unlinked_skyhook_id, (TYPE_MAGMATIC_GAS, 0, 0, t0));
+        snap.sov_runtime
+            .skyhook_last_harvest_unix
+            .insert(unlinked_skyhook_id, t0);
+        let (_, unlinked_sec, unlinked_sur) =
+            advance_skyhook_reagents_in_snap(snap, &ctx.sde, unlinked_skyhook_id, t0 + 3_600)
+                .expect("unlinked 1h skyhook tick");
+        assert_eq!(
+            (unlinked_sec, unlinked_sur),
+            (0, 0),
+            "Unlinked skyhook without planet/structure must harvest 0 reagents"
+        );
     });
 }
 }
