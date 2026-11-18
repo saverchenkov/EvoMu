@@ -142,29 +142,6 @@ pub fn handle(
             Some(handle_purchase_skills_direct(ctx, session, args, kwargs))
         }
 
-        // parity: feat:skills.omega-weekly-free-sp
-        ("storeManager", "can_purchase_offer") | ("storeManager", "buy_offer") => {
-            let offer_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| {
-                    kwargs
-                        .get("offer_id")
-                        .or_else(|| kwargs.get("offerID"))
-                        .and_then(|v| v.as_i64())
-                })
-                .unwrap_or(0);
-            let sp_grant = ctx.db.with_snapshot(|snap| {
-                crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(
-                    snap,
-                    offer_id,
-                )
-            });
-            sp_grant.map(|sp| {
-                handle_omega_weekly_free_sp_offer(ctx, session, offer_id, sp, method == "buy_offer")
-            })
-        }
-
         ("skillMgr2", "AbortTraining") => Some(handle_abort_training(ctx, session)),
         ("skillMgr2", "GetRespecInfo") => Some(handle_get_respec_info(ctx, session)),
         ("skillMgr2", "GetSkillChangesForISIS") => {

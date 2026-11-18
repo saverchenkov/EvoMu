@@ -186,9 +186,6 @@ fn resolve_fast_checkout_offers_for_user(
     };
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        if snap.quasar_commerce.targeted_offers.is_empty() {
-            return;
-        }
         let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
         offers.retain(|fc_off| {
             match store_catalog
@@ -1121,6 +1118,10 @@ fn handle_buy_offer(
         });
     }
 
+    let has_physical_items = offer
+        .products
+        .iter()
+        .any(|p| p.type_id > 0 && p.quantity > 0);
     let (tx_id, rem_plex, delivered_items_count, delivered_items, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
         let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
         let store_tags = crate::services::quasar_payment_store::read_store_offer_tags(snap);
@@ -1144,6 +1145,34 @@ fn handle_buy_offer(
                 ));
             }
         }
+        let delivery_target = if has_physical_items {
+            let char_id = active_char_id.ok_or_else(|| {
+                fc_err(
+                    "CharacterNotFound",
+                    "Active character required for physical store item delivery",
+                )
+            })?;
+            let ch = snap.characters.get(&char_id).ok_or_else(|| {
+                fc_err("CharacterNotFound", format!("Character {char_id} not found"))
+            })?;
+            let station_id = active_station_id
+                .filter(|&id| id > 0)
+                .or_else(|| {
+                    ch.station_id
+                        .or(ch.structure_id)
+                        .or(Some(ch.home_station_id))
+                        .filter(|&id| id > 0)
+                })
+                .ok_or_else(|| {
+                    fc_err(
+                        "InvalidLocation",
+                        format!("Character {char_id} has no valid delivery station"),
+                    )
+                })?;
+            Some((char_id, station_id))
+        } else {
+            None
+        };
         if amount_in_cents > 0 {
             let Some(token) = snap
                 .quasar_commerce
@@ -1210,59 +1239,46 @@ fn handle_buy_offer(
 
         let mut delivered_count = 0_i64;
         let mut delivered_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
-        let char_id = active_char_id.unwrap_or(user_id as i64);
-        let station_id = active_station_id
-            .or_else(|| {
-                snap.characters
-                    .get(&char_id)
-                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.home_station_id)).filter(|&id| id > 0))
-            })
-            .unwrap_or(0);
-        for prod in &offer.products {
-            if prod.type_id > 0 && prod.quantity > 0 {
-                let total_item_qty = i32::try_from(
-                    (prod.quantity as i64)
-                        .checked_mul(quantity)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "ArithmeticOverflow".into(),
-                            message: "Product quantity overflows i32".into(),
-                            client_error: None,
-                        })?,
-                )
-                .map_err(|_| BridgeRpcError {
-                    code: "ArithmeticOverflow".into(),
-                    message: "Product quantity overflows i32".into(),
-                    client_error: None,
-                })?;
-                snap.next_entity_id += 1;
-                let item_id = snap.next_entity_id;
-                let rec = eve_db::InventoryItemRecord {
-                    item_id,
-                    type_id: prod.type_id,
-                    owner_id: char_id,
-                    location_id: station_id,
-                    flag: eve_db::InventoryFlag::Hangar,
-                    quantity: total_item_qty,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                };
-                snap.items.insert(item_id, rec.clone());
-                delivered_items.push(rec);
-                delivered_count += total_item_qty as i64;
+        if let Some((char_id, station_id)) = delivery_target {
+            for prod in &offer.products {
+                if prod.type_id > 0 && prod.quantity > 0 {
+                    let total_item_qty = i32::try_from(
+                        (prod.quantity as i64)
+                            .checked_mul(quantity)
+                            .ok_or_else(|| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?,
+                    )
+                    .map_err(|_| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?;
+                    snap.next_entity_id += 1;
+                    let item_id = snap.next_entity_id;
+                    let rec = eve_db::InventoryItemRecord {
+                        item_id,
+                        type_id: prod.type_id,
+                        owner_id: char_id,
+                        location_id: station_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: total_item_qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    };
+                    snap.items.insert(item_id, rec.clone());
+                    delivered_items.push(rec);
+                    delivered_count += total_item_qty as i64;
+                }
             }
         }
 
-        let is_omega_offer = if let Some(ref store_off) = store_offer_opt {
+        let omega_duration_secs = if let Some(ref store_off) = store_offer_opt {
             let tags = store_tags.get(&store_off.id).map(Vec::as_slice).unwrap_or(&[]);
-            crate::services::quasar_payment_store_types::is_omega_store_offer(
+            crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
                 store_off,
                 &store_catalog,
                 tags,
+                u32::try_from(quantity).unwrap_or(1),
             )
         } else {
             let offer_lc = offer.name.to_ascii_lowercase();
-            (offer.tags.iter().any(|t| {
+            let is_standalone_omega = (offer.tags.iter().any(|t| {
                 let lc = t.to_ascii_lowercase();
                 lc == "omega" || lc == "upsellstarterpack"
             }) || (offer_lc.contains("omega")
@@ -1272,12 +1288,21 @@ fn handle_buy_offer(
                     && offer.products.is_empty()
                     && !offer_lc.contains("skin")
                     && !offer_lc.contains("plex")
-                    && !offer_lc.contains("skill"))
+                    && !offer_lc.contains("skill"));
+            is_standalone_omega.then(|| {
+                let months: u64 = offer
+                    .products
+                    .iter()
+                    .filter(|p| p.type_id == 0 && p.quantity > 0)
+                    .map(|p| u64::from(p.quantity))
+                    .sum::<u64>()
+                    .max(1);
+                months
+                    .saturating_mul(30 * 86_400)
+                    .saturating_mul(u64::try_from(quantity).unwrap_or(1))
+            })
         };
-        let omega_notice = if is_omega_offer {
-            let duration_secs = u64::try_from(quantity)
-                .unwrap_or(1)
-                .saturating_mul(30 * 86_400);
+        let omega_notice = if let Some(duration_secs) = omega_duration_secs {
             let (_, notice) =
                 crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                     snap,
@@ -1306,9 +1331,8 @@ fn handle_buy_offer(
         Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, delivered_items, omega_notice))
     })?;
 
-    let delivery_cid = active_char_id.unwrap_or(user_id as i64);
     for rec in &delivered_items {
-        ctx.notify_item_mutation(delivery_cid, None, Some(rec));
+        ctx.notify_item_mutation(rec.owner_id, None, Some(rec));
     }
 
     if let Some(notice) = omega_notice {

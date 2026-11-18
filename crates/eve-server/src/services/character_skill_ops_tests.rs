@@ -160,92 +160,110 @@ async fn omega_weekly_sp_abort_respec_strip_fitting_and_container_hooks() {
     let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 
-    // Non-1005 storeManager offer returns None
+    // character_skill_ops::handle never intercepts storeManager directly (`BF-01`: all storeManager
+    // calls dispatch through wallet_serverops -> wallet_services_ext for eligibility/currency validation).
     assert!(handle(
         &ctx,
         &mut sess,
         "storeManager",
         "can_purchase_offer",
-        &[PyRep::Integer(999)],
+        &[PyRep::Integer(1005)],
+        &kw,
+    )
+    .is_none());
+    assert!(handle(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1005)],
         &kw,
     )
     .is_none());
 
-    // Alpha character cannot claim weekly Omega SP
+    // Alpha character cannot claim weekly Omega SP via full RPC dispatch
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.clone_grade = 1;
         }
     });
     assert_eq!(
-        handle(
-            &ctx,
+        ctx.dispatch_rpc(
             &mut sess,
             "storeManager",
+            None,
             "can_purchase_offer",
             &[PyRep::Integer(1005)],
             &kw,
+            None,
         )
-        .unwrap()
+        .await
         .unwrap(),
         PyRep::Bool(false)
     );
     let sm_svc = format!("store{}", "Manager");
-    let omega_err = handle(
-        &ctx,
-        &mut sess,
-        &sm_svc,
-        "buy_offer",
-        &[PyRep::Integer(1005)],
-        &kw,
-    )
-    .unwrap()
-    .unwrap_err();
+    let omega_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            &sm_svc,
+            None,
+            "buy_offer",
+            &[PyRep::Integer(1005)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(omega_err.code, "OmegaRequired");
 
-    // Upgrade to Omega and claim weekly SP
+    // Upgrade to Omega and claim weekly SP via full RPC dispatch
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&cid) {
             ch.clone_grade = 2;
         }
     });
     assert_eq!(
-        handle(
-            &ctx,
+        ctx.dispatch_rpc(
             &mut sess,
             &sm_svc,
+            None,
             "can_purchase_offer",
             &[PyRep::Integer(1005)],
             &kw,
+            None,
         )
-        .unwrap()
+        .await
         .unwrap(),
         PyRep::Bool(true)
     );
-    let claim_rep = handle(
-        &ctx,
-        &mut sess,
-        &sm_svc,
-        "buy_offer",
-        &[PyRep::Integer(1005)],
-        &kw,
-    )
-    .unwrap()
-    .unwrap();
+    let claim_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            &sm_svc,
+            None,
+            "buy_offer",
+            &[PyRep::Integer(1005)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         claim_rep.dict_get("freeSkillPointsGranted"),
         Some(&PyRep::Integer(15_000))
     );
-    let dup_claim_err = handle(
-        &ctx,
-        &mut sess,
-        &sm_svc,
-        "buy_offer",
-        &[PyRep::Integer(1005)],
-        &kw,
-    )
-    .unwrap()
-    .unwrap_err();
+    let dup_claim_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            &sm_svc,
+            None,
+            "buy_offer",
+            &[PyRep::Integer(1005)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(dup_claim_err.code, "WeeklyOfferAlreadyClaimed");
 
     // AbortTraining, GetRespecInfo, GetSkillChangesForISIS
@@ -310,6 +328,8 @@ async fn omega_weekly_sp_abort_respec_strip_fitting_and_container_hooks() {
     );
 
     // StripFitting: undocked error, contract lock error, and stripping modules/drones while keeping rigs
+    sess.station_id = None;
+    sess.structure_id = None;
     assert_eq!(
         handle(&ctx, &mut sess, "dogmaIM", "StripFitting", &[PyRep::Integer(ship_id)], &kw)
             .unwrap()

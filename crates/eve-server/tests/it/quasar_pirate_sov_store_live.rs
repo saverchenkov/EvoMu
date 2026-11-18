@@ -303,11 +303,28 @@ async fn test_quasar_payment_and_store_catalog_live() {
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.ListRequest", ta_list, false).await.status_code, STATUS_OK);
 
     let (mut u_ident, mut c_ident, mut ta_ident, mut ta_get) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    encode_varint_field(1, uid, &mut u_ident);
+    encode_varint_field(1, eve_proto::quasar::encode_zigzag32(uid as i32) as u64, &mut u_ident);
     encode_string_field(1, &off_ids[1], &mut c_ident);
     encode_bytes_field(1, &u_ident, &mut ta_ident);
     encode_bytes_field(2, &c_ident, &mut ta_ident);
     encode_bytes_field(1, &ta_ident, &mut ta_get);
+    assert_eq!(
+        quasar_call(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get.clone(), false).await.status_code,
+        STATUS_NOT_FOUND
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:{}", off_ids[1]),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: off_ids[1].clone(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     assert_eq!(quasar_call(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get, false).await.status_code, STATUS_OK);
 
     let off_num = off_ids[0].parse::<u64>().expect("off_num");

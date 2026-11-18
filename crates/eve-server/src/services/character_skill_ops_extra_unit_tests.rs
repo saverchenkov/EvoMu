@@ -277,10 +277,21 @@ fn omega_weekly_free_sp_kwargs_subscription_expiry_and_min_grant() {
         }
         snap.service_state_blobs.remove(&format!("omega_weekly_sp_claim:{uid}"));
     });
+    assert!(
+        dispatch(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw1).is_none(),
+        "character_skill_ops::handle must delegate storeManager to wallet_services_ext"
+    );
     assert_eq!(
-        dispatch(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw1)
-            .unwrap()
-            .unwrap(),
+        crate::services::wallet_services_ext::handle(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[],
+            &kw1
+        )
+        .unwrap()
+        .unwrap(),
         PyRep::Bool(true)
     );
 
@@ -291,9 +302,16 @@ fn omega_weekly_free_sp_kwargs_subscription_expiry_and_min_grant() {
         st.omega_subscriptions.insert(uid, now.saturating_sub(10));
     });
     assert_eq!(
-        dispatch(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw1)
-            .unwrap()
-            .unwrap(),
+        crate::services::wallet_services_ext::handle(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "can_purchase_offer",
+            &[],
+            &kw1
+        )
+        .unwrap()
+        .unwrap(),
         PyRep::Bool(false)
     );
     assert_eq!(

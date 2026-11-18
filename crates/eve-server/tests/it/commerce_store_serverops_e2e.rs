@@ -239,6 +239,26 @@ async fn nes_store_sde_hydration_catalog_and_purchase_flow() {
     let off_wm = WireMessage::decode(&off_rsp.payload.unwrap().value).unwrap();
     assert_ne!(off_wm.fields.len(), 0);
 
+    // BF-02: targetaudience.offer.api.ListRequest fails closed until targeted offer is promoted for player.
+    let ta_empty_rsp = qrpc(&ctx, &mut player, "eve_public.store.targetaudience.offer.api.ListRequest", Vec::new()).await;
+    assert_eq!(ta_empty_rsp.status_code, STATUS_OK);
+    let ta_empty_wm = WireMessage::decode(&ta_empty_rsp.payload.unwrap().value).unwrap();
+    assert_eq!(ta_empty_wm.fields.len(), 0);
+
+    let uid = player.user_id.expect("player user_id");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:2001"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "2001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let ta_rsp = qrpc(&ctx, &mut player, "eve_public.store.targetaudience.offer.api.ListRequest", Vec::new()).await;
     assert_eq!(ta_rsp.status_code, STATUS_OK);
     let ta_wm = WireMessage::decode(&ta_rsp.payload.unwrap().value).unwrap();

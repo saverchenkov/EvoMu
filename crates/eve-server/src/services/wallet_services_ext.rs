@@ -443,14 +443,33 @@ pub fn handle(
                 return Some(Ok(PyRep::Bool(can_buy)));
             }
             let offer_tags_slice = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
-            let is_omega_offer = crate::services::quasar_payment_store_types::is_omega_store_offer(
-                &offer,
-                &catalog,
-                offer_tags_slice,
-            );
+            let omega_duration_secs =
+                crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
+                    &offer,
+                    &catalog,
+                    offer_tags_slice,
+                    u32::try_from(qty).unwrap_or(1),
+                );
+            let has_physical_items = offer.product_ids.iter().any(|pid| {
+                catalog
+                    .products
+                    .iter()
+                    .any(|p| p.id == *pid && p.type_id > 0 && p.quantity > 0)
+            });
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id).ok_or_else(|| rpc_err("CharacterNotFound", "character not found"))?;
-                let station_id = session.station_id.or(session.structure_id).unwrap_or(ch.home_station_id);
+                let delivery_station = session
+                    .station_id
+                    .or(session.structure_id)
+                    .filter(|&s| s > 0)
+                    .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id));
+                if has_physical_items && delivery_station.is_none() {
+                    return Err(rpc_err(
+                        "InvalidLocation",
+                        format!("Character {char_id} has no valid delivery station"),
+                    ));
+                }
+                let station_id = delivery_station.unwrap_or(0);
                 let cur_plex = snap.plex_vault_balance(char_id);
                 if cur_plex < total_plex {
                     return Err(rpc_err(
@@ -477,7 +496,7 @@ pub fn handle(
                 let mut delivered_items: Vec<InventoryItemRecord> = Vec::new();
                 for pid in &offer.product_ids {
                     if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                        if prod.type_id > 0 {
+                        if prod.type_id > 0 && prod.quantity > 0 {
                             let total_qty = i32::try_from(
                                 (prod.quantity as i64)
                                     .checked_mul(qty)
@@ -502,10 +521,7 @@ pub fn handle(
                         }
                     }
                 }
-                let omega_notice = if is_omega_offer {
-                    let duration_secs = u64::try_from(qty)
-                        .unwrap_or(1)
-                        .saturating_mul(30 * 86_400);
+                let omega_notice = if let Some(duration_secs) = omega_duration_secs {
                     crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                         snap,
                         user_id,

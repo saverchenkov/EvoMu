@@ -97,7 +97,7 @@ async fn test_journey_cosmetics_store() {
     let bal_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", Vec::new()).await;
     assert_eq!(bal_rsp.status_code, STATUS_OK);
 
-    // Purchase offer 2001 from NES store
+    // Purchase targeted offer 2001 from NES store (fails closed until promoted)
     let offer_2001_plex = ctx.db.with_snapshot(|s| {
         eve_server::services::quasar_payment_store::read_store_catalog(s)
             .offers
@@ -109,6 +109,22 @@ async fn test_journey_cosmetics_store() {
     let (mut b, mut purch_payload) = (Vec::new(), Vec::new());
     encode_string_field(1, "2001", &mut b);
     encode_bytes_field(1, &b, &mut purch_payload);
+    let unprom_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", purch_payload.clone()).await;
+    assert_eq!(unprom_rsp.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
+    let uid = sess.user_id.expect("uid");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:2001"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "2001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let purch_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", purch_payload).await;
     assert_eq!(purch_rsp.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 500 - offer_2001_plex);

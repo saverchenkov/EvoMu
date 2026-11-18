@@ -955,3 +955,201 @@ fn store_manager_enforces_targeted_audience_and_product_omega_without_cat_1() {
         "storeManager non-cat-1 Omega bundle must queue ActivatedNotice"
     );
 }
+
+#[tokio::test]
+async fn store_manager_dispatch_rpc_enforces_weekly_sp_eligibility_station_and_omega_months() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+    use eve_db::TargetedOfferAdminRecord;
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.free_skill_points = 1_000.0;
+        }
+        snap.account_plex_vault.insert(1, 2_000);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 7101,
+            name: "Targeted Weekly 15k SP".into(),
+            description: "Targeted weekly SP reward".into(),
+            type_id: 0,
+            quantity: 15_000,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7101,
+            name: "Targeted Weekly Free SP".into(),
+            description: "Targeted weekly SP reward".into(),
+            category_id: 3,
+            price_plex: 0,
+            product_ids: vec![7101],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        });
+        cat.products.push(StoreProduct {
+            id: 7102,
+            name: "30 Days Omega Clone State".into(),
+            description: "3-month pack via quantity=3".into(),
+            type_id: 0,
+            quantity: 3,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7102,
+            name: "90 Days Omega License Pack".into(),
+            description: "3 months Omega".into(),
+            category_id: 1,
+            price_plex: 1_200,
+            product_ids: vec![7102],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        cat.products.push(StoreProduct {
+            id: 7103,
+            name: "Delivered Crate".into(),
+            description: "Physical hangar item".into(),
+            type_id: 40_519,
+            quantity: 1,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7103,
+            name: "Physical Crate Offer".into(),
+            description: "Needs station".into(),
+            category_id: 3,
+            price_plex: 10,
+            product_ids: vec![7103],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(7101, vec!["omega-weekly-free-sp".into()]);
+    });
+
+    // 1. Real dispatch_rpc must reject unpromoted targeted weekly SP offer (`BF-01`/`BF-02`) without minting SP
+    let err_ineligible = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7101)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_ineligible.code, "TargetedOfferNotEligible");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.free_skill_points)),
+        Some(1_000.0)
+    );
+
+    // Promote offer 7101 for user 1; AUR currency must still be rejected even on weekly SP
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:7101".into(),
+            TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "7101".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    let err_aur = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::String("VEVC-7101".into()), PyRep::String("AUR".into())],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_aur.code, "AurumCurrencyRemoved");
+
+    // Promoted weekly SP claim via real dispatch_rpc succeeds
+    let granted = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7101)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("promoted weekly SP offer should succeed via dispatch_rpc");
+    assert_eq!(
+        granted.dict_get("freeSkillPointsGranted"),
+        Some(&PyRep::Integer(15_000))
+    );
+
+    // 2. Multi-month Omega pack (`product.quantity = 3`) grants 90 days instead of 30 (`BF-05`)
+    let before_now = ctx.now_unix();
+    let buy_90d = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7102), PyRep::String("PLX".into()), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("90-day Omega pack must succeed");
+    assert_eq!(buy_90d.dict_get("plexSpent"), Some(&PyRep::Integer(1_200)));
+    let exp = crate::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
+        st.omega_subscriptions.get(&1).copied().unwrap_or(0)
+    });
+    assert!(
+        exp >= before_now + 90 * 86_400,
+        "expected >= 90d expiry, got delta {}",
+        exp.saturating_sub(before_now)
+    );
+
+    // 3. Physical store item delivery without valid station/home_station fails (`InvalidLocation`)
+    let (orig_station, orig_struct, orig_home) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let prev = (ch.station_id, ch.structure_id, ch.home_station_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.home_station_id = 0;
+        prev
+    });
+    session.station_id = None;
+    session.structure_id = None;
+    let err_loc = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7103), PyRep::String("PLX".into()), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_loc.code, "InvalidLocation");
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = orig_station;
+        ch.structure_id = orig_struct;
+        ch.home_station_id = orig_home;
+    });
+}

@@ -1063,6 +1063,7 @@ impl ServerContext {
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
+        crate::services::quasar_payment_store_types::register_item_mutation_notifier(&ctx);
         crate::services::cosmetics_ui_ops::ensure_rookie_overview_seeded(&ctx);
         ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
         ctx

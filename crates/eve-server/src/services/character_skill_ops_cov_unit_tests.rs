@@ -300,8 +300,11 @@ fn tuesday_downtime_boundaries_omega_catalog_override_abort_and_respec() {
         handle_omega_weekly_free_sp_offer(&ctx, &mut sess, 1005, 15_000, true).unwrap_err().code,
         "OmegaRequired"
     );
+    assert!(handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_oid).is_none());
     assert_eq!(
-        handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_oid).unwrap().unwrap(),
+        crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_oid)
+            .unwrap()
+            .unwrap(),
         PyRep::Bool(false)
     );
 
@@ -532,11 +535,16 @@ fn store_manager_offer_id_snake_case_purchase_boundaries_and_abort_present_skill
     assert!(handle(&ctx, &mut sess, "storeManager", "get_offers", &[PyRep::Integer(1005)], &empty_kw).is_none());
     let mut kw_snake = HashMap::new();
     kw_snake.insert("offer_id".into(), PyRep::Integer(1005));
+    assert!(handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_snake).is_none());
     assert_eq!(
-        handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_snake).unwrap().unwrap(),
+        crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[], &kw_snake)
+            .unwrap()
+            .unwrap(),
         PyRep::Bool(true)
     );
-    let bought = handle(&ctx, &mut sess, "storeManager", "buy_offer", &[], &kw_snake).unwrap().unwrap();
+    let bought = crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "buy_offer", &[], &kw_snake)
+        .unwrap()
+        .unwrap();
     assert_eq!(bought.dict_get("freeSkillPointsGranted"), Some(&PyRep::Integer(15_000)));
 
     // `PurchaseSkills` validation & exact ISK boundary (`cost - 1` fails `NotEnoughISK`, `cost` succeeds)
@@ -753,7 +761,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
             .remove(&format!("omega_weekly_sp_claim:{uid}"));
     });
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -766,7 +774,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         PyRep::Bool(false)
     );
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -783,7 +791,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&cid).unwrap().clone_grade = 2;
     });
-    let claim1 = handle(
+    let claim1 = crate::services::wallet_services_ext::handle(
         &ctx,
         &mut sess,
         "storeManager",
@@ -806,7 +814,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
 
     // Repeat claim within same week is rejected (`WeeklyOfferAlreadyClaimed`)
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -819,7 +827,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         PyRep::Bool(false)
     );
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -836,7 +844,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
     // Next weekly window (+604,800s) allows claiming again
     ctx.advance_secs(604_800);
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -848,7 +856,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         .unwrap(),
         PyRep::Bool(true)
     );
-    let claim2 = handle(
+    let claim2 = crate::services::wallet_services_ext::handle(
         &ctx,
         &mut sess,
         "storeManager",
@@ -863,16 +871,20 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         Some(31_000.0)
     );
 
-    // Verify `handle_weekly_free_sp` catalog & tag predicates:
-    // 1) Paid offer 1005 (`price_plex > 0`) falls through (`None`) to paid NES store
+    // Verify `resolve_omega_weekly_free_sp_grant` / `wallet_services_ext` catalog & tag predicates:
+    // 1) Paid offer 1005 (`price_plex > 0`) is NOT treated as free weekly SP (`resolve_omega_weekly_free_sp_grant` == None)
     ctx.db.with_mut_snapshot(|snap| {
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
         cat.offers.iter_mut().find(|o| o.id == 1005).unwrap().price_plex = 10;
         crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        assert_eq!(
+            crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(snap, 1005),
+            None
+        );
     });
     assert!(handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw).is_none());
 
-    // 2) Offer 1005 with `price_plex == 0` but non-matching tag falls through (`None`)
+    // 2) Offer 1005 with `price_plex == 0` but non-matching tag is rejected (`InvalidOffer`, not weekly SP)
     ctx.db.with_mut_snapshot(|snap| {
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
         cat.offers.iter_mut().find(|o| o.id == 1005).unwrap().price_plex = 0;
@@ -880,8 +892,18 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         snap.quasar_commerce
             .nes_store_offer_tags
             .insert(1005, vec!["other-promo".into()]);
+        assert_eq!(
+            crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(snap, 1005),
+            None
+        );
     });
-    assert!(handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw).is_none());
+    assert_eq!(
+        crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InvalidOffer"
+    );
 
     // 3) Offer 1005 with `price_plex == 0` and `"OMEGA-WEEKLY"` tag matches case-insensitively
     ctx.advance_secs(604_800);
@@ -891,20 +913,20 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
             .insert(1005, vec!["OMEGA-WEEKLY".into()]);
     });
     assert_eq!(
-        handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw)
+        crate::services::wallet_services_ext::handle(&ctx, &mut sess, "storeManager", "can_purchase_offer", &[PyRep::Integer(1005)], &kw)
             .unwrap()
             .unwrap(),
         PyRep::Bool(true)
     );
 
-    // 4) When offer 1005 is absent from `cat.offers`, `character_skill_ops` returns `None` (no hardcoded 1005 fallback)
+    // 4) When offer 1005 is absent from `cat.offers`, `storeManager` returns `OfferNotFound` (no hardcoded 1005 fallback)
     ctx.db.with_mut_snapshot(|snap| {
         let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
         cat.offers.retain(|o| o.id != 1005);
         crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
     });
-    assert!(
-        handle(
+    assert_eq!(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -912,8 +934,10 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
             &[PyRep::Integer(1005)],
             &kw,
         )
-        .is_none(),
-        "missing catalog offer 1005 must not be synthesized by hardcoded offer_id branch"
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
     );
 
     // 5) Custom non-1005 catalog offer tagged `omega-weekly-free-sp` routes dynamically and grants product quantity
@@ -945,7 +969,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
             .insert(9005, vec!["omega-weekly-free-sp".into()]);
     });
     assert_eq!(
-        handle(
+        crate::services::wallet_services_ext::handle(
             &ctx,
             &mut sess,
             "storeManager",
@@ -957,7 +981,7 @@ fn skill_changes_for_isis_7day_cutoff_and_strip_fitting_rigs_structure_variants(
         .unwrap(),
         PyRep::Bool(true)
     );
-    let custom_claim = handle(
+    let custom_claim = crate::services::wallet_services_ext::handle(
         &ctx,
         &mut sess,
         "storeManager",

@@ -327,6 +327,32 @@ async fn test_payment_purchase_and_store_catalog() {
     let tgt_entry = raw_msg(&offers_tgt_msg, 1).expect("targeted offer 5002");
     assert_eq!(raw_str(&tgt_entry, 1).as_deref(), Some("5002"));
 
+    // Targeted offer 5002 fails closed on targetaudience.offer.api.ListRequest until promoted.
+    let ta_empty = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.store.targetaudience.offer.api.ListRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(ta_empty.status_code, STATUS_OK);
+    assert!(raw_msg(&decode_rsp_fields(&ta_empty), 1).is_none());
+
+    let uid = sess.user_id.expect("uid");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:5002"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "5002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+
     let ta_list = quasar_rpc(
         &ctx,
         &mut sess,
