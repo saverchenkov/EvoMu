@@ -1997,43 +1997,55 @@ def _install_modular_hangar_teardown_guard():
     return hooked
 
 
+def _make_wreck_none_model_guard(orig_fn):
+    """Guard Wreck Prepare/rotation methods when async model loading or Release() leaves self.model None (#1217)."""
+    def _wrapped_wreck_method(self, *args, **kwargs):
+        try:
+            return orig_fn(self, *args, **kwargs)
+        except AttributeError:
+            if getattr(self, "model", None) is None:
+                return None
+            raise
+
+    _wrapped_wreck_method._evomu_camera_guard = True
+    return _wrapped_wreck_method
+
+
+def _make_space_mgr_wreck_guard(orig_fn):
+    """Install Wreck guards before SpaceMgr adds/prepares lazily imported spaceObject.Wreck instances (#1217)."""
+    def _wrapped_space_mgr_call(self, *args, **kwargs):
+        if "wreck" not in _HOOKED_CAMERA_GUARD_TARGETS:
+            _install_wreck_rotation_guard()
+        return orig_fn(self, *args, **kwargs)
+
+    _wrapped_space_mgr_call._evomu_camera_guard = True
+    return _wrapped_space_mgr_call
+
+
 def _install_wreck_rotation_guard():
-    """Guard Wreck.SetRandomRotation / Prepare when self.model is None on persisted ballID=0 wrecks (#1217)."""
-    if "wreck" in _HOOKED_CAMERA_GUARD_TARGETS:
-        return False
-    wreck_mod = sys.modules.get("eve.client.script.environment.spaceObject.wreck")
-    wreck_cls = getattr(wreck_mod, "Wreck", None) if wreck_mod is not None else None
-    if wreck_cls is None or not (isinstance(wreck_cls, type) or hasattr(wreck_cls, "__bases__")):
-        return False
-
-    orig_rot = getattr(wreck_cls, "SetRandomRotation", None)
-    if callable(orig_rot) and not getattr(orig_rot, "_evomu_camera_guard", False):
-        def _wrapped_set_random_rotation(self):
-            try:
-                return orig_rot(self)
-            except AttributeError:
-                if getattr(self, "model", None) is None:
-                    return None
-                raise
-
-        _wrapped_set_random_rotation._evomu_camera_guard = True
-        wreck_cls.SetRandomRotation = _wrapped_set_random_rotation
-
-    orig_prep = getattr(wreck_cls, "Prepare", None)
-    if callable(orig_prep) and not getattr(orig_prep, "_evomu_camera_guard", False):
-        def _wrapped_prepare(self):
-            try:
-                return orig_prep(self)
-            except AttributeError:
-                if getattr(self, "model", None) is None:
-                    return None
-                raise
-
-        _wrapped_prepare._evomu_camera_guard = True
-        wreck_cls.Prepare = _wrapped_prepare
-
-    _HOOKED_CAMERA_GUARD_TARGETS.add("wreck")
-    return True
+    """Guard Wreck.Prepare/rotation methods when self.model is None on persisted or unloaded wrecks (#1217)."""
+    hooked_wreck = _wrap_cls_methods_table(
+        "wreck",
+        "eve.client.script.environment.spaceObject.wreck",
+        "Wreck",
+        (
+            ("Prepare", _make_wreck_none_model_guard),
+            ("SetRandomRotation", _make_wreck_none_model_guard),
+            ("SetDungeonRotation", _make_wreck_none_model_guard),
+            ("SetBallRotation", _make_wreck_none_model_guard),
+        ),
+    )
+    hooked_space_mgr = _wrap_cls_methods_table(
+        "spaceMgrWreck",
+        "eve.client.script.parklife.spaceMgr",
+        "SpaceMgr",
+        (
+            ("DoBallsAdded_", _make_space_mgr_wreck_guard),
+            ("_LoadObjects", _make_space_mgr_wreck_guard),
+            ("LoadObject", _make_space_mgr_wreck_guard),
+        ),
+    )
+    return hooked_wreck or hooked_space_mgr
 
 
 def _install_slots_container_sync_guard():
@@ -2416,6 +2428,17 @@ class _EvomuMetaHook(object):
         _install_fsd_typelist_preload_hook(preload_typelist=False)
         _install_camera_dock_guard()
         _install_live_client_sync_guards()
+        if (
+            fullname == "eve.client.script.environment.spaceObject.wreck"
+            and "wreck" not in _HOOKED_CAMERA_GUARD_TARGETS
+        ):
+            uthread_mod = sys.modules.get("uthread")
+            uthread_new = getattr(uthread_mod, "new", None) if uthread_mod is not None else None
+            if callable(uthread_new):
+                try:
+                    uthread_new(_install_wreck_rotation_guard)
+                except Exception:
+                    pass
         _maybe_schedule_driver_on_main_thread()
         return None
 

@@ -41,6 +41,7 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
             "modularHangarCamera",
             "modularHangarCapitalCamera",
             "wreck",
+            "spaceMgrWreck",
             "slotsContainer",
             "sensorGfxHandler",
         })
@@ -297,6 +298,14 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
                 self.SetRotation(1.0, 2.0, 3.0)
                 self.model.display = 1
 
+            def SetDungeonRotation(self, direction):
+                self.SetRotation(direction[0], direction[1], direction[2])
+                self.model.display = 1
+
+            def SetBallRotation(self, rotation):
+                self.model.rotationCurve = rotation
+                self.model.display = 0
+
             def Prepare(self):
                 self.SetRandomRotation()
 
@@ -308,11 +317,76 @@ class LiveClientSyncGuardsTest(unittest.TestCase):
         no_model = Wreck(model=None)
         no_model.Prepare()
         self.assertEqual(no_model.rot, (1.0, 2.0, 3.0))
+        no_model.SetDungeonRotation((4.0, 5.0, 6.0))
+        self.assertEqual(no_model.rot, (4.0, 5.0, 6.0))
+        self.assertIsNone(no_model.SetBallRotation("rotCurve"))
 
-        # Unrelated AttributeError when model IS present must still propagate.
+        # Unrelated AttributeError when model IS present must still propagate across all guarded methods.
         bad_model = Wreck(model=object())
         with self.assertRaises(AttributeError):
+            bad_model.Prepare()
+        with self.assertRaises(AttributeError):
             bad_model.SetRandomRotation()
+        with self.assertRaises(AttributeError):
+            bad_model.SetDungeonRotation((1.0, 2.0, 3.0))
+        with self.assertRaises(AttributeError):
+            bad_model.SetBallRotation("rotCurve")
+
+    def test_1217_space_mgr_and_meta_hook_install_wreck_guard_on_lazy_import(self):
+        space_mgr_mod = types.ModuleType("eve.client.script.parklife.spaceMgr")
+        wreck_mod = types.ModuleType("eve.client.script.environment.spaceObject.wreck")
+
+        class Wreck:
+            def __init__(self, model):
+                self.model = model
+                self.rot = None
+
+            def SetRandomRotation(self):
+                self.rot = (7.0, 8.0, 9.0)
+                self.model.display = 1
+
+            def Prepare(self):
+                self.SetRandomRotation()
+
+        wreck_mod.Wreck = Wreck
+
+        class SpaceMgr:
+            def __init__(self):
+                self.loaded = False
+
+            def DoBallsAdded_(self, balls):
+                sys.modules["eve.client.script.environment.spaceObject.wreck"] = wreck_mod
+                for ball in balls:
+                    self.LoadObject(ball)
+
+            def _LoadObjects(self, balls):
+                for ball in balls:
+                    self.LoadObject(ball)
+
+            def LoadObject(self, ball):
+                ball.Prepare()
+                self.loaded = True
+
+        space_mgr_mod.SpaceMgr = SpaceMgr
+        sys.modules["eve.client.script.parklife.spaceMgr"] = space_mgr_mod
+
+        # Install SpaceMgr wrapper before `wreck` is imported in sys.modules.
+        self.assertTrue(evomu_site._install_wreck_rotation_guard())
+        self.assertIn("spaceMgrWreck", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertNotIn("wreck", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+
+        scheduled = []
+        sys.modules["uthread"] = types.SimpleNamespace(new=lambda fn: scheduled.append(fn))
+        evomu_site._EvomuMetaHook().find_module("eve.client.script.environment.spaceObject.wreck")
+        self.assertEqual(scheduled, [evomu_site._install_wreck_rotation_guard])
+
+        # Synchronous SpaceMgr.DoBallsAdded_ -> LoadObject lazily imports wreck and guards it before Prepare().
+        mgr = SpaceMgr()
+        wreck = Wreck(model=None)
+        mgr.DoBallsAdded_([wreck])
+        self.assertTrue(mgr.loaded)
+        self.assertIn("wreck", evomu_site._HOOKED_CAMERA_GUARD_TARGETS)
+        self.assertEqual(wreck.rot, (7.0, 8.0, 9.0))
 
     def test_1252_slots_container_resyncs_on_onmodulefitted_and_late_process_ship_effect(self):
         sc_mod = types.ModuleType("eve.client.script.ui.inflight.shipHud.slotsContainer")

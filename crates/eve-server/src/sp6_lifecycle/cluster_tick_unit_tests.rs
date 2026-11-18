@@ -3436,3 +3436,139 @@ async fn fire_weapon_cycle_volley_outbox_lease_rollback_and_ack_1168() {
     assert_eq!(count_system_wrecks_for_type_1168(&ctx, sys_id, ship_type_id), wrecks_0 + 4);
     assert_eq!(ctx.db.with_snapshot(|s| s.killmails.len()), kms_0 + 4);
 }
+
+#[test]
+fn populate_persisted_space_objects_populates_sde_type_name_on_wreck_slim_meta() {
+    let mut ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142u32;
+    let now_unix = ctx.now_unix();
+    let named_wreck_id = 880_101i64;
+    let empty_name_wreck_id = 880_102i64;
+    let empty_name_tid = 999_880_102u32;
+
+    let mut sde = (*ctx.sde).clone();
+    sde.types.insert(
+        26_557,
+        eve_sde::InvType {
+            type_id: 26_557,
+            group_id: 186,
+            category_id: 2,
+            name: "Frigate Wreck".into(),
+            mass: 10_000.0,
+            volume: 10_000.0,
+            capacity: 250.0,
+            radius: 14.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: Some(3117),
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: Default::default(),
+        },
+    );
+    sde.types.insert(
+        empty_name_tid,
+        eve_sde::InvType {
+            type_id: empty_name_tid,
+            group_id: 186,
+            category_id: 2,
+            name: String::new(),
+            mass: 10_000.0,
+            volume: 10_000.0,
+            capacity: 250.0,
+            radius: 14.0,
+            base_price: 0.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: None,
+            description: String::new(),
+            effect_ids: Vec::new(),
+            default_attributes: Default::default(),
+        },
+    );
+    ctx.sde = Arc::new(sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, pos) in [
+            (named_wreck_id, 26_557, [1_200.0, 0.0, 0.0]),
+            (empty_name_wreck_id, empty_name_tid, [1_500.0, 0.0, 0.0]),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: 1,
+                    location_id: i64::from(sys_id),
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(iid, pos);
+            snap.sp6_lifecycle
+                .as_inner_mut()
+                .space_object_meta
+                .insert(
+                    iid,
+                    PersistedSpaceObjectMeta {
+                        created_unix: Some(now_unix),
+                        ..Default::default()
+                    },
+                );
+        }
+    });
+
+    let mut ballpark = Ballpark::new(sys_id);
+    let _ = populate_persisted_space_objects(&mut ballpark, sys_id, &ctx.sde, &ctx.db);
+
+    let named_meta = ballpark
+        .ball_slim_meta(named_wreck_id)
+        .expect("persisted named wreck slim meta");
+    assert_eq!(named_meta.name.as_deref(), Some("Frigate Wreck"));
+    let named_ball = ballpark.balls.get(&named_wreck_id).expect("named wreck ball");
+    let named_slim = eve_destiny::wire::slim_item_dict(named_ball, named_meta);
+    assert_eq!(
+        named_slim.dict_get("name"),
+        Some(&eve_proto::PyRep::String("Frigate Wreck".into()))
+    );
+
+    let unnamed_meta = ballpark
+        .ball_slim_meta(empty_name_wreck_id)
+        .expect("persisted empty-name wreck slim meta");
+    assert_eq!(unnamed_meta.name, None);
+    let unnamed_ball = ballpark
+        .balls
+        .get(&empty_name_wreck_id)
+        .expect("empty-name wreck ball");
+    let unnamed_slim = eve_destiny::wire::slim_item_dict(unnamed_ball, unnamed_meta);
+    assert_eq!(
+        unnamed_slim.dict_get("name"),
+        Some(&eve_proto::PyRep::String(format!("Item {empty_name_wreck_id}")))
+    );
+}
