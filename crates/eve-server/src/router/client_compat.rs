@@ -3101,7 +3101,7 @@ pub fn normalize_macho_notification_with_sde(
             let norm_items: Vec<PyRep> = raw_items
                 .into_iter()
                 .map(|el| match el {
-                    PyRep::Tuple(mut t) if t.len() == 8 => {
+                    PyRep::Tuple(mut t) | PyRep::List(mut t) if t.len() == 8 => {
                         if t.get(3) == Some(&PyRep::Integer(0)) {
                             t[3] = PyRep::Integer(2);
                         }
@@ -3110,7 +3110,7 @@ pub fn normalize_macho_notification_with_sde(
                         }
                         PyRep::Tuple(t)
                     }
-                    PyRep::Tuple(mut t) if t.len() == 7 => {
+                    PyRep::Tuple(mut t) | PyRep::List(mut t) if t.len() == 7 => {
                         if t.get(3) == Some(&PyRep::Integer(0)) {
                             t[3] = PyRep::Integer(2);
                         }

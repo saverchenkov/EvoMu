@@ -809,7 +809,8 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
         }
     }
 
-    // 4b. `#1268`: `notify` also patches `cid` and `now_ft` when an entry is already `PyRep::List`.
+    // 4b. `#1268`: `notify` patches `cid` and `now_ft` when an entry is already `PyRep::List`
+    // and normalizes it into an 8-element `PyRep::Tuple` without fallback mangling.
     let attr_change_list_arg = vec![PyRep::List(vec![PyRep::List(vec![
         PyRep::String("OnModuleAttributeChange".into()),
         PyRep::None,
@@ -828,11 +829,18 @@ fn mutants_cov_notification_seq_flag_module_fx_tombstone_and_target_edges() {
     assert_eq!(res_list.len(), 1);
     if let PyRep::List(items) = &res_list[0].args[0] {
         match &items[0] {
-            PyRep::List(t) | PyRep::Tuple(t) => {
+            PyRep::Tuple(t) => {
+                assert_eq!(t.len(), 8);
+                assert_eq!(t[0], PyRep::String("OnModuleAttributeChange".into()));
                 assert_eq!(t[1], PyRep::Integer(char_id));
+                assert_eq!(t[2], PyRep::Integer(700_002));
+                assert_eq!(t[3], PyRep::Integer(9));
                 assert_ne!(t[4], PyRep::Integer(0));
+                assert_eq!(t[5], PyRep::Real(120.0));
+                assert_eq!(t[6], PyRep::Real(90.0));
+                assert_eq!(t[7], PyRep::None);
             }
-            other => panic!("expected List/Tuple entry, got {other:?}"),
+            other => panic!("expected normalized PyRep::Tuple entry, got {other:?}"),
         }
     } else {
         panic!("expected OnModuleAttributeChanges List arg");
