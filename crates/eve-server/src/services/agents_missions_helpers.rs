@@ -331,6 +331,8 @@ enum MissionRewardCategory {
     EpicArc,
     Research,
     Career,
+    DataCenter,
+    Cosmos,
 }
 
 fn splitmix64(mut x: u64) -> u64 {
@@ -558,6 +560,12 @@ fn classify_reward_category(
     if agent_info.is_some_and(|a| a.agent_type_id == 12) {
         return MissionRewardCategory::Career;
     }
+    if agent_info.is_some_and(|a| a.agent_type_id == 5) {
+        return MissionRewardCategory::DataCenter;
+    }
+    if agent_info.is_some_and(|a| a.agent_type_id == 8) {
+        return MissionRewardCategory::Cosmos;
+    }
     if ct.contains("Research") || agent_info.is_some_and(is_rnd_agent) {
         return MissionRewardCategory::Research;
     }
@@ -633,6 +641,20 @@ fn derive_mission_reward_definition(
             (3_500_000, 8_500_000, 0, 0, 240, 360),
         ][idx],
         MissionRewardCategory::Career => (38_000, 92_000, 0, 0, 30, 60),
+        MissionRewardCategory::DataCenter => [
+            (18_000, 48_000, 0, 0, 30, 60),
+            (45_000, 120_000, 0, 0, 30, 90),
+            (95_000, 260_000, 0, 0, 60, 120),
+            (220_000, 620_000, 0, 0, 60, 180),
+            (480_000, 1_150_000, 0, 0, 90, 240),
+        ][idx],
+        MissionRewardCategory::Cosmos => [
+            (55_000, 145_000, 0, 0, 30, 80),
+            (160_000, 420_000, 0, 0, 60, 150),
+            (420_000, 1_100_000, 0, 0, 120, 240),
+            (1_050_000, 2_900_000, 0, 0, 180, 360),
+            (2_500_000, 5_600_000, 0, 0, 240, 360),
+        ][idx],
         MissionRewardCategory::Research => {
             let l = i64::from(effective_lvl.clamp(1, 5));
             (28_000 * l, 85_000 * l, 0, 0, 30, 90)
@@ -782,10 +804,11 @@ pub fn resolve_mission_reward_definition(
         )
     };
 
+    // Data Center (5), COSMOS (8), Epic Arc (10), Tutorial (11), Career (12), R&D, and Storyline agents pay 0 LP.
     let no_lp_agent = agent_info.is_some_and(|a| {
         is_rnd_agent(a)
             || is_storyline_agent_type(a.agent_type_id)
-            || matches!(a.agent_type_id, 10..=12)
+            || matches!(a.agent_type_id, 5 | 8 | 10..=12)
     });
     let no_lp_tmpl = tmpl.is_some_and(|t| {
         is_storyline_template(t)

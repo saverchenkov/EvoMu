@@ -533,3 +533,65 @@ fn per_mission_wiki_catalog_and_derived_curves_produce_distinct_isk_bonus_window
             != (def_b.base_isk, def_b.time_bonus_isk, def_b.base_lp)
     );
 }
+
+#[test]
+fn cosmos_and_data_center_agents_grant_zero_lp_on_real_sde_missions() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001_i64;
+    let dc_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 5)
+        .expect("Real SDE Data Center agent (agent_type_id == 5)")
+        .clone();
+    let cosmos_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 8)
+        .expect("Real SDE COSMOS agent (agent_type_id == 8)")
+        .clone();
+    let std_sec_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.level == 1)
+        .expect("Real SDE Basic L1 Security agent")
+        .clone();
+
+    let mut non_lp_mids: Vec<u32> = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| m.lp_omega == 0 && !m.title.trim().is_empty())
+        .take(2)
+        .map(|m| m.mission_id)
+        .collect();
+    non_lp_mids.push(13_777); // Wiki Security mission that pays LP for Basic agents
+
+    for (label, agent) in [("DataCenter(5)", &dc_agent), ("COSMOS(8)", &cosmos_agent)] {
+        let sys_id = agent.solar_system_id.unwrap_or(30_000_142);
+        for &mid in &non_lp_mids {
+            let def = resolve_mission_reward_definition(&ctx, char_id, agent.agent_id, mid);
+            assert!(
+                !def.grants_lp && def.base_lp == 0 && def.base_lp_alpha == 0,
+                "{label} agent {} must not grant LP for mission {mid}: {def:?}",
+                agent.agent_id
+            );
+            assert!(def.base_isk > 0, "{label} agent {} mission {mid} must pay ISK", agent.agent_id);
+            let rewards = compute_character_mission_rewards(&ctx, char_id, agent.agent_id, mid, sys_id);
+            assert_eq!(
+                rewards.lp_reward, 0,
+                "{label} agent {} mission {mid} computed LP must be 0",
+                agent.agent_id
+            );
+            assert!(rewards.isk_reward > 0);
+        }
+    }
+
+    // Control check: standard Basic Security agent on 13_777 still pays positive LP.
+    let std_sys = std_sec_agent.solar_system_id.unwrap_or(30_000_142);
+    let std_rewards = compute_character_mission_rewards(&ctx, char_id, std_sec_agent.agent_id, 13_777, std_sys);
+    assert!(std_rewards.lp_reward > 0);
+}

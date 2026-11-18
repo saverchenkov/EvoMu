@@ -903,7 +903,7 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     .unwrap();
     assert_eq!(declined.dict_get("state"), Some(&PyRep::String("Declined".into())));
 
-    // 5. NPC corp LP tax: >= 100_000 ISK deducts 11% LP when char is in non-exempt NPC corp
+    // 5. NPC corp tax: 0% LP tax; 11% ISK tax independently on >= 100_000 ISK rewards in non-exempt NPC corp
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.remove(&(char_id, mid_deliv));
         snap.characters.get_mut(&char_id).unwrap().corporation_id = 1_000_009; // NPC corp, non-exempt
@@ -927,20 +927,24 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
             &MissionTimingAndCargoMeta {
                 mission_id: 72_003,
                 agent_id: ag.agent_id,
-                offered_level: Some(4), // >= 100k ISK reward -> 11% NPC corp LP tax applies
+                offered_level: Some(4), // >= 100k ISK reward -> 11% NPC corp ISK tax applies; 0% LP tax
                 ..Default::default()
             },
         );
     });
     let CharacterMissionRewards {
         isk_reward: isk_r,
+        bonus_reward: bonus_r,
         lp_reward: raw_lp,
-        ..
     } = compute_character_mission_rewards(&ctx, char_id, ag.agent_id, 72_003, sys_id);
     assert!(isk_r >= 100_000, "expected >= 100k ISK for tax test, got {isk_r}");
-    let lp_before = ctx
-        .db
-        .with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0));
+    let (bal_before, lp_before, j_start) = ctx.db.with_snapshot(|s| {
+        (
+            s.characters[&char_id].balance.raw_cents(),
+            s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0),
+            s.wallet_journal.len(),
+        )
+    });
     let comp_tax = handle(
         &ctx,
         &mut sess_docked,
@@ -953,12 +957,50 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     .unwrap()
     .unwrap();
     assert_eq!(comp_tax.dict_get("state"), Some(&PyRep::String("Completed".into())));
-    let lp_after = ctx
-        .db
-        .with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0));
-    let lp_gained = lp_after - lp_before;
-    let expected_taxed_lp = raw_lp - ((raw_lp.saturating_mul(11) + 50) / 100);
-    assert_eq!(lp_gained, expected_taxed_lp, "expected 11% NPC corp LP tax ({raw_lp} -> {expected_taxed_lp})");
+    let bonus_paid = comp_tax.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert_eq!(bonus_paid, bonus_r);
+    let tax_for = |isk: i64| -> i64 {
+        if isk >= 100_000 {
+            ((isk * 100).saturating_mul(11) + 50) / 100
+        } else {
+            0
+        }
+    };
+    let expected_isk_tax_cents = tax_for(isk_r);
+    let expected_bonus_tax_cents = tax_for(bonus_paid);
+    let expected_net_delta_cents =
+        (isk_r * 100 - expected_isk_tax_cents) + (bonus_paid * 100 - expected_bonus_tax_cents);
+    ctx.db.with_snapshot(|s| {
+        let lp_after = s.characters[&char_id].loyalty_points.get(&ag.corporation_id).copied().unwrap_or(0);
+        let lp_gained = lp_after - lp_before;
+        assert_eq!(lp_gained, raw_lp, "NPC corps charge 0% LP tax ({raw_lp})");
+
+        let bal_after = s.characters[&char_id].balance.raw_cents();
+        assert_eq!(
+            bal_after - bal_before,
+            expected_net_delta_cents,
+            "11% NPC corp ISK tax must be deducted independently from >= 100k ISK rewards"
+        );
+        let new_entries: Vec<_> = s.wallet_journal.iter().skip(j_start).collect();
+        assert!(
+            new_entries.iter().any(|e| {
+                e.character_id == char_id
+                    && e.entry_type == "agent_mission_reward_corporation_tax"
+                    && e.amount.raw_cents() == -expected_isk_tax_cents
+            }),
+            "expected agent_mission_reward_corporation_tax entry for {expected_isk_tax_cents} cents"
+        );
+        if expected_bonus_tax_cents > 0 {
+            assert!(
+                new_entries.iter().any(|e| {
+                    e.character_id == char_id
+                        && e.entry_type == "agent_mission_time_bonus_reward_corporation_tax"
+                        && e.amount.raw_cents() == -expected_bonus_tax_cents
+                }),
+                "expected agent_mission_time_bonus_reward_corporation_tax entry for {expected_bonus_tax_cents} cents"
+            );
+        }
+    });
 
     // 6. Paragon corp (1_000_437) LP credit & Epic Arc completion/re-start clearing completed_missions
     if let Some(epic_ag) = ctx
