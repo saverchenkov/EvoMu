@@ -1085,10 +1085,11 @@ pub(crate) mod pi_command_center_budget_launchpads {
             ctx.sde
                 .planet_schematics
                 .iter()
-                .find(|(_, s)| {
+                .filter(|(_, s)| {
                     (s.pins.is_empty() || s.pins.contains(&pin_tid))
                         && s.types.iter().any(|t| !t.is_input && t.type_id == out_tid)
                 })
+                .min_by_key(|(&id, _)| id)
                 .map(|(&id, _)| i64::from(id))
                 .unwrap()
         };
@@ -1660,14 +1661,26 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
         assert_eq!(empty_rsp.status_code, 400);
         assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em);
 
-        // Activate a real SDE SKINR coating component item & initiate validated SKINR sequencing jobs
+        // Activate a real SDE SKINR finite coating component item & initiate validated SKINR sequencing jobs
         let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
-        let coating_comp = skinr_cat
+        let slot1_allowed = skinr_cat.slot_allowed_categories.get(&1);
+        let (coating_comp, coating_item_type_id, _coating_uses) = skinr_cat
             .components
             .values()
-            .find(|c| !c.is_pattern() && !c.associated_types.is_empty() && !c.disallowed_slots.contains(&1))
-            .expect("SDE SKINR coating component");
-        let (coating_item_type_id, _) = coating_comp.associated_types[0];
+            .filter(|c| {
+                !c.is_pattern()
+                    && !c.disallowed_slots.contains(&1)
+                    && slot1_allowed.is_none_or(|cats| cats.is_empty() || cats.contains(&c.category))
+            })
+            .flat_map(|c| c.associated_types.iter().map(move |&(tid, uses)| (c, tid, uses)))
+            .filter(|&(c, tid, uses)| {
+                uses > 0
+                    && u64::try_from(uses).is_ok_and(|u| u.saturating_mul(10) >= 10)
+                    && skinr_cat.item_type_to_component.get(&tid).copied()
+                        == Some((c.component_id, uses))
+            })
+            .min_by_key(|(c, tid, _)| (c.component_id, *tid))
+            .expect("finite SDE SKINR coating component item");
         let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.balance = IskCents::from_isk(1_000_000);
