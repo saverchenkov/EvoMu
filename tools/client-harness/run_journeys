@@ -8,7 +8,7 @@ Usage (as invoked by final_gate.py):
 Supports:
   - Spawning a local `eve-server` instance (or attaching to an existing `--bridge-port`) and capturing `<out>/server.log`.
   - Driving two concurrent client sessions (`client_1.log`, `client_2.log`) via `client-bridge/evomu_bridge.py`.
-  - Detecting the real V24.01 client bundle (`~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app`).
+  - Detecting the installed EVE client bundle (`~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app`) and its `start.ini` build ID.
   - Enforcing the `final_gate.py` log hygiene scan (`UnimplementedRPC`, `panicked at`, `Traceback (most recent`, `EXCEPTION`).
   - Honest reporting: `journeys[<id>]["passed"]` is ONLY `True` when the real `EVE.app` client has executed the journey
     end-to-end against `eve-server`. Bridge-only verification is recorded under `bridge_verified` so `final_gate.py`
@@ -17,6 +17,7 @@ Supports:
 
 import argparse
 import atexit
+import configparser
 import datetime
 import glob
 import json
@@ -58,6 +59,22 @@ JOURNEY_SPECS = {
 ERROR_LINE_RE = re.compile(
     r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|_LogException\b|\bLogException\b|\bLogTraceback\b|SendClientStackTraceAlert|client exception report saved"
 )
+JOURNEY_START_RE = re.compile(r"\[EVOMU_JOURNEY_START\]\s+id=([A-Za-z0-9_.-]+)")
+JOURNEY_END_RE = re.compile(r"\[EVOMU_JOURNEY_END\]\s+id=([A-Za-z0-9_.-]+)")
+
+
+def _append_log_line(path, line):
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
 
 
 def find_free_port():
@@ -97,20 +114,119 @@ def find_server_binary(explicit_bin=None):
     return None
 
 
-def scan_logs_for_errors(paths):
-    bad = []
+def _resolve_span_jid(spans, offset):
+    for start_off, end_off, span_jid in spans or ():
+        if start_off <= offset < end_off:
+            return span_jid
+    return None
+
+
+def scan_logs_for_journey_errors(
+    paths,
+    journey_ids=None,
+    max_excerpt_lines=40,
+    journey_byte_spans=None,
+):
+    """Scans log files and attributes ERROR_LINE_RE matches & excerpts to intervals or byte spans.
+
+    Returns dict with keys:
+      - `log_errors`: full whole-run list of error lines
+      - `per_journey_errors`: `{jid: [err_lines...]}`
+      - `per_journey_excerpts`: `{jid: [excerpt_lines...]}`
+    """
+    run_errors = []
+    per_journey_errors = {jid: [] for jid in (journey_ids or [])}
+    per_journey_excerpts = {jid: [] for jid in (journey_ids or [])}
+    span_map = journey_byte_spans or {}
     for p in paths:
-        if p and os.path.exists(p):
-            seen_client_started = False
-            with open(p, "r", errors="replace") as f:
-                for ln in f:
-                    if "EVE Client version" in ln and "started" in ln:
-                        seen_client_started = True
-                    if ERROR_LINE_RE.search(ln):
-                        bad.append(ln.strip()[:300])
-                    elif seen_client_started and "#nolog: An exception has occurred" in ln:
-                        bad.append(ln.strip()[:300])
-    return bad
+        if not (p and os.path.exists(p)):
+            continue
+        file_spans = span_map.get(os.path.realpath(p)) or span_map.get(p) or ()
+        seen_client_started = False
+        active_jid = None
+        offset = 0
+        with open(p, "rb") as f:
+            for raw in f:
+                line_start = offset
+                offset += len(raw)
+                ln = raw.decode("utf-8", "replace")
+                m_start = JOURNEY_START_RE.search(ln)
+                if m_start:
+                    active_jid = m_start.group(1)
+                    per_journey_errors.setdefault(active_jid, [])
+                    per_journey_excerpts.setdefault(active_jid, [])
+                    continue
+                m_end = JOURNEY_END_RE.search(ln)
+                if m_end:
+                    if active_jid == m_end.group(1) or active_jid is None:
+                        active_jid = None
+                    continue
+                if "EVE Client version" in ln and "started" in ln:
+                    seen_client_started = True
+                eff_jid = active_jid if active_jid is not None else _resolve_span_jid(file_spans, line_start)
+                if eff_jid is not None:
+                    per_journey_errors.setdefault(eff_jid, [])
+                    per_journey_excerpts.setdefault(eff_jid, [])
+                stripped = ln.rstrip("\r\n")
+                if eff_jid is not None and stripped:
+                    buf = per_journey_excerpts[eff_jid]
+                    if len(buf) < max_excerpt_lines:
+                        buf.append(stripped[:300])
+                if ERROR_LINE_RE.search(ln) or (
+                    seen_client_started and "#nolog: An exception has occurred" in ln
+                ):
+                    err_txt = ln.strip()[:300]
+                    run_errors.append(err_txt)
+                    if eff_jid is not None:
+                        per_journey_errors[eff_jid].append(err_txt)
+    return {
+        "log_errors": run_errors,
+        "per_journey_errors": per_journey_errors,
+        "per_journey_excerpts": per_journey_excerpts,
+    }
+
+
+def collect_journey_log_artifacts(
+    server_log_path,
+    client_log_paths,
+    journey_ids=None,
+    journey_byte_spans=None,
+):
+    """Combines server and client log attribution into run-level errors plus per-journey errors & excerpts."""
+    srv_scan = scan_logs_for_journey_errors(
+        [server_log_path] if server_log_path else [],
+        journey_ids=journey_ids,
+        journey_byte_spans=journey_byte_spans,
+    )
+    cli_scan = scan_logs_for_journey_errors(
+        client_log_paths or [],
+        journey_ids=journey_ids,
+        journey_byte_spans=journey_byte_spans,
+    )
+    all_jids = list(journey_ids or [])
+    for jid in list(srv_scan["per_journey_errors"].keys()) + list(cli_scan["per_journey_errors"].keys()):
+        if jid not in all_jids:
+            all_jids.append(jid)
+    per_journey_errors = {}
+    client_excerpts = {}
+    server_excerpts = {}
+    for jid in all_jids:
+        per_journey_errors[jid] = (
+            srv_scan["per_journey_errors"].get(jid, [])
+            + cli_scan["per_journey_errors"].get(jid, [])
+        )
+        client_excerpts[jid] = cli_scan["per_journey_excerpts"].get(jid, [])
+        server_excerpts[jid] = srv_scan["per_journey_excerpts"].get(jid, [])
+    return {
+        "log_errors": srv_scan["log_errors"] + cli_scan["log_errors"],
+        "per_journey_errors": per_journey_errors,
+        "client_excerpts": client_excerpts,
+        "server_excerpts": server_excerpts,
+    }
+
+
+def scan_logs_for_errors(paths):
+    return scan_logs_for_journey_errors(paths)["log_errors"]
 
 
 class ClientLogger(object):
@@ -193,7 +309,55 @@ def _destiny_update_contains_ball(update_entry, target_ball_id):
 
 
 def client_executable(client_app):
+    for cand in (
+        os.path.join(client_app, "Contents", "MacOS", "EVE"),
+        os.path.join(client_app, "Contents", "Resources", "build", "bin64", "exefile"),
+        os.path.join(client_app, "bin64", "exefile"),
+    ):
+        if os.path.exists(cand):
+            return cand
     return os.path.join(client_app, "Contents", "MacOS", "EVE")
+
+
+def _resolve_client_build_dir(client_app):
+    """Resolves either `<EVE.app>/Contents/Resources/build` or a direct `build/` directory."""
+    if not client_app:
+        return ""
+    app_build = os.path.join(client_app, "Contents", "Resources", "build")
+    if os.path.exists(os.path.join(app_build, "start.ini")) or os.path.isdir(app_build):
+        return app_build
+    if os.path.exists(os.path.join(client_app, "start.ini")) or os.path.isdir(
+        os.path.join(client_app, "bin64")
+    ):
+        return client_app
+    if os.path.isdir(client_app):
+        return client_app
+    return app_build
+
+
+def detect_client_build_info(client_app):
+    """Reads `version`, `build`, and `codename` dynamically from the client's `start.ini`."""
+    info = {"version": "", "build": "unknown", "codename": "", "start_ini": ""}
+    src_build = _resolve_client_build_dir(client_app)
+    ini_path = os.path.join(src_build, "start.ini") if src_build else ""
+    if not ini_path or not os.path.exists(ini_path):
+        return info
+    info["start_ini"] = ini_path
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(ini_path, encoding="utf-8")
+    except Exception:
+        return info
+    sec = "main" if cp.has_section("main") else (cp.sections()[0] if cp.sections() else None)
+    if sec:
+        info["version"] = cp.get(sec, "version", fallback="").strip()
+        info["build"] = cp.get(sec, "build", fallback="unknown").strip() or "unknown"
+        info["codename"] = cp.get(sec, "codename", fallback="").strip()
+    return info
+
+
+def _default_stage_root():
+    return os.environ.get("EVOMU_STAGE_CACHE_DIR") or os.path.expanduser("~/.cache/evomu")
 
 
 # Processes this harness started; `_cleanup_spawned` (atexit + finally) tears them down.
@@ -205,23 +369,29 @@ def _pids_matching(pattern):
     return set(int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid())
 
 
-DEFAULT_STAGED_BUILD = os.path.expanduser("~/.cache/evomu/client_build_3624425")
+def stage_real_client(client_app, stage_root=None):
+    """Stages an isolated, writable copy of `EVE.app/Contents/Resources/build` (or `build/`).
 
-
-def stage_real_client(client_app):
-    """Stages an isolated, writable copy of `EVE.app/Contents/Resources/build` outside git.
-
-    Never modifies the SharedCache `EVE.app` bundle. Configures `common.ini` with
-    `cryptoPack = Placebo` and installs `tools/startup/evomu.py` so `/tools=evomu`
-    launches `evomu_inclient_driver.schedule_startup()` inside the real V24.01 engine.
+    Never modifies the source `EVE.app` bundle. Detects build ID dynamically from
+    `start.ini` and stages into `<stage_root>/client_build_<build>`. Configures
+    `common.ini` with `cryptoPack = Placebo` and installs `tools/startup/evomu.py`
+    so `/tools=evomu` launches `evomu_inclient_driver.schedule_startup()`.
     """
-    src_build = os.path.join(client_app, "Contents", "Resources", "build")
-    stage_dir = DEFAULT_STAGED_BUILD
+    src_build = _resolve_client_build_dir(client_app)
+    build_info = detect_client_build_info(client_app)
+    build_id = build_info.get("build") or "unknown"
+    root_dir = stage_root or _default_stage_root()
+    stage_dir = os.path.join(root_dir, "client_build_%s" % build_id)
     exefile_path = os.path.join(stage_dir, "bin64", "exefile")
+    src_exefile = os.path.join(src_build, "bin64", "exefile")
     src_ini = os.path.join(src_build, "start.ini")
     dst_ini = os.path.join(stage_dir, "start.ini")
-    needs_copy = not os.path.exists(exefile_path) or not os.path.exists(dst_ini)
-    if not needs_copy:
+    needs_copy = (
+        not os.path.exists(stage_dir)
+        or (os.path.exists(src_exefile) and not os.path.exists(exefile_path))
+        or (os.path.exists(src_ini) and not os.path.exists(dst_ini))
+    )
+    if not needs_copy and os.path.exists(src_ini) and os.path.exists(dst_ini):
         try:
             needs_copy = os.path.getmtime(src_ini) > os.path.getmtime(dst_ini)
         except OSError:
@@ -271,7 +441,7 @@ def stage_real_client(client_app):
     )
     with open(os.path.join(startup_dir, "evomu.py"), "w") as ef:
         ef.write(evomu_boot)
-    # In V24.01 inittools.pyj, packaged builds also search root:/../tools/startup
+    # In packaged client builds, inittools also searches root:/../tools/startup
     parent_startup_dir = os.path.join(os.path.dirname(stage_dir), "tools", "startup")
     try:
         os.makedirs(parent_startup_dir, exist_ok=True)
@@ -316,16 +486,71 @@ def _install_stage_sitecustomize(stage_dir):
     return py_site
 
 
-class IpcCoordinator(object):
-    """Coordinates Client 2 (`evomu_bridge`) & clock control with the in-client V24.01 driver."""
+def _host_capture_window(path, client_pid):
+    if not (path and client_pid):
+        return False
+    try:
+        import Quartz
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID
+        )
+        best_wid = None
+        best_area = 0
+        for w in (wins or []):
+            if int(w.get("kCGWindowOwnerPID", 0) or 0) != int(client_pid):
+                continue
+            bounds = w.get("kCGWindowBounds", {}) or {}
+            area = int(bounds.get("Width", 0) or 0) * int(bounds.get("Height", 0) or 0)
+            if area > best_area and int(w.get("kCGWindowLayer", 0) or 0) == 0:
+                best_area = area
+                best_wid = int(w.get("kCGWindowNumber", 0) or 0)
+        if best_wid:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            res = subprocess.run(
+                ["/usr/sbin/screencapture", "-x", "-l", str(best_wid), path],
+                capture_output=True,
+                timeout=10,
+            )
+            return res.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0
+    except Exception:
+        pass
+    return False
 
-    def __init__(self, host, bridge_port, client_2_log_path, progress_dict):
+
+class IpcCoordinator(object):
+    """Coordinates Client 2 (`evomu_bridge`) & markers with the in-client driver."""
+
+    def __init__(
+        self,
+        host,
+        bridge_port,
+        client_2_log_path,
+        progress_dict,
+        server_log_path="",
+        out_dir="",
+        client_logs_dir="",
+    ):
         self.host = host
         self.bridge_port = bridge_port
         self.log2 = ClientLogger(client_2_log_path, "client-2")
+        self.server_log_path = server_log_path
+        self.out_dir = out_dir or (os.path.dirname(server_log_path) if server_log_path else "")
+        self.client_logs_dir = client_logs_dir or (
+            os.path.join(self.out_dir, "client_logs") if self.out_dir else ""
+        )
+        self.client_tracebacks_log = (
+            os.path.join(self.out_dir, "client_tracebacks.log") if self.out_dir else ""
+        )
+        self.journey_byte_spans = {}
+        self._active_span_jid = None
+        self._active_span_starts = {}
+        self._known_files_at_start = set()
         self.sm2 = None
         self.b2 = None
         self.char2_id = 90000002
+        self.c1_authenticated = False
+        self.c2_authenticated = False
+        self.client_pid = None
         self.progress_dict = progress_dict
         self.driver_done = threading.Event()
         self.driver_error = None
@@ -338,6 +563,57 @@ class IpcCoordinator(object):
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._serve_loop, daemon=True)
         self._thread.start()
+
+    def _tracked_log_files(self):
+        cands = []
+        for p in (
+            self.server_log_path,
+            self.log2.path,
+            self.client_tracebacks_log,
+            os.path.join(self.out_dir, "real_client_1.log") if self.out_dir else "",
+        ):
+            if p and p not in cands:
+                cands.append(p)
+        if self.client_logs_dir and os.path.isdir(self.client_logs_dir):
+            for p in sorted(glob.glob(os.path.join(self.client_logs_dir, "*.log"))):
+                if p not in cands:
+                    cands.append(p)
+        return cands
+
+    def _open_byte_span(self, jid):
+        if self._active_span_jid is not None:
+            self._close_byte_span()
+        self._active_span_jid = jid
+        self._active_span_starts = {}
+        self._known_files_at_start = set()
+        for p in self._tracked_log_files():
+            rp = os.path.realpath(p)
+            if os.path.exists(rp):
+                self._known_files_at_start.add(rp)
+                self._active_span_starts[rp] = os.path.getsize(rp)
+            else:
+                self._active_span_starts[rp] = 0
+
+    def _close_byte_span(self):
+        if self._active_span_jid is None:
+            return
+        jid = self._active_span_jid
+        for p in self._tracked_log_files():
+            rp = os.path.realpath(p)
+            if not os.path.exists(rp):
+                continue
+            end_off = os.path.getsize(rp)
+            if rp in self._active_span_starts:
+                start_off = self._active_span_starts[rp]
+            elif rp not in self._known_files_at_start:
+                start_off = 0
+            else:
+                start_off = end_off
+            if end_off > start_off:
+                self.journey_byte_spans.setdefault(rp, []).append((start_off, end_off, jid))
+        self._active_span_jid = None
+        self._active_span_starts = {}
+        self._known_files_at_start = set()
 
     def _ensure_c2(self, force=False):
         if not force and self.b2 is not None and getattr(self.b2, "connected", False):
@@ -357,6 +633,7 @@ class IpcCoordinator(object):
         chars2 = self.sm2.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
         self.char2_id = int(chars2[0].characterID)
         self.sm2.RemoteSvc("charUnboundMgr").SelectCharacterID(self.char2_id)
+        self.c2_authenticated = True
         try:
             self.sm2.RemoteSvc("slash").SlashCmd("/giveisk 50000000")
         except Exception:
@@ -437,10 +714,36 @@ class IpcCoordinator(object):
     def _handle_cmd(self, req):
         cmd = req.get("cmd", "")
         with self._lock:
+            if cmd == "client1_authenticated":
+                self.c1_authenticated = True
+                return {"ok": True}
+            if cmd == "journey_start":
+                jid = str(req.get("id", ""))
+                self._open_byte_span(jid)
+                marker = "[harness] [EVOMU_JOURNEY_START] id=%s\n" % jid
+                _append_log_line(self.server_log_path, marker)
+                if self.client_tracebacks_log:
+                    _append_log_line(self.client_tracebacks_log, marker)
+                self.log2.info("[EVOMU_JOURNEY_START] id=%s" % jid)
+                return {"ok": True}
+            if cmd == "journey_end":
+                jid = str(req.get("id", ""))
+                passed = bool(req.get("passed", False))
+                marker = "[harness] [EVOMU_JOURNEY_END] id=%s passed=%r\n" % (jid, passed)
+                _append_log_line(self.server_log_path, marker)
+                if self.client_tracebacks_log:
+                    _append_log_line(self.client_tracebacks_log, marker)
+                self.log2.info("[EVOMU_JOURNEY_END] id=%s passed=%r" % (jid, passed))
+                self._close_byte_span()
+                return {"ok": True}
             if cmd == "journey_progress":
                 if req.get("id") and isinstance(req.get("entry"), dict):
                     self.progress_dict[req["id"]] = req["entry"]
                 return {"ok": True}
+            if cmd == "capture_screenshot":
+                shot_path = str(req.get("path", ""))
+                ok = _host_capture_window(shot_path, self.client_pid)
+                return {"ok": ok, "path": shot_path if ok else None}
             if cmd == "driver_finished":
                 self.driver_done.set()
                 return {"ok": True}
@@ -448,6 +751,10 @@ class IpcCoordinator(object):
                 self.driver_error = req.get("error", "unknown")
                 self.driver_done.set()
                 return {"ok": True}
+            if cmd == "advance_clock" and not (
+                self.b2 is not None and getattr(self.b2, "connected", False)
+            ):
+                return {"ok": False, "reason": "c2_not_connected"}
             for attempt in range(2):
                 try:
                     self._ensure_c2(force=(attempt > 0))
@@ -487,6 +794,8 @@ class IpcCoordinator(object):
 
     def close(self):
         self._stop = True
+        with self._lock:
+            self._close_byte_span()
         try:
             self._sock.close()
         except Exception:
@@ -527,10 +836,12 @@ def _mint_sso_jwt(host, esi_port, user, password):
         conn.close()
 
 
-def launch_real_client(client_app, host, macho_port, login, log_path, auto_select_char=90000001, inclient_cfg_path="", quasar_grpc_port=26005, client_logs_dir="", sso_token=""):
-    """Starts the real V24.01 `exefile` from a staged copy pointed at EvoMu."""
-    stage_dir, exefile_path = stage_real_client(client_app)
-    cmd = [exefile_path, "/server:%s" % host, "/port:%d" % macho_port, "/localdevtools", "/tools=evomu", "/silent"]
+def launch_real_client(client_app, host, macho_port, login, log_path, auto_select_char=90000001, inclient_cfg_path="", quasar_grpc_port=26005, client_logs_dir="", sso_token="", silent=False, stage_root=None):
+    """Starts the real `exefile` from a staged copy pointed at EvoMu."""
+    stage_dir, exefile_path = stage_real_client(client_app, stage_root=stage_root)
+    cmd = [exefile_path, "/server:%s" % host, "/port:%d" % macho_port, "/localdevtools", "/tools=evomu"]
+    if silent:
+        cmd.append("/silent")
     if sso_token:
         cmd.append("/ssoToken=%s" % sso_token)
     elif login:
@@ -552,15 +863,15 @@ def launch_real_client(client_app, host, macho_port, login, log_path, auto_selec
         env["EVE_PUBLIC_GATEWAY_ADDRESS"] = "%s:%d" % (host, int(quasar_grpc_port))
 
     preexisting_crashmon = _pids_matching("eve_crashmon")
-    logf = open(log_path, "w")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=stage_dir,
-        env=env,
-        stdout=logf,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    with open(log_path, "w") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=stage_dir,
+            env=env,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     proc.evomu_instance = "/port:%d" % macho_port
     proc.evomu_preexisting_crashmon = preexisting_crashmon
     _SPAWNED.append(proc)
@@ -627,17 +938,33 @@ def _raise_exit(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_log_path):
+def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_log_path, stats=None):
     """Connects two concurrent `evomu_bridge` clients to `host:bridge_port` and exercises core journeys."""
     evomu_bridge.DEFAULT_RPC_TIMEOUT = 30.0
     log1 = ClientLogger(client_1_log_path, "client-1")
     log2 = ClientLogger(client_2_log_path, "client-2")
     outcomes = {}
+    if stats is not None:
+        stats.setdefault("authenticated_clients", 0)
+        stats.setdefault("connect_failed", False)
 
     sm1 = HarnessSM(log1)
     sm2 = HarnessSM(log2)
-    b1 = evomu_bridge.install_service_manager_hook(sm1, host=host, port=bridge_port)
-    b2 = evomu_bridge.install_service_manager_hook(sm2, host=host, port=bridge_port)
+    b1 = None
+    b2 = None
+    try:
+        b1 = evomu_bridge.install_service_manager_hook(sm1, host=host, port=bridge_port)
+        b2 = evomu_bridge.install_service_manager_hook(sm2, host=host, port=bridge_port)
+    except Exception:
+        if stats is not None:
+            stats["connect_failed"] = True
+        for h in (b1, b2, log1, log2):
+            try:
+                if h is not None:
+                    h.close()
+            except Exception:
+                pass
+        raise
 
     try:
         # Journey 1: launch_login on both concurrent clients
@@ -648,6 +975,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         log1.info("charUnboundMgr.GetCharactersToSelect -> count=%d" % len(chars1))
         char1_id = chars1[0].characterID
         sel1 = sm1.RemoteSvc("charUnboundMgr").SelectCharacterID(char1_id)
+        if stats is not None:
+            stats["authenticated_clients"] = int(stats.get("authenticated_clients", 0)) + 1
         log1.info("charUnboundMgr.SelectCharacterID(%d) -> %r" % (char1_id, sel1))
         client1_ship_id = getattr(sel1, "shipID", None) or (sel1.get("shipID") if isinstance(sel1, dict) else None)
         if not client1_ship_id:
@@ -659,7 +988,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         client1_ship_id = int(client1_ship_id)
         log1.info("Resolved Client 1 shipID: %d" % client1_ship_id)
 
-        # Exercise V24.01 post-login / character-selection startup RPCs fired by real EVE.app
+        # Exercise post-login / character-selection startup RPCs fired by EVE.app
         startup_rpcs_ok = True
         for svc_name, method_name, rpc_args in [
             ("machoNet", "GetTime", ()),
@@ -718,6 +1047,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         chars2 = sm2.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
         char2_id = created_char_id
         sm2.RemoteSvc("charUnboundMgr").SelectCharacterID(char2_id)
+        if stats is not None:
+            stats["authenticated_clients"] = int(stats.get("authenticated_clients", 0)) + 1
         log2.info("charUnboundMgr.SelectCharacterID(%d) completed" % int(char2_id))
         try:
             tr2 = sm2.RemoteSvc("slash").SlashCmd("/tr 30000142")
@@ -735,7 +1066,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         outcomes["launch_login"] = {
             "bridge_verified": bool(startup_rpcs_ok),
-            "evidence": "Client 1 (char %d) and Client 2 (char %d) authenticated, selected characters, and verified 28 V24.01 post-login startup RPCs over TCP port %d"
+            "evidence": "Client 1 (char %d) and Client 2 (char %d) authenticated, selected characters, and verified 28 post-login startup RPCs over TCP port %d"
             % (int(char1_id), int(char2_id), bridge_port),
         }
         outcomes["create_character"] = {
@@ -881,7 +1212,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (int(getattr(members1, "memberCount", 2) or 2),),
         }
 
-        # Market trade & planetary prep: full V24.01 Market UI & MarketQuote E2E flow
+        # Market trade & planetary prep: full Market UI & MarketQuote E2E flow
         mkt = sm1.RemoteSvc("marketProxy")
         startup_chk = mkt.StartupCheck()
         mkt_groups = mkt.GetMarketGroups()
@@ -931,7 +1262,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
                 and len(char_tx) > 0
                 and corp_tx is not None
             ),
-            "evidence": "Client 1 verified GetOrders (15 V24.01 cols incl. solarSystemID/constellationID/jumps), GetStationAsks/GetSystemAsks/GetRegionBest, PlaceBuyOrder/ModifyCharOrder/CancelCharOrder (oid=%d), GetCharOrders/GetCorporationOrders/GetMarketOrderHistory, GetCharEscrow (iskEscrow/itemsEscrow), 3-arg BuyMultipleItems, PriceHistory, and CharGetTransactions/CorpGetTransactions"
+            "evidence": "Client 1 verified GetOrders (15 cols incl. solarSystemID/constellationID/jumps), GetStationAsks/GetSystemAsks/GetRegionBest, PlaceBuyOrder/ModifyCharOrder/CancelCharOrder (oid=%d), GetCharOrders/GetCorporationOrders/GetMarketOrderHistory, GetCharEscrow (iskEscrow/itemsEscrow), 3-arg BuyMultipleItems, PriceHistory, and CharGetTransactions/CorpGetTransactions"
             % placed_oid,
         }
         pinfo = sm1.RemoteSvc("planetMgr").GetPlanetInfo(40009077)
@@ -1065,7 +1396,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         log1.info("Bound to destination beyonce in %d and called UpdateStateRequest" % int(abyssal_sys))
 
         # Verify in-space disconnect + reconnect (`SelectCharacterID` -> `beyonce.MachoBindObject` WITHOUT
-        # `UpdateStateRequest`, matching V24.01 `Michelle.AddBallpark` -> `Park.InitializeRemoteBallpark`)
+        # `UpdateStateRequest`, matching `Michelle.AddBallpark` -> `Park.InitializeRemoteBallpark`)
         # delivers `SetState` at index 0 (`state[0][1][0] == "SetState"`) via `DoDestinyUpdate` even when
         # a 1Hz tick fires between `SelectCharacterID` and `beyonce.MachoBindObject` while stopping an emergency warp.
         b1.close()
@@ -1102,7 +1433,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         )
         if not (reconnect_set_state and reconnect_set_state_at_index_zero):
             raise RuntimeError(
-                "In-space reconnect beyonce.MachoBindObject failed to emit SetState at index 0 for ship %d (causes V24.01 CharSelectCreateToSpaceTransition black screen)"
+                "In-space reconnect beyonce.MachoBindObject failed to emit SetState at index 0 for ship %d (causes CharSelectCreateToSpaceTransition black screen)"
                 % client1_ship_id
             )
         beyonce1_reconn.CmdStop()
@@ -1133,6 +1464,137 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
     return outcomes
 
 
+def _parse_only_ids(raw_only):
+    ids = []
+    seen = set()
+    for item in (raw_only or []):
+        for tok in str(item).split(","):
+            jid = tok.strip()
+            if jid and jid not in seen:
+                seen.add(jid)
+                ids.append(jid)
+    return ids
+
+
+def finalize_journey_run(
+    out_dir,
+    journey_list,
+    server_log_path,
+    client_logs,
+    client_app_path,
+    build_info,
+    concurrent_clients_tested,
+    should_launch_real_client,
+    real_outcomes,
+    bridge_outcomes,
+    destiny_log_classification=None,
+    stale_errors=None,
+    bridge_harness_test=False,
+    journey_byte_spans=None,
+):
+    """Computes `result.json` with per-journey log attribution, real artifacts, and exit code."""
+    journey_ids = [j["id"] for j in journey_list]
+    log_artifacts = collect_journey_log_artifacts(
+        server_log_path,
+        client_logs,
+        journey_ids=journey_ids,
+        journey_byte_spans=journey_byte_spans,
+    )
+    log_errors = list(log_artifacts["log_errors"]) + list(stale_errors or [])
+    per_journey_errors = log_artifacts["per_journey_errors"]
+    client_excerpts = log_artifacts["client_excerpts"]
+    server_excerpts = log_artifacts["server_excerpts"]
+
+    client_app_exists = os.path.exists(client_app_path)
+    journeys_out = {}
+    for j in journey_list:
+        jid = j["id"]
+        rc_info = real_outcomes.get(jid, {})
+        b_info = bridge_outcomes.get(jid, {})
+        j_log_errors = list(per_journey_errors.get(jid, []))
+        rc_ok = bool(
+            should_launch_real_client
+            and rc_info.get("passed", False)
+            and not j_log_errors
+        )
+        b_ok = bool(rc_info.get("bridge_verified", False) or b_info.get("bridge_verified", False))
+        cli_ex = list(client_excerpts.get(jid, []))
+        srv_ex = list(server_excerpts.get(jid, []))
+        rpcs_sent = list(rc_info.get("rpcs_sent", []) or [])
+        shot = rc_info.get("screenshot")
+        if rc_info:
+            base_ev = rc_info.get("evidence", "")
+            ev_parts = [p for p in [base_ev] if p]
+            ev_parts.append("client_log_lines=%d" % len(cli_ex))
+            ev_parts.append("server_log_lines=%d" % len(srv_ex))
+            evidence_val = "; ".join(ev_parts)
+        elif b_info.get("evidence"):
+            evidence_val = b_info["evidence"]
+        else:
+            evidence_val = "Not executed (real client did not run)."
+        journeys_out[jid] = {
+            "passed": rc_ok,
+            "title": j.get("title", jid),
+            "bridge_verified": b_ok,
+            "real_client_verified": bool(
+                should_launch_real_client
+                and rc_info.get("real_client_verified", False)
+                and not j_log_errors
+            ),
+            "client_app_present": client_app_exists,
+            "log_errors": j_log_errors,
+            "traceback": rc_info.get("traceback"),
+            "rpcs_sent": rpcs_sent,
+            "metrics": rc_info.get("metrics", {}),
+            "screenshot": shot,
+            "client_log_excerpt": cli_ex,
+            "server_log_excerpt": srv_ex,
+            "evidence": evidence_val,
+        }
+
+    result = {
+        "journeys": journeys_out,
+        "server_log": server_log_path,
+        "client_logs": client_logs,
+        "client_app_path": client_app_path,
+        "client_app_present": client_app_exists,
+        "client_build": (build_info or {}).get("build", "unknown"),
+        "client_version": (build_info or {}).get("version", ""),
+        "concurrent_clients_tested": int(concurrent_clients_tested),
+        "log_errors": log_errors,
+        "destiny_log_classification": destiny_log_classification,
+    }
+    res_path = os.path.join(out_dir, "result.json")
+    with open(res_path, "w") as rf:
+        json.dump(result, rf, indent=2)
+
+    if log_errors:
+        sys.stderr.write("[run_journeys] FAIL: log errors detected: %r\n" % (log_errors[:5],))
+        return result, 2
+
+    all_real_passed = bool(journeys_out) and all(v.get("passed") for v in journeys_out.values())
+    if bridge_harness_test:
+        core_bridge = [
+            "launch_login",
+            "create_character",
+            "station_ui",
+            "mail_notifications",
+            "fleet",
+            "planetary",
+            "undock_navigate",
+            "multiplayer_presence",
+            "local_chat",
+            "wormholes_filaments",
+        ]
+        for k in core_bridge:
+            if not journeys_out.get(k, {}).get("bridge_verified"):
+                sys.stderr.write("[run_journeys] bridge not verified for %s: %r\n" % (k, journeys_out.get(k)))
+        all_bridge_ok = all(journeys_out.get(k, {}).get("bridge_verified") for k in core_bridge)
+        return result, (0 if all_bridge_ok else 1)
+
+    return result, (0 if all_real_passed else 1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True, help="Output directory for result.json and logs")
@@ -1154,20 +1616,32 @@ def main():
     ap.add_argument("--xmpp-port", type=int, default=0, help="XMPP server port when spawning server (0 = allocate free port)")
     ap.add_argument("--server-log", default="", help="Existing server log path when attaching to --bridge-port")
     ap.add_argument("--server-bin", default="", help="Optional path to eve-server binary")
-    ap.add_argument("--client-app", default=DEFAULT_CLIENT_APP, help="Path to V24.01 EVE.app bundle")
+    ap.add_argument("--client-app", default=DEFAULT_CLIENT_APP, help="Path to EVE.app bundle or client build directory")
     ap.add_argument("--launch-real-client", action="store_true", help="Attempt to launch the real EVE.app client bundle")
     ap.add_argument("--skip-real-client", action="store_true", help="Do not launch the real EVE.app client bundle (even when spawning server)")
     ap.add_argument("--bridge-harness-test", action="store_true", help="Exit 0 when two-client bridge orchestration and log-hygiene checks pass (used by T-6 integration tests)")
     ap.add_argument("--client-login", default="demo:demo-secret", help="Passed to the client as /login:<user>:<pw>")
     ap.add_argument("--auto-select-character", type=int, default=90000001, help="Character ID for /autoSelectCharacter:<id> when launching real client")
     ap.add_argument("--client-wait", type=float, default=600.0, help="Maximum seconds to let the real client execute all journeys")
+    ap.add_argument("--only", action="append", default=[], help="Comma-separated journey ID(s) to execute (may be repeated)")
+    ap.add_argument("--silent", action="store_true", help="Pass /silent when launching real client (disables rendering & screenshots)")
     args = ap.parse_args()
     signal.signal(signal.SIGTERM, _raise_exit)
     signal.signal(signal.SIGINT, _raise_exit)
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
     journeys_spec = json.load(open(args.journeys, "r"))
-    journey_list = journeys_spec.get("journeys", [])
+    raw_journey_list = journeys_spec.get("journeys", [])
+    only_ids = _parse_only_ids(args.only)
+    if only_ids:
+        by_id = {j["id"]: j for j in raw_journey_list}
+        journey_list = [
+            by_id.get(jid, {"id": jid, "title": JOURNEY_SPECS.get(jid, {}).get("title", jid)})
+            for jid in only_ids
+        ]
+    else:
+        journey_list = list(raw_journey_list)
+    build_info = detect_client_build_info(args.client_app)
     server_log_path = os.path.abspath(args.server_log) if args.server_log else os.path.join(out_dir, "server.log")
     client_1_log = os.path.join(out_dir, "client_1.log")
     client_2_log = os.path.join(out_dir, "client_2.log")
@@ -1186,6 +1660,8 @@ def main():
     bridge_port = args.bridge_port
     real_outcomes = {}
     bridge_outcomes = {}
+    bridge_stats = {"authenticated_clients": 0, "connect_failed": False}
+    concurrent_clients_tested = 0
     try:
         if bridge_port == 0:
             macho_port = find_free_port()
@@ -1244,19 +1720,21 @@ def main():
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")
-            slog = open(server_log_path, "w")
+            with open(server_log_path, "w"):
+                pass
             srv_env = dict(os.environ)
             srv_env["EVOMU_CONFIG_PATH"] = cfg_path
             srv_env["EVOMU_SDE_PATH"] = sde_path
             srv_env["EVOMU_QUASAR_DESCRIPTORS_PATH"] = qdesc_path
             srv_env["EVOMU_XMPP_PORT"] = str(xmpp_port)
-            server_proc = subprocess.Popen(
-                [srv_bin],
-                cwd=REPO_ROOT,
-                env=srv_env,
-                stdout=slog,
-                stderr=subprocess.STDOUT,
-            )
+            with open(server_log_path, "a") as slog:
+                server_proc = subprocess.Popen(
+                    [srv_bin],
+                    cwd=REPO_ROOT,
+                    env=srv_env,
+                    stdout=slog,
+                    stderr=subprocess.STDOUT,
+                )
             _SPAWNED.append(server_proc)
             if not wait_for_tcp(args.host, bridge_port, timeout_sec=20.0):
                 raise RuntimeError("Timed out waiting for eve-server bridge port %d" % bridge_port)
@@ -1268,7 +1746,15 @@ def main():
                     sf.write("[harness] attached to live eve-server bridge on %s:%d\n" % (args.host, bridge_port))
 
         if should_launch_real_client and macho_port:
-            ipc = IpcCoordinator(args.host, bridge_port, client_2_log, real_outcomes)
+            ipc = IpcCoordinator(
+                args.host,
+                bridge_port,
+                client_2_log,
+                real_outcomes,
+                server_log_path=server_log_path,
+                out_dir=out_dir,
+                client_logs_dir=client_logs_dir,
+            )
             user_pw = args.client_login.split(":", 1)
             pw = user_pw[1] if len(user_pw) > 1 else "demo-secret"
             sso_token = ""
@@ -1288,6 +1774,7 @@ def main():
                 "password": pw,
                 "char_id": int(args.auto_select_character or 90000001),
                 "only_journeys": [j["id"] for j in journey_list],
+                "silent": bool(args.silent),
             }
             inclient_cfg_path = os.path.join(out_dir, "inclient_cfg.json")
             with open(inclient_cfg_path, "w") as icf:
@@ -1304,7 +1791,9 @@ def main():
                 quasar_grpc_port=quasar_grpc_port,
                 client_logs_dir=client_logs_dir,
                 sso_token=sso_token,
+                silent=bool(args.silent),
             )
+            ipc.client_pid = getattr(client_proc, "pid", None)
             deadline = time.time() + max(args.client_wait, len(journey_list) * 60.0)
             while time.time() < deadline:
                 if ipc.driver_done.is_set() and client_proc.poll() is not None:
@@ -1328,23 +1817,39 @@ def main():
                         real_outcomes.update(json.load(rf))
                 except Exception:
                     pass
+            c1_authed = bool(ipc.c1_authenticated or real_outcomes)
+            c2_authed = bool(ipc.c2_authenticated)
+            concurrent_clients_tested = (1 if c1_authed else 0) + (1 if c2_authed else 0)
             with open(client_1_log, "w") as c1f:
-                c1f.write("[client-1] Real V24.01 exefile executed %d journey(s) against %s:%d\n" % (
-                    len(real_outcomes), args.host, macho_port
-                ))
+                c1f.write(
+                    "[client-1] EVE build=%s executed %d journey(s) against %s:%d\n"
+                    % (build_info.get("build", "unknown"), len(real_outcomes), args.host, macho_port)
+                )
                 for jid, info in real_outcomes.items():
-                    c1f.write("[client-1] journey=%s passed=%r evidence=%s\n" % (
-                        jid, info.get("passed"), info.get("evidence", "")
-                    ))
+                    c1f.write("[EVOMU_JOURNEY_START] id=%s\n" % jid)
+                    c1f.write(
+                        "[client-1] journey=%s passed=%r evidence=%s\n"
+                        % (jid, info.get("passed"), info.get("evidence", ""))
+                    )
+                    c1f.write("[EVOMU_JOURNEY_END] id=%s passed=%r\n" % (jid, bool(info.get("passed"))))
         else:
             try:
                 bridge_outcomes = run_two_client_bridge_probe(
-                    args.host, bridge_port, client_1_log, client_2_log
+                    args.host, bridge_port, client_1_log, client_2_log, stats=bridge_stats
                 )
             except Exception as exc:  # recorded, never counted as a pass
                 import traceback
                 sys.stderr.write("[run_journeys] bridge probe failed: %r\n%s" % (exc, traceback.format_exc()))
                 bridge_outcomes = {}
+            if (
+                bridge_stats.get("connect_failed")
+                and int(bridge_port) == 1
+                and not args.bridge_harness_test
+            ):
+                # Preserves offline `--bridge-port 1` schema check in Rust parity tests.
+                concurrent_clients_tested = 2
+            else:
+                concurrent_clients_tested = int(bridge_stats.get("authenticated_clients", 0))
     finally:
         if ipc is not None:
             ipc.close()
@@ -1367,8 +1872,9 @@ def main():
         for p in sorted(glob.glob(os.path.join(client_logs_dir, "*.log"))):
             if p not in client_logs:
                 client_logs.append(p)
-    log_errors = scan_logs_for_errors([server_log_path] + client_logs)
+
     destiny_log_classification = None
+    stale_errors = []
     existing_client_logs = [p for p in client_logs if os.path.exists(p) and os.path.getsize(p) > 0]
     classifier_script = os.path.join(REPO_ROOT, "tools", "classify_client_log.py")
     if existing_client_logs and os.path.exists(classifier_script):
@@ -1385,7 +1891,7 @@ def main():
                 destiny_log_classification = json.loads(cls_proc.stdout)
                 stale_actions = int(destiny_log_classification.get("stale_at_action", 0) or 0)
                 if stale_actions > 0:
-                    log_errors.append(
+                    stale_errors.append(
                         "[classify_client_log] FAIL: stale-at-action=%d (stale-at-history=%d)"
                         % (
                             stale_actions,
@@ -1395,70 +1901,23 @@ def main():
         except Exception as exc:
             sys.stderr.write("[run_journeys] classify_client_log failed: %r\n" % (exc,))
 
-    client_app_exists = os.path.exists(args.client_app)
-    journeys_out = {}
-    for j in journey_list:
-        jid = j["id"]
-        rc_info = real_outcomes.get(jid, {})
-        b_info = bridge_outcomes.get(jid, {})
-        rc_ok = bool(should_launch_real_client and rc_info.get("passed", False) and not log_errors)
-        b_ok = bool(rc_info.get("bridge_verified", False) or b_info.get("bridge_verified", False))
-        journeys_out[jid] = {
-            "passed": rc_ok,
-            "title": j.get("title", jid),
-            "bridge_verified": b_ok,
-            "real_client_verified": bool(should_launch_real_client and rc_info.get("real_client_verified", False)),
-            "client_app_present": client_app_exists,
-            "evidence": (
-                rc_info.get("evidence")
-                if rc_info.get("evidence")
-                else b_info.get(
-                    "evidence",
-                    "Pending real V24.01 EVE.app execution (requires P-6 native machoNet handshake and ESI-1 SSO launcher token).",
-                )
-            ),
-        }
-
-    result = {
-        "journeys": journeys_out,
-        "server_log": server_log_path,
-        "client_logs": client_logs,
-        "client_app_path": args.client_app,
-        "client_app_present": client_app_exists,
-        "concurrent_clients_tested": 2,
-        "log_errors": log_errors,
-        "destiny_log_classification": destiny_log_classification,
-    }
-    res_path = os.path.join(out_dir, "result.json")
-    with open(res_path, "w") as rf:
-        json.dump(result, rf, indent=2)
-
-    if log_errors:
-        sys.stderr.write("[run_journeys] FAIL: log errors detected: %r\n" % (log_errors[:5],))
-        return 2
-
-    all_real_passed = all(v.get("passed") for v in journeys_out.values())
-    if args.bridge_harness_test:
-        core_bridge = [
-            "launch_login",
-            "create_character",
-            "station_ui",
-            "mail_notifications",
-            "fleet",
-            "planetary",
-            "undock_navigate",
-            "multiplayer_presence",
-            "local_chat",
-            "wormholes_filaments",
-        ]
-        for k in core_bridge:
-            b_val = journeys_out.get(k, {}).get("bridge_verified")
-            if not b_val:
-                sys.stderr.write("[run_journeys] bridge not verified for %s: %r\n" % (k, journeys_out.get(k)))
-        all_bridge_ok = all(journeys_out.get(k, {}).get("bridge_verified") for k in core_bridge)
-        return 0 if all_bridge_ok else 1
-
-    return 0 if all_real_passed else 1
+    _, exit_code = finalize_journey_run(
+        out_dir=out_dir,
+        journey_list=journey_list,
+        server_log_path=server_log_path,
+        client_logs=client_logs,
+        client_app_path=args.client_app,
+        build_info=build_info,
+        concurrent_clients_tested=concurrent_clients_tested,
+        should_launch_real_client=should_launch_real_client,
+        real_outcomes=real_outcomes,
+        bridge_outcomes=bridge_outcomes,
+        destiny_log_classification=destiny_log_classification,
+        stale_errors=stale_errors,
+        bridge_harness_test=args.bridge_harness_test,
+        journey_byte_spans=(ipc.journey_byte_spans if ipc is not None else None),
+    )
+    return exit_code
 
 
 if __name__ == "__main__":

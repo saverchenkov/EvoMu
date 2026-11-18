@@ -1,11 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Helper utilities for the EvoMu V24.01 in-client journey driver (Python 2.7)."""
+"""Helper utilities for the EvoMu in-client journey driver (Python 2.7)."""
 
-import __builtin__
+try:
+    import __builtin__
+except ImportError:
+    import builtins as __builtin__
 import json
 import os
 import socket
 import time
+
+try:
+    _INT_TYPES = (int, long)
+except NameError:
+    _INT_TYPES = (int,)
+
+try:
+    _STR_TYPES = (basestring,)
+except NameError:
+    _STR_TYPES = (str, bytes)
+
+
+def _to_long(val):
+    try:
+        return long(val)
+    except NameError:
+        return int(val)
 
 
 def _sleep_ms(ms):
@@ -54,14 +74,19 @@ class IpcClient(object):
         self.sock = socket.create_connection(("127.0.0.1", int(port)), 15.0) if port else None
         if self.sock is not None:
             self.sock.settimeout(30.0)
-        self.rfile = self.sock.makefile("r") if self.sock is not None else None
+        self.rfile = self.sock.makefile("rb") if self.sock is not None else None
 
     def request(self, payload):
         if self.sock is None:
             return {"ok": False, "error": "no ipc socket"}
-        self.sock.sendall(json.dumps(payload) + "\n")
+        wire = (json.dumps(payload) + "\n").encode("utf-8")
+        self.sock.sendall(wire)
         resp = self.rfile.readline()
-        return json.loads(resp) if resp else {"ok": False, "error": "ipc eof"}
+        if not resp:
+            return {"ok": False, "error": "ipc eof"}
+        if isinstance(resp, bytes):
+            resp = resp.decode("utf-8", "replace")
+        return json.loads(resp)
 
     def notify(self, payload):
         try:
@@ -92,7 +117,7 @@ def _get_field(obj, name, default=None):
 
 
 def _extract_id(res, keys=("itemID", "contractID", "fleetID", "jobID", "mailID", "eventID", "labelID", "listID", "corporationID", "allianceID", "structureID", "orderID")):
-    if isinstance(res, (int, long)):
+    if isinstance(res, _INT_TYPES):
         return int(res)
     for k in keys:
         v = res.get(k) if isinstance(res, dict) else getattr(res, k, None)
@@ -100,7 +125,7 @@ def _extract_id(res, keys=("itemID", "contractID", "fleetID", "jobID", "mailID",
             return int(v)
     if isinstance(res, (tuple, list)) and len(res) > 0:
         first = res[0]
-        if isinstance(first, (int, long)):
+        if isinstance(first, _INT_TYPES):
             return int(first)
         if hasattr(first, "GetMachoObjectBoundId"):
             return first
@@ -127,54 +152,69 @@ def _ensure_view(sm, target_view):
                 charsel.CloseView()
             except Exception:
                 pass
-    vs = sm.GetService("viewState")
-    for _ in range(100):
-        cur = vs.GetCurrentViewInfo()
-        cname = getattr(cur, "name", None) if cur is not None else None
-        opening = getattr(vs, "isOpeningView", None)
-        if not opening:
-            if target_view == "hangar" and (
-                vs.IsViewActive("hangar")
-                or vs.IsViewActive("station")
-                or cname in ("hangar", "station")
-            ):
-                break
-            if vs.IsViewActive(target_view) or cname == target_view:
-                break
-        _sleep_ms(100)
-    else:
-        if not getattr(vs, "isOpeningView", None):
+    vs = None
+    try:
+        vs = sm.GetService("viewState")
+    except Exception:
+        vs = None
+    if vs is not None:
+        for _ in range(100):
             cur = vs.GetCurrentViewInfo()
             cname = getattr(cur, "name", None) if cur is not None else None
-            already = (
-                target_view == "hangar" and (
-                    vs.IsViewActive("hangar") or vs.IsViewActive("station") or cname in ("hangar", "station")
-                )
-            ) or vs.IsViewActive(target_view) or cname == target_view
-            if not already:
-                if hasattr(vs, "ChangePrimaryView"):
-                    vs.ChangePrimaryView(target_view)
-                else:
-                    vs.ActivateView(target_view)
-                _sleep_ms(300)
-    loading = sm.GetService("loading")
-    for _ in range(40):
-        if not loading.IsLoading():
-            break
-        _sleep_ms(100)
+            opening = getattr(vs, "isOpeningView", None)
+            if not opening:
+                if target_view == "hangar" and (
+                    vs.IsViewActive("hangar")
+                    or vs.IsViewActive("station")
+                    or cname in ("hangar", "station")
+                ):
+                    break
+                if vs.IsViewActive(target_view) or cname == target_view:
+                    break
+            _sleep_ms(100)
+        else:
+            if not getattr(vs, "isOpeningView", None):
+                cur = vs.GetCurrentViewInfo()
+                cname = getattr(cur, "name", None) if cur is not None else None
+                already = (
+                    target_view == "hangar" and (
+                        vs.IsViewActive("hangar") or vs.IsViewActive("station") or cname in ("hangar", "station")
+                    )
+                ) or vs.IsViewActive(target_view) or cname == target_view
+                if not already:
+                    if hasattr(vs, "ChangePrimaryView"):
+                        vs.ChangePrimaryView(target_view)
+                    else:
+                        vs.ActivateView(target_view)
+                    _sleep_ms(300)
+    loading = None
+    try:
+        loading = sm.GetService("loading")
+    except Exception:
+        loading = None
+    if loading is not None and hasattr(loading, "IsLoading"):
+        for _ in range(40):
+            if not loading.IsLoading():
+                break
+            _sleep_ms(100)
     _wait_view_settled(sm)
 
 
 def _wait_view_settled(sm, timeout_sec=10.0):
-    vs = sm.GetService("viewState")
-    loading = getattr(sm, "services", {}).get("loading")
+    vs = None
+    try:
+        vs = sm.GetService("viewState")
+    except Exception:
+        vs = None
+    services_map = getattr(sm, "services", None) or {}
+    loading = services_map.get("loading")
     start = time.time()
     deadline = start + timeout_sec
     while time.time() < deadline:
         now = time.time()
-        opening = getattr(vs, "isOpeningView", None)
+        opening = getattr(vs, "isOpeningView", None) if vs is not None else None
         is_loading = bool(loading.IsLoading()) if loading is not None and hasattr(loading, "IsLoading") else False
-        space_svc = getattr(sm, "services", {}).get("space")
+        space_svc = services_map.get("space")
         lazy_cnt = getattr(space_svc, "lazyLoadQueueCount", 0) if space_svc is not None else 0
         sess = getattr(__builtin__, "session", None)
         sess_busy = bool(sess is not None and (getattr(sess, "mutating", 0) or getattr(sess, "changing", None) is not None))
@@ -184,12 +224,12 @@ def _wait_view_settled(sm, timeout_sec=10.0):
             and not getattr(sess, "stationid", None) and not getattr(sess, "structureid", None)
         )
         bp_ok = True
-        if in_space and not opening and vs.IsViewActive("inflight"):
-            michelle = getattr(sm, "services", {}).get("michelle")
+        if in_space and not opening and vs is not None and vs.IsViewActive("inflight"):
+            michelle = services_map.get("michelle")
             bp = getattr(michelle, "_Michelle__bp", None) if michelle is not None else None
             if (bp is None or int(getattr(bp, "solarsystemID", 0) or 0) != sys_id) and now > start + 2.0 and michelle is not None:
                 try:
-                    michelle.AddBallpark(long(sys_id))
+                    michelle.AddBallpark(_to_long(sys_id))
                     sm.RemoteSvc("beyonce").MachoBindObject(int(sys_id), None)
                     bp = getattr(michelle, "_Michelle__bp", None)
                 except Exception:
@@ -199,7 +239,7 @@ def _wait_view_settled(sm, timeout_sec=10.0):
                 and int(getattr(bp, "solarsystemID", 0) or 0) == sys_id
                 and getattr(bp, "validState", 0)
             )
-        ip_svc = getattr(sm, "services", {}).get("infoPanel")
+        ip_svc = services_map.get("infoPanel")
         ip_busy = False
         if ip_svc is not None and now <= start + 1.5:
             ip_busy = any(
@@ -428,7 +468,7 @@ def _wait_for_session(sm, user, password, target_char_id, timeout_sec=120.0, def
     sess = getattr(__builtin__, "session", None)
     if getattr(sess, "charid", None):
         return int(sess.charid)
-    raise RuntimeError("Timed out waiting for V24.01 session character selection")
+    raise RuntimeError("Timed out waiting for EVE session character selection")
 
 
 def _live_session_attr(attr, default=None):
@@ -474,6 +514,9 @@ def _get_beyonce(sm, sys_id):
             and bp is not None
             and int(getattr(bp, "solarsystemID", 0) or 0) == int(sys_id)
         ):
+            sink = getattr(sm, "_evomu_rpc_sink", None)
+            if sink is not None and not isinstance(rp, _RecordedBoundProxy):
+                return _RecordedBoundProxy("beyonce.bound", rp, sink)
             return rp
     except Exception:
         pass
@@ -713,7 +756,7 @@ def _warp_animated(sm, b_obj, tid, stuff_type="item", distance=0.0, max_ticks=45
                 continue
             raise
 
-    # 0.005 * 3.0 * AU_METERS (~2.24e9 m/s): exact threshold in V24 Warp.WarpLoop for warp tunnel/explosion.
+    # 0.005 * 3.0 * AU_METERS (~2.24e9 m/s): threshold in client Warp.WarpLoop for warp tunnel/explosion.
     tunnel_speed_threshold = 0.005 * 3.0 * 149597870700.0
     saw_warp_mode = False
     saw_active_stamp = False
@@ -875,37 +918,61 @@ def _dock_station(sm, station_id=60003760, allow_time_control=True):
     _ensure_view(sm, "hangar")
 
 
-def _ensure_docked_jita(sm, ipc):
+def _advance_clock(sm, ipc, secs):
+    """Advances server simulation clock, using IPC if Client 2 is connected or Client 1 timeControl."""
+    secs_i = int(secs)
+    if ipc is not None:
+        try:
+            res = ipc.request({"cmd": "advance_clock", "secs": secs_i})
+            if isinstance(res, dict) and res.get("ok"):
+                return res.get("time", True)
+        except Exception:
+            pass
+    return sm.RemoteSvc("timeControl").AdvanceClock(secs_i)
+
+
+def _ensure_docked_jita(sm, ipc, station_id=60003760, system_id=30000142):
+    target_station = int(station_id)
+    target_system = int(system_id)
     _wait_view_settled(sm)
     sess = getattr(__builtin__, "session", None)
-    station_id = getattr(sess, "stationid", None)
-    if station_id == 60003760:
+    cur_station = getattr(sess, "stationid", None)
+    if cur_station == target_station:
         _ensure_view(sm, "hangar")
         return
-    if getattr(sess, "solarsystemid", None) and not station_id:
+    if cur_station is not None and cur_station != target_station:
+        _undock_ship(sm)
+    if getattr(sess, "structureid", None):
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            sm.RemoteSvc("structureDocking").Undock(int(getattr(sess, "structureid")))
+            _wait_session_attr("structureid", None, timeout_sec=3.0)
+        except Exception:
+            pass
+    if getattr(sess, "solarsystemid", None) and not getattr(sess, "stationid", None):
         _sleep_sim_ms(1200)
     _wait_warp_fx_settled(sm, timeout_sec=35.0)
     try:
-        beyonce, _ = sm.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        beyonce, _ = sm.RemoteSvc("beyonce").MachoBindObject(target_system, None)
         beyonce.CmdStop()
     except Exception:
         pass
-    ipc.request({"cmd": "advance_clock", "secs": 12})
+    _advance_clock(sm, ipc, 12)
     _sleep_sim_ms(1200)
     _sleep_ms(1200)
     _wait_warp_fx_settled(sm, timeout_sec=5.0)
     try:
-        sm.RemoteSvc("stationSvc").Dock(60003760)
+        sm.RemoteSvc("stationSvc").Dock(target_station)
     except Exception:
-        _try_slash(sm, "/tr 30000142")
-        _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+        _try_slash(sm, "/tr %d" % target_station)
+        _wait_session_attr("solarsystemid2", target_system, timeout_sec=3.0)
         _wait_view_settled(sm)
-        ipc.request({"cmd": "advance_clock", "secs": 12})
-        sm.RemoteSvc("stationSvc").Dock(60003760)
+        _advance_clock(sm, ipc, 12)
+        sm.RemoteSvc("stationSvc").Dock(target_station)
     deadline = time.time() + 10.0
     while time.time() < deadline:
         sess = getattr(__builtin__, "session", None)
-        if getattr(sess, "stationid", None) == 60003760 and getattr(sess, "changing", None) is None:
+        if getattr(sess, "stationid", None) == target_station and getattr(sess, "changing", None) is None:
             break
         _sleep_ms(100)
     try:
@@ -913,3 +980,289 @@ def _ensure_docked_jita(sm, ipc):
     except Exception:
         pass
     _ensure_view(sm, "hangar")
+
+
+def _leave_active_fleet(sm):
+    fid = _live_session_attr("fleetid", None)
+    if fid:
+        try:
+            sm.RemoteSvc("fleetMgr").LeaveFleet()
+            _wait_session_attr("fleetid", None, timeout_sec=3.0)
+        except Exception:
+            pass
+    try:
+        fleet_svc = sm.GetService("fleet") if hasattr(sm, "GetService") else None
+        if fleet_svc is not None and hasattr(fleet_svc, "fleet"):
+            fleet_svc.fleet = None
+    except Exception:
+        pass
+
+
+def _cleanup_corp_structures(sm, ipc=None, structure_ids=None):
+    """Best-effort unanchor + package of active structures owned by the current player corp."""
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp < 98000000:
+        return
+    ids = []
+    for sid in (structure_ids or ()):
+        try:
+            if sid and int(sid) not in ids:
+                ids.append(int(sid))
+        except Exception:
+            pass
+    try:
+        corp_structs = sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+        if isinstance(corp_structs, dict):
+            for k in corp_structs.keys():
+                if int(k) not in ids:
+                    ids.append(int(k))
+        elif isinstance(corp_structs, (list, tuple)):
+            for row in corp_structs:
+                sid = int(_get_field(row, "structureID", _get_field(row, "itemID", 0)) or 0)
+                if sid and sid not in ids:
+                    ids.append(sid)
+    except Exception:
+        pass
+    for sid in ids:
+        if _live_session_attr("structureid", None) == sid:
+            try:
+                sm.RemoteSvc("timeControl").ClearSessionTimer()
+                sm.RemoteSvc("structureDocking").Undock(sid)
+                _wait_session_attr("structureid", None, timeout_sec=3.0)
+            except Exception:
+                pass
+        try:
+            sm.RemoteSvc("structureDeployment").Unanchor(sid)
+        except Exception:
+            _try_slash(sm, "/structure state %d 110" % sid)
+            try:
+                sm.RemoteSvc("structureDeployment").Unanchor(sid)
+            except Exception:
+                pass
+        _try_slash(sm, "/upwelltimer %d" % sid)
+        try:
+            _advance_clock(sm, ipc, 5)
+        except Exception:
+            pass
+    if ids:
+        try:
+            sm.RemoteSvc("structureDirectory").GetMyCorporationStructures()
+        except Exception:
+            pass
+
+
+def _resign_player_corp(sm, baseline_corp_id=0, ipc=None, structure_ids=None):
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp >= 98000000 and (not baseline_corp_id or cur_corp != int(baseline_corp_id)):
+        _cleanup_corp_structures(sm, ipc=ipc, structure_ids=structure_ids)
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+        try:
+            _advance_clock(sm, ipc, 12)
+        except Exception:
+            pass
+        try:
+            sm.RemoteSvc("corpRegistry").ResignFromCorp()
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                now_corp = int(_live_session_attr("corpid", 0) or 0)
+                if 0 < now_corp < 98000000:
+                    break
+                _sleep_ms(50)
+        except Exception:
+            pass
+
+
+def _ensure_home_ship(sm, target_ship_id, ipc=None):
+    if not target_ship_id:
+        return int(_live_session_attr("shipid", 0) or 0)
+    target_sid = int(target_ship_id)
+    cur_sid = int(_live_session_attr("shipid", 0) or 0)
+    if cur_sid == target_sid:
+        return target_sid
+    try:
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    except Exception:
+        pass
+    try:
+        sm.RemoteSvc("ship").Board(target_sid)
+    except Exception:
+        try:
+            _advance_clock(sm, ipc, 12)
+        except Exception:
+            pass
+        try:
+            sm.RemoteSvc("ship").AssembleShip([target_sid])
+        except Exception:
+            pass
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
+        sm.RemoteSvc("ship").Board(target_sid)
+    _wait_session_attr("shipid", target_sid, timeout_sec=3.0)
+    _sleep_ms(100)
+    _wait_view_settled(sm)
+    try:
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    except Exception:
+        pass
+    return int(_live_session_attr("shipid", target_sid) or target_sid)
+
+
+def _reset_baseline_state(sm, ipc, baseline, char_id=None):
+    """Best-effort restore of baseline station, starting ship, NPC corp, and cleared fleet."""
+    target_char = int(char_id or baseline.get("char_id", 0) or 0)
+    home_station = int(baseline.get("station_id", 60003760) or 60003760)
+    home_system = int(baseline.get("system_id", 30000142) or 30000142)
+    home_ship = int(baseline.get("ship_id", 0) or 0)
+    home_corp = int(baseline.get("corp_id", 0) or 0)
+
+    if target_char and int(_live_session_attr("charid", 0) or 0) != target_char:
+        try:
+            sm.GetService("sessionMgr").PerformSessionChange(
+                "charsel", sm.RemoteSvc("charUnboundMgr").SelectCharacterID, target_char
+            )
+            _ensure_view(sm, "hangar")
+        except Exception:
+            pass
+
+    if _live_session_attr("fleetid", None):
+        _leave_active_fleet(sm)
+    else:
+        try:
+            fleet_svc = sm.GetService("fleet") if hasattr(sm, "GetService") else None
+            if fleet_svc is not None and getattr(fleet_svc, "fleet", None) is not None:
+                fleet_svc.fleet = None
+        except Exception:
+            pass
+
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
+        _cleanup_corp_structures(sm, ipc=ipc)
+
+    cur_station = _live_session_attr("stationid", None)
+    cur_struct = _live_session_attr("structureid", None)
+    cur_sys = int(_live_session_attr("solarsystemid2", home_system) or home_system)
+    if cur_station != home_station or cur_struct is not None or cur_sys != home_system:
+        _ensure_docked_jita(sm, ipc, station_id=home_station, system_id=home_system)
+
+    if home_ship and int(_live_session_attr("shipid", 0) or 0) != home_ship:
+        try:
+            _ensure_home_ship(sm, home_ship, ipc=ipc)
+        except Exception:
+            pass
+
+    cur_corp = int(_live_session_attr("corpid", 0) or 0)
+    if cur_corp >= 98000000 and (not home_corp or cur_corp != home_corp):
+        _resign_player_corp(sm, home_corp, ipc=ipc)
+
+    if target_char:
+        _sync_quasar_gateway(sm, target_char)
+
+
+class _RecordedBoundProxy(object):
+    def __init__(self, svc_name, target, active_sink):
+        self.__dict__["_svc_name"] = svc_name
+        self.__dict__["_target"] = target
+        self.__dict__["_active_sink"] = active_sink
+
+    def __setattr__(self, name, value):
+        return setattr(self._target, name, value)
+
+    def __getattr__(self, method_name):
+        attr = getattr(self._target, method_name)
+        if str(method_name).startswith("_") or not callable(attr):
+            return attr
+        svc_name = self._svc_name
+        active_sink = self._active_sink
+
+        def _wrapped(*args, **kwargs):
+            status = "ok"
+            try:
+                res = attr(*args, **kwargs)
+                if (
+                    method_name == "MachoBindObject"
+                    and isinstance(res, tuple)
+                    and len(res) >= 1
+                    and res[0] is not None
+                    and not isinstance(res[0], (_INT_TYPES, _STR_TYPES, float, bool, list, dict, tuple))
+                ):
+                    bound = _RecordedBoundProxy("%s.bound" % svc_name, res[0], active_sink)
+                    res = (bound,) + res[1:]
+                return res
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                if (
+                    isinstance(active_sink, list)
+                    and len(active_sink) == 1
+                    and (active_sink[0] is None or isinstance(active_sink[0], list))
+                ):
+                    sink = active_sink[0]
+                else:
+                    sink = active_sink
+                if sink is not None:
+                    try:
+                        sink.append({"service": svc_name, "method": method_name, "status": status})
+                    except Exception:
+                        pass
+
+        return _wrapped
+
+
+def _install_rpc_recorder(sm):
+    if getattr(sm, "_evomu_rpc_recorder_installed", False):
+        return getattr(sm, "_evomu_rpc_sink", [None])
+    orig_remote = getattr(sm, "RemoteSvc", None)
+    if not callable(orig_remote):
+        return [None]
+    active_sink = [None]
+
+    def _wrapped_remote_svc(service_name, *args, **kwargs):
+        svc = orig_remote(service_name, *args, **kwargs)
+        if svc is None:
+            return None
+        return _RecordedBoundProxy(str(service_name), svc, active_sink)
+
+    sm.RemoteSvc = _wrapped_remote_svc
+    sm._evomu_rpc_recorder_installed = True
+    sm._evomu_rpc_sink = active_sink
+    return active_sink
+
+
+def _capture_inclient_screenshot(out_dir, jid, ipc=None):
+    if not out_dir:
+        return None
+    shots_dir = os.path.join(out_dir, "screenshots")
+    try:
+        if not os.path.isdir(shots_dir):
+            os.makedirs(shots_dir)
+    except Exception:
+        return None
+    shot_path = os.path.join(shots_dir, "%s.png" % jid)
+    try:
+        import trinity
+        dev = getattr(trinity, "device", None)
+        if dev is not None and hasattr(dev, "GetRenderTargets") and hasattr(trinity, "Tr2HostBitmap"):
+            rts = dev.GetRenderTargets()
+            rt = rts[0] if rts else None
+            if rt is not None:
+                bmp = trinity.Tr2HostBitmap()
+                bmp.CreateFromRenderTarget(rt)
+                bmp.Save(shot_path)
+                if os.path.exists(shot_path) and os.path.getsize(shot_path) > 0:
+                    return shot_path
+    except Exception:
+        pass
+    if ipc is not None:
+        try:
+            resp = ipc.request({"cmd": "capture_screenshot", "path": shot_path, "journey_id": jid})
+            if isinstance(resp, dict) and resp.get("ok") and resp.get("path"):
+                return resp.get("path")
+        except Exception:
+            pass
+    return None
