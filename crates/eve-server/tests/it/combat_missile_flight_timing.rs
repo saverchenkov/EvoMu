@@ -952,9 +952,19 @@ async fn missile_flight_follows_sim_clock_under_tidi() {
     let init_shield = shield_of(&sys, victim.ship_id).await;
     activate_launcher(&ctx, &mut attacker, lml, victim.ship_id, 5).await.unwrap();
 
-    // First 4 wall ticks (~2.0s sim): 1st missile still in flight (< 3.0s sim), target shield untouched.
+    // First 4 wall ticks (~2.0s sim): under 0.5x TiDi, 1st sim tick completes at wall tick 2
+    // (1.0s sim = 2.0s wall) where missile #1 spawns; at 2.0s sim it is still in flight (< 3.0s sim).
     let early = advance_and_step(&ctx, &sys, 4).await;
-    assert_eq!(collect_missile_add_batches(&early[0].events, victim.ship_id).len(), 1);
+    assert_eq!(
+        collect_missile_add_batches(&early[0].events, victim.ship_id).len(),
+        0,
+        "0.5s sim wall tick 1 under 0.5x TiDi must not increment tick or flush next-tick missile batch early"
+    );
+    assert_eq!(
+        collect_missile_add_batches(&early[1].events, victim.ship_id).len(),
+        1,
+        "1.0s sim wall tick 2 under 0.5x TiDi must advance tick +1 and flush missile AddBalls2"
+    );
     assert_eq!(shield_of(&sys, victim.ship_id).await, init_shield);
 
     // Next 6 wall ticks (10s wall total = 5s sim): 1st missile impacts; LML I cycle (14.4s sim = 28.8s wall) + 10s sim reload (20s wall) not done.

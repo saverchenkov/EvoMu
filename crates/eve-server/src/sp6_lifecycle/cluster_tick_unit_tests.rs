@@ -2399,10 +2399,20 @@ async fn physics_tick_subsec_accumulation_overrun_lateness_and_isolation_1207_12
         accumulate_physics_ticker_steps(Duration::from_millis(1_600), rem_1);
     assert_eq!(steps_2, 2);
     assert_eq!(rem_2, Duration::from_millis(200));
+    // Sub-1s wakes preserve remainder without early stepping (#1169).
+    let (steps_sub, rem_sub) =
+        accumulate_physics_ticker_steps(Duration::from_millis(400), Duration::from_millis(300));
+    assert_eq!(steps_sub, 0);
+    assert_eq!(rem_sub, Duration::from_millis(700));
+    let (steps_sub_done, rem_sub_done) =
+        accumulate_physics_ticker_steps(Duration::from_millis(350), rem_sub);
+    assert_eq!(steps_sub_done, 1);
+    assert_eq!(rem_sub_done, Duration::from_millis(50));
+
     let (steps_cap, rem_cap) =
         accumulate_physics_ticker_steps(Duration::from_secs(10), Duration::from_millis(500));
     assert_eq!(steps_cap, MAX_PHYSICS_BACKLOG_STEPS);
-    assert_eq!(rem_cap, Duration::ZERO);
+    assert_eq!(rem_cap, Duration::from_millis(500));
 
     // 2. Per-system step duration inside the 1,000 ms tick window reports 0 ms lateness (#1207).
     assert_eq!(compute_physics_step_lateness_ms(0.0, 270.0, true), 0.0);
@@ -3818,5 +3828,77 @@ async fn self_destruct_due_countdown_aborts_cleanly_if_docked_or_unowned_gh_1174
             rt.self_destruct_countdowns.len()
         }),
         0
+    );
+}
+
+#[tokio::test]
+async fn overrun_physics_tick_emits_sim_clock_rebase_for_skipped_secs_1169() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_id = 30_000_142_u32;
+    let char_space = 90_000_001_i64;
+    let char_docked = 90_000_002_i64;
+
+    let (u_space, u_docked) = ctx.db.with_mut_snapshot(|snap| {
+        let c1 = snap.characters.get_mut(&char_space).expect("char_space");
+        c1.solar_system_id = sys_id;
+        c1.station_id = None;
+        c1.structure_id = None;
+        let u1 = c1.user_id;
+
+        let c2 = snap.characters.get_mut(&char_docked).expect("char_docked");
+        c2.solar_system_id = sys_id;
+        c2.station_id = Some(60_003_760);
+        c2.structure_id = None;
+        let u2 = c2.user_id;
+        (u1, u2)
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(u_space, 11_169, Some(char_space), false, ctx.now_unix());
+    let _ = ctx
+        .db
+        .acquire_online_lock(u_docked, 11_170, Some(char_docked), false, ctx.now_unix());
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let tick_0 = sys_h.ballpark.read().unwrap().current_tick;
+    let _ = ctx.drain_notifications_for_char(char_space);
+    let _ = ctx.drain_notifications_for_char(char_docked);
+
+    // 0-second tick is a no-op once subsec remainder has not reached 1.0s.
+    step_active_systems_physics_tick(&ctx, 0).await;
+    assert_eq!(sys_h.ballpark.read().unwrap().current_tick, tick_0);
+    assert!(ctx.drain_notifications_for_char(char_space).is_empty());
+
+    // 10s overrun steps MAX_PHYSICS_BACKLOG_STEPS (3) ticks and reconciles the 7 skipped seconds
+    // via DoSimClockRebase for online in-space pilots only (not docked pilots).
+    step_active_systems_physics_tick(&ctx, 10).await;
+    assert_eq!(
+        sys_h.ballpark.read().unwrap().current_tick,
+        tick_0 + MAX_PHYSICS_BACKLOG_STEPS
+    );
+
+    let space_notes = ctx.drain_notifications_for_char(char_space);
+    let rebase = space_notes
+        .iter()
+        .find(|n| n.event == "DoSimClockRebase")
+        .expect("in-space pilot must receive DoSimClockRebase on multi-second overrun");
+    let times = match rebase.args.first() {
+        Some(eve_proto::PyRep::Tuple(items)) | Some(eve_proto::PyRep::List(items)) => items,
+        other => panic!("expected DoSimClockRebase tuple arg, got {other:?}"),
+    };
+    let old_ft = times[0].as_i64().expect("old_ft integer");
+    let new_ft = times[1].as_i64().expect("new_ft integer");
+    let expected_skipped_ft = (10 - MAX_PHYSICS_BACKLOG_STEPS) as i64 * FILETIME_TICKS_PER_SEC;
+    assert_eq!(
+        old_ft - new_ft,
+        expected_skipped_ft,
+        "overrun DoSimClockRebase delta must equal -7s skipped wall-clock time"
+    );
+
+    assert!(
+        !ctx.drain_notifications_for_char(char_docked)
+            .iter()
+            .any(|n| n.event == "DoSimClockRebase"),
+        "docked pilots must not receive space overrun DoSimClockRebase"
     );
 }

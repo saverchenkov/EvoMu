@@ -260,12 +260,15 @@ impl Ballpark {
             }
         }
 
-        let mut goto_event: Option<(DestinyEvent, bool)> = None;
+        let mut goto_event: Option<(DestinyEvent, crate::ballpark::OwnerGotoDelivery)> = None;
         let mut mode_events: Vec<DestinyEvent> = Vec::new();
         let mut extra_events: Vec<DestinyEvent> = Vec::new();
         let current_tick = self.current_tick;
         let already_echoed_goto_this_tick =
             self.same_tick_owner_goto_tick.get(&ball_id) == Some(&current_tick);
+        let owner_has_undrained_goto =
+            self.has_undrained_goto_for_observer(ball_id, ball_id);
+        let sim_tick_accum = self.sim_tick_accum;
         let ball = self.balls.get_mut(&ball_id).unwrap();
         if cancelling_align_warp {
             clamp_ball_subwarp_velocity(ball);
@@ -276,11 +279,28 @@ impl Ballpark {
                     ball_id,
                     direction: direction.to_array(),
                 };
-                let emit_to_owner = !already_echoed_goto_this_tick;
-                if emit_to_owner {
-                    self.pending_events.push(ev.clone());
+                let owner_delivery =
+                    if !already_echoed_goto_this_tick || !owner_has_undrained_goto {
+                        crate::ballpark::OwnerGotoDelivery::Push
+                    } else if sim_tick_accum > 0.0 {
+                        crate::ballpark::OwnerGotoDelivery::Coalesce
+                    } else {
+                        crate::ballpark::OwnerGotoDelivery::Suppress
+                    };
+                match owner_delivery {
+                    crate::ballpark::OwnerGotoDelivery::Suppress => {}
+                    crate::ballpark::OwnerGotoDelivery::Push => {
+                        self.pending_events.push(ev.clone());
+                    }
+                    crate::ballpark::OwnerGotoDelivery::Coalesce => {
+                        crate::ballpark::Ballpark::coalesce_or_push_goto(
+                            &mut self.pending_events,
+                            ball_id,
+                            &ev,
+                        );
+                    }
                 }
-                goto_event = Some((ev, emit_to_owner));
+                goto_event = Some((ev, owner_delivery));
             }
             MovementMode::Follow { target_id, range } => {
                 if ball.speed_fraction <= 0.0 {
@@ -355,8 +375,8 @@ impl Ballpark {
         }
         ball.mode = mode;
         self.warp_align_ticks.remove(&ball_id);
-        if let Some((_, emit_to_owner)) = &goto_event {
-            if *emit_to_owner {
+        if let Some((_, owner_delivery)) = &goto_event {
+            if *owner_delivery != crate::ballpark::OwnerGotoDelivery::Suppress {
                 self.same_tick_owner_goto_tick.insert(ball_id, current_tick);
             }
         } else {
@@ -365,9 +385,9 @@ impl Ballpark {
         if cancelling_align_warp {
             self.emit_warp_cancelled_events(ball_id);
         }
-        if let Some((ev, emit_to_owner)) = goto_event {
+        if let Some((ev, owner_delivery)) = goto_event {
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
-                self.queue_or_coalesce_goto_for_grid_observers(gid, ball_id, &ev, emit_to_owner);
+                self.queue_or_coalesce_goto_for_grid_observers(gid, ball_id, &ev, owner_delivery);
             }
         }
         for ev in mode_events {

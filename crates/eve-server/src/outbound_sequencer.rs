@@ -78,6 +78,7 @@ pub struct SessionWireState {
     flight_recorder: Option<Arc<FlightRecorder>>,
     guard: SequencerGuardState,
     synthetic_remove_floor: Option<(u32, u32)>,
+    last_wire_epoch_and_stamp: Option<(u32, u32)>,
 }
 
 impl SessionWireState {
@@ -94,6 +95,7 @@ impl SessionWireState {
             flight_recorder: None,
             guard: SequencerGuardState::default(),
             synthetic_remove_floor: None,
+            last_wire_epoch_and_stamp: None,
         }
     }
 
@@ -211,6 +213,7 @@ impl SessionWireState {
         self.materialized.clear();
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
+        self.last_wire_epoch_and_stamp = None;
         self.destiny = DestinyStream::AwaitingSetState { epoch: ep };
         ep
     }
@@ -234,6 +237,7 @@ impl SessionWireState {
         self.materialized.clear();
         self.guard.reset_epoch_state();
         self.synthetic_remove_floor = None;
+        self.last_wire_epoch_and_stamp = None;
         self.destiny = DestinyStream::Detached;
     }
 
@@ -312,13 +316,18 @@ impl SessionWireState {
     /// `#845`, `#1077 §A`), enforcing strict per-epoch stamp monotonicity for non-`SetState` batches.
     pub fn accept_destiny_batch_with_reason(
         &mut self,
-        batch: DestinyBatch,
+        mut batch: DestinyBatch,
     ) -> AcceptDestinyOutcome {
         if batch.is_empty() {
             return AcceptDestinyOutcome::Empty;
         }
         let batch_epoch = batch.epoch;
         let batch_stamp = batch.stamp;
+        let prev_wire_stamp = self
+            .last_wire_epoch_and_stamp
+            .filter(|&(ep, _)| ep == batch_epoch)
+            .map(|(_, st)| st)
+            .unwrap_or(0);
         match self.destiny {
             DestinyStream::Detached => AcceptDestinyOutcome::Dropped {
                 epoch: batch_epoch,
@@ -341,11 +350,23 @@ impl SessionWireState {
                         reason: "awaiting_set_state".to_string(),
                     };
                 }
+                // Issue #1169: SetState must remain stamped at Ballpark::current_tick globally; if
+                // this single session's wire already emitted a higher stamp in this epoch (e.g. an
+                // FX-floored delta before broadcast lag resync), clamp only this session's wire
+                // SetState up to `prev_wire_stamp` so client monotonicity (`INV_MONOTONIC_STAMP`)
+                // holds without inflating `Ballpark::current_tick`.
+                let wire_stamp = if batch_stamp < prev_wire_stamp {
+                    restamp_batch_entries(&mut batch, prev_wire_stamp);
+                    prev_wire_stamp
+                } else {
+                    batch_stamp
+                };
                 self.destiny = DestinyStream::Live {
                     epoch,
-                    set_state_stamp: batch_stamp,
-                    last_stamp: batch_stamp,
+                    set_state_stamp: wire_stamp,
+                    last_stamp: wire_stamp,
                 };
+                self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
                 AcceptDestinyOutcome::Accepted(batch)
             }
             DestinyStream::Live {
@@ -361,12 +382,19 @@ impl SessionWireState {
                     };
                 }
                 if batch.has_set_state {
-                    let new_last = last_stamp.max(batch_stamp);
+                    let wire_floor = prev_wire_stamp.max(last_stamp).max(set_state_stamp);
+                    let wire_stamp = if batch_stamp < wire_floor {
+                        restamp_batch_entries(&mut batch, wire_floor);
+                        wire_floor
+                    } else {
+                        batch_stamp
+                    };
                     self.destiny = DestinyStream::Live {
                         epoch,
-                        set_state_stamp: batch_stamp,
-                        last_stamp: new_last,
+                        set_state_stamp: wire_stamp,
+                        last_stamp: wire_stamp,
                     };
+                    self.last_wire_epoch_and_stamp = Some((epoch, wire_stamp));
                     AcceptDestinyOutcome::Accepted(batch)
                 } else {
                     let trusted_stamp = last_stamp.max(set_state_stamp);
@@ -396,6 +424,7 @@ impl SessionWireState {
                         set_state_stamp,
                         last_stamp: batch_stamp,
                     };
+                    self.last_wire_epoch_and_stamp = Some((epoch, batch_stamp));
                     AcceptDestinyOutcome::Accepted(batch)
                 }
             }
@@ -1264,6 +1293,47 @@ impl ServerDestinyNormalizer {
     }
 }
 
+fn restamp_damage_state_map(rep: &mut PyRep, new_stamp: u32) {
+    let stamp_rep = PyRep::Integer(i64::from(new_stamp));
+    let patch_entry = |val: &mut PyRep| {
+        if let PyRep::Tuple(outer) | PyRep::List(outer) = val {
+            if let Some(PyRep::Tuple(shield_tuple) | PyRep::List(shield_tuple)) =
+                outer.first_mut()
+            {
+                if shield_tuple.len() >= 3 && shield_tuple[2].as_i64().is_some() {
+                    shield_tuple[2] = stamp_rep.clone();
+                }
+            }
+        }
+    };
+    match rep {
+        PyRep::Dict(entries) => {
+            for (_, val) in entries.iter_mut() {
+                patch_entry(val);
+            }
+        }
+        PyRep::List(entries) | PyRep::Tuple(entries) => {
+            for item in entries.iter_mut() {
+                if let PyRep::Tuple(kv) | PyRep::List(kv) = item {
+                    if kv.len() >= 2 {
+                        patch_entry(&mut kv[1]);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn restamp_state_binary_header(rep: &mut PyRep, new_stamp: u32) {
+    match rep {
+        PyRep::Bytes(bytes) | PyRep::Buffer(bytes) if bytes.len() >= 5 => {
+            bytes[1..5].copy_from_slice(&new_stamp.to_le_bytes());
+        }
+        _ => {}
+    }
+}
+
 fn restamp_set_state_args(args: &mut PyRep, new_stamp: u32) {
     match args {
         PyRep::KeyVal(map) => {
@@ -1272,11 +1342,26 @@ fn restamp_set_state_args(args: &mut PyRep, new_stamp: u32) {
                     *v = PyRep::Integer(i64::from(new_stamp));
                 }
             }
+            if let Some(v) = map.get_mut("state") {
+                restamp_state_binary_header(v, new_stamp);
+            }
+            if let Some(v) = map.get_mut("damageState") {
+                restamp_damage_state_map(v, new_stamp);
+            }
         }
         PyRep::Dict(entries) => {
             for (k, v) in entries.iter_mut() {
-                if k.as_str() == Some("stamp") && v.as_i64().is_some() {
-                    *v = PyRep::Integer(i64::from(new_stamp));
+                match k.as_str() {
+                    Some("stamp") if v.as_i64().is_some() => {
+                        *v = PyRep::Integer(i64::from(new_stamp));
+                    }
+                    Some("state") => {
+                        restamp_state_binary_header(v, new_stamp);
+                    }
+                    Some("damageState") => {
+                        restamp_damage_state_map(v, new_stamp);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2684,5 +2769,140 @@ mod tests {
             vec![crate::sequencer_invariants::INV_REMOVE_AFTER_ADDBALLS]
         );
         assert_eq!(raw_wire.sequencer_counters().invariant_violations, 1);
+    }
+
+    #[test]
+    fn reattach_set_state_preserves_same_stamp_and_clamps_below_wire_floor() {
+        let fr = Arc::new(FlightRecorder::new());
+        let mut wire = SessionWireState::new(98_116_901, 9601).with_flight_recorder(Arc::clone(&fr));
+        wire.set_invariant_validator_mode(InvariantValidatorMode::RecordAndEmit);
+        let ep = wire.enter_space(Some(30_000_142));
+
+        let init = DestinyBatch::new(
+            ep,
+            40,
+            true,
+            named_update(40, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+        );
+        let init_frame = sequence_tick(&mut wire, init).expect("initial SetState accepted");
+        assert!(matches!(
+            init_frame,
+            OutFrame::DoDestinyUpdate { stamp: 40, has_set_state: true, .. }
+        ));
+
+        // Equal-stamp re-attachment SetState at current_tick (= 40) is accepted cleanly without bumping.
+        let same_tick_reattach = DestinyBatch::new(
+            ep,
+            40,
+            true,
+            named_update(40, "SetState", vec![PyRep::keyval([("ego", PyRep::Integer(5001))])]),
+        );
+        let reattach_frame =
+            sequence_tick(&mut wire, same_tick_reattach).expect("same-stamp SetState accepted");
+        assert!(matches!(
+            reattach_frame,
+            OutFrame::DoDestinyUpdate { stamp: 40, has_set_state: true, .. }
+        ));
+        assert_eq!(
+            wire.destiny,
+            DestinyStream::Live {
+                epoch: ep,
+                set_state_stamp: 40,
+                last_stamp: 40,
+            }
+        );
+
+        // Suppose an FX-floored delta bumped this wire's last emitted stamp to 43 while ballpark tick is 41.
+        let fx_delta = DestinyBatch::new(ep, 43, false, dummy_updates("OnSpecialFX", 43));
+        assert!(sequence_tick(&mut wire, fx_delta).is_some());
+
+        // Subsequent lag transition + SetState stamped at current_tick = 41 must clamp ONLY this session's
+        // SetState wire stamp (including KeyVal["stamp"], binary state header bytes[1..5], and damageState
+        // stamps) up to 43 so INV_MONOTONIC_STAMP and V24 ReadFullStateFromStream consistency hold.
+        assert_eq!(wire.on_broadcast_lagged(), Some(ep));
+        let mut bp = eve_destiny::Ballpark::new(30_000_142);
+        bp.current_tick = 41;
+        bp.add_ball(eve_destiny::Ball {
+            id: 5001,
+            type_id: 587,
+            position: eve_destiny::DVec3::ZERO,
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        });
+        if let Some(cs) = bp.combat_states.get_mut(&5001) {
+            cs.shield_hp = 120.0;
+            cs.max_shield_hp = 200.0;
+        }
+        let set_state_payload = eve_destiny::wire::encode_set_state_payload(&bp, 5001);
+        let lag_resync = DestinyBatch::new(
+            ep,
+            41,
+            true,
+            named_update(41, "SetState", vec![set_state_payload]),
+        );
+        let (resync_frame, _) = sequence_tick_with_events(&mut wire, lag_resync);
+        match resync_frame.expect("lag resync SetState emitted") {
+            OutFrame::DoDestinyUpdate { stamp, has_set_state, updates, .. } => {
+                assert!(has_set_state);
+                assert_eq!(stamp, 43);
+                let PyRep::List(entries) = updates else {
+                    panic!("expected List of updates");
+                };
+                let PyRep::Tuple(entry) = &entries[0] else {
+                    panic!("expected tuple entry");
+                };
+                assert_eq!(entry[0], PyRep::Integer(43));
+                let PyRep::Tuple(action_pair) = &entry[1] else {
+                    panic!("expected action pair");
+                };
+                assert_eq!(action_pair[0].as_str(), Some("SetState"));
+                let PyRep::Tuple(args) = &action_pair[1] else {
+                    panic!("expected args tuple");
+                };
+                let PyRep::KeyVal(kv) = &args[0] else {
+                    panic!("expected SetState KeyVal");
+                };
+                assert_eq!(kv.get("stamp"), Some(&PyRep::Integer(43)));
+                let Some(PyRep::Bytes(state_bytes)) = kv.get("state") else {
+                    panic!("expected binary state bytes");
+                };
+                let (_, header_stamp, decoded_balls) =
+                    eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState binary buffer");
+                assert_eq!(header_stamp, 43, "SetState binary bytes[1..5] must match clamped stamp");
+                assert_eq!(decoded_balls.len(), 1);
+                let Some(PyRep::Dict(damage_entries)) = kv.get("damageState") else {
+                    panic!("expected damageState Dict");
+                };
+                assert!(!damage_entries.is_empty());
+                for (_, dmg_val) in damage_entries {
+                    let PyRep::Tuple(outer) = dmg_val else {
+                        panic!("expected damage tuple");
+                    };
+                    let PyRep::Tuple(shield_tuple) = &outer[0] else {
+                        panic!("expected shield inner tuple");
+                    };
+                    assert_eq!(
+                        shield_tuple[2],
+                        PyRep::Integer(43),
+                        "damageState shield stamp must match clamped SetState wire stamp"
+                    );
+                }
+            }
+            other => panic!("expected DoDestinyUpdate, got {other:?}"),
+        }
+        assert_eq!(wire.sequencer_counters().invariant_violations, 0);
+        assert_eq!(
+            wire.destiny,
+            DestinyStream::Live {
+                epoch: ep,
+                set_state_stamp: 43,
+                last_stamp: 43,
+            }
+        );
     }
 }

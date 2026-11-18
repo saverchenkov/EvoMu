@@ -88,19 +88,8 @@ fn drain_observer_updates_in_actor(
 ) -> (u64, Vec<DestinyEvent>, PyRep, u64) {
     sync_player_slim_items(ballpark, db_opt);
     let events = ballpark.drain_observer_events(observer_ball_id);
-    if events
-        .iter()
-        .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
-    {
-        let min_floor = last_visible_stamp_actor
-            .load(std::sync::atomic::Ordering::Acquire)
-            .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire));
-        ballpark.current_tick = ballpark.current_tick.saturating_add(1).max(min_floor);
-        last_visible_stamp_actor.fetch_max(
-            ballpark.current_tick,
-            std::sync::atomic::Ordering::AcqRel,
-        );
-    }
+    // `#1169`: `Ballpark::current_tick` increments exclusively inside `Ballpark::step` when `1.0 s`
+    // of simulated physics is integrated — never inside `DrainObserverUpdates`.
     let stamp = ballpark.current_tick as u32;
     let fx_floor = last_visible_stamp_actor
         .load(std::sync::atomic::Ordering::Acquire)
@@ -113,6 +102,16 @@ fn drain_observer_updates_in_actor(
         Some(ballpark),
         Some(last_fx_stamp_actor),
     );
+    if !events.is_empty()
+        && !events
+            .iter()
+            .any(|ev| matches!(ev, DestinyEvent::SetState { .. }))
+    {
+        last_visible_stamp_actor.fetch_max(
+            u64::from(stamp.max(fx_floor)),
+            std::sync::atomic::Ordering::AcqRel,
+        );
+    }
     let broadcast_seq = *broadcast_seq_gate
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -192,6 +191,9 @@ pub struct SystemRegistry {
     physics_step_flags: RankedMutex<HashMap<SolarSystemId, Arc<std::sync::atomic::AtomicBool>>, RANK_LEAF>,
     /// Shared `ServerContext` active-warp tracking tables wired into spawned system actors (`#1175`).
     warp_tracking: types::SharedWarpTracking,
+    /// Per-session `beyonce.UpdateStateRequest` cooldown guards owned by this `ServerContext` (`#1169`).
+    pub(crate) explicit_update_state_guards:
+        Arc<RankedMutex<HashMap<(u64, i64), types::ExplicitUpdateStateGuard>, RANK_LEAF>>,
 }
 
 /// Lock-free RAII guard releasing a system's in-flight physics-step slot upon completion or panic.
@@ -234,7 +236,22 @@ impl SystemRegistry {
             unrebased_clock_offset_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             physics_step_flags: RankedMutex::new(HashMap::new()),
             warp_tracking: types::SharedWarpTracking::default(),
+            explicit_update_state_guards: Arc::new(RankedMutex::new(HashMap::new())),
         }
+    }
+
+    pub fn clear_explicit_update_state_guard(&self, session_id: u64, char_id: i64) {
+        self.explicit_update_state_guards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(session_id, char_id));
+    }
+
+    pub fn clear_explicit_update_state_guards_for_session(&self, session_id: u64) {
+        self.explicit_update_state_guards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(sid, _), _| *sid != session_id);
     }
 
     /// Acquires the exclusive per-system physics-step slot if no prior step for `solar_system_id` is still in flight.
@@ -958,6 +975,7 @@ impl SystemRegistry {
         let last_fx_stamp = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_fx_stamp_actor = last_fx_stamp.clone();
         let unrebased_clock_offset_secs_actor = Arc::clone(&self.unrebased_clock_offset_secs);
+        let explicit_update_state_guards_actor = Arc::clone(&self.explicit_update_state_guards);
         let command_panics = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let command_panics_actor = command_panics.clone();
         #[cfg(test)]
@@ -1332,6 +1350,10 @@ impl SystemRegistry {
                                 let removed = ballpark.remove_ball(ball_id);
                                 fit_projections.remove(&ball_id);
                                 removed_checkpoint_ball = Some(ball_id);
+                                explicit_update_state_guards_actor
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ball_id));
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(removed);
                             }
@@ -1363,6 +1385,10 @@ impl SystemRegistry {
                                 asteroids.remove(&ship_id);
                                 fit_projections.remove(&ship_id);
                                 removed_checkpoint_ball = Some(ship_id);
+                                explicit_update_state_guards_actor
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ship_id));
                                 let removed = if ballpark.balls.contains_key(&station_id) {
                                     ballpark.accept_docking(ship_id, station_id)
                                 } else {
@@ -1376,6 +1402,10 @@ impl SystemRegistry {
                                 accept_docking_target,
                                 reply,
                             } => {
+                                explicit_update_state_guards_actor
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .retain(|_, g| !(g.sys_id == solar_system_id && g.ship_id == ball_id));
                                 if !ballpark.balls.contains_key(&ball_id) {
                                     let _ = ballpark.remove_ball(ball_id);
                                     warp_provenance.remove(&ball_id);
@@ -1731,6 +1761,9 @@ impl SystemRegistry {
                                         "Observer ball {observer_ball_id} not in system {solar_system_id}"
                                     )));
                                 }
+                            }
+                            SystemCommand::CurrentTick { reply } => {
+                                let _ = reply.send(ballpark.current_tick);
                             }
                             SystemCommand::GetBubbleIdForBall { ball_id, reply } => {
                                 let bid = ballpark.bubble_id_for_ball(ball_id);
@@ -2622,7 +2655,12 @@ impl SystemRegistry {
                             let pre_tick_caps = cycles::snapshot_player_ship_capacitors(&ballpark, db_opt.as_ref());
                             let pre_missile_positions =
                                 missiles::snapshot_missile_positions(&ballpark, active_guided_missiles);
+                            // `#1169`: `Ballpark::step(dt_sim)` integrates continuous motion while
+                            // `Ballpark::sim_tick_accum` advances `current_tick` strictly once per
+                            // completed `1.0 s` of simulated physics.
+                            let prev_tick = ballpark.current_tick;
                             let events = ballpark.step(dt_sim);
+                            let completed_sim_steps = ballpark.current_tick.saturating_sub(prev_tick);
                             missiles::flush_pending_missile_deploy_fx(
                                 &mut ballpark,
                                 pending_missile_deploy_fx,
@@ -2785,36 +2823,38 @@ impl SystemRegistry {
                                     );
                                 }
                             }
-                            for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
-                            }
-                            for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-                                notify_tx_opt.as_ref(),
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
-                            }
-                            for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
-                                &mut ballpark,
-                                sde_opt.as_deref(),
-                                db_opt.as_ref(),
-                                solar_system_id,
-                                pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
-                                notify_tx_opt.as_ref(),
-                            ) {
-                                destroyed_balls.push((bid, None));
-                                pending_destroyed_actor.record_one(bid, None);
+                            for _ in 0..completed_sim_steps {
+                                for bid in crate::services::pve_abyssal_pylons::step_abyssal_hazards_and_pylons_in_ballpark_for_tick(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
+                                for bid in crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark_for_tick(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                    pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                    notify_tx_opt.as_ref(),
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
+                                for bid in crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_with_notifications(
+                                    &mut ballpark,
+                                    sde_opt.as_deref(),
+                                    db_opt.as_ref(),
+                                    solar_system_id,
+                                    pending_notifications_opt.as_deref().map(|r| r as &dyn AnyRwLock<_>),
+                                    notify_tx_opt.as_ref(),
+                                ) {
+                                    destroyed_balls.push((bid, None));
+                                    pending_destroyed_actor.record_one(bid, None);
+                                }
                             }
                             {
                                 let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or_else(|| {
@@ -2880,7 +2920,13 @@ impl SystemRegistry {
                             }
                             let current_tick = ballpark.current_tick;
                             let has_subscribers = event_tx_actor.receiver_count() > 0;
-                            let broadcast_opt = if has_subscribers || matches!(step_reply, StepReply::Full(_)) {
+                            let has_pending_destiny_updates = !events.is_empty()
+                                || !ballpark.pending_events.is_empty()
+                                || ballpark.observer_events.values().any(|evs| !evs.is_empty());
+                            let should_emit_broadcast = matches!(step_reply, StepReply::Full(_))
+                                || (has_subscribers
+                                    && (completed_sim_steps > 0 || has_pending_destiny_updates));
+                            let broadcast_opt = if should_emit_broadcast {
                                 let fx_floor = last_visible_stamp_actor
                                     .load(std::sync::atomic::Ordering::Acquire)
                                     .max(last_fx_stamp_actor.load(std::sync::atomic::Ordering::Acquire))
@@ -3469,6 +3515,17 @@ fn apply_set_movement_mode_command(
 }
 
 impl SystemHandle {
+    /// Queries the actor's authoritative `Ballpark::current_tick` without locking `ballpark` externally (`#1169`, `#1173`).
+    pub(crate) async fn query_current_tick(&self) -> Result<u64, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::CurrentTick { reply: tx })
+            .await
+            .map_err(|_| format!("system {} actor closed", self.solar_system_id))?;
+        rx.await
+            .map_err(|_| format!("system {} actor dropped CurrentTick reply", self.solar_system_id))
+    }
+
     /// Pushes an immutable [`eve_dogma::FitProjection`] to the system actor and awaits completion (`#922`).
     pub async fn apply_fit_projection(
         &self,

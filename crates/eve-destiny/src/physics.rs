@@ -62,9 +62,20 @@ impl Ballpark {
             return Vec::new();
         }
         let dt = dt.min(60.0);
-        self.current_tick += 1;
-        if self.sim_unix_secs > 0 {
-            self.sim_unix_secs = self.sim_unix_secs.saturating_add(dt.round().max(0.0) as u64);
+        // Only advance `current_tick` per whole `1.0 s` of integrated simulation physics (`#1169`).
+        self.sim_tick_accum += dt;
+        let whole_sim_secs = if self.sim_tick_accum >= 1.0 - 1e-9 {
+            let whole = (self.sim_tick_accum + 1e-9).floor().max(0.0) as u64;
+            self.sim_tick_accum = (self.sim_tick_accum - whole as f64).max(0.0);
+            whole
+        } else {
+            0
+        };
+        if whole_sim_secs > 0 {
+            self.current_tick = self.current_tick.saturating_add(whole_sim_secs);
+            if self.sim_unix_secs > 0 {
+                self.sim_unix_secs = self.sim_unix_secs.saturating_add(whole_sim_secs);
+            }
         }
         let current_tick = self.current_tick;
         self.same_tick_owner_goto_tick
@@ -158,7 +169,8 @@ impl Ballpark {
                 // radius expands by R(t) = R_max * (t / duration)^{0.25} and expires at t >= duration.
                 ball.velocity = DVec3::ZERO;
                 if let Some(ms) = mushroom_states.get(&ball.id) {
-                    let elapsed_s = (current_tick.saturating_sub(ms.effect_stamp) as f64) * dt;
+                    let elapsed_s =
+                        (current_tick.saturating_sub(ms.effect_stamp) as f64) + self.sim_tick_accum;
                     let t_norm = if ms.duration_s > 0.0 {
                         elapsed_s / ms.duration_s
                     } else {
@@ -249,11 +261,12 @@ impl Ballpark {
                 }
 
                 let was_aligning = phase == WarpPhase::Aligning;
-                if phase == WarpPhase::Aligning && dt > 0.0 {
+                let align_step_ticks = whole_sim_secs.min(u32::MAX as u64) as u32;
+                if phase == WarpPhase::Aligning && align_step_ticks > 0 {
                     let align_ticks = warp_align_ticks
                         .entry(ball.id)
-                        .and_modify(|c| *c = c.saturating_add(1))
-                        .or_insert(1);
+                        .and_modify(|c| *c = c.saturating_add(align_step_ticks))
+                        .or_insert(align_step_ticks);
                     if *align_ticks >= FORCED_WARP_ALIGN_TICKS {
                         // Match V24 `_destiny.so` `Destiny::AlignForWarp` (`-effectStamp >= 181`):
                         // capitals/titans whose effective align exceeds 181s force-enter warp
@@ -352,7 +365,7 @@ impl Ballpark {
         self.step_collision_bumping_with_dynamics(&dynamic_ids, &pre_step_dynamic_balls, &positions, dt);
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
-        let elapsed_ticks = (dt.floor() as u32).max(1);
+        let elapsed_ticks = whole_sim_secs.min(u32::MAX as u64) as u32;
         let mut gate_decloaked = Vec::new();
         for (&id, cs) in &mut self.combat_states {
             cs.sync_action_breaks();
@@ -657,40 +670,59 @@ impl Ballpark {
                     }
                 }
                 if let Some((flat_dps, pct_dps, rem_ticks)) = cs.active_breacher_dot {
-                    let max_total = cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp;
-                    let tick_dmg = flat_dps.min(pct_dps * max_total) * dt;
-                    let (applied, destroyed) = cs.apply_true_damage(tick_dmg);
-                    let shield_ratio = if cs.max_shield_hp > 0.0 {
-                        (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let armor_ratio = if cs.max_armor_hp > 0.0 {
-                        (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let structure_ratio = if cs.max_structure_hp > 0.0 {
-                        (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let next_rem = rem_ticks.saturating_sub(1);
-                    dot_updates.push((
-                        id_a,
-                        flat_dps,
-                        pct_dps,
-                        next_rem,
-                        applied > 0.0,
-                        shield_ratio,
-                        armor_ratio,
-                        structure_ratio,
-                        destroyed,
-                    ));
-                    if rem_ticks <= 1 || destroyed {
+                    if rem_ticks == 0 {
                         cs.active_breacher_dot = None;
+                        cs.breacher_dot_tick_accum = 0.0;
                     } else {
-                        cs.active_breacher_dot = Some((flat_dps, pct_dps, next_rem));
+                        let max_total = cs.max_shield_hp + cs.max_armor_hp + cs.max_structure_hp;
+                        let tick_dmg = flat_dps.min(pct_dps * max_total) * dt;
+                        let (applied, destroyed) = cs.apply_true_damage(tick_dmg);
+                        let elapsed_ticks = if dt > 0.0 {
+                            cs.breacher_dot_tick_accum += dt;
+                            let whole = ((cs.breacher_dot_tick_accum + 1e-9).floor().max(0.0)
+                                as u32)
+                                .min(rem_ticks);
+                            cs.breacher_dot_tick_accum =
+                                (cs.breacher_dot_tick_accum - f64::from(whole)).max(0.0);
+                            whole
+                        } else {
+                            0
+                        };
+                        let next_rem = rem_ticks.saturating_sub(elapsed_ticks);
+                        if elapsed_ticks > 0 || destroyed {
+                            let shield_ratio = if cs.max_shield_hp > 0.0 {
+                                (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let armor_ratio = if cs.max_armor_hp > 0.0 {
+                                (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let structure_ratio = if cs.max_structure_hp > 0.0 {
+                                (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            dot_updates.push((
+                                id_a,
+                                flat_dps,
+                                pct_dps,
+                                next_rem,
+                                applied > 0.0,
+                                shield_ratio,
+                                armor_ratio,
+                                structure_ratio,
+                                destroyed,
+                            ));
+                        }
+                        if next_rem == 0 || destroyed {
+                            cs.active_breacher_dot = None;
+                            cs.breacher_dot_tick_accum = 0.0;
+                        } else {
+                            cs.active_breacher_dot = Some((flat_dps, pct_dps, next_rem));
+                        }
                     }
                 }
 
@@ -1797,4 +1829,196 @@ impl Ballpark {
 }
 
 #[cfg(test)] #[path = "physics_unit_tests.rs"] mod physics_unit_tests;
+
+#[cfg(test)]
+mod tick_accumulation_1169_tests {
+    use crate::{Ball, Ballpark, MovementMode};
+    use glam::DVec3;
+
+    #[test]
+    fn ballpark_step_advances_current_tick_only_per_whole_sim_second() {
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(Ball {
+            id: 42,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::new(100.0, 0.0, 0.0),
+            max_velocity: 100.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::GotoDirection {
+                direction: DVec3::X,
+            },
+        });
+        let t0 = bp.current_tick;
+        for step_idx in 1..=9 {
+            let _ = bp.step(0.1);
+            assert_eq!(
+                bp.current_tick, t0,
+                "sub-1.0s step {step_idx}/9 must not increment Ballpark::current_tick (#1169)"
+            );
+        }
+        assert!(
+            bp.balls[&42].position.x > 80.0,
+            "sub-1.0s steps must still integrate continuous ship motion"
+        );
+        let _ = bp.step(0.1);
+        assert_eq!(
+            bp.current_tick,
+            t0 + 1,
+            "10th 0.1s step completes 1.0 sim second and advances current_tick by 1"
+        );
+        assert!(
+            (bp.balls[&42].position.x - 100.0).abs() < 1e-6,
+            "10 x 0.1s at 100 m/s must equal 100m total travel, got {}",
+            bp.balls[&42].position.x
+        );
+        let _ = bp.step(1.0);
+        assert_eq!(bp.current_tick, t0 + 2);
+        let _ = bp.step(2.0);
+        assert_eq!(bp.current_tick, t0 + 4);
+    }
+
+    #[test]
+    fn breacher_dot_scales_damage_and_expiry_over_750_tidi_tenth_steps() {
+        use crate::{CombatState, DestinyEvent};
+
+        let mut bp = Ballpark::new(30_000_142);
+        bp.add_ball(Ball {
+            id: 77,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        });
+        bp.combat_states.insert(
+            77,
+            CombatState {
+                shield_hp: 0.0,
+                max_shield_hp: 1_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 4_000.0,
+                max_structure_hp: 4_000.0,
+                shield_recharge_time_ms: 0.0,
+                ..Default::default()
+            },
+        );
+        // 100 flat DPS < 0.05 * 10_000 = 500 -> exact 100.0 DPS for 75s simulated (7,500 total dmg).
+        assert!(bp.apply_breacher_dot(77, 100.0, 0.05, 75));
+        assert!(bp.pending_events.iter().any(|e| matches!(
+            e,
+            DestinyEvent::OnDotVictimUpdated {
+                ball_id: 77,
+                remaining_ticks: 75,
+                ..
+            }
+        )));
+        bp.pending_events.clear();
+        let start_hp = bp.combat_states[&77].armor_hp + bp.combat_states[&77].structure_hp;
+
+        let mut dot_event_count = 0usize;
+        for step_idx in 1..=750 {
+            let evs = bp.step(0.1);
+            let step_dots = evs
+                .iter()
+                .filter(|e| matches!(e, DestinyEvent::OnDotVictimUpdated { ball_id: 77, .. }))
+                .count();
+            dot_event_count += step_dots;
+            if step_idx % 10 != 0 {
+                assert_eq!(
+                    step_dots, 0,
+                    "sub-second step {step_idx} should not spam OnDotVictimUpdated"
+                );
+            } else {
+                assert_eq!(
+                    step_dots, 1,
+                    "whole simulated second boundary step {step_idx} must emit 1 OnDotVictimUpdated"
+                );
+            }
+            if step_idx < 750 {
+                assert!(
+                    bp.combat_states[&77].active_breacher_dot.is_some(),
+                    "Breacher DoT expired early at step {step_idx}/750"
+                );
+            }
+        }
+        let end_hp = bp.combat_states[&77].armor_hp + bp.combat_states[&77].structure_hp;
+        assert!(
+            ((start_hp - end_hp) - 7_500.0).abs() < 1e-6,
+            "750 x 0.1s at 100 DPS must deal exact 7,500 damage, dealt {}",
+            start_hp - end_hp
+        );
+        assert_eq!(bp.combat_states[&77].active_breacher_dot, None);
+        assert_eq!(dot_event_count, 75);
+    }
+
+    #[test]
+    fn mushroom_expansion_and_expiry_follows_sim_clock_under_tidi() {
+        use crate::MushroomState;
+
+        let mut bp = Ballpark::new(30_000_142);
+        let start_tick = bp.current_tick;
+        bp.add_ball(Ball {
+            id: 88,
+            type_id: 1978,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 1.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Mushroom,
+        });
+        bp.mushroom_states.insert(
+            88,
+            MushroomState {
+                max_radius: 10_000.0,
+                duration_s: 10.0,
+                effect_stamp: start_tick,
+                owner_id: 1,
+            },
+        );
+
+        // First 0.1s step (`elapsed_s = 0.1`, t_norm = 0.01): expands instead of stalling at 0.0.
+        let _ = bp.step(0.1);
+        assert_eq!(bp.current_tick, start_tick);
+        let r_01 = bp.balls[&88].radius;
+        assert!(
+            (r_01 - 10_000.0 * (0.01_f64).sqrt().sqrt()).abs() < 1e-6,
+            "expected Mushroom radius at 0.1s to match sim_tick_accum progress, got {r_01}"
+        );
+
+        // Advance to 5.0s simulated (`50` x 0.1s total): R(5s) = 10_000 * 0.5^{0.25}.
+        for _ in 1..50 {
+            let _ = bp.step(0.1);
+            assert!(bp.balls.contains_key(&88), "Mushroom must remain active before 10s");
+        }
+        let r_50 = bp.balls[&88].radius;
+        assert!(
+            (r_50 - 10_000.0 * (0.5_f64).sqrt().sqrt()).abs() < 1e-4,
+            "expected Mushroom radius at 5.0s = {}, got {r_50}",
+            10_000.0 * (0.5_f64).sqrt().sqrt()
+        );
+
+        // Advance through 9.9s (steps 51..99), still present, then expire at exact 10.0s (step 100).
+        for _ in 50..99 {
+            let _ = bp.step(0.1);
+            assert!(bp.balls.contains_key(&88), "Mushroom expired before 10.0s sim");
+        }
+        let _ = bp.step(0.1);
+        assert!(
+            !bp.balls.contains_key(&88) && !bp.mushroom_states.contains_key(&88),
+            "Mushroom must expire cleanly after 100 x 0.1s = 10.0s simulated"
+        );
+    }
+}
 
