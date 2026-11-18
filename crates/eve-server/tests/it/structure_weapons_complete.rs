@@ -296,10 +296,10 @@ async fn test_standup_point_defense_battery_pulse_exclusions_and_capsules() {
 
     dock_and_board_structure(&ctx, &mut sess, gunner, ls_st, LOWSEC_SYS).await;
 
-    // Overload is forbidden on Standup modules; empty ammo fails with NoChargesLoaded
+    // Overload is forbidden on Standup modules (even unloaded); Activate without ammo fails with NoAmmoLoaded
     assert_eq!(
         rpc(&ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(ls_pds)]).await.unwrap_err().code,
-        "NoAmmoLoaded"
+        "CannotOverloadStructureModule"
     );
     assert_eq!(
         rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(ls_pds)]).await.unwrap_err().code,
@@ -333,12 +333,22 @@ async fn test_standup_point_defense_battery_pulse_exclusions_and_capsules() {
     spawn_grid_entity(&ctx, LOWSEC_SYS, 950_008, 587, in_pds_pos, 5_000.0, 5_000.0, 5_000.0, 35.0, 300.0, Some(fleetmate), hostile_corp).await; // 8. Fleetmate Frigate (SPARED!)
     spawn_grid_entity(&ctx, LOWSEC_SYS, 950_009, 587, out_pds_pos, 5_000.0, 5_000.0, 5_000.0, 35.0, 300.0, Some(90_000_059), hostile_corp).await; // 9. Out-of-range Hostile Frigate (SPARED!)
 
+    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(ls_pds), PyRep::String("structureModuleEffectPointDefense".into())])
+            .await
+            .unwrap_err()
+            .code,
+        "CannotOverloadStructureModule"
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&ls_ammo].quantity), 500, "Overload rejection must not consume PDS ammo");
+    assert!((sys_h.get_combat_state(950_001).await.unwrap().unwrap().shield_hp - 5_000.0).abs() < 1e-6, "Overload rejection must not fire PDS");
+
     let res = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(ls_pds), PyRep::String("structureModuleEffectPointDefense".into())])
         .await
         .expect("Activate Standup Point Defense Battery I");
     assert_eq!(kv_entry(&res, "targetsHit").and_then(|v| v.as_i64()), Some(6), "Exact 6 valid hostile targets must be hit");
 
-    let sys_h = ctx.systems.get_or_spawn(LOWSEC_SYS);
     // Verify 1..6 took damage (missile 950_004 may even be destroyed & despawned!)
     assert!(sys_h.get_combat_state(950_001).await.unwrap().unwrap().shield_hp < 5_000.0, "Hostile frigate must take PDS damage");
     assert!(sys_h.get_combat_state(950_002).await.unwrap().map_or(true, |cs| cs.shield_hp < 200.0), "Hostile drone must take PDS damage");
@@ -440,6 +450,15 @@ async fn test_standup_guided_bomb_launcher_missiles_and_burst_projectors() {
         }
         sys_h.step_manual(1.0).await.unwrap();
     }
+
+    // 0. Overload on loaded Standup Guided Bomb Launcher is rejected without firing
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(gbl_mod), PyRep::String("defaultEffect".into()), PyRep::Integer(primary_cruiser)])
+            .await
+            .unwrap_err()
+            .code,
+        "CannotOverloadStructureModule"
+    );
 
     // 1. Fire Standup Light Guided Bomb (37850): hits primary_cruiser (0km) + nearby_frigate (12km <= 20km), spares far_battleship (35km > 20km)
     let _gbl_res = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gbl_mod), PyRep::String("defaultEffect".into()), PyRep::Integer(primary_cruiser)])
@@ -561,6 +580,18 @@ async fn test_keepstar_standup_arcing_vorton_projector_chain_and_immobilization(
             break;
         }
     }
+
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)])
+            .await
+            .unwrap_err()
+            .code,
+        "CannotOverloadStructureModule"
+    );
+    assert!(
+        (sys_h.get_combat_state(971_000).await.unwrap().unwrap().shield_hp - 5_000_000.0).abs() < 1e-6,
+        "Overload rejection must not fire Standup Arcing Vorton Projector"
+    );
 
     let fire_rep = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)])
         .await

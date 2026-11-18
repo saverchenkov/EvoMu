@@ -260,6 +260,13 @@ pub async fn handle_weapons(
                     client_error: None,
                 }));
             };
+            let is_structure_ship = controlling_structure
+                || ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id));
+            if method == "Overload" && is_structure_ship {
+                return Some(Err(
+                    crate::services::structure_weapons_ops::cannot_overload_structure_module_error(),
+                ));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -300,7 +307,7 @@ pub async fn handle_weapons(
                 None => None,
             };
 
-            if controlling_structure {
+            if controlling_structure && method != "Overload" {
                 if let Some(res) = crate::router::box_fut(|| {
                     crate::services::structure_standup_weapons::try_activate_standup_weapon(
                         ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
@@ -368,7 +375,13 @@ pub async fn handle_weapons(
                     client_error: None,
                 }));
             };
-            if let Some(res) = crate::router::box_fut(|| {
+            if method == "Overload" {
+                if matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
+                    return Some(Err(
+                        crate::services::structure_weapons_ops::cannot_overload_structure_module_error(),
+                    ));
+                }
+            } else if let Some(res) = crate::router::box_fut(|| {
                 crate::services::structure_standup_weapons::try_activate_standup_weapon(
                     ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
                 )
