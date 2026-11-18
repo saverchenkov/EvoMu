@@ -31,6 +31,40 @@ pub fn compute_overload_multiplier(
     }
 }
 
+/// Maps a ship module slot `flag_id` to its thermodynamic rack index (`0 = high`, `1 = med`, `2 = low`).
+pub fn rack_index_for_flag(flag_id: u16) -> Option<usize> {
+    match flag_id {
+        27..=34 => Some(0),
+        19..=26 => Some(1),
+        11..=18 => Some(2),
+        _ => None,
+    }
+}
+
+/// Maps a thermodynamic rack index (`0 = high`, `1 = med`, `2 = low`) to its ship rack heat attribute ID (`1175`/`1176`/`1177`).
+pub fn rack_heat_attr_id_for_rack(rack_idx: usize) -> i64 {
+    let attrs = crate::services::tactical_module_mechanics::RACK_HEAT_ATTR_IDS;
+    i64::from(attrs.get(rack_idx).copied().unwrap_or(attrs[2]))
+}
+
+/// Maps a ship module slot `flag_id` to its ship rack heat attribute ID (`1175`/`1176`/`1177`).
+pub fn rack_heat_attr_id_for_flag(flag_id: u16) -> i64 {
+    rack_heat_attr_id_for_rack(rack_index_for_flag(flag_id).unwrap_or(2))
+}
+
+/// Resolves a fitted module's ship rack heat attribute ID (`1175`/`1176`/`1177`) from `fit` with DB snapshot fallback.
+pub fn resolve_module_heat_id(
+    ctx: &ServerContext,
+    fit: &ShipFittingEngine,
+    module_id: i64,
+) -> i64 {
+    let flag_id = fit.modules.get(&module_id).map(|fm| fm.flag_id).unwrap_or_else(|| {
+        ctx.db
+            .with_snapshot(|s| s.items.get(&module_id).map_or(0, |i| i.flag as u16))
+    });
+    rack_heat_attr_id_for_flag(flag_id)
+}
+
 pub struct AncillaryRepairPrep {
     pub is_asb: bool,
     pub asb_fallback_cap_need: f64,
@@ -217,6 +251,72 @@ pub fn prepare_ancillary_module(
     prep
 }
 
+/// Returns the trained `Thermodynamics` (`28164`) level (`0` if untrained) for `char_id`.
+pub fn pilot_thermodynamics_level(ctx: &ServerContext, char_id: i64) -> u32 {
+    ctx.db.with_snapshot(|snap| {
+        snap.skills
+            .get(&char_id)
+            .and_then(|sk| sk.get(&28164))
+            .map_or(0, |r| u32::from(r.level))
+    })
+}
+
+/// Returns true if the fitted module is burned out (`damage >= max_hp - 1e-6`).
+pub fn is_module_burned_out(
+    ctx: &ServerContext,
+    fm: &eve_dogma::FittedModule,
+    module_id: i64,
+) -> bool {
+    fm.damage_hp >= fm.max_hp - 1e-6
+        || ctx.db.with_snapshot(|snap| {
+            let it = snap.items.get(&module_id);
+            let dmg = it
+                .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
+                .unwrap_or(0.0);
+            let hp = it
+                .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&fm.type_id)
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+                })
+                .unwrap_or(40.0);
+            dmg >= hp - 1e-6
+        })
+}
+
+/// Checks whether `mod_type_id` has an SDE `effect_category == 5` overload effect and
+/// whether `thermo_lvl` satisfies `requiredThermoDynamicsSkill` (`1212`, minimum `1`).
+pub fn can_overload_module(ctx: &ServerContext, mod_type_id: u32, thermo_lvl: u32) -> bool {
+    let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
+        return false;
+    };
+    if !has_category5_overload(mod_type, &ctx.sde) {
+        return false;
+    }
+    let req_thermo = mod_type
+        .default_attributes
+        .get(&1212)
+        .copied()
+        .map_or(1u32, |v| v.ceil().max(1.0) as u32);
+    thermo_lvl >= req_thermo
+}
+
+/// Emits `OnHeatAdded { heat_id, module_id }` for a fitted module's thermodynamic rack.
+pub fn emit_module_heat_added(
+    ctx: &ServerContext,
+    char_id: i64,
+    fit: &ShipFittingEngine,
+    module_id: i64,
+) {
+    let heat_id = resolve_module_heat_id(ctx, fit, module_id);
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnHeatAdded { heat_id, module_id },
+    );
+}
+
 /// Handles toggling overload on a module that is already cycling, or pre-overloading an inactive targeted module.
 pub async fn handle_active_overload_toggle(
     ctx: &ServerContext,
@@ -237,13 +337,7 @@ pub async fn handle_active_overload_toggle(
         ctx.invalidate_and_push_fit(ship_id);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    ctx.emit_typed(
-        crate::router::NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnHeatAdded {
-            module_or_heat_id: module_id,
-            module_id: None,
-        },
-    );
+    emit_module_heat_added(ctx, char_id, &fit, module_id);
     PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("overloaded", PyRep::Bool(true)),

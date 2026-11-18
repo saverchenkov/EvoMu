@@ -441,13 +441,11 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+            let heat_id = crate::services::fitting_cycles_overheat::resolve_module_heat_id(ctx, &fit, module_id);
 
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
-                crate::router::notify_registry::OnHeatRemoved {
-                    module_or_heat_id: module_id,
-                    module_id: None,
-                },
+                crate::router::notify_registry::OnHeatRemoved { heat_id, module_id },
             );
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
@@ -493,17 +491,27 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             let target_rack_idx: usize = if let Some(fm) = fit.modules.get(&arg_val) {
-                match fm.flag_id {
-                    27..=34 => 0,
-                    19..=26 => 1,
-                    _ => 2,
-                }
+                let Some(idx) = crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "ModuleNotFound".into(),
+                        message: format!("Module {arg_val} is not fitted in a thermodynamic rack"),
+                        client_error: None,
+                    }));
+                };
+                idx
+            } else if matches!(arg_val, 0 | 1 | 2) {
+                arg_val as usize
+            } else if let Some(idx) = u16::try_from(arg_val)
+                .ok()
+                .and_then(crate::services::fitting_cycles_overheat::rack_index_for_flag)
+            {
+                idx
             } else {
-                match arg_val as u16 {
-                    27..=34 | 0 => 0,
-                    19..=26 | 1 => 1,
-                    _ => 2,
-                }
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleNotFound".into(),
+                    message: format!("Module or rack {arg_val} not found on ship {ship_id}"),
+                    client_error: None,
+                }));
             };
             let overloaded = method == "OverloadRack";
             if overloaded
@@ -517,23 +525,52 @@ pub(crate) async fn handle_mining_and_deactivate(
                     client_error: None,
                 }));
             }
+            let cycle_overload_states: std::collections::HashMap<i64, (bool, Option<bool>)> =
+                if let Some(sys_id) = session.solar_system_id {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    let st = sys.actor_state.read().unwrap_or_else(|e| e.into_inner());
+                    st.active_module_cycles
+                        .iter()
+                        .filter(|c| c.ship_id == ship_id)
+                        .map(|c| (c.module_id, (c.is_overloaded, c.pending_overloaded)))
+                        .collect()
+                } else {
+                    std::collections::HashMap::new()
+                };
+            let thermo_lvl = if overloaded {
+                crate::services::fitting_cycles_overheat::pilot_thermodynamics_level(ctx, char_id)
+            } else {
+                0
+            };
             let mut notified_modules = Vec::new();
             let mut cycling_modules = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
-                let r_idx = match fm.flag_id {
-                    27..=34 => 0,
-                    19..=26 => 1,
-                    11..=18 => 2,
-                    _ => continue,
+                let Some(r_idx) = crate::services::fitting_cycles_overheat::rack_index_for_flag(fm.flag_id) else {
+                    continue;
                 };
                 if r_idx != target_rack_idx || fm.state == eve_dogma::ModuleState::Offline {
                     continue;
                 }
                 if overloaded {
-                    if fm.state == eve_dogma::ModuleState::Online {
+                    if crate::services::fitting_cycles_overheat::is_module_burned_out(ctx, fm, mid)
+                        || !crate::services::fitting_cycles_overheat::can_overload_module(ctx, fm.type_id, thermo_lvl)
+                    {
+                        continue;
+                    }
+                    if let Some(&(cyc_ovl, pend_ovl)) = cycle_overload_states.get(&mid) {
+                        if (!cyc_ovl && pend_ovl != Some(true)) || (cyc_ovl && pend_ovl == Some(false)) {
+                            cycling_modules.push(mid);
+                            notified_modules.push(mid);
+                        }
+                    } else if fm.state == eve_dogma::ModuleState::Online {
                         fm.state = eve_dogma::ModuleState::Overloaded;
                         notified_modules.push(mid);
                     } else if fm.state == eve_dogma::ModuleState::Active {
+                        cycling_modules.push(mid);
+                        notified_modules.push(mid);
+                    }
+                } else if let Some(&(cyc_ovl, pend_ovl)) = cycle_overload_states.get(&mid) {
+                    if (cyc_ovl && pend_ovl != Some(false)) || (!cyc_ovl && pend_ovl == Some(true)) {
                         cycling_modules.push(mid);
                         notified_modules.push(mid);
                     }
@@ -542,58 +579,56 @@ pub(crate) async fn handle_mining_and_deactivate(
                     notified_modules.push(mid);
                 }
             }
+            notified_modules.sort_unstable();
+            let sync_idle_overload_state = |fit: &mut eve_dogma::ShipFittingEngine, mid: i64| {
+                if let Some(fm) = fit.modules.get_mut(&mid) {
+                    if overloaded && fm.state == eve_dogma::ModuleState::Active {
+                        fm.state = eve_dogma::ModuleState::Overloaded;
+                    } else if !overloaded && fm.state == eve_dogma::ModuleState::Overloaded {
+                        fm.state = eve_dogma::ModuleState::Online;
+                    }
+                }
+            };
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for &mid in &cycling_modules {
                     let was_cycling = sys.update_module_overload(ship_id, mid, overloaded).await.unwrap_or(false);
-                    if !overloaded && !was_cycling {
-                        if let Some(fm) = fit.modules.get_mut(&mid) {
-                            if fm.state == eve_dogma::ModuleState::Overloaded {
-                                fm.state = eve_dogma::ModuleState::Online;
-                            }
-                        }
+                    if !was_cycling {
+                        sync_idle_overload_state(&mut fit, mid);
                     }
                 }
-            } else if !overloaded {
+            } else {
                 for &mid in &cycling_modules {
-                    if let Some(fm) = fit.modules.get_mut(&mid) {
-                        if fm.state == eve_dogma::ModuleState::Overloaded {
-                            fm.state = eve_dogma::ModuleState::Online;
-                        }
-                    }
+                    sync_idle_overload_state(&mut fit, mid);
                 }
             }
             fit.recalculate_stats(&ctx.sde);
             ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
             ctx.invalidate_and_push_fit(ship_id);
+            let heat_id = crate::services::fitting_cycles_overheat::rack_heat_attr_id_for_rack(target_rack_idx);
             for &mid in &notified_modules {
                 if overloaded {
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnHeatAdded {
-                            module_or_heat_id: mid,
-                            module_id: None,
+                            heat_id,
+                            module_id: mid,
                         },
                     );
                 } else {
                     ctx.emit_typed(
                         crate::router::NotificationTarget::Character(char_id),
                         crate::router::notify_registry::OnHeatRemoved {
-                            module_or_heat_id: mid,
-                            module_id: None,
+                            heat_id,
+                            module_id: mid,
                         },
                     );
                 }
             }
 
-            Some(Ok(PyRep::keyval([
-                ("rackIndex", PyRep::Integer(target_rack_idx as i64)),
-                ("overloaded", PyRep::Bool(overloaded)),
-                (
-                    "moduleIDs",
-                    PyRep::List(notified_modules.into_iter().map(PyRep::Integer).collect()),
-                ),
-            ])))
+            Some(Ok(PyRep::List(
+                notified_modules.into_iter().map(PyRep::Integer).collect(),
+            )))
         }
 
         ("dogmaIM", "RepairModule") | ("dogmaIM", "InitiateModuleRepair") => {

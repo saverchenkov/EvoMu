@@ -1219,11 +1219,7 @@ pub(crate) async fn handle_module_cycles(
                 (duration_s, reactivation_delay_s)
             };
 
-            let rack_idx = match m.flag_id {
-                27..=34 => 0,
-                19..=26 => 1,
-                _ => 2,
-            };
+            let rack_idx = crate::services::fitting_cycles_overheat::rack_index_for_flag(m.flag_id).unwrap_or(2);
             let heat_damage_per_cycle = {
                 let mut pre_thermo = mod_state.clone();
                 pre_thermo
@@ -2015,8 +2011,8 @@ pub(crate) async fn handle_module_cycles(
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Character(char_id),
                     crate::router::notify_registry::OnHeatAdded {
-                        module_or_heat_id: module_id,
-                        module_id: None,
+                        heat_id: crate::services::fitting_cycles_overheat::rack_heat_attr_id_for_rack(rack_idx),
+                        module_id,
                     },
                 );
             }

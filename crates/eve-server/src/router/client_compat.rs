@@ -768,21 +768,6 @@ pub fn normalize_macho_rpc_reply_at(
             }
             return Ok(PyRep::Tuple(vec![rep, PyRep::List(Vec::new())]));
         }
-    } else if service == "dogmaIM" && method == "OverloadRack" {
-        if let Ok(ref rep) = rpc_res {
-            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
-                let rack = rep.dict_get("rackIndex").cloned().unwrap_or(PyRep::Integer(0));
-                let mids = match rep.dict_get("moduleIDs") {
-                    Some(PyRep::List(list)) => list.clone(),
-                    _ => Vec::new(),
-                };
-                return Ok(PyRep::List(
-                    mids.into_iter()
-                        .map(|mid| PyRep::Tuple(vec![mid, rack.clone()]))
-                        .collect(),
-                ));
-            }
-        }
     } else if service == "map" && method == "GetConstellationLPData" {
         if let Ok(ref rep) = rpc_res {
             let rows = extract_table_rows(rep)
@@ -2728,13 +2713,6 @@ pub fn normalize_macho_notification_with_sde(
         "OnTargetClear" => {
             if args.is_empty() {
                 vec![PyRep::List(Vec::new())]
-            } else {
-                args
-            }
-        }
-        "OnHeatAdded" | "OnHeatRemoved" => {
-            if args.len() == 1 {
-                vec![PyRep::Integer(1211), args.into_iter().next().unwrap()]
             } else {
                 args
             }

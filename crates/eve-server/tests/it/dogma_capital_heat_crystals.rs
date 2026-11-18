@@ -1158,7 +1158,12 @@ async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility(
     .await
     .expect("Overload laser_1_id");
     let notes_ovl = sess.drain_notifications();
-    assert!(notes_ovl.iter().any(|(n, _)| n == "OnHeatAdded"));
+    assert!(
+        notes_ovl.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+        }),
+        "expected OnHeatAdded([1175, laser_1_id]), got: {notes_ovl:?}"
+    );
 
     // Step 20s of overloaded weapon cycles -> high rack heat (1175) stays above 0.85,
     // laser_1_id takes more probabilistic heat hits than attenuated adjacent laser_2_id,
@@ -1218,17 +1223,44 @@ async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility(
     );
 
     // Verify OverloadRack, StopOverloadRack, and StopOverload RPCs
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "OverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
+    let _ = sess.drain_notifications();
+    let ov_rack = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "OverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("OverloadRack");
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
+    assert_eq!(ov_rack, PyRep::List(vec![PyRep::Integer(laser_2_id)]));
+    let ov_rack_notes = sess.drain_notifications();
+    assert!(
+        ov_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_2_id)]
+        }),
+        "expected OnHeatAdded([1175, laser_2_id]), got: {ov_rack_notes:?}"
+    );
+
+    let stop_rack = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverloadRack", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("StopOverloadRack");
-    let _ = sess.drain_notifications();
+    assert_eq!(
+        stop_rack,
+        PyRep::List(vec![PyRep::Integer(laser_1_id), PyRep::Integer(laser_2_id)])
+    );
+    let stop_rack_notes = sess.drain_notifications();
+    assert!(
+        stop_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+        }) && stop_rack_notes.iter().any(|(n, args)| {
+            n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_2_id)]
+        }),
+        "expected OnHeatRemoved([1175, laser_1_id/laser_2_id]), got: {stop_rack_notes:?}"
+    );
+
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopOverload", &[PyRep::Integer(laser_1_id)], &kw, None)
         .await
         .expect("StopOverload");
-    assert!(sess.drain_notifications().iter().any(|(n, _)| n == "OnHeatRemoved"));
+    assert!(sess.drain_notifications().iter().any(|(n, args)| {
+        n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(laser_1_id)]
+    }));
 
     // Step 5s with no overloaded modules -> high rack heat (1175) dissipates exponentially!
     for _ in 0..5 {
@@ -1411,6 +1443,246 @@ async fn test_dg6_heat_rack_thermodynamics_nanite_repair_and_crystal_volatility(
             .code,
         "ModuleBurnedOut"
     );
+}
+
+#[tokio::test]
+async fn combat_weapons_overload_and_preoverloaded_activate_emit_on_heat_added() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(4205);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let char_id = 90_000_001i64;
+    let ship_id = 100_000_001i64;
+    let station_id = 60_003_760i64;
+
+    // Upgrade ship to Rupture (629, Minmatar Cruiser) and fit two 200mm AutoCannon II (2889)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|&id, it| id == ship_id || it.location_id != ship_id);
+        if let Some(s) = snap.items.get_mut(&ship_id) {
+            s.type_id = 629;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    for tid in [629u32, 2889, 185, 28164] {
+        grant_all_required_skills_for_type(&ctx, char_id, tid);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28164,
+                level: 4,
+                skill_points: 181_020.0,
+            },
+        );
+    });
+
+    let ac1_id = 100_002_401i64;
+    let ac2_id = 100_002_402i64;
+    let ammo1_id = 100_002_403i64;
+    let ammo2_id = 100_002_404i64;
+    seed_item(&ctx, ac1_id, 2889, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, ac2_id, 2889, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    seed_item(&ctx, ammo1_id, 185, char_id, ship_id, InventoryFlag::Cargo, 80, false);
+    seed_item(&ctx, ammo2_id, 185, char_id, ship_id, InventoryFlag::Cargo, 80, false);
+
+    for (mid, flag) in [
+        (ac1_id, InventoryFlag::HiSlot0),
+        (ac2_id, InventoryFlag::HiSlot1),
+    ] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(mid),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(flag as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Fit 200mm AutoCannon II");
+    }
+
+    for (mid, aid) in [(ac1_id, ammo1_id), (ac2_id, ammo2_id)] {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::List(vec![PyRep::Integer(mid)]),
+                PyRep::List(vec![PyRep::Integer(aid)]),
+                PyRep::Integer(ship_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Load EMP S into 200mm AutoCannon II");
+    }
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    sys.set_capacitor(ship_id, 50_000.0).await.unwrap();
+    let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+
+    let target_id = 100_002_420i64;
+    let mut target_cs = CombatState::default();
+    target_cs.max_shield_hp = 500_000.0;
+    target_cs.shield_hp = 500_000.0;
+    sys.spawn_ball_with_combat(
+        Ball {
+            id: target_id,
+            type_id: 587,
+            position: ship_ball.position + DVec3::new(2_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.2,
+            mass: 1_350_000.0,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        target_cs,
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id,
+            lock_time_ms: 0.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    // 1. Direct dogmaIM.Overload on turret routed via combat_weapons::handle_weapons emits OnHeatAdded
+    let _ = sess.drain_notifications();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Overload",
+        &[
+            PyRep::Integer(ac1_id),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(target_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Overload ac1_id");
+    let notes_ovl = sess.drain_notifications();
+    assert!(
+        notes_ovl.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(ac1_id)]
+        }),
+        "expected OnHeatAdded([1175, ac1_id]) from dogmaIM.Overload on combat weapon, got: {notes_ovl:?}"
+    );
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&ac1_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    // 2. Pre-overload idle ac2_id via OverloadRack, then activate via dogmaIM.Activate (simulating client click
+    // after rack overload) -> must preserve ModuleState::Overloaded and emit OnHeatAdded([1175, ac2_id])
+    let rack_add = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "OverloadRack",
+            &[PyRep::Integer(ac2_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("OverloadRack ac2_id");
+    assert_eq!(rack_add, PyRep::List(vec![PyRep::Integer(ac2_id)]));
+    let _ = sess.drain_notifications();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[
+            PyRep::Integer(ac2_id),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(target_id),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate pre-overloaded ac2_id");
+    let notes_act = sess.drain_notifications();
+    assert!(
+        notes_act.iter().any(|(n, args)| {
+            n == "OnHeatAdded" && args == &vec![PyRep::Integer(1175), PyRep::Integer(ac2_id)]
+        }),
+        "expected OnHeatAdded([1175, ac2_id]) when activating pre-overloaded turret, got: {notes_act:?}"
+    );
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&ac2_id].state,
+        eve_dogma::ModuleState::Overloaded,
+        "Activate on pre-overloaded module must preserve ModuleState::Overloaded"
+    );
+
+    // 3. StopOverloadRack picks up both active overloaded cycling turrets cleanly
+    let rack_stop = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "StopOverloadRack",
+            &[PyRep::Integer(ac1_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("StopOverloadRack");
+    assert_eq!(
+        rack_stop,
+        PyRep::List(vec![PyRep::Integer(ac1_id), PyRep::Integer(ac2_id)])
+    );
+    let stop_notes = sess.drain_notifications();
+    for mid in [ac1_id, ac2_id] {
+        assert!(
+            stop_notes.iter().any(|(n, args)| {
+                n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1175), PyRep::Integer(mid)]
+            }),
+            "expected OnHeatRemoved([1175, {mid}]), got: {stop_notes:?}"
+        );
+    }
 }
 
 }

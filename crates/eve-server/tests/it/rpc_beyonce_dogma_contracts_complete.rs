@@ -321,7 +321,9 @@ async fn test_rpc_dogma_im_activation_overload_and_nanite_repair() {
     seed_item(&ctx, 882_010, 439, C1, 882_001, InventoryFlag::MedSlot0, 1);
     ctx.db.with_mut_snapshot(|s| {
         s.module_online_states.insert(882_010, true);
-        s.skills.entry(C1).or_default().insert(28609, TrainedSkillRecord { type_id: 28609, level: 4, skill_points: 100_000.0 });
+        let skills = s.skills.entry(C1).or_default();
+        skills.insert(28164, TrainedSkillRecord { type_id: 28164, level: 4, skill_points: 100_000.0 });
+        skills.insert(28609, TrainedSkillRecord { type_id: 28609, level: 4, skill_points: 100_000.0 });
     });
     ctx.invalidate_ship_fitting(882_001);
 
@@ -334,11 +336,18 @@ async fn test_rpc_dogma_im_activation_overload_and_nanite_repair() {
     let stop_ov = rpc(&ctx, &mut s1, "dogmaIM", "StopOverload", &[PyRep::Integer(882_010)]).await;
     assert_eq!(stop_ov.dict_get("overloaded"), Some(&PyRep::Bool(false)));
 
+    let _ = s1.drain_notifications();
     let ov_rack = rpc(&ctx, &mut s1, "dogmaIM", "OverloadRack", &[PyRep::Integer(882_010)]).await;
-    assert_eq!(ov_rack.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert_eq!(ov_rack, PyRep::List(vec![PyRep::Integer(882_010)]));
+    assert!(s1.drain_notifications().iter().any(|(n, args)| {
+        n == "OnHeatAdded" && args == &vec![PyRep::Integer(1176), PyRep::Integer(882_010)]
+    }));
 
     let stop_rack = rpc(&ctx, &mut s1, "dogmaIM", "StopOverloadRack", &[PyRep::Integer(882_010)]).await;
-    assert_eq!(stop_rack.dict_get("overloaded"), Some(&PyRep::Bool(false)));
+    assert_eq!(stop_rack, PyRep::List(vec![PyRep::Integer(882_010)]));
+    assert!(s1.drain_notifications().iter().any(|(n, args)| {
+        n == "OnHeatRemoved" && args == &vec![PyRep::Integer(1176), PyRep::Integer(882_010)]
+    }));
 
     let deact = rpc(&ctx, &mut s1, "dogmaIM", "Deactivate", &[PyRep::Integer(882_010)]).await;
     assert_eq!(deact.dict_get("moduleID"), Some(&PyRep::Integer(882_010)));

@@ -141,10 +141,15 @@ fn normalize_macho_rpc_reply_covers_char_contracts_corp_and_dev_indices() {
 
 #[test]
 fn normalize_macho_rpc_reply_covers_dogma_map_planet_raffle_skill_war_and_store() {
-    assert!(matches!(
-        normalize_macho_rpc_reply("dogmaIM", "OverloadRack", Ok(PyRep::Dict(Vec::new()))).unwrap(),
-        PyRep::List(_)
-    ));
+    assert_eq!(
+        normalize_macho_rpc_reply(
+            "dogmaIM",
+            "OverloadRack",
+            Ok(PyRep::List(vec![PyRep::Integer(1001)])),
+        )
+        .unwrap(),
+        PyRep::List(vec![PyRep::Integer(1001)])
+    );
     let hs = normalize_macho_rpc_reply(
         "home_station",
         "get_home_station_candidates",

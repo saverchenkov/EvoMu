@@ -207,20 +207,14 @@ fn normalize_contract_corp_devindex_dogma_fw_homestation_inv_and_clones() {
     .expect("emp tuple");
     assert_eq!(emp2, PyRep::Tuple(vec![PyRep::Integer(1)]));
 
-    // dogmaIM.OverloadRack, home_station, invbroker, jumpCloneSvc
+    // dogmaIM.OverloadRack passes through flat integer list, home_station, invbroker, jumpCloneSvc
     let ov = normalize_macho_rpc_reply(
         "dogmaIM",
         "OverloadRack",
-        Ok(PyRep::keyval([
-            ("rackIndex", PyRep::Integer(27)),
-            ("moduleIDs", PyRep::List(vec![PyRep::Integer(1001)])),
-        ])),
+        Ok(PyRep::List(vec![PyRep::Integer(1001)])),
     )
     .expect("overload");
-    assert_eq!(
-        ov,
-        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1001), PyRep::Integer(27)])])
-    );
+    assert_eq!(ov, PyRep::List(vec![PyRep::Integer(1001)]));
 
     let hs = normalize_macho_rpc_reply(
         "home_station",
