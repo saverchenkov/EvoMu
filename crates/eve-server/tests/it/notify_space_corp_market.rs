@@ -3496,6 +3496,12 @@ async fn test_batch3_container_password_and_cache_invalidation() {
 async fn test_batch3_target_multi_event_and_kill_notification() {
     let ctx = new_ctx();
     let (ship_a, ship_b, gun_id, ammo_id) = (640_000_301_i64, 640_000_302_i64, 640_000_310_i64, 640_000_311_i64);
+    let fulcrum_pos = ctx
+        .sde
+        .stations
+        .get(&60_015_187)
+        .expect("The Fulcrum station in Zarzakh")
+        .position;
     let mut sess_a = login_in_space(
         &ctx,
         92_020,
@@ -3505,7 +3511,7 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
         ship_a,
         587,
         SYS_ZARZAKH,
-        DVec3::ZERO,
+        fulcrum_pos + DVec3::new(5_000.0, 0.0, 0.0),
     )
     .await;
     let _sess_b = login_in_space(
@@ -3517,7 +3523,7 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
         ship_b,
         587,
         SYS_ZARZAKH,
-        DVec3::new(1_000.0, 0.0, 0.0),
+        fulcrum_pos + DVec3::new(6_000.0, 0.0, 0.0),
     )
     .await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -3527,7 +3533,7 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
         );
         snap.items.insert(
             ammo_id,
-            make_item(ammo_id, 218, PILOT_A, ship_a, InventoryFlag::HiSlot0, 100, false),
+            make_item(ammo_id, 185, PILOT_A, ship_a, InventoryFlag::HiSlot0, 200, false),
         );
         snap.module_online_states.insert(gun_id, true);
     });
@@ -3614,11 +3620,29 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
     drain_all(&ctx, PILOT_B);
 
     let sys_h = ctx.systems.get_or_spawn(SYS_ZARZAKH);
-    for _ in 0..40 {
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(gun_id),
+            PyRep::String("projectileFired".into()),
+            PyRep::Integer(ship_b),
+        ],
+    )
+    .await
+    .expect("initial dogmaIM.Activate must succeed with compatible projectile ammo");
+    for _ in 0..100 {
         if sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none() {
             break;
         }
-        let _ = rpc(
+        ctx.advance_secs(5);
+        sys_h.step_manual(5.0).await.unwrap();
+        if sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none() {
+            break;
+        }
+        match rpc(
             &ctx,
             &mut sess_a,
             "dogmaIM",
@@ -3629,10 +3653,17 @@ async fn test_batch3_target_multi_event_and_kill_notification() {
                 PyRep::Integer(ship_b),
             ],
         )
-        .await;
-        ctx.advance_secs(5);
-        let _ = sys_h.step_manual(5.0).await;
+        .await
+        {
+            Ok(_) => {}
+            Err(e) if e.code == "ModuleAlreadyActive" => {}
+            Err(e) => panic!("unexpected dogmaIM.Activate error: {e:?}"),
+        }
     }
+    assert!(
+        sys_h.get_ball_snapshot(ship_a).await.ok().flatten().is_some(),
+        "attacker ship_a must survive inside Zarzakh safe zone"
+    );
     assert!(
         sys_h.get_ball_snapshot(ship_b).await.ok().flatten().is_none(),
         "ship_b must be destroyed by weapon fire"
