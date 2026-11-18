@@ -630,6 +630,15 @@ def _safe_tactical_new_direction(direction):
     return _safe_direction_vec3((0.0, 0.0, 0.0), (dx, y, dz), (0.0, 0.7071067811865475, 0.7071067811865475))
 
 
+def _clear_camera_anchor_state(cam):
+    """Clear anchor ball/offset references on BaseSpaceCamera teardown/poison (#1340)."""
+    for attr in ("_anchorBall", "_anchorOffset"):
+        try:
+            setattr(cam, attr, None)
+        except AttributeError:
+            pass
+
+
 def _sanitize_camera_state(cam):
     changed = False
     default_at = _vec3_tuple(getattr(cam, "default_atPosition", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0))
@@ -650,12 +659,136 @@ def _sanitize_camera_state(cam):
     if _vec3_tuple(eye_pos, default_eye) == _vec3_tuple(at_pos, default_at):
         cam._eyePosition = [float(at_pos[0]), float(at_pos[1]) + 500.0, float(at_pos[2]) + 1000.0]
         changed = True
-    for attr in ("_eyeOffset", "_atOffset", "_eyeTransitOffset", "_atTransitOffset"):
+    for attr in (
+        "_eyeOffset",
+        "_atOffset",
+        "_eyeTransitOffset",
+        "_atTransitOffset",
+        "_eyeAndAtOffset",
+        "_anchorOffset",
+    ):
         val = getattr(cam, attr, None)
         if val is not None and not _is_finite_safe_vec3(val):
             setattr(cam, attr, None)
+            if attr == "_anchorOffset":
+                _clear_camera_anchor_state(cam)
             changed = True
     return changed
+
+
+def _sanitize_present_camera_state(cam):
+    if hasattr(cam, "_eyePosition") or hasattr(cam, "_atPosition"):
+        _sanitize_camera_state(cam)
+
+
+def _sanitize_base_space_anchor_state(cam):
+    anchor_offset = getattr(cam, "_anchorOffset", None)
+    if anchor_offset is not None and not _is_finite_safe_vec3(anchor_offset):
+        _clear_camera_anchor_state(cam)
+    _sanitize_present_camera_state(cam)
+
+
+def _resolve_base_space_get_ball_position(orig_func):
+    fn_globals = getattr(orig_func, "__globals__", None) or getattr(orig_func, "func_globals", None)
+    get_ball_pos = fn_globals.get("GetBallPosition") if isinstance(fn_globals, dict) else None
+    if not callable(get_ball_pos):
+        bsc_mod = sys.modules.get("eve.client.script.ui.camera.baseSpaceCamera")
+        get_ball_pos = getattr(bsc_mod, "GetBallPosition", None) if bsc_mod is not None else None
+    return get_ball_pos if callable(get_ball_pos) else None
+
+
+def _make_reset_anchor_pos_guard(orig_fn):
+    """Clear non-finite/_CAMERA_MAX_SAFE_COORD _anchorOffset before BaseSpaceCamera.ResetAnchorPos adds it (#1340)."""
+    orig_func = getattr(orig_fn, "__func__", orig_fn)
+
+    def _wrapped_reset_anchor_pos(self):
+        _sanitize_base_space_anchor_state(self)
+        anchor_offset = getattr(self, "_anchorOffset", None)
+        if anchor_offset:
+            eye_pos = getattr(self, "eyePosition", None)
+            at_pos = getattr(self, "atPosition", None)
+            if (
+                not _is_finite_safe_vec3(anchor_offset)
+                or not _is_finite_safe_vec3(eye_pos)
+                or not _is_finite_safe_vec3(at_pos)
+            ):
+                _clear_camera_anchor_state(self)
+        return orig_func(self)
+
+    _wrapped_reset_anchor_pos.__name__ = getattr(orig_func, "__name__", "ResetAnchorPos")
+    _wrapped_reset_anchor_pos._evomu_camera_guard = True
+    return _wrapped_reset_anchor_pos
+
+
+def _make_update_anchor_offset_guard(orig_fn):
+    """Clear stale _anchorBall/_anchorOffset if GetBallPosition returns non-finite or > _CAMERA_MAX_SAFE_COORD (#1340)."""
+    orig_func = getattr(orig_fn, "__func__", orig_fn)
+
+    def _wrapped_update_anchor_offset(self):
+        _sanitize_base_space_anchor_state(self)
+        anchor_ball = getattr(self, "_anchorBall", None)
+        if anchor_ball:
+            if hasattr(anchor_ball, "ballpark") and getattr(anchor_ball, "ballpark", None) is None:
+                _clear_camera_anchor_state(self)
+            else:
+                get_ball_pos = _resolve_base_space_get_ball_position(orig_func)
+                if get_ball_pos is not None:
+                    pos = get_ball_pos(anchor_ball)
+                    if not _is_finite_safe_vec3(pos):
+                        _clear_camera_anchor_state(self)
+        try:
+            res = orig_func(self)
+        except Exception:
+            cur_offset = getattr(self, "_anchorOffset", None)
+            if cur_offset is not None and not _is_finite_safe_vec3(cur_offset):
+                _clear_camera_anchor_state(self)
+                _sanitize_present_camera_state(self)
+                return None
+            raise
+        _sanitize_base_space_anchor_state(self)
+        return res
+
+    _wrapped_update_anchor_offset.__name__ = getattr(orig_func, "__name__", "UpdateAnchorOffset")
+    _wrapped_update_anchor_offset._evomu_camera_guard = True
+    return _wrapped_update_anchor_offset
+
+
+def _make_get_track_position_guard(orig_fn):
+    """Prevent poisoned _anchorOffset or GetBallPosition from poisoning BaseSpaceCamera.GetTrackPosition (#1340)."""
+    orig_func = getattr(orig_fn, "__func__", orig_fn)
+
+    def _wrapped_get_track_position(self, *args, **kwargs):
+        ball = args[0] if args else kwargs.get("ball")
+        _sanitize_base_space_anchor_state(self)
+        res = orig_func(self, *args, **kwargs)
+        if not _is_finite_safe_vec3(res):
+            cur_offset = getattr(self, "_anchorOffset", None)
+            if (cur_offset is not None and not _is_finite_safe_vec3(cur_offset)) or (
+                ball is not None and ball is getattr(self, "_anchorBall", None)
+            ):
+                _clear_camera_anchor_state(self)
+            _sanitize_present_camera_state(self)
+            at_pos = getattr(self, "_atPosition", getattr(self, "atPosition", (0.0, 0.0, 0.0)))
+            return tuple(_vec3_tuple(at_pos, (0.0, 0.0, 0.0)))
+        return res
+
+    _wrapped_get_track_position.__name__ = getattr(orig_func, "__name__", "GetTrackPosition")
+    _wrapped_get_track_position._evomu_camera_guard = True
+    return _wrapped_get_track_position
+
+
+def _install_base_space_camera_guard():
+    """Guard BaseSpaceCamera anchor offset/position teardown against -FLT_MAX / non-finite balls (#1340)."""
+    return _wrap_cls_methods_table(
+        "baseSpaceCamera",
+        "eve.client.script.ui.camera.baseSpaceCamera",
+        "BaseSpaceCamera",
+        (
+            ("ResetAnchorPos", _make_reset_anchor_pos_guard),
+            ("UpdateAnchorOffset", _make_update_anchor_offset_guard),
+            ("GetTrackPosition", _make_get_track_position_guard),
+        ),
+    )
 
 
 def _michelle_ballpark_missing(michelle):
@@ -970,6 +1103,8 @@ def _install_camera_dock_guard():
                 _wrapped_set_appropriate_at_pos._evomu_camera_guard = True
                 tac_cls.SetAppropriateAtPositionForRotation = _wrapped_set_appropriate_at_pos
         _HOOKED_CAMERA_GUARD_TARGETS.add("tacticalCamera")
+
+    _install_base_space_camera_guard()
 
     michelle_mod = sys.modules.get("eve.client.script.remote.michelle")
     if michelle_mod is not None and "michelle" not in _HOOKED_CAMERA_GUARD_TARGETS:
@@ -2717,7 +2852,8 @@ def _install_probe_tracker_guard():
 
 
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332, #1333, #1334)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332, #1333, #1334, #1340)."""
+    _install_base_space_camera_guard()
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
     _install_hangar_view_teardown_guard()
@@ -2772,6 +2908,7 @@ class _EvomuMetaHook(object):
         _install_camera_dock_guard()
         _install_live_client_sync_guards()
         for target_mod, target_key, install_fn in (
+            ("eve.client.script.ui.camera.baseSpaceCamera", "baseSpaceCamera", _install_base_space_camera_guard),
             ("eve.client.script.environment.spaceObject.wreck", "wreck", _install_wreck_rotation_guard),
             ("eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
             ("eve.client.script.environment.invCache", "invCacheContainer", _install_inventory_transition_guard),
