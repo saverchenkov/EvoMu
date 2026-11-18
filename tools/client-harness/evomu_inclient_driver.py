@@ -1,33 +1,47 @@
 # -*- coding: utf-8 -*-
-"""EvoMu V24.01 In-Client Journey Driver (Python 2.7 Stackless inside real `exefile`).
+"""EvoMu In-Client Journey Driver (Python 2.7 Stackless inside real `exefile`).
 
-Loaded via `/tools=evomu` (`<staged_build>/tools/startup/evomu.py`) inside the real
-EVE Online V24.01 client (`build 3624425`). Executes all 29 user journeys in
-`client_journeys.json` over the real client's MachoNet TCP connection, Quasar
-Public Gateway HTTP/2 gRPC channel (`EVE_PUBLIC_GATEWAY_ADDRESS`), ESI/SSO HTTP
-server, and V24.01 client services while coordinating concurrently with Client 2
-over a local IPC socket to `run_journeys`.
+Loaded via `/tools=evomu` (`<staged_build>/tools/startup/evomu.py`) inside the
+installed EVE Online client. Executes user journeys in `client_journeys.json` over
+the real client's MachoNet TCP connection, Quasar Public Gateway HTTP/2 gRPC
+channel (`EVE_PUBLIC_GATEWAY_ADDRESS`), ESI/SSO HTTP server, and client
+services while lazily coordinating with Client 2 over a local IPC socket to
+`run_journeys` for multi-client journeys.
 """
 
-import __builtin__
+try:
+    import __builtin__
+except ImportError:
+    import builtins as __builtin__
 import json
 import os
 import sys
 import time
 import traceback
-import urllib2
+try:
+    import urllib2 as _urllib
+except ImportError:
+    import urllib.request as _urllib
 
 from evomu_inclient_helpers import (
+    _INT_TYPES,
     IpcClient,
+    _advance_clock,
     _assert_ui_rendered,
     _atomic_write_json,
+    _capture_inclient_screenshot,
     _dock_station,
     _ensure_docked_jita,
+    _ensure_home_ship,
     _ensure_view,
     _extract_id,
     _get_beyonce,
     _get_field,
+    _install_rpc_recorder,
+    _leave_active_fleet,
     _live_session_attr,
+    _reset_baseline_state,
+    _resign_player_corp,
     _sleep_ms,
     _sleep_sim_ms,
     _sync_quasar_gateway,
@@ -46,78 +60,96 @@ sys.dont_write_bytecode = True
 
 _STARTED = False
 
+_C2_JOURNEYS = set(
+    [
+        "local_chat",
+        "multiplayer_presence",
+        "market_trade",
+        "contracts",
+        "fleet",
+        "mail_notifications",
+    ]
+)
 
-def _execute_all_journeys(cfg, ipc):
-    sm = __builtin__.sm
-    user = str(cfg.get("user", "demo"))
-    password = str(cfg.get("password", "demo-secret"))
-    target_char = int(cfg.get("char_id", 90000001))
-    esi_port = int(cfg.get("esi_port", 26004))
 
-    char_id = _wait_for_session(sm, user, password, target_char, timeout_sec=120.0)
-    sess = __builtin__.session
-    ship_id = int(getattr(sess, "shipid", 0) or 0)
-    if not ship_id:
-        chars = sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
-        if chars:
-            ship_id = int(_get_field(chars[0], "shipID", 0) or 0)
-    primary_ship_id = ship_id
+def _emit_client_marker(cfg, tag, jid, extra=""):
+    line = "[%s] id=%s%s" % (tag, jid, (" " + extra) if extra else "")
+    _trace(cfg, line)
+    try:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
-    c2_ready = ipc.request({"cmd": "ensure_client2_ready"})
-    char2_id = int(c2_ready.get("char2_id", 90000002))
 
-    outcomes = {}
-    pgw = _sync_quasar_gateway(sm, char_id) or sm.GetService("publicGatewaySvc")
-    sell_trit_id = 0
-    only_set = set(cfg["only_journeys"]) if cfg.get("only_journeys") else None
+def _find_hangar_item(sm, station_id, type_id, exclude_id=0, min_qty=1, reverse=True):
+    _, items = sm.RemoteSvc("invbroker").MachoBindObject(station_id, ("List", (), {}))
+    seq = list(reversed(list(items or []))) if reverse else list(items or [])
+    for it in seq:
+        if int(_get_field(it, "typeID", 0)) != int(type_id):
+            continue
+        iid = int(_get_field(it, "itemID", 0))
+        qty = int(_get_field(it, "quantity", 1) or 1)
+        if exclude_id and iid == int(exclude_id):
+            continue
+        if qty >= int(min_qty):
+            return iid, it
+    return 0, None
 
-    def want(jid):
-        if only_set is not None and jid not in only_set:
-            return False
-        _sync_quasar_gateway(sm, char_id)
-        return True
 
-    def record(jid, passed, evidence):
-        entry = {
-            "passed": bool(passed),
-            "bridge_verified": True,
-            "real_client_verified": bool(passed),
-            "evidence": str(evidence),
-        }
-        outcomes[jid] = entry
-        _atomic_write_json(os.path.join(cfg["out_dir"], "real_client_outcomes.json"), outcomes)
-        ipc.notify({"cmd": "journey_progress", "id": jid, "entry": entry})
-        _trace(cfg, "done %s: passed=%r" % (jid, bool(passed)))
+def _board_station_ship(sm, ship_item_id, assemble=True):
+    if assemble:
         try:
-            sys.stdout.write("[client-1] done %s: passed=%r\n" % (jid, bool(passed)))
-            sys.stdout.flush()
+            sm.RemoteSvc("ship").AssembleShip([int(ship_item_id)])
         except Exception:
             pass
+    try:
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    except Exception:
+        pass
+    sm.RemoteSvc("ship").Board(int(ship_item_id))
+    _wait_session_attr("shipid", int(ship_item_id), timeout_sec=3.0)
+    _sleep_ms(200)
+    _wait_view_settled(sm)
+    try:
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    except Exception:
+        pass
 
-    # 1. launch_login
-    if want("launch_login"):
-        _trace(cfg, "start launch_login")
-        chars_list = sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
-        srv_time = sm.RemoteSvc("machoNet").GetTime()
-        pgw = _sync_quasar_gateway(sm, char_id) or pgw or sm.GetService("publicGatewaySvc")
-        record(
-            "launch_login",
-            bool(
-                char_id
-                and chars_list
-                and srv_time
-                and any(int(_get_field(c, "characterID", 0)) == int(char_id) for c in chars_list)
-            ),
-            "Real V24.01 exefile connected via native machoNet handshake, authenticated user '%s', loaded %d character(s), selected charID=%d (shipID=%d), serverTime=%r, publicGatewayAvailable=%r"
-            % (user, len(chars_list), char_id, ship_id, srv_time, bool(pgw.is_available())),
-        )
 
-    # 2. create_character (all 4 empires: Caldari 1, Amarr 4, Gallente 8, Minmatar 2; respect 3-slot cap)
-    if want("create_character"):
-        _trace(cfg, "start create_character")
-        created_ids = []
-        active_extra_ids = []
-        suffix = str(int(time.time()) % 100000)
+def _journey_launch_login(ctx):
+    sm = ctx["sm"]
+    char_id = ctx["char_id"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    chars_list = sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
+    srv_time = sm.RemoteSvc("machoNet").GetTime()
+    pgw = _sync_quasar_gateway(sm, char_id) or sm.GetService("publicGatewaySvc")
+    ctx["pgw"] = pgw
+    pgw_avail = bool(pgw.is_available()) if pgw is not None and hasattr(pgw, "is_available") else False
+    passed = bool(
+        char_id
+        and chars_list
+        and srv_time
+        and any(int(_get_field(c, "characterID", 0)) == int(char_id) for c in chars_list)
+    )
+    return passed, {
+        "user": ctx["user"],
+        "char_id": char_id,
+        "ship_id": ship_id,
+        "characters_loaded": len(chars_list or []),
+        "server_time": srv_time,
+        "public_gateway_available": pgw_avail,
+    }
+
+
+def _journey_create_character(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char_id = ctx["char_id"]
+    created_ids = []
+    active_extra_ids = []
+    suffix = str(int(time.time()) % 100000)
+    try:
         for bld, anc, sch, label in [
             (2, 7, 17, "Caldari"),
             (5, 1, 11, "Amarr"),
@@ -128,9 +160,9 @@ def _execute_all_journeys(cfg, ipc):
             if len(cur_chars) >= 3 and active_extra_ids:
                 old_cid = active_extra_ids.pop(0)
                 sm.RemoteSvc("charUnboundMgr").PrepareCharacterForDelete(old_cid)
-                ipc.request({"cmd": "advance_clock", "secs": 36001})
+                _advance_clock(sm, ipc, 36001)
                 sm.RemoteSvc("charUnboundMgr").DeleteCharacter(old_cid)
-            cname = "V24%s%s" % (label[:3], suffix)
+            cname = "Evo%s%s" % (label[:3], suffix)
             if sm.RemoteSvc("charUnboundMgr").ValidateNameEx(cname):
                 cid = sm.RemoteSvc("charUnboundMgr").CreateCharacterWithDoll(
                     cname, bld, 0, anc, {"hair": "short"}, {"poseID": 1}, sch
@@ -138,363 +170,424 @@ def _execute_all_journeys(cfg, ipc):
                 created_ids.append(int(cid))
                 active_extra_ids.append(int(cid))
         all_chars = sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
-        if int(getattr(__builtin__.session, "charid", 0) or 0) != int(char_id):
-            sm.GetService("sessionMgr").PerformSessionChange("charsel", sm.RemoteSvc("charUnboundMgr").SelectCharacterID, char_id)
+    finally:
+        if int(_live_session_attr("charid", 0) or 0) != int(char_id):
+            sm.GetService("sessionMgr").PerformSessionChange(
+                "charsel", sm.RemoteSvc("charUnboundMgr").SelectCharacterID, char_id
+            )
             _ensure_view(sm, "hangar")
         _sync_quasar_gateway(sm, char_id)
-        record(
-            "create_character",
-            len(created_ids) == 4 and len(all_chars) >= 2,
-            "Real V24.01 client created 4 empire characters (bloodlines 2/5/7/3 -> %r) via charUnboundMgr.CreateCharacterWithDoll and kept active charID=%d"
-            % (created_ids, char_id),
-        )
+    passed = len(created_ids) == 4 and len(all_chars) >= 2
+    return passed, {
+        "created_char_ids": created_ids,
+        "total_chars": len(all_chars or []),
+        "active_char_id": char_id,
+    }
 
-    # 3. station_ui
-    if want("station_ui"):
-        _trace(cfg, "start station_ui")
-        _ensure_docked_jita(sm, ipc)
-        _assert_ui_rendered(sm, "hangar")
-        _, hangar_items = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        _, ship_dogma = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, ("GetShipAttributes", (), {}))
-        mkt_groups = sm.RemoteSvc("marketProxy").GetMarketGroups()
-        facs = sm.RemoteSvc("facilityManager").GetFacilities()
-        sm.RemoteSvc("charMgr").GetPublicInfo3(char_id)
-        skills_map = sm.RemoteSvc("skillMgr2").GetSkills()
-        wallet_bal = sm.RemoteSvc("account").GetCashBalance(0)
-        sm.RemoteSvc("agentMgr").GetMyJournalDetails()
-        corp_id_cur = int(_live_session_attr("corpid", getattr(sess, "corpid", 1000167)) or 1000167)
-        corp_info = sm.RemoteSvc("corpRegistry").GetCorporation(corp_id_cur)
-        sm.RemoteSvc("mailMgr").GetLabels()
-        sm.RemoteSvc("notificationMgr").GetUnprocessed()
-        sm.RemoteSvc("calendarMgr").GetEventList(1, 2030)
-        nes_offers = sm.RemoteSvc("storeManager").get_offers()
-        record(
-            "station_ui",
-            hangar_items is not None and mkt_groups is not None and corp_info is not None,
-            "Real V24.01 client queried docked station services: hangar=%d items, dogma=%d attrs, marketGroups=%d, facilities=%d, skills=%d, wallet=%r ISK, corp=%r, nesOffers=%d"
-            % (len(hangar_items), len(ship_dogma), len(mkt_groups), len(facs), len(skills_map), wallet_bal, _get_field(corp_info, "corporationName", corp_id_cur), len(nes_offers or [])),
-        )
 
-    # 4. fit_ship
-    if want("fit_ship"):
-        _trace(cfg, "start fit_ship")
-        _try_slash(sm, "/giveisk 50000000")
-        sm.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 484, 100000.0, 2, -1, 1, 90, False)
-        sm.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 178, 1000.0, 40, -1, 1, 90, False)
-        _, inv_after_buy = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        ammo_id = None
-        for it in inv_after_buy:
-            if int(_get_field(it, "typeID", 0)) == 178:
-                ammo_id = int(_get_field(it, "itemID", 0))
-        sm.RemoteSvc("charFittingMgr").SaveFitting(
-            char_id,
-            {"name": "V24 Rifter Fit", "shipTypeID": 587, "fitData": [(484, 27, 1)]},
-        )
-        saved_fits = sm.RemoteSvc("charFittingMgr").GetFittings(char_id)
-        _try_slash(sm, "/createitem 587 1")
-        _, inv_with_hull = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        hull_id = None
-        for it in inv_with_hull:
-            if int(_get_field(it, "typeID", 0)) == 587 and int(_get_field(it, "itemID", 0)) != ship_id:
-                hull_id = int(_get_field(it, "itemID", 0))
-                break
-        if hull_id:
-            sm.RemoteSvc("ship").AssembleShip([hull_id])
-            sm.RemoteSvc("repackagingSvc").RepackageItems([(hull_id, 60003760, 4)])
-        record(
-            "fit_ship",
-            len(saved_fits) >= 1 and hull_id is not None,
-            "Real V24.01 client bought modules/ammo on Jita market (ammoID=%r), saved fitting (count=%d), and assembled/repackaged hull %r via ship.AssembleShip + repackagingSvc.RepackageItems"
-            % (ammo_id, len(saved_fits), hull_id),
-        )
+def _journey_station_ui(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char_id = ctx["char_id"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    _ensure_docked_jita(sm, ipc)
+    _assert_ui_rendered(sm, "hangar")
+    _, hangar_items = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+    _, ship_dogma = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, ("GetShipAttributes", (), {}))
+    mkt_groups = sm.RemoteSvc("marketProxy").GetMarketGroups()
+    facs = sm.RemoteSvc("facilityManager").GetFacilities()
+    sm.RemoteSvc("charMgr").GetPublicInfo3(char_id)
+    skills_map = sm.RemoteSvc("skillMgr2").GetSkills()
+    wallet_bal = sm.RemoteSvc("account").GetCashBalance(0)
+    sm.RemoteSvc("agentMgr").GetMyJournalDetails()
+    corp_id_cur = int(_live_session_attr("corpid", ctx["baseline_corp_id"]) or ctx["baseline_corp_id"])
+    corp_info = sm.RemoteSvc("corpRegistry").GetCorporation(corp_id_cur)
+    sm.RemoteSvc("mailMgr").GetLabels()
+    sm.RemoteSvc("notificationMgr").GetUnprocessed()
+    sm.RemoteSvc("calendarMgr").GetEventList(1, 2030)
+    nes_offers = sm.RemoteSvc("storeManager").get_offers()
+    passed = hangar_items is not None and mkt_groups is not None and corp_info is not None
+    return passed, {
+        "hangar_items": len(hangar_items or []),
+        "ship_dogma_attrs": len(ship_dogma or {}),
+        "market_groups": len(mkt_groups or []),
+        "facilities": len(facs or []),
+        "skills": len(skills_map or {}),
+        "wallet_balance": wallet_bal,
+        "corp_name": _get_field(corp_info, "corporationName", corp_id_cur),
+        "nes_offers": len(nes_offers or []),
+    }
 
-    # 5. undock_navigate
-    if want("undock_navigate"):
-        _trace(cfg, "start undock_navigate")
-        _undock_ship(sm)
-        beyonce_jita = _get_beyonce(sm, 30000142)
-        _assert_ui_rendered(sm, "inflight")
-        bm_res = sm.RemoteSvc("accessGroupBookmarkMgr").BookmarkStaticLocation("V24 Jita Planet", 40009077, "Jita I", None)
-        beyonce_jita.CmdFollowBall(40009077, 1500.0)
-        beyonce_jita.CmdOrbit(40009077, 5000.0)
-        beyonce_jita.CmdAlignTo(40009077)
-        beyonce_jita.CmdSetSpeedFraction(1.0)
-        beyonce_jita.CmdStop()
-        warp_anim = _warp_animated(sm, beyonce_jita, 40009077)
-        beyonce_jita.CmdStop()
-        route_sys = [
-            (30000142, 50001249, 30000144),
-            (30000144, 50002184, 30000139),
-            (30000139, 50000547, 30000141),
-        ]
-        jumped_systems = []
-        for cur_sys, gate_id, next_sys in route_sys:
-            _wait_view_settled(sm)
+
+def _journey_fit_ship(ctx):
+    sm = ctx["sm"]
+    char_id = ctx["char_id"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    _try_slash(sm, "/giveisk 50000000")
+    sm.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 484, 100000.0, 2, -1, 1, 90, False)
+    sm.RemoteSvc("marketProxy").PlaceBuyOrder(60003760, 178, 1000.0, 40, -1, 1, 90, False)
+    ammo_id, _ = _find_hangar_item(sm, 60003760, 178, reverse=False)
+    sm.RemoteSvc("charFittingMgr").SaveFitting(
+        char_id,
+        {"name": "Rifter Fit", "shipTypeID": 587, "fitData": [(484, 27, 1)]},
+    )
+    saved_fits = sm.RemoteSvc("charFittingMgr").GetFittings(char_id)
+    _try_slash(sm, "/createitem 587 1")
+    hull_id, _ = _find_hangar_item(sm, 60003760, 587, exclude_id=ship_id, reverse=False)
+    if hull_id:
+        sm.RemoteSvc("ship").AssembleShip([hull_id])
+        sm.RemoteSvc("repackagingSvc").RepackageItems([(hull_id, 60003760, 4)])
+    passed = len(saved_fits or []) >= 1 and bool(hull_id)
+    return passed, {
+        "ammo_id": ammo_id or None,
+        "saved_fittings": len(saved_fits or []),
+        "hull_id": hull_id or None,
+    }
+
+
+def _journey_undock_navigate(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    _undock_ship(sm)
+    beyonce_jita = _get_beyonce(sm, 30000142)
+    _assert_ui_rendered(sm, "inflight")
+    bm_res = sm.RemoteSvc("accessGroupBookmarkMgr").BookmarkStaticLocation(
+        "Jita Planet", 40009077, "Jita I", None
+    )
+    beyonce_jita.CmdFollowBall(40009077, 1500.0)
+    beyonce_jita.CmdOrbit(40009077, 5000.0)
+    beyonce_jita.CmdAlignTo(40009077)
+    beyonce_jita.CmdSetSpeedFraction(1.0)
+    beyonce_jita.CmdStop()
+    warp_anim = _warp_animated(sm, beyonce_jita, 40009077)
+    beyonce_jita.CmdStop()
+    route_sys = [
+        (30000142, 50001249, 30000144),
+        (30000144, 50002184, 30000139),
+        (30000139, 50000547, 30000141),
+    ]
+    jumped_systems = []
+    for cur_sys, gate_id, next_sys in route_sys:
+        _wait_view_settled(sm)
+        b_cur = _get_beyonce(sm, cur_sys)
+        _warp_full(sm, b_cur, gate_id)
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
+        _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0)
+        _wait_view_settled(sm)
+        jumped_systems.append(int(_live_session_attr("solarsystemid2", next_sys)))
+    for cur_sys, gate_id, next_sys, need_warp in [
+        (30000141, 50001004, 30000139, False),
+        (30000139, 50000549, 30000144, True),
+        (30000144, 50002185, 30000142, True),
+    ]:
+        _wait_view_settled(sm)
+        if need_warp:
             b_cur = _get_beyonce(sm, cur_sys)
             _warp_full(sm, b_cur, gate_id)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-            sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
-            _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0)
-            _wait_view_settled(sm)
-            jumped_systems.append(int(_live_session_attr("solarsystemid2", next_sys)))
-        for cur_sys, gate_id, next_sys, need_warp in [
-            (30000141, 50001004, 30000139, False),
-            (30000139, 50000549, 30000144, True),
-            (30000144, 50002185, 30000142, True),
-        ]:
-            _wait_view_settled(sm)
-            if need_warp:
-                b_cur = _get_beyonce(sm, cur_sys)
-                _warp_full(sm, b_cur, gate_id)
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-            sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
-            _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0)
-            _wait_view_settled(sm)
-        beyonce_jita2 = _get_beyonce(sm, 30000142)
-        _warp_full(sm, beyonce_jita2, 60003760)
-        _ensure_docked_jita(sm, ipc)
-        _assert_ui_rendered(sm, "hangar")
-        record(
-            "undock_navigate",
-            len(jumped_systems) == 3 and bm_res is not None and bool(warp_anim),
-            "Real V24.01 client undocked, created bookmark, executed CmdFollowBall/CmdOrbit/CmdAlignTo/CmdWarpToStuff (animated warp telemetry=%r), jumped 3 stargates %r, and redocked at Jita 4-4"
-            % (warp_anim, jumped_systems),
-        )
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+        sm.RemoteSvc("beyonce").CmdStargateJump(gate_id)
+        _wait_session_attr("solarsystemid2", next_sys, timeout_sec=3.0)
+        _wait_view_settled(sm)
+    beyonce_jita2 = _get_beyonce(sm, 30000142)
+    _warp_full(sm, beyonce_jita2, 60003760)
+    _ensure_docked_jita(sm, ipc)
+    _assert_ui_rendered(sm, "hangar")
+    passed = len(jumped_systems) == 3 and bm_res is not None and bool(warp_anim)
+    return passed, {
+        "jumped_systems": jumped_systems,
+        "bookmark_created": bm_res is not None,
+        "warp_telemetry": warp_anim,
+    }
 
-    # 6. local_chat
-    if want("local_chat"):
-        _trace(cfg, "start local_chat")
-        sys_chans = sm.RemoteSvc("XmppChatMgr").ResyncSystemChannelAccess(30000142)
-        owned_chan = sm.RemoteSvc("XmppChatMgr").CreatePlayerOwnedChannel("V24Squad", "Tactical Channel")
-        cid_chan = str(_get_field(owned_chan, "channelID", 1))
-        sm.RemoteSvc("XmppChatMgr").AddCharacterToChannel(cid_chan, char2_id, 1)
-        chat_c2 = ipc.request({"cmd": "test_chat_with_c2", "channel_id": cid_chan, "msg": "Hello from real V24.01 client"})
-        record(
-            "local_chat",
-            sys_chans is not None and chat_c2.get("ok", False),
-            "Real V24.01 client synced XMPP system channels (%d), created player channel %r, invited Client 2 (%d), and verified concurrent message exchange"
-            % (len(sys_chans), cid_chan, char2_id),
-        )
 
-    # 7. multiplayer_presence
-    if want("multiplayer_presence"):
-        _trace(cfg, "start multiplayer_presence")
+def _journey_local_chat(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char2_id = ctx["char2_id"]
+    sys_chans = sm.RemoteSvc("XmppChatMgr").ResyncSystemChannelAccess(30000142)
+    owned_chan = sm.RemoteSvc("XmppChatMgr").CreatePlayerOwnedChannel(
+        "SquadChannel", "Tactical Channel"
+    )
+    cid_chan = str(_get_field(owned_chan, "channelID", 1))
+    sm.RemoteSvc("XmppChatMgr").AddCharacterToChannel(cid_chan, char2_id, 1)
+    chat_c2 = ipc.request(
+        {"cmd": "test_chat_with_c2", "channel_id": cid_chan, "msg": "Hello from client 1"}
+    )
+    passed = sys_chans is not None and bool(chat_c2.get("ok", False))
+    return passed, {
+        "system_channels": len(sys_chans or []),
+        "channel_id": cid_chan,
+        "char2_id": char2_id,
+        "c2_chat_ok": bool(chat_c2.get("ok", False)),
+    }
+
+
+def _journey_multiplayer_presence(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char_id = ctx["char_id"]
+    char2_id = ctx["char2_id"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    _undock_ship(sm)
+    ipc.request({"cmd": "c2_undock_jita"})
+    beyonce_jita, _ = sm.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+    beyonce_jita.CmdSetSpeedFraction(0.5)
+    c2_vis = ipc.request({"cmd": "c2_check_ball_and_dock", "target_ball_id": ship_id})
+    beyonce_jita.CmdStop()
+    _advance_clock(sm, ipc, 12)
+    _dock_station(sm, 60003760)
+    _try_slash(sm, "/createitem 34 50")
+    trit_id, _ = _find_hangar_item(sm, 60003760, 34, reverse=False)
+    c2_trade_res = None
+    if trit_id:
+        t_res = sm.RemoteSvc("trademgr").InitiateTrade(char2_id, 60003760)
+        trade_id = int(_get_field(t_res, "tradeContainerID", 0))
+        sm.RemoteSvc("trademgr").AddItem(trade_id, trit_id)
+        sm.RemoteSvc("trademgr").OfferMoney(trade_id, 5000.0)
+        sm.RemoteSvc("trademgr").MakeOffer(trade_id)
+        c2_trade_res = ipc.request(
+            {"cmd": "c2_complete_trade", "char1_id": char_id, "trade_id": trade_id}
+        )
+    passed = bool(
+        c2_vis.get("saw_ship", False)
+        and trit_id
+        and c2_trade_res
+        and c2_trade_res.get("ok")
+    )
+    return passed, {
+        "ship_id": ship_id,
+        "c2_saw_ship": bool(c2_vis.get("saw_ship", False)),
+        "c2_destiny_updates": int(c2_vis.get("updates", 0)),
+        "trit_item_id": trit_id or None,
+        "trade_ok": bool(c2_trade_res and c2_trade_res.get("ok")),
+    }
+
+
+def _journey_skills_training(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char_id = ctx["char_id"]
+    sm.GetService("shipTree")
+    for sk_id, lvl in ((3300, 5), (3402, 5), (3411, 5), (3301, 0), (3302, 0)):
+        _try_slash(sm, "/giveskill %d %d" % (sk_id, lvl))
+    bound_skill, _ = sm.RemoteSvc("skillMgr2").MachoBindObject(char_id, None)
+    bound_skill.SaveSkillQueue([(3301, 1), (3302, 1)])
+    bound_skill.GetSkillQueue()
+    _advance_clock(sm, ipc, 3600)
+    _try_slash(sm, "/createitem 40520 1")
+    _try_slash(sm, "/createitem 40519 1")
+    inj_id, _ = _find_hangar_item(sm, 60003760, 40520, reverse=True)
+    if inj_id:
+        sm.RemoteSvc("skillMgr2").InjectSkillpoints(inj_id)
+    plan_res = sm.RemoteSvc("skillMgr2").GetSkillChangesForISIS()
+    sm.RemoteSvc("skillMgr2").RespecCharacter(20, 22, 21, 18, 18)
+    _try_slash(sm, "/createitem 9899 1")
+    imp_id, _ = _find_hangar_item(sm, 60003760, 9899, reverse=False)
+    if imp_id:
+        sm.RemoteSvc("dogmaIM").InjectImplant(imp_id)
+    passed = plan_res is not None
+    return passed, {
+        "injector_item_id": inj_id or None,
+        "implant_item_id": imp_id or None,
+        "isis_plan_ok": plan_res is not None,
+    }
+
+
+def _journey_market_trade(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    market_tid = 19658
+    sell_mkt_id = int(_get_field(_try_slash(sm, "/createitem %d 200" % market_tid), "itemID", 0) or 0)
+    if not sell_mkt_id:
+        sell_mkt_id, _ = _find_hangar_item(sm, 60003760, market_tid, min_qty=50, reverse=True)
+    placed_orders = sm.RemoteSvc("marketProxy").PlaceMultiSellOrder(
+        [{"stationID": 60003760, "typeID": market_tid, "itemID": sell_mkt_id, "price": 50.0, "quantity": 20}],
+        False,
+        90,
+    )
+    sm.RemoteSvc("timeControl").AdvanceClock(305)
+    orders = sm.RemoteSvc("marketProxy").GetCharOrders()
+    sell_orders = [
+        o for o in (orders or [])
+        if int(_get_field(o, "typeID", 0)) == market_tid and not bool(_get_field(o, "bid", False))
+    ]
+    target_orders = sell_orders or list(placed_orders or []) or list(orders or [])
+    modified_oid = None
+    if target_orders:
+        modified_oid = int(_get_field(target_orders[-1], "orderID", 0))
+        sm.RemoteSvc("marketProxy").ModifyCharOrder(modified_oid, 55.0, False, True, False)
+    ipc.request({"cmd": "c2_buy_tritanium", "type_id": market_tid, "price": 100.0, "qty": 5})
+    txs = sm.RemoteSvc("marketProxy").CharGetTransactions()
+    hist = sm.RemoteSvc("marketProxy").GetOldPriceHistory(market_tid)
+    has_mkt_tx = any(int(_get_field(tx, "typeID", 0)) == market_tid for tx in (txs or []))
+    passed = bool(orders is not None and has_mkt_tx and hist is not None and len(hist) > 0)
+    return passed, {
+        "type_id": market_tid,
+        "modified_order_id": modified_oid,
+        "transactions_count": len(txs or []),
+        "history_rows": len(hist or []),
+    }
+
+
+def _journey_contracts(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char_id = ctx["char_id"]
+    char2_id = ctx["char2_id"]
+    it_ex = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", 0) or 0)
+    it_auc = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", 0) or 0)
+    it_cour = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", 0) or 0)
+    if not (it_ex and it_auc and it_cour):
+        fallback_trit, _ = _find_hangar_item(sm, 60003760, 34, min_qty=5, reverse=True)
+        it_ex = it_ex or fallback_trit
+        it_auc = it_auc or fallback_trit
+        it_cour = it_cour or fallback_trit
+    c_ex = sm.RemoteSvc("contractProxy").CreateContract(
+        1, 0, char2_id, 1440, 1, 60003760, 60003760, 25000.0, 0.0, 0.0, "Item Exchange", "", [(it_ex, 5)]
+    )
+    c_auc = sm.RemoteSvc("contractProxy").CreateContract(
+        2, 0, 0, 1440, 1, 60003760, 60003760, 10000.0, 50000.0, 0.0, "Auction", "", [(it_auc, 5)]
+    )
+    c_cour = sm.RemoteSvc("contractProxy").CreateContract(
+        3, 0, char2_id, 1440, 1, 60003760, 60003760, 0.0, 15000.0, 5000.0, "Courier", "", [(it_cour, 5)]
+    )
+    c_ex_id = int(_get_field(c_ex, "contractID", c_ex))
+    c_auc_id = int(_get_field(c_auc, "contractID", c_auc))
+    c_cour_id = int(_get_field(c_cour, "contractID", c_cour))
+    ipc.request(
+        {
+            "cmd": "c2_process_contracts",
+            "c_ex": c_ex_id,
+            "c_auc": c_auc_id,
+            "c_cour": c_cour_id,
+            "char1_id": char_id,
+        }
+    )
+    passed = bool(c_ex_id and c_auc_id and c_cour_id)
+    return passed, {
+        "exchange_contract_id": c_ex_id,
+        "auction_contract_id": c_auc_id,
+        "courier_contract_id": c_cour_id,
+    }
+
+
+def _journey_mining_loop(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    primary_ship_id = ctx["primary_ship_id"]
+    for sk in (3327, 3328, 3329, 3330, 3331, 3386, 32918):
+        _try_slash(sm, "/giveskill %d 5" % sk)
+    _try_slash(sm, "/createitem 32880 1")
+    _try_slash(sm, "/createitem 483 1")
+    venture_id, _ = _find_hangar_item(sm, 60003760, 32880, reverse=True)
+    miner_id, _ = _find_hangar_item(sm, 60003760, 483, reverse=True)
+    rock_id = 0
+    mine_rep = None
+    ore_id = None
+    reproc_quotes = None
+    reproc_res = None
+    try:
+        if venture_id:
+            _board_station_ship(sm, venture_id, assemble=True)
+            if miner_id:
+                try:
+                    inv_v, _ = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, None)
+                    inv_v.Add(miner_id, 60003760, flag=27)
+                    dogma_v, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                    dogma_v.SetModuleOnline(venture_id, miner_id)
+                except Exception:
+                    pass
         _undock_ship(sm)
-        ipc.request({"cmd": "c2_undock_jita"})
-        beyonce_jita, _ = sm.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-        beyonce_jita.CmdSetSpeedFraction(0.5)
-        c2_vis = ipc.request({"cmd": "c2_check_ball_and_dock", "target_ball_id": ship_id})
-        beyonce_jita.CmdStop()
-        ipc.request({"cmd": "advance_clock", "secs": 12})
-        _dock_station(sm, 60003760)
-        _try_slash(sm, "/createitem 34 50")
-        _, inv_trade = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        trit_id = None
-        for it in inv_trade:
-            if int(_get_field(it, "typeID", 0)) == 34:
-                trit_id = int(_get_field(it, "itemID", 0))
-                break
-        c2_trade_res = None
-        if trit_id:
-            t_res = sm.RemoteSvc("trademgr").InitiateTrade(char2_id, 60003760)
-            trade_id = int(_get_field(t_res, "tradeContainerID", 0))
-            sm.RemoteSvc("trademgr").AddItem(trade_id, trit_id)
-            sm.RemoteSvc("trademgr").OfferMoney(trade_id, 5000.0)
-            sm.RemoteSvc("trademgr").MakeOffer(trade_id)
-            c2_trade_res = ipc.request({"cmd": "c2_complete_trade", "char1_id": char_id, "trade_id": trade_id})
-        record(
-            "multiplayer_presence",
-            c2_vis.get("saw_ship", False) and trit_id is not None and bool(c2_trade_res and c2_trade_res.get("ok")),
-            "Real V24.01 ship %d observed live by concurrent Client 2 in Jita space (%d DoDestinyUpdate packets) and completed direct player-to-player trade (itemID=%r)"
-            % (ship_id, int(c2_vis.get("updates", 0)), trit_id),
-        )
-
-    # 8. skills_training
-    if want("skills_training"):
-        _trace(cfg, "start skills_training")
-        sm.GetService("shipTree")
-        for sk_id, lvl in ((3300, 5), (3402, 5), (3411, 5), (3301, 0), (3302, 0)):
-            _try_slash(sm, "/giveskill %d %d" % (sk_id, lvl))
-        bound_skill, _ = sm.RemoteSvc("skillMgr2").MachoBindObject(char_id, None)
-        bound_skill.SaveSkillQueue([(3301, 1), (3302, 1)])
-        bound_skill.GetSkillQueue()
-        ipc.request({"cmd": "advance_clock", "secs": 3600})
-        _try_slash(sm, "/createitem 40520 1")
-        _try_slash(sm, "/createitem 40519 1")
-        _, inv_sk = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        inj_id = None
-        for it in inv_sk:
-            if int(_get_field(it, "typeID", 0)) == 40520:
-                inj_id = int(_get_field(it, "itemID", 0))
-        if inj_id:
-            sm.RemoteSvc("skillMgr2").InjectSkillpoints(inj_id)
-        plan_res = sm.RemoteSvc("skillMgr2").GetSkillChangesForISIS()
-        sm.RemoteSvc("skillMgr2").RespecCharacter(20, 22, 21, 18, 18)
-        _try_slash(sm, "/createitem 9899 1")
-        _, inv_imp = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        for it in inv_imp:
-            if int(_get_field(it, "typeID", 0)) == 9899:
-                sm.RemoteSvc("dogmaIM").InjectImplant(int(_get_field(it, "itemID", 0)))
-                break
-        record(
-            "skills_training",
-            plan_res is not None,
-            "Real V24.01 client queued skills, advanced clock +3600s to complete training, applied skill injector %r, saved skill plan, remapped attributes, and plugged implant"
-            % (inj_id,),
-        )
-
-    # 9. market_trade
-    if want("market_trade"):
-        _trace(cfg, "start market_trade")
-        market_tid = 19658
-        sell_mkt_id = int(_get_field(_try_slash(sm, "/createitem %d 200" % market_tid), "itemID", 0) or 0)
-        _, inv_mkt = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        if not sell_mkt_id:
-            for it in reversed(list(inv_mkt)):
-                if int(_get_field(it, "typeID", 0)) == market_tid and int(_get_field(it, "quantity", 0)) >= 50:
-                    sell_mkt_id = int(_get_field(it, "itemID", 0))
+        active_mine_ship = venture_id or primary_ship_id
+        bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+        if bp_mine is not None:
+            for bid in list(bp_mine.balls.keys()):
+                slim_m = bp_mine.GetInvItem(bid)
+                if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
+                    rock_id = int(bid)
                     break
-        placed_orders = sm.RemoteSvc("marketProxy").PlaceMultiSellOrder(
-            [{"stationID": 60003760, "typeID": market_tid, "itemID": sell_mkt_id, "price": 50.0, "quantity": 20}],
-            False,
-            90,
-        )
-        sm.RemoteSvc("timeControl").AdvanceClock(305)
-        orders = sm.RemoteSvc("marketProxy").GetCharOrders()
-        sell_orders = [
-            o for o in (orders or [])
-            if int(_get_field(o, "typeID", 0)) == market_tid and not bool(_get_field(o, "bid", False))
-        ]
-        target_orders = sell_orders or list(placed_orders or []) or list(orders or [])
-        if target_orders:
-            oid = int(_get_field(target_orders[-1], "orderID", 0))
-            sm.RemoteSvc("marketProxy").ModifyCharOrder(oid, 55.0, False, True, False)
-        ipc.request({"cmd": "c2_buy_tritanium", "type_id": market_tid, "price": 100.0, "qty": 5})
-        txs = sm.RemoteSvc("marketProxy").CharGetTransactions()
-        hist = sm.RemoteSvc("marketProxy").GetOldPriceHistory(market_tid)
-        has_mkt_tx = any(int(_get_field(tx, "typeID", 0)) == market_tid for tx in (txs or []))
-        record(
-            "market_trade",
-            bool(orders is not None and has_mkt_tx and hist is not None and len(hist) > 0),
-            "Real V24.01 client placed & modified sell order (typeID=%d) on Jita market, executed cross-client fill with Client 2, and retrieved wallet transactions (%d) & price history (%d)"
-            % (market_tid, len(txs or []), len(hist or [])),
-        )
-
-    # 10. contracts
-    if want("contracts"):
-        _trace(cfg, "start contracts")
-        it_ex = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", sell_trit_id))
-        it_auc = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", sell_trit_id))
-        it_cour = int(_get_field(_try_slash(sm, "/createitem 34 20"), "itemID", sell_trit_id))
-        c_ex = sm.RemoteSvc("contractProxy").CreateContract(1, 0, char2_id, 1440, 1, 60003760, 60003760, 25000.0, 0.0, 0.0, "V24 Item Exchange", "", [(it_ex, 5)])
-        c_auc = sm.RemoteSvc("contractProxy").CreateContract(2, 0, 0, 1440, 1, 60003760, 60003760, 10000.0, 50000.0, 0.0, "V24 Auction", "", [(it_auc, 5)])
-        c_cour = sm.RemoteSvc("contractProxy").CreateContract(3, 0, char2_id, 1440, 1, 60003760, 60003760, 0.0, 15000.0, 5000.0, "V24 Courier", "", [(it_cour, 5)])
-        c_ex_id = int(_get_field(c_ex, "contractID", c_ex))
-        c_auc_id = int(_get_field(c_auc, "contractID", c_auc))
-        c_cour_id = int(_get_field(c_cour, "contractID", c_cour))
-        ipc.request({"cmd": "c2_process_contracts", "c_ex": c_ex_id, "c_auc": c_auc_id, "c_cour": c_cour_id, "char1_id": char_id})
-        record(
-            "contracts",
-            bool(c_ex_id and c_auc_id and c_cour_id),
-            "Real V24.01 client created Item Exchange (%d), Auction (%d), and Courier (%d) contracts and completed cross-client acceptance/bidding/delivery with Client 2"
-            % (c_ex_id, c_auc_id, c_cour_id),
-        )
-
-    # 11. mining_loop
-    if want("mining_loop"):
-        _trace(cfg, "start mining_loop")
-        for sk in (3327, 3328, 3329, 3330, 3331, 3386, 32918):
-            _try_slash(sm, "/giveskill %d 5" % sk)
-        _try_slash(sm, "/createitem 32880 1")
-        _try_slash(sm, "/createitem 483 1")
-        _, inv_mine = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        venture_id = None
-        miner_id = None
-        for it in reversed(list(inv_mine or [])):
-            tid_mine = int(_get_field(it, "typeID", 0))
-            if tid_mine == 32880 and not venture_id:
-                venture_id = int(_get_field(it, "itemID", 0))
-            elif tid_mine == 483 and not miner_id:
-                miner_id = int(_get_field(it, "itemID", 0))
-            if venture_id and miner_id:
-                break
-        rock_id = 0
-        mine_rep = None
-        ore_id = None
-        reproc_quotes = None
-        reproc_res = None
-        try:
-            if venture_id:
-                try:
-                    sm.RemoteSvc("ship").AssembleShip([venture_id])
-                except Exception:
-                    pass
+        if not rock_id:
+            try:
+                b_jita_mine = _get_beyonce(sm, 30000142)
+                _warp_full(sm, b_jita_mine, 50001249)
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
-                sm.RemoteSvc("ship").Board(venture_id)
-                _wait_session_attr("shipid", venture_id, timeout_sec=3.0)
-                _sleep_ms(200)
+                sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
+                _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0)
+                b_perim_mine = _get_beyonce(sm, 30000144)
+                _ensure_view(sm, "inflight")
                 _wait_view_settled(sm)
-                if miner_id:
-                    try:
-                        inv_v, _ = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, None)
-                        inv_v.Add(miner_id, 60003760, flag=27)
-                        dogma_v, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                        dogma_v.SetModuleOnline(venture_id, miner_id)
-                    except Exception:
-                        pass
-            _undock_ship(sm)
-            active_mine_ship = venture_id or ship_id
-            bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-            if bp_mine is not None:
-                for bid in list(bp_mine.balls.keys()):
-                    slim_m = bp_mine.GetInvItem(bid)
-                    if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
-                        rock_id = int(bid)
-                        break
-            if not rock_id:
-                try:
-                    b_jita_mine = _get_beyonce(sm, 30000142)
-                    _warp_full(sm, b_jita_mine, 50001249)
-                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                    sm.RemoteSvc("beyonce").CmdStargateJump(50001249)
-                    _wait_session_attr("solarsystemid2", 30000144, timeout_sec=3.0)
-                    b_perim_mine = _get_beyonce(sm, 30000144)
-                    _ensure_view(sm, "inflight")
-                    _wait_view_settled(sm)
-                    bp_perim = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-                    belt_id = 40009232
-                    if bp_perim is not None:
-                        for bid in list(bp_perim.balls.keys()):
-                            slim_b = bp_perim.GetInvItem(bid)
-                            if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
-                                belt_id = int(bid)
-                                break
-                    _warp_full(sm, b_perim_mine, belt_id)
-                    _wait_view_settled(sm)
-                    bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
-                    if bp_mine is not None:
-                        for bid in list(bp_mine.balls.keys()):
-                            slim_m = bp_mine.GetInvItem(bid)
-                            if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
-                                rock_id = int(bid)
-                                break
-                except Exception:
-                    pass
-            if rock_id:
-                try:
-                    sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
-                    if venture_id and miner_id:
-                        dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                        mine_rep = dogma_mine.Activate(miner_id, "mining", rock_id)
-                except Exception:
-                    pass
-            ipc.request({"cmd": "advance_clock", "secs": 65})
-            if venture_id and miner_id and mine_rep is not None:
-                try:
+                bp_perim = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+                belt_id = 40009232
+                if bp_perim is not None:
+                    for bid in list(bp_perim.balls.keys()):
+                        slim_b = bp_perim.GetInvItem(bid)
+                        if slim_b is not None and int(getattr(slim_b, "groupID", 0) or 0) == 9:
+                            belt_id = int(bid)
+                            break
+                _warp_full(sm, b_perim_mine, belt_id)
+                _wait_view_settled(sm)
+                bp_mine = getattr(sm.GetService("michelle"), "_Michelle__bp", None)
+                if bp_mine is not None:
+                    for bid in list(bp_mine.balls.keys()):
+                        slim_m = bp_mine.GetInvItem(bid)
+                        if int(bid) != active_mine_ship and slim_m is not None and int(getattr(slim_m, "categoryID", 0) or 0) == 25:
+                            rock_id = int(bid)
+                            break
+            except Exception:
+                pass
+        if rock_id:
+            try:
+                sm.RemoteSvc("dogmaIM").AddTarget(rock_id)
+                if venture_id and miner_id:
                     dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
-                    dogma_mine.Deactivate(miner_id)
-                except Exception:
-                    pass
+                    mine_rep = dogma_mine.Activate(miner_id, "mining", rock_id)
+            except Exception:
+                pass
+        _advance_clock(sm, ipc, 65)
+        if venture_id and miner_id and mine_rep is not None:
+            try:
+                dogma_mine, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(venture_id, None)
+                dogma_mine.Deactivate(miner_id)
+            except Exception:
+                pass
+        if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
+            b_perim_ret = _get_beyonce(sm, 30000144)
+            _warp_full(sm, b_perim_ret, 50002185)
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
+            _ensure_view(sm, "inflight")
+            _wait_view_settled(sm)
+            b_jita_ret = _get_beyonce(sm, 30000142)
+            _warp_full(sm, b_jita_ret, 60003760)
+        _dock_station(sm, 60003760)
+        if venture_id:
+            try:
+                inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
+                _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
+                for it in (ship_ore_items or []):
+                    if int(_get_field(it, "typeID", 0)) in (1228, 1230):
+                        inv_hangar.Add(int(_get_field(it, "itemID", 0)), venture_id)
+            except Exception:
+                pass
+        _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+        for it in (inv_ore or []):
+            if int(_get_field(it, "typeID", 0)) in (1228, 1230) and int(_get_field(it, "quantity", 0)) >= 100:
+                ore_id = int(_get_field(it, "itemID", 0))
+                break
+        if not ore_id:
+            _try_slash(sm, "/createitem 1228 200")
+            ore_id, _ = _find_hangar_item(sm, 60003760, 1228, min_qty=100, reverse=False)
+        if ore_id:
+            try:
+                reproc_svc, _ = sm.RemoteSvc("reprocessingSvc").MachoBindObject(60003760, None)
+                reproc_quotes = reproc_svc.GetQuotes([ore_id], 60003760)
+                reproc_res = reproc_svc.Reprocess([ore_id], 60003760)
+            except Exception:
+                pass
+    finally:
+        try:
             if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
                 b_perim_ret = _get_beyonce(sm, 30000144)
                 _warp_full(sm, b_perim_ret, 50002185)
@@ -503,227 +596,206 @@ def _execute_all_journeys(cfg, ipc):
                 _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
                 _ensure_view(sm, "inflight")
                 _wait_view_settled(sm)
-                b_jita_ret = _get_beyonce(sm, 30000142)
-                _warp_full(sm, b_jita_ret, 60003760)
-            _dock_station(sm, 60003760)
-            if venture_id:
-                try:
-                    inv_hangar, _ = sm.RemoteSvc("invbroker").MachoBindObject(60003760, None)
-                    _, ship_ore_items = sm.RemoteSvc("invbroker").MachoBindObject(venture_id, ("List", (), {}))
-                    for it in (ship_ore_items or []):
-                        if int(_get_field(it, "typeID", 0)) in (1228, 1230):
-                            inv_hangar.Add(int(_get_field(it, "itemID", 0)), venture_id)
-                except Exception:
-                    pass
-            _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-            for it in inv_ore:
-                if int(_get_field(it, "typeID", 0)) in (1228, 1230) and int(_get_field(it, "quantity", 0)) >= 100:
-                    ore_id = int(_get_field(it, "itemID", 0))
-                    break
-            if not ore_id:
-                _try_slash(sm, "/createitem 1228 200")
-                _, inv_ore = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-                for it in inv_ore:
-                    if int(_get_field(it, "typeID", 0)) == 1228 and int(_get_field(it, "quantity", 0)) >= 100:
-                        ore_id = int(_get_field(it, "itemID", 0))
-                        break
-            if ore_id:
-                try:
-                    reproc_svc, _ = sm.RemoteSvc("reprocessingSvc").MachoBindObject(60003760, None)
-                    reproc_quotes = reproc_svc.GetQuotes([ore_id], 60003760)
-                    reproc_res = reproc_svc.Reprocess([ore_id], 60003760)
-                except Exception:
-                    pass
-        finally:
+            if int(_live_session_attr("stationid", 0) or 0) != 60003760:
+                if not int(_live_session_attr("stationid", 0) or 0):
+                    b_jita_ret = _get_beyonce(sm, 30000142)
+                    _warp_full(sm, b_jita_ret, 60003760)
+                    _dock_station(sm, 60003760)
+        except Exception:
+            pass
+        _ensure_docked_jita(sm, ipc)
+        try:
+            _ensure_home_ship(sm, primary_ship_id)
+        except Exception:
+            pass
+    passed = bool(
+        venture_id
+        and miner_id
+        and rock_id
+        and mine_rep is not None
+        and ore_id
+        and reproc_quotes is not None
+        and reproc_res is not None
+    )
+    return passed, {
+        "venture_id": venture_id or None,
+        "miner_id": miner_id or None,
+        "rock_id": rock_id or None,
+        "ore_id": ore_id or None,
+        "reprocess_ok": reproc_res is not None,
+    }
+
+
+def _journey_pve_combat(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    _undock_ship(sm)
+    rat_rep = _try_slash(sm, "/spawnnpc 10035")
+    rat_id = int(
+        _get_field(rat_rep, "npcID", _get_field(rat_rep, "ballID", _get_field(rat_rep, "itemID", 0))) or 0
+    )
+    if rat_id:
+        sm.RemoteSvc("dogmaIM").AddTarget(rat_id)
+        _try_slash(sm, "/despawn %d" % rat_id)
+    _advance_clock(sm, ipc, 2)
+    _dock_station(sm, 60003760)
+    passed = rat_id != 0
+    return passed, {
+        "ship_id": ship_id,
+        "npc_id": rat_id,
+    }
+
+
+def _journey_missions(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    agents_rows = sm.RemoteSvc("agentMgr").GetAgents()
+    sec_ag_id = None
+    sec_ag_station_id = 0
+    sec_ag_sys_id = 0
+    for r in (agents_rows or []):
+        if int(_get_field(r, "level", 0)) == 1 and int(_get_field(r, "solarSystemID", 0)) == 30000142:
+            sec_ag_id = int(_get_field(r, "agentID", 0))
+            sec_ag_station_id = int(_get_field(r, "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
+            sec_ag_sys_id = int(_get_field(r, "solarSystemID", 0) or 0)
+            break
+    if not sec_ag_id and agents_rows:
+        sec_ag_id = int(_get_field(agents_rows[0], "agentID", 0))
+        sec_ag_station_id = int(_get_field(agents_rows[0], "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
+        sec_ag_sys_id = int(_get_field(agents_rows[0], "solarSystemID", 0) or 0)
+    ag_action = None
+    lp_offers = None
+    moved_ag_station = False
+    try:
+        if sec_ag_station_id and sec_ag_station_id != 60003760 and sec_ag_sys_id == 30000142:
+            _undock_ship(sm)
+            moved_ag_station = True
+            b_ag = _get_beyonce(sm, 30000142)
+            _warp_full(sm, b_ag, sec_ag_station_id)
+            _dock_station(sm, sec_ag_station_id)
+        if sec_ag_id:
             try:
-                if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) == 30000144:
-                    b_perim_ret = _get_beyonce(sm, 30000144)
-                    _warp_full(sm, b_perim_ret, 50002185)
-                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                    sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
-                    _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
-                    _ensure_view(sm, "inflight")
-                    _wait_view_settled(sm)
+                bound_ag, _ = sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
+                ag_action = bound_ag.DoAction(2)
+            except Exception:
+                pass
+        try:
+            lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
+        except Exception:
+            pass
+    finally:
+        if moved_ag_station:
+            try:
                 if int(_live_session_attr("stationid", 0) or 0) != 60003760:
-                    if not int(_live_session_attr("stationid", 0) or 0):
-                        b_jita_ret = _get_beyonce(sm, 30000142)
-                        _warp_full(sm, b_jita_ret, 60003760)
-                        _dock_station(sm, 60003760)
+                    if int(_live_session_attr("stationid", 0) or 0):
+                        _undock_ship(sm)
+                    b_ag_ret = _get_beyonce(sm, 30000142)
+                    _warp_full(sm, b_ag_ret, 60003760)
+                    _dock_station(sm, 60003760)
             except Exception:
                 pass
             _ensure_docked_jita(sm, ipc)
-            try:
-                if int(_live_session_attr("shipid", ship_id) or ship_id) != ship_id:
-                    sm.RemoteSvc("timeControl").ClearSessionTimer()
-                    sm.RemoteSvc("ship").Board(ship_id)
-                    _wait_session_attr("shipid", ship_id, timeout_sec=3.0)
-                    _sleep_ms(200)
-                    _wait_view_settled(sm)
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-            except Exception:
-                pass
-        record(
-            "mining_loop",
-            bool(venture_id and miner_id and rock_id and mine_rep is not None and ore_id and reproc_quotes is not None and reproc_res is not None),
-            "Real V24.01 client boarded Venture (%r), fitted & activated Miner I (%r) on asteroid (%r), docked, quoted & reprocessed ore (%r) via reprocessingSvc"
-            % (venture_id, miner_id, rock_id, ore_id),
-        )
+    passed = bool(agents_rows and len(agents_rows) > 0 and sec_ag_id and ag_action is not None and lp_offers is not None)
+    return passed, {
+        "agents_count": len(agents_rows or []),
+        "agent_id": sec_ag_id,
+        "agent_station_id": sec_ag_station_id,
+        "lp_offers_count": len(lp_offers or []),
+    }
 
-    # 12. pve_combat
-    if want("pve_combat"):
-        _trace(cfg, "start pve_combat")
-        _undock_ship(sm)
-        rat_rep = _try_slash(sm, "/spawnnpc 10035")
-        rat_id = int(_get_field(rat_rep, "npcID", _get_field(rat_rep, "ballID", _get_field(rat_rep, "itemID", 0))) or 0)
-        if rat_id:
-            sm.RemoteSvc("dogmaIM").AddTarget(rat_id)
-            _try_slash(sm, "/despawn %d" % rat_id)
-        ipc.request({"cmd": "advance_clock", "secs": 2})
-        _dock_station(sm, 60003760)
-        record(
-            "pve_combat",
-            rat_id != 0,
-            "Real V24.01 client undocked in ship %d, spawned NPC target (%r), locked target via dogmaIM.AddTarget, eliminated rat & collected bounty, and redocked"
-            % (ship_id, rat_id),
-        )
 
-    # 13. missions & LP store
-    if want("missions"):
-        _trace(cfg, "start missions")
-        agents_rows = sm.RemoteSvc("agentMgr").GetAgents()
-        sec_ag_id = None
-        sec_ag_station_id = 0
-        sec_ag_sys_id = 0
-        for r in (agents_rows or []):
-            if int(_get_field(r, "level", 0)) == 1 and int(_get_field(r, "solarSystemID", 0)) == 30000142:
-                sec_ag_id = int(_get_field(r, "agentID", 0))
-                sec_ag_station_id = int(_get_field(r, "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
-                sec_ag_sys_id = int(_get_field(r, "solarSystemID", 0) or 0)
-                break
-        if not sec_ag_id and agents_rows:
-            sec_ag_id = int(_get_field(agents_rows[0], "agentID", 0))
-            sec_ag_station_id = int(_get_field(agents_rows[0], "stationID", 0) or (60015169 if sec_ag_id == 3020034 else 0))
-            sec_ag_sys_id = int(_get_field(agents_rows[0], "solarSystemID", 0) or 0)
-        ag_action = None
-        lp_offers = None
-        moved_ag_station = False
+def _journey_exploration(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    for sk_exp in (3402, 3412, 3413, 3426, 3432, 13278, 21718, 25810, 25811, 25812):
+        _try_slash(sm, "/giveskill %d 5" % sk_exp)
+    _try_slash(sm, "/createitem 22175 1")
+    _try_slash(sm, "/createitem 17938 1")
+    _try_slash(sm, "/createitem 30013 8")
+    _, inv_exp = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+    da_id, launcher_id, probe_id = 0, 0, 0
+    for it in (inv_exp or []):
+        t_exp = int(_get_field(it, "typeID", 0))
+        i_exp = int(_get_field(it, "itemID", 0))
+        if t_exp == 22175 and not da_id:
+            da_id = i_exp
+        elif t_exp == 17938 and not launcher_id:
+            launcher_id = i_exp
+        elif t_exp == 30013 and not probe_id:
+            probe_id = i_exp
+    inv_ship_exp, _ = sm.RemoteSvc("invbroker").MachoBindObject(ship_id, None)
+    if da_id:
+        inv_ship_exp.Add(da_id, 60003760, flag=19)
+    if launcher_id:
+        inv_ship_exp.Add(launcher_id, 60003760, flag=27)
+    if probe_id:
+        inv_ship_exp.Add(probe_id, 60003760, flag=27)
+    if launcher_id:
         try:
-            if sec_ag_station_id and sec_ag_station_id != 60003760 and sec_ag_sys_id == 30000142:
-                _undock_ship(sm)
-                moved_ag_station = True
-                b_ag = _get_beyonce(sm, 30000142)
-                _warp_full(sm, b_ag, sec_ag_station_id)
-                _dock_station(sm, sec_ag_station_id)
-            if sec_ag_id:
-                try:
-                    bound_ag, _ = sm.RemoteSvc("agentMgr").MachoBindObject(sec_ag_id, None)
-                    ag_action = bound_ag.DoAction(2)
-                except Exception:
-                    pass
-            try:
-                lp_offers = sm.RemoteSvc("LPStoreMgr").GetAvailableOffersFromCorp(1000035)
-            except Exception:
-                pass
-        finally:
-            if moved_ag_station:
-                try:
-                    if int(_live_session_attr("stationid", 0) or 0) != 60003760:
-                        if int(_live_session_attr("stationid", 0) or 0):
-                            _undock_ship(sm)
-                        b_ag_ret = _get_beyonce(sm, 30000142)
-                        _warp_full(sm, b_ag_ret, 60003760)
-                        _dock_station(sm, 60003760)
-                except Exception:
-                    pass
-                _ensure_docked_jita(sm, ipc)
-        record(
-            "missions",
-            bool(agents_rows and len(agents_rows) > 0 and sec_ag_id and ag_action is not None and lp_offers is not None),
-            "Real V24.01 client queried %d agents via agentMgr.GetAgents, called DoAction(2) on agent %r (station %r), and queried LPStoreMgr offers (%d)"
-            % (len(agents_rows or []), sec_ag_id, sec_ag_station_id, len(lp_offers or [])),
-        )
-
-    # 14. exploration (probe scan, directional scan, hacking minigame)
-    if want("exploration"):
-        _trace(cfg, "start exploration")
-        for sk_exp in (3402, 3412, 3413, 3426, 3432, 13278, 21718, 25810, 25811, 25812):
-            _try_slash(sm, "/giveskill %d 5" % sk_exp)
-        _try_slash(sm, "/createitem 22175 1")
-        _try_slash(sm, "/createitem 17938 1")
-        _try_slash(sm, "/createitem 30013 8")
-        _, inv_exp = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        da_id, launcher_id, probe_id = 0, 0, 0
-        for it in inv_exp:
-            t_exp = int(_get_field(it, "typeID", 0))
-            i_exp = int(_get_field(it, "itemID", 0))
-            if t_exp == 22175 and not da_id:
-                da_id = i_exp
-            elif t_exp == 17938 and not launcher_id:
-                launcher_id = i_exp
-            elif t_exp == 30013 and not probe_id:
-                probe_id = i_exp
-        inv_ship_exp, _ = sm.RemoteSvc("invbroker").MachoBindObject(ship_id, None)
-        if da_id:
-            inv_ship_exp.Add(da_id, 60003760, flag=19)
-        if launcher_id:
-            inv_ship_exp.Add(launcher_id, 60003760, flag=27)
-        if probe_id:
-            inv_ship_exp.Add(probe_id, 60003760, flag=27)
-        if launcher_id:
-            try:
-                dogma_dock_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
-                dogma_dock_exp.SetModuleOnline(ship_id, launcher_id)
-            except Exception:
-                pass
-        _undock_ship(sm)
-        dscan_res = sm.RemoteSvc("scanSvc").ConeScan(360.0, 21474836475000.0, [1.0, 0.0, 0.0])
-        try:
-            sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
+            dogma_dock_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
+            dogma_dock_exp.SetModuleOnline(ship_id, launcher_id)
         except Exception:
             pass
-        dogma_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
-        launch_rep = dogma_exp.Activate(launcher_id, "default")
-        probe_pids = list(_get_field(launch_rep, "probeIDs", []) or [])
-        sm.RemoteSvc("scanMgr").RequestScans(
-            {int(pid): {"pos": (-32000000.0, 28000000.0, -10000000.0), "scanRangeAU": 0.25} for pid in probe_pids},
-            1,
-        )
-        ipc.request({"cmd": "advance_clock", "secs": 15})
-        scan_res = sm.RemoteSvc("scanMgr").RequestScans()
-        beyonce_exp = _get_beyonce(sm, 30000142)
-        _warp_full(sm, beyonce_exp, "DAT-30000142", stuff_type="scan")
-        hack_res = sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
-        sm.RemoteSvc("hackingMgr").ClickedOnTile(1)
-        ipc.request({"cmd": "advance_clock", "secs": 5})
-        _warp_full(sm, beyonce_exp, 60003760)
-        _dock_station(sm, 60003760)
-        record(
-            "exploration",
-            bool(dscan_res is not None and len(probe_pids) > 0 and scan_res is not None and hack_res is not None),
-            "Real V24.01 client executed ConeScan (D-scan=%d), launched %d probes & RequestScans (%d), and ran hacking minigame"
-            % (len(dscan_res) if isinstance(dscan_res, (list, tuple)) else 1, len(probe_pids), len(scan_res) if isinstance(scan_res, (list, tuple)) else 1),
-        )
+    _undock_ship(sm)
+    dscan_res = sm.RemoteSvc("scanSvc").ConeScan(360.0, 21474836475000.0, [1.0, 0.0, 0.0])
+    try:
+        sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
+    except Exception:
+        pass
+    dogma_exp, _ = sm.RemoteSvc("dogmaIM").MachoBindObject(ship_id, None)
+    launch_rep = dogma_exp.Activate(launcher_id, "default")
+    probe_pids = list(_get_field(launch_rep, "probeIDs", []) or [])
+    sm.RemoteSvc("scanMgr").RequestScans(
+        {int(pid): {"pos": (-32000000.0, 28000000.0, -10000000.0), "scanRangeAU": 0.25} for pid in probe_pids},
+        1,
+    )
+    _advance_clock(sm, ipc, 15)
+    scan_res = sm.RemoteSvc("scanMgr").RequestScans()
+    beyonce_exp = _get_beyonce(sm, 30000142)
+    _warp_full(sm, beyonce_exp, "DAT-30000142", stuff_type="scan")
+    hack_res = sm.RemoteSvc("hackingMgr").StartNewGameInstance(1870014200)
+    sm.RemoteSvc("hackingMgr").ClickedOnTile(1)
+    _advance_clock(sm, ipc, 5)
+    _warp_full(sm, beyonce_exp, 60003760)
+    _dock_station(sm, 60003760)
+    passed = bool(dscan_res is not None and len(probe_pids) > 0 and scan_res is not None and hack_res is not None)
+    return passed, {
+        "dscan_count": len(dscan_res) if isinstance(dscan_res, (list, tuple)) else 1,
+        "probes_launched": len(probe_pids),
+        "scan_results": len(scan_res) if isinstance(scan_res, (list, tuple)) else 1,
+        "hacking_ok": hack_res is not None,
+    }
 
-    # 15. wormholes_filaments
-    if want("wormholes_filaments"):
-        _trace(cfg, "start wormholes_filaments")
-        _try_slash(sm, "/createitem 53977 1")
-        _try_slash(sm, "/createitem 56131 3")
-        _, inv_fil = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        nj_id, aby_id = 0, 0
-        for it in inv_fil:
-            tid = int(_get_field(it, "typeID", 0))
-            iid = int(_get_field(it, "itemID", 0))
-            if tid == 53977 and not nj_id:
-                nj_id = iid
-            elif tid == 56131 and not aby_id:
-                aby_id = iid
-        if nj_id or aby_id:
-            inv_ship_fil, _ = sm.RemoteSvc("invbroker").MachoBindObject(ship_id, None)
-            if nj_id:
-                inv_ship_fil.Add(nj_id, 60003760)
-            if aby_id:
-                inv_ship_fil.Add(aby_id, 60003760)
+
+def _journey_wormholes_filaments(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    cfg = ctx["cfg"]
+    char_id = ctx["char_id"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    _try_slash(sm, "/createitem 53977 1")
+    _try_slash(sm, "/createitem 56131 3")
+    _, inv_fil = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
+    nj_id, aby_id = 0, 0
+    for it in (inv_fil or []):
+        tid = int(_get_field(it, "typeID", 0))
+        iid = int(_get_field(it, "itemID", 0))
+        if tid == 53977 and not nj_id:
+            nj_id = iid
+        elif tid == 56131 and not aby_id:
+            aby_id = iid
+    if nj_id or aby_id:
+        inv_ship_fil, _ = sm.RemoteSvc("invbroker").MachoBindObject(ship_id, None)
+        if nj_id:
+            inv_ship_fil.Add(nj_id, 60003760)
+        if aby_id:
+            inv_ship_fil.Add(aby_id, 60003760)
+    dest_sys = 30000142
+    aby_ent = None
+    fil_res = None
+    try:
         _undock_ship(sm)
         _trace(cfg, "j15 undocked")
         beyonce_jita = _get_beyonce(sm, 30000142)
@@ -788,28 +860,46 @@ def _execute_all_journeys(cfg, ipc):
         dest_sys = int(_get_field(fil_res, "solarSystemID", _live_session_attr("solarsystemid2", 30000142)) or 30000142)
         _wait_session_attr("solarsystemid2", dest_sys, timeout_sec=5.0)
         _wait_view_settled(sm)
+    finally:
+        _leave_active_fleet(sm)
         try:
-            sm.RemoteSvc("fleetMgr").LeaveFleet()
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
         except Exception:
             pass
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
-        _try_slash(sm, "/tr 30000142")
-        _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
-        _wait_view_settled(sm)
-        beyonce_jita2 = _get_beyonce(sm, 30000142)
-        _warp_full(sm, beyonce_jita2, 60003760)
+        if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
+            _try_slash(sm, "/tr 30000142")
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
+            _wait_view_settled(sm)
+        if not _live_session_attr("stationid", None):
+            try:
+                beyonce_jita2 = _get_beyonce(sm, 30000142)
+                _warp_full(sm, beyonce_jita2, 60003760)
+            except Exception:
+                pass
         _ensure_docked_jita(sm, ipc)
-        record(
-            "wormholes_filaments",
-            bool(fil_res and aby_ent),
-            "Real V24.01 client warped off-grid, activated Noise-5 Needlejack filament to %d, completed Abyssal pocket room/gate progression, and returned to Jita 4-4"
-            % (dest_sys,),
-        )
+    passed = bool(fil_res and aby_ent)
+    return passed, {
+        "needlejack_dest_sys": dest_sys,
+        "abyssal_deployed": aby_ent is not None,
+    }
 
-    # 16. ship_loss
-    if want("ship_loss"):
-        _trace(cfg, "start ship_loss")
-        curr_ship = int(_live_session_attr("shipid", ship_id) or ship_id)
+
+def _journey_ship_loss(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    primary_ship_id = ctx["primary_ship_id"]
+    _try_slash(sm, "/giveskill 3327 5")
+    _try_slash(sm, "/giveskill 3329 5")
+    _try_slash(sm, "/createitem 587 1")
+    sac_ship, _ = _find_hangar_item(sm, 60003760, 587, exclude_id=primary_ship_id, reverse=True)
+    if sac_ship:
+        _board_station_ship(sm, sac_ship, assemble=True)
+    curr_ship = int(_live_session_attr("shipid", sac_ship or primary_ship_id) or (sac_ship or primary_ship_id))
+    ins_res = None
+    pod_ship = 0
+    kms = []
+    reboarded_ship = 0
+    try:
         ins_res = sm.RemoteSvc("insuranceSvc").InsureShip(curr_ship, 1.0)
         sm.RemoteSvc("insuranceSvc").GetContracts()
         _undock_ship(sm)
@@ -820,153 +910,159 @@ def _execute_all_journeys(cfg, ipc):
         pod_ship = int(_live_session_attr("shipid", 0) or 0)
         kms = sm.RemoteSvc("charMgr").GetRecentShipKillsAndLosses(10, 0)
         _dock_station(sm, 60003760)
-        _try_slash(sm, "/giveskill 3327 5")
-        _try_slash(sm, "/giveskill 3329 5")
-        _try_slash(sm, "/createitem 587 1")
-        _, inv_reboard = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        for it in inv_reboard:
-            if int(_get_field(it, "typeID", 0)) == 587:
-                new_ship = int(_get_field(it, "itemID", 0))
-                sm.RemoteSvc("ship").AssembleShip([new_ship])
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                sm.RemoteSvc("ship").Board(new_ship)
-                _wait_session_attr("shipid", new_ship, timeout_sec=3.0)
-                _sleep_ms(200)
-                _wait_view_settled(sm)
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                ship_id = new_ship
-                break
-        record(
-            "ship_loss",
-            ins_res is not None and pod_ship != curr_ship and len(kms) >= 1,
-            "Real V24.01 client insured ship %d, triggered ship destruction, ejected into capsule %d with wreck/payout, verified killmail, and reboarded ship %d"
-            % (curr_ship, pod_ship, ship_id),
-        )
+    finally:
+        _ensure_docked_jita(sm, ipc)
+        if primary_ship_id and curr_ship != primary_ship_id:
+            try:
+                reboarded_ship = _ensure_home_ship(sm, primary_ship_id)
+            except Exception:
+                reboarded_ship = 0
+        if not reboarded_ship or reboarded_ship == pod_ship:
+            _try_slash(sm, "/createitem 587 1")
+            new_ship, _ = _find_hangar_item(sm, 60003760, 587, exclude_id=pod_ship, reverse=True)
+            if new_ship:
+                _board_station_ship(sm, new_ship, assemble=True)
+                ctx["primary_ship_id"] = new_ship
+                ctx["baseline"]["ship_id"] = new_ship
+                reboarded_ship = new_ship
+    passed = ins_res is not None and pod_ship != curr_ship and len(kms or []) >= 1
+    return passed, {
+        "lost_ship_id": curr_ship,
+        "pod_ship_id": pod_ship,
+        "killmails": len(kms or []),
+        "restored_ship_id": reboarded_ship,
+    }
 
-    # 17. clones
-    if want("clones"):
-        _trace(cfg, "start clones")
-        _try_slash(sm, "/giveskill 24242 2")
-        _try_slash(sm, "/giveskill 3411 2")
-        jc_res = sm.RemoteSvc("jumpCloneSvc").InstallCloneInStation()
-        clone_state = sm.RemoteSvc("jumpCloneSvc").GetCloneState()
-        sm.RemoteSvc("home_station").set_home_station(60003760)
-        record(
-            "clones",
-            jc_res is not None and clone_state is not None,
-            "Real V24.01 client installed jump clone in Jita 4-4, inspected clone state, and set medical home station via home_station.set_home_station",
-        )
 
-    # 18. industry
-    if want("industry"):
-        _trace(cfg, "start industry")
-        _try_slash(sm, "/giveskill 3380 5")
-        _try_slash(sm, "/giveskill 3388 5")
-        _try_slash(sm, "/createitem 691 1")
-        _try_slash(sm, "/createitem 34 50000")
-        _try_slash(sm, "/createitem 35 20000")
-        _try_slash(sm, "/createitem 36 10000")
-        _try_slash(sm, "/createitem 37 5000")
-        _, inv_ind = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        bpo_id = None
-        for it in inv_ind:
-            if int(_get_field(it, "typeID", 0)) == 691:
-                bpo_id = int(_get_field(it, "itemID", 0))
-                break
-        job_res = None
-        if bpo_id:
-            job_res = sm.RemoteSvc("industryManager").InstallJob(
-                {
-                    "facilityID": 60003760,
-                    "activityID": 1,
-                    "blueprintID": bpo_id,
-                    "blueprintTypeID": 691,
-                    "productTypeID": 587,
-                    "runs": 1,
-                    "inputLocationID": 60003760,
-                    "outputLocationID": 60003760,
-                }
-            )
-            dur_ind = int(
-                _get_field(job_res, "duration", 0)
-                or _get_field(job_res, "durationSeconds", 0)
-                or 10800
-            )
-            adv_ind = max(14400, dur_ind + 600)
-            adv_ipc = ipc.request({"cmd": "advance_clock", "secs": adv_ind})
-            if not adv_ipc.get("ok"):
-                sm.RemoteSvc("timeControl").AdvanceClock(adv_ind)
-            jid_ind = _extract_id(job_res)
-            sm.RemoteSvc("industryManager").CompleteJob(jid_ind)
-        record(
-            "industry",
-            job_res is not None,
-            "Real V24.01 client installed manufacturing job (blueprint %r -> job %r), advanced clock to completion, and delivered output via industryManager.CompleteJob"
-            % (bpo_id, job_res),
-        )
+def _journey_clones(ctx):
+    sm = ctx["sm"]
+    _try_slash(sm, "/giveskill 24242 2")
+    _try_slash(sm, "/giveskill 3411 2")
+    jc_res = sm.RemoteSvc("jumpCloneSvc").InstallCloneInStation()
+    clone_state = sm.RemoteSvc("jumpCloneSvc").GetCloneState()
+    sm.RemoteSvc("home_station").set_home_station(60003760)
+    passed = jc_res is not None and clone_state is not None
+    return passed, {
+        "jump_clone_installed": jc_res is not None,
+        "home_station_id": 60003760,
+    }
 
-    # 19. planetary
-    if want("planetary"):
-        _trace(cfg, "start planetary")
-        _try_slash(sm, "/giveskill 2505 4")
-        _try_slash(sm, "/giveskill 3342 5")
-        _try_slash(sm, "/giveskill 20342 1")
-        _try_slash(sm, "/giveskill 20526 1")
-        _try_slash(sm, "/createitem 20185 1")
-        _try_slash(sm, "/createitem 2524 1")
-        _, inv_pi = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        hauler_id = None
-        cc_id = None
-        for it in inv_pi:
-            tid_pi = int(_get_field(it, "typeID", 0))
-            if tid_pi == 20185 and hauler_id is None:
-                hauler_id = int(_get_field(it, "itemID", 0))
-            elif tid_pi == 2524 and cc_id is None:
-                cc_id = int(_get_field(it, "itemID", 0))
+
+def _journey_industry(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    _try_slash(sm, "/giveskill 3380 5")
+    _try_slash(sm, "/giveskill 3388 5")
+    _try_slash(sm, "/createitem 691 1")
+    _try_slash(sm, "/createitem 34 50000")
+    _try_slash(sm, "/createitem 35 20000")
+    _try_slash(sm, "/createitem 36 10000")
+    _try_slash(sm, "/createitem 37 5000")
+    bpo_id, _ = _find_hangar_item(sm, 60003760, 691, reverse=False)
+    job_res = None
+    jid_ind = None
+    if bpo_id:
+        job_res = sm.RemoteSvc("industryManager").InstallJob(
+            {
+                "facilityID": 60003760,
+                "activityID": 1,
+                "blueprintID": bpo_id,
+                "blueprintTypeID": 691,
+                "productTypeID": 587,
+                "runs": 1,
+                "inputLocationID": 60003760,
+                "outputLocationID": 60003760,
+            }
+        )
+        dur_ind = int(
+            _get_field(job_res, "duration", 0)
+            or _get_field(job_res, "durationSeconds", 0)
+            or 10800
+        )
+        adv_ind = max(14400, dur_ind + 600)
+        try:
+            _advance_clock(sm, ipc, adv_ind)
+        except Exception:
+            sm.RemoteSvc("timeControl").AdvanceClock(adv_ind)
+        jid_ind = _extract_id(job_res)
+        sm.RemoteSvc("industryManager").CompleteJob(jid_ind)
+    passed = job_res is not None
+    return passed, {
+        "blueprint_id": bpo_id or None,
+        "job_id": jid_ind,
+    }
+
+
+def _journey_planetary(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    primary_ship_id = ctx["primary_ship_id"]
+    _try_slash(sm, "/giveskill 2505 4")
+    _try_slash(sm, "/giveskill 3342 5")
+    _try_slash(sm, "/giveskill 20342 1")
+    _try_slash(sm, "/giveskill 20526 1")
+    _try_slash(sm, "/createitem 20185 1")
+    _try_slash(sm, "/createitem 2524 1")
+    hauler_id, _ = _find_hangar_item(sm, 60003760, 20185, reverse=False)
+    cc_id, _ = _find_hangar_item(sm, 60003760, 2524, reverse=False)
+    pinfo = None
+    try:
+        active_pi_ship = primary_ship_id
         if hauler_id:
-            sm.RemoteSvc("ship").AssembleShip([hauler_id])
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
-            sm.RemoteSvc("ship").Board(hauler_id)
-            _wait_session_attr("shipid", hauler_id, timeout_sec=3.0)
-            _sleep_ms(200)
-            _wait_view_settled(sm)
-            ship_id = hauler_id
-        if cc_id:
-            inv_ship_pi, _ = sm.RemoteSvc("invbroker").MachoBindObject(ship_id, None)
+            _board_station_ship(sm, hauler_id, assemble=True)
+            active_pi_ship = hauler_id
+        if cc_id and active_pi_ship:
+            inv_ship_pi, _ = sm.RemoteSvc("invbroker").MachoBindObject(active_pi_ship, None)
             inv_ship_pi.Add(cc_id, 60003760)
         _undock_ship(sm)
         sm.RemoteSvc("planetMgr").UserUpdateNetwork(
             40009077,
             [(1, 1, 2524, 0.25, 0.5), (1, 2, 2409, 0.26, 0.52), (3, 1, 2, 0), (5, 1, 2, 1)],
         )
-        ipc.request({"cmd": "advance_clock", "secs": 1800})
+        _advance_clock(sm, ipc, 1800)
         pinfo = sm.RemoteSvc("planetMgr").GetPlanetResourceInfo(40009077)
         _dock_station(sm, 60003760)
-        record(
-            "planetary",
-            pinfo is not None,
-            "Real V24.01 client built planetary colony network & routes on planet 40009077, advanced extraction cycle +1800s, and queried planetMgr.GetPlanetResourceInfo",
-        )
-
-    # 20. corporation
-    if want("corporation"):
-        _trace(cfg, "start corporation")
-        _try_slash(sm, "/giveskill 3363 2")
-        _try_slash(sm, "/giveskill 11584 2")
-        _try_slash(sm, "/giveisk 1500000000")
+    finally:
+        _ensure_docked_jita(sm, ipc)
         try:
-            sm.RemoteSvc("timeControl").ClearSessionTimer()
+            _ensure_home_ship(sm, primary_ship_id)
         except Exception:
             pass
+    passed = pinfo is not None
+    return passed, {
+        "planet_id": 40009077,
+        "hauler_id": hauler_id or None,
+        "command_center_id": cc_id or None,
+        "resource_info_ok": pinfo is not None,
+    }
+
+
+def _journey_corporation(ctx):
+    sm = ctx["sm"]
+    baseline_corp_id = ctx["baseline_corp_id"]
+    _try_slash(sm, "/giveskill 3363 2")
+    _try_slash(sm, "/giveskill 11584 2")
+    _try_slash(sm, "/giveisk 1500000000")
+    try:
+        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    except Exception:
+        pass
+    corp_id = 0
+    ali_id = 0
+    office_res = None
+    corp_info = None
+    ali_info = None
+    wars_rep = None
+    try:
         corp_res = sm.RemoteSvc("corpRegistry").AddCorporation(
-            "V24 Alliance Builders", "V24AB", "Founded by real V24.01 client", 10.0, False
+            "Alliance Builders", "EVAB", "Player corporation", 10.0, False
         )
         corp_id = int(_extract_id(corp_res, ("corporationID", "corpID", "id")))
         _wait_session_attr("corpid", corp_id, timeout_sec=3.0)
-        sm.RemoteSvc("account").GiveCash(corp_id, 1200000000.0, "Fund V24 Alliance Builders")
+        sm.RemoteSvc("account").GiveCash(corp_id, 1200000000.0, "Fund Alliance Builders")
         office_res = sm.RemoteSvc("officeManager").RentOffice(60003760, 1)
         ali_res = sm.RemoteSvc("corpRegistry").CreateAlliance(
-            "V24 Vanguard Alliance", "V24VA", "Vanguard", ""
+            "Vanguard Alliance", "EVVA", "Vanguard", ""
         )
         ali_id = int(_extract_id(ali_res, ("allianceID", "id")))
         _wait_session_attr("allianceid", ali_id, timeout_sec=3.0)
@@ -977,23 +1073,31 @@ def _execute_all_journeys(cfg, ipc):
         corp_info = sm.RemoteSvc("corpRegistry").GetCorporation(corp_id)
         ali_info = sm.RemoteSvc("allianceRegistry").GetAlliance(ali_id)
         wars_rep = sm.RemoteSvc("warsInfoMgr").GetWarsByOwners([corp_id, ali_id])
-        record(
-            "corporation",
-            corp_id > 0 and ali_id > 0 and corp_info is not None and ali_info is not None and wars_rep is not None,
-            "Real V24.01 client founded corp %d, rented office (%r), created alliance %d, and verified GetCorporation/GetAlliance/GetWarsByOwners"
-            % (corp_id, office_res, ali_id),
-        )
+    finally:
+        _resign_player_corp(sm, baseline_corp_id)
+    passed = (
+        corp_id > 0
+        and ali_id > 0
+        and corp_info is not None
+        and ali_info is not None
+        and wars_rep is not None
+    )
+    return passed, {
+        "corp_id": corp_id,
+        "office_rented": office_res is not None,
+        "alliance_id": ali_id,
+    }
 
-    # 21. fleet
-    if want("fleet"):
-        _trace(cfg, "start fleet")
-        if _live_session_attr("fleetid", None):
-            try:
-                sm.RemoteSvc("fleetMgr").LeaveFleet()
-                _wait_session_attr("fleetid", None, timeout_sec=3.0)
-            except Exception:
-                pass
-        fleet_svc = sm.GetService("fleet")
+
+def _journey_fleet(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char2_id = ctx["char2_id"]
+    _leave_active_fleet(sm)
+    fleet_svc = sm.GetService("fleet")
+    fleet_id = 0
+    motd = None
+    try:
         fleet_id = int(_extract_id(sm.RemoteSvc("fleetMgr").CreateFleet()))
         _wait_session_attr("fleetid", fleet_id, timeout_sec=3.0)
         fl_handler, _ = sm.RemoteSvc("fleetObjectHandler").MachoBindObject(fleet_id, None)
@@ -1003,23 +1107,32 @@ def _execute_all_journeys(cfg, ipc):
         sm.RemoteSvc("fleetMgr").Invite(char2_id, None, None, 4)
         ipc.request({"cmd": "c2_accept_fleet", "fleet_id": fleet_id})
         fleet_svc.InitFleet()
-        fl_handler.SetMotdEx("V24 Real Client Fleet")
+        fl_handler.SetMotdEx("Fleet Operations")
         motd = fl_handler.GetMotd()
         _undock_ship(sm)
         sm.RemoteSvc("fleetMgr").SendBroadcast("Target", 0, None, None)
-        ipc.request({"cmd": "advance_clock", "secs": 12})
+        _advance_clock(sm, ipc, 12)
         _dock_station(sm, 60003760)
-        record(
-            "fleet",
-            fleet_id > 0 and motd is not None,
-            "Real V24.01 client formed fleet %d, invited Client 2, updated fleet MOTD (%r), and sent space broadcast"
-            % (fleet_id, motd),
-        )
+    finally:
+        _ensure_docked_jita(sm, ipc)
+        _leave_active_fleet(sm)
+    passed = fleet_id > 0 and motd is not None
+    return passed, {
+        "fleet_id": fleet_id,
+        "motd": motd,
+        "char2_id": char2_id,
+    }
 
-    # 22. structures
-    if want("structures"):
-        _trace(cfg, "start structures")
-        if int(_live_session_attr("corpid", 0)) < 98000000:
+
+def _journey_structures(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    primary_ship_id = ctx["primary_ship_id"]
+    baseline_corp_id = ctx["baseline_corp_id"]
+    struct_id = None
+    c_id = int(_live_session_attr("corpid", 0) or 0)
+    try:
+        if c_id < 98000000:
             _try_slash(sm, "/giveskill 3363 2")
             _try_slash(sm, "/giveskill 11584 2")
             _try_slash(sm, "/giveisk 500000000")
@@ -1028,7 +1141,7 @@ def _execute_all_journeys(cfg, ipc):
             except Exception:
                 pass
             c_res = sm.RemoteSvc("corpRegistry").AddCorporation(
-                "V24 Structure Builders", "V24SB", "Structure corporation", 10.0, False
+                "Structure Builders", "EVSB", "Structure corporation", 10.0, False
             )
             c_id = int(_extract_id(c_res, ("corporationID", "corpID", "id")))
             _wait_session_attr("corpid", c_id, timeout_sec=3.0)
@@ -1036,43 +1149,28 @@ def _execute_all_journeys(cfg, ipc):
                 sm.RemoteSvc("timeControl").ClearSessionTimer()
             except Exception:
                 pass
-        cur_ship = None
         _, inv_ships = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        for it in inv_ships:
-            if int(_get_field(it, "itemID", 0)) == ship_id:
+        cur_ship = None
+        for it in (inv_ships or []):
+            if int(_get_field(it, "itemID", 0)) == primary_ship_id:
                 cur_ship = it
                 break
+        active_st_ship = primary_ship_id
         if cur_ship is None or int(_get_field(cur_ship, "typeID", 0)) != 20185:
             _try_slash(sm, "/giveskill 20342 1")
             _try_slash(sm, "/giveskill 20526 1")
             _try_slash(sm, "/giveskill 3342 5")
             _try_slash(sm, "/giveskill 3328 5")
             _try_slash(sm, "/createitem 20185 1")
-            _, inv_h = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-            hauler_st = None
-            for it in inv_h:
-                if int(_get_field(it, "typeID", 0)) == 20185:
-                    hauler_st = int(_get_field(it, "itemID", 0))
-                    break
+            hauler_st, _ = _find_hangar_item(sm, 60003760, 20185, reverse=False)
             if hauler_st:
-                sm.RemoteSvc("ship").AssembleShip([hauler_st])
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                sm.RemoteSvc("ship").Board(hauler_st)
-                _wait_session_attr("shipid", hauler_st, timeout_sec=3.0)
-                _sleep_ms(200)
-                _wait_view_settled(sm)
-                ship_id = hauler_st
+                _board_station_ship(sm, hauler_st, assemble=True)
+                active_st_ship = hauler_st
         _try_slash(sm, "/createitem 35832 1")
-        _, inv_cit = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
-        cit_id = None
-        for it in inv_cit:
-            if int(_get_field(it, "typeID", 0)) == 35832:
-                cit_id = int(_get_field(it, "itemID", 0))
-                break
+        cit_id, _ = _find_hangar_item(sm, 60003760, 35832, reverse=False)
         if cit_id:
-            sm.GetService("invCache").GetInventoryFromId(ship_id).Add(cit_id, 60003760)
+            sm.GetService("invCache").GetInventoryFromId(active_st_ship).Add(cit_id, 60003760)
         _undock_ship(sm)
-        struct_id = None
         if cit_id:
             b_jita_st = _get_beyonce(sm, 30000142)
             _warp_full(sm, b_jita_st, 50001249)
@@ -1086,21 +1184,23 @@ def _execute_all_journeys(cfg, ipc):
             sm.RemoteSvc("slash").SlashCmd("/heal")
             b_perim.CmdWarpToStuff("item", 40009248, 0.0)
             sm.RemoteSvc("timeControl").AdvanceClock(112)
-            bm_mid = sm.RemoteSvc("accessGroupBookmarkMgr").BookmarkStaticLocation("Perim MidSafe", ship_id, "Perim", None)
+            bm_mid = sm.RemoteSvc("accessGroupBookmarkMgr").BookmarkStaticLocation(
+                "Perim MidSafe", active_st_ship, "Perim", None
+            )
             _sleep_sim_ms(350)
             sm.RemoteSvc("timeControl").AdvanceClock(240)
             _sleep_sim_ms(1500)
             _wait_warp_fx_settled(sm, timeout_sec=4.0)
             _warp_full(sm, b_perim, int(bm_mid[0]), stuff_type="bookmark")
             sm.RemoteSvc("timeControl").AdvanceClock(604860)
-            anc_res = sm.RemoteSvc("structureDeployment").Anchor(cit_id, "V24 Fortizar")
+            anc_res = sm.RemoteSvc("structureDeployment").Anchor(cit_id, "Station Citadel")
             struct_id = int(_extract_id(anc_res) or cit_id)
             core_rep = _try_slash(sm, "/load me 56201 1")
             core_id = int(_get_field(core_rep, "itemID", 0) or 0)
             if core_id > 0:
                 try:
                     inv_st, _ = sm.RemoteSvc("invbroker").MachoBindObject(struct_id, None)
-                    inv_st.Add(core_id, ship_id, flag=180)
+                    inv_st.Add(core_id, active_st_ship, flag=180)
                 except Exception:
                     pass
             for _ in range(4):
@@ -1127,6 +1227,11 @@ def _execute_all_journeys(cfg, ipc):
                         _wait_session_attr("structureid", None, timeout_sec=3.0)
                     except Exception:
                         pass
+            try:
+                sm.RemoteSvc("structureDeployment").Unanchor(struct_id)
+                _try_slash(sm, "/upwelltimer %d" % struct_id)
+            except Exception:
+                pass
             _warp_full(sm, b_perim, 50002185)
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("beyonce").CmdStargateJump(50002185)
@@ -1135,83 +1240,106 @@ def _execute_all_journeys(cfg, ipc):
             _ensure_view(sm, "inflight")
             _wait_view_settled(sm)
             _warp_full(sm, b_jita_back, 60003760)
+    finally:
+        if struct_id:
+            try:
+                sm.RemoteSvc("structureDeployment").Unanchor(struct_id)
+                _try_slash(sm, "/upwelltimer %d" % struct_id)
+            except Exception:
+                pass
+        if int(_live_session_attr("solarsystemid2", 30000142) or 30000142) != 30000142:
+            _try_slash(sm, "/tr 30000142")
+            _wait_session_attr("solarsystemid2", 30000142, timeout_sec=3.0)
         _ensure_docked_jita(sm, ipc)
-        ship_id = int(_live_session_attr("shipid", ship_id) or ship_id)
-        record(
-            "structures",
-            struct_id is not None,
-            "Real V24.01 client anchored Upwell Citadel %r in Perimeter, installed Quantum Core 56201, advanced /upwelltimer to online ShieldVulnerable, exercised structureDocking + structureControl, and verified structureDirectory"
-            % (struct_id,),
-        )
-
-    # 23. sovereignty_fw
-    if want("sovereignty_fw"):
-        _trace(cfg, "start sovereignty_fw")
-        sm.RemoteSvc("facWarMgr").JoinFactionAsCharacter(500001)
-        _wait_session_attr("warfactionid", 500001, timeout_sec=3.0)
-        fw_stats = sm.RemoteSvc("facWarMgr").GetStats_Character()
-        fw_occ = sm.RemoteSvc("fwWarzoneSolarsystem").GetLocalOccupationState(30000142)
-        fw_warzones = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzones()
-        fw_states = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzonesOccupationStates()
-        record(
-            "sovereignty_fw",
-            fw_stats is not None and fw_occ is not None and bool(fw_warzones) and fw_states is not None,
-            "Real V24.01 client enlisted in Caldari FW (factionID=500001) and queried stats, local occupation, GetAllWarzones (%d), and warzone states"
-            % (len(fw_warzones) if isinstance(fw_warzones, (list, tuple, dict)) else 1,),
-        )
-
-    # 24. daily_goals_events
-    if want("daily_goals_events"):
-        _trace(cfg, "start daily_goals_events")
-        pgw = _sync_quasar_gateway(sm, char_id) or pgw or sm.GetService("publicGatewaySvc")
-        gw_obj = getattr(pgw, "publicGateway", None)
-        broker_det = gw_obj.get_request_broker_details() if gw_obj is not None and hasattr(gw_obj, "get_request_broker_details") else {}
-        goals_cur = None
-        goal_prog = None
         try:
-            from dailygoals.client.goalMessenger import DailyGoalMessenger
-            goals_cur = DailyGoalMessenger.get_instance(pgw).get_current_goals()
+            _ensure_home_ship(sm, primary_ship_id)
         except Exception:
             pass
-        try:
-            goal_prog = sm.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
-        except Exception:
-            pass
-        ops_cat = sm.RemoteSvc("operationsManager").can_character_play_the_tutorial()
-        res_dg = goals_cur or broker_det or bool(pgw.is_available())
-        record(
-            "daily_goals_events",
-            bool(pgw.is_available() and ops_cat is not None and goals_cur and goal_prog is not None),
-            "Real V24.01 client connected Quasar publicGatewaySvc HTTP/2 gRPC channel (%r), queried DailyGoalMessenger goals & AIR operations state"
-            % (res_dg,),
-        )
+        _resign_player_corp(sm, baseline_corp_id)
+    passed = struct_id is not None
+    return passed, {
+        "structure_id": struct_id,
+        "corp_id": c_id,
+    }
 
-    # 25. cosmetics_store
-    if want("cosmetics_store"):
-        _trace(cfg, "start cosmetics_store")
-        fc_res = sm.RemoteSvc("FastCheckoutService").GetOffersForUser()
-        fc_packs = fc_res.get("offers", []) if isinstance(fc_res, dict) else getattr(fc_res, "offers", [])
-        fc_pack = fc_packs[0] if fc_packs else {"offerId": 1, "price": 0.0}
-        fc_free_ok = len(fc_packs) >= 1 and float(_get_field(fc_pack, "price", 1.0)) == 0.0
-        fc_offer_id = int(_get_field(fc_pack, "offerId", 1) or 1)
-        fc_buy = sm.RemoteSvc("FastCheckoutService").BuyOffer(fc_offer_id, 1)
-        fc_status = _get_field(fc_buy, "status", "")
-        new_plex_bal = int(_get_field(fc_buy, "newPlexBalance", 0) or 0)
-        nes_offers = sm.RemoteSvc("storeManager").get_offers()
-        nes_offer = next(
-            (o for o in nes_offers if any(int(_get_field(p, "typeID", 0) or 0) > 0 for p in (_get_field(o, "products", []) or []))),
-            nes_offers[1] if len(nes_offers) > 1 else nes_offers[0],
-        )
-        nes_offer_id = int(_get_field(nes_offer, "offerID", 1) or 1)
-        nes_price = int(_get_field(nes_offer, "price", 0) or 0)
-        can_buy_nes = sm.RemoteSvc("storeManager").can_purchase_offer(nes_offer_id, "PLX", 1)
-        nes_buy = sm.RemoteSvc("storeManager").buy_offer(nes_offer_id, "PLX", 1)
-        delivered_id = int(_get_field(nes_buy, "deliveredItemID", 0) or 0)
-        plex_rem = int(_get_field(nes_buy, "plexRemaining", -1))
+
+def _journey_sovereignty_fw(ctx):
+    sm = ctx["sm"]
+    sm.RemoteSvc("facWarMgr").JoinFactionAsCharacter(500001)
+    _wait_session_attr("warfactionid", 500001, timeout_sec=3.0)
+    fw_stats = sm.RemoteSvc("facWarMgr").GetStats_Character()
+    fw_occ = sm.RemoteSvc("fwWarzoneSolarsystem").GetLocalOccupationState(30000142)
+    fw_warzones = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzones()
+    fw_states = sm.RemoteSvc("fwWarzoneSolarsystem").GetAllWarzonesOccupationStates()
+    passed = fw_stats is not None and fw_occ is not None and bool(fw_warzones) and fw_states is not None
+    return passed, {
+        "faction_id": 500001,
+        "warzones_count": len(fw_warzones) if isinstance(fw_warzones, (list, tuple, dict)) else 1,
+    }
+
+
+def _journey_daily_goals_events(ctx):
+    sm = ctx["sm"]
+    char_id = ctx["char_id"]
+    pgw = _sync_quasar_gateway(sm, char_id) or ctx.get("pgw") or sm.GetService("publicGatewaySvc")
+    gw_obj = getattr(pgw, "publicGateway", None)
+    broker_det = (
+        gw_obj.get_request_broker_details()
+        if gw_obj is not None and hasattr(gw_obj, "get_request_broker_details")
+        else {}
+    )
+    goals_cur = None
+    goal_prog = None
+    try:
+        from dailygoals.client.goalMessenger import DailyGoalMessenger
+        goals_cur = DailyGoalMessenger.get_instance(pgw).get_current_goals()
+    except Exception:
+        pass
+    try:
+        goal_prog = sm.RemoteSvc("seasonManager").get_character_progress_by_character_id(2)
+    except Exception:
+        pass
+    ops_cat = sm.RemoteSvc("operationsManager").can_character_play_the_tutorial()
+    pgw_avail = bool(pgw.is_available()) if pgw is not None and hasattr(pgw, "is_available") else False
+    passed = bool(pgw_avail and ops_cat is not None and goals_cur and goal_prog is not None)
+    return passed, {
+        "public_gateway_available": pgw_avail,
+        "broker_details_present": bool(broker_det),
+        "goals_present": bool(goals_cur),
+        "season_progress_ok": goal_prog is not None,
+    }
+
+
+def _journey_cosmetics_store(ctx):
+    sm = ctx["sm"]
+    primary_ship_id = ctx["primary_ship_id"]
+    fc_res = sm.RemoteSvc("FastCheckoutService").GetOffersForUser()
+    fc_packs = fc_res.get("offers", []) if isinstance(fc_res, dict) else getattr(fc_res, "offers", [])
+    fc_pack = fc_packs[0] if fc_packs else {"offerId": 1, "price": 0.0}
+    fc_free_ok = len(fc_packs) >= 1 and float(_get_field(fc_pack, "price", 1.0)) == 0.0
+    fc_offer_id = int(_get_field(fc_pack, "offerId", 1) or 1)
+    fc_buy = sm.RemoteSvc("FastCheckoutService").BuyOffer(fc_offer_id, 1)
+    fc_status = _get_field(fc_buy, "status", "")
+    new_plex_bal = int(_get_field(fc_buy, "newPlexBalance", 0) or 0)
+    nes_offers = sm.RemoteSvc("storeManager").get_offers()
+    nes_offer = next(
+        (o for o in nes_offers if any(int(_get_field(p, "typeID", 0) or 0) > 0 for p in (_get_field(o, "products", []) or []))),
+        nes_offers[1] if len(nes_offers) > 1 else nes_offers[0],
+    )
+    nes_offer_id = int(_get_field(nes_offer, "offerID", 1) or 1)
+    nes_price = int(_get_field(nes_offer, "price", 0) or 0)
+    can_buy_nes = sm.RemoteSvc("storeManager").can_purchase_offer(nes_offer_id, "PLX", 1)
+    nes_buy = sm.RemoteSvc("storeManager").buy_offer(nes_offer_id, "PLX", 1)
+    delivered_id = int(_get_field(nes_buy, "deliveredItemID", 0) or 0)
+    plex_rem = int(_get_field(nes_buy, "plexRemaining", -1))
+
+    cos_ship_id = primary_ship_id
+    skins = []
+    try:
         _, inv_cos = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         ship_type_id = 0
-        for it in inv_cos:
-            if int(_get_field(it, "itemID", 0)) == ship_id:
+        for it in (inv_cos or []):
+            if int(_get_field(it, "itemID", 0)) == primary_ship_id:
                 ship_type_id = int(_get_field(it, "typeID", 0))
                 break
         if ship_type_id != 587:
@@ -1220,98 +1348,124 @@ def _execute_all_journeys(cfg, ipc):
             _try_slash(sm, "/createitem 587 1")
             _, inv_cos2 = sm.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
             rifter_id = None
-            for it in inv_cos2:
+            for it in (inv_cos2 or []):
                 if int(_get_field(it, "typeID", 0)) == 587 and int(_get_field(it, "flagID", 0)) == 4:
                     rifter_id = int(_get_field(it, "itemID", 0))
                     if int(_get_field(it, "singleton", 0)) != 1:
                         sm.RemoteSvc("ship").AssembleShip([rifter_id])
                     break
             if rifter_id:
-                sm.RemoteSvc("timeControl").ClearSessionTimer()
-                sm.RemoteSvc("ship").Board(rifter_id)
-                _wait_session_attr("shipid", rifter_id, timeout_sec=3.0)
-                _sleep_ms(200)
-                _wait_view_settled(sm)
-                ship_id = rifter_id
+                _board_station_ship(sm, rifter_id, assemble=False)
+                cos_ship_id = rifter_id
         sm.RemoteSvc("shipCosmeticsMgr").GiveSkin(170)
-        sm.RemoteSvc("shipCosmeticsMgr").ApplySkinToShip(ship_id, 170)
+        sm.RemoteSvc("shipCosmeticsMgr").ApplySkinToShip(cos_ship_id, 170)
         skins = sm.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
-        record(
-            "cosmetics_store",
-            (
-                fc_free_ok
-                and fc_status == "COMPLETED"
-                and new_plex_bal >= 50100
-                and can_buy_nes == True
-                and delivered_id > 0
-                and plex_rem == new_plex_bal - nes_price
-                and isinstance(skins, list)
-                and len(skins) >= 1
-            ),
-            "Real V24.01 client claimed $0.00 FastCheckout PLEX pack (offer=%d -> %d PLEX), bought NES offer %d for %d PLEX (deliveredItemID=%d, plexRemaining=%d), and applied SKIN 170 to ship %d (%d skins)"
-            % (fc_offer_id, new_plex_bal, nes_offer_id, nes_price, delivered_id, plex_rem, ship_id, len(skins) if isinstance(skins, list) else -1),
-        )
+    finally:
+        if cos_ship_id != primary_ship_id:
+            try:
+                _ensure_home_ship(sm, primary_ship_id)
+            except Exception:
+                pass
+    passed = (
+        fc_free_ok
+        and fc_status == "COMPLETED"
+        and new_plex_bal >= 50100
+        and can_buy_nes == True
+        and delivered_id > 0
+        and plex_rem == new_plex_bal - nes_price
+        and isinstance(skins, list)
+        and len(skins) >= 1
+    )
+    return passed, {
+        "fast_checkout_offer_id": fc_offer_id,
+        "new_plex_balance": new_plex_bal,
+        "nes_offer_id": nes_offer_id,
+        "nes_price": nes_price,
+        "delivered_item_id": delivered_id,
+        "plex_remaining": plex_rem,
+        "skinned_ship_id": cos_ship_id,
+        "skins_count": len(skins) if isinstance(skins, list) else -1,
+    }
 
-    # 26. mail_notifications
-    if want("mail_notifications"):
-        _trace(cfg, "start mail_notifications")
-        mail_id = sm.RemoteSvc("mailMgr").SendMail([char2_id], None, None, "V24 Client Mail", "Sent directly from real V24.01 exefile", False, False)
-        lbl_id = sm.RemoteSvc("mailMgr").CreateLabel("V24Important", 16776960)
-        cal_start_ft = int(sm.RemoteSvc("machoNet").GetTime()) + 36000000000
-        cal_id = sm.RemoteSvc("calendarMgr").CreatePersonalEvent(cal_start_ft, 60, "V24 Fleet Briefing", "Jita 4-4", 1, [])
-        ipc.request({"cmd": "c2_read_mail", "mail_id": int(mail_id) if isinstance(mail_id, (int, long)) else 1})
-        record(
-            "mail_notifications",
-            mail_id is not None and cal_id is not None,
-            "Real V24.01 client sent mail %r, created label %r, scheduled calendar event %r, and verified Client 2 receipt"
-            % (mail_id, lbl_id, cal_id),
-        )
 
-    # 27. esi_external
-    if want("esi_external"):
-        _trace(cfg, "start esi_external")
-        esi_req = urllib2.Request("http://127.0.0.1:%d/latest/status" % esi_port)
-        esi_resp = urllib2.urlopen(esi_req, timeout=5.0)
-        esi_body = esi_resp.read()
-        record(
-            "esi_external",
-            esi_resp.getcode() == 200 and "players" in esi_body,
-            "Real V24.01 client queried local ESI HTTP endpoint /latest/status -> HTTP %d (%s)"
-            % (esi_resp.getcode(), esi_body.strip()[:120]),
-        )
+def _journey_mail_notifications(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    char2_id = ctx["char2_id"]
+    mail_id = sm.RemoteSvc("mailMgr").SendMail(
+        [char2_id], None, None, "Client Mail", "Sent from in-client journey driver", False, False
+    )
+    lbl_id = sm.RemoteSvc("mailMgr").CreateLabel("Important", 16776960)
+    cal_start_ft = int(sm.RemoteSvc("machoNet").GetTime()) + 36000000000
+    cal_id = sm.RemoteSvc("calendarMgr").CreatePersonalEvent(
+        cal_start_ft, 60, "Fleet Briefing", "Jita 4-4", 1, []
+    )
+    ipc.request({"cmd": "c2_read_mail", "mail_id": int(mail_id) if isinstance(mail_id, _INT_TYPES) else 1})
+    passed = mail_id is not None and cal_id is not None
+    return passed, {
+        "mail_id": mail_id,
+        "label_id": lbl_id,
+        "calendar_event_id": cal_id,
+        "char2_id": char2_id,
+    }
 
-    # 28. downtime_persistence
-    if want("downtime_persistence"):
-        _trace(cfg, "start downtime_persistence")
-        _try_slash(sm, "/downtime")
-        _sleep_ms(200)
-        bal_after_dt = sm.RemoteSvc("account").GetCashBalance(0)
-        record(
-            "downtime_persistence",
-            bal_after_dt is not None,
-            "Real V24.01 client triggered cluster downtime maintenance cycle and verified persistent wallet balance (%r ISK) & daily reset"
-            % (bal_after_dt,),
-        )
 
-    # 29. gm_tools
-    if want("gm_tools"):
-        _trace(cfg, "start gm_tools")
+def _journey_esi_external(ctx):
+    esi_port = ctx["esi_port"]
+    esi_req = _urllib.Request("http://127.0.0.1:%d/latest/status" % esi_port)
+    esi_resp = _urllib.urlopen(esi_req, timeout=5.0)
+    esi_body = esi_resp.read()
+    if bytes is not str and isinstance(esi_body, bytes):
+        esi_body = esi_body.decode("utf-8", "replace")
+    status_code = esi_resp.getcode()
+    passed = status_code == 200 and "players" in esi_body
+    return passed, {
+        "http_status": status_code,
+        "body_excerpt": esi_body.strip()[:120],
+    }
+
+
+def _journey_downtime_persistence(ctx):
+    sm = ctx["sm"]
+    _try_slash(sm, "/downtime")
+    _sleep_ms(200)
+    bal_after_dt = sm.RemoteSvc("account").GetCashBalance(0)
+    passed = bal_after_dt is not None
+    return passed, {
+        "balance_after_downtime": bal_after_dt,
+    }
+
+
+def _journey_gm_tools(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    ship_id = int(_live_session_attr("shipid", ctx["primary_ship_id"]) or ctx["primary_ship_id"])
+    try:
         tr_rep = _try_slash(sm, "/tr 30000142")
         _wait_session_attr("stationid", None, timeout_sec=3.0)
         _wait_view_settled(sm)
         heal_rep = _try_slash(sm, "/heal")
         setattr_rep = _try_slash(sm, "/setattr %d 164 25" % ship_id)
-        record(
-            "gm_tools",
-            tr_rep is not None and heal_rep is not None and setattr_rep is not None,
-            "Real V24.01 client executed GM slash commands (/tr 30000142, /heal, /setattr) with admin privileges",
-        )
+    finally:
+        _ensure_docked_jita(sm, ipc)
+    passed = tr_rep is not None and heal_rep is not None and setattr_rep is not None
+    return passed, {
+        "ship_id": ship_id,
+        "tr_ok": tr_rep is not None,
+        "heal_ok": heal_rep is not None,
+        "setattr_ok": setattr_rep is not None,
+    }
 
-    # 30. titans
-    if want("titans"):
-        _trace(cfg, "start titans")
-        for sk_id in (3347, 24563, 24562, 3433, 20533, 21610):
-            _try_slash(sm, "/giveskill %d 5" % sk_id)
+
+def _journey_titans(ctx):
+    sm = ctx["sm"]
+    ipc = ctx["ipc"]
+    primary_ship_id = ctx["primary_ship_id"]
+    for sk_id in (3347, 24563, 24562, 3433, 20533, 21610):
+        _try_slash(sm, "/giveskill %d 5" % sk_id)
+    titan_id = 0
+    dd_ok = False
+    try:
         sm.RemoteSvc("timeControl").ClearSessionTimer()
         _try_slash(sm, "/tr 30004759")
         _wait_session_attr("solarsystemid2", 30004759, timeout_sec=5.0)
@@ -1319,12 +1473,10 @@ def _execute_all_journeys(cfg, ipc):
         _wait_view_settled(sm)
         sp_tit = _try_slash(sm, "/spawn 11567")
         titan_id = int(_get_field(sp_tit, "spawnedID", _get_field(sp_tit, "itemID", 0)) or 0)
-        dd_ok = False
         if titan_id > 0:
             sm.RemoteSvc("timeControl").ClearSessionTimer()
             sm.RemoteSvc("ship").Board(titan_id)
             _wait_session_attr("shipid", titan_id, timeout_sec=3.0)
-            ship_id = titan_id
             dd_fit = _try_slash(sm, "/fit me 24550")
             dd_mod_id = int(_get_field(dd_fit, "itemID", 0) or 0)
             _try_slash(sm, "/fit me 43658")
@@ -1344,19 +1496,219 @@ def _execute_all_journeys(cfg, ipc):
                 dd_ok = dd_res is not None
                 sm.RemoteSvc("timeControl").AdvanceClock(310)
                 _try_slash(sm, "/despawn %d" % cap_tgt_id)
-        sm.RemoteSvc("timeControl").ClearSessionTimer()
+    finally:
+        try:
+            sm.RemoteSvc("timeControl").ClearSessionTimer()
+        except Exception:
+            pass
         _try_slash(sm, "/tr 30000142")
         _wait_session_attr("solarsystemid2", 30000142, timeout_sec=5.0)
         _ensure_docked_jita(sm, ipc)
-        ship_id = int(_live_session_attr("shipid", ship_id) or ship_id)
-        record(
-            "titans",
-            titan_id > 0 and dd_ok,
-            "Real V24.01 client boarded Avatar Titan %d in 1DQ1-A (30004759), fitted 'Judgment' Doomsday (24550) & Amarr Phenomena Generator (43658), loaded Helium Isotopes/Strontium Clathrates, and fired superWeapon at capital target"
-            % (titan_id,),
-        )
+        try:
+            _ensure_home_ship(sm, primary_ship_id)
+        except Exception:
+            pass
+    passed = titan_id > 0 and dd_ok
+    return passed, {
+        "titan_id": titan_id,
+        "doomsday_fired": dd_ok,
+    }
 
-    _atomic_write_json(os.path.join(cfg["out_dir"], "real_client_outcomes.json"), outcomes)
+
+_JOURNEY_HANDLERS = [
+    ("launch_login", _journey_launch_login),
+    ("create_character", _journey_create_character),
+    ("station_ui", _journey_station_ui),
+    ("fit_ship", _journey_fit_ship),
+    ("undock_navigate", _journey_undock_navigate),
+    ("local_chat", _journey_local_chat),
+    ("multiplayer_presence", _journey_multiplayer_presence),
+    ("skills_training", _journey_skills_training),
+    ("market_trade", _journey_market_trade),
+    ("contracts", _journey_contracts),
+    ("mining_loop", _journey_mining_loop),
+    ("pve_combat", _journey_pve_combat),
+    ("missions", _journey_missions),
+    ("exploration", _journey_exploration),
+    ("wormholes_filaments", _journey_wormholes_filaments),
+    ("ship_loss", _journey_ship_loss),
+    ("clones", _journey_clones),
+    ("industry", _journey_industry),
+    ("planetary", _journey_planetary),
+    ("corporation", _journey_corporation),
+    ("fleet", _journey_fleet),
+    ("structures", _journey_structures),
+    ("sovereignty_fw", _journey_sovereignty_fw),
+    ("daily_goals_events", _journey_daily_goals_events),
+    ("cosmetics_store", _journey_cosmetics_store),
+    ("mail_notifications", _journey_mail_notifications),
+    ("esi_external", _journey_esi_external),
+    ("downtime_persistence", _journey_downtime_persistence),
+    ("gm_tools", _journey_gm_tools),
+    ("titans", _journey_titans),
+]
+
+
+def _format_evidence(passed, rpcs_sent, metrics, shot_path, tb_str):
+    parts = ["rpcs=%d" % len(rpcs_sent or [])]
+    if rpcs_sent:
+        rpc_names = []
+        for entry in rpcs_sent[:6]:
+            svc = entry.get("service", "")
+            meth = entry.get("method", "")
+            rpc_names.append("%s.%s" % (svc, meth))
+        if len(rpcs_sent) > 6:
+            rpc_names.append("...")
+        parts.append("calls=[%s]" % ", ".join(rpc_names))
+    if metrics:
+        parts.append("metrics=%s" % json.dumps(metrics, sort_keys=True))
+    if shot_path:
+        parts.append("screenshot=%s" % shot_path)
+    if not passed and tb_str:
+        last_line = tb_str.strip().splitlines()[-1] if tb_str.strip() else "error"
+        parts.append("error=%s" % last_line)
+    return "; ".join(parts)
+
+
+def _execute_all_journeys(cfg, ipc):
+    sm = __builtin__.sm
+    user = str(cfg.get("user", "demo"))
+    password = str(cfg.get("password", "demo-secret"))
+    target_char = int(cfg.get("char_id", 90000001))
+    esi_port = int(cfg.get("esi_port", 26004))
+
+    char_id = _wait_for_session(sm, user, password, target_char, timeout_sec=120.0)
+    ipc.notify({"cmd": "client1_authenticated", "char_id": char_id})
+    sess = __builtin__.session
+    ship_id = int(getattr(sess, "shipid", 0) or 0)
+    if not ship_id:
+        chars = sm.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
+        if chars:
+            ship_id = int(_get_field(chars[0], "shipID", 0) or 0)
+    primary_ship_id = ship_id
+    home_station_id = int(getattr(sess, "stationid", None) or 60003760)
+    home_system_id = int(getattr(sess, "solarsystemid2", None) or 30000142)
+    cur_corp_id = int(getattr(sess, "corpid", 0) or 0)
+    baseline_corp_id = cur_corp_id if 0 < cur_corp_id < 98000000 else 0
+
+    outcomes = {}
+    pgw = _sync_quasar_gateway(sm, char_id) or sm.GetService("publicGatewaySvc")
+    only_set = set(cfg["only_journeys"]) if cfg.get("only_journeys") else None
+    rpc_sink = _install_rpc_recorder(sm)
+
+    ctx = {
+        "sm": sm,
+        "ipc": ipc,
+        "cfg": cfg,
+        "user": user,
+        "password": password,
+        "char_id": char_id,
+        "primary_ship_id": primary_ship_id,
+        "home_station_id": home_station_id,
+        "home_system_id": home_system_id,
+        "baseline_corp_id": baseline_corp_id,
+        "baseline": {
+            "char_id": char_id,
+            "ship_id": primary_ship_id,
+            "station_id": home_station_id,
+            "system_id": home_system_id,
+            "corp_id": baseline_corp_id,
+        },
+        "esi_port": esi_port,
+        "pgw": pgw,
+        "char2_id": None,
+    }
+
+    def ensure_c2_ready():
+        if ctx["char2_id"] is None:
+            c2_ready = ipc.request({"cmd": "ensure_client2_ready"})
+            ctx["char2_id"] = int(c2_ready.get("char2_id", 90000002))
+        return ctx["char2_id"]
+
+    ctx["ensure_c2_ready"] = ensure_c2_ready
+
+    out_dir = cfg.get("out_dir")
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir)
+    outcomes_path = os.path.join(out_dir, "real_client_outcomes.json") if out_dir else ""
+
+    for jid, handler in _JOURNEY_HANDLERS:
+        if only_set is not None and jid not in only_set:
+            continue
+
+        try:
+            _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
+        except Exception:
+            pass
+
+        if jid in _C2_JOURNEYS:
+            try:
+                ensure_c2_ready()
+            except Exception:
+                ctx["char2_id"] = ctx["char2_id"] or 90000002
+
+        _emit_client_marker(cfg, "EVOMU_JOURNEY_START", jid)
+        ipc.notify({"cmd": "journey_start", "id": jid})
+
+        j_rpcs = []
+        rpc_sink[0] = j_rpcs
+        passed = False
+        metrics = {}
+        tb_str = None
+        shot_path = None
+        try:
+            _sync_quasar_gateway(sm, char_id)
+            res = handler(ctx)
+            if isinstance(res, tuple):
+                passed, metrics = bool(res[0]), (res[1] if len(res) > 1 and isinstance(res[1], dict) else {})
+            else:
+                passed = bool(res)
+        except Exception:
+            passed = False
+            tb_str = traceback.format_exc()
+            _trace(cfg, "EXCEPTION in %s:\n%s" % (jid, tb_str))
+            try:
+                sys.stdout.write("[client-1] journey=%s exception:\n%s\n" % (jid, tb_str))
+                sys.stdout.flush()
+            except Exception:
+                pass
+        finally:
+            rpc_sink[0] = None
+
+        if not cfg.get("silent", False):
+            shot_path = _capture_inclient_screenshot(out_dir, jid, ipc=ipc)
+
+        entry = {
+            "passed": bool(passed),
+            "bridge_verified": True,
+            "real_client_verified": bool(passed),
+            "rpcs_sent": list(j_rpcs),
+            "metrics": metrics,
+            "screenshot": shot_path,
+            "traceback": tb_str,
+            "evidence": _format_evidence(bool(passed), j_rpcs, metrics, shot_path, tb_str),
+        }
+        outcomes[jid] = entry
+        if outcomes_path:
+            _atomic_write_json(outcomes_path, outcomes)
+        ipc.notify({"cmd": "journey_progress", "id": jid, "entry": entry})
+        _trace(cfg, "done %s: passed=%r" % (jid, bool(passed)))
+        try:
+            sys.stdout.write("[client-1] done %s: passed=%r\n" % (jid, bool(passed)))
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+        try:
+            _reset_baseline_state(sm, ipc, ctx["baseline"], char_id=ctx["char_id"])
+        except Exception:
+            pass
+
+        _emit_client_marker(cfg, "EVOMU_JOURNEY_END", jid, "passed=%r rpcs=%d" % (bool(passed), len(j_rpcs)))
+        ipc.notify({"cmd": "journey_end", "id": jid, "passed": bool(passed)})
+
+    if outcomes_path:
+        _atomic_write_json(outcomes_path, outcomes)
     return outcomes
 
 
