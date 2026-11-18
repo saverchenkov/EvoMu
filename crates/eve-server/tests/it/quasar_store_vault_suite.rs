@@ -582,6 +582,18 @@ async fn test_quasar_achievements_progression_and_claims() {
         prog_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()),
         Some(10)
     );
+    // SDE achievement 2 has target 3, so delta=10 completes it immediately at Step 5.
+    let step5_comp = ach_notices
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.normalized_type_name() == "eve_public.achievement.api.CompletedNotice"))
+        .expect("Step 5 AddProgress delta=10 must emit CompletedNotice when crossing SDE target 3");
+    let step5_comp_wm = WireMessage::decode(&step5_comp.payload.as_ref().unwrap().value).expect("decode Step 5 CompletedNotice");
+    let step5_comp_id = step5_comp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()).expect("step 5 achievement ident");
+    let step5_comp_id_wm = WireMessage::decode(step5_comp_id).expect("decode ident");
+    assert_eq!(
+        step5_comp_id_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()),
+        Some(expected_ach2_uuid.as_slice())
+    );
 
     // 6. Reward GetUnclaimedRequest -> returns empty when achievement has no configured ISK/SP payout
     let unclaim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", vec![]).await;
@@ -605,6 +617,24 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(bal_after, bal_before);
     assert_eq!(sp_after, sp_before);
     assert!(!has_journal, "ClaimRequest must not write achievement_reward journal entry");
+
+    // 7b. Repeat CompleteRequest(2) while already completed must NOT emit a duplicate CompletedNotice;
+    // then reset achievement 2 so Step 8 exercises a genuine incomplete -> completed transition.
+    let dup_comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2)).await;
+    assert_eq!(dup_comp_rsp.status_code, STATUS_OK);
+    flush_pending_notices(&ctx);
+    let dup_notices = drain_notices(&mut notice_rx);
+    assert!(
+        !dup_notices
+            .iter()
+            .any(|n| n.payload.as_ref().is_some_and(|p| p.normalized_type_name() == "eve_public.achievement.api.CompletedNotice")),
+        "Repeat CompleteRequest on an already-completed achievement must not emit duplicate CompletedNotice"
+    );
+
+    let reset_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.ResetRequest", make_id_request(2)).await;
+    assert_eq!(reset_rsp.status_code, STATUS_OK, "ResetRequest failed: {}", reset_rsp.status_message);
+    flush_pending_notices(&ctx);
+    let _ = drain_notices(&mut notice_rx);
 
     // 8. Admin CompleteRequest -> completes achievement 2
     let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2)).await;

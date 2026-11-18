@@ -276,18 +276,27 @@ fn filtered_reward_claiming_and_notice_encoding_and_dynamic_extractors() {
     assert_eq!(mgr.claim_rewards(cid, &ctx.db), 3);
     assert_eq!(mgr.claim_rewards(cid, &ctx.db), 0);
 
-    // Test emit_achievement_notices for cat_id == 0 vs cat_id > 0
+    // Test emit_achievement_notices for cat_id == 0 vs cat_id > 0 and separated milestones
     let _ = crate::services::quasar_social_chat::drain_local_notices();
-    emit_achievement_notices(cid, 303, 0, 5, 0, false, &[1], 4000);
+    emit_achievement_notices(cid, 303, 0, 5, 0, false, &[1], &[999], 4000);
     let notices_cat0 = crate::services::quasar_social_chat::drain_local_notices();
     // Should emit ProgressedNotice and milestone.api.ReachedNotice (2 notices, no category notices, no CompletedNotice)
     assert_eq!(notices_cat0.len(), 2);
     assert!(notices_cat0.iter().all(|(s, _, _)| *s == NoticeScope::Character(cid)));
+    assert!(notices_cat0.iter().all(|(_, a, _)| !a.type_url.contains("achievement.category.")));
 
-    emit_achievement_notices(cid, 101, 1, 100, 40, true, &[1, 2], 4001);
+    emit_achievement_notices(cid, 101, 1, 100, 40, true, &[1, 2], &[501, 502], 4001);
     let notices_cat1 = crate::services::quasar_social_chat::drain_local_notices();
-    // ProgressedNotice + CompletedNotice + 2*(milestone ReachedNotice + category.milestone ReachedNotice) + category ProgressedNotice = 7
+    // ProgressedNotice + CompletedNotice + 2 ach ReachedNotice + 2 cat ReachedNotice + category ProgressedNotice = 7
     assert_eq!(notices_cat1.len(), 7);
+    assert_eq!(
+        notices_cat1.iter().filter(|(_, a, _)| a.type_url.ends_with("achievement.milestone.api.ReachedNotice")).count(),
+        2
+    );
+    assert_eq!(
+        notices_cat1.iter().filter(|(_, a, _)| a.type_url.ends_with("achievement.category.milestone.api.ReachedNotice")).count(),
+        2
+    );
 
     // DynamicValue extractors coverage
     assert_eq!(extract_u32_ident(&DynamicValue::Uint32(7)), Some(7));

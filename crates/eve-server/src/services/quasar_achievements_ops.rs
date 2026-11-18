@@ -127,23 +127,22 @@ pub fn register_achievement_admin_handlers(
             .filter(|&d| d > 0)
             .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid progress delta".into()))?;
 
-        let Some((ach, just_completed, new_milestones)) =
-            mgr_prog.add_progress(cid, aid, delta, ctx.now_unix())
+        let Some((ach, just_completed, new_ach_milestones, cat_score, new_cat_milestones)) =
+            mgr_prog.add_progress_with_outcomes(cid, aid, delta, ctx.now_unix())
         else {
             return Err((STATUS_NOT_FOUND, "Achievement not found".into()));
         };
         mgr_prog.save_to_db();
 
-        let cat_id = ach.def.category_id;
-        let cat_score = mgr_prog.category_score(cid, cat_id);
         emit_achievement_notices(
             cid,
             aid,
-            cat_id,
+            ach.def.category_id,
             ach.progress,
             cat_score,
             just_completed,
-            &new_milestones,
+            &new_ach_milestones,
+            &new_cat_milestones,
             ctx.now_unix(),
         );
 
@@ -171,13 +170,21 @@ pub fn register_achievement_admin_handlers(
             .and_then(extract_u32_ident)
             .filter(|&id| id > 0)
             .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
-        let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
+        let (ach, just_completed, new_ach_milestones, cat_score, new_cat_milestones) =
+            mgr_comp.mark_completed_with_outcomes(cid, aid, ctx.now_unix())?;
         mgr_comp.save_to_db();
 
-        let cat_id = ach.def.category_id;
-        let cat_score = mgr_comp.category_score(cid, cat_id);
-        let ms: Vec<u32> = (1..=ach.def.milestone_targets.len() as u32).collect();
-        emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, true, &ms, ctx.now_unix());
+        emit_achievement_notices(
+            cid,
+            aid,
+            ach.def.category_id,
+            ach.progress,
+            cat_score,
+            just_completed,
+            &new_ach_milestones,
+            &new_cat_milestones,
+            ctx.now_unix(),
+        );
 
         pb::message("eve_public.achievement.api.admin.CompleteResponse")
             .to_any_or_internal_err()
@@ -399,9 +406,21 @@ pub fn register_achievement_handlers(
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
-            pb::message("eve_public.achievement.category.api.GetResponse")
-                .set("score", score)
-                .to_any_or_internal_err()
+            let reached_milestones = mgr.reached_category_milestones(cid, cat_id);
+            let mut msg = pb::message("eve_public.achievement.category.api.GetResponse")
+                .set("score", score);
+            for rm in reached_milestones {
+                let ts = GoogleTimestamp {
+                    seconds: rm.reached_date as i64,
+                    nanos: 0,
+                };
+                msg = msg.add_with("reached_milestones", |entry| {
+                    entry
+                        .set("milestone.uuid", id_to_uuid(rm.milestone_id))
+                        .set("reached_date", ts)
+                });
+            }
+            msg.to_any_or_internal_err()
         }),
     );
 
