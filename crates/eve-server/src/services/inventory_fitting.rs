@@ -221,7 +221,7 @@ async fn handle_invbroker_add(
                     .as_ref()
                     .and_then(|src| ctx.sde.types.get(&src.type_id))
                     .is_some_and(|t| matches!(t.category_id, 7 | 32));
-            let Some(new_loc) = super::inventory_bound::resolve_inv_target_location(
+            let Some(mut new_loc) = super::inventory_bound::resolve_inv_target_location(
                 ctx,
                 session,
                 bound_entry,
@@ -356,6 +356,25 @@ async fn handle_invbroker_add(
                     (!src.singleton && !src.is_blueprint_copy && q_i32 < src.quantity).then_some(q_i32)
                 })
             });
+            let orig_source_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
+            let (looted_from_space, looted_foreign_jetcan) = if let Some(src_item) = &source_item_opt {
+                match super::inventory_stacking::evaluate_space_wreck_or_jetcan_loot(ctx, char_id, src_item) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
+            } else {
+                (false, false)
+            };
+            // Unbound / station-style 2-arg space loot (`Add(loot_id, can_or_wreck_id[, Cargo, qty, ship_id])`)
+            // resolves `new_loc == orig_source_loc_id` when no ship bound handle is provided; redirect the
+            // destination to the pilot's active ship here so `dst_ok` and capacity checks validate the
+            // actual ship receiving the looted item instead of requiring deposit access on the foreign
+            // jetcan or wreck itself (`tx_res` already delivers `looted_from_space` items to `active_ship`).
+            if looted_from_space && new_loc == orig_source_loc_id {
+                if let Some(active_ship) = session.ship_id.filter(|&id| id > 0) {
+                    new_loc = active_ship;
+                }
+            }
             if let Err(e) = ctx.db.with_snapshot(|snap| {
                 super::inventory_bound::validate_ship_only_bay_target_in_snap(ctx, snap, new_loc, flag_u16)
             }) {
@@ -385,15 +404,6 @@ async fn handle_invbroker_add(
                     }
                 }
             }
-            let orig_source_loc_id = source_item_opt.as_ref().map(|i| i.location_id).unwrap_or(0);
-            let (looted_from_space, looted_foreign_jetcan) = if let Some(src_item) = &source_item_opt {
-                match super::inventory_stacking::evaluate_space_wreck_or_jetcan_loot(ctx, char_id, src_item) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                }
-            } else {
-                (false, false)
-            };
 
             let explicit_online = kwargs.get("online").and_then(|v| match v {
                 PyRep::Bool(b) => Some(*b),
@@ -952,43 +962,52 @@ async fn handle_invbroker_add(
                                 })
                     }
                 };
-                let is_loc_colocated = |start_loc: i64| -> bool {
-                    let mut cur = start_loc;
-                    let caller_r = ball_or_sde_radius(caller_ship_id);
-                    for _ in 0..8 {
-                        if ch_dock > 0 {
-                            if cur == ch_dock { return true; }
-                            let Some(node) = snap.items.get(&cur) else { return false; };
-                            cur = node.location_id;
-                        } else if ch_sys > 0 {
-                            if cur == ch_sys { return false; }
-                            if let Some(st) = snap.structures.get(&cur) {
-                                if st.solar_system_id as i64 == ch_sys {
-                                    let target_pos = ball_or_snap_pos(cur).or(Some(DVec3::from_array(st.position)));
+                let is_loc_colocated_with_fallback =
+                    |start_loc: i64, allow_unpositioned_loot_can: bool| -> bool {
+                        let mut cur = start_loc;
+                        let caller_r = ball_or_sde_radius(caller_ship_id);
+                        for _ in 0..8 {
+                            if ch_dock > 0 {
+                                if cur == ch_dock { return true; }
+                                let Some(node) = snap.items.get(&cur) else { return false; };
+                                cur = node.location_id;
+                            } else if ch_sys > 0 {
+                                if cur == ch_sys { return false; }
+                                if let Some(st) = snap.structures.get(&cur) {
+                                    if st.solar_system_id as i64 == ch_sys {
+                                        let target_pos = ball_or_snap_pos(cur).or(Some(DVec3::from_array(st.position)));
+                                        let target_r = ball_or_sde_radius(cur);
+                                        return match (ball_or_snap_pos(caller_ship_id), target_pos) {
+                                            (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= 5_000.0,
+                                            _ => false,
+                                        };
+                                    }
+                                }
+                                let Some(node) = snap.items.get(&cur) else { return false; };
+                                if node.location_id == ch_sys {
+                                    if cur == active_ship_id || cur == caller_ship_id { return true; }
                                     let target_r = ball_or_sde_radius(cur);
-                                    return match (ball_or_snap_pos(caller_ship_id), target_pos) {
-                                        (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= 5_000.0,
+                                    let node_type = ctx.sde.types.get(&node.type_id);
+                                    let is_starbase_unit = node_type.is_some_and(|t| t.category_id == 22);
+                                    let is_unanchored_loot_can = allow_unpositioned_loot_can
+                                        && (node.type_id == 23
+                                            || node_type.is_some_and(|t| matches!(t.group_id, 186 | 1247 | 1250)));
+                                    let max_range = if is_starbase_unit { 5_000.0 } else { 2_500.0 };
+                                    return match (ball_or_snap_pos(caller_ship_id), ball_or_snap_pos(cur)) {
+                                        (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= max_range,
+                                        (Some(_), None) if is_unanchored_loot_can => true,
                                         _ => false,
                                     };
                                 }
+                                cur = node.location_id;
+                            } else {
+                                return false;
                             }
-                            let Some(node) = snap.items.get(&cur) else { return false; };
-                            if node.location_id == ch_sys {
-                                if cur == active_ship_id || cur == caller_ship_id { return true; }
-                                let target_r = ball_or_sde_radius(cur);
-                                let is_starbase_unit = ctx.sde.types.get(&node.type_id).is_some_and(|t| t.category_id == 22);
-                                let max_range = if is_starbase_unit { 5_000.0 } else { 2_500.0 };
-                                return match (ball_or_snap_pos(caller_ship_id), ball_or_snap_pos(cur)) {
-                                    (Some(s), Some(t)) => (s.distance(t) - caller_r - target_r).max(0.0) <= max_range,
-                                    _ => false,
-                                };
-                            }
-                            cur = node.location_id;
-                        } else {
-                            return false;
                         }
-                    }
-                    false
+                        false
+                    };
+                let is_loc_colocated = |start_loc: i64| -> bool {
+                    is_loc_colocated_with_fallback(start_loc, false)
                 };
                 let is_struct_loc = snap.structures.contains_key(&moving.location_id);
                 let is_core_item = is_struct_loc && (
@@ -1050,7 +1069,10 @@ async fn handle_invbroker_add(
                             let is_shared_bay = matches!(moving_flag, 90 | 138 | 155);
                             is_shared_bay && is_ship_near_or_docked(parent.item_id)
                         } else {
-                            is_loc_colocated(moving.location_id)
+                            let allow_unpos_can = looted_from_space
+                                || parent.type_id == 23
+                                || matches!(p_grp, 186 | 1247 | 1250);
+                            is_loc_colocated_with_fallback(moving.location_id, allow_unpos_can)
                         }
                     } else {
                         is_loc_colocated(moving.location_id)
@@ -1090,7 +1112,10 @@ async fn handle_invbroker_add(
                         if let Some(foreign_ship_id) = src_foreign_ship_opt {
                             is_ship_near_or_docked(foreign_ship_id)
                         } else if is_public_or_own {
-                            is_loc_colocated(parent.item_id)
+                            let allow_unpos_can = looted_from_space
+                                || parent.type_id == 23
+                                || matches!(p_grp, 186 | 1247 | 1250);
+                            is_loc_colocated_with_fallback(parent.item_id, allow_unpos_can)
                         } else {
                             is_storage_auth_and_near(parent.item_id)
                         }

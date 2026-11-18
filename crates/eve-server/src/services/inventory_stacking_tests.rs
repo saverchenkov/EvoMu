@@ -4238,3 +4238,559 @@ async fn foreign_ship_bay_list_visibility_and_multiadd_owner_transfer() {
     );
 }
 
+#[tokio::test]
+async fn gh_1311_get_container_contents_remote_docked_assets_and_3arg_password() {
+    let ctx = test_ctx();
+    let char_id = 95_920_001_i64;
+    let other_id = 95_920_002_i64;
+    let corp_id = 98_920_001_i64;
+    let other_corp_id = 98_920_002_i64;
+
+    let jita_station = 60_003_760_i64; // Jita 4-4 (30000142)
+    let jita_sys = 30_000_142_u32;
+    let amarr_station = 60_008_494_i64; // Amarr VIII (30002187)
+    let amarr_sys = 30_002_187_u32;
+    let keepstar_id = 1_001_896_944_936_i64;
+    let destroyed_keepstar_id = 1_001_896_944_937_i64;
+
+    let active_jita_ship = 1_897_147_461_i64;
+    let remote_avatar = 1_897_147_462_i64; // Avatar (11567) in Keepstar
+    let avatar_cargo_trit = 1_897_147_463_i64;
+    let nested_can = 1_897_147_464_i64; // Small Standard Container (3293) inside Avatar
+    let nested_can_trit = 1_897_147_465_i64;
+    let remote_npc_ship = 1_897_147_466_i64; // Rifter (587) at Amarr
+    let remote_npc_trit = 1_897_147_467_i64;
+    let remote_alsc = 1_897_147_468_i64; // Small Audit Log Secure Container (17363) in Keepstar
+    let remote_alsc_trit = 1_897_147_469_i64;
+    let jita_alsc = 1_897_147_470_i64; // Local ALSC at Jita
+    let jita_alsc_trit = 1_897_147_471_i64;
+    let foreign_avatar = 1_897_147_472_i64;
+    let owned_can_in_foreign_titan = 1_897_147_473_i64;
+    let space_owned_can = 1_897_147_474_i64;
+    let space_remote_sys_can = 1_897_147_475_i64;
+    let destroyed_keepstar_ship = 1_897_147_476_i64;
+
+    ensure_char(&ctx, char_id, corp_id, Some(jita_station), jita_sys, active_jita_ship);
+    ensure_char(&ctx, other_id, other_corp_id, Some(amarr_station), amarr_sys, foreign_avatar);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            keepstar_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: 35834,
+                owner_corp_id: corp_id,
+                solar_system_id: amarr_sys,
+                name: "1DQ1-A Keepstar".into(),
+                state: "ShieldVulnerable".into(),
+                position: [1_000.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            destroyed_keepstar_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: destroyed_keepstar_id,
+                type_id: 35834,
+                owner_corp_id: corp_id,
+                solar_system_id: amarr_sys,
+                name: "Destroyed Keepstar".into(),
+                state: "Destroyed".into(),
+                position: [5_000.0, 0.0, 0.0],
+                quantum_core_installed: false,
+                fuel_blocks: 0,
+                ..Default::default()
+            },
+        );
+    });
+
+    insert_item(&ctx, active_jita_ship, 587, char_id, jita_station, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, remote_avatar, 11567, char_id, keepstar_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, avatar_cargo_trit, 34, char_id, remote_avatar, InventoryFlag::Cargo, 500, false);
+    insert_item(&ctx, nested_can, 3293, char_id, remote_avatar, InventoryFlag::Cargo, 1, true);
+    insert_item(&ctx, nested_can_trit, 34, char_id, nested_can, InventoryFlag::Cargo, 42, false);
+    insert_item(&ctx, remote_npc_ship, 587, char_id, amarr_station, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, remote_npc_trit, 34, char_id, remote_npc_ship, InventoryFlag::Cargo, 77, false);
+    insert_item(&ctx, remote_alsc, 17363, char_id, keepstar_id, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, remote_alsc_trit, 34, char_id, remote_alsc, InventoryFlag::Cargo, 99, false);
+    insert_item(&ctx, jita_alsc, 17363, char_id, jita_station, InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, jita_alsc_trit, 34, char_id, jita_alsc, InventoryFlag::Cargo, 88, false);
+    insert_item(&ctx, foreign_avatar, 11567, other_id, keepstar_id, InventoryFlag::Hangar, 1, true);
+    insert_item(
+        &ctx,
+        owned_can_in_foreign_titan,
+        3293,
+        char_id,
+        foreign_avatar,
+        InventoryFlag::FleetHangar,
+        1,
+        true,
+    );
+    insert_item(&ctx, space_owned_can, 23, char_id, i64::from(jita_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, space_remote_sys_can, 23, char_id, i64::from(amarr_sys), InventoryFlag::None, 1, true);
+    insert_item(
+        &ctx,
+        destroyed_keepstar_ship,
+        587,
+        char_id,
+        destroyed_keepstar_id,
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+
+    {
+        let mut st = read_container_ship_state(&ctx);
+        st.container_passwords.insert(remote_alsc, "pw-remote".into());
+        st.container_passwords.insert(jita_alsc, "pw-jita".into());
+        save_container_ship_state(&ctx, &st);
+    }
+
+    let jita_sess = make_session(char_id, corp_id, Some(jita_station), Some(jita_sys), Some(active_jita_ship));
+    let jita_bound = make_bound(jita_station, char_id);
+    let space_jita_sess = make_session(char_id, corp_id, None, Some(jita_sys), Some(active_jita_ship));
+    let kw = HashMap::new();
+
+    let extract_ids = |rep: PyRep| -> Vec<i64> {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx rowset, got {rep:?}");
+        };
+        list.iter().filter_map(|r| dbrow_col_i64(r, "itemID")).collect()
+    };
+
+    // 1. GH #1311 exact repro: docked at Jita 4-4, GetContainerContents(1897147462, 1001896944936, None)
+    //    on own remote Avatar in Keepstar succeeds both unbound and bound to active Jita invbroker.
+    let avatar_unbound_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(remote_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .expect("remote Avatar GetContainerContents unbound succeeds"),
+    );
+    assert!(avatar_unbound_ids.contains(&avatar_cargo_trit));
+    assert!(avatar_unbound_ids.contains(&nested_can));
+
+    let avatar_bound_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            Some(&jita_bound),
+            &[PyRep::Integer(remote_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .expect("remote Avatar GetContainerContents bound to Jita station invbroker succeeds"),
+    );
+    assert_eq!(avatar_bound_ids, avatar_unbound_ids);
+
+    // 2. Nested owned container inside remote Avatar and owned ship at remote NPC station (Amarr) also succeed.
+    let nested_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            Some(&jita_bound),
+            &[PyRep::Integer(nested_can), PyRep::Integer(remote_avatar), PyRep::None],
+            &kw,
+        )
+        .await
+        .expect("nested owned container in remote Avatar succeeds"),
+    );
+    assert_eq!(nested_ids, vec![nested_can_trit]);
+
+    let npc_remote_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(remote_npc_ship), PyRep::Integer(amarr_station), PyRep::None],
+            &kw,
+        )
+        .await
+        .expect("remote NPC station ship GetContainerContents succeeds"),
+    );
+    assert_eq!(npc_remote_ids, vec![remote_npc_trit]);
+
+    // 3. V24.02 3-arg `(containerID, locationID, password)` parsing on local & remote passworded ALSCs.
+    let wrong_pw_err = handle_get_container_contents(
+        &ctx,
+        &jita_sess,
+        Some(&jita_bound),
+        &[PyRep::Integer(jita_alsc), PyRep::Integer(jita_station), PyRep::String("wrong".into())],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(wrong_pw_err.code, "ALSCPasswordRequired");
+
+    let local_alsc_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            Some(&jita_bound),
+            &[PyRep::Integer(jita_alsc), PyRep::Integer(jita_station), PyRep::String("pw-jita".into())],
+            &kw,
+        )
+        .await
+        .expect("3-arg password unlocks Jita ALSC"),
+    );
+    assert_eq!(local_alsc_ids, vec![jita_alsc_trit]);
+
+    let remote_alsc_none = handle_get_container_contents(
+        &ctx,
+        &jita_sess,
+        None,
+        &[PyRep::Integer(remote_alsc), PyRep::Integer(keepstar_id), PyRep::None],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(remote_alsc_none.code, "ALSCPasswordRequired");
+
+    let remote_alsc_ids = extract_ids(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(remote_alsc), PyRep::Integer(keepstar_id), PyRep::String("pw-remote".into())],
+            &kw,
+        )
+        .await
+        .expect("3-arg password unlocks remote Keepstar ALSC"),
+    );
+    assert_eq!(remote_alsc_ids, vec![remote_alsc_trit]);
+    let st_after = read_container_ship_state(&ctx);
+    assert!(st_after.unlocked_containers.contains(&(remote_alsc, char_id)));
+    assert!(st_after.unlocked_containers.contains(&(jita_alsc, char_id)));
+    assert!(st_after.alsc_logs.get(&jita_alsc).is_some_and(|v| v.iter().any(|e| e.action == "ALSCActionOpen")));
+
+    // 4. Negative security checks:
+    //    - Foreign remote Avatar -> CantDoThatWithSomeoneElsesStuff
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            Some(&jita_bound),
+            &[PyRep::Integer(foreign_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    //    - Owned container inside a foreign Titan -> blocked (#1290 foreign traversal barrier preserved)
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(owned_can_in_foreign_titan), PyRep::Integer(foreign_avatar), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    //    - Owned ship in Destroyed Upwell structure -> blocked
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(destroyed_keepstar_ship), PyRep::Integer(destroyed_keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    //    - Owned space container while docked or in a remote solar system -> must NOT bypass space range limit
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            None,
+            &[PyRep::Integer(space_owned_can), PyRep::Integer(i64::from(jita_sys)), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &space_jita_sess,
+            None,
+            &[PyRep::Integer(space_remote_sys_can), PyRep::Integer(i64::from(amarr_sys)), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    //    - Mismatched bound moniker (bound to Amarr while docked in Jita) -> rejected
+    let stale_amarr_bound = make_bound(amarr_station, char_id);
+    assert_eq!(
+        handle_get_container_contents(
+            &ctx,
+            &jita_sess,
+            Some(&stale_amarr_bound),
+            &[PyRep::Integer(remote_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gh_1317_suspect_jetcan_wreck_looting_without_ball_preserves_range_and_acl() {
+    use eve_destiny::{Ball, MovementMode};
+
+    let ctx = test_ctx();
+    let jita_sys: u32 = 30_000_142;
+    let looter_id = 90_000_002_i64;
+    let owner_id = 90_000_001_i64;
+    let looter_ship = 96_317_001_i64;
+    let unpos_jetcan = 96_317_010_i64;
+    let jetcan_loot_add = 96_317_011_i64;
+    let jetcan_loot_multi = 96_317_012_i64;
+    let unpos_wreck = 96_317_020_i64;
+    let wreck_loot = 96_317_021_i64;
+    let far_jetcan = 96_317_030_i64;
+    let far_jetcan_loot = 96_317_031_i64;
+    let unpos_secure_can = 96_317_040_i64;
+    let secure_can_loot = 96_317_041_i64;
+    let unspawned_looter_id = 96_317_090_i64;
+    let unspawned_ship = 96_317_091_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&looter_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = jita_sys;
+            ch.active_ship_id = looter_ship;
+        }
+        if let Some(ch) = snap.characters.get_mut(&owner_id) {
+            ch.corporation_id = 1_000_009;
+        }
+        let mut phantom = snap.characters[&looter_id].clone();
+        phantom.character_id = unspawned_looter_id;
+        phantom.user_id = 917_090;
+        phantom.name = "PhantomLooter".into();
+        phantom.active_ship_id = unspawned_ship;
+        phantom.corporation_id = 1_000_044;
+        snap.characters.insert(unspawned_looter_id, phantom);
+    });
+
+    insert_item(&ctx, looter_ship, 587, looter_id, i64::from(jita_sys), InventoryFlag::Hangar, 1, true);
+    insert_item(&ctx, unspawned_ship, 587, unspawned_looter_id, i64::from(jita_sys), InventoryFlag::Hangar, 1, true);
+
+    // Suspect jetcan (type_id 23) and wreck (type_id 26557, group_id 186) in space without Ball/item_positions.
+    insert_item(&ctx, unpos_jetcan, 23, owner_id, i64::from(jita_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, jetcan_loot_add, 34, owner_id, unpos_jetcan, InventoryFlag::Cargo, 10, false);
+    insert_item(&ctx, jetcan_loot_multi, 35, owner_id, unpos_jetcan, InventoryFlag::Cargo, 5, false);
+
+    insert_item(&ctx, unpos_wreck, 26_557, owner_id, i64::from(jita_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, wreck_loot, 36, owner_id, unpos_wreck, InventoryFlag::Cargo, 8, false);
+
+    // Positioned far jetcan (> 2,500m) must STILL be rejected.
+    insert_item(&ctx, far_jetcan, 23, owner_id, i64::from(jita_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, far_jetcan_loot, 34, owner_id, far_jetcan, InventoryFlag::Cargo, 12, false);
+
+    // Non-loot secure container without position must STILL fail closed.
+    insert_item(&ctx, unpos_secure_can, 3293, owner_id, i64::from(jita_sys), InventoryFlag::None, 1, true);
+    insert_item(&ctx, secure_can_loot, 34, owner_id, unpos_secure_can, InventoryFlag::Cargo, 4, false);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(far_jetcan, [3_500.0, 0.0, 0.0]);
+    });
+    let _ = ctx
+        .systems
+        .get_or_spawn(jita_sys)
+        .spawn_ball(Ball {
+            id: looter_ship,
+            type_id: 587,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let mut looter_sess = make_session(looter_id, 1_000_045, None, Some(jita_sys), Some(looter_ship));
+    let mut phantom_sess = make_session(unspawned_looter_id, 1_000_044, None, Some(jita_sys), Some(unspawned_ship));
+    let kw = HashMap::new();
+
+    // 1. Phantom looter without ship ball in space still cannot loot unpositioned jetcan.
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut phantom_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(jetcan_loot_add), PyRep::Integer(unpos_jetcan)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+
+    // 2. Non-loot secure container without ball still fails closed.
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut looter_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(secure_can_loot), PyRep::Integer(unpos_secure_can)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+
+    // 3. Out-of-range positioned jetcan (> 2,500m) still fails on Add and MultiAdd.
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut looter_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(far_jetcan_loot), PyRep::Integer(far_jetcan)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+    assert_eq!(
+        handle_multi_add(
+            &ctx,
+            &mut looter_sess,
+            None,
+            &[
+                PyRep::List(vec![PyRep::Integer(far_jetcan_loot)]),
+                PyRep::Integer(looter_ship),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ItemOwnershipViolation"
+    );
+
+    // 4. Undocked pilot with active ball loots foreign unpositioned jetcan via Add (triggers Suspect!) and MultiAdd.
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut looter_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(jetcan_loot_add), PyRep::Integer(unpos_jetcan)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Add from foreign unpositioned jetcan must succeed");
+    let moved_jetcan_item = ctx.db.get_item(jetcan_loot_add).expect("looted jetcan item exists");
+    assert_eq!(
+        (moved_jetcan_item.location_id, moved_jetcan_item.owner_id),
+        (looter_ship, looter_id),
+        "looted jetcan item must land inside looter_ship owned by looter"
+    );
+    assert!(
+        ctx.crimewatch
+            .read()
+            .unwrap()
+            .is_suspect(looter_id, ctx.now_unix()),
+        "looting foreign jetcan must trigger Crimewatch Suspect flag"
+    );
+    handle_multi_add(
+        &ctx,
+        &mut looter_sess,
+        None,
+        &[
+            PyRep::List(vec![PyRep::Integer(jetcan_loot_multi)]),
+            PyRep::Integer(looter_ship),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("MultiAdd from foreign unpositioned jetcan must succeed");
+    assert_eq!(
+        ctx.db.get_item(jetcan_loot_multi).unwrap().location_id,
+        looter_ship,
+        "MultiAdd looted jetcan item must land inside looter_ship"
+    );
+
+    // 5. Undocked pilot with active ball loots foreign unpositioned wreck (group_id == 186) via Add.
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut looter_sess,
+        None,
+        "invbroker",
+        "Add",
+        &[PyRep::Integer(wreck_loot), PyRep::Integer(unpos_wreck)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("Add from foreign unpositioned wreck must succeed");
+    let moved_wreck_item = ctx.db.get_item(wreck_loot).expect("looted wreck item exists");
+    assert_eq!(
+        (moved_wreck_item.location_id, moved_wreck_item.owner_id),
+        (looter_ship, looter_id),
+        "looted wreck item must land inside looter_ship owned by looter"
+    );
+
+    // 6. Putting an item INTO a foreign unpositioned wreck still fails closed with DestinationAccessDenied.
+    assert_eq!(
+        crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut looter_sess,
+            None,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(wreck_loot), PyRep::Integer(unpos_wreck)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "DestinationAccessDenied"
+    );
+}
+

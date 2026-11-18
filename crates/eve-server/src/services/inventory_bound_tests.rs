@@ -2757,3 +2757,259 @@ fn issue_1290_ship_bay_targets_foreign_bay_auth_and_station_fuel_redirect() {
         assert!(recheck_invbroker_add_auth_in_snap(&ctx, snap, &mate_sess, mate_id, src_bay, Some(src_bay), station_id, InventoryFlag::Hangar, &[], &kw_pw).is_ok());
     });
 }
+
+#[tokio::test]
+async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar_system() {
+    let ctx = test_ctx();
+    let char_id = 95_910_001_i64;
+    let other_char_id = 95_910_002_i64;
+    let corp_id = 98_910_001_i64;
+    let station_id = 60_002_956_i64; // Perimeter IX - Caldari Constructions Production Plant (SDE)
+    let system_id = 30_000_144_u32; // Perimeter
+    let remote_station_id = 60_003_760_i64; // Jita 4-4
+    let remote_system_id = 30_000_142_u32; // Jita
+    let venture_id = 1_000_959_901_i64;
+    let veldspar_id = 1_000_959_902_i64;
+    let foreign_ship_id = 1_000_959_903_i64;
+
+    assert!(ctx.sde.stations.contains_key(&station_id), "Perimeter station 60002956 must exist in SDE");
+    assert!(ctx.sde.stations.contains_key(&remote_station_id), "Jita station 60003760 must exist in SDE");
+    assert!(ctx.sde.solar_systems.contains_key(&system_id), "Perimeter 30000144 must exist in SDE");
+    assert!(ctx.sde.solar_systems.contains_key(&remote_system_id), "Jita 30000142 must exist in SDE");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.name = "Miner1307".into();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.solar_system_id = system_id;
+        ch.active_ship_id = venture_id;
+        snap.characters.insert(char_id, ch);
+
+        let mk = |item_id, type_id, oid, loc, flag, qty, singleton| InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: oid,
+            location_id: loc,
+            flag,
+            quantity: qty,
+            singleton,
+            version: 1,
+            ..Default::default()
+        };
+        // Venture (32880) with Veldspar II-Grade (17470) in Mining Hold (134) + foreign ship at same station.
+        snap.items.insert(venture_id, mk(venture_id, 32880, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(
+            veldspar_id,
+            mk(veldspar_id, 17470, char_id, venture_id, InventoryFlag::SpecializedOreHold, 250, false),
+        );
+        snap.items.insert(
+            foreign_ship_id,
+            mk(foreign_ship_id, 587, other_char_id, station_id, InventoryFlag::Hangar, 1, true),
+        );
+    });
+
+    let mut docked_sess = SessionState {
+        session_id: 1,
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        station_id: Some(station_id),
+        solar_system_id: Some(system_id),
+        ship_id: Some(venture_id),
+        ..Default::default()
+    };
+    let b_station = bound_invbroker(char_id, station_id);
+
+    // 1. GH #1307 core repro: GetInventoryFromId(60002956, 0) while docked at 60002956 must bind
+    //    station inventory cleanly (no FakeItemNotFound) and expose canonical station DBRow + List.
+    let st_inv_rep = handle(
+        &ctx,
+        &docked_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(station_id), PyRep::Integer(0)],
+        None,
+    )
+    .expect("GetInventoryFromId handled")
+    .expect("docked GetInventoryFromId(station_id, 0) succeeds");
+    let st_bid = st_inv_rep.as_i64().expect("sub-object bound id") as u64;
+    let st_entry = ctx
+        .verify_bound_object(&docked_sess, st_bid)
+        .expect("station sub-object verifies for caller session");
+    assert_eq!(st_entry.service, "invbroker");
+    assert_eq!(st_entry.object_id, station_id);
+
+    let st_self = handle(&ctx, &docked_sess, Some(&st_entry), "invbroker", "GetSelfInvItem", &[], None)
+        .expect("GetSelfInvItem handled")
+        .expect("station GetSelfInvItem succeeds");
+    let st_info = &ctx.sde.stations[&station_id];
+    let st_type = &ctx.sde.types[&st_info.station_type_id];
+    let PyRep::DBRow { columns: ref st_cols, .. } = st_self else {
+        panic!("expected DBRow from station GetSelfInvItem, got {st_self:?}");
+    };
+    let st_col = |k: &str| st_cols.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    assert_eq!(st_col("itemID"), Some(&PyRep::Integer(station_id)));
+    assert_eq!(st_col("typeID"), Some(&PyRep::Integer(i64::from(st_info.station_type_id))));
+    assert_eq!(st_col("ownerID"), Some(&PyRep::Integer(st_info.owner_corporation_id)));
+    assert_eq!(st_col("locationID"), Some(&PyRep::Integer(i64::from(st_info.solar_system_id))));
+    assert_eq!(st_col("flagID"), Some(&PyRep::Integer(0)));
+    assert_eq!(st_col("quantity"), Some(&PyRep::Integer(-1)));
+    assert_eq!(st_col("groupID"), Some(&PyRep::Integer(i64::from(st_type.group_id))));
+    assert_eq!(st_col("categoryID"), Some(&PyRep::Integer(i64::from(st_type.category_id))));
+    assert_eq!(st_col("customInfo"), Some(&PyRep::String(st_info.name.clone())));
+
+    let listed_station = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut docked_sess,
+        Some(&st_entry),
+        "invbroker",
+        "List",
+        &[PyRep::Integer(i64::from(InventoryFlag::Hangar as u16))],
+        &HashMap::new(),
+    )
+    .await
+    .expect("List handled")
+    .expect("station List(Hangar) succeeds");
+    let PyRep::ObjectEx { list: station_rows, .. } = listed_station else {
+        panic!("expected CRowset ObjectEx from station List");
+    };
+    assert!(
+        station_rows.iter().any(|r| r.dbrow_get("itemID") == Some(&PyRep::Integer(venture_id))),
+        "station hangar List must include caller's Venture"
+    );
+    assert!(
+        !station_rows.iter().any(|r| r.dbrow_get("itemID") == Some(&PyRep::Integer(foreign_ship_id))),
+        "station hangar List must exclude foreign character's ship"
+    );
+
+    // 2. Venture & its Mining Hold (SpecializedOreHold = 134) remain accessible via GetInventoryFromId.
+    let v_rep = handle(
+        &ctx,
+        &docked_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(venture_id), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .expect("GetInventoryFromId(venture_id, 0) succeeds");
+    let v_entry = ctx
+        .verify_bound_object(&docked_sess, v_rep.as_i64().unwrap() as u64)
+        .expect("venture sub-object verifies");
+    let mut kw_ore = HashMap::new();
+    kw_ore.insert("flag".to_string(), PyRep::Integer(134));
+    let listed_ore = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut docked_sess,
+        Some(&v_entry),
+        "invbroker",
+        "List",
+        &[],
+        &kw_ore,
+    )
+    .await
+    .unwrap()
+    .expect("List(flag=134) succeeds");
+    let PyRep::ObjectEx { list: ore_rows, .. } = listed_ore else {
+        panic!("expected CRowset ObjectEx from Venture Mining Hold List");
+    };
+    assert_eq!(ore_rows.len(), 1);
+    assert_eq!(ore_rows[0].dbrow_get("itemID"), Some(&PyRep::Integer(veldspar_id)));
+
+    // 3. Current solar system (30000144) is rejected while NPC-station docked (matching
+    //    `authorize_invbroker_binding`) and binds cleanly in space / non-NPC-station contexts.
+    assert_eq!(
+        handle(
+            &ctx,
+            &docked_sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(i64::from(system_id)), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
+
+    let space_sess = SessionState {
+        session_id: 2,
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        station_id: None,
+        structure_id: None,
+        solar_system_id: Some(system_id),
+        ship_id: Some(venture_id),
+        ..Default::default()
+    };
+    let b_sys = BoundObjectEntry {
+        session_id: 2,
+        ..bound_invbroker(char_id, i64::from(system_id))
+    };
+    let sys_space_rep = handle(
+        &ctx,
+        &space_sess,
+        Some(&b_sys),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(i64::from(system_id)), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .expect("space GetInventoryFromId(current_solar_system_id, 0) succeeds");
+    let sys_space_entry = ctx
+        .verify_bound_object(&space_sess, sys_space_rep.as_i64().unwrap() as u64)
+        .expect("space solar system sub-object verifies");
+    let sys_self = handle(&ctx, &space_sess, Some(&sys_space_entry), "invbroker", "GetSelfInvItem", &[], None)
+        .unwrap()
+        .expect("solar system GetSelfInvItem succeeds");
+    let sys_info = &ctx.sde.solar_systems[&system_id];
+    let PyRep::DBRow { columns: ref sys_cols, .. } = sys_self else {
+        panic!("expected DBRow from solar system GetSelfInvItem, got {sys_self:?}");
+    };
+    let sys_col = |k: &str| sys_cols.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    assert_eq!(sys_col("itemID"), Some(&PyRep::Integer(i64::from(system_id))));
+    assert_eq!(sys_col("typeID"), Some(&PyRep::Integer(5)));
+    assert_eq!(sys_col("ownerID"), Some(&PyRep::Integer(1)));
+    assert_eq!(sys_col("locationID"), Some(&PyRep::Integer(i64::from(sys_info.constellation_id))));
+    assert_eq!(sys_col("flagID"), Some(&PyRep::Integer(0)));
+    assert_eq!(sys_col("quantity"), Some(&PyRep::Integer(-1)));
+    assert_eq!(sys_col("groupID"), Some(&PyRep::Integer(5)));
+    assert_eq!(sys_col("categoryID"), Some(&PyRep::Integer(2)));
+    assert_eq!(sys_col("customInfo"), Some(&PyRep::String(sys_info.name.clone())));
+
+    // 4. Negative / fail-closed cases: remote station, remote solar system, undocked station,
+    //    stale moniker, foreign ship (#1290 ACL preserved), and non-existent IDs.
+    let err_code = |sess: &SessionState, bound: &BoundObjectEntry, target_id: i64| {
+        handle(
+            &ctx,
+            sess,
+            Some(bound),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(target_id), PyRep::Integer(0)],
+            None,
+        )
+        .expect("handled")
+        .expect_err("must reject invalid or unreachable inventory")
+        .code
+    };
+    assert_eq!(err_code(&docked_sess, &b_station, remote_station_id), "InventoryNotAccessible");
+    assert_eq!(err_code(&docked_sess, &b_station, i64::from(remote_system_id)), "InventoryNotAccessible");
+    let b_stale_station = bound_invbroker(char_id, remote_station_id);
+    assert_eq!(err_code(&docked_sess, &b_stale_station, station_id), "InventoryNotAccessible");
+    assert_eq!(err_code(&docked_sess, &b_station, foreign_ship_id), "InventoryNotAccessible");
+    assert_eq!(err_code(&space_sess, &b_sys, station_id), "InventoryNotAccessible");
+    assert_eq!(err_code(&space_sess, &b_sys, i64::from(remote_system_id)), "InventoryNotAccessible");
+    assert_eq!(err_code(&docked_sess, &b_station, 60_999_999), "FakeItemNotFound");
+    assert_eq!(err_code(&docked_sess, &b_station, 199_888_777), "FakeItemNotFound");
+}

@@ -1135,3 +1135,529 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
         "Reconnect beyonce.MachoBindObject must emit SetState in DoDestinyUpdate even during return-warp"
     );
 }
+
+#[tokio::test]
+async fn gh_1307_1311_wire_harness_station_inv_and_remote_container_contents() {
+    use eve_db::{InventoryItemRecord, UpwellStructureRecord};
+    use eve_testkit::client_harness::{extract_bound_id_from_wire_rep, ContractValidationMode};
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let jita_char_id = 90_000_001_i64; // "demo" / "demo-secret", docked at Jita 4-4 (60003760)
+    let miner_char_id = 90_000_002_i64; // "other" / "other-secret", moved to Perimeter IX (60002956)
+    let jita_station = 60_003_760_i64;
+    let jita_sys = 30_000_142_u32;
+    let perimeter_station = 60_002_956_i64;
+    let perimeter_sys = 30_000_144_u32;
+    let amarr_station = 60_008_494_i64;
+    let keepstar_id = 1_001_896_944_936_i64;
+
+    let venture_id = 800_959_901_i64;
+    let veldspar_id = 800_959_902_i64;
+    let remote_avatar = 1_897_147_462_i64;
+    let avatar_trit = 800_959_903_i64;
+    let nested_can = 800_959_904_i64;
+    let nested_trit = 800_959_905_i64;
+    let remote_npc_rifter = 800_959_906_i64;
+    let remote_npc_trit = 800_959_907_i64;
+    let local_jita_alsc = 800_959_908_i64;
+    let jita_alsc_trit = 800_959_909_i64;
+    let foreign_keepstar_avatar = 800_959_910_i64;
+    let nested_foreign_can = 800_959_911_i64;
+    let foreign_perimeter_ship = 800_959_912_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let miner = snap.characters.get_mut(&miner_char_id).expect("seed other char 90000002");
+        let miner_corp = miner.corporation_id;
+        miner.station_id = Some(perimeter_station);
+        miner.structure_id = None;
+        miner.solar_system_id = perimeter_sys;
+        miner.active_ship_id = venture_id;
+
+        let jita_corp = snap
+            .characters
+            .get(&jita_char_id)
+            .expect("seed demo char 90000001")
+            .corporation_id;
+
+        snap.structures.insert(
+            keepstar_id,
+            UpwellStructureRecord {
+                structure_id: keepstar_id,
+                type_id: 35834,
+                owner_corp_id: jita_corp,
+                solar_system_id: perimeter_sys,
+                name: "1DQ1-A Keepstar".into(),
+                state: "ShieldVulnerable".into(),
+                position: [1_000.0, 0.0, 0.0],
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                ..Default::default()
+            },
+        );
+
+        let mk = |item_id, type_id, oid, loc, flag, qty, singleton| InventoryItemRecord {
+            item_id,
+            type_id,
+            owner_id: oid,
+            location_id: loc,
+            flag,
+            quantity: qty,
+            singleton,
+            version: 1,
+            ..Default::default()
+        };
+
+        // GH #1307 fixtures: Venture + Veldspar II-Grade in Mining Hold at Perimeter IX (60002956).
+        snap.items.insert(
+            venture_id,
+            mk(venture_id, 32880, miner_char_id, perimeter_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            veldspar_id,
+            mk(veldspar_id, 17470, miner_char_id, venture_id, InventoryFlag::SpecializedOreHold, 400, false),
+        );
+        snap.items.insert(
+            foreign_perimeter_ship,
+            mk(foreign_perimeter_ship, 587, jita_char_id, perimeter_station, InventoryFlag::Hangar, 1, true),
+        );
+
+        // GH #1311 fixtures: Avatar + nested container in remote Keepstar, ship at Amarr, local ALSC at Jita,
+        // and cross-owner isolation items (#1290).
+        snap.items.insert(
+            remote_avatar,
+            mk(remote_avatar, 11567, jita_char_id, keepstar_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            avatar_trit,
+            mk(avatar_trit, 34, jita_char_id, remote_avatar, InventoryFlag::Cargo, 500, false),
+        );
+        snap.items.insert(
+            nested_can,
+            mk(nested_can, 3293, jita_char_id, remote_avatar, InventoryFlag::Cargo, 1, true),
+        );
+        snap.items.insert(
+            nested_trit,
+            mk(nested_trit, 34, jita_char_id, nested_can, InventoryFlag::Cargo, 42, false),
+        );
+        snap.items.insert(
+            remote_npc_rifter,
+            mk(remote_npc_rifter, 587, jita_char_id, amarr_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            remote_npc_trit,
+            mk(remote_npc_trit, 34, jita_char_id, remote_npc_rifter, InventoryFlag::Cargo, 77, false),
+        );
+        snap.items.insert(
+            local_jita_alsc,
+            mk(local_jita_alsc, 17363, jita_char_id, jita_station, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            jita_alsc_trit,
+            mk(jita_alsc_trit, 34, jita_char_id, local_jita_alsc, InventoryFlag::Cargo, 88, false),
+        );
+        snap.items.insert(
+            foreign_keepstar_avatar,
+            mk(foreign_keepstar_avatar, 11567, miner_char_id, keepstar_id, InventoryFlag::Hangar, 1, true),
+        );
+        snap.items.insert(
+            nested_foreign_can,
+            mk(nested_foreign_can, 3293, jita_char_id, foreign_keepstar_avatar, InventoryFlag::FleetHangar, 1, true),
+        );
+        let _ = miner_corp;
+    });
+
+    let kw = std::collections::HashMap::new();
+
+    let mut h_miner = crate::common::new_wire_harness(&ctx, 130_701)
+        .with_mode(ContractValidationMode::Ratcheted);
+    h_miner
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("other".into()), PyRep::String("other-secret".into())],
+            &kw,
+        )
+        .await;
+    h_miner
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(miner_char_id)], &kw)
+        .await;
+    let _ = h_miner.drain_pending_frames();
+
+    // --- Part A (GH #1307 over :26000 wire): invbroker.GetInventoryFromId(60002956, 0) ---
+    let perimeter_bind = h_miner
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(perimeter_station), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+        )
+        .await;
+    let perimeter_mgr_bid =
+        extract_bound_id_from_wire_rep(&perimeter_bind).expect("perimeter invbroker bound id");
+
+    let station_sub_rep = h_miner
+        .call_ok(
+            "invbroker",
+            Some(perimeter_mgr_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(perimeter_station), PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    let station_sub_bid =
+        extract_bound_id_from_wire_rep(&station_sub_rep).expect("station sub-object bound id");
+    let station_self = h_miner
+        .call_ok("invbroker", Some(station_sub_bid), "GetSelfInvItem", &[], &kw)
+        .await;
+    assert_eq!(station_self.dbrow_get("itemID"), Some(&PyRep::Integer(perimeter_station)));
+    assert_eq!(station_self.dbrow_get("typeID"), Some(&PyRep::Integer(1529)));
+    assert_eq!(station_self.dbrow_get("locationID"), Some(&PyRep::Integer(i64::from(perimeter_sys))));
+
+    // While NPC-station docked, current solar system inventory is rejected (`InventoryNotAccessible`,
+    // matching `authorize_invbroker_binding`), while in-space solar system inventory binds cleanly.
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                Some(perimeter_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(i64::from(perimeter_sys)), PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "InventoryNotAccessible"
+    );
+
+    let venture_sub_rep = h_miner
+        .call_ok(
+            "invbroker",
+            Some(perimeter_mgr_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(venture_id), PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    let venture_sub_bid =
+        extract_bound_id_from_wire_rep(&venture_sub_rep).expect("venture sub-object bound id");
+    let mut kw_ore = std::collections::HashMap::new();
+    kw_ore.insert("flag".to_string(), PyRep::Integer(134));
+    let ore_list = h_miner
+        .call_ok("invbroker", Some(venture_sub_bid), "List", &[], &kw_ore)
+        .await;
+    let ore_ids: Vec<i64> = ore_list
+        .crowset_rows()
+        .expect("CRowset from Venture Mining Hold List")
+        .iter()
+        .filter_map(|r| r.dbrow_get("itemID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(ore_ids, vec![veldspar_id]);
+
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                Some(perimeter_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(jita_station), PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "InventoryNotAccessible"
+    );
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                Some(perimeter_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(i64::from(jita_sys)), PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "InventoryNotAccessible"
+    );
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                Some(perimeter_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(foreign_perimeter_ship), PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "InventoryNotAccessible"
+    );
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                Some(perimeter_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(60_999_999), PyRep::Integer(0)],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "FakeItemNotFound"
+    );
+
+    // Undock `h_miner` on the same authenticated session (`user_id = 2`) to verify solar-system
+    // `GetInventoryFromId(30000144, 0)` over the `:26000` wire after leaving the station.
+    ctx.advance_secs(11);
+    h_miner.call_ok("beyonce", None, "Undock", &[], &kw).await;
+    let sys_mgr_bind = h_miner
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(i64::from(perimeter_sys)), PyRep::Integer(5)]), PyRep::None],
+            &kw,
+        )
+        .await;
+    let sys_mgr_bid =
+        extract_bound_id_from_wire_rep(&sys_mgr_bind).expect("space solar system invbroker bound id");
+    let sys_sub_rep = h_miner
+        .call_ok(
+            "invbroker",
+            Some(sys_mgr_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(i64::from(perimeter_sys)), PyRep::Integer(0)],
+            &kw,
+        )
+        .await;
+    let sys_sub_bid =
+        extract_bound_id_from_wire_rep(&sys_sub_rep).expect("solar system sub-object bound id");
+    let sys_self = h_miner
+        .call_ok("invbroker", Some(sys_sub_bid), "GetSelfInvItem", &[], &kw)
+        .await;
+    assert_eq!(sys_self.dbrow_get("itemID"), Some(&PyRep::Integer(i64::from(perimeter_sys))));
+    assert_eq!(sys_self.dbrow_get("typeID"), Some(&PyRep::Integer(5)));
+    assert_eq!(sys_self.dbrow_get("groupID"), Some(&PyRep::Integer(5)));
+    assert_eq!(sys_self.dbrow_get("categoryID"), Some(&PyRep::Integer(2)));
+
+    // --- Part B (GH #1311 over :26000 wire): invbroker.GetContainerContents ---
+    let mut h_jita = crate::common::new_wire_harness(&ctx, 131_101)
+        .with_mode(ContractValidationMode::Ratcheted);
+    h_jita
+        .call_ok(
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+            &kw,
+        )
+        .await;
+    h_jita
+        .call_ok("charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(jita_char_id)], &kw)
+        .await;
+    let _ = h_jita.drain_pending_frames();
+
+    let jita_bind = h_jita
+        .call_ok(
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(jita_station), PyRep::Integer(15)]), PyRep::None],
+            &kw,
+        )
+        .await;
+    let jita_mgr_bid = extract_bound_id_from_wire_rep(&jita_bind).expect("jita invbroker bound id");
+
+    let item_ids = |rep: &PyRep| -> Vec<i64> {
+        rep.crowset_rows()
+            .expect("CRowset from GetContainerContents")
+            .iter()
+            .filter_map(|r| r.dbrow_get("itemID").and_then(PyRep::as_i64))
+            .collect()
+    };
+
+    let avatar_unbound = h_jita
+        .call_ok(
+            "invbroker",
+            None,
+            "GetContainerContents",
+            &[PyRep::Integer(remote_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await;
+    let avatar_unbound_ids = item_ids(&avatar_unbound);
+    assert!(avatar_unbound_ids.contains(&avatar_trit));
+    assert!(avatar_unbound_ids.contains(&nested_can));
+
+    let avatar_bound = h_jita
+        .call_ok(
+            "invbroker",
+            Some(jita_mgr_bid),
+            "GetContainerContents",
+            &[PyRep::Integer(remote_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert_eq!(item_ids(&avatar_bound), avatar_unbound_ids);
+
+    let nested_rsp = h_jita
+        .call_ok(
+            "invbroker",
+            Some(jita_mgr_bid),
+            "GetContainerContents",
+            &[PyRep::Integer(nested_can), PyRep::Integer(remote_avatar), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert_eq!(item_ids(&nested_rsp), vec![nested_trit]);
+
+    let amarr_rsp = h_jita
+        .call_ok(
+            "invbroker",
+            Some(jita_mgr_bid),
+            "GetContainerContents",
+            &[PyRep::Integer(remote_npc_rifter), PyRep::Integer(amarr_station), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert_eq!(item_ids(&amarr_rsp), vec![remote_npc_trit]);
+
+    // V24.02 3-arg `(containerID, locationID, password)` enforcement & unlock over wire.
+    h_jita
+        .call_ok(
+            "invbroker",
+            Some(jita_mgr_bid),
+            "SetPassword",
+            &[PyRep::Integer(local_jita_alsc), PyRep::Integer(1), PyRep::String("wire-pw".into())],
+            &kw,
+        )
+        .await;
+    // Clear the session unlock recorded by SetPassword so this connection exercises full
+    // password-prompt -> wrong-password -> 3-arg V24.02 password unlock over the wire.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(note) = snap.owner_notes.get_mut(&-8_400_000_000_000) {
+            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
+                val["unlocked_containers"] = serde_json::json!([]);
+                note.note = val.to_string();
+            }
+        }
+    });
+    assert_eq!(
+        h_jita
+            .call(
+                "invbroker",
+                Some(jita_mgr_bid),
+                "GetContainerContents",
+                &[PyRep::Integer(local_jita_alsc), PyRep::Integer(jita_station), PyRep::None],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "ALSCPasswordRequired"
+    );
+    assert_eq!(
+        h_jita
+            .call(
+                "invbroker",
+                Some(jita_mgr_bid),
+                "GetContainerContents",
+                &[
+                    PyRep::Integer(local_jita_alsc),
+                    PyRep::Integer(jita_station),
+                    PyRep::String("wrong-pw".into()),
+                ],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "ALSCPasswordRequired"
+    );
+    let alsc_unlocked = h_jita
+        .call_ok(
+            "invbroker",
+            Some(jita_mgr_bid),
+            "GetContainerContents",
+            &[
+                PyRep::Integer(local_jita_alsc),
+                PyRep::Integer(jita_station),
+                PyRep::String("wire-pw".into()),
+            ],
+            &kw,
+        )
+        .await;
+    assert_eq!(item_ids(&alsc_unlocked), vec![jita_alsc_trit]);
+
+    // Cross-owner & #1290 foreign-hull traversal ACLs remain fail-closed over wire.
+    assert_eq!(
+        h_jita
+            .call(
+                "invbroker",
+                Some(jita_mgr_bid),
+                "GetContainerContents",
+                &[PyRep::Integer(foreign_keepstar_avatar), PyRep::Integer(keepstar_id), PyRep::None],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    assert_eq!(
+        h_jita
+            .call(
+                "invbroker",
+                Some(jita_mgr_bid),
+                "GetContainerContents",
+                &[PyRep::Integer(nested_foreign_can), PyRep::Integer(foreign_keepstar_avatar), PyRep::None],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    assert_eq!(
+        h_jita
+            .call(
+                "invbroker",
+                Some(jita_mgr_bid),
+                "GetContainerContents",
+                &[PyRep::Integer(venture_id), PyRep::Integer(perimeter_station), PyRep::None],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+    // Knowing another character's ALSC password must never bypass ownership check on docked container.
+    assert_eq!(
+        h_miner
+            .call(
+                "invbroker",
+                None,
+                "GetContainerContents",
+                &[
+                    PyRep::Integer(local_jita_alsc),
+                    PyRep::Integer(jita_station),
+                    PyRep::String("wire-pw".into()),
+                ],
+                &kw,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "CantDoThatWithSomeoneElsesStuff"
+    );
+}
