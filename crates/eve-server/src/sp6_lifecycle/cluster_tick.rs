@@ -9,7 +9,7 @@
 use super::{
     load_sp6_state_from_snap, safe_logoff_blocking_space_conditions,
     sde_mobile_warp_disruptor_decay_secs, sde_ship_physics, with_mut_sp6_state,
-    AbyssalPersistedSession, DisconnectedShipEntry, SafeLogoffEntry, SelfDestructPersistedEntry,
+    AbyssalPersistedSession, DisconnectedShipEntry, DueSelfDestructEntry, SafeLogoffEntry,
     JETCAN_DECAY_LIFETIME_SECS, WRECK_DECAY_LIFETIME_SECS,
 };
 
@@ -672,12 +672,12 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
 /// (`feat:lifecycle.self-destruct-server-timer`).
 fn execute_due_self_destruct_sync(
     ctx: &ServerContext,
-    entry: &SelfDestructPersistedEntry,
+    due: &DueSelfDestructEntry,
     now_unix: u64,
 ) {
-    let sys_id = entry.solar_system_id;
-    let char_id = entry.char_id;
-    let ship_id = entry.ship_id;
+    let sys_id = due.entry.solar_system_id;
+    let char_id = due.entry.char_id;
+    let ship_id = due.entry.ship_id;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let pos = sys_handle
         .get_ball_position_sync(ship_id)
@@ -691,13 +691,15 @@ fn execute_due_self_destruct_sync(
         })
         .unwrap_or(DVec3::ZERO);
 
-    let _ = crate::combat::death_pipeline::execute_live_self_destruct_sync(
+    let _ = crate::combat::death_pipeline::execute_guarded_self_destruct_sync(
         ctx,
         sys_id,
         char_id,
         ship_id,
         pos,
         now_unix,
+        Some(due.expected_generation),
+        true,
     );
 }
 
@@ -938,16 +940,8 @@ pub fn on_advance_secs_internal(
         }
     }
 
-    // 1. Sync any in-memory self-destruct countdowns from `CombatRuntimeState` into `Sp6PersistedState`
-    let rt_self_destructs: Vec<SelfDestructPersistedEntry> = with_combat_runtime(ctx, |rt| {
-        rt.self_destruct_countdowns.values().map(|cd| SelfDestructPersistedEntry {
-            ship_id: cd.ship_id, char_id: cd.char_id, solar_system_id: cd.solar_system_id,
-            started_unix: cd.started_unix, detonate_at_unix: cd.detonate_at_unix,
-        }).collect()
-    });
-
     let (mut completed_safe_logoffs, mut aborted_safe_logoffs) = (Vec::<SafeLogoffEntry>::new(), Vec::<(i64, &'static str)>::new());
-    let mut due_self_destructs = Vec::<SelfDestructPersistedEntry>::new();
+    let mut due_self_destructs = Vec::<DueSelfDestructEntry>::new();
     let (mut due_abyssal, mut active_warping_disconnected) = (Vec::<AbyssalPersistedSession>::new(), Vec::<DisconnectedShipEntry>::new());
 
     // Evaluate blocking space conditions outside `with_mut_sp6_state` so we never re-enter `ctx.db`
@@ -988,13 +982,14 @@ pub fn on_advance_secs_internal(
         .map(|entry| entry.char_id)
         .collect();
 
-    let needs_sp6_lifecycle_sync = !rt_self_destructs.is_empty()
-        || super::with_sp6_state(&ctx.db, |st| {
-            !st.disconnected_ships.is_empty()
-                || !st.safe_logoffs.is_empty()
-                || !st.self_destructs.is_empty()
-                || !st.abyssal_sessions.is_empty()
-        });
+    let needs_sp6_lifecycle_sync =
+        with_combat_runtime(ctx, |rt| !rt.self_destruct_countdowns.is_empty())
+            || super::with_sp6_state(&ctx.db, |st| {
+                !st.disconnected_ships.is_empty()
+                    || !st.safe_logoffs.is_empty()
+                    || !st.self_destructs.is_empty()
+                    || !st.abyssal_sessions.is_empty()
+            });
 
     if needs_sp6_lifecycle_sync {
         // Pre-evaluate system-actor tackle & committed-warp predicates outside `with_mut_sp6_state`
@@ -1015,85 +1010,78 @@ pub fn on_advance_secs_internal(
             .map(|(_, ship_id)| ship_id)
             .collect();
 
-        ctx.db.with_mut_snapshot(|snap| {
-            let st = snap.sp6_lifecycle.as_inner_mut();
-            for cd in rt_self_destructs {
-                let started = cd.started_unix;
-                let detonate = cd.detonate_at_unix;
-                st.self_destructs
-                    .entry(cd.ship_id)
-                    .and_modify(|e| {
-                        e.started_unix = started;
-                        e.detonate_at_unix = detonate;
-                    })
-                    .or_insert(cd);
-            }
+        // Sync runtime self-destruct countdowns and collect due entries atomically under
+        // `WorldRepository` (rank 40) -> `combat_ephemeral` (rank 60) (`#1174`).
+        crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+            &ctx.db,
+            &*ctx.combat_ephemeral,
+            |snap, rt| {
+                let rt_self_destructs = super::snapshot_rt_self_destructs_in_rt(rt, None);
+                super::persist_rt_self_destructs_in_tx(snap, rt, &rt_self_destructs);
 
-            // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship
-            st.disconnected_ships.retain(|&cid, disc| {
-                snap.items.contains_key(&disc.ship_id)
-                    && snap.characters.get(&cid).is_some_and(|c| {
-                        c.active_ship_id == disc.ship_id
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
-            });
+                {
+                    let st = snap.sp6_lifecycle.as_inner_mut();
 
-            let safe_keys: Vec<i64> = st.safe_logoffs.keys().copied().collect();
-            for cid in safe_keys {
-                let Some(entry) = st.safe_logoffs.get(&cid).cloned() else {
-                    continue;
-                };
-                if entry.completed {
-                    continue;
-                }
-                if blocked_safe_char_ids.contains(&cid) {
-                    st.safe_logoffs.remove(&cid);
-                    aborted_safe_logoffs.push((cid, "SAFE_LOGOFF_ABORT_MODULE"));
-                    continue;
-                }
-                if now_unix >= entry.complete_at_unix {
-                    if let Some(e) = st.safe_logoffs.get_mut(&cid) {
-                        e.completed = true;
+                    // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship
+                    st.disconnected_ships.retain(|&cid, disc| {
+                        snap.items.contains_key(&disc.ship_id)
+                            && snap.characters.get(&cid).is_some_and(|c| {
+                                c.active_ship_id == disc.ship_id
+                                    && c.station_id.is_none()
+                                    && c.structure_id.is_none()
+                            })
+                    });
+
+                    let safe_keys: Vec<i64> = st.safe_logoffs.keys().copied().collect();
+                    for cid in safe_keys {
+                        let Some(entry) = st.safe_logoffs.get(&cid).cloned() else {
+                            continue;
+                        };
+                        if entry.completed {
+                            continue;
+                        }
+                        if blocked_safe_char_ids.contains(&cid) {
+                            st.safe_logoffs.remove(&cid);
+                            aborted_safe_logoffs.push((cid, "SAFE_LOGOFF_ABORT_MODULE"));
+                            continue;
+                        }
+                        if now_unix >= entry.complete_at_unix {
+                            if let Some(e) = st.safe_logoffs.get_mut(&cid) {
+                                e.completed = true;
+                            }
+                            completed_safe_logoffs.push(entry);
+                        }
                     }
-                    completed_safe_logoffs.push(entry);
-                }
-            }
 
-            for disc in st.disconnected_ships.values_mut() {
-                if !disc.removed_from_space {
-                    if scrambled_uncommitted_disc_ships.contains(&disc.ship_id) {
-                        disc.emergency_warp_dest = None;
-                    } else if disc.emergency_warp_dest.is_some() {
-                        active_warping_disconnected.push(disc.clone());
+                    for disc in st.disconnected_ships.values_mut() {
+                        if !disc.removed_from_space {
+                            if scrambled_uncommitted_disc_ships.contains(&disc.ship_id) {
+                                disc.emergency_warp_dest = None;
+                            } else if disc.emergency_warp_dest.is_some() {
+                                active_warping_disconnected.push(disc.clone());
+                            }
+                        }
+                    }
+
+                    let ab_keys: Vec<i64> = st
+                        .abyssal_sessions
+                        .iter()
+                        .filter(|(_, ab)| now_unix >= ab.collapse_at_unix)
+                        .map(|(&cid, _)| cid)
+                        .collect();
+                    for cid in ab_keys {
+                        if let Some(ab) = st.abyssal_sessions.remove(&cid) {
+                            due_abyssal.push(ab);
+                        }
                     }
                 }
-            }
 
-            let sd_keys: Vec<i64> = st
-                .self_destructs
-                .iter()
-                .filter(|(_, cd)| now_unix >= cd.detonate_at_unix)
-                .map(|(&sid, _)| sid)
-                .collect();
-            for sid in sd_keys {
-                if let Some(cd) = st.self_destructs.remove(&sid) {
-                    due_self_destructs.push(cd);
-                }
-            }
-
-            let ab_keys: Vec<i64> = st
-                .abyssal_sessions
-                .iter()
-                .filter(|(_, ab)| now_unix >= ab.collapse_at_unix)
-                .map(|(&cid, _)| cid)
-                .collect();
-            for cid in ab_keys {
-                if let Some(ab) = st.abyssal_sessions.remove(&cid) {
-                    due_abyssal.push(ab);
-                }
-            }
-        });
+                // Collect due self-destructs without removing them from `st.self_destructs` or
+                // `rt` yet; the death commit transaction atomically validates & consumes them (`#1174`).
+                due_self_destructs =
+                    super::collect_due_self_destructs_in_tx(snap, rt, None, now_unix);
+            },
+        );
     }
 
     for (cid, reason) in aborted_safe_logoffs {
@@ -1272,12 +1260,8 @@ pub fn on_advance_secs_internal(
     }
 
     // 5. Detonate due server-driven self-destructs (`feat:lifecycle.self-destruct-server-timer`)
-    for cd in due_self_destructs {
-        with_mut_combat_runtime(ctx, |rt| {
-            rt.self_destruct_countdowns.remove(&cd.ship_id);
-            rt.self_destruct_sim_remaining_secs.remove(&cd.ship_id);
-        });
-        execute_due_self_destruct_sync(ctx, &cd, now_unix);
+    for due in due_self_destructs {
+        execute_due_self_destruct_sync(ctx, &due, now_unix);
     }
 
     // 6. Collapse expired Abyssal pockets (`feat:lifecycle.abyssal-disconnect`)

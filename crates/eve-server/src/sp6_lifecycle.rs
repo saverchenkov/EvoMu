@@ -2261,6 +2261,119 @@ pub async fn reconnect_character_in_space(
 
 /// Persists a started 120s self-destruct countdown so it detonates via server timer at `T+120s`
 /// even if the client disconnects or never calls again (`feat:lifecycle.self-destruct-server-timer`).
+#[derive(Debug, Clone)]
+pub(crate) struct SelfDestructRuntimeSnapshotEntry {
+    pub entry: SelfDestructPersistedEntry,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DueSelfDestructEntry {
+    pub entry: SelfDestructPersistedEntry,
+    pub expected_generation: u64,
+}
+
+pub(crate) fn snapshot_rt_self_destructs_in_rt(
+    rt: &crate::services::combat_crimewatch::CombatRuntimeState,
+    solar_system_id: Option<u32>,
+) -> Vec<SelfDestructRuntimeSnapshotEntry> {
+    rt.self_destruct_countdowns
+        .values()
+        .filter(|cd| solar_system_id.is_none_or(|sid| cd.solar_system_id == sid))
+        .map(|cd| SelfDestructRuntimeSnapshotEntry {
+            entry: SelfDestructPersistedEntry {
+                ship_id: cd.ship_id,
+                char_id: cd.char_id,
+                solar_system_id: cd.solar_system_id,
+                started_unix: cd.started_unix,
+                detonate_at_unix: cd.detonate_at_unix,
+            },
+            generation: rt.self_destruct_generation(cd.ship_id),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_rt_self_destructs(
+    ctx: &ServerContext,
+    solar_system_id: Option<u32>,
+) -> Vec<SelfDestructRuntimeSnapshotEntry> {
+    with_combat_runtime(ctx, |rt| snapshot_rt_self_destructs_in_rt(rt, solar_system_id))
+}
+
+pub(crate) fn persist_rt_self_destructs_in_tx(
+    snap: &mut eve_db::WorldStateSnapshot,
+    rt: &crate::services::combat_crimewatch::CombatRuntimeState,
+    snapshot: &[SelfDestructRuntimeSnapshotEntry],
+) {
+    let st = snap.sp6_lifecycle.as_inner_mut();
+    for snap_entry in snapshot {
+        let cd = &snap_entry.entry;
+        // Reject stale runtime snapshots if the countdown was aborted, replaced, or removed
+        // from runtime state between snapshot capture and persistence (#1174).
+        if rt.self_destruct_generation(cd.ship_id) != snap_entry.generation {
+            continue;
+        }
+        let Some(active_rt) = rt.self_destruct_countdowns.get(&cd.ship_id) else {
+            continue;
+        };
+        if active_rt.char_id != cd.char_id
+            || active_rt.solar_system_id != cd.solar_system_id
+            || active_rt.started_unix != cd.started_unix
+        {
+            continue;
+        }
+        let fresh_detonate = active_rt.detonate_at_unix;
+        st.self_destructs
+            .entry(cd.ship_id)
+            .and_modify(|e| {
+                e.char_id = cd.char_id;
+                e.solar_system_id = cd.solar_system_id;
+                e.started_unix = cd.started_unix;
+                e.detonate_at_unix = fresh_detonate;
+            })
+            .or_insert(SelfDestructPersistedEntry {
+                ship_id: cd.ship_id,
+                char_id: cd.char_id,
+                solar_system_id: cd.solar_system_id,
+                started_unix: cd.started_unix,
+                detonate_at_unix: fresh_detonate,
+            });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn persist_rt_self_destructs_snapshot(
+    ctx: &ServerContext,
+    snapshot: &[SelfDestructRuntimeSnapshotEntry],
+) {
+    crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| persist_rt_self_destructs_in_tx(snap, rt, snapshot),
+    );
+}
+
+pub(crate) fn collect_due_self_destructs_in_tx(
+    snap: &eve_db::WorldStateSnapshot,
+    rt: &crate::services::combat_crimewatch::CombatRuntimeState,
+    solar_system_id: Option<u32>,
+    now_unix: u64,
+) -> Vec<DueSelfDestructEntry> {
+    snap.sp6_lifecycle
+        .self_destructs
+        .values()
+        .filter(|cd| {
+            solar_system_id.is_none_or(|sid| cd.solar_system_id == sid)
+                && now_unix >= cd.detonate_at_unix
+        })
+        .map(|cd| DueSelfDestructEntry {
+            entry: cd.clone(),
+            expected_generation: rt.self_destruct_generation(cd.ship_id),
+        })
+        .collect()
+}
+
 pub fn register_self_destruct_countdown(
     ctx: &ServerContext,
     ship_id: i64,
@@ -2269,37 +2382,61 @@ pub fn register_self_destruct_countdown(
     started_unix: u64,
     detonate_at_unix: u64,
 ) {
-    with_mut_sp6_state(&ctx.db, |st| {
-        st.self_destructs.insert(
-            ship_id,
-            SelfDestructPersistedEntry {
+    crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            rt.bump_self_destruct_generation(ship_id);
+            rt.self_destruct_sim_remaining_secs.remove(&ship_id);
+            rt.self_destruct_countdowns.insert(
                 ship_id,
-                char_id,
-                solar_system_id,
-                started_unix,
-                detonate_at_unix,
-            },
-        );
-    });
+                crate::services::combat_crimewatch::SelfDestructCountdown {
+                    ship_id,
+                    char_id,
+                    solar_system_id,
+                    started_unix,
+                    detonate_at_unix,
+                },
+            );
+            snap.sp6_lifecycle.as_inner_mut().self_destructs.insert(
+                ship_id,
+                SelfDestructPersistedEntry {
+                    ship_id,
+                    char_id,
+                    solar_system_id,
+                    started_unix,
+                    detonate_at_unix,
+                },
+            );
+        },
+    );
 }
 
 pub fn abort_self_destruct_countdown(ctx: &ServerContext, ship_id: i64) -> bool {
-    with_mut_sp6_state(&ctx.db, |st| {
-        st.self_destructs.remove(&ship_id).is_some()
-    })
+    abort_self_destruct_for_ship(ctx, ship_id)
 }
 
 /// Aborts any active self-destruct countdown for `ship_id` across both persisted SP6 state
-/// and runtime combat state (#539).
+/// and runtime combat state atomically (`#539`, `#1174`).
 pub fn abort_self_destruct_for_ship(ctx: &ServerContext, ship_id: i64) -> bool {
-    let sp6_aborted = with_mut_sp6_state(&ctx.db, |st| {
-        st.self_destructs.remove(&ship_id).is_some()
-    });
-    let rt_aborted = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.self_destruct_sim_remaining_secs.remove(&ship_id);
-        rt.self_destruct_countdowns.remove(&ship_id).is_some()
-    });
-    sp6_aborted || rt_aborted
+    crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            let sp6_aborted = snap
+                .sp6_lifecycle
+                .as_inner_mut()
+                .self_destructs
+                .remove(&ship_id)
+                .is_some();
+            rt.self_destruct_sim_remaining_secs.remove(&ship_id);
+            let rt_aborted = rt.self_destruct_countdowns.remove(&ship_id).is_some();
+            if sp6_aborted || rt_aborted {
+                rt.bump_self_destruct_generation(ship_id);
+            }
+            sp6_aborted || rt_aborted
+        },
+    )
 }
 
 /// Persists an active Abyssal Deadspace pocket session (`20m` = `1200s` collapse timer)

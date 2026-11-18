@@ -333,6 +333,111 @@ struct PodRespawnOutcome {
     cleared_zarzakh_gate: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LiveSelfDestructGuard {
+    pub sys_id: u32,
+    pub char_id: i64,
+    pub now_unix: u64,
+    pub expected_generation: Option<u64>,
+    pub require_active_countdown: bool,
+}
+
+enum LiveSelfDestructCheck {
+    Proceed,
+    AbortNoTouch,
+    PruneOrphanedCountdown,
+}
+
+fn check_live_self_destruct_guard_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    combat_ephemeral: &dyn eve_db::lock_rank::AnyRwLock<
+        crate::services::combat_crimewatch::CombatRuntimeState,
+    >,
+    victim_ship_id: i64,
+    ship: Option<&InventoryItemRecord>,
+    guard: LiveSelfDestructGuard,
+) -> LiveSelfDestructCheck {
+    if guard.require_active_countdown {
+        let mut persisted_rt = crate::services::combat_crimewatch::CombatRuntimeState::default();
+        persisted_rt.sync_from_persisted(&snap.combat_crimewatch_state);
+        let (ram_gen, ram_cd) = {
+            let rt = combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+            (
+                rt.self_destruct_generation(victim_ship_id),
+                rt.self_destruct_countdowns.get(&victim_ship_id).cloned(),
+            )
+        };
+        let current_gen = persisted_rt
+            .self_destruct_generation(victim_ship_id)
+            .max(ram_gen);
+        if let Some(exp_gen) = guard.expected_generation {
+            if current_gen != exp_gen {
+                return LiveSelfDestructCheck::AbortNoTouch;
+            }
+        }
+        let Some(sp6_cd) = snap.sp6_lifecycle.self_destructs.get(&victim_ship_id) else {
+            return LiveSelfDestructCheck::AbortNoTouch;
+        };
+        if sp6_cd.char_id != guard.char_id
+            || sp6_cd.solar_system_id != guard.sys_id
+            || guard.now_unix < sp6_cd.detonate_at_unix
+        {
+            return LiveSelfDestructCheck::AbortNoTouch;
+        }
+        if ram_cd.as_ref().is_some_and(|rcd| {
+            rcd.char_id != guard.char_id
+                || rcd.solar_system_id != guard.sys_id
+                || guard.now_unix < rcd.detonate_at_unix
+        }) {
+            return LiveSelfDestructCheck::AbortNoTouch;
+        }
+    }
+
+    let in_space_valid = ship.is_some_and(|s| {
+        s.owner_id == guard.char_id
+            && s.location_id == i64::from(guard.sys_id)
+            && snap.characters.get(&guard.char_id).is_some_and(|ch| {
+                ch.solar_system_id == guard.sys_id
+                    && ch.station_id.is_none()
+                    && ch.structure_id.is_none()
+                    && ch.active_ship_id == victim_ship_id
+            })
+    });
+    if !in_space_valid {
+        return if guard.require_active_countdown {
+            LiveSelfDestructCheck::PruneOrphanedCountdown
+        } else {
+            LiveSelfDestructCheck::AbortNoTouch
+        };
+    }
+    LiveSelfDestructCheck::Proceed
+}
+
+fn prune_orphaned_self_destruct_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    victim_ship_id: i64,
+) -> u64 {
+    snap.sp6_lifecycle.self_destructs.remove(&victim_ship_id);
+    crate::services::combat_crimewatch::with_mut_combat_runtime_in_snap(snap, |rt| {
+        rt.self_destruct_countdowns.remove(&victim_ship_id);
+        rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
+        rt.bump_self_destruct_generation(victim_ship_id)
+    })
+}
+
+fn cleanup_self_destruct_runtime_if_not_restarted(
+    ctx: &ServerContext,
+    victim_ship_id: i64,
+    tx_sd_gen: u64,
+) {
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        if rt.self_destruct_generation(victim_ship_id) <= tx_sd_gen {
+            rt.self_destruct_countdowns.remove(&victim_ship_id);
+            rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
+        }
+    });
+}
+
 pub fn execute_death_pipeline_sync_inner(
     ctx: &ServerContext,
     sys_id: u32,
@@ -343,75 +448,162 @@ pub fn execute_death_pipeline_sync_inner(
     rng_seed: u64,
     is_self_destruct: bool,
 ) -> Result<DeathPipelineResult, String> {
-    let (victim_ship_type_id, base_price, victim_char_id, victim_corp_owner_id, needs_structure_sync) =
-        ctx.db.with_snapshot(|snap| {
-            let ship = snap
-                .items
-                .get(&victim_ship_id)
-                .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
-            let cat_id = ctx
-                .sde
-                .types
-                .get(&ship.type_id)
-                .map(|t| t.category_id)
-                .unwrap_or(6);
-            if cat_id != 6 {
-                return Err(format!(
-                    "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
-                    ship.type_id
-                ));
+    execute_death_pipeline_sync_with_guard(
+        ctx,
+        sys_id,
+        victim_char_id,
+        victim_ship_id,
+        attacker_char_id,
+        victim_pos,
+        rng_seed,
+        is_self_destruct,
+        None,
+    )?
+    .ok_or_else(|| format!("Ship {victim_ship_id} self-destruct guard unexpectedly skipped death pipeline"))
+}
+
+pub(crate) fn execute_death_pipeline_sync_with_guard(
+    ctx: &ServerContext,
+    sys_id: u32,
+    victim_char_id: i64,
+    victim_ship_id: i64,
+    attacker_char_id: i64,
+    victim_pos: DVec3,
+    rng_seed: u64,
+    is_self_destruct: bool,
+    live_sd_guard: Option<LiveSelfDestructGuard>,
+) -> Result<Option<DeathPipelineResult>, String> {
+    enum DeathPrecheckErr {
+        User(String),
+        CancelledNoDestruct,
+        PruneOrphanedOnly(LiveSelfDestructGuard),
+    }
+    impl From<String> for DeathPrecheckErr {
+        fn from(err: String) -> Self {
+            Self::User(err)
+        }
+    }
+
+    let precheck = ctx.db.with_snapshot(|snap| {
+        let ship_opt = snap.items.get(&victim_ship_id);
+        if let Some(guard) = live_sd_guard {
+            match check_live_self_destruct_guard_in_snap(
+                snap,
+                &*ctx.combat_ephemeral,
+                victim_ship_id,
+                ship_opt,
+                guard,
+            ) {
+                LiveSelfDestructCheck::Proceed => {}
+                LiveSelfDestructCheck::AbortNoTouch => {
+                    return Err(DeathPrecheckErr::CancelledNoDestruct);
+                }
+                LiveSelfDestructCheck::PruneOrphanedCountdown => {
+                    return Err(DeathPrecheckErr::PruneOrphanedOnly(guard));
+                }
             }
-            let base = ctx
-                .sde
-                .types
-                .get(&ship.type_id)
-                .map(|t| t.base_price)
-                .unwrap_or(230_000.0);
-            let resolved_pilot = snap
-                .characters
-                .values()
-                .find(|c| c.active_ship_id == victim_ship_id)
-                .map(|c| c.character_id)
-                .or_else(|| {
-                    snap.sp6_lifecycle
-                        .disconnected_ships
-                        .values()
-                        .find(|d| d.ship_id == victim_ship_id)
-                        .map(|d| d.char_id)
-                });
-            let corp_owner_id = if resolved_pilot.is_none()
-                && !snap.characters.contains_key(&ship.owner_id)
-                && snap.corporations.contains_key(&ship.owner_id)
-            {
-                Some(ship.owner_id)
-            } else {
-                None
-            };
-            let resolved_vic = if corp_owner_id.is_some() {
-                0
-            } else if victim_char_id > 0 {
-                victim_char_id
-            } else {
-                resolved_pilot.unwrap_or(ship.owner_id)
-            };
-            let needs_structure_sync = corp_owner_id.is_none()
-                && snap.characters.get(&resolved_vic).is_some_and(|c| {
-                    c.home_station_id >= 1_000_000_000_000
-                        && (c.active_ship_id == victim_ship_id
-                            || snap
-                                .sp6_lifecycle
-                                .disconnected_ships
-                                .get(&resolved_vic)
-                                .is_some_and(|d| d.ship_id == victim_ship_id))
-                });
-            Ok::<_, String>((
-                ship.type_id,
-                base,
-                resolved_vic,
-                corp_owner_id,
-                needs_structure_sync,
-            ))
-        })?;
+        }
+        let Some(ship) = ship_opt else {
+            if live_sd_guard.is_some() {
+                return Err(DeathPrecheckErr::CancelledNoDestruct);
+            }
+            return Err(DeathPrecheckErr::User(format!(
+                "Ship {victim_ship_id} not found in world repository"
+            )));
+        };
+        let cat_id = ctx
+            .sde
+            .types
+            .get(&ship.type_id)
+            .map(|t| t.category_id)
+            .unwrap_or(6);
+        if cat_id != 6 {
+            return Err(DeathPrecheckErr::User(format!(
+                "Item {victim_ship_id} (type {}, category {cat_id}) is not a ship",
+                ship.type_id
+            )));
+        }
+        let base = ctx
+            .sde
+            .types
+            .get(&ship.type_id)
+            .map(|t| t.base_price)
+            .unwrap_or(230_000.0);
+        let resolved_pilot = snap
+            .characters
+            .values()
+            .find(|c| c.active_ship_id == victim_ship_id)
+            .map(|c| c.character_id)
+            .or_else(|| {
+                snap.sp6_lifecycle
+                    .disconnected_ships
+                    .values()
+                    .find(|d| d.ship_id == victim_ship_id)
+                    .map(|d| d.char_id)
+            });
+        let corp_owner_id = if resolved_pilot.is_none()
+            && !snap.characters.contains_key(&ship.owner_id)
+            && snap.corporations.contains_key(&ship.owner_id)
+        {
+            Some(ship.owner_id)
+        } else {
+            None
+        };
+        let resolved_vic = if corp_owner_id.is_some() {
+            0
+        } else if victim_char_id > 0 {
+            victim_char_id
+        } else {
+            resolved_pilot.unwrap_or(ship.owner_id)
+        };
+        let needs_structure_sync = corp_owner_id.is_none()
+            && snap.characters.get(&resolved_vic).is_some_and(|c| {
+                c.home_station_id >= 1_000_000_000_000
+                    && (c.active_ship_id == victim_ship_id
+                        || snap
+                            .sp6_lifecycle
+                            .disconnected_ships
+                            .get(&resolved_vic)
+                            .is_some_and(|d| d.ship_id == victim_ship_id))
+            });
+        Ok::<_, DeathPrecheckErr>((
+            ship.type_id,
+            base,
+            resolved_vic,
+            corp_owner_id,
+            needs_structure_sync,
+        ))
+    });
+    let (victim_ship_type_id, base_price, victim_char_id, victim_corp_owner_id, needs_structure_sync) =
+        match precheck {
+            Ok(v) => v,
+            Err(DeathPrecheckErr::CancelledNoDestruct) => return Ok(None),
+            Err(DeathPrecheckErr::PruneOrphanedOnly(guard)) => {
+                let pruned_gen = ctx
+                    .db
+                    .tx("prune_orphaned_self_destruct", |wtx| {
+                        let ship_opt = wtx.snap.items.get(&victim_ship_id).cloned();
+                        match check_live_self_destruct_guard_in_snap(
+                            wtx.snap,
+                            &*ctx.combat_ephemeral,
+                            victim_ship_id,
+                            ship_opt.as_ref(),
+                            guard,
+                        ) {
+                            LiveSelfDestructCheck::PruneOrphanedCountdown => Ok::<_, eve_db::TxError>(
+                                Some(prune_orphaned_self_destruct_in_snap(wtx.snap, victim_ship_id)),
+                            ),
+                            _ => Ok(None),
+                        }
+                    })
+                    .map_err(|e| format!("orphaned self-destruct prune tx failed: {e:?}"))?;
+                if let Some(g) = pruned_gen {
+                    cleanup_self_destruct_runtime_if_not_restarted(ctx, victim_ship_id, g);
+                }
+                return Ok(None);
+            }
+            Err(DeathPrecheckErr::User(e)) => return Err(e),
+        };
     let wreck_owner_id = victim_corp_owner_id.unwrap_or(victim_char_id);
 
     let is_pod = victim_ship_type_id == 670
@@ -483,8 +675,13 @@ pub fn execute_death_pipeline_sync_inner(
         })
         .unwrap_or_default();
 
+    enum DeathTxOutcome<T> {
+        Committed { payload: T, sd_gen: u64 },
+        OrphanedPruned(u64),
+    }
     enum DeathTxErr {
         User(String),
+        CancelledNoDestruct,
         Tx(eve_db::TxError),
     }
     impl From<String> for DeathTxErr {
@@ -498,35 +695,37 @@ pub fn execute_death_pipeline_sync_inner(
         }
     }
 
-    let (
-        wreck_item_id,
-        dropped_ids,
-        destroyed_ids,
-        dropped_entries,
-        destroyed_entries,
-        total_value_isk,
-        ejected_cap_id,
-        killmail_id,
-        vic_corp,
-        vic_all,
-        att_corp,
-        att_all,
-        att_ship_type_id,
-        calculated_insurance_payout,
-        ins_notify,
-        victim_piloting_ship,
-        nested_ship_ids,
-        respawn_outcome,
-        cleanup_capture,
-    ) = ctx
+    let tx_outcome = ctx
         .db
         .tx("execute_death_pipeline_sync", |wtx| {
             let snap = &mut *wtx.snap;
-            let ship = snap
-                .items
-                .get(&victim_ship_id)
-                .cloned()
-                .ok_or_else(|| format!("Ship {victim_ship_id} not found in world repository"))?;
+            let ship_opt = snap.items.get(&victim_ship_id).cloned();
+            if let Some(guard) = live_sd_guard {
+                match check_live_self_destruct_guard_in_snap(
+                    snap,
+                    &*ctx.combat_ephemeral,
+                    victim_ship_id,
+                    ship_opt.as_ref(),
+                    guard,
+                ) {
+                    LiveSelfDestructCheck::Proceed => {}
+                    LiveSelfDestructCheck::AbortNoTouch => {
+                        return Err(DeathTxErr::CancelledNoDestruct);
+                    }
+                    LiveSelfDestructCheck::PruneOrphanedCountdown => {
+                        let pruned_gen = prune_orphaned_self_destruct_in_snap(snap, victim_ship_id);
+                        return Ok(DeathTxOutcome::OrphanedPruned(pruned_gen));
+                    }
+                }
+            }
+            let Some(ship) = ship_opt else {
+                if live_sd_guard.is_some() {
+                    return Err(DeathTxErr::CancelledNoDestruct);
+                }
+                return Err(DeathTxErr::User(format!(
+                    "Ship {victim_ship_id} not found in world repository"
+                )));
+            };
             let cat_id = ctx
                 .sde
                 .types
@@ -797,6 +996,12 @@ pub fn execute_death_pipeline_sync_inner(
         snap.sp6_lifecycle.space_object_meta.remove(&victim_ship_id);
         snap.sp6_lifecycle.ship_combat_hp.remove(&victim_ship_id);
         snap.sp6_lifecycle.self_destructs.remove(&victim_ship_id);
+        let committed_sd_gen =
+            crate::services::combat_crimewatch::with_mut_combat_runtime_in_snap(snap, |rt| {
+                rt.self_destruct_countdowns.remove(&victim_ship_id);
+                rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
+                rt.bump_self_destruct_generation(victim_ship_id)
+            });
 
         let (cap_id, respawn_outcome) = if !is_pod && victim_piloting_ship {
             let cid = if let Some(esc_id) = escape_frigate_id {
@@ -978,37 +1183,68 @@ pub fn execute_death_pipeline_sync_inner(
             }
         }
         wtx.effects.on_commit(|_| {});
-        Ok::<_, DeathTxErr>((
-            wreck_id,
-            dropped,
-            destroyed,
-            dropped_km,
-            destroyed_km,
-            total_val,
-            cap_id,
-            kid,
-            vic_c,
-            vic_a,
-            att_c,
-            att_a,
-            att_stid,
-            ins_settlement.payout_isk,
-            ins_notify,
-            victim_piloting_ship,
-            nested_ship_ids,
-            respawn_outcome,
-            cleanup_capture,
-        ))
-    })
-    .map_err(|err| match err {
-        DeathTxErr::User(msg) => msg,
-        DeathTxErr::Tx(tx) => format!("death transaction failed: {tx:?}"),
-    })?;
-
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.self_destruct_countdowns.remove(&victim_ship_id);
-        rt.self_destruct_sim_remaining_secs.remove(&victim_ship_id);
+        Ok::<_, DeathTxErr>(DeathTxOutcome::Committed {
+            payload: (
+                wreck_id,
+                dropped,
+                destroyed,
+                dropped_km,
+                destroyed_km,
+                total_val,
+                cap_id,
+                kid,
+                vic_c,
+                vic_a,
+                att_c,
+                att_a,
+                att_stid,
+                ins_settlement.payout_isk,
+                ins_notify,
+                victim_piloting_ship,
+                nested_ship_ids,
+                respawn_outcome,
+                cleanup_capture,
+            ),
+            sd_gen: committed_sd_gen,
+        })
     });
+    let (
+        wreck_item_id,
+        dropped_ids,
+        destroyed_ids,
+        dropped_entries,
+        destroyed_entries,
+        total_value_isk,
+        ejected_cap_id,
+        killmail_id,
+        vic_corp,
+        vic_all,
+        att_corp,
+        att_all,
+        att_ship_type_id,
+        calculated_insurance_payout,
+        ins_notify,
+        victim_piloting_ship,
+        nested_ship_ids,
+        respawn_outcome,
+        cleanup_capture,
+        committed_sd_gen,
+    ) = match tx_outcome {
+        Ok(DeathTxOutcome::Committed { payload, sd_gen }) => (
+            payload.0, payload.1, payload.2, payload.3, payload.4, payload.5, payload.6,
+            payload.7, payload.8, payload.9, payload.10, payload.11, payload.12, payload.13,
+            payload.14, payload.15, payload.16, payload.17, payload.18, sd_gen,
+        ),
+        Ok(DeathTxOutcome::OrphanedPruned(pruned_gen)) => {
+            cleanup_self_destruct_runtime_if_not_restarted(ctx, victim_ship_id, pruned_gen);
+            return Ok(None);
+        }
+        Err(DeathTxErr::CancelledNoDestruct) => return Ok(None),
+        Err(DeathTxErr::User(msg)) => return Err(msg),
+        Err(DeathTxErr::Tx(tx)) => return Err(format!("death transaction failed: {tx:?}")),
+    };
+
+    cleanup_self_destruct_runtime_if_not_restarted(ctx, victim_ship_id, committed_sd_gen);
     {
         let mut fittings = ctx
             .ship_fittings
@@ -1484,7 +1720,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
     }
 
-    Ok(DeathPipelineResult {
+    Ok(Some(DeathPipelineResult {
         wreck_item_id,
         wreck_type_id,
         loot_dropped_item_ids: dropped_ids,
@@ -1492,7 +1728,7 @@ pub fn execute_death_pipeline_sync_inner(
         ejected_capsule_id: ejected_cap_id,
         insurance_payout_isk: calculated_insurance_payout,
         killmail_id,
-    })
+    }))
 }
 
 #[inline]
@@ -1981,9 +2217,55 @@ pub async fn execute_self_destruct(
     )
 }
 
+pub(crate) fn execute_self_destruct_guarded(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    pos: DVec3,
+    rng_seed: u64,
+    now_unix: u64,
+    expected_generation: Option<u64>,
+) -> Result<Option<DeathPipelineResult>, String> {
+    let final_blow_char_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        let mut latest: Option<(u64, i64)> = None;
+        for key in [ship_id, char_id] {
+            if let Some(list) = rt.aggression_assist_log.get(&key) {
+                for e in list {
+                    if now_unix.saturating_sub(e.last_action_unix)
+                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && e.attacker_char_id != char_id
+                        && latest.is_none_or(|(ts, _)| e.last_action_unix >= ts)
+                    {
+                        latest = Some((e.last_action_unix, e.attacker_char_id));
+                    }
+                }
+            }
+        }
+        latest.map(|(_, cid)| cid).unwrap_or(char_id)
+    });
+    execute_death_pipeline_sync_with_guard(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        final_blow_char_id,
+        pos,
+        rng_seed,
+        true,
+        Some(LiveSelfDestructGuard {
+            sys_id,
+            char_id,
+            now_unix,
+            expected_generation,
+            require_active_countdown: true,
+        }),
+    )
+}
+
 /// Validates live ship ownership, active ship, undocked state, and system presence before
 /// executing a scheduled self-destruct, denying uncontested self-destruct insurance & loot
-/// while crediting recent PvP aggressors within the assist window (#539).
+/// while crediting recent PvP aggressors within the assist window (#539, #1174).
 pub fn execute_live_self_destruct_sync(
     ctx: &ServerContext,
     sys_id: u32,
@@ -1992,30 +2274,21 @@ pub fn execute_live_self_destruct_sync(
     pos: DVec3,
     now_unix: u64,
 ) -> Result<Option<DeathPipelineResult>, String> {
-    let still_valid = ctx.db.with_mut_snapshot(|snap| {
-        snap.sp6_lifecycle.self_destructs.remove(&ship_id);
-        let Some(ship) = snap.items.get(&ship_id) else {
-            return false;
-        };
-        if ship.owner_id != char_id || ship.location_id != i64::from(sys_id) {
-            return false;
-        }
-        let Some(ch) = snap.characters.get(&char_id) else {
-            return false;
-        };
-        ch.solar_system_id == sys_id
-            && ch.station_id.is_none()
-            && ch.structure_id.is_none()
-            && ch.active_ship_id == ship_id
-    });
-    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
-        rt.self_destruct_countdowns.remove(&ship_id);
-        rt.self_destruct_sim_remaining_secs.remove(&ship_id);
-    });
-    if !still_valid {
-        return Ok(None);
-    }
+    execute_guarded_self_destruct_sync(ctx, sys_id, char_id, ship_id, pos, now_unix, None, false)
+}
 
+/// Atomically verifies live ship in-space state, active countdown, and monotonic generation
+/// inside the death commit transaction before executing scheduled self-destruct (`#1174`).
+pub(crate) fn execute_guarded_self_destruct_sync(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    pos: DVec3,
+    now_unix: u64,
+    expected_generation: Option<u64>,
+    require_active_countdown: bool,
+) -> Result<Option<DeathPipelineResult>, String> {
     let last_aggressor = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         let mut latest: Option<(u64, i64)> = None;
         for key in [ship_id, char_id] {
@@ -2037,7 +2310,7 @@ pub fn execute_live_self_destruct_sync(
     let effective_attacker = last_aggressor.unwrap_or(char_id);
     let is_uncontested = last_aggressor.is_none();
 
-    execute_death_pipeline_sync_inner(
+    execute_death_pipeline_sync_with_guard(
         ctx,
         sys_id,
         char_id,
@@ -2046,8 +2319,14 @@ pub fn execute_live_self_destruct_sync(
         pos,
         now_unix,
         is_uncontested,
+        Some(LiveSelfDestructGuard {
+            sys_id,
+            char_id,
+            now_unix,
+            expected_generation,
+            require_active_countdown,
+        }),
     )
-    .map(Some)
 }
 
 /// Tracks 2-minute self-destruct countdown timers and cancellations (`feat:ships.self-destruct`).

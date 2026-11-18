@@ -370,107 +370,124 @@ pub async fn step_missiles_and_breachers(
     // Step active Breacher Pod DoTs (non-stacking per target) ONLY for targets in `solar_system_id` (#208)
     crate::services::r6_t1_p1_helpers::step_active_breacher_dots(ctx, &sys_handle, solar_system_id, dt).await;
 
-    // Complete any self-destruct countdowns in `solar_system_id` whose sim-clock timer has elapsed (`feat:ships.self-destruct-countdown`, `#1081`)
+    // Complete any self-destruct countdowns in `solar_system_id` whose sim-clock timer has elapsed (`feat:ships.self-destruct-countdown`, `#1081`, `#1174`)
     let now_unix = ctx.now_unix();
     let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, solar_system_id)
         .clamp(0.10, 1.0);
-    let rt_self_destructs: Vec<SelfDestructCountdown> = with_mut_combat_runtime(ctx, |rt| {
-        let mut out = Vec::new();
-        let ship_ids: Vec<i64> = rt.self_destruct_countdowns.keys().copied().collect();
-        for ship_id in ship_ids {
-            let Some(cd) = rt.self_destruct_countdowns.get_mut(&ship_id) else {
-                continue;
-            };
-            if cd.solar_system_id != solar_system_id {
-                continue;
-            }
-            // Respect deadlines already due (e.g., wall-clock completion or direct test override)
-            // instead of pushing `detonate_at_unix` forward into the future.
-            if cd.detonate_at_unix <= now_unix {
-                rt.self_destruct_sim_remaining_secs.remove(&ship_id);
-            } else if dt > 0.0 {
-                let rem = rt
-                    .self_destruct_sim_remaining_secs
-                    .entry(ship_id)
-                    .or_insert_with(|| {
-                        ((cd.detonate_at_unix.saturating_sub(now_unix) as f64) * tidi)
-                            .min(crate::services::combat_crimewatch::SELF_DESTRUCT_COUNTDOWN_SECS as f64)
-                    });
-                *rem -= dt;
-                if *rem <= 1e-6 {
-                    cd.detonate_at_unix = now_unix;
-                    rt.self_destruct_sim_remaining_secs.remove(&ship_id);
-                } else {
-                    cd.detonate_at_unix =
-                        now_unix.saturating_add((*rem / tidi).ceil().max(1.0) as u64);
-                }
-            }
-            out.push(cd.clone());
-        }
-        out
-    });
-    let due_countdowns: Vec<SelfDestructCountdown> =
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
-            for cd in &rt_self_destructs {
-                st.self_destructs
-                    .entry(cd.ship_id)
-                    .and_modify(|e| {
-                        e.started_unix = cd.started_unix;
-                        e.detonate_at_unix = cd.detonate_at_unix;
-                    })
-                    .or_insert(eve_db::SelfDestructPersistedEntry {
-                        ship_id: cd.ship_id,
-                        char_id: cd.char_id,
-                        solar_system_id: cd.solar_system_id,
-                        started_unix: cd.started_unix,
-                        detonate_at_unix: cd.detonate_at_unix,
-                    });
-            }
-            let due_ids: Vec<i64> = st
-                .self_destructs
-                .values()
-                .filter(|cd| cd.solar_system_id == solar_system_id && now_unix >= cd.detonate_at_unix)
-                .map(|cd| cd.ship_id)
-                .collect();
-            due_ids
-                .into_iter()
-                .filter_map(|sid| st.self_destructs.remove(&sid))
-                .map(|cd| SelfDestructCountdown {
-                    ship_id: cd.ship_id,
-                    char_id: cd.char_id,
-                    solar_system_id: cd.solar_system_id,
-                    started_unix: cd.started_unix,
-                    detonate_at_unix: cd.detonate_at_unix,
-                })
-                .collect()
-        });
-    if !due_countdowns.is_empty() {
-        with_mut_combat_runtime(ctx, |rt| {
-            for cd in &due_countdowns {
-                rt.self_destruct_countdowns.remove(&cd.ship_id);
-                rt.self_destruct_sim_remaining_secs.remove(&cd.ship_id);
-            }
-        });
-    }
-    for cd in due_countdowns {
+    let due_countdowns: Vec<crate::sp6_lifecycle::DueSelfDestructEntry> =
+        crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+            &ctx.db,
+            &*ctx.combat_ephemeral,
+            |snap, rt| {
+                let rt_self_destructs =
+                    step_system_self_destructs_in_rt(rt, solar_system_id, now_unix, tidi, dt);
+                crate::sp6_lifecycle::persist_rt_self_destructs_in_tx(snap, rt, &rt_self_destructs);
+                crate::sp6_lifecycle::collect_due_self_destructs_in_tx(
+                    snap,
+                    rt,
+                    Some(solar_system_id),
+                    now_unix,
+                )
+            },
+        );
+    for due in due_countdowns {
         let pos = sys_handle
-            .get_ball_snapshot(cd.ship_id)
+            .get_ball_snapshot(due.entry.ship_id)
             .await
             .ok()
             .flatten()
             .map(|(_, b)| b.position)
             .unwrap_or(DVec3::ZERO);
-        let _ = crate::combat::death_pipeline::execute_live_self_destruct_sync(
+        let _ = crate::combat::death_pipeline::execute_guarded_self_destruct_sync(
             ctx,
             solar_system_id,
-            cd.char_id,
-            cd.ship_id,
+            due.entry.char_id,
+            due.entry.ship_id,
             pos,
             now_unix,
+            Some(due.expected_generation),
+            true,
         );
     }
 
     completed
+}
+
+fn step_system_self_destructs_in_rt(
+    rt: &mut CombatRuntimeState,
+    solar_system_id: u32,
+    now_unix: u64,
+    tidi: f64,
+    dt: f64,
+) -> Vec<crate::sp6_lifecycle::SelfDestructRuntimeSnapshotEntry> {
+    let ship_ids: Vec<i64> = rt.self_destruct_countdowns.keys().copied().collect();
+    for ship_id in ship_ids {
+        let Some(cd) = rt.self_destruct_countdowns.get_mut(&ship_id) else {
+            continue;
+        };
+        if cd.solar_system_id != solar_system_id {
+            continue;
+        }
+        // Respect deadlines already due (e.g., wall-clock completion or direct test override)
+        // instead of pushing `detonate_at_unix` forward into the future.
+        if cd.detonate_at_unix <= now_unix {
+            rt.self_destruct_sim_remaining_secs.remove(&ship_id);
+        } else if dt > 0.0 {
+            let rem = rt
+                .self_destruct_sim_remaining_secs
+                .entry(ship_id)
+                .or_insert_with(|| {
+                    ((cd.detonate_at_unix.saturating_sub(now_unix) as f64) * tidi)
+                        .min(crate::services::combat_crimewatch::SELF_DESTRUCT_COUNTDOWN_SECS as f64)
+                });
+            *rem -= dt;
+            if *rem <= 1e-6 {
+                cd.detonate_at_unix = now_unix;
+                rt.self_destruct_sim_remaining_secs.remove(&ship_id);
+            } else {
+                cd.detonate_at_unix =
+                    now_unix.saturating_add((*rem / tidi).ceil().max(1.0) as u64);
+            }
+        }
+    }
+    crate::sp6_lifecycle::snapshot_rt_self_destructs_in_rt(rt, Some(solar_system_id))
+}
+
+#[cfg(test)]
+pub(crate) fn step_and_snapshot_self_destructs_for_test(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    dt: f64,
+) -> (Vec<crate::sp6_lifecycle::SelfDestructRuntimeSnapshotEntry>, u64) {
+    let now_unix = ctx.now_unix();
+    let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, solar_system_id)
+        .clamp(0.10, 1.0);
+    let snap = with_mut_combat_runtime(ctx, |rt| {
+        step_system_self_destructs_in_rt(rt, solar_system_id, now_unix, tidi, dt)
+    });
+    (snap, now_unix)
+}
+
+#[cfg(test)]
+pub(crate) fn persist_and_collect_due_self_destructs_for_test(
+    ctx: &ServerContext,
+    snapshot: &[crate::sp6_lifecycle::SelfDestructRuntimeSnapshotEntry],
+    solar_system_id: u32,
+    now_unix: u64,
+) -> Vec<crate::sp6_lifecycle::DueSelfDestructEntry> {
+    crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
+        &ctx.db,
+        &*ctx.combat_ephemeral,
+        |snap, rt| {
+            crate::sp6_lifecycle::persist_rt_self_destructs_in_tx(snap, rt, snapshot);
+            crate::sp6_lifecycle::collect_due_self_destructs_in_tx(
+                snap,
+                rt,
+                Some(solar_system_id),
+                now_unix,
+            )
+        },
+    )
 }
 
 
