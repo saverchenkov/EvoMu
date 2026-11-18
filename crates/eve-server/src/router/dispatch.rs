@@ -691,6 +691,21 @@ impl ServerContext {
                         self.cache_method_call_result("marketProxy", method, rep, "always", None)
                     });
                 }
+            } else if effective_service == "agentMgr"
+                && method == "GetMessagesForEpicArcMissions"
+            {
+                if let Ok(rep) = res {
+                    let already_cached = matches!(
+                        &rep,
+                        PyRep::Object { type_name, .. }
+                            if type_name == eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS
+                    );
+                    res = Ok(if already_cached {
+                        rep
+                    } else {
+                        self.cache_method_call_result("agentMgr", method, rep, "never", None)
+                    });
+                }
             }
         }
 

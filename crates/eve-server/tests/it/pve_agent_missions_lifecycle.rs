@@ -177,6 +177,12 @@ async fn test_pve_agent_finder_and_conversation() {
     // 2c. GetMissionBriefingInfo
     let briefing_info = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionBriefingInfo", &[], &kw, None).await.expect("GetMissionBriefingInfo");
     assert_eq!(briefing_info.dict_get("missionID").and_then(|v| v.as_i64()), Some(mission_id));
+    let raw_briefing = briefing_info.dict_get("briefing").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(!raw_briefing.is_empty());
+    assert!(!raw_briefing.contains("Execute objectives in system"), "GetMissionBriefingInfo must not emit fixed template: {raw_briefing}");
+    if let Some(title) = ctx.sde.missions.get(&(mission_id as u32)).map(|m| m.title.as_str()).filter(|s| !s.is_empty()) {
+        assert!(raw_briefing.contains(title), "GetMissionBriefingInfo must include mission title {title:?}: {raw_briefing}");
+    }
 }
 
 #[tokio::test]
@@ -818,6 +824,23 @@ async fn test_issue_766_agent_dialogue_v24_machonet_wire_contract() {
     assert!(matches!(brief, PyRep::Dict(_)));
     assert!(brief.dict_get("Mission Title ID").is_some());
     assert!(brief.dict_get("ContentID").is_some());
+    let v24_briefing = brief
+        .dict_get("Mission Briefing ID")
+        .and_then(|v| v.as_str())
+        .expect("Mission Briefing ID string");
+    assert!(!v24_briefing.is_empty());
+    assert!(
+        !v24_briefing.contains("Execute objectives in system"),
+        "V24 Mission Briefing ID must not emit fixed template: {v24_briefing}"
+    );
+    if let Some(mid) = brief.dict_get("ContentID").and_then(|v| v.as_i64()) {
+        if let Some(title) = ctx.sde.missions.get(&(mid as u32)).map(|m| m.title.as_str()).filter(|s| !s.is_empty()) {
+            assert!(
+                v24_briefing.contains(title),
+                "V24 Mission Briefing ID must include mission title {title:?}: {v24_briefing}"
+            );
+        }
+    }
 
     let obj = ctx
         .dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "GetMissionObjectiveInfo", &[], &kw, Some("machoNet:26000"))

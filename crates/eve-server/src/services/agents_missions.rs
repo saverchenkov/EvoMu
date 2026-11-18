@@ -110,6 +110,225 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .max(2)
 }
 
+/// Resolves mission-specific briefing text from SDE templates, agent/corp/system/station
+/// records, dungeon encounters, and active mission delivery metadata (never falling back to
+/// the legacy generic `"Execute objectives in system"` sentence). Must remain DB-lock-free
+/// because callers also invoke it inside `ctx.db.with_snapshot`.
+fn build_mission_briefing_text(
+    ctx: &ServerContext,
+    agent_id: i64,
+    mission_id: u32,
+    title: &str,
+    sys_id: u32,
+    meta: Option<&MissionTimingAndCargoMeta>,
+) -> String {
+    let agent_opt = ctx.sde.agents.get(&agent_id);
+    let agent_label = agent_opt
+        .map(|a| a.name.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("Agent {agent_id}"));
+    let corp_name = agent_opt
+        .and_then(|a| ctx.sde.npc_corporations.get(&a.corporation_id))
+        .map(|c| c.name.as_str())
+        .filter(|n| !n.is_empty());
+    let issuer = match corp_name {
+        Some(corp) => format!("{agent_label} ({corp})"),
+        None => agent_label.clone(),
+    };
+    let sys_name = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.name.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("system {sys_id}"));
+    let origin_sid = meta
+        .and_then(|mt| mt.origin_station_id)
+        .or_else(|| agent_opt.and_then(|a| a.station_id));
+    let dropoff = origin_sid
+        .and_then(|sid| ctx.sde.stations.get(&sid))
+        .map(|st| st.name.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| sys_name.clone());
+
+    let tmpl_opt = ctx.sde.missions.get(&mission_id);
+    let ct = tmpl_opt
+        .and_then(|t| t.content_template.as_deref())
+        .unwrap_or_default()
+        .trim();
+
+    let mut text = if !ct.is_empty() && !ct.starts_with("agent.missionTemplatizedContent_") {
+        if title.is_empty() || ct.contains(title) {
+            ct.to_string()
+        } else {
+            format!("{title}: {ct}")
+        }
+    } else {
+        let is_epic_arc =
+            agent_opt.is_some_and(|a| a.agent_type_id == 10) || ct.contains("EpicArc");
+        let arc_name = is_epic_arc.then(|| {
+            let (arc_id, _) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+            ctx.sde
+                .epic_arcs
+                .get(&arc_id)
+                .map(|ea| ea.name.clone())
+                .unwrap_or_else(|| format!("Epic Arc {arc_id}"))
+        });
+        let item_label = |tid: eve_db::TypeId, fallback: &str| -> String {
+            ctx.sde
+                .types
+                .get(&tid)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| fallback.to_string())
+        };
+
+        if agent_opt.is_some_and(|a| a.agent_type_id == 4) && !ct.contains("Courier") {
+            let tid = meta.and_then(|mt| mt.required_delivery_type_id).unwrap_or(34);
+            let qty = meta
+                .map(|mt| mt.required_delivery_qty)
+                .filter(|&q| q > 0)
+                .unwrap_or(100);
+            let item = item_label(tid, "research material");
+            format!(
+                "Research assignment \"{title}\" for {issuer}: supply {qty}x {item} to {dropoff} in {sys_name} for active R&D work."
+            )
+        } else if agent_opt.is_some_and(|a| a.agent_type_id == 8) {
+            let tid = meta
+                .and_then(|mt| mt.required_delivery_type_id)
+                .unwrap_or(17202);
+            let qty = meta
+                .map(|mt| mt.required_delivery_qty)
+                .filter(|&q| q > 0)
+                .unwrap_or(1);
+            let item = item_label(tid, "Pirate Tag");
+            format!(
+                "Data Center commission \"{title}\" for {issuer}: turn in {qty}x {item} at {dropoff} in {sys_name}."
+            )
+        } else if ct.contains("Heraldry") {
+            format!(
+                "Heraldry commission \"{title}\" for {issuer}: complete the Paragon emblem assignment at {dropoff} in {sys_name}."
+            )
+        } else if ct.contains("TalkToAgent") || ct.contains("AgentInteraction") {
+            let arc_prefix = arc_name
+                .as_deref()
+                .map(|n| format!("Epic Arc ({n})"))
+                .unwrap_or_else(|| "Epic Arc".into());
+            format!(
+                "{arc_prefix} liaison \"{title}\" for {issuer}: proceed to {dropoff} in {sys_name} and confer with your designated contact."
+            )
+        } else if ct.contains("Trade") {
+            let derived = tmpl_opt.map(|t| resolve_trade_mission_details(ctx, t));
+            let tid = meta
+                .and_then(|mt| mt.required_delivery_type_id)
+                .or_else(|| derived.as_ref().map(|d| d.trade_type_id))
+                .unwrap_or(43);
+            let qty = meta
+                .map(|mt| mt.required_delivery_qty)
+                .filter(|&q| q > 0)
+                .or_else(|| derived.map(|d| d.trade_quantity))
+                .unwrap_or(20);
+            let item = item_label(tid, "trade goods");
+            format!(
+                "Trade order \"{title}\" for {issuer}: acquire {qty}x {item} and deliver the shipment to {dropoff} in {sys_name}."
+            )
+        } else if tmpl_opt.is_some_and(|t| t.is_courier || ct.contains("Courier"))
+            || meta.is_some_and(|mt| mt.destination_station_id.is_some())
+        {
+            let derived = tmpl_opt.and_then(|t| {
+                agent_opt.and_then(|a| resolve_courier_mission_details(ctx, t, a).ok())
+            });
+            let tid = meta
+                .and_then(|mt| mt.required_delivery_type_id)
+                .or_else(|| derived.as_ref().map(|d| d.cargo_type_id))
+                .unwrap_or(3814);
+            let qty = meta
+                .map(|mt| mt.required_delivery_qty)
+                .filter(|&q| q > 0)
+                .or_else(|| derived.as_ref().map(|d| d.cargo_quantity))
+                .unwrap_or(10);
+            let cargo = item_label(tid, "diplomatic cargo");
+            let dest_sid = meta
+                .and_then(|mt| mt.destination_station_id)
+                .or_else(|| derived.as_ref().map(|d| d.destination_station_id));
+            let dest_station = dest_sid
+                .and_then(|sid| ctx.sde.stations.get(&sid))
+                .map(|st| {
+                    let dsys = ctx
+                        .sde
+                        .solar_systems
+                        .get(&st.solar_system_id)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("destination system");
+                    format!("{} ({dsys})", st.name)
+                })
+                .unwrap_or_else(|| match dest_sid {
+                    Some(sid) => format!("station {sid}"),
+                    None => dropoff.clone(),
+                });
+            format!(
+                "Courier contract \"{title}\" for {issuer}: transport {qty}x {cargo} from {dropoff} ({sys_name}) to {dest_station}."
+            )
+        } else if ct.contains("Mining") {
+            let derived = tmpl_opt.map(|t| resolve_mining_mission_details(ctx, t));
+            let ore_tid = meta
+                .and_then(|mt| mt.required_delivery_type_id)
+                .or_else(|| derived.as_ref().map(|d| d.ore_type_id))
+                .unwrap_or(1230);
+            let qty = meta
+                .map(|mt| mt.required_delivery_qty)
+                .filter(|&q| q > 0)
+                .or_else(|| derived.map(|d| d.required_units))
+                .unwrap_or(500);
+            let ore_name = item_label(ore_tid, "ore");
+            format!(
+                "Mining operation \"{title}\" for {issuer}: harvest {qty} units of {ore_name} in {sys_name} and haul the ore to {dropoff}."
+            )
+        } else if let (Some(tmpl), Some(agent)) = (tmpl_opt, agent_opt) {
+            let enc = resolve_security_mission_encounter(ctx, tmpl, agent, sys_id);
+            let arc_prefix = arc_name
+                .as_deref()
+                .map(|n| format!("[{n}] "))
+                .unwrap_or_default();
+            let burner_prefix = if meta.is_some_and(|mt| mt.is_anomic_burner) {
+                "[Anomic Burner] "
+            } else {
+                ""
+            };
+            format!("{arc_prefix}{burner_prefix}{}", enc.briefing_text)
+        } else {
+            let dungeon_name = tmpl_opt
+                .and_then(|t| t.dungeon_id)
+                .or_else(|| {
+                    ctx.sde
+                        .dungeons
+                        .contains_key(&mission_id)
+                        .then_some(mission_id)
+                })
+                .and_then(|did| ctx.sde.dungeons.get(&did))
+                .map(|d| d.name.as_str());
+            match dungeon_name {
+                Some(dname) => format!(
+                    "Mission \"{title}\" for {issuer}: investigate {dname} in {sys_name}, neutralize hostile forces, and return to {dropoff}."
+                ),
+                None => format!(
+                    "Mission \"{title}\" for {issuer} in {sys_name}: neutralize designated targets and report back to {dropoff}."
+                ),
+            }
+        }
+    };
+
+    if let Some(branch) = meta
+        .and_then(|mt| mt.chosen_branch.as_deref())
+        .filter(|b| !b.is_empty())
+    {
+        text.push_str(&format!(" [Branch: {branch}]"));
+    }
+    text
+}
+
 pub async fn handle_with_bound(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -526,9 +745,13 @@ pub async fn handle_with_bound(
             let tmpl = ctx.sde.missions.get(&mission_id);
             let title = tmpl.map(|t| t.title.clone())
                 .unwrap_or_else(|| format!("Mission {mission_id}"));
-            let briefing = format!(
-                "Agent {} operation: {}. Execute objectives in system {} and report back.",
-                m.agent_id, title, m.solar_system_id
+            let briefing = build_mission_briefing_text(
+                ctx,
+                m.agent_id,
+                mission_id,
+                &title,
+                m.solar_system_id,
+                meta.as_ref(),
             );
             let req_type = meta
                 .as_ref().and_then(|mt| mt.required_delivery_type_id).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None);
@@ -958,6 +1181,9 @@ pub async fn handle_with_bound(
                     if is_storyline_agent_type(agent_info.agent_type_id) {
                         return Some(Err(BridgeRpcError { code: "StorylineAgentRequiresReferral".into(), message: format!("Storyline agent {agent_id} (agentType {}) cannot be requested directly without a 16-mission referral", agent_info.agent_type_id), client_error: None }));
                     }
+                    // V24 parity (`agents.pyj:OpenDialogueWindow`): `agentTypeAura = 11` rejects tutorial agent
+                    // dialogue with `NewNPEClickOnTutorialLinkDisabled`; locked as `UnimplementedRPC` by
+                    // `auth_persistence` and `agents_missions_extra_unit_tests` (#1204).
                     if agent_info.agent_type_id == 11 {
                         return Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("Agent {agent_id} (agentType {}) uses Aura node-graph missions which are not yet implemented", agent_info.agent_type_id), client_error: None }));
                     }
@@ -1114,7 +1340,14 @@ pub async fn handle_with_bound(
                             let title = ctx.sde.missions.get(&mid).map(|t| t.title.clone()).unwrap_or_default();
                             let meta = load_mission_meta(snap, char_id, mid);
                             let dest_sid = meta.as_ref().and_then(|m| m.destination_station_id);
-                            let briefing = format!("Agent {} assignment: {}.", agent_id, title);
+                            let briefing = build_mission_briefing_text(
+                                ctx,
+                                agent_id,
+                                mid,
+                                &title,
+                                existing_active.solar_system_id,
+                                meta.as_ref(),
+                            );
                             let objectives = format!("Execute mission objectives for {} and report back.", title);
                             return Ok((mid, title, briefing, objectives, dest_sid));
                         }
@@ -1170,9 +1403,25 @@ pub async fn handle_with_bound(
                             (Some(td.trade_type_id), td.trade_quantity, agent_info.station_id, None, 0, format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name), format!("Agent {} operation: Deliver {} units of {} to the agent station hangar.", agent_id, td.trade_quantity, trade_name))
                         } else if is_mining {
                             let md = resolve_mining_mission_details(ctx, tmpl);
-                            (Some(md.ore_type_id), md.required_units, agent_info.station_id, None, 0, md.objective_text, format!("Agent {} operation: {}. Execute mining assignment and deliver ore to station hangar.", agent_id, tmpl.title))
+                            let mining_briefing = build_mission_briefing_text(
+                                ctx,
+                                agent_id,
+                                tmpl.mission_id,
+                                &tmpl.title,
+                                sys_id,
+                                None,
+                            );
+                            (Some(md.ore_type_id), md.required_units, agent_info.station_id, None, 0, md.objective_text, mining_briefing)
                         } else if is_heraldry {
-                            (None, 0, agent_info.station_id, None, 0, "Complete heraldry assignment and report back.".to_string(), format!("Agent {} operation: {}. Complete heraldry assignment.", agent_id, tmpl.title))
+                            let heraldry_briefing = build_mission_briefing_text(
+                                ctx,
+                                agent_id,
+                                tmpl.mission_id,
+                                &tmpl.title,
+                                sys_id,
+                                None,
+                            );
+                            (None, 0, agent_info.station_id, None, 0, "Complete heraldry assignment and report back.".to_string(), heraldry_briefing)
                         } else {
                             let enc = resolve_security_mission_encounter(ctx, tmpl, agent_info, sys_id);
                             (None, 0, agent_info.station_id, None, enc.wave_npc_count, enc.objective_text, enc.briefing_text)

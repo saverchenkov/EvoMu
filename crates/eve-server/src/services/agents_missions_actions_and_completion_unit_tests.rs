@@ -1369,3 +1369,238 @@ async fn reaccept_respawning_missing_npcs_preserves_bonus_expiry_deadline() {
     .expect("complete respawned 13_777");
     assert_eq!(done.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_mission_briefing_info_uses_mission_specific_text_instead_of_fixed_template_1204() {
+    let mut ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let kw = HashMap::new();
+
+    // Pick distinct SDE templates across mission categories so each yields its own briefing.
+    let combat_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            !m.is_courier
+                && m.content_template
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("BasicKill")
+        })
+        .cloned()
+        .expect("combat mission in SDE");
+    let courier_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            m.is_courier
+                && !m
+                    .content_template
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Trade")
+        })
+        .cloned()
+        .expect("courier mission in SDE");
+    let mining_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            m.content_template
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Mining")
+        })
+        .cloned()
+        .expect("mining mission in SDE");
+    let trade_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            m.content_template
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Trade")
+        })
+        .cloned()
+        .expect("trade mission in SDE");
+
+    // Add a synthetic mission with explicit non-templatized prose in content_template
+    // to verify custom mission text in SDE is surfaced directly.
+    let custom_mid = 990_204_u32;
+    let custom_prose = "Recover the encrypted Caldari courier beacon from the derelict cruiser wreck before Syndicate salvagers arrive.";
+    std::sync::Arc::make_mut(&mut ctx.sde).missions.insert(
+        custom_mid,
+        eve_sde::MissionTemplate {
+            mission_id: custom_mid,
+            title: "Recovered Beacon".into(),
+            is_courier: false,
+            lp_alpha: 100,
+            lp_omega: 150,
+            has_standing_rewards: true,
+            content_template: Some(custom_prose.into()),
+            dungeon_id: None,
+        },
+    );
+
+    let ag = find_standard_agent(&ctx, 1);
+    let sys_id = ag.solar_system_id.unwrap();
+    let origin_sid = ag.station_id.unwrap();
+    let courier_details = resolve_courier_mission_details(&ctx, &courier_tmpl, &ag)
+        .expect("courier details");
+    let mining_details = resolve_mining_mission_details(&ctx, &mining_tmpl);
+    let trade_details = resolve_trade_mission_details(&ctx, &trade_tmpl);
+    let combat_enc = resolve_security_mission_encounter(&ctx, &combat_tmpl, &ag, sys_id);
+
+    let mut sess = char_session(char_id, Some(sys_id), Some(origin_sid));
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (mid, req_tid, req_qty, dest_sid) in [
+            (combat_tmpl.mission_id, None, 0, None),
+            (
+                courier_tmpl.mission_id,
+                Some(courier_details.cargo_type_id),
+                courier_details.cargo_quantity,
+                Some(courier_details.destination_station_id),
+            ),
+            (
+                mining_tmpl.mission_id,
+                Some(mining_details.ore_type_id),
+                mining_details.required_units,
+                None,
+            ),
+            (
+                trade_tmpl.mission_id,
+                Some(trade_details.trade_type_id),
+                trade_details.trade_quantity,
+                None,
+            ),
+            (custom_mid, None, 0, None),
+        ] {
+            snap.active_missions.insert(
+                (char_id, mid),
+                make_active_mission(mid, char_id, ag.agent_id, sys_id, "Offered", None),
+            );
+            let mut mt = make_meta(mid, ag.agent_id, now + 86_400, None);
+            mt.required_delivery_type_id = req_tid;
+            mt.required_delivery_qty = req_qty;
+            mt.origin_station_id = Some(origin_sid);
+            mt.destination_station_id = dest_sid;
+            save_mission_meta(snap, char_id, &mt);
+        }
+    });
+
+    let combat_rep = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(combat_tmpl.mission_id as i64)],
+        &kw,
+    )
+    .await
+    .expect("combat briefing");
+    let combat_str = combat_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert!(!combat_str.contains("Execute objectives in system"));
+    assert!(combat_str.contains(&combat_enc.dungeon_name));
+    assert!(combat_str.contains(&combat_tmpl.title));
+
+    let courier_rep = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(courier_tmpl.mission_id as i64)],
+        &kw,
+    )
+    .await
+    .expect("courier briefing");
+    let courier_str = courier_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert!(!courier_str.contains("Execute objectives in system"));
+    assert!(courier_str.contains(&courier_tmpl.title));
+    if let Some(cargo_name) = ctx.sde.types.get(&courier_details.cargo_type_id).map(|t| t.name.as_str()) {
+        assert!(courier_str.contains(cargo_name), "courier briefing must name cargo {cargo_name}: {courier_str}");
+    }
+    if let Some(dest_name) = ctx.sde.stations.get(&courier_details.destination_station_id).map(|s| s.name.as_str()) {
+        assert!(courier_str.contains(dest_name), "courier briefing must name dest {dest_name}: {courier_str}");
+    }
+
+    let mining_rep = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(mining_tmpl.mission_id as i64)],
+        &kw,
+    )
+    .await
+    .expect("mining briefing");
+    let mining_str = mining_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert!(!mining_str.contains("Execute objectives in system"));
+    assert!(mining_str.contains(&mining_tmpl.title));
+    assert!(mining_str.contains(&mining_details.required_units.to_string()));
+
+    let trade_rep = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(trade_tmpl.mission_id as i64)],
+        &kw,
+    )
+    .await
+    .expect("trade briefing");
+    let trade_str = trade_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert!(!trade_str.contains("Execute objectives in system"));
+    assert!(trade_str.contains(&trade_tmpl.title));
+
+    let custom_rep = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(custom_mid as i64)],
+        &kw,
+    )
+    .await
+    .expect("custom prose briefing");
+    let custom_str = custom_rep.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert!(custom_str.contains(custom_prose), "custom prose must be returned: {custom_str}");
+
+    // Distinct missions produce distinct briefings.
+    assert_ne!(combat_str, courier_str);
+    assert_ne!(courier_str, mining_str);
+    assert_ne!(mining_str, trade_str);
+
+    // Re-opening an existing Offered mission via DoAction(2) also uses the rich briefing builder.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions
+            .retain(|(cid, mid), _| !(*cid == char_id && *mid != combat_tmpl.mission_id));
+    });
+    let reoffer = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(2), PyRep::Integer(ag.agent_id)],
+        &kw,
+    )
+    .await
+    .expect("re-offer via DoAction(2)");
+    let reoffer_briefing = reoffer.dict_get("briefing").and_then(|v| v.as_str()).unwrap();
+    assert_eq!(reoffer_briefing, combat_str);
+    assert!(!reoffer_briefing.contains("assignment:"));
+
+    // Negative path: unseeded mission/agent ID fails cleanly with MissionNotActive once cleared.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+    });
+    let missing_err = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionBriefingInfo",
+        &[PyRep::Integer(999_888_777)],
+        &kw,
+    )
+    .await
+    .expect_err("unknown mission must fail");
+    assert_eq!(missing_err.code, "MissionNotActive");
+}

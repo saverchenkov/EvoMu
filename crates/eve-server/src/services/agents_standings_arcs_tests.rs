@@ -1111,6 +1111,70 @@ async fn get_my_epic_arc_status_isolates_regular_missions_coalesces_legacy_ids_a
     assert!(matches!(rest_missions[0].1.dict_get("acceptedDate"), Some(PyRep::Integer(_))));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epic_arc_messages_return_never_cached_result_over_machonet_26000() {
+    let ctx = make_test_context();
+    let mut session = char_session(90_000_001, 98_000_001);
+    let kw = HashMap::new();
+
+    // Direct/non-V24 dispatch preserves raw Dict for internal callers and IT parity tests.
+    let raw = ctx
+        .dispatch_rpc(
+            &mut session,
+            "agentMgr",
+            None,
+            "GetMessagesForEpicArcMissions",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("direct GetMessagesForEpicArcMissions");
+    assert!(matches!(raw, PyRep::Dict(_)));
+
+    // Live V24 client (machoNet:26000) receives CachedMethodCallResult with versionCheck=("never", None, None)
+    // so ServiceCallGPCS/objectCaching serves repeated epicArcController lookups locally instead of 825+ RPCs.
+    let cached = ctx
+        .dispatch_rpc(
+            &mut session,
+            "agentMgr",
+            None,
+            "GetMessagesForEpicArcMissions",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("machoNet:26000 GetMessagesForEpicArcMissions");
+    let PyRep::Object { type_name, args } = cached else {
+        panic!("expected CachedMethodCallResult object wrapper for GetMessagesForEpicArcMissions");
+    };
+    assert_eq!(type_name, eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS);
+    let PyRep::Tuple(items) = *args else {
+        panic!("expected 3-tuple args in CachedMethodCallResult");
+    };
+    assert_eq!(items.len(), 3);
+    let PyRep::Dict(entries) = &items[0] else {
+        panic!("expected details Dict in CachedMethodCallResult[0]");
+    };
+    let vc = entries
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("versionCheck"))
+        .map(|(_, v)| v);
+    assert_eq!(
+        vc,
+        Some(&PyRep::Tuple(vec![
+            PyRep::String("never".into()),
+            PyRep::None,
+            PyRep::None,
+        ]))
+    );
+    let PyRep::SubStream(inner) = &items[1] else {
+        panic!("expected SubStream payload in CachedMethodCallResult[1]");
+    };
+    assert_eq!(inner.as_ref(), &raw);
+}
+
 #[cfg(test)]
 #[path = "agents_standings_arcs_extra_unit_tests.rs"]
 mod agents_standings_arcs_extra_unit_tests;
