@@ -1176,6 +1176,24 @@ pub struct CallReqWireOutcome {
     pub drained_char_notifications: Vec<crate::router::PendingMachoNotification>,
 }
 
+fn session_owns_char_notifications(ctx: &ServerContext, session: &SessionState) -> bool {
+    let (Some(uid), Some(cid)) = (session.user_id, session.character_id) else {
+        return false;
+    };
+    let now_unix = ctx.now_unix_secs();
+    if ctx
+        .db
+        .check_session_revoked(uid, session.session_id, now_unix)
+        .is_some()
+    {
+        return false;
+    }
+    match ctx.db.get_online_session(uid) {
+        Some(os) => os.session_id == session.session_id && os.character_id.is_none_or(|c| c == cid),
+        None => true,
+    }
+}
+
 /// Executes a single `CallReq` through the exact production socket-loop path:
 /// `ctx.dispatch_rpc(..., Some("machoNet:26000"))`, session sync + `SessionChangeNotification` enrichment,
 /// `TickBroadcast`/direct `DoDestinyUpdate` synchronization, notification suppression & SDE normalization,
@@ -1212,10 +1230,12 @@ pub async fn execute_call_req_wire(
     };
     let mut drained_char_notifications = Vec::new();
     let mut pre_rpc_notifs = Vec::new();
-    if let Some(cid) = session.character_id {
-        for notif in ctx.drain_notifications_for_char(cid) {
-            drained_char_notifications.push(notif.clone());
-            pre_rpc_notifs.push(notif);
+    if session_owns_char_notifications(ctx, session) {
+        if let Some(cid) = session.character_id {
+            for notif in ctx.drain_notifications_for_char(cid) {
+                drained_char_notifications.push(notif.clone());
+                pre_rpc_notifs.push(notif);
+            }
         }
     }
     let prev_session = session.clone();
@@ -1259,15 +1279,17 @@ pub async fn execute_call_req_wire(
         ),
     )
     .await;
-    if let Some(cid) = session.character_id {
-        for notif in ctx.drain_notifications_for_char(cid) {
-            drained_char_notifications.push(notif.clone());
-            if !session
-                .notifications
-                .iter()
-                .any(|(ev, a)| ev == &notif.event && a == &notif.args)
-            {
-                pre_rpc_notifs.push(notif);
+    if session_owns_char_notifications(ctx, session) {
+        if let Some(cid) = session.character_id {
+            for notif in ctx.drain_notifications_for_char(cid) {
+                drained_char_notifications.push(notif.clone());
+                if !session
+                    .notifications
+                    .iter()
+                    .any(|(ev, a)| ev == &notif.event && a == &notif.args)
+                {
+                    pre_rpc_notifs.push(notif);
+                }
             }
         }
     }
@@ -1294,6 +1316,7 @@ pub async fn execute_call_req_wire(
         ctx.sync_session(session);
     }
 
+    let owns_char_session = session_owns_char_notifications(ctx, session);
     let was_in_space = prev_session.station_id.is_none() && prev_session.structure_id.is_none();
     let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
     let mut cross_sys_pre_ticks = Vec::new();
@@ -1301,7 +1324,8 @@ pub async fn execute_call_req_wire(
     if session.solar_system_id != prev_session.solar_system_id
         || session.solar_system_id != *wire.subscribed_sys_id
     {
-        if was_in_space
+        if owns_char_session
+            && was_in_space
             && is_in_space
             && session.solar_system_id != prev_session.solar_system_id
             && matches!(wire.wire_state.destiny, DestinyStream::Live { .. })
@@ -1482,7 +1506,10 @@ pub async fn execute_call_req_wire(
 
     let mut pre_dock_destiny = None;
     let mut pre_dock_ticks = Vec::new();
-    if !matches!(wire.wire_state.destiny, DestinyStream::Detached) && docking_transition {
+    if owns_char_session
+        && !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+        && docking_transition
+    {
         if death_respawn_docking {
             let _ = drain_sys_rx_discarding_lag(wire.sys_rx);
             if let Some(old_sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
@@ -1534,7 +1561,7 @@ pub async fn execute_call_req_wire(
         }
     }
 
-    if docking_transition {
+    if owns_char_session && docking_transition {
         if let Some(sys_id) = prev_session.solar_system_id.or(session.solar_system_id) {
             let _ = ctx
                 .systems
@@ -1542,7 +1569,10 @@ pub async fn execute_call_req_wire(
                 .flush_peer_observer_updates(prev_session.ship_id.or(session.ship_id))
                 .await;
         }
-    } else if was_in_space && prev_session.solar_system_id != session.solar_system_id {
+    } else if owns_char_session
+        && was_in_space
+        && prev_session.solar_system_id != session.solar_system_id
+    {
         if let Some(old_sys_id) = prev_session.solar_system_id {
             let _ = ctx
                 .systems
@@ -1580,7 +1610,9 @@ pub async fn execute_call_req_wire(
     let mut post_drain_tick_batches = Vec::new();
     let mut post_rpc_direct_batch = None;
     let mut effective_was_live = was_live;
-    if !matches!(wire.wire_state.destiny, DestinyStream::Detached)
+    let post_rpc_owns_char = session_owns_char_notifications(ctx, session);
+    if post_rpc_owns_char
+        && !matches!(wire.wire_state.destiny, DestinyStream::Detached)
         && !docking_transition
         && !cross_sys_pre_detach
         && (was_in_space || is_in_space)
@@ -1697,7 +1729,7 @@ pub async fn execute_call_req_wire(
             }
         }
     }
-    if !docking_transition && (was_in_space || is_in_space) {
+    if post_rpc_owns_char && !docking_transition && (was_in_space || is_in_space) {
         if let Some(sys_id) = session.solar_system_id.or(prev_session.solar_system_id) {
             let _ = ctx
                 .systems
@@ -1712,15 +1744,17 @@ pub async fn execute_call_req_wire(
             .clear_explicit_update_state_guards_for_session(session.session_id);
     }
 
-    if let Some(cid) = session.character_id {
-        for notif in ctx.drain_notifications_for_char(cid) {
-            drained_char_notifications.push(notif.clone());
-            if !session
-                .notifications
-                .iter()
-                .any(|(ev, a)| ev == &notif.event && a == &notif.args)
-            {
-                pre_rpc_notifs.push(notif);
+    if session_owns_char_notifications(ctx, session) {
+        if let Some(cid) = session.character_id {
+            for notif in ctx.drain_notifications_for_char(cid) {
+                drained_char_notifications.push(notif.clone());
+                if !session
+                    .notifications
+                    .iter()
+                    .any(|(ev, a)| ev == &notif.event && a == &notif.args)
+                {
+                    pre_rpc_notifs.push(notif);
+                }
             }
         }
     }
@@ -2136,7 +2170,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 match tick_res {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!("machoNet session {session_id} sys_rx lagged by {skipped} ticks; resyncing SetState (ORD-5)");
-                        if still_in_same_live_space {
+                        if still_in_same_live_space && session_owns_char_notifications(&ctx, &session) {
                             wire_state.on_broadcast_lagged();
                             if session.character_id.is_some()
                                 && session.station_id.is_none()
@@ -2155,42 +2189,44 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     )
                                     .await
                                     {
-                                        let ep = wire_state.current_epoch();
-                                        let write_failed = if let Some(batch) = build_destiny_batch(
-                                            &ctx,
-                                            ep,
-                                            resynced.tick,
-                                            &resynced.events,
-                                            resynced.updates_pyrep,
-                                            &[ship_id],
-                                            SelfDestinyWireContext::NonDock,
-                                        ) {
-                                            emit_tick_batch_with_observability(
+                                        if session_owns_char_notifications(&ctx, &session) {
+                                            let ep = wire_state.current_epoch();
+                                            let write_failed = if let Some(batch) = build_destiny_batch(
+                                                &ctx,
+                                                ep,
+                                                resynced.tick,
+                                                &resynced.events,
+                                                resynced.updates_pyrep,
+                                                &[ship_id],
+                                                SelfDestinyWireContext::NonDock,
+                                            ) {
+                                                emit_tick_batch_with_observability(
+                                                    &ctx,
+                                                    &mut wire_state,
+                                                    &mut writer,
+                                                    client_id,
+                                                    &session,
+                                                    batch,
+                                                    "lagged_resync_tick",
+                                                )
+                                                .await
+                                                .is_err()
+                                            } else {
+                                                false
+                                            } || emit_tick_batches_with_observability(
                                                 &ctx,
                                                 &mut wire_state,
                                                 &mut writer,
                                                 client_id,
                                                 &session,
-                                                batch,
-                                                "lagged_resync_tick",
+                                                resynced.post_batches,
+                                                "system_tick_broadcast",
                                             )
                                             .await
-                                            .is_err()
-                                        } else {
-                                            false
-                                        } || emit_tick_batches_with_observability(
-                                            &ctx,
-                                            &mut wire_state,
-                                            &mut writer,
-                                            client_id,
-                                            &session,
-                                            resynced.post_batches,
-                                            "system_tick_broadcast",
-                                        )
-                                        .await
-                                        .is_err();
-                                        if write_failed {
-                                            break;
+                                            .is_err();
+                                            if write_failed {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -2200,6 +2236,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     Ok(tick_msg) => {
                         if still_in_same_live_space
+                            && session_owns_char_notifications(&ctx, &session)
                             && session.character_id.is_some()
                             && session.station_id.is_none()
                             && session.structure_id.is_none()
@@ -2242,26 +2279,34 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                     };
-                    if should_drain {
+                    if should_drain && session_owns_char_notifications(&ctx, &session) {
                         let prev_session = session.clone();
                         ctx.sync_session(&mut session);
                         ctx.sync_transition_grace_on_session_change(&prev_session, &session);
+                        if !session_owns_char_notifications(&ctx, &session) {
+                            continue;
+                        }
                         let mut pending_notifs = Vec::new();
-                        for notif in ctx.drain_notifications_for_char(cid) {
-                            if notif.event == "OnSessionChanged" {
-                                let notif_prev = session.clone();
-                                ctx.sync_session(&mut session);
-                                ctx.sync_transition_grace_on_session_change(&notif_prev, &session);
-                                continue;
+                        if session_owns_char_notifications(&ctx, &session) {
+                            for notif in ctx.drain_notifications_for_char(cid) {
+                                if notif.event == "OnSessionChanged" {
+                                    let notif_prev = session.clone();
+                                    ctx.sync_session(&mut session);
+                                    ctx.sync_transition_grace_on_session_change(&notif_prev, &session);
+                                    continue;
+                                }
+                                if let Some(typed_notif) = build_typed_notification(
+                                    &ctx,
+                                    notif.event,
+                                    Some(&notif.id_type),
+                                    notif.args,
+                                ) {
+                                    pending_notifs.push(typed_notif);
+                                }
                             }
-                            if let Some(typed_notif) = build_typed_notification(
-                                &ctx,
-                                notif.event,
-                                Some(&notif.id_type),
-                                notif.args,
-                            ) {
-                                pending_notifs.push(typed_notif);
-                            }
+                        }
+                        if !session_owns_char_notifications(&ctx, &session) {
+                            continue;
                         }
                         let was_in_space = prev_session.character_id.is_some()
                             && prev_session.station_id.is_none()
@@ -2284,17 +2329,24 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             {
                                 if let Some(old_sys_id) = prev_session.solar_system_id {
                                     let old_sys = ctx.systems.get_or_spawn(old_sys_id);
-                                    if let Some(old_ship_id) = prev_session.ship_id {
-                                        // Discard stale old-system observer updates (e.g. pod
-                                        // TerminalExplosion / RemoveBall / SetState) on async
-                                        // DeathRespawn (#1010) before SessionChangeNotification
-                                        // tears down the client ballpark via OnPrimaryViewChanged.
-                                        let _ = old_sys.drain_observer_updates(old_ship_id).await;
+                                    if session_owns_char_notifications(&ctx, &session) {
+                                        if let Some(old_ship_id) = prev_session.ship_id {
+                                            // Discard stale old-system observer updates (e.g. pod
+                                            // TerminalExplosion / RemoveBall / SetState) on async
+                                            // DeathRespawn (#1010) before SessionChangeNotification
+                                            // tears down the client ballpark via OnPrimaryViewChanged.
+                                            let _ = old_sys.drain_observer_updates(old_ship_id).await;
+                                        }
+                                        if session_owns_char_notifications(&ctx, &session) {
+                                            let _ = old_sys
+                                                .flush_peer_observer_updates(prev_session.ship_id)
+                                                .await;
+                                        }
                                     }
-                                    let _ = old_sys
-                                        .flush_peer_observer_updates(prev_session.ship_id)
-                                        .await;
                                 }
+                            }
+                            if !session_owns_char_notifications(&ctx, &session) {
+                                continue;
                             }
                             wire_state.leave_space();
                             ctx.systems
@@ -2308,6 +2360,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
 
+                        if !session_owns_char_notifications(&ctx, &session) {
+                            continue;
+                        }
                         let (sess_change_frame, _) = resolve_deferred_session_change_frame(
                             &ctx,
                             client_id,
@@ -2335,61 +2390,69 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     let prev_in_same_space = prev_session.station_id.is_none()
                                         && prev_session.structure_id.is_none()
                                         && prev_session.solar_system_id == session.solar_system_id;
-                                    if let Some(ship_swap) = sync_in_space_ship_swap_destiny(
-                                        &ctx,
-                                        &mut sys_rx,
-                                        &mut wire_state,
-                                        session_id,
-                                        sys_id,
-                                        new_ship_id,
-                                        prev_session.ship_id,
-                                        prev_in_same_space,
-                                    )
-                                    .await
-                                    {
-                                        let swap_write_failed =
-                                            emit_tick_batches_with_observability(
-                                                &ctx,
-                                                &mut wire_state,
-                                                &mut writer,
-                                                client_id,
-                                                &session,
-                                                ship_swap.pre_batches,
-                                                "pending_session_change_pre_tick",
-                                            )
-                                            .await
-                                            .is_err()
-                                                || if let Some(batch) = ship_swap.direct_batch {
-                                                    emit_tick_batch_with_observability(
-                                                        &ctx,
-                                                        &mut wire_state,
-                                                        &mut writer,
-                                                        client_id,
-                                                        &session,
-                                                        batch,
-                                                        "pending_session_change_tick",
-                                                    )
-                                                    .await
-                                                    .is_err()
-                                                } else {
-                                                    false
-                                                }
-                                                || emit_tick_batches_with_observability(
+                                    if session_owns_char_notifications(&ctx, &session) {
+                                        if let Some(ship_swap) = sync_in_space_ship_swap_destiny(
+                                            &ctx,
+                                            &mut sys_rx,
+                                            &mut wire_state,
+                                            session_id,
+                                            sys_id,
+                                            new_ship_id,
+                                            prev_session.ship_id,
+                                            prev_in_same_space,
+                                        )
+                                        .await
+                                        {
+                                            if !session_owns_char_notifications(&ctx, &session) {
+                                                continue;
+                                            }
+                                            let swap_write_failed =
+                                                emit_tick_batches_with_observability(
                                                     &ctx,
                                                     &mut wire_state,
                                                     &mut writer,
                                                     client_id,
                                                     &session,
-                                                    ship_swap.post_batches,
-                                                    "system_tick_broadcast",
+                                                    ship_swap.pre_batches,
+                                                    "pending_session_change_pre_tick",
                                                 )
                                                 .await
-                                                .is_err();
-                                        if swap_write_failed {
-                                            break;
+                                                .is_err()
+                                                    || if let Some(batch) = ship_swap.direct_batch {
+                                                        emit_tick_batch_with_observability(
+                                                            &ctx,
+                                                            &mut wire_state,
+                                                            &mut writer,
+                                                            client_id,
+                                                            &session,
+                                                            batch,
+                                                            "pending_session_change_tick",
+                                                        )
+                                                        .await
+                                                        .is_err()
+                                                    } else {
+                                                        false
+                                                    }
+                                                    || emit_tick_batches_with_observability(
+                                                        &ctx,
+                                                        &mut wire_state,
+                                                        &mut writer,
+                                                        client_id,
+                                                        &session,
+                                                        ship_swap.post_batches,
+                                                        "system_tick_broadcast",
+                                                    )
+                                                    .await
+                                                    .is_err();
+                                            if swap_write_failed {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            if !session_owns_char_notifications(&ctx, &session) {
+                                continue;
                             }
                             if write_framed_pyrep(&mut writer, &sess_frame).await.is_err() {
                                 break;
@@ -2397,6 +2460,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         let mut write_failed = false;
                         for typed_notif in pending_notifs {
+                            if !session_owns_char_notifications(&ctx, &session) {
+                                break;
+                            }
                             if let Some(drop_ev) =
                                 wire_state.gate_notification(&typed_notif.event, &typed_notif.args)
                             {
@@ -2665,17 +2731,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         &peer_addr,
                                     );
                                     if let Some(d) = displaced {
-                                        if d.session_id != session_id {
-                                            if let Some(disp_cid) = d.character_id {
-                                                ctx.logoff_character_sync(disp_cid, None);
-                                            }
-                                            ctx.disconnect_session(
-                                                d.session_id,
-                                                "ACL_DISPLACED",
-                                                "Displaced by concurrent login on same account",
-                                            );
-                                            ctx.release_session_bindings(d.session_id);
-                                        }
+                                        ctx.disconnect_displaced_session(session_id, &d);
                                     }
                                 }
                                 Err(err) => {
@@ -2830,137 +2886,150 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         let (bound_id, method, call_args, call_kwargs) =
                             extract_macho_call_req(&pkt.payload);
-                        if let Some(plan) = crate::services::space_warp_jump::prepare_dock_warp_settle(
-                            &ctx,
-                            &session,
-                            &service,
-                            &method,
-                            &call_args,
-                        )
-                        .await
-                        {
-                            let handle = ctx.systems.get_or_spawn(plan.sys_id);
-                            if let Ok((tick, events, updates_pyrep, watermark_seq)) =
-                                handle.drain_observer_updates_with_seq(plan.ship_id).await
-                            {
-                                let mut pre_batches = Vec::new();
-                                let mut post_batches = Vec::new();
-                                let ep = if matches!(
-                                    wire_state.destiny,
-                                    crate::outbound_sequencer::DestinyStream::Live { .. }
-                                ) {
-                                    drain_pending_tick_batches_for_sys_with_watermark(
-                                        &ctx,
-                                        &mut sys_rx,
-                                        plan.sys_id,
-                                        &[plan.ship_id],
-                                        &mut wire_state,
-                                        Some(watermark_seq),
-                                        &mut pre_batches,
-                                        &mut post_batches,
-                                        session_id,
-                                    )
-                                    .0
-                                } else {
-                                    wire_state.current_epoch()
-                                };
-                                let settle_write_failed = emit_tick_batches_with_observability(
-                                    &ctx,
-                                    &mut wire_state,
-                                    &mut writer,
-                                    client_id,
-                                    &session,
-                                    pre_batches,
-                                    "pending_dock_settle_pre_tick",
-                                )
-                                .await
-                                .is_err()
-                                    || if !events.is_empty() || plan.stopped_now {
-                                        if let Some(batch) = build_destiny_batch(
-                                            &ctx,
-                                            ep,
-                                            tick,
-                                            &events,
-                                            updates_pyrep,
-                                            &[plan.ship_id],
-                                            SelfDestinyWireContext::DockSettle,
+                        let dock_plan = if session_owns_char_notifications(&ctx, &session) {
+                            crate::services::space_warp_jump::prepare_dock_warp_settle(
+                                &ctx,
+                                &session,
+                                &service,
+                                &method,
+                                &call_args,
+                            )
+                            .await
+                        } else {
+                            pending_dock = None;
+                            None
+                        };
+                        if let Some(plan) = dock_plan {
+                            if !session_owns_char_notifications(&ctx, &session) {
+                                pending_dock = None;
+                            } else {
+                                let handle = ctx.systems.get_or_spawn(plan.sys_id);
+                                if let Ok((tick, events, updates_pyrep, watermark_seq)) =
+                                    handle.drain_observer_updates_with_seq(plan.ship_id).await
+                                {
+                                    if session_owns_char_notifications(&ctx, &session) {
+                                        let mut pre_batches = Vec::new();
+                                        let mut post_batches = Vec::new();
+                                        let ep = if matches!(
+                                            wire_state.destiny,
+                                            crate::outbound_sequencer::DestinyStream::Live { .. }
                                         ) {
-                                            emit_tick_batch_with_observability(
+                                            drain_pending_tick_batches_for_sys_with_watermark(
+                                                &ctx,
+                                                &mut sys_rx,
+                                                plan.sys_id,
+                                                &[plan.ship_id],
+                                                &mut wire_state,
+                                                Some(watermark_seq),
+                                                &mut pre_batches,
+                                                &mut post_batches,
+                                                session_id,
+                                            )
+                                            .0
+                                        } else {
+                                            wire_state.current_epoch()
+                                        };
+                                        let settle_write_failed = emit_tick_batches_with_observability(
+                                            &ctx,
+                                            &mut wire_state,
+                                            &mut writer,
+                                            client_id,
+                                            &session,
+                                            pre_batches,
+                                            "pending_dock_settle_pre_tick",
+                                        )
+                                        .await
+                                        .is_err()
+                                            || if !events.is_empty() || plan.stopped_now {
+                                                if let Some(batch) = build_destiny_batch(
+                                                    &ctx,
+                                                    ep,
+                                                    tick,
+                                                    &events,
+                                                    updates_pyrep,
+                                                    &[plan.ship_id],
+                                                    SelfDestinyWireContext::DockSettle,
+                                                ) {
+                                                    emit_tick_batch_with_observability(
+                                                        &ctx,
+                                                        &mut wire_state,
+                                                        &mut writer,
+                                                        client_id,
+                                                        &session,
+                                                        batch,
+                                                        "pending_dock_settle_tick",
+                                                    )
+                                                    .await
+                                                    .is_err()
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                            || emit_tick_batches_with_observability(
                                                 &ctx,
                                                 &mut wire_state,
                                                 &mut writer,
                                                 client_id,
                                                 &session,
-                                                batch,
-                                                "pending_dock_settle_tick",
+                                                post_batches,
+                                                "system_tick_broadcast",
                                             )
                                             .await
-                                            .is_err()
-                                        } else {
-                                            false
+                                            .is_err();
+                                        if settle_write_failed {
+                                            break;
                                         }
-                                    } else {
-                                        false
-                                    }
-                                    || emit_tick_batches_with_observability(
-                                        &ctx,
-                                        &mut wire_state,
-                                        &mut writer,
-                                        client_id,
-                                        &session,
-                                        post_batches,
-                                        "system_tick_broadcast",
-                                    )
-                                    .await
-                                    .is_err();
-                                if settle_write_failed {
-                                    break;
-                                }
-                            }
-                            if plan.stopped_now {
-                                let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
-                            }
-                            if plan.settle_deadline > tokio::time::Instant::now() {
-                                if let Some(prev_pending) = pending_dock.take() {
-                                    let user_id_before = session.user_id;
-                                    let mut wire_refs = CallReqWireRefs {
-                                        client_id,
-                                        sys_rx: &mut sys_rx,
-                                        subscribed_sys_id: &mut subscribed_sys_id,
-                                        wire_state: &mut wire_state,
-                                        deferred_ship_id: &mut deferred_ship_id,
-                                    };
-                                    if dispatch_call_req_to_wire(
-                                        &ctx,
-                                        &mut session,
-                                        &mut wire_refs,
-                                        &mut writer,
-                                        user_id_before,
-                                        &prev_pending.source,
-                                        &prev_pending.destination,
-                                        &prev_pending.service,
-                                        prev_pending.bound_id,
-                                        &prev_pending.method,
-                                        &prev_pending.call_args,
-                                        &prev_pending.call_kwargs,
-                                    )
-                                    .await
-                                    .is_err()
-                                    {
-                                        break;
                                     }
                                 }
-                                pending_dock = Some(PendingDockCall {
-                                    source: pkt.source,
-                                    destination: pkt.destination,
-                                    service,
-                                    bound_id,
-                                    method,
-                                    call_args,
-                                    call_kwargs,
-                                    sleep: Box::pin(tokio::time::sleep_until(plan.settle_deadline)),
-                                });
-                                continue;
+                                if plan.stopped_now && session_owns_char_notifications(&ctx, &session) {
+                                    let _ = handle.flush_peer_observer_updates(Some(plan.ship_id)).await;
+                                }
+                                if !session_owns_char_notifications(&ctx, &session) {
+                                    pending_dock = None;
+                                } else if plan.settle_deadline > tokio::time::Instant::now() {
+                                    if let Some(prev_pending) = pending_dock.take() {
+                                        let user_id_before = session.user_id;
+                                        let mut wire_refs = CallReqWireRefs {
+                                            client_id,
+                                            sys_rx: &mut sys_rx,
+                                            subscribed_sys_id: &mut subscribed_sys_id,
+                                            wire_state: &mut wire_state,
+                                            deferred_ship_id: &mut deferred_ship_id,
+                                        };
+                                        if dispatch_call_req_to_wire(
+                                            &ctx,
+                                            &mut session,
+                                            &mut wire_refs,
+                                            &mut writer,
+                                            user_id_before,
+                                            &prev_pending.source,
+                                            &prev_pending.destination,
+                                            &prev_pending.service,
+                                            prev_pending.bound_id,
+                                            &prev_pending.method,
+                                            &prev_pending.call_args,
+                                            &prev_pending.call_kwargs,
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    pending_dock = Some(PendingDockCall {
+                                        source: pkt.source,
+                                        destination: pkt.destination,
+                                        service,
+                                        bound_id,
+                                        method,
+                                        call_args,
+                                        call_kwargs,
+                                        sleep: Box::pin(tokio::time::sleep_until(plan.settle_deadline)),
+                                    });
+                                    continue;
+                                }
                             }
                         }
                         let user_id_before = session.user_id;
@@ -3506,9 +3575,11 @@ pub(crate) fn drain_pending_tick_frames_for_wire_session(
     }
     ctx.flight_recorder.record_wire_state(wire.wire_state);
     let mut notifs = Vec::new();
-    if let Some(cid) = session.character_id {
-        for n in ctx.drain_notifications_for_char(cid) {
-            notifs.push((n.event, Some(n.id_type), n.args));
+    if session_owns_char_notifications(ctx, session) {
+        if let Some(cid) = session.character_id {
+            for n in ctx.drain_notifications_for_char(cid) {
+                notifs.push((n.event, Some(n.id_type), n.args));
+            }
         }
     }
     for (ev, args) in session.drain_notifications() {

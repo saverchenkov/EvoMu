@@ -692,3 +692,352 @@ async fn space_boarding_consumes_pod_and_keeps_ballpark() {
     assert_eq!(p.sess.ship_id, Some(tristan_id));
     assert_eq!(extract_set_state_keyvals(&board_far).len(), 0);
 }
+
+#[tokio::test]
+async fn stargate_jump_concurrent_displacement_prevents_dual_ball_and_preserves_notifications() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{mpsc, oneshot};
+
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+        CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,
+        VersionExchange, MACHO_PROXY_NODE_ID,
+    };
+    use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use eve_server::router::NotificationTarget;
+    use eve_server::services::space_warp_jump::{
+        set_pre_take_ball_hook_for_test, PreTakeBallHook,
+    };
+    use eve_server::sp6_lifecycle::{
+        has_active_disconnected_ship, tick_background_cluster_with_step,
+    };
+
+    let ctx = Arc::new(ServerContext::new());
+    pin_clock(&ctx);
+    let _guard = teardown_guard(&ctx);
+
+    let char_id = 91_008_001_i64;
+    let (user, pass, ship_id) =
+        setup_space_pilot_logged_out(&ctx, 58_001, char_id, RIFTER_TYPE, TEST_SYS_A).await;
+    ctx.advance_secs(12);
+
+    let jita_gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == TEST_SYS_A && j.to_solar_system_id == TEST_SYS_B)
+        .cloned()
+        .expect("Jita -> Perimeter stargate in SDE");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test macho listener");
+    let addr = listener.local_addr().unwrap();
+    let (task_tx, mut task_rx) = mpsc::unbounded_channel();
+    let accept_ctx = Arc::clone(&ctx);
+    let accept_handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&accept_ctx);
+            let jh = tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+            if task_tx.send(jh).is_err() {
+                break;
+            }
+        }
+    });
+
+    async fn tcp_login(
+        addr: std::net::SocketAddr,
+        user: &str,
+        pass: &str,
+    ) -> (TcpStream, u64, u64) {
+        let mut s = TcpStream::connect(addr).await.expect("connect macho");
+        let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+            .await
+            .unwrap();
+        write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+            .await
+            .unwrap();
+        let cc = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        assert_eq!(cc.as_str(), Some("OK CC"));
+
+        let chal = CryptoChallengePacket::new_password_login(user, pass);
+        write_framed_pyrep(&mut s, &chal.to_pyrep()).await.unwrap();
+        assert_eq!(read_framed_pyrep(&mut s).await.unwrap().unwrap(), PyRep::Integer(2));
+        let srv_hs = CryptoServerHandshake::from_pyrep(
+            &read_framed_pyrep(&mut s).await.unwrap().unwrap(),
+        )
+        .expect("CryptoServerHandshake");
+        write_framed_pyrep(
+            &mut s,
+            &(CryptoHandshakeResult {
+                challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+                func_output: Vec::new(),
+                func_result: PyRep::Integer(0),
+            })
+            .to_pyrep(),
+        )
+        .await
+        .unwrap();
+        let ack = CryptoHandshakeAck::from_pyrep(
+            &read_framed_pyrep(&mut s).await.unwrap().unwrap(),
+        )
+        .expect("CryptoHandshakeAck");
+        let init_pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+            panic!("expected Client destination on SessionInitialStateNotification");
+        };
+        let _sess_chg = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        (s, client_id, ack.user_id)
+    }
+
+    let make_call = |client_id: u64, user_id: u64, call_id: u64, service: &str, method: &str, args: Vec<PyRep>| {
+        MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id,
+                call_id,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(service.into()),
+                call_id: 0,
+            },
+            user_id: Some(user_id),
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                    PyRep::ascii_bytes(method),
+                    PyRep::Tuple(args),
+                    PyRep::Dict(Vec::new()),
+                ]))),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    };
+
+    async fn read_until_call_rsp(stream: &mut TcpStream) {
+        loop {
+            let rep = tokio::time::timeout(Duration::from_secs(10), read_framed_pyrep(stream))
+                .await
+                .expect("timeout waiting for CallRsp")
+                .expect("frame read")
+                .expect("non-EOF");
+            let pkt = MachoPacket::from_pyrep(&rep).expect("MachoPacket");
+            assert_ne!(
+                pkt.packet_type,
+                MachoPacketType::ErrorResponse,
+                "unexpected ErrorResponse: {rep:?}"
+            );
+            if pkt.packet_type == MachoPacketType::CallRsp {
+                return;
+            }
+        }
+    }
+
+    // 1. Connect S1, select char_id into space at TEST_SYS_A, and move near the Jita->Perimeter gate.
+    let (mut s1, client_id_1, user_id) = tcp_login(addr, &user, &pass).await;
+    let s1_task = tokio::time::timeout(Duration::from_secs(5), task_rx.recv())
+        .await
+        .unwrap()
+        .expect("S1 listener task");
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(char_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    read_until_call_rsp(&mut s1).await;
+
+    ctx.advance_secs(12);
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            2,
+            "beyonce",
+            "MachoBindObject",
+            vec![
+                PyRep::Integer(i64::from(TEST_SYS_A)),
+                PyRep::Tuple(vec![
+                    PyRep::ascii_bytes("GetFormations"),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    read_until_call_rsp(&mut s1).await;
+
+    let sys_a_handle = ctx.systems.get_or_spawn(TEST_SYS_A);
+    assert!(
+        sys_a_handle
+            .set_ball_position(ship_id, jita_gate.position + DVec3::new(1_000.0, 0.0, 0.0))
+            .await,
+        "ship {ship_id} ball must exist in TEST_SYS_A before stargate jump"
+    );
+    ctx.advance_secs(12);
+
+    // 2. Install deterministic pause barrier immediately before old_handle.take_ball in CmdStargateJump.
+    let (paused_tx, paused_rx) = oneshot::channel::<()>();
+    let (resume_tx, resume_rx) = oneshot::channel::<()>();
+    let hook: PreTakeBallHook = Box::new(move || {
+        Box::pin(async move {
+            let _ = paused_tx.send(());
+            let _ = resume_rx.await;
+        })
+    });
+    set_pre_take_ball_hook_for_test(&ctx, char_id, Some(hook));
+
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            3,
+            "beyonce",
+            "CmdStargateJump",
+            vec![PyRep::Integer(jita_gate.stargate_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), paused_rx)
+        .await
+        .expect("S1 must hit pre-take_ball pause barrier")
+        .expect("paused_tx dropped cleanly");
+
+    // 3. Displace account from S2 while S1 is mid-RPC before take_ball.
+    let (mut s2, client_id_2, user_id_2) = tcp_login(addr, &user, &pass).await;
+    assert_eq!(user_id_2, user_id);
+    let s2_task = tokio::time::timeout(Duration::from_secs(5), task_rx.recv())
+        .await
+        .unwrap()
+        .expect("S2 listener task");
+    assert!(
+        !has_active_disconnected_ship(&ctx.db, char_id),
+        "displacing live S1 mid-jump must not record a premature disconnected_ships entry"
+    );
+
+    write_framed_pyrep(
+        &mut s2,
+        &make_call(
+            client_id_2,
+            user_id,
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(char_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    read_until_call_rsp(&mut s2).await;
+
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Real(7_777_000.0),
+        ],
+    );
+
+    // 4. Resume S1 and await S1's full RPC exit + disconnect cleanup before ticking cluster.
+    let _ = resume_tx.send(());
+    tokio::time::timeout(Duration::from_secs(10), s1_task)
+        .await
+        .expect("S1 handler must exit after displacement")
+        .expect("S1 task join ok");
+
+    let mut s1_stole_account_change = false;
+    let mut s1_got_jump_error_rsp = false;
+    while let Ok(Ok(Some(rep))) =
+        tokio::time::timeout(Duration::from_secs(1), read_framed_pyrep(&mut s1)).await
+    {
+        if let Some(pkt) = MachoPacket::from_pyrep(&rep) {
+            if pkt.packet_type == MachoPacketType::ErrorResponse
+                && matches!(pkt.destination, MachoAddress::Client { call_id: 3, .. })
+            {
+                s1_got_jump_error_rsp = true;
+            }
+            if pkt.packet_type == MachoPacketType::Notification {
+                if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                    if broadcast_id == "OnAccountChange" {
+                        s1_stole_account_change = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        s1_got_jump_error_rsp,
+        "displaced S1 must receive ErrorResponse for in-flight CmdStargateJump (call_id=3)"
+    );
+    assert!(
+        !s1_stole_account_change,
+        "displaced S1 must not steal S2's OnAccountChange notification"
+    );
+
+    // 5. Run two cluster ticks and verify no dual-ball, no TEST_SYS_A disconnect hold, and S2 got its notification.
+    for _ in 0..2 {
+        ctx.advance_secs(1);
+        tick_background_cluster_with_step(&ctx, 1).await;
+    }
+
+    let sys_b_handle = ctx.systems.get_or_spawn(TEST_SYS_B);
+    let in_a = sys_a_handle.get_ball_snapshot(ship_id).await.unwrap().is_some();
+    let in_b = sys_b_handle.get_ball_snapshot(ship_id).await.unwrap().is_some();
+    assert!(
+        in_a && !in_b,
+        "ship {ship_id} must stay strictly in TEST_SYS_A under S2 after displaced jump abort (in_a={in_a}, in_b={in_b})"
+    );
+    assert!(
+        ctx.db
+            .with_snapshot(|s| !s.sp6_lifecycle.disconnected_ships.contains_key(&char_id)),
+        "disconnected_ships must not retain any TEST_SYS_A entry while S2 owns {char_id}"
+    );
+
+    loop {
+        let rep = tokio::time::timeout(Duration::from_secs(10), read_framed_pyrep(&mut s2))
+            .await
+            .expect("S2 must receive preserved OnAccountChange notification")
+            .expect("frame read")
+            .expect("non-EOF on S2");
+        let pkt = MachoPacket::from_pyrep(&rep).expect("MachoPacket");
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnAccountChange" {
+                    break;
+                }
+            }
+        }
+    }
+
+    set_pre_take_ball_hook_for_test(&ctx, char_id, None);
+    accept_handle.abort();
+    drop(s2);
+    let _ = tokio::time::timeout(Duration::from_secs(5), s2_task).await;
+}

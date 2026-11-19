@@ -2718,15 +2718,14 @@ impl SystemHandle {
 
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_disconnected_warp_sync(
-        &self, ship_id: BallId, type_id: u32, radius: f64, mass: f64,
-        inertia: f64, max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
+        &self, ship_id: BallId, _type_id: u32, _radius: f64, _mass: f64,
+        _inertia: f64, _max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
     ) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if !bp.balls.contains_key(&ship_id) {
-            bp.add_ball(eve_destiny::Ball {
-                id: ship_id, type_id, position: current_pos, velocity: DVec3::ZERO,
-                max_velocity, speed_fraction: 1.0, inertia, mass, radius, mode: MovementMode::Stop,
-            });
+            // Do not synthesize a phantom ball from stale disconnected-ship state if the ship
+            // already transitioned out of this solar system.
+            return;
         }
         let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0

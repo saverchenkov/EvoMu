@@ -1010,6 +1010,34 @@ pub fn on_advance_secs_internal(
             .map(|(_, ship_id)| ship_id)
             .collect();
 
+        // Prune stale or reconnected `disconnected_ships` entries before taking `combat_ephemeral`
+        // so checking runtime `online_sessions` (`auth_runtime`, rank 60) keeps rank order below
+        // `WorldRepository` (rank 40). Snapshot pre-logoff holds beforehand; in-flight
+        // reconnect holds are checked post-read via the leaf `TRANSITION_DISCONNECT_GRACE` lock (`BF-R6-02`).
+        let prelogoff_holds = ctx.snapshot_prelogoff_hold_sessions();
+        let mut pruned_hold_chars = Vec::new();
+        ctx.db.with_mut_snapshot(|snap| {
+            let st = snap.sp6_lifecycle.as_inner_mut();
+            st.disconnected_ships.retain(|&cid, disc| {
+                let keep = super::disconnect_hold::is_disconnected_ship_valid(
+                    snap.items.contains_key(&disc.ship_id),
+                    snap.characters.get(&cid),
+                    &*snap.sessions,
+                    Some(ctx),
+                    prelogoff_holds.get(&cid).copied(),
+                    None,
+                    Some(ctx),
+                    cid,
+                    disc,
+                    true,
+                );
+                if !keep {
+                    pruned_hold_chars.push(cid);
+                }
+                keep
+            });
+        });
+
         // Sync runtime self-destruct countdowns and collect due entries atomically under
         // `WorldRepository` (rank 40) -> `combat_ephemeral` (rank 60) (`#1174`).
         crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
@@ -1022,14 +1050,25 @@ pub fn on_advance_secs_internal(
                 {
                     let st = snap.sp6_lifecycle.as_inner_mut();
 
-                    // Prune disconnected_ships entries whose ship was destroyed or pilot docked/changed ship
+                    // Re-validate inside the TX so concurrent jumps, docks, ship switches, or
+                    // logins cannot slip past into emergency-warp preparation or hold expiry.
                     st.disconnected_ships.retain(|&cid, disc| {
-                        snap.items.contains_key(&disc.ship_id)
-                            && snap.characters.get(&cid).is_some_and(|c| {
-                                c.active_ship_id == disc.ship_id
-                                    && c.station_id.is_none()
-                                    && c.structure_id.is_none()
-                            })
+                        let keep = super::disconnect_hold::is_disconnected_ship_valid(
+                            snap.items.contains_key(&disc.ship_id),
+                            snap.characters.get(&cid),
+                            &*snap.sessions,
+                            None,
+                            prelogoff_holds.get(&cid).copied(),
+                            None,
+                            Some(ctx),
+                            cid,
+                            disc,
+                            true,
+                        );
+                        if !keep {
+                            pruned_hold_chars.push(cid);
+                        }
+                        keep
                     });
 
                     let safe_keys: Vec<i64> = st.safe_logoffs.keys().copied().collect();
@@ -1082,6 +1121,11 @@ pub fn on_advance_secs_internal(
                     super::collect_due_self_destructs_in_tx(snap, rt, None, now_unix);
             },
         );
+        for cid in pruned_hold_chars {
+            if let Some(pair) = prelogoff_holds.get(&cid).copied() {
+                ctx.clear_prelogoff_hold_session_if_matches(cid, pair);
+            }
+        }
     }
 
     for (cid, reason) in aborted_safe_logoffs {

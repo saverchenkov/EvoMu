@@ -2237,3 +2237,142 @@ async fn slash_moveme_from_docked_upwell_structure_undocks_ship_notifies_and_rel
         "Upwell structure ball must never be teleported into destination system"
     );
 }
+
+#[tokio::test]
+async fn authentication_login_displacement_defers_logoff_for_live_session_and_logs_off_headless() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let cid = 90_171_501_i64;
+    ctx.db
+        .provision_gm_account("disp_user_1171", "secret_pw", cid, "DispPilot1171");
+    let (uid, ship_id) = ctx.db.with_snapshot(|s| {
+        (
+            s.accounts["disp_user_1171"].user_id,
+            s.characters[&cid].active_ship_id,
+        )
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let place_in_space = || {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = sys_id as i64;
+            }
+        });
+    };
+
+    // 1. Live session S1 holds the account + char in space with a registered session closer.
+    place_in_space();
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    let s1_sid = 91_710_u64;
+    let mut sess_s1 = auth_session(uid, cid, 98_000_001, sys_id);
+    sess_s1.session_id = s1_sid;
+    sess_s1.ship_id = Some(ship_id);
+    sess_s1.station_id = None;
+    sess_s1.structure_id = None;
+    let (s1_close_tx, mut s1_close_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(s1_sid, s1_close_tx);
+    ctx.db
+        .acquire_online_lock(uid, s1_sid, Some(cid), false, ctx.now_unix())
+        .expect("S1 lock");
+
+    // S2 calls authentication.Login on the same account while S1 is live.
+    let mut sess_s2 = eve_machonet::SessionState::new(91_711);
+    let login_res = handle(
+        &ctx,
+        &mut sess_s2,
+        "authentication",
+        "Login",
+        &[
+            PyRep::String("disp_user_1171".into()),
+            PyRep::String("secret_pw".into()),
+        ],
+        &kw,
+    )
+    .await
+    .expect("Login handled")
+    .expect("Login succeeds");
+    assert_eq!(login_res.dict_get("userID"), Some(&PyRep::Integer(uid as i64)));
+
+    // S1 must receive ACL_DISPLACED signal, while logoff_character_sync is deferred until S1 exits.
+    let (kick_code, _) = s1_close_rx
+        .try_recv()
+        .expect("S1 must receive ACL_DISPLACED close notification");
+    assert_eq!(kick_code, "ACL_DISPLACED");
+    assert!(
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, cid),
+        "displacing a live session must not insert disconnected_ships before S1 exits"
+    );
+
+    // Once S1 exits its task loop and runs cleanup (S2 has not selected cid yet), deferred logoff runs.
+    ctx.cleanup_disconnected_client_session(&mut sess_s1).await;
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, cid),
+        "S1 disconnect cleanup must run deferred logoff when S2 does not own cid"
+    );
+
+    // 2. Headless session S3 (no registered closer) MUST trigger immediate logoff on displacement.
+    place_in_space();
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 0.5,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sp6_lifecycle.disconnected_ships.remove(&cid);
+    });
+    let s3_sid = 91_712_u64;
+    ctx.db
+        .acquire_online_lock(uid, s3_sid, Some(cid), true, ctx.now_unix())
+        .expect("S3 lock");
+
+    let mut sess_s4 = eve_machonet::SessionState::new(91_713);
+    handle(
+        &ctx,
+        &mut sess_s4,
+        "authentication",
+        "Login",
+        &[
+            PyRep::String("disp_user_1171".into()),
+            PyRep::String("secret_pw".into()),
+        ],
+        &kw,
+    )
+    .await
+    .expect("S4 Login handled")
+    .expect("S4 Login succeeds");
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, cid),
+        "displacing a headless session without a closer must still log off synchronously"
+    );
+}

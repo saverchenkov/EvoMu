@@ -587,15 +587,7 @@ pub async fn handle(
             let lock_res = ctx.db.acquire_online_lock(acc.user_id, session.session_id, None, true, now_unix);
             ctx.db.set_online_session_peer_ip(acc.user_id, session.session_id, &session.address);
             if let Ok(Some(displaced)) = lock_res {
-                if let Some(disp_cid) = displaced.character_id {
-                    ctx.logoff_character_sync(disp_cid, None);
-                }
-                ctx.disconnect_session(
-                    displaced.session_id,
-                    "ACL_DISPLACED",
-                    "Displaced by concurrent login on same account",
-                );
-                ctx.release_session_bindings(displaced.session_id);
+                ctx.disconnect_displaced_session(session.session_id, &displaced);
             }
             let prev_role = session.role;
             session.user_id = Some(acc.user_id);
@@ -720,17 +712,7 @@ pub async fn handle(
                 Ok(displaced) => {
                     ctx.db.set_online_session_peer_ip(uid, session.session_id, &session.address);
                     if let Some(prev) = displaced {
-                        if prev.session_id != session.session_id {
-                            if let Some(prev_cid) = prev.character_id {
-                                ctx.logoff_character_sync(prev_cid, None);
-                            }
-                            ctx.disconnect_session(
-                                prev.session_id,
-                                "ACL_DISPLACED",
-                                "Displaced by concurrent login on same account",
-                            );
-                            ctx.release_session_bindings(prev.session_id);
-                        }
+                        ctx.disconnect_displaced_session(session.session_id, &prev);
                     }
                     Some(Ok(PyRep::Bool(true)))
                 }

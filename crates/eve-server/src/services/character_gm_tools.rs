@@ -19,6 +19,53 @@ use eve_proto::{BridgeRpcError, DBRowDescriptor, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
+fn clear_session_selection_state(session: &mut SessionState) {
+    session.character_id = None;
+    session.corporation_id = None;
+    session.alliance_id = None;
+    session.war_faction_id = None;
+    session.corp_role = 0;
+    session.fleet_id = None;
+    crate::router::clear_session_character_state(session);
+}
+
+fn displaced_selection_error(
+    ctx: &ServerContext,
+    user_id: u64,
+    session_id: u64,
+) -> BridgeRpcError {
+    match ctx.db.check_session_revoked(user_id, session_id, ctx.now_unix()) {
+        Some((code, msg)) if code == "MultiLoginBlocked" => {
+            crate::router::binding::session_kicked_error(msg)
+        }
+        Some((code, msg)) => crate::router::binding::session_revoked_error(code, msg),
+        None => crate::router::binding::session_kicked_error(
+            "Session displaced before character selection completed",
+        ),
+    }
+}
+
+pub(crate) fn finalize_displaced_character_selection(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    user_id: u64,
+    char_id: i64,
+) -> BridgeRpcError {
+    let err = displaced_selection_error(ctx, user_id, session.session_id);
+    let _ = ctx.take_pending_displaced_logoff(session.session_id);
+    let should_relogoff = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .is_some_and(|ch| ch.user_id == user_id)
+    }) && !ctx.is_character_online(char_id, user_id)
+        && !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id);
+    if should_relogoff {
+        ctx.logoff_character_sync(char_id, None);
+    }
+    clear_session_selection_state(session);
+    err
+}
+
 /// DERIVED: Validates character name syntax, ASCII alphanumeric + space/hyphen/apostrophe rules,
 /// word count (1..=3 words, 3..=37 chars), and reserved prefix/banned token checks (`feat:character.name-validation`).
 /// CCP's server-side profanity/reserved-word table is not part of the client staticdata distribution.
@@ -402,30 +449,90 @@ pub fn handle_char_unbound(
                 }
             };
 
-            if let Some(prev_cid) = session.character_id.filter(|&id| id != c.character_id) {
-                crate::quasar_gateway::isolate_side_effect(
-                    "character_gm_tools.SelectCharacterID.prev_logout",
-                    || {
-                        crate::services::fleet_social::revoke_xmpp_auth_token(ctx, prev_cid);
-                        crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, prev_cid);
-                        ctx.clear_notifications_for_char(prev_cid);
-                    },
-                );
-            }
+            let prev_cid = session.character_id.filter(|&id| id != c.character_id);
             let was_online = session.character_id == Some(c.character_id)
                 || crate::services::character_contacts::is_character_online(ctx, c.character_id);
-            ctx.release_session_bindings(session.session_id);
+            let mut holds_online_lock = false;
             if let Some(os) = ctx.db.get_online_session(user_id) {
-                if os.session_id == session.session_id {
-                    let _ = ctx.db.acquire_online_lock(user_id, session.session_id, Some(c.character_id), false, ctx.now_unix());
-                } else if os.character_id == Some(c.character_id) {
-                    return Some(Err(BridgeRpcError {
-                        code: "CharacterAlreadyOnline".into(),
-                        message: format!("Character {} is already online on another active session", c.character_id),
-                        client_error: None,
-                    }));
+                if os.session_id != session.session_id {
+                    clear_session_selection_state(session);
+                    if os.character_id == Some(c.character_id) {
+                        return Some(Err(BridgeRpcError {
+                            code: "CharacterAlreadyOnline".into(),
+                            message: format!(
+                                "Character {} is already online on another active session",
+                                c.character_id
+                            ),
+                            client_error: None,
+                        }));
+                    }
+                    return Some(Err(crate::router::binding::session_kicked_error(
+                        "Session displaced before character selection completed",
+                    )));
                 }
+                holds_online_lock = true;
             }
+            if let Some((code, msg)) =
+                ctx.db
+                    .check_session_revoked(user_id, session.session_id, ctx.now_unix())
+            {
+                clear_session_selection_state(session);
+                return Some(Err(if code == "MultiLoginBlocked" {
+                    crate::router::binding::session_kicked_error(msg)
+                } else {
+                    crate::router::binding::session_revoked_error(code, msg)
+                }));
+            }
+            if let Some(prev_cid) = prev_cid {
+                // Switch the OnlineSession character binding first so concurrent cluster ticks
+                // observe `prev_cid` as offline once `logoff_character_sync` records its ship hold.
+                if holds_online_lock
+                    && ctx
+                        .db
+                        .acquire_online_lock(
+                            user_id,
+                            session.session_id,
+                            None,
+                            false,
+                            ctx.now_unix(),
+                        )
+                        .is_err()
+                {
+                    clear_session_selection_state(session);
+                    return Some(Err(crate::router::binding::session_kicked_error(
+                        "Session displaced before character switch completed",
+                    )));
+                }
+                ctx.logoff_character_sync(prev_cid, Some(session));
+                clear_session_selection_state(session);
+            }
+            // Hold `reconnect_hold_sessions[char_id]` across `acquire_online_lock(Some(char_id))`
+            // and `reconnect_character_in_space_sync` so claiming the online lock before
+            // reconnect blocks concurrent displaced-session cleanup from emergency-warping the ship
+            // without letting `on_advance_secs(0)` prune a still-active disconnect hold.
+            let reconnect_guard = crate::router::binding::ReconnectHoldGuard::acquire(
+                ctx,
+                c.character_id,
+                session.session_id,
+            );
+            if holds_online_lock
+                && ctx
+                    .db
+                    .acquire_online_lock(
+                        user_id,
+                        session.session_id,
+                        Some(c.character_id),
+                        false,
+                        ctx.now_unix(),
+                    )
+                    .is_err()
+            {
+                drop(reconnect_guard);
+                clear_session_selection_state(session);
+                return Some(Err(displaced_selection_error(ctx, user_id, session.session_id)));
+            }
+            ctx.clear_pending_displaced_logoffs_for_char(user_id, c.character_id);
+            ctx.release_session_bindings(session.session_id);
             ctx.clear_notifications_for_char(c.character_id);
             crate::router::cache_notifications::set_active_dispatch_char(Some(c.character_id));
             let eff_sys = crate::services::pve_special_sites::reconcile_abyssal_login(
@@ -452,6 +559,42 @@ pub fn handle_char_unbound(
                 c.race_id = resolved_race;
             }
             let now_unix = ctx.now_unix();
+            let pre_reconnect_sys = c.solar_system_id;
+            if c.station_id.is_none() && c.structure_id.is_none() {
+                let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
+                drop(reconnect_guard);
+                if let Ok(reloaded) = ctx.db.get_character(c.character_id) {
+                    c = reloaded;
+                }
+            } else {
+                drop(reconnect_guard);
+            }
+            let eff_sys = if c.solar_system_id != pre_reconnect_sys && c.solar_system_id != 0 {
+                c.solar_system_id
+            } else {
+                eff_sys
+            };
+            ctx.record_prelogoff_hold_session(c.character_id, None);
+            let displaced_during_reconnect = ctx
+                .db
+                .check_session_revoked(user_id, session.session_id, ctx.now_unix())
+                .is_some()
+                || match ctx.db.get_online_session(user_id) {
+                    Some(os) => {
+                        os.session_id != session.session_id
+                            || (holds_online_lock && os.character_id != Some(c.character_id))
+                    }
+                    None => holds_online_lock,
+                };
+            if displaced_during_reconnect {
+                return Some(Err(finalize_displaced_character_selection(
+                    ctx,
+                    session,
+                    user_id,
+                    c.character_id,
+                )));
+            }
+
             session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
             crate::router::apply_session_from_character(session, &c, None, Some(&ctx.sde));
@@ -473,9 +616,7 @@ pub fn handle_char_unbound(
                     eff_roles
                 }
             });
-
             if c.station_id.is_none() && c.structure_id.is_none() {
-                let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
                 let _ = crate::services::serverops_cluster::emit_sim_clock_rebase_on_entry_if_needed(
                     ctx,
                     c.character_id,

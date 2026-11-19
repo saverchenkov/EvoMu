@@ -2179,3 +2179,542 @@ async fn test_1172_notify_rx_ship_swap_broadcast_lagged_triggers_set_state_resyn
     );
 }
 
+#[tokio::test]
+async fn displaced_macho_session_does_not_steal_or_clear_replacement_notifications() {
+    use crate::services::space_warp_jump::{set_pre_take_ball_hook_for_test, PreTakeBallHook};
+    use tokio::sync::oneshot;
+
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = char_id;
+            sh.location_id = i64::from(sys_id);
+            sh.flag = eve_db::InventoryFlag::None;
+        }
+    });
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == sys_id)
+        .cloned()
+        .expect("gate from 30000142 in SDE");
+    let addr = spawn_test_listener(Arc::clone(&ctx)).await;
+
+    let make_call = |cid: u64, uid: u64, call_id: u64, service: &str, method: &str, args: Vec<PyRep>| {
+        MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id: cid,
+                call_id,
+                service: None,
+            },
+            destination: MachoAddress::Any {
+                service: Some(service.to_string()),
+                call_id: 0,
+            },
+            user_id: Some(uid),
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                    PyRep::ascii_bytes(method),
+                    PyRep::Tuple(args),
+                    PyRep::Dict(Vec::new()),
+                ]))),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    };
+    let (mut s1, client_id_1, user_id) = login_client(addr, "demo", "demo-secret", "DE").await;
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(char_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let mut got_rsp_1 = false;
+    let mut got_sc_1 = false;
+    while !got_rsp_1 || !got_sc_1 {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut s1),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            got_rsp_1 = true;
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            got_sc_1 = true;
+        }
+    }
+
+    ctx.advance_secs(12);
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            2,
+            "beyonce",
+            "MachoBindObject",
+            vec![
+                PyRep::Integer(i64::from(sys_id)),
+                PyRep::Tuple(vec![
+                    PyRep::ascii_bytes("GetFormations"),
+                    PyRep::Tuple(Vec::new()),
+                    PyRep::Dict(Vec::new()),
+                ]),
+            ],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    loop {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut s1),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            break;
+        }
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    assert!(
+        sys_handle
+            .set_ball_position(
+                ship_id,
+                gate.position + eve_destiny::DVec3::new(1_000.0, 0.0, 0.0),
+            )
+            .await
+    );
+    ctx.advance_secs(12);
+
+    // Pause S1 mid-RPC inside CmdStargateJump so S1 stays live across S2 login + notify.
+    let (paused_tx, paused_rx) = oneshot::channel::<()>();
+    let (resume_tx, resume_rx) = oneshot::channel::<()>();
+    let hook: PreTakeBallHook = Box::new(move || {
+        Box::pin(async move {
+            let _ = paused_tx.send(());
+            let _ = resume_rx.await;
+        })
+    });
+    set_pre_take_ball_hook_for_test(&ctx, char_id, Some(hook));
+    write_framed_pyrep(
+        &mut s1,
+        &make_call(
+            client_id_1,
+            user_id,
+            3,
+            "beyonce",
+            "CmdStargateJump",
+            vec![PyRep::Integer(gate.stargate_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), paused_rx)
+        .await
+        .expect("S1 paused inside CmdStargateJump")
+        .expect("paused_tx");
+
+    // S2 logs in on the same account (displacing S1) and selects char_id while S1 is paused in-flight.
+    let (mut s2, client_id_2, user_id_2) = login_client(addr, "demo", "demo-secret", "DE").await;
+    assert_eq!(user_id_2, user_id);
+    write_framed_pyrep(
+        &mut s2,
+        &make_call(
+            client_id_2,
+            user_id,
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(char_id)],
+        )
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let mut got_rsp_2 = false;
+    let mut got_sc_2 = false;
+    while !got_rsp_2 || !got_sc_2 {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut s2),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            got_rsp_2 = true;
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            got_sc_2 = true;
+        }
+    }
+
+    // Push a character notification WHILE S1 is still live inside execute_call_req_wire, then resume S1.
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Real(9_999_000.0),
+        ],
+    );
+    let _ = resume_tx.send(());
+
+    let mut s1_stole_account_change = false;
+    let mut s1_got_error_rsp = false;
+    while let Ok(Ok(Some(rep))) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), read_framed_pyrep(&mut s1)).await
+    {
+        if let Some(pkt) = MachoPacket::from_pyrep(&rep) {
+            if pkt.packet_type == MachoPacketType::ErrorResponse {
+                s1_got_error_rsp = true;
+            }
+            if pkt.packet_type == MachoPacketType::Notification {
+                if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                    if broadcast_id == "OnAccountChange" {
+                        s1_stole_account_change = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(s1_got_error_rsp, "paused S1 RPC must unwind cleanly with ErrorResponse");
+    assert!(
+        !s1_stole_account_change,
+        "live displaced S1 resuming from RPC must never steal replacement S2's OnAccountChange notification"
+    );
+
+    loop {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut s2),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnAccountChange" {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn execute_call_req_wire_displaced_in_space_preserves_observer_destiny_updates_for_replacement() {
+    use crate::outbound_sequencer::{DestinyStream, OutFrame, SessionWireState};
+
+    let ctx = ServerContext::new();
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let s1_id = 91_301_u64;
+    let s2_id = 91_302_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = user_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = char_id;
+            sh.location_id = i64::from(sys_id);
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship ball");
+
+    // S1 was previously live in space, then S2 displaced S1 and reclaimed char_id.
+    ctx.db
+        .acquire_online_lock(user_id, s1_id, Some(char_id), true, ctx.now_unix())
+        .expect("s1 acquires lock");
+    ctx.db
+        .acquire_online_lock(user_id, s2_id, Some(char_id), true, ctx.now_unix())
+        .expect("s2 displaces s1 and owns char_id");
+
+    // Queue a pending SetState observer event (intended for S2's space bootstrap/resync).
+    sys_handle.push_set_state(ship_id).await.unwrap();
+
+    let mut sess_s1 = SessionState::new(s1_id);
+    sess_s1.user_id = Some(user_id);
+    sess_s1.character_id = Some(char_id);
+    sess_s1.ship_id = Some(ship_id);
+    sess_s1.solar_system_id = Some(sys_id);
+
+    let mut sys_rx = sys_handle.subscribe();
+    let mut subscribed_sys_id = Some(sys_id);
+    let mut wire_state = SessionWireState::new(s1_id, 91_301);
+    let ep = wire_state.enter_space(Some(sys_id));
+    wire_state.destiny = DestinyStream::Live {
+        epoch: ep,
+        set_state_stamp: 100,
+        last_stamp: 100,
+    };
+    let mut deferred_ship_id = None;
+    let mut wire_refs = CallReqWireRefs {
+        client_id: 91_301,
+        sys_rx: &mut sys_rx,
+        subscribed_sys_id: &mut subscribed_sys_id,
+        wire_state: &mut wire_state,
+        deferred_ship_id: &mut deferred_ship_id,
+    };
+
+    let req_source = MachoAddress::Client {
+        client_id: 91_301,
+        call_id: 17,
+        service: None,
+    };
+    let req_dest = MachoAddress::Node {
+        node_id: eve_machonet::MACHO_PROXY_NODE_ID,
+        service: Some("beyonce".to_string()),
+        call_id: 0,
+    };
+    let kwargs = HashMap::new();
+    let outcome = execute_call_req_wire(
+        &ctx,
+        &mut sess_s1,
+        &mut wire_refs,
+        &req_source,
+        &req_dest,
+        "beyonce",
+        None,
+        "GetFormations",
+        &[],
+        &kwargs,
+    )
+    .await;
+
+    assert!(
+        !outcome
+            .out_frames
+            .iter()
+            .any(|f| matches!(f, OutFrame::DoDestinyUpdate { .. })),
+        "BF-04: displaced S1 must not emit DoDestinyUpdate observer batches: {:?}",
+        outcome.out_frames
+    );
+
+    // S2 must still find the queued SetState observer update untouched.
+    let (_tick, obs_evs, _pyrep, _seq) = sys_handle
+        .drain_observer_updates_with_seq(ship_id)
+        .await
+        .expect("drain observer updates for S2");
+    assert!(
+        obs_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "BF-04: displaced S1 RPC completion must leave replacement S2's observer queue intact"
+    );
+}
+
+#[tokio::test]
+async fn notify_rx_displaced_session_preserves_notifications_and_observer_updates_for_replacement() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = char_id;
+            sh.location_id = i64::from(sys_id);
+            sh.flag = eve_db::InventoryFlag::None;
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 587,
+            position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.0,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ball");
+
+    let addr = spawn_test_listener(Arc::clone(&ctx)).await;
+    let (mut s1, client_id_1, user_id) = login_client(addr, "demo", "demo-secret", "DE").await;
+    let select_call = MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client {
+            client_id: client_id_1,
+            call_id: 1,
+            service: None,
+        },
+        destination: MachoAddress::Any {
+            service: Some("charUnboundMgr".to_string()),
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::ascii_bytes("SelectCharacterID"),
+                PyRep::Tuple(vec![PyRep::Integer(char_id)]),
+                PyRep::Dict(Vec::new()),
+            ]))),
+        ])]),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s1, &select_call.to_pyrep())
+        .await
+        .unwrap();
+    let mut got_rsp = false;
+    let mut got_sc = false;
+    while !got_rsp || !got_sc {
+        let pkt = MachoPacket::from_pyrep(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                read_framed_pyrep(&mut s1),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            got_rsp = true;
+        } else if pkt.packet_type == MachoPacketType::SessionChangeNotification {
+            got_sc = true;
+        }
+    }
+
+    // Drain post-SelectCharacterID client notifications (e.g. OnChannelJoined) before displacing S1.
+    while let Ok(Ok(Some(_))) = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        read_framed_pyrep(&mut s1),
+    )
+    .await
+    {}
+
+    // Displace S1's online lock with S2 directly (without closing S1 yet, isolating the notify_rx race)
+    // and transition char_id in DB + push SetState & OnAccountChange intended for S2.
+    ctx.db
+        .acquire_online_lock(user_id, 99_991, Some(char_id), true, ctx.now_unix())
+        .expect("S2 claims lock");
+    sys_handle.push_set_state(ship_id).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnSessionChanged",
+        "charid",
+        vec![],
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Real(8_888_000.0),
+        ],
+    );
+
+    // Give S1's listener task a moment to wake on notify_rx and process any guarded branches.
+    let leaked_frame = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        read_framed_pyrep(&mut s1),
+    )
+    .await;
+    assert!(
+        leaked_frame.is_err(),
+        "P1-1: displaced S1 must not emit SessionChangeNotification or OnAccountChange: {leaked_frame:?}"
+    );
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id).len(),
+        2,
+        "P1-1: displaced S1 notify_rx must leave survivor's queued notifications intact"
+    );
+    let (_tick, obs_evs, _pyrep, _seq) = sys_handle
+        .drain_observer_updates_with_seq(ship_id)
+        .await
+        .expect("drain observer updates for survivor");
+    assert!(
+        obs_evs
+            .iter()
+            .any(|ev| matches!(ev, eve_destiny::DestinyEvent::SetState { .. })),
+        "P1-1: displaced S1 notify_rx must leave survivor's observer updates intact"
+    );
+}
+

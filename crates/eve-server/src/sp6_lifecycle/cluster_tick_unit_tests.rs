@@ -1048,6 +1048,14 @@ async fn engine_supervision_catch_unwind_system_actor_recovery_and_backlog_cap_8
     let _disc_handle = dedicated_ctx.systems.get_or_spawn(disc_sys);
     let sim_before = dedicated_ctx.systems.get_system_sim_elapsed(disc_sys);
     let now_unix = dedicated_ctx.now_unix();
+    dedicated_ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = disc_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = 100_000_001;
+        }
+    });
     with_mut_sp6_state(&dedicated_ctx.db, |st| {
         st.disconnected_ships.insert(
             90_000_001,
@@ -3900,5 +3908,430 @@ async fn overrun_physics_tick_emits_sim_clock_rebase_for_skipped_secs_1169() {
             .iter()
             .any(|n| n.event == "DoSimClockRebase"),
         "docked pilots must not receive space overrun DoSimClockRebase"
+    );
+}
+
+#[tokio::test]
+async fn cluster_tick_prunes_disconnected_ships_on_system_mismatch_or_online_character() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let now_unix = ctx.now_unix();
+
+    let char_moved = 90_000_001_i64;
+    let char_online = 90_000_002_i64;
+    let ship_moved = 100_000_001_i64;
+    let ship_online = 100_000_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&char_moved) {
+            c1.solar_system_id = sys_b;
+            c1.station_id = None;
+            c1.structure_id = None;
+            c1.active_ship_id = ship_moved;
+        }
+        let mut c2 = snap.characters[&char_moved].clone();
+        c2.character_id = char_online;
+        c2.user_id = 2;
+        c2.solar_system_id = sys_a;
+        c2.station_id = None;
+        c2.structure_id = None;
+        c2.active_ship_id = ship_online;
+        snap.characters.insert(char_online, c2);
+
+        let mut base_ship = snap.items[&ship_moved].clone();
+        base_ship.item_id = ship_online;
+        base_ship.owner_id = char_online;
+        base_ship.location_id = i64::from(sys_a);
+        snap.items.insert(ship_online, base_ship);
+
+        snap.accounts
+            .entry("demo2".into())
+            .or_insert_with(|| eve_db::AccountRecord {
+                user_id: 2,
+                username: "demo2".into(),
+                password_token: "secret".into(),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
+            });
+    });
+
+    ctx.db
+        .acquire_online_lock(2, 55_002, Some(char_online), true, now_unix)
+        .expect("online lock for char_online");
+
+    let stale_warp_dest = [1_000_000.0, 0.0, 0.0];
+    with_mut_sp6_state(&ctx.db, |st| {
+        st.disconnected_ships.insert(
+            char_moved,
+            DisconnectedShipEntry {
+                char_id: char_moved,
+                ship_id: ship_moved,
+                ship_type_id: 606,
+                solar_system_id: sys_a,
+                disconnected_at_unix: now_unix,
+                remove_at_unix: now_unix + 60,
+                last_position: [1_000.0, 0.0, 0.0],
+                pre_warp_position: Some([1_000.0, 0.0, 0.0]),
+                emergency_warp_dest: Some(stale_warp_dest),
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+            },
+        );
+        st.disconnected_ships.insert(
+            char_online,
+            DisconnectedShipEntry {
+                char_id: char_online,
+                ship_id: ship_online,
+                ship_type_id: 606,
+                solar_system_id: sys_a,
+                disconnected_at_unix: now_unix,
+                remove_at_unix: now_unix + 60,
+                last_position: [2_000.0, 0.0, 0.0],
+                pre_warp_position: Some([2_000.0, 0.0, 0.0]),
+                emergency_warp_dest: Some(stale_warp_dest),
+                last_velocity: [0.0, 0.0, 0.0],
+                removed_from_space: false,
+            },
+        );
+    });
+
+    tick_background_cluster_with_step(&ctx, 1).await;
+
+    crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+        assert!(
+            !st.disconnected_ships.contains_key(&char_moved),
+            "disconnected_ships must prune entries whose solar_system_id no longer matches character"
+        );
+        assert!(
+            !st.disconnected_ships.contains_key(&char_online),
+            "disconnected_ships must prune entries for currently online characters"
+        );
+    });
+
+    let sys_a_handle = ctx.systems.get_or_spawn(sys_a);
+    assert!(
+        sys_a_handle
+            .get_ball_snapshot(ship_moved)
+            .await
+            .unwrap()
+            .is_none(),
+        "stale sys_a disconnected_ships entry must not synthesize ship_moved ball into sys_a"
+    );
+    assert!(
+        sys_a_handle
+            .get_ball_snapshot(ship_online)
+            .await
+            .unwrap()
+            .is_none(),
+        "pruned online disconnected_ships entry must not synthesize ship_online ball into sys_a"
+    );
+}
+
+#[tokio::test]
+async fn cluster_tick_preserves_prelogoff_hold_until_expiry_or_new_session() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let user_id = 1_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.user_id = user_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.owner_id = char_id;
+            sh.location_id = i64::from(sys_id);
+        }
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 606,
+        position: eve_destiny::DVec3::new(100_000.0, 0.0, 0.0),
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 2.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .expect("spawn ball");
+
+    // Simulate direct `handle_character_logoff_or_disconnect` while an active pre-logoff
+    // session owns `char_id` (as in direct IT disconnect tests and pre-release RPC paths).
+    ctx.db
+        .acquire_online_lock(user_id, 9201, Some(char_id), true, ctx.now_unix())
+        .expect("acquire initial session lock");
+    let entry = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("disconnect hold recorded");
+    assert!(!entry.removed_from_space);
+
+    // Mid-hold tick must NOT prune the recorded hold while only the matching pre-logoff session remains.
+    ctx.advance_secs(10);
+    tick_background_cluster_with_step(&ctx, 10).await;
+    assert!(crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id));
+    assert!(sys.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    // After hold expiry, finalize_expired_disconnected_ship must despawn the ball cleanly.
+    ctx.advance_secs(60);
+    tick_background_cluster_with_step(&ctx, 60).await;
+    assert!(
+        sys.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "prelogoff hold must expire and despawn ball cleanly"
+    );
+    assert_eq!(
+        ctx.prelogoff_hold_session(char_id),
+        None,
+        "expired prelogoff hold entry must be cleared from ContextGraceStore"
+    );
+
+    // Conversely, if a DIFFERENT replacement session claims `char_id`, any stale hold is pruned immediately.
+    let prior_pair = ctx
+        .db
+        .get_online_session(user_id)
+        .filter(|os| os.session_id == 9201)
+        .map(|os| (os.session_id, os.connected_at_unix))
+        .expect("session 9201 lock active");
+    ctx.record_prelogoff_hold_session(char_id, Some(prior_pair));
+    assert_eq!(
+        ctx.prelogoff_hold_session(char_id),
+        Some(prior_pair),
+        "prelogoff hold must be populated before replacement claim so cluster_tick pruning is exercised"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.sp6_lifecycle.disconnected_ships.get_mut(&char_id) {
+            st.removed_from_space = false;
+            st.remove_at_unix = ctx.now_unix() + 60;
+        }
+    });
+    ctx.db
+        .acquire_online_lock(user_id, 9202, Some(char_id), true, ctx.now_unix())
+        .expect("replacement session claims char_id");
+    ctx.advance_secs(1);
+    tick_background_cluster_with_step(&ctx, 1).await;
+    assert!(
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "new session claiming char_id must invalidate prelogoff grace and prune disconnected_ships"
+    );
+    assert_eq!(
+        ctx.prelogoff_hold_session(char_id),
+        None,
+        "invalidated prelogoff hold entry must be cleared from ContextGraceStore"
+    );
+}
+
+#[tokio::test]
+async fn finalize_expired_disconnected_ship_aborts_when_consumed_or_held_for_reconnect() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let pos = eve_destiny::DVec3::new(150_000.0, 25_000.0, -10_000.0);
+    let now = ctx.now_unix();
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.user_id = user_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let sh_id = ch.active_ship_id;
+        if let Some(sh) = snap.items.get_mut(&sh_id) {
+            sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+        sh_id
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: pos,
+        velocity: eve_destiny::DVec3::ZERO,
+        max_velocity: 350.0,
+        inertia: 2.5,
+        mass: 1_200_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    })
+    .await
+    .expect("spawn ball");
+
+    let disc = DisconnectedShipEntry {
+        char_id,
+        ship_id,
+        ship_type_id: 587,
+        solar_system_id: sys_id,
+        disconnected_at_unix: now.saturating_sub(60),
+        last_position: [pos.x, pos.y, pos.z],
+        emergency_warp_dest: None,
+        pre_warp_position: Some([pos.x, pos.y, pos.z]),
+        last_velocity: [0.0, 0.0, 0.0],
+        remove_at_unix: now.saturating_sub(1),
+        removed_from_space: true,
+    };
+    with_mut_sp6_state(&ctx.db, |st| {
+        st.disconnected_ships.insert(char_id, disc.clone());
+    });
+
+    // Case 1: ReconnectHoldGuard active while `disc` is still present -> aborts despawn and clears `removed_from_space`.
+    let reconnect_guard = crate::router::binding::ReconnectHoldGuard::acquire(&ctx, char_id, 92_101);
+    ctx.db
+        .acquire_online_lock(user_id, 92_101, Some(char_id), true, now)
+        .expect("S2 acquires char_id lock");
+    super::super::disconnect_hold::finalize_expired_disconnected_ship(&ctx, disc.clone());
+    assert!(
+        sys.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "live ship ball must not be despawned while ReconnectHoldGuard is held"
+    );
+    let still_armed = ctx.db.with_snapshot(|snap| {
+        snap.sp6_lifecycle
+            .disconnected_ships
+            .get(&char_id)
+            .is_some_and(|d| !d.removed_from_space)
+    });
+    assert!(
+        still_armed,
+        "aborted finalization under ReconnectHoldGuard must reset removed_from_space = false"
+    );
+
+    // Case 2: `reconnect_character_in_space_sync` has already consumed `disconnected_ships[char_id]`
+    // while `ReconnectHoldGuard` is still held -> finalization must abort before touching the live ball or `leave_space_in_snap`.
+    crate::sp6_lifecycle::reconnect_character_in_space_sync(&ctx, char_id)
+        .expect("reconnect succeeds");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.remove(&ship_id);
+    });
+    super::super::disconnect_hold::finalize_expired_disconnected_ship(&ctx, disc);
+    drop(reconnect_guard);
+    assert!(
+        sys.get_ball_snapshot(ship_id).await.unwrap().is_some(),
+        "finalization after disconnected_ships consumption must never despawn reconnected ball"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.item_positions.contains_key(&ship_id)
+                && snap
+                    .sp6_lifecycle
+                    .ship_combat_hp
+                    .get(&(-ship_id))
+                    .is_none_or(|m| m.armor_hp >= 0.0),
+            "finalization after consumption must not invoke leave_space_in_snap"
+        );
+        assert_eq!(snap.items[&ship_id].location_id, i64::from(sys_id));
+    });
+}
+
+#[tokio::test]
+async fn is_disconnected_ship_valid_queries_reconnect_hold_post_session_read() {
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let user_id = 1_u64;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let now = ctx.now_unix();
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.user_id = user_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let sh_id = ch.active_ship_id;
+        if let Some(sh) = snap.items.get_mut(&sh_id) {
+            sh.location_id = i64::from(sys_id);
+            sh.flag = InventoryFlag::None;
+        }
+        sh_id
+    });
+
+    let disc = DisconnectedShipEntry {
+        char_id,
+        ship_id,
+        ship_type_id: 587,
+        solar_system_id: sys_id,
+        disconnected_at_unix: now.saturating_sub(30),
+        last_position: [150_000.0, 0.0, 0.0],
+        emergency_warp_dest: None,
+        pre_warp_position: Some([150_000.0, 0.0, 0.0]),
+        last_velocity: [0.0, 0.0, 0.0],
+        remove_at_unix: now + 60,
+        removed_from_space: false,
+    };
+    with_mut_sp6_state(&ctx.db, |st| {
+        st.disconnected_ships.insert(char_id, disc.clone());
+    });
+
+    // Simulate SelectCharacterID order: ReconnectHoldGuard acquired, then online lock acquired
+    // AFTER a stale caller would have passed `reconnecting_session: None`.
+    let reconnect_guard = crate::router::binding::ReconnectHoldGuard::acquire(&ctx, char_id, 92_102);
+    ctx.db
+        .acquire_online_lock(user_id, 92_102, Some(char_id), true, now)
+        .expect("S2 acquires char_id lock");
+
+    let (valid_with_runtime, valid_tx_only) = ctx.db.with_snapshot(|snap| {
+        let r = super::super::disconnect_hold::is_disconnected_ship_valid(
+            snap.items.contains_key(&ship_id),
+            snap.characters.get(&char_id),
+            &*snap.sessions,
+            Some(&ctx),
+            None,
+            None,
+            Some(&ctx),
+            char_id,
+            &disc,
+            true,
+        );
+        let tx = super::super::disconnect_hold::is_disconnected_ship_valid(
+            snap.items.contains_key(&ship_id),
+            snap.characters.get(&char_id),
+            &*snap.sessions,
+            None,
+            None,
+            None,
+            Some(&ctx),
+            char_id,
+            &disc,
+            true,
+        );
+        (r, tx)
+    });
+    assert!(
+        valid_with_runtime && valid_tx_only,
+        "post-read reconnect_hold_ctx check must preserve disconnected ship despite None pre-snapshot"
+    );
+
+    ctx.advance_secs(1);
+    tick_background_cluster_with_step(&ctx, 1).await;
+    assert!(
+        crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "cluster_tick must retain disconnected_ships while ReconnectHoldGuard is held"
+    );
+
+    drop(reconnect_guard);
+    ctx.advance_secs(1);
+    tick_background_cluster_with_step(&ctx, 1).await;
+    assert!(
+        !crate::sp6_lifecycle::has_active_disconnected_ship(&ctx.db, char_id),
+        "cluster_tick must prune disconnected_ships once ReconnectHoldGuard drops while S2 holds online lock"
     );
 }

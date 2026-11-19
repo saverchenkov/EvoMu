@@ -248,6 +248,22 @@ async fn cleanup_and_ship_cycle_removal_restore_ship_attributes_and_handle_warp(
     let reg = crate::system_actor::SystemRegistry::new();
     let handle = reg.get_or_spawn(30_000_142);
 
+    handle
+        .spawn_ball(Ball {
+            id: 2001,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 40.0,
+            speed_fraction: 1.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
     // Prepare and reconcile disconnected warp
     handle.prepare_disconnected_warp_sync(
         2001,
@@ -2317,6 +2333,38 @@ fn vorton_surface_distance_and_oor_no_miss_1247() {
         actions.is_empty(),
         "out-of-range Vorton/missile cycle must return early without CycleWeaponMiss: {:?}",
         actions.len()
+    );
+}
+
+#[tokio::test]
+async fn prepare_disconnected_warp_sync_does_not_synthesize_missing_ball() {
+    let reg = crate::system_actor::SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+    let missing_ship_id: BallId = 900_200_142;
+
+    handle.prepare_disconnected_warp_sync(
+        missing_ship_id,
+        587,
+        40.0,
+        1_200_000.0,
+        2.5,
+        350.0,
+        4.0,
+        DVec3::ZERO,
+        DVec3::new(1_000_000.0, 0.0, 0.0),
+    );
+
+    assert!(
+        handle
+            .get_ball_snapshot(missing_ship_id)
+            .await
+            .expect("ballpark snapshot query")
+            .is_none(),
+        "prepare_disconnected_warp_sync must never synthesize a ball absent from ballpark"
+    );
+    assert!(
+        handle.committed_warp_destination_sync(missing_ship_id).is_none(),
+        "prepare_disconnected_warp_sync must not record warp state for an absent ball"
     );
 }
 
