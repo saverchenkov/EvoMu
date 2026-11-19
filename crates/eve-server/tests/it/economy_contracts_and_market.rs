@@ -121,6 +121,19 @@ async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
         (1_000_000_010_005_i64, 35836_u32, 1.00_f64, 0.75_f64, 1.00_f64),
     ];
     ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Facility Tax Corp".into();
+        corp.ticker = "FTXC".into();
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
         for &(sid, tid, _, _, _) in &structures {
             snap.structures.insert(
                 sid,
@@ -147,7 +160,7 @@ async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
     let npc_tax = npc_fac.dict_get("tax").and_then(|v| v.as_f64()).unwrap();
     assert!((npc_tax - 0.0025).abs() < 1e-6, "NPC tax must be 0.25%, got {npc_tax}");
 
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess.corp_role = 0;
     let raitaru_id = structures[0].0;
     let tax_dict = vec![(PyRep::Integer(1), PyRep::Real(0.02))];
     rpc_call(

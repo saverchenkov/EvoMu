@@ -985,13 +985,15 @@ fn get_num_items_in_containers_rejects_mixed_invalid_ids_and_checks_db_first_and
         PyRep::Dict(vec![(PyRep::Integer(corp_box_id), PyRep::Integer(1))])
     );
 
-    // Mixed non-integer, empty, or non-positive elements must fail with InvalidContainer rather than dropping bad items.
+    // Mixed non-integer (including Bool), empty, or non-positive elements must fail with InvalidContainer rather than dropping or coercing bad items.
     for bad_arg in [
         PyRep::List(vec![
             PyRep::Integer(corp_box_id),
             PyRep::String("bad".into()),
         ]),
         PyRep::Tuple(vec![PyRep::Integer(corp_box_id), PyRep::None]),
+        PyRep::List(vec![PyRep::Bool(true)]),
+        PyRep::Tuple(vec![PyRep::Integer(corp_box_id), PyRep::Bool(true)]),
         PyRep::List(vec![PyRep::Integer(corp_box_id), PyRep::Integer(0)]),
         PyRep::List(vec![PyRep::Integer(corp_box_id), PyRep::Integer(-1)]),
         PyRep::List(vec![]),
@@ -1063,6 +1065,137 @@ fn get_num_items_in_containers_rejects_mixed_invalid_ids_and_checks_db_first_and
         .unwrap_err()
         .code,
         "CorporationNotFound"
+    );
+}
+
+#[test]
+fn contract_container_corp_access_ignores_stale_session_corp_role() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let corp_id = 98_300_401_i64;
+    let ceo_id = 90_300_401_i64;
+    let plain_member_id = 90_300_402_i64;
+    let corp_office_id = 920_300_401_i64;
+    let corp_box_id = 920_300_402_i64;
+    let inner_item_id = 920_300_403_i64;
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Contract Role Corp".into();
+        corp.ticker = "CRC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.insert(ceo_id);
+        corp.members.insert(plain_member_id);
+        s.corporations.insert(corp_id, corp);
+        s.characters.insert(
+            plain_member_id,
+            eve_db::CharacterRecord {
+                character_id: plain_member_id,
+                corporation_id: corp_id,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            corp_office_id,
+            InventoryItemRecord {
+                item_id: corp_office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            corp_box_id,
+            InventoryItemRecord {
+                item_id: corp_box_id,
+                type_id: 3293,
+                owner_id: corp_id,
+                location_id: corp_office_id,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            inner_item_id,
+            InventoryItemRecord {
+                item_id: inner_item_id,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: corp_box_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 25,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Member of registered corp without DB query/director roles cannot use stale session.corp_role.
+    let mut plain_sess = jita_session(plain_member_id, corp_id);
+    plain_sess.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1];
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut plain_sess,
+            "contractProxy",
+            "GetNumItemsInContainers",
+            &[PyRep::List(vec![PyRep::Integer(corp_box_id)])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut plain_sess,
+            "contractProxy",
+            "GetItemsInContainer",
+            &[
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::Integer(corp_box_id),
+                PyRep::Bool(true),
+                PyRep::Integer(InventoryFlag::CorpSAG2 as i64),
+            ],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Grant DB ROLE_HANGAR_CAN_QUERY[1] while clearing session.corp_role -> both queries succeed via DB roles alone.
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations
+            .get_mut(&corp_id)
+            .unwrap()
+            .member_roles
+            .insert(plain_member_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
+    });
+    plain_sess.corp_role = 0;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut plain_sess,
+            "contractProxy",
+            "GetNumItemsInContainers",
+            &[PyRep::List(vec![PyRep::Integer(corp_box_id)])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Dict(vec![(PyRep::Integer(corp_box_id), PyRep::Integer(1))])
     );
 }
 

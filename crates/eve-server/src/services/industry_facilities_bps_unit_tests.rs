@@ -1202,6 +1202,194 @@ fn corp_blueprints_and_taxes_use_db_first_corp_and_enforce_corp_members() {
     );
 }
 
+#[test]
+fn industry_facilities_bps_db_first_roles_and_corp_facility_locations() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let st_id = 60_003_760_i64;
+    let struct_id = 1_040_999_921_i64;
+    let unreg_struct_id = 1_040_999_922_i64;
+    let bp_type_id = *ctx.sde.blueprints.keys().min().expect("blueprint in SDE");
+    let corp_id = 98_900_921_i64;
+    let unreg_corp_id = 98_900_999_i64;
+    let ceo_id = 2_900_921_i64;
+    let plain_id = 2_900_922_i64;
+    let div2_id = 2_900_923_i64;
+    let unreg_id = 2_900_924_i64;
+    let corp_bp_id = 9_900_921_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "DbRoleCorp".into();
+        corp.ticker = "DRCP".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id, plain_id, div2_id]);
+        corp.member_roles
+            .insert(div2_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, coid) in [
+            (ceo_id, corp_id),
+            (plain_id, corp_id),
+            (div2_id, corp_id),
+            (unreg_id, unreg_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    ..Default::default()
+                },
+            );
+        }
+
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "DB Role Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            unreg_struct_id,
+            UpwellStructureRecord {
+                structure_id: unreg_struct_id,
+                type_id: 35832,
+                owner_corp_id: unreg_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Unregistered Corp Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_bp_id,
+            InventoryItemRecord {
+                item_id: corp_bp_id,
+                type_id: bp_type_id,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Registered corp member without DB roles is denied SetFacilityTaxes, GetBlueprintData, and corp facility locations even with stale session.corp_role.
+    let mut plain_sess = char_session(plain_id, st_id);
+    plain_sess.corporation_id = Some(corp_id);
+    plain_sess.corp_role = u64::MAX;
+
+    let plain_locs = handle_industry_facilities_bps(
+        &ctx,
+        &mut plain_sess,
+        "facilityManager",
+        "GetFacilityLocations",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(plain_rows) = plain_locs else {
+        panic!("expected list from GetFacilityLocations");
+    };
+    assert!(
+        !plain_rows
+            .iter()
+            .any(|row| row.dict_get("ownerID").and_then(PyRep::as_i64) == Some(corp_id)),
+        "stale session.corp_role must not expose corp facility locations"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut plain_sess,
+            "facilityManager",
+            "SetFacilityTaxes",
+            &[PyRep::Integer(struct_id), PyRep::Real(0.04)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut plain_sess,
+            "blueprintManager",
+            "GetBlueprintData",
+            &[PyRep::Integer(corp_bp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+
+    // 2. DB division take role grants only that division's corp facility location (flagID 116) even with session.corp_role == 0.
+    let mut div2_sess = char_session(div2_id, st_id);
+    div2_sess.corporation_id = Some(corp_id);
+    div2_sess.corp_role = 0;
+    let div2_locs = handle_industry_facilities_bps(
+        &ctx,
+        &mut div2_sess,
+        "facilityManager",
+        "GetFacilityLocations",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(div2_rows) = div2_locs else {
+        panic!("expected list from GetFacilityLocations");
+    };
+    let corp_flags: Vec<i64> = div2_rows
+        .iter()
+        .filter(|row| row.dict_get("ownerID").and_then(PyRep::as_i64) == Some(corp_id))
+        .filter_map(|row| row.dict_get("flagID").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(corp_flags, vec![116]);
+
+    // 3. Unregistered corp (>= 98M without DB CorporationRecord) is denied SetFacilityTaxes even with ROLE_DIRECTOR in session.
+    let mut unreg_sess = char_session(unreg_id, st_id);
+    unreg_sess.corporation_id = Some(unreg_corp_id);
+    unreg_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut unreg_sess,
+            "facilityManager",
+            "SetFacilityTaxes",
+            &[PyRep::Integer(unreg_struct_id), PyRep::Real(0.04)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;

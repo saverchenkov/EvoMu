@@ -96,8 +96,29 @@ fn blueprint_data_corp_permissions_contract_visibility_and_nested_container_reso
     .unwrap_err();
     assert_eq!(err_corp.code, "OwnerAccessDenied");
 
-    // 2. Grant ROLE_FACTORY_MANAGER -> 1-arg call returns canonical (bps, bpCounts) 2-tuple with BPC resolved to st_id facility
+    // 2. Stale session.corp_role without DB role still fails with OwnerAccessDenied
     sess.corp_role = corp_roles::ROLE_FACTORY_MANAGER;
+    assert_eq!(
+        call_ind_bps(
+            &ctx,
+            &mut sess,
+            "blueprintManager",
+            "GetBlueprintDataByOwner",
+            &[PyRep::Integer(corp_id)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "OwnerAccessDenied"
+    );
+
+    // Grant DB ROLE_FACTORY_MANAGER and reset session.corp_role = 0 -> 1-arg call returns canonical (bps, bpCounts) 2-tuple with BPC resolved to st_id facility
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, corp_roles::ROLE_FACTORY_MANAGER);
+    });
+    sess.corp_role = 0;
     let corp_bps = call_ind_bps(
         &ctx,
         &mut sess,
@@ -350,8 +371,29 @@ fn facility_manager_limits_locations_and_set_facility_taxes_dict_keyval_and_role
         "FacilityPermissionDenied"
     );
 
-    // Grant ROLE_STATION_MANAGER and test KeyVal and Dict tax updates (including ppm > 100.0 normalization)
+    // Stale session.corp_role without DB member_roles must still fail with InsufficientCorpRoles
     sess.corp_role = corp_roles::ROLE_STATION_MANAGER;
+    assert_eq!(
+        call_ind_bps(
+            &ctx,
+            &mut sess,
+            "facilityManager",
+            "SetFacilityTaxes",
+            &[PyRep::Integer(struct_id), PyRep::Real(0.04)],
+            &kw,
+        )
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+
+    // Grant ROLE_STATION_MANAGER in DB and verify KeyVal and Dict tax updates succeed even with session.corp_role == 0
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.members.insert(char_id);
+        corp.member_roles.insert(char_id, corp_roles::ROLE_STATION_MANAGER);
+    });
+    sess.corp_role = 0;
     let kv_taxes = PyRep::keyval([
         ("manufacturing", PyRep::Real(40_000.0)), // 40,000 ppm -> 0.04 (4%)
         ("reaction", PyRep::Real(0.06)),

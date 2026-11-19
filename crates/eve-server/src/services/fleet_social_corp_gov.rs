@@ -977,7 +977,16 @@ pub(super) fn handle_get_wallet_divisions_info(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+    let corp_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| {
+            ctx.db
+                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
+                .filter(|&id| id > 0)
+        })
+        .or_else(|| session.corporation_id.filter(|&id| id > 0))
+        .unwrap_or(0);
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1038,10 +1047,11 @@ pub(super) fn handle_corp_gov(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = session
-        .corporation_id
+    let corp_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
         .filter(|&id| id > 0)
-        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id)))
+        .or_else(|| session.corporation_id.filter(|&id| id > 0))
         .unwrap_or(0);
     super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();

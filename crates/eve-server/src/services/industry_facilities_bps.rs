@@ -1383,7 +1383,7 @@ pub fn handle_industry_facilities_bps(
                                 corp_id,
                                 char_id,
                                 Some(fid),
-                                session.corp_role,
+                                0,
                                 ctx.now_unix(),
                             );
                             let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
@@ -1664,19 +1664,26 @@ pub fn handle_industry_facilities_bps(
                             client_error: None,
                         });
                     }
-                    if let Some(corp) = snap.corporations.get(&owner_corp_id) {
-                        if corp.ceo_id != char_id
-                            && !corp.members.is_empty()
-                            && !corp.members.contains(&char_id)
-                        {
-                            return Err(BridgeRpcError {
-                                code: "CorpRoleDenied".into(),
-                                message: format!(
-                                    "Character {char_id} is not a member of corporation {owner_corp_id}"
-                                ),
-                                client_error: None,
-                            });
-                        }
+                    let Some(corp) = snap.corporations.get(&owner_corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!(
+                                "Corporation {owner_corp_id} is not registered"
+                            ),
+                            client_error: None,
+                        });
+                    };
+                    if corp.ceo_id != char_id
+                        && !corp.members.is_empty()
+                        && !corp.members.contains(&char_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "CorpRoleDenied".into(),
+                            message: format!(
+                                "Character {char_id} is not a member of corporation {owner_corp_id}"
+                            ),
+                            client_error: None,
+                        });
                     }
                     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_STATION_MANAGER;
@@ -1684,7 +1691,7 @@ pub fn handle_industry_facilities_bps(
                         owner_corp_id,
                         char_id,
                         Some(facility_id),
-                        session.corp_role,
+                        0,
                         ctx.now_unix(),
                     );
                     if !is_ceo && (eff_roles & req_roles) == 0 {
@@ -1874,7 +1881,7 @@ fn caller_has_corp_blueprint_access(
         corp_id,
         char_id,
         facility_filter,
-        session.corp_role,
+        0,
         ctx.now_unix(),
     );
     is_ceo || (eff_roles & CORP_BP_ROLES) != 0

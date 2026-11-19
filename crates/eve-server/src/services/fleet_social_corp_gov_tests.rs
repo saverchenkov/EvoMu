@@ -2004,3 +2004,83 @@ async fn add_corp_and_recruitment_ads_store_typed_fields_with_recruiter_cap_and_
     let _ = std::fs::remove_file(db_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("sqlite-shm"));
 }
+
+#[tokio::test]
+async fn corp_gov_resolves_db_first_corp_id_over_stale_session() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_a = 98_700_301_i64;
+    let corp_b = 98_700_302_i64;
+    let ceo_a = 91_700_301_i64;
+    let ceo_b = 91_700_302_i64;
+    let acc_b = 91_700_303_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, ceo, name, extra_mem) in [
+            (corp_a, ceo_a, "GovCorpA", None),
+            (corp_b, ceo_b, "GovCorpB", Some(acc_b)),
+        ] {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = cid;
+            corp.name = name.into();
+            corp.ticker = name[..3].to_uppercase();
+            corp.ceo_id = ceo;
+            corp.members.insert(ceo);
+            if let Some(mid) = extra_mem {
+                corp.members.insert(mid);
+                corp.member_roles
+                    .insert(mid, eve_db::corp_roles::ROLE_ACCOUNTANT);
+            }
+            corp.ensure_wallet_divisions();
+            snap.corporations.insert(cid, corp);
+        }
+        for (char_id, cid) in [(ceo_a, corp_a), (ceo_b, corp_b), (acc_b, corp_b)] {
+            snap.characters.insert(
+                char_id,
+                eve_db::CharacterRecord {
+                    character_id: char_id,
+                    corporation_id: cid,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // ceo_b has DB corp_b while session.corporation_id is stale corp_a -> UpdateCorporationAbilities/UpdateAttributes & GetWalletDivisionsInfo target DB corp_b.
+    let mut stale_b_sess = SessionState::new(91_702);
+    stale_b_sess.user_id = Some(702);
+    stale_b_sess.character_id = Some(ceo_b);
+    stale_b_sess.corporation_id = Some(corp_a);
+    stale_b_sess.corp_role = 0;
+
+    let updated_b = call_gov(
+        &ctx,
+        &mut stale_b_sess,
+        "corpRegistry",
+        "UpdateCorporationAbilities",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(kv(&updated_b, "corporationID").as_i64(), Some(corp_b));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.corp_member_limits.contains_key(&corp_a));
+        assert!(snap.corp_member_limits.contains_key(&corp_b));
+    });
+
+    // GetWalletDivisionsInfo with omitted args also resolves DB-first corp_b instead of stale session corp_a.
+    let mut acc_stale_sess = SessionState::new(91_703);
+    acc_stale_sess.user_id = Some(703);
+    acc_stale_sess.character_id = Some(acc_b);
+    acc_stale_sess.corporation_id = Some(corp_a);
+    acc_stale_sess.corp_role = u64::MAX;
+    let divs = call_gov(
+        &ctx,
+        &mut acc_stale_sess,
+        "account",
+        "GetWalletDivisionsInfo",
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rs_rows(&divs).len(), 7);
+}

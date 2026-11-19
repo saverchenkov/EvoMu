@@ -381,7 +381,7 @@ pub fn handle_corp_gov_tail(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut skills_owner_id = char_id;
                 let (is_ceo, caller_role) =
-                    snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(crate::services::account_services::err(
                         "CorporationNotFound",

@@ -565,3 +565,58 @@ fn corp_gov_tail_enforces_non_empty_corp_members() {
         "CorpRoleDenied"
     );
 }
+
+#[test]
+fn corp_gov_tail_update_attributes_rejects_stale_session_corp_role() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_id = 98_600_801_i64;
+    let ceo_id = 91_600_801_i64;
+    let plain_id = 91_600_802_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "AttrRoleCorp".into();
+        corp.ticker = "ARC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id, plain_id]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+    });
+
+    let mut plain_sess = make_session(plain_id, corp_id);
+    plain_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut plain_sess,
+            "corpRegistry",
+            "UpdateAttributes",
+            &[],
+            corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut ceo_sess = make_session(ceo_id, corp_id);
+    ceo_sess.corp_role = 0;
+    assert!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut ceo_sess,
+            "corpRegistry",
+            "UpdateAttributes",
+            &[],
+            corp_id,
+            ceo_id,
+            1000,
+        )
+        .unwrap()
+        .is_ok()
+    );
+}

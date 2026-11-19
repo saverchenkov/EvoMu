@@ -1320,3 +1320,156 @@ async fn require_director_and_executor_use_db_first_and_enforce_corp_members() {
         "NotInAlliance"
     );
 }
+
+#[tokio::test]
+async fn alliance_kick_and_delete_member_db_first_rbac_blocks_stale_session() {
+    let (ctx, _clock, mut exec, memb, _) = setup_alliance_sandbox();
+    let created = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "CreateAlliance",
+        vec![PyRep::String("Kick Leave Guard".into()), PyRep::String("KLG".into())],
+    )
+    .await
+    .unwrap();
+    let aid = created.dict_get("allianceID").unwrap().as_i64().unwrap();
+    let exec_corp = exec.corporation_id.unwrap();
+    let memb_corp = memb.corporation_id.unwrap();
+    let memb_char = memb.character_id.unwrap();
+    let non_dir_char = 91_000_201_i64;
+    let rogue_corp = 98_100_299_i64;
+    let rogue_char = 91_000_202_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(a) = snap.alliances.get_mut(&aid) {
+            a.member_corp_ids.insert(memb_corp);
+        }
+        if let Some(c) = snap.corporations.get_mut(&memb_corp) {
+            c.alliance_id = Some(aid);
+        }
+        if let Some(ch) = snap.characters.get_mut(&memb_char) {
+            ch.alliance_id = Some(aid);
+        }
+        if let Some(c) = snap.corporations.get_mut(&exec_corp) {
+            c.members.insert(non_dir_char);
+        }
+        snap.characters.insert(
+            non_dir_char,
+            eve_db::CharacterRecord {
+                character_id: non_dir_char,
+                corporation_id: exec_corp,
+                alliance_id: Some(aid),
+                ..Default::default()
+            },
+        );
+        let mut rcorp = eve_db::CorporationRecord::default();
+        rcorp.corporation_id = rogue_corp;
+        rcorp.name = "Rogue Corp".into();
+        rcorp.ticker = "ROG".into();
+        rcorp.ceo_id = rogue_char;
+        rcorp.members.insert(rogue_char);
+        snap.corporations.insert(rogue_corp, rcorp);
+        snap.characters.insert(
+            rogue_char,
+            eve_db::CharacterRecord {
+                character_id: rogue_char,
+                corporation_id: rogue_corp,
+                alliance_id: None,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Non-director member of executor corp with stale session.corp_role = ROLE_DIRECTOR is denied KickMember & DeleteMember.
+    let mut non_dir_sess = SessionState::new(91_201);
+    non_dir_sess.user_id = Some(201);
+    non_dir_sess.character_id = Some(non_dir_char);
+    non_dir_sess.corporation_id = Some(exec_corp);
+    non_dir_sess.alliance_id = Some(aid);
+    non_dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        call_social(&ctx, &mut non_dir_sess, "allianceRegistry", "KickMember", vec![PyRep::Integer(memb_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_social(&ctx, &mut non_dir_sess, "allianceRegistry", "DeleteMember", vec![PyRep::Integer(exec_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // 2. Non-executor member corp CEO spoofing session.corporation_id = exec_corp cannot KickMember or withdraw exec_corp.
+    let mut spoof_exec_sess = memb.clone();
+    spoof_exec_sess.corporation_id = Some(exec_corp);
+    spoof_exec_sess.alliance_id = Some(aid);
+    spoof_exec_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_social(&ctx, &mut spoof_exec_sess, "allianceRegistry", "KickMember", vec![PyRep::Integer(memb_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotAllianceExecutor"
+    );
+    assert_eq!(
+        call_social(&ctx, &mut spoof_exec_sess, "allianceRegistry", "DeleteMember", vec![PyRep::Integer(exec_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // 3. Outside corp CEO spoofing session.corporation_id = exec_corp & session.alliance_id = aid is denied both.
+    let mut rogue_sess = SessionState::new(91_202);
+    rogue_sess.user_id = Some(202);
+    rogue_sess.character_id = Some(rogue_char);
+    rogue_sess.corporation_id = Some(exec_corp);
+    rogue_sess.alliance_id = Some(aid);
+    rogue_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_social(&ctx, &mut rogue_sess, "allianceRegistry", "KickMember", vec![PyRep::Integer(memb_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInAlliance"
+    );
+    assert_eq!(
+        call_social(&ctx, &mut rogue_sess, "allianceRegistry", "DeleteMember", vec![PyRep::Integer(rogue_corp)])
+            .await
+            .unwrap_err()
+            .code,
+        "NotInAlliance"
+    );
+
+    // 4. Legitimate executor CEO with stale/cleared session.alliance_id resolves DB alliance for KickMember & DeleteMember.
+    let mut exec_stale_sess = exec.clone();
+    exec_stale_sess.alliance_id = Some(99_999_999);
+    let kicked = call_social(
+        &ctx,
+        &mut exec_stale_sess,
+        "allianceRegistry",
+        "KickMember",
+        vec![PyRep::Integer(memb_corp)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(kicked.dict_get("allianceID").and_then(PyRep::as_i64), Some(aid));
+    assert_eq!(kicked.dict_get("removed").and_then(PyRep::as_bool), Some(true));
+
+    exec_stale_sess.alliance_id = None;
+    let leave = call_social(
+        &ctx,
+        &mut exec_stale_sess,
+        "allianceRegistry",
+        "DeleteMember",
+        vec![PyRep::Integer(exec_corp)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(leave.dict_get("allianceID").and_then(PyRep::as_i64), Some(aid));
+    assert_eq!(leave.dict_get("corporationID").and_then(PyRep::as_i64), Some(exec_corp));
+}

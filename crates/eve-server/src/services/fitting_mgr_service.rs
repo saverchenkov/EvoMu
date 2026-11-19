@@ -181,18 +181,17 @@ fn resolve_and_authorize_fitting_owner(
                 ),
             ));
         }
-        let (corp_exists, excluded_member, _alliance_exists, in_alliance) =
+        let (corp_exists, excluded_member, in_alliance) =
             ctx.db.with_snapshot(|s| {
                 let corp_opt = s.corporations.get(&caller_corp);
                 let corp_ok = corp_opt.is_some();
                 let excluded = corp_opt.is_some_and(|c| is_excluded_corp_member(c, char_id));
                 let alliance_opt = s.alliances.get(&target_owner);
-                let ally_exists = alliance_opt.is_some();
                 let alliance_ok = alliance_opt.map_or(true, |a| {
                     a.member_corp_ids.contains(&caller_corp)
                         || corp_opt.and_then(|c| c.alliance_id) == Some(target_owner)
                 });
-                (corp_ok, excluded, ally_exists, alliance_ok)
+                (corp_ok, excluded, alliance_ok)
             });
         if !in_alliance {
             return Err(crate::services::account_services::err(

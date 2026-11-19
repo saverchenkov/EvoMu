@@ -50,6 +50,14 @@ fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bo
     corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
 }
 
+fn alliance_rpc_error(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.to_owned(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
@@ -71,7 +79,7 @@ fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<
             return None;
         }
         let (is_ceo, roles) =
-            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+            snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
         (is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)).then_some(corp_id)
     });
     corp_id.ok_or_else(|| BridgeRpcError {
@@ -766,45 +774,54 @@ pub async fn handle(
             ])))
         }
 
-        ("allianceRegistry", "KickMember") | ("allianceRegistry", "DeleteMember") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let aid = session.alliance_id.unwrap_or(0);
+        ("allianceRegistry", "KickMember") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let pre_aid = ctx.db.with_snapshot(|snap| {
+                let ccorp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                snap.corporations
+                    .get(&ccorp)
+                    .and_then(|c| c.alliance_id)
+                    .or_else(|| {
+                        snap.alliances
+                            .values()
+                            .find(|a| a.member_corp_ids.contains(&ccorp))
+                            .map(|a| a.alliance_id)
+                    })
+                    .unwrap_or(0)
+            });
+            if pre_aid > 0 {
+                let _ = sync_alliance_timers(ctx, pre_aid);
+            }
+            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let _ = sync_alliance_timers(ctx, aid);
-            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_corp);
+            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
-            let (exec_corp, has_active_war) = ctx.db.with_snapshot(|snap| {
-                let exec = snap.alliances.get(&aid).map(|a| a.executor_corp_id).unwrap_or(0);
+            let (caller_corp, is_member, has_active_war) = ctx.db.with_snapshot(|snap| {
+                let caller_corp = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                let is_member = snap
+                    .alliances
+                    .get(&aid)
+                    .is_some_and(|a| a.member_corp_ids.contains(&target_corp));
                 let in_war = snap.wars.values().any(|w| {
                     w.active && (w.aggressor_corp_id == target_corp || w.defender_corp_id == target_corp || w.aggressor_corp_id == aid || w.defender_corp_id == aid)
                 });
-                (exec, in_war)
+                (caller_corp, is_member, in_war)
             });
-            if method == "KickMember" && caller_corp != exec_corp {
-                return Some(Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can kick alliance members".into(), client_error: None }));
-            }
-            if method == "DeleteMember" && target_corp != caller_corp {
-                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "A corporation can only withdraw itself from the alliance".into(), client_error: None }));
-            }
-            if let Err(e) = require_corp_director(ctx, session) {
-                return Some(Err(e));
+            if !is_member {
+                return Some(Err(BridgeRpcError { code: "AllianceMemberNotFound".into(), message: format!("Corporation {target_corp} is not a member of alliance {aid}"), client_error: None }));
             }
             if has_active_war {
                 return Some(Err(BridgeRpcError { code: "CannotLeaveAllianceDuringWar".into(), message: "Member corporations cannot leave an alliance during an active war".into(), client_error: None }));
-            }
-            let immediate = method == "KickMember";
-            if !immediate {
-                let eff = now_unix + 86_400;
-                with_alliance_war_state(ctx, |st| {
-                    st.alliances.entry(aid).or_default().pending_leaves.insert(target_corp, eff);
-                });
-                return Some(Ok(PyRep::keyval([
-                    ("allianceID", PyRep::Integer(aid)),
-                    ("corporationID", PyRep::Integer(target_corp)),
-                    ("leaveEffectiveTime", PyRep::Integer(eff as i64)),
-                    ("delaySeconds", PyRep::Integer(86_400)),
-                    ("allianceClosed", PyRep::Bool(false)),
-                ])));
             }
             with_alliance_war_state(ctx, |st| {
                 st.alliances.entry(aid).or_default().pending_leaves.insert(target_corp, now_unix);
@@ -818,6 +835,58 @@ pub async fn handle(
                 ("corporationID", PyRep::Integer(target_corp)),
                 ("removed", PyRep::Bool(true)),
                 ("allianceClosed", PyRep::Bool(closed)),
+            ])))
+        }
+
+        ("allianceRegistry", "DeleteMember") => {
+            let caller_corp = match require_corp_director(ctx, session) { Ok(c) => c, Err(e) => return Some(Err(e)) };
+            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_corp);
+            if target_corp != caller_corp {
+                return Some(Err(alliance_rpc_error("CorpRoleDenied", "A corporation can only withdraw itself from the alliance")));
+            }
+            let pre_aid = ctx.db.with_snapshot(|snap| {
+                snap.corporations
+                    .get(&caller_corp)
+                    .and_then(|c| c.alliance_id)
+                    .or_else(|| {
+                        snap.alliances
+                            .values()
+                            .find(|a| a.member_corp_ids.contains(&caller_corp))
+                            .map(|a| a.alliance_id)
+                    })
+                    .unwrap_or(0)
+            });
+            if pre_aid <= 0 {
+                return Some(Err(alliance_rpc_error("NotInAlliance", "Your corporation is not in an alliance")));
+            }
+            let _ = sync_alliance_timers(ctx, pre_aid);
+            let now_unix = ctx.now_unix();
+            let (is_member, has_active_war) = ctx.db.with_snapshot(|snap| {
+                let is_mem = snap
+                    .alliances
+                    .get(&pre_aid)
+                    .is_some_and(|a| a.member_corp_ids.contains(&caller_corp));
+                let in_war = snap.wars.values().any(|w| {
+                    w.active && (w.aggressor_corp_id == caller_corp || w.defender_corp_id == caller_corp || w.aggressor_corp_id == pre_aid || w.defender_corp_id == pre_aid)
+                });
+                (is_mem, in_war)
+            });
+            if !is_member {
+                return Some(Err(alliance_rpc_error("NotInAlliance", "Your corporation is not a member of an alliance")));
+            }
+            if has_active_war {
+                return Some(Err(alliance_rpc_error("CannotLeaveAllianceDuringWar", "Member corporations cannot leave an alliance during an active war")));
+            }
+            let eff = now_unix + 86_400;
+            with_alliance_war_state(ctx, |st| {
+                st.alliances.entry(pre_aid).or_default().pending_leaves.insert(caller_corp, eff);
+            });
+            Some(Ok(PyRep::keyval([
+                ("allianceID", PyRep::Integer(pre_aid)),
+                ("corporationID", PyRep::Integer(caller_corp)),
+                ("leaveEffectiveTime", PyRep::Integer(eff as i64)),
+                ("delaySeconds", PyRep::Integer(86_400)),
+                ("allianceClosed", PyRep::Bool(false)),
             ])))
         }
 
