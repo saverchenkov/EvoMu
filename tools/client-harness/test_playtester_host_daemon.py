@@ -343,6 +343,34 @@ class TestBugOracleSlashErrors(unittest.TestCase):
                     {"service": "dogmaIM", "method": "Activate", "error": "RuntimeError('boom')"}
                 )
             )
+            macho_only_res = {
+                "action_ok": False,
+                "action_error": "beyonce.CmdStargateJump: GateClosed",
+                "flight_recorder": {
+                    "log_exceptions": [],
+                    "quasar_errors": [],
+                    "macho_exceptions": [
+                        {"kind": "macho", "service": "beyonce", "method": "CmdStargateJump", "error": "UserError('CustomInfo', {'info': (101, 'UI/GateIcons/GateClosed')})"}
+                    ],
+                },
+            }
+            macho_queued = oracle.evaluate_step(
+                step_num=2,
+                git_head="deadbeef",
+                decision={"action": {"type": "jump_gate", "target": "Urlen", "expected_ui_and_state_change": ""}, "bug_report": {"should_file": False}},
+                exec_res=macho_only_res,
+                ui_snapshot={},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(len(macho_queued), 1)
+            payload = json.loads(Path(macho_queued[0]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["manual_report"]["category_id"], "macho")
+            self.assertIn("MachoNet error on jump_gate (beyonce.CmdStargateJump)", payload["manual_report"]["title"])
+            self.assertNotIn("Quasar", payload["manual_report"]["title"])
 
 
 
