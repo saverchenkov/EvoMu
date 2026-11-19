@@ -915,3 +915,92 @@ fn handshake_state_machine_retry_bounds_and_missing_identity_error() {
     assert!(matches!(sm_retry.phase, HandshakePhase::Failed(_)));
 }
 
+// Regression test for issue #1360
+#[test]
+fn gps_transport_closed_to_pyrep_emits_v24_object_ex1_reduce_wire_format() {
+    let mut closed = GPSTransportClosed::new("Bad build", "HANDSHAKE_INCOMPATIBLEBUILD")
+        .with_arg("serverBuild", PyRep::Integer(3_698_585))
+        .with_arg("clientBuild", PyRep::Integer(100));
+    closed.macho_version = 496;
+    closed.version = 24.02;
+    closed.build = 3_698_585;
+    closed.codename = "V24.02".into();
+    closed.region = "ccp".into();
+    closed.logged_on_user_count = 17;
+
+    let rep = closed.to_pyrep();
+    let PyRep::ObjectEx {
+        is_type_2,
+        header,
+        list,
+        dict,
+    } = &rep
+    else {
+        panic!("V24 GPSTransportClosed must encode as ObjectEx1, got {rep:?}");
+    };
+    assert!(!is_type_2, "must emit Op_PyObjectEx1 (is_type_2 = false)");
+    assert!(list.is_empty());
+    assert!(dict.is_empty());
+
+    let PyRep::Tuple(hdr) = header.as_ref() else {
+        panic!("ObjectEx1 header must be a 2-tuple");
+    };
+    assert_eq!(hdr.len(), 2);
+    assert_eq!(
+        hdr[0],
+        PyRep::Token("exceptions.GPSTransportClosed".into())
+    );
+    let PyRep::Tuple(args) = &hdr[1] else {
+        panic!("ObjectEx1 header[1] must be positional __init__ args tuple");
+    };
+    assert_eq!(
+        args,
+        &vec![
+            PyRep::ascii_bytes("Bad build"),
+            PyRep::ascii_bytes("HANDSHAKE_INCOMPATIBLEBUILD"),
+            PyRep::Dict(vec![
+                (PyRep::ascii_bytes("clientBuild"), PyRep::Integer(100)),
+                (
+                    PyRep::ascii_bytes("serverBuild"),
+                    PyRep::Integer(3_698_585)
+                ),
+            ]),
+            PyRep::Integer(496),
+            PyRep::Real(24.02),
+            PyRep::Integer(3_698_585),
+            PyRep::ascii_bytes("V24.02"),
+            PyRep::ascii_bytes("ccp"),
+            PyRep::None,
+            PyRep::Integer(17),
+        ]
+    );
+
+    let wire = eve_proto::marshal::encode(&rep);
+    assert_eq!(wire[0], eve_proto::MARSHAL_HEADER_BYTE);
+    assert_eq!(
+        wire[5],
+        eve_proto::MarshalOpcode::PyObjectEx1 as u8,
+        "wire stream must start with Op_PyObjectEx1 (0x22), never Op_PyObject (0x17)"
+    );
+    assert_ne!(wire[5], eve_proto::MarshalOpcode::PyObject as u8);
+
+    let decoded_rep = eve_proto::marshal::decode(&wire).expect("marshal round-trip");
+    assert_eq!(decoded_rep, rep);
+    let parsed = GPSTransportClosed::from_pyrep(&decoded_rep)
+        .expect("from_pyrep must decode ObjectEx1 wire payload");
+    assert_eq!(parsed.reason, "Bad build");
+    assert_eq!(
+        parsed.reason_code.as_deref(),
+        Some("HANDSHAKE_INCOMPATIBLEBUILD")
+    );
+    assert_eq!(
+        parsed.reason_args.get("serverBuild"),
+        Some(&PyRep::Integer(3_698_585))
+    );
+    assert_eq!(
+        parsed.reason_args.get("clientBuild"),
+        Some(&PyRep::Integer(100))
+    );
+}
+
+

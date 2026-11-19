@@ -673,3 +673,71 @@ fn state_machine_edge_transitions() {
     let already = sm2.step(&PyRep::None).unwrap_err();
     assert_eq!(already.reason_code.as_deref(), Some("HANDSHAKE_ALREADY_COMPLETE"));
 }
+
+#[test]
+fn gps_transport_closed_to_pyrep_none_reason_code_and_unicode_reason() {
+    let closed_none = GPSTransportClosed {
+        reason: "Disconnected cleanly".into(),
+        reason_code: None,
+        reason_args: HashMap::new(),
+        macho_version: 496,
+        version: 24.02,
+        build: 3_698_585,
+        codename: "V24.02".into(),
+        region: "ccp".into(),
+        logged_on_user_count: 0,
+    };
+    let rep_none = closed_none.to_pyrep();
+    let PyRep::ObjectEx {
+        is_type_2,
+        header,
+        list,
+        dict,
+    } = &rep_none
+    else {
+        panic!("expected ObjectEx1");
+    };
+    assert!(!is_type_2);
+    assert!(list.is_empty());
+    assert!(dict.is_empty());
+    let PyRep::Tuple(hdr) = header.as_ref() else {
+        panic!("expected header tuple");
+    };
+    let PyRep::Tuple(args) = &hdr[1] else {
+        panic!("expected args tuple");
+    };
+    assert_eq!(args[1], PyRep::None);
+    assert_eq!(args[2], PyRep::Dict(Vec::new()));
+    assert_eq!(args[9], PyRep::Integer(0));
+    let wire_none = eve_proto::marshal::encode(&rep_none);
+    assert_eq!(wire_none[5], eve_proto::MarshalOpcode::PyObjectEx1 as u8);
+    let parsed_none = GPSTransportClosed::from_pyrep(
+        &eve_proto::marshal::decode(&wire_none).expect("decode"),
+    )
+    .expect("from_pyrep");
+    assert_eq!(parsed_none.reason, "Disconnected cleanly");
+    assert_eq!(parsed_none.reason_code, None);
+
+    let unicode_reason = "Server closing — maintenance";
+    let closed_utf8 = GPSTransportClosed::new(unicode_reason, "ClusterShutdown");
+    let rep_utf8 = closed_utf8.to_pyrep();
+    let PyRep::ObjectEx { header: u_hdr, .. } = &rep_utf8 else {
+        panic!("expected ObjectEx1 for utf8 reason");
+    };
+    let PyRep::Tuple(u_hdr_items) = u_hdr.as_ref() else {
+        panic!("expected header tuple");
+    };
+    let PyRep::Tuple(u_args) = &u_hdr_items[1] else {
+        panic!("expected args tuple");
+    };
+    assert_eq!(u_args[0], PyRep::String(unicode_reason.into()));
+    let wire_utf8 = eve_proto::marshal::encode(&rep_utf8);
+    assert_eq!(wire_utf8[5], eve_proto::MarshalOpcode::PyObjectEx1 as u8);
+    let parsed_utf8 = GPSTransportClosed::from_pyrep(
+        &eve_proto::marshal::decode(&wire_utf8).expect("decode utf8"),
+    )
+    .expect("from_pyrep utf8");
+    assert_eq!(parsed_utf8.reason, unicode_reason);
+    assert_eq!(parsed_utf8.reason_code.as_deref(), Some("ClusterShutdown"));
+}
+
