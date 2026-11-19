@@ -1200,8 +1200,8 @@ pub fn handle_pi_colonies(
                                         client_error: None,
                                     });
                                 };
-                                if let Some(heads) = parsed_heads {
-                                    for &(_, hlat, hlon) in &heads {
+                                if let Some(ref heads) = parsed_heads {
+                                    for &(_, hlat, hlon) in heads {
                                         if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
                                             return Err(BridgeRpcError {
                                                 code: "ExtractorHeadOutOfRange".into(),
@@ -1210,7 +1210,6 @@ pub fn handle_pi_colonies(
                                             });
                                         }
                                     }
-                                    pin.extractor_heads = heads;
                                 }
                                 let actual_res_tid = if res_tid > 0 { res_tid } else { 2268 };
                                 let prev_res_tid = pin.extractor_resource_type_id.unwrap_or(actual_res_tid);
@@ -1228,6 +1227,9 @@ pub fn handle_pi_colonies(
                                         pin.extractor_heads.clone(),
                                         pin.extractor_head_radius.max(0.02),
                                     ));
+                                }
+                                if let Some(heads) = parsed_heads {
+                                    pin.extractor_heads = heads;
                                 }
                                 pin.extractor_depletion_cycles = if actual_res_tid == prev_res_tid {
                                     pin.extractor_depletion_cycles.max(

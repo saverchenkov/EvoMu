@@ -818,6 +818,7 @@ impl ShipFittingEngine {
             .get_mut(&module_item_id)
             .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
         m.state = ModuleState::Offline;
+        self.pending_overload_modules.remove(&module_item_id);
         self.recalculate_stats(sde);
         let _ = self.enforce_post_unfit_or_offline_constraints(sde);
         Ok(())
@@ -833,6 +834,7 @@ impl ShipFittingEngine {
             .modules
             .remove(&module_item_id)
             .ok_or_else(|| format!("Module {module_item_id} is not fitted"))?;
+        let had_pending_overload = self.pending_overload_modules.remove(&module_item_id);
         self.recalculate_stats(sde);
         if (125..=129).contains(&removed.flag_id) {
             let max_lo = self.ship.get_attribute(attr_ids::LOW_SLOTS, sde).max(0.0) as u16;
@@ -846,6 +848,9 @@ impl ShipFittingEngine {
             });
             if slot_overflow {
                 self.modules.insert(module_item_id, removed);
+                if had_pending_overload {
+                    self.pending_overload_modules.insert(module_item_id);
+                }
                 self.recalculate_stats(sde);
                 return Err(
                     "SubsystemHasFittedModules: Cannot unfit subsystem while modules occupy its slots"
@@ -891,6 +896,7 @@ impl ShipFittingEngine {
             }
             mod_entry.state = ModuleState::Online;
         }
+        self.pending_overload_modules.remove(&module_item_id);
         self.recalculate_stats(sde);
         Ok(())
     }
@@ -920,6 +926,8 @@ impl ShipFittingEngine {
                 ModuleState::Active
             };
         }
+        // Clear any queued pre-overload marker once the module is explicitly activated.
+        self.pending_overload_modules.remove(&module_item_id);
         self.recalculate_stats(sde);
         Ok(())
     }

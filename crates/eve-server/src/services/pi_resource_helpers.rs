@@ -327,9 +327,13 @@ fn seed_legacy_colony_pressure(
     {
         return;
     }
+    let mut saw_legacy_colony = false;
     for col in snap.planetary_colonies.values() {
         if col.planet_id != planet_id {
             continue;
+        }
+        if !col.extracted_commodities.is_empty() {
+            saw_legacy_colony = true;
         }
         let factor = depletion_recovery_factor(col.last_extracted_unix, now_unix);
         for (&tid, &qty) in &col.extracted_commodities {
@@ -339,7 +343,9 @@ fn seed_legacy_colony_pressure(
             }
         }
     }
-    if !depl_state.colony_extraction_pressure.is_empty() && now_unix > 0 {
+    // Mark planets whose legacy colonies already decayed below 1.0 as migrated so later
+    // `last_extracted_unix` bumps during colony ticks cannot re-trigger legacy fallback at 1.0x.
+    if (!depl_state.colony_extraction_pressure.is_empty() || saw_legacy_colony) && now_unix > 0 {
         depl_state.colony_pressure_last_unix = now_unix;
     }
 }
