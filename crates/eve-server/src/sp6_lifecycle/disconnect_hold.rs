@@ -170,23 +170,34 @@ pub(super) fn is_disconnected_ship_valid(
     online_check: Option<&ServerContext>,
     prelogoff_session: Option<(u64, u64)>,
     reconnecting_session: Option<u64>,
+    reconnect_hold_ctx: Option<&ServerContext>,
     cid: i64,
     disc: &DisconnectedShipEntry,
     require_char_record: bool,
 ) -> bool {
-    let is_hold_exempt_session = |os: &eve_db::OnlineSessionRecord| {
-        prelogoff_session == Some((os.session_id, os.connected_at_unix))
-            || reconnecting_session == Some(os.session_id)
-    };
     let pilot_ok = |c: &eve_db::CharacterRecord| {
-        let runtime_online = online_check.is_some_and(|ctx| {
-            ctx.db
-                .get_online_session(c.user_id)
-                .is_some_and(|os| os.character_id == Some(cid) && !is_hold_exempt_session(&os))
-        });
-        let snap_online = sessions
+        let runtime_os = online_check
+            .and_then(|ctx| ctx.db.get_online_session(c.user_id))
+            .filter(|os| os.character_id == Some(cid));
+        let snap_os = sessions
             .get(&c.user_id)
-            .is_some_and(|os| os.character_id == Some(cid) && !is_hold_exempt_session(os));
+            .filter(|os| os.character_id == Some(cid));
+        // Read `reconnect_hold_session(cid)` AFTER observing `online_sessions`/`snap.sessions`
+        // so `SelectCharacterID` (`ReconnectHoldGuard::acquire` -> `acquire_online_lock`)
+        // cannot be torn by an inverted pre-snapshot read (`BF-R6-02`).
+        let effective_reconnect = if runtime_os.is_some() || snap_os.is_some() {
+            reconnect_hold_ctx
+                .and_then(|ctx| ctx.reconnect_hold_session(cid))
+                .or(reconnecting_session)
+        } else {
+            reconnecting_session
+        };
+        let is_hold_exempt_session = |os: &eve_db::OnlineSessionRecord| {
+            prelogoff_session == Some((os.session_id, os.connected_at_unix))
+                || effective_reconnect == Some(os.session_id)
+        };
+        let runtime_online = runtime_os.is_some_and(|os| !is_hold_exempt_session(&os));
+        let snap_online = snap_os.is_some_and(|os| !is_hold_exempt_session(os));
         c.active_ship_id == disc.ship_id
             && c.station_id.is_none()
             && c.structure_id.is_none()
@@ -222,6 +233,7 @@ fn pre_despawn_gate(
             .is_some_and(|d| disc_entry_matches(d, disc));
         // Apply `reconnecting_session` exemption only while `disc` itself still sits in `disconnected_ships`.
         let effective_reconnecting = entry_matches.then_some(reconnecting_session).flatten();
+        let reconnect_ctx = entry_matches.then_some(ctx);
         let valid = entry_matches
             && is_disconnected_ship_valid(
                 snap.items.contains_key(&disc.ship_id),
@@ -230,6 +242,7 @@ fn pre_despawn_gate(
                 Some(ctx),
                 prelogoff_session,
                 effective_reconnecting,
+                reconnect_ctx,
                 disc.char_id,
                 disc,
                 false,
@@ -260,7 +273,7 @@ fn pre_despawn_gate(
         }
         return (false, None);
     }
-    if reconnecting_session.is_some() {
+    if reconnecting_session.is_some() || ctx.reconnect_hold_session(disc.char_id).is_some() {
         // Re-arm collection in case the reconnecting session aborts before consuming `disc`.
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
             if let Some(d) = snap

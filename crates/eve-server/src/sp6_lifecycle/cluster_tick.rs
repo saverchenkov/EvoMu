@@ -1012,10 +1012,9 @@ pub fn on_advance_secs_internal(
 
         // Prune stale or reconnected `disconnected_ships` entries before taking `combat_ephemeral`
         // so checking runtime `online_sessions` (`auth_runtime`, rank 60) keeps rank order below
-        // `WorldRepository` (rank 40). Snapshot pre-logoff and in-flight reconnect sessions
-        // beforehand so `with_mut_combat_runtime_tx_locks` acquires no extra locks.
+        // `WorldRepository` (rank 40). Snapshot pre-logoff holds beforehand; in-flight
+        // reconnect holds are checked post-read via the leaf `TRANSITION_DISCONNECT_GRACE` lock (`BF-R6-02`).
         let prelogoff_holds = ctx.snapshot_prelogoff_hold_sessions();
-        let reconnect_holds = ctx.snapshot_reconnect_hold_sessions();
         let mut pruned_hold_chars = Vec::new();
         ctx.db.with_mut_snapshot(|snap| {
             let st = snap.sp6_lifecycle.as_inner_mut();
@@ -1026,7 +1025,8 @@ pub fn on_advance_secs_internal(
                     &*snap.sessions,
                     Some(ctx),
                     prelogoff_holds.get(&cid).copied(),
-                    reconnect_holds.get(&cid).copied(),
+                    None,
+                    Some(ctx),
                     cid,
                     disc,
                     true,
@@ -1059,7 +1059,8 @@ pub fn on_advance_secs_internal(
                             &*snap.sessions,
                             None,
                             prelogoff_holds.get(&cid).copied(),
-                            reconnect_holds.get(&cid).copied(),
+                            None,
+                            Some(ctx),
                             cid,
                             disc,
                             true,

@@ -579,10 +579,13 @@ pub fn handle_char_unbound(
                 .db
                 .check_session_revoked(user_id, session.session_id, ctx.now_unix())
                 .is_some()
-                || ctx.db.get_online_session(user_id).is_some_and(|os| {
-                    os.session_id != session.session_id
-                        || (holds_online_lock && os.character_id != Some(c.character_id))
-                });
+                || match ctx.db.get_online_session(user_id) {
+                    Some(os) => {
+                        os.session_id != session.session_id
+                            || (holds_online_lock && os.character_id != Some(c.character_id))
+                    }
+                    None => holds_online_lock,
+                };
             if displaced_during_reconnect {
                 return Some(Err(finalize_displaced_character_selection(
                     ctx,

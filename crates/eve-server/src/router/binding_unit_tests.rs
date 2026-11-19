@@ -2357,7 +2357,23 @@ async fn displaced_docked_s1_delayed_cleanup_after_s2_relocation_does_not_overwr
     sess_s2.character_id = Some(char_id);
     sess_s2.solar_system_id = Some(sys_id);
     sess_s2.structure_id = Some(struct_b);
+    let emitted = ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![],
+    );
+    assert_eq!(emitted.len(), 1, "online S2 must produce 1 notification");
     ctx.cleanup_disconnected_client_session(&mut sess_s2).await;
+
+    // Re-queue a post-logoff notification (e.g. shutdown/maintenance notice) after S2 logs off;
+    // delayed S1 cleanup must recognize its pre-release displacement revocation (`BF-R6-01`)
+    // and skip BOTH `logoff_character_sync` and `clear_notifications_for_char`.
+    ctx.restore_pending_notifications(emitted);
+    assert!(
+        ctx.latest_notification_seq_for_char(char_id) > 0,
+        "precondition: post-S2 notification must be queued before delayed S1 cleanup"
+    );
 
     // Delayed cleanup of displaced S1 (still carrying stale `structure_id = struct_a`) must NOT overwrite struct_b.
     ctx.cleanup_disconnected_client_session(&mut sess_s1).await;
@@ -2369,6 +2385,11 @@ async fn displaced_docked_s1_delayed_cleanup_after_s2_relocation_does_not_overwr
             "displaced S1 delayed cleanup must not overwrite S2's docked structure_id back to struct_a"
         );
     });
+    assert_eq!(
+        ctx.drain_notifications_for_char(char_id).len(),
+        1,
+        "delayed cleanup of displaced S1 after S2 logoff must skip clear_notifications_for_char and logoff_character_sync"
+    );
 }
 
 #[cfg(test)]

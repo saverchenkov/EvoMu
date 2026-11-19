@@ -433,16 +433,19 @@ impl ServerContext {
         }
         self.quasar_gateway.unsubscribe_session(session_id);
         if let Some(uid) = session.user_id {
+            // Capture revocation BEFORE `release_online_lock`, because `release_online_lock`
+            // unconditionally deletes `displaced_sessions[session_id]` even when `released == false`.
+            let pre_release_revoked =
+                self.db
+                    .check_session_revoked(uid, session_id, self.now_unix());
+            let kicked_before_release = self.db.kicked_reason(uid).is_some();
             let released = self.db.release_online_lock(uid, session_id);
             let is_displaced_revocation = !released
                 && pending_displaced.is_none()
-                && self.db.kicked_reason(uid).is_none()
-                && self
-                    .db
-                    .check_session_revoked(uid, session_id, self.now_unix())
-                    .is_some_and(|(code, _)| {
-                        matches!(code.as_str(), "SessionKicked" | "MultiLoginBlocked")
-                    });
+                && !kicked_before_release
+                && pre_release_revoked.as_ref().is_some_and(|(code, _)| {
+                    matches!(code.as_str(), "SessionKicked" | "MultiLoginBlocked")
+                });
             if !is_displaced_revocation {
                 let effective_cid = session.character_id.or_else(|| {
                     pending_displaced.and_then(|(pending_uid, pending_cid)| {
@@ -1246,13 +1249,6 @@ impl ServerContext {
     pub(crate) fn reconnect_hold_session(&self, char_id: i64) -> Option<u64> {
         self.read_context_grace_store(|s| {
             s.and_then(|st| st.reconnect_hold_sessions.get(&char_id).copied())
-        })
-    }
-
-    pub(crate) fn snapshot_reconnect_hold_sessions(&self) -> HashMap<i64, u64> {
-        self.read_context_grace_store(|s| {
-            s.map(|st| st.reconnect_hold_sessions.clone())
-                .unwrap_or_default()
         })
     }
 
