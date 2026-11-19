@@ -1510,8 +1510,13 @@ fn handle_has_existing_password_set(
         .station_id
         .or(session.structure_id)
         .or_else(|| session.solar_system_id.map(i64::from));
+    let (arg0, arg1) = match args {
+        [a0, a1, ..] => (Some(a0), Some(a1)),
+        [a0] => (Some(a0), None),
+        [] => (None, None),
+    };
     let explicit_container_arg = kwargs.contains_key("containerID")
-        || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
+        || arg0.and_then(|a| a.as_i64()).is_some_and(|v| {
             // Disambiguate bound 1-arg `HasExistingPasswordSet(which)` (including invalid slots
             // like `3` or `99`) from explicit `(container_id, which)` or large entity-ID calls.
             (args.len() >= 2 && v > 2) || v >= 1_000
@@ -1528,14 +1533,14 @@ fn handle_has_existing_password_set(
         }
     };
     let (container_id, which) = if let Some(b) = item_bound {
-        (b.object_id, parse_which(args.first()))
+        (b.object_id, parse_which(arg0))
     } else {
         let cid = kwargs
             .get("containerID")
             .and_then(|v| v.as_i64())
-            .or_else(|| args.first().and_then(|a| a.as_i64()))
+            .or_else(|| arg0.and_then(|a| a.as_i64()))
             .unwrap_or(0);
-        (cid, parse_which(args.get(1)))
+        (cid, parse_which(arg1))
     };
     if !matches!(which, 1 | 2) {
         return Err(BridgeRpcError {
