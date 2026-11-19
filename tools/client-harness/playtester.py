@@ -5035,6 +5035,7 @@ class PlaytesterBugOracle:
         "cannotloadnotenoughcharges",
         "invalidtarget",
         "warpdestinationgone",
+        "notcloseenoughtojump",
         "windowblockedfromopening",
     )
 

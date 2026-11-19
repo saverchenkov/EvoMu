@@ -1903,10 +1903,19 @@ class TestSpeedupOptimizations(unittest.TestCase):
 
     def test_benign_user_error_markers_target_too_far_warp_gone_and_window_blocked(self):
         oracle = playtester.PlaytesterBugOracle
-        for marker in ("targettoofar", "warpdestinationgone", "windowblockedfromopening"):
+        for marker in ("targettoofar", "warpdestinationgone", "notcloseenoughtojump", "windowblockedfromopening"):
             self.assertIn(marker, oracle.BENIGN_USER_ERROR_MARKERS)
 
         cases = (
+            (
+                "NotCloseEnoughToJump",
+                {"error": "UserError('NotCloseEnoughToJump', {'maxdist': 2500})"},
+                "UserError: NotCloseEnoughToJump",
+                (
+                    "  File \"eve/client/script/ui/services/autoPilot.py\", line 412, in StargateJump\n"
+                    "UserError: User error, msg=NotCloseEnoughToJump, dict={'maxdist': 2500}\n"
+                ),
+            ),
             (
                 "TargetTooFar",
                 {"error": "UserError('CustomInfo', {'info': 'TargetTooFar: Target is out of range'})"},
