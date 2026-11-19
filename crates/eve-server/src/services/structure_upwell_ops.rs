@@ -635,23 +635,23 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
                     && !is_ceo
                     && !eve_db::corp_roles::has_role(
                         eff_roles,
-                        eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
+                        eve_db::corp_roles::ROLE_ACCOUNTANT,
                     )
                 {
                     return Err(err(
                         "CorpRoleDenied",
-                        "Viewing corporate asset safety requires Config Equipment or Director role",
+                        "Viewing corporate asset safety requires Accountant or Director role",
                     ));
                 }
             } else if owner_id >= 98_000_000
                 && !eve_db::corp_roles::has_role(
                     session.corp_role,
-                    eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
+                    eve_db::corp_roles::ROLE_ACCOUNTANT,
                 )
             {
                 return Err(err(
                     "CorpRoleDenied",
-                    "Viewing corporate asset safety requires Config Equipment or Director role",
+                    "Viewing corporate asset safety requires Accountant or Director role",
                 ));
             }
             Ok(())

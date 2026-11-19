@@ -652,6 +652,238 @@ fn startup_check_and_contract_container_rbac() {
         counts_rep,
         PyRep::Dict(vec![(PyRep::Integer(corp_cont_id), PyRep::Integer(1))])
     );
+
+    // 4. Corporate office (type_id == 27, flag == Hangar) & multi-hop nested containers cannot leak restricted CorpSAG2..7 items.
+    let office_id = 9_100_820;
+    let office_sag1_item_id = 9_100_821;
+    let office_sag2_item_id = 9_100_822;
+    let sag2_outer_box_id = 9_100_823;
+    let sag2_nested_box_id = 9_100_824;
+    let sag2_nested_item_id = 9_100_825;
+    let sag2_only_office_id = 9_100_826;
+    let sag2_only_item_id = 9_100_827;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            office_id,
+            InventoryItemRecord {
+                item_id: office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            office_sag1_item_id,
+            InventoryItemRecord {
+                item_id: office_sag1_item_id,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: office_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            office_sag2_item_id,
+            InventoryItemRecord {
+                item_id: office_sag2_item_id,
+                type_id: 35,
+                owner_id: corp_id,
+                location_id: office_id,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 20,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            sag2_outer_box_id,
+            InventoryItemRecord {
+                item_id: sag2_outer_box_id,
+                type_id: 17_366,
+                owner_id: corp_id,
+                location_id: office_id,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            sag2_nested_box_id,
+            InventoryItemRecord {
+                item_id: sag2_nested_box_id,
+                type_id: 17_366,
+                owner_id: corp_id,
+                location_id: sag2_outer_box_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            sag2_nested_item_id,
+            InventoryItemRecord {
+                item_id: sag2_nested_item_id,
+                type_id: 36,
+                owner_id: corp_id,
+                location_id: sag2_nested_box_id,
+                flag: InventoryFlag::None,
+                quantity: 30,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            sag2_only_office_id,
+            InventoryItemRecord {
+                item_id: sag2_only_office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            sag2_only_item_id,
+            InventoryItemRecord {
+                item_id: sag2_only_item_id,
+                type_id: 37,
+                owner_id: corp_id,
+                location_id: sag2_only_office_id,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 40,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    // q1 querying the mixed office sees/counts ONLY CorpSAG1 items (never CorpSAG2 items/boxes).
+    let q1_office_items = handle(
+        &ctx,
+        &mut sess_q1,
+        "contractProxy",
+        "GetItemsInContainer",
+        &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(office_id), PyRep::Bool(true), PyRep::Integer(4)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(q1_office_rows) = q1_office_items else {
+        panic!("expected List from office GetItemsInContainer");
+    };
+    assert_eq!(q1_office_rows.len(), 1);
+    assert_eq!(q1_office_rows[0].dict_get("itemID"), Some(&PyRep::Integer(office_sag1_item_id)));
+
+    let q1_office_counts = handle(
+        &ctx,
+        &mut sess_q1,
+        "contractProxy",
+        "GetNumItemsInContainers",
+        &[
+            PyRep::Integer(JITA_STATION_ID),
+            PyRep::List(vec![PyRep::Integer(office_id)]),
+            PyRep::Bool(true),
+            PyRep::Integer(4),
+        ],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        q1_office_counts,
+        PyRep::Dict(vec![(PyRep::Integer(office_id), PyRep::Integer(1))])
+    );
+
+    // Unflagged forCorp=true probe on missing container is denied to single-division member (no catch-all else).
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess_q1,
+            "contractProxy",
+            "GetItemsInContainer",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(99_888_777), PyRep::Bool(true), PyRep::Integer(4)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Office holding only CorpSAG2 items denies q1 when queried without CorpSAG1 filter.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess_q1,
+            "contractProxy",
+            "GetItemsInContainer",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(sag2_only_office_id), PyRep::Bool(true), PyRep::Integer(4)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Nested box (Cargo) inside CorpSAG2 box inside corp office denies q1 across all ancestor hops.
+    assert_eq!(
+        handle(&ctx, &mut sess_q1, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(sag2_nested_box_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess_q1,
+            "contractProxy",
+            "GetNumItemsInContainers",
+            &[PyRep::List(vec![PyRep::Integer(sag2_nested_box_id)])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // q2 sees nested item & count inside CorpSAG2 box, and sees its CorpSAG2 office items when filtered.
+    let q2_nested = handle(&ctx, &mut sess_q2, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(sag2_nested_box_id)], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::List(q2_nested_rows) = q2_nested else {
+        panic!("expected List from nested GetItemsInContainer");
+    };
+    assert_eq!(q2_nested_rows.len(), 1);
+    assert_eq!(q2_nested_rows[0].dict_get("itemID"), Some(&PyRep::Integer(sag2_nested_item_id)));
+    let q2_nested_counts = handle(
+        &ctx,
+        &mut sess_q2,
+        "contractProxy",
+        "GetNumItemsInContainers",
+        &[PyRep::List(vec![PyRep::Integer(sag2_nested_box_id)])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        q2_nested_counts,
+        PyRep::Dict(vec![(PyRep::Integer(sag2_nested_box_id), PyRep::Integer(1))])
+    );
 }
 
 #[cfg(test)]

@@ -1575,6 +1575,62 @@ async fn get_my_corporation_skyhooks_enforces_station_manager_or_director_and_re
         .unwrap()
         .unwrap_err();
     assert_eq!(npc_err.code, "CorpRoleDenied");
+
+    // Non-member spoofing corp_id / session.corp_role is denied when corp.members is populated.
+    let outsider_id = 90_000_846;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            outsider_id,
+            eve_db::CharacterRecord {
+                character_id: outsider_id,
+                corporation_id: corp_id,
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+    });
+    let mut outsider_sess = sov_session(outsider_id, corp_id, sys_id, None);
+    outsider_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle(&ctx, &mut outsider_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Uninserted player corp >= 98M enforces session.corp_role (plain denied, Station Manager/Director allowed).
+    let uninserted_corp = 98_099_841;
+    let uninserted_char = 90_000_847;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            uninserted_char,
+            eve_db::CharacterRecord {
+                character_id: uninserted_char,
+                corporation_id: uninserted_corp,
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+    });
+    let mut uninserted_plain = sov_session(uninserted_char, uninserted_corp, sys_id, None);
+    assert_eq!(
+        handle(&ctx, &mut uninserted_plain, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    let mut uninserted_mgr = sov_session(uninserted_char, uninserted_corp, sys_id, None);
+    uninserted_mgr.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    assert!(
+        handle(&ctx, &mut uninserted_mgr, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
 }
 
 #[test]

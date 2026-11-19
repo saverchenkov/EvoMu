@@ -751,13 +751,13 @@ async fn test_hangar_view_state_covers_v24_upkeep_damage_and_timer_fields() {
 }
 
 #[tokio::test]
-async fn get_items_in_safety_for_corp_enforces_config_equipment_or_director() {
+async fn get_items_in_safety_for_corp_enforces_accountant_or_director() {
     let ctx = test_ctx();
     let corp_id = 98_000_851;
     let ceo_id = 90_000_851;
     let dir_id = 90_000_852;
-    let cfg_id = 90_000_853;
-    let st_mgr_id = 90_000_854;
+    let acct_id = 90_000_853;
+    let cfg_id = 90_000_854;
     let plain_id = 90_000_855;
     let unseeded_corp_id = 98_000_852;
     let unseeded_plain_id = 90_000_856;
@@ -768,19 +768,19 @@ async fn get_items_in_safety_for_corp_enforces_config_equipment_or_director() {
         corp.name = "SafetyRbacCorp".into();
         corp.ticker = "SRBC".into();
         corp.ceo_id = ceo_id;
-        corp.members.extend([ceo_id, dir_id, cfg_id, st_mgr_id, plain_id]);
+        corp.members.extend([ceo_id, dir_id, acct_id, cfg_id, plain_id]);
         corp.member_roles.insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
         corp.member_roles
-            .insert(cfg_id, eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT);
+            .insert(acct_id, eve_db::corp_roles::ROLE_ACCOUNTANT);
         corp.member_roles
-            .insert(st_mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+            .insert(cfg_id, eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT);
         snap.corporations.insert(corp_id, corp);
 
         for (cid, coid) in [
             (ceo_id, corp_id),
             (dir_id, corp_id),
+            (acct_id, corp_id),
             (cfg_id, corp_id),
-            (st_mgr_id, corp_id),
             (plain_id, corp_id),
             (unseeded_plain_id, unseeded_corp_id),
         ] {
@@ -817,7 +817,7 @@ async fn get_items_in_safety_for_corp_enforces_config_equipment_or_director() {
     });
 
     let kw = HashMap::new();
-    for (cid, label) in [(ceo_id, "ceo"), (dir_id, "director"), (cfg_id, "config_equipment")] {
+    for (cid, label) in [(ceo_id, "ceo"), (dir_id, "director"), (acct_id, "accountant")] {
         let mut sess = make_session(cid, corp_id, None, service_roles::ROLE_PLAYER);
         sess.corp_role = 0;
         let PyRep::List(rows) = handle(
@@ -836,7 +836,7 @@ async fn get_items_in_safety_for_corp_enforces_config_equipment_or_director() {
         assert_eq!(rows.len(), 1, "{label} should see corporate safety wrap");
     }
 
-    for (cid, label) in [(plain_id, "roleless"), (st_mgr_id, "station_manager_only")] {
+    for (cid, label) in [(plain_id, "roleless"), (cfg_id, "config_equipment_only")] {
         let mut sess = make_session(cid, corp_id, None, service_roles::ROLE_PLAYER);
         sess.corp_role = 0;
         let err = handle(

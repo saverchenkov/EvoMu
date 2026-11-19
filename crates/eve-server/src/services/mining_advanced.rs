@@ -934,6 +934,21 @@ pub async fn handle(
                                 "Querying corporate moon extractions requires Station Manager or Director role",
                             ));
                         }
+                    } else if (1_000_000..2_000_000).contains(&corp_id)
+                        || ctx.sde.npc_corporations.contains_key(&corp_id)
+                    {
+                        return Err(crate::services::account_services::err(
+                            "AccessDenied",
+                            "NPC corporations cannot manage moon extractions",
+                        ));
+                    } else if !eve_db::corp_roles::has_role(
+                        session.corp_role,
+                        eve_db::corp_roles::ROLE_STATION_MANAGER,
+                    ) {
+                        return Err(crate::services::account_services::err(
+                            "AccessDenied",
+                            "Querying corporate moon extractions requires Station Manager or Director role",
+                        ));
                     }
                 }
                 Ok(snap

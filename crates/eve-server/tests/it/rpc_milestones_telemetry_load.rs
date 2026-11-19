@@ -372,6 +372,7 @@ async fn test_rewards_sov_and_epic_arc_status() {
     let corp_id = 98_000_101i64;
     let sys_id = 30_000_142u32;
     sess.corporation_id = Some(corp_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     sess.solar_system_id = Some(sys_id);
 
     // 1. rewardMgr.GetRewardLPLogs

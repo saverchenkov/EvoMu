@@ -709,6 +709,79 @@ async fn get_extractions_for_corp_enforces_station_manager_or_director_role() {
     .unwrap()
     .unwrap_err();
     assert_eq!(err_out.code, "AccessDenied");
+
+    // Uninserted NPC corps must always fail closed even for members.
+    let npc_char_id = 90_000_799;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            npc_char_id,
+            eve_db::CharacterRecord {
+                character_id: npc_char_id,
+                corporation_id: 1_000_170,
+                ..Default::default()
+            },
+        );
+    });
+    let mut npc_sess = SessionState {
+        user_id: Some(npc_char_id as u64),
+        character_id: Some(npc_char_id),
+        corporation_id: Some(1_000_170),
+        corp_role: eve_db::corp_roles::ROLE_DIRECTOR,
+        ..Default::default()
+    };
+    let err_npc = handle(
+        &ctx,
+        &mut npc_sess,
+        "moonExtractions",
+        "GetExtractionsForCorp",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_npc.code, "AccessDenied");
+
+    // Uninserted player corps fall back to session.corp_role checks (plain denied, Station Manager/Director allowed).
+    let uninserted_corp = 98_099_701;
+    let uninserted_char = 90_000_798;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            uninserted_char,
+            eve_db::CharacterRecord {
+                character_id: uninserted_char,
+                corporation_id: uninserted_corp,
+                ..Default::default()
+            },
+        );
+    });
+    let mut uninserted_plain = SessionState {
+        user_id: Some(uninserted_char as u64),
+        character_id: Some(uninserted_char),
+        corporation_id: Some(uninserted_corp),
+        ..Default::default()
+    };
+    assert_eq!(
+        handle(&ctx, &mut uninserted_plain, "moonExtractions", "GetExtractionsForCorp", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "AccessDenied"
+    );
+    let mut uninserted_mgr = SessionState {
+        user_id: Some(uninserted_char as u64),
+        character_id: Some(uninserted_char),
+        corporation_id: Some(uninserted_corp),
+        corp_role: eve_db::corp_roles::ROLE_STATION_MANAGER,
+        ..Default::default()
+    };
+    assert!(
+        handle(&ctx, &mut uninserted_mgr, "moonExtractions", "GetExtractionsForCorp", &[], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
 }
 
 #[cfg(test)]

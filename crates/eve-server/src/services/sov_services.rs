@@ -879,6 +879,15 @@ pub async fn handle(
                 }
                 if !session.has_gm_role() {
                     if let Some(corp) = corp_record {
+                        if corp.ceo_id != char_id
+                            && !corp.members.is_empty()
+                            && !corp.members.contains(&char_id)
+                        {
+                            return Err(crate::services::account_services::err(
+                                "CorpRoleDenied",
+                                format!("Character {char_id} is not a member of corporation {corp_id}"),
+                            ));
+                        }
                         let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
                             corp_id,
                             char_id,
@@ -898,6 +907,14 @@ pub async fn handle(
                                 "Viewing corporation Skyhooks requires Station Manager or Director role",
                             ));
                         }
+                    } else if !eve_db::corp_roles::has_role(
+                        session.corp_role,
+                        eve_db::corp_roles::ROLE_STATION_MANAGER,
+                    ) {
+                        return Err(crate::services::account_services::err(
+                            "CorpRoleDenied",
+                            "Viewing corporation Skyhooks requires Station Manager or Director role",
+                        ));
                     }
                 }
                 Ok(snap
