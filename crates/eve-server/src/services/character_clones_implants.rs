@@ -1542,50 +1542,7 @@ pub fn handle_clones_and_sheet(
         }
 
         ("charMgr", "ListStations") | ("charUnboundMgr", "ListStations") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rows = ctx.db.with_snapshot(|snap| {
-                let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64)> =
-                    std::collections::BTreeMap::new();
-                for item in snap.items.values() {
-                    if item.owner_id != char_id {
-                        continue;
-                    }
-                    let loc_id = item.location_id;
-                    let solar_system_id = if (60_000_000..=69_999_999).contains(&loc_id) {
-                        ctx.sde
-                            .stations
-                            .get(&loc_id)
-                            .map(|st| i64::from(st.solar_system_id))
-                    } else if loc_id >= 1_000_000_000_000 {
-                        snap.structures
-                            .get(&loc_id)
-                            .map(|st| i64::from(st.solar_system_id))
-                    } else {
-                        None
-                    };
-                    if let Some(sys_id) = solar_system_id {
-                        let entry = counts_by_station.entry(loc_id).or_insert((sys_id, 0));
-                        entry.1 += 1;
-                    }
-                }
-                counts_by_station
-                    .into_iter()
-                    .map(|(station_id, (solar_system_id, item_count))| {
-                        vec![
-                            PyRep::Integer(station_id),
-                            PyRep::Integer(solar_system_id),
-                            PyRep::Integer(item_count),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["stationID", "solarSystemID", "itemCount"],
-                rows,
-            )))
+            Some(handle_list_stations(ctx, session, args, _kwargs))
         }
 
         // =========================================================================
@@ -1622,6 +1579,92 @@ fn handle_get_ship_clone_state(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     Some(crate::services::jump_clone_names::get_ship_clone_state(
         ctx, session, args,
+    ))
+}
+
+fn parse_py_bool_flag(rep: &PyRep) -> Option<bool> {
+    rep.as_bool().or_else(|| rep.as_i64().map(|v| v != 0))
+}
+
+/// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr`.
+///
+/// Matches V24 `assetsWindow.py:1131-1135` and `invbroker.ListStations` by returning
+/// `["stationID", "solarSystemID", "itemCount", "typeID"]` for both NPC stations and Upwell
+/// structures while scoping ownership strictly to `char_id` (or the caller's session
+/// corporation when `is_corp` is set).
+fn handle_list_stations(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let rpc = crate::router::RpcArgs::new(args, kwargs);
+    let blueprint_only = rpc
+        .get_raw_any(0, &["blueprintOnly", "blueprint_only"])
+        .and_then(parse_py_bool_flag)
+        .unwrap_or(false);
+    let is_corp = rpc
+        .get_raw_any(1, &["isCorp", "isCorporation", "is_corp"])
+        .and_then(parse_py_bool_flag)
+        .unwrap_or(false);
+    let target_owner_id = if is_corp {
+        session.corporation_id.filter(|&cid| cid > 0)
+    } else {
+        Some(char_id)
+    };
+    let rows = match target_owner_id {
+        None => Vec::new(),
+        Some(owner_id) => ctx.db.with_snapshot(|snap| {
+            let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
+                std::collections::BTreeMap::new();
+            for item in snap.items.values() {
+                if item.owner_id != owner_id {
+                    continue;
+                }
+                if blueprint_only
+                    && !ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .is_some_and(|t| t.category_id == 9)
+                {
+                    continue;
+                }
+                let loc_id = item.location_id;
+                let st_info = if (60_000_000..=69_999_999).contains(&loc_id) {
+                    ctx.sde
+                        .stations
+                        .get(&loc_id)
+                        .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
+                } else {
+                    snap.structures
+                        .get(&loc_id)
+                        .map(|st| (i64::from(st.solar_system_id), i64::from(st.type_id)))
+                };
+                if let Some((sys_id, st_type_id)) = st_info {
+                    let entry = counts_by_station
+                        .entry(loc_id)
+                        .or_insert((sys_id, 0, st_type_id));
+                    entry.1 += 1;
+                }
+            }
+            counts_by_station
+                .into_iter()
+                .map(|(station_id, (solar_system_id, item_count, st_type_id))| {
+                    vec![
+                        PyRep::Integer(station_id),
+                        PyRep::Integer(solar_system_id),
+                        PyRep::Integer(item_count),
+                        PyRep::Integer(st_type_id),
+                    ]
+                })
+                .collect()
+        }),
+    };
+    Ok(PyRep::rowset(
+        vec!["stationID", "solarSystemID", "itemCount", "typeID"],
+        rows,
     ))
 }
 

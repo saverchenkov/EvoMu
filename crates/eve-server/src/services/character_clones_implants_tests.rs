@@ -223,7 +223,7 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
         Some(1)
     );
 
-    // ListStations reports items in station_id
+    // ListStations reports items in station_id with V24 typeID column
     let stations_rs = handle_clones_and_sheet(
         &ctx,
         &mut sess,
@@ -234,10 +234,21 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
     )
     .expect("handled")
     .expect("stations ok");
-    let PyRep::Rowset { rows, .. } = stations_rs else {
+    let PyRep::Rowset { columns, rows } = stations_rs else {
         panic!("expected Rowset");
     };
-    assert!(rows.iter().any(|r| r.first().and_then(PyRep::as_i64) == Some(station_id)));
+    assert_eq!(
+        columns,
+        vec!["stationID", "solarSystemID", "itemCount", "typeID"]
+    );
+    let expected_st = ctx.sde.stations.get(&station_id).expect("station in SDE");
+    let row = rows
+        .iter()
+        .find(|r| r.first().and_then(PyRep::as_i64) == Some(station_id))
+        .expect("station row present");
+    assert_eq!(row[1], PyRep::Integer(i64::from(expected_st.solar_system_id)));
+    assert!(row[2].as_i64().unwrap_or(0) >= 1);
+    assert_eq!(row[3], PyRep::Integer(i64::from(expected_st.station_type_id)));
 }
 
 #[test]
@@ -932,6 +943,190 @@ fn destroy_installed_clone_unknown_id_does_not_create_empty_entry() {
     ctx.db.with_snapshot(|snap| {
         assert!(snap.jump_clones.get(&char_id).is_some_and(Vec::is_empty));
     });
+}
+
+#[test]
+fn list_stations_includes_type_id_filters_and_isolates_non_gm_ownership() {
+    let ctx = test_ctx();
+    let mut st_iter = ctx.sde.stations.values();
+    let st1 = st_iter.next().expect("first SDE station").clone();
+    let st2 = st_iter
+        .find(|s| s.station_id != st1.station_id)
+        .expect("second SDE station")
+        .clone();
+    let bp_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 9)
+        .expect("blueprint SDE type")
+        .type_id;
+
+    let char_id = 90_000_099_i64;
+    let other_char_id = 90_000_199_i64;
+    let corp_id = 98_000_099_i64;
+    let other_corp_id = 98_000_199_i64;
+    let struct_a = 1_001_896_954_561_i64;
+    let struct_b = 1_048_000_000_099_i64;
+    let struct_other = 1_048_000_000_100_i64;
+    let empty_kw = HashMap::new();
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(st1.station_id);
+        let uid = ch.user_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.structures.insert(
+            struct_a,
+            UpwellStructureRecord {
+                structure_id: struct_a,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Player Astrahus".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_b,
+            UpwellStructureRecord {
+                structure_id: struct_b,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_144,
+                name: "Player Raitaru".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_other,
+            UpwellStructureRecord {
+                structure_id: struct_other,
+                type_id: 35_825,
+                owner_corp_id: other_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Foreign Structure".into(),
+                ..Default::default()
+            },
+        );
+
+        // Non-station/non-structure/unknown locations must never appear in ListStations.
+        put_item(snap, 34, char_id, 30_000_142, InventoryFlag::None, 5, false);
+        put_item(snap, 34, char_id, char_id, InventoryFlag::Wardrobe, 1, true);
+        put_item(snap, 34, char_id, 9_900_100, InventoryFlag::Hangar, 1, false);
+        put_item(snap, 34, char_id, 69_999_999, InventoryFlag::Hangar, 1, false);
+        put_item(snap, 34, char_id, 1_999_999_999_999, InventoryFlag::Hangar, 1, false);
+        uid
+    });
+
+    let mut sess = make_session(uid, char_id, corp_id, Some(st1.station_id), None);
+    assert!(!sess.has_gm_role());
+
+    let call_ls = |s: &mut SessionState, svc: &str, args: &[PyRep], kw: &HashMap<String, PyRep>| -> (Vec<String>, Vec<Vec<i64>>) {
+        let rep = handle_clones_and_sheet(&ctx, s, svc, "ListStations", args, kw)
+            .expect("handled")
+            .expect("ListStations ok");
+        let PyRep::Rowset { columns, rows } = rep else {
+            panic!("expected Rowset, got {rep:?}");
+        };
+        let parsed = rows
+            .into_iter()
+            .map(|r| r.into_iter().map(|c| c.as_i64().expect("int cell")).collect())
+            .collect();
+        (columns, parsed)
+    };
+
+    let expected_cols = vec![
+        "stationID".to_string(),
+        "solarSystemID".to_string(),
+        "itemCount".to_string(),
+        "typeID".to_string(),
+    ];
+
+    // 1. Empty station/structure result set preserves the 4-column Rowset schema.
+    for svc in ["charMgr", "charUnboundMgr"] {
+        let (cols, rows) = call_ls(&mut sess, svc, &[], &empty_kw);
+        assert_eq!(cols, expected_cols);
+        assert!(rows.is_empty(), "non-station items must not appear: {rows:?}");
+    }
+
+    // Populate personal, foreign character, session corp, and foreign corp assets.
+    ctx.db.with_mut_snapshot(|snap| {
+        // char_id personal items
+        put_item(snap, 34, char_id, st1.station_id, InventoryFlag::Hangar, 10, false);
+        put_item(snap, bp_tid, char_id, st1.station_id, InventoryFlag::Hangar, 1, true);
+        put_item(snap, 34, char_id, struct_a, InventoryFlag::Hangar, 20, false);
+        put_item(snap, bp_tid, char_id, struct_b, InventoryFlag::Hangar, 1, false);
+
+        // other_char_id items (must stay invisible to non-GM sess)
+        put_item(snap, 34, other_char_id, st2.station_id, InventoryFlag::Hangar, 1, false);
+        put_item(snap, bp_tid, other_char_id, struct_other, InventoryFlag::Hangar, 1, true);
+
+        // corp_id items
+        put_item(snap, 34, corp_id, st2.station_id, InventoryFlag::CorpSAG1, 5, false);
+        put_item(snap, bp_tid, corp_id, struct_a, InventoryFlag::CorpSAG1, 1, false);
+
+        // other_corp_id item (must stay invisible even with is_corp=true)
+        put_item(snap, 34, other_corp_id, struct_other, InventoryFlag::CorpSAG1, 5, false);
+    });
+
+    // 2. NPC station + Upwell structures include exact typeID, solarSystemID, and itemCount,
+    //    and ignore extra caller-supplied IDs for non-GM sessions.
+    let expected_personal = vec![
+        vec![st1.station_id, i64::from(st1.solar_system_id), 2, i64::from(st1.station_type_id)],
+        vec![struct_a, 30_000_142, 1, 35_832],
+        vec![struct_b, 30_000_144, 1, 35_835],
+    ];
+    for svc in ["charMgr", "charUnboundMgr"] {
+        let (cols, rows) = call_ls(&mut sess, svc, &[], &empty_kw);
+        assert_eq!(cols, expected_cols);
+        assert_eq!(rows, expected_personal);
+    }
+    let (_, spoofed_rows) = call_ls(
+        &mut sess,
+        "charMgr",
+        &[PyRep::Bool(false), PyRep::Bool(false), PyRep::Integer(other_char_id)],
+        &empty_kw,
+    );
+    assert_eq!(spoofed_rows, expected_personal);
+
+    // 3. blueprint_only=true filters out non-blueprint stations/structures & decrements counts.
+    let expected_bp_personal = vec![
+        vec![st1.station_id, i64::from(st1.solar_system_id), 1, i64::from(st1.station_type_id)],
+        vec![struct_b, 30_000_144, 1, 35_835],
+    ];
+    let (_, bp_bool_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Bool(true), PyRep::Bool(false)], &empty_kw);
+    assert_eq!(bp_bool_rows, expected_bp_personal);
+    let (_, bp_int_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Integer(1)], &empty_kw);
+    assert_eq!(bp_int_rows, expected_bp_personal);
+    let mut kw_bp = HashMap::new();
+    kw_bp.insert("blueprintOnly".to_string(), PyRep::Bool(true));
+    let (_, bp_kw_rows) = call_ls(&mut sess, "charMgr", &[], &kw_bp);
+    assert_eq!(bp_kw_rows, expected_bp_personal);
+
+    // 4. is_corp=true scopes strictly to session.corporation_id and supports blueprint_only.
+    let expected_corp = vec![
+        vec![st2.station_id, i64::from(st2.solar_system_id), 1, i64::from(st2.station_type_id)],
+        vec![struct_a, 30_000_142, 1, 35_832],
+    ];
+    let (corp_cols, corp_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Bool(false), PyRep::Bool(true)], &empty_kw);
+    assert_eq!(corp_cols, expected_cols);
+    assert_eq!(corp_rows, expected_corp);
+
+    let mut kw_corp_bp = HashMap::new();
+    kw_corp_bp.insert("blueprintOnly".to_string(), PyRep::Integer(1));
+    kw_corp_bp.insert("isCorporation".to_string(), PyRep::Bool(true));
+    let (_, corp_bp_rows) = call_ls(&mut sess, "charUnboundMgr", &[], &kw_corp_bp);
+    assert_eq!(corp_bp_rows, vec![vec![struct_a, 30_000_142, 1, 35_832]]);
+
+    // 5. Missing session corporation with is_corp=true yields empty rows (never leaks personal assets).
+    sess.corporation_id = None;
+    let (no_corp_cols, no_corp_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Bool(false), PyRep::Bool(true)], &empty_kw);
+    assert_eq!(no_corp_cols, expected_cols);
+    assert!(no_corp_rows.is_empty());
 }
 
 #[cfg(test)]

@@ -399,14 +399,38 @@ fn sheet_omega_custom_ship_clone_state_rowset_paperdoll_resculpt_and_apparel_une
     assert_eq!(imp_cols, &vec!["jumpCloneID", "implantID", "typeID"]);
     assert_eq!(imp_rows.len(), 1);
 
-    // 3. ListStations includes Upwell structure items
+    // 3. ListStations includes Upwell structure & NPC station typeID, excluding Wardrobe items
     let st_rs = handle_clones_and_sheet(&ctx, &mut sess, "charUnboundMgr", "ListStations", &[], &kw)
         .unwrap()
         .unwrap();
-    let PyRep::Rowset { rows, .. } = st_rs else {
+    let PyRep::Rowset { columns, rows } = st_rs else {
         panic!("expected rowset");
     };
-    assert!(rows.iter().any(|r| r[0].as_i64() == Some(struct_id)));
+    assert_eq!(
+        columns,
+        vec!["stationID", "solarSystemID", "itemCount", "typeID"]
+    );
+    let struct_row = rows
+        .iter()
+        .find(|r| r[0].as_i64() == Some(struct_id))
+        .expect("Upwell structure row present");
+    assert_eq!(
+        struct_row,
+        &vec![
+            PyRep::Integer(struct_id),
+            PyRep::Integer(30_000_142),
+            PyRep::Integer(1),
+            PyRep::Integer(35_832),
+        ]
+    );
+    let npc_st = ctx.sde.stations.get(&station_id).expect("station in SDE");
+    let npc_row = rows
+        .iter()
+        .find(|r| r[0].as_i64() == Some(station_id))
+        .expect("NPC station row present");
+    assert_eq!(npc_row[1], PyRep::Integer(i64::from(npc_st.solar_system_id)));
+    assert_eq!(npc_row[3], PyRep::Integer(i64::from(npc_st.station_type_id)));
+    assert!(rows.iter().all(|r| r[0].as_i64() != Some(char_id)));
 
     // 4. jumpCloneSvc delegate endpoints
     assert!(handle_clones_and_sheet(
