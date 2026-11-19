@@ -387,3 +387,80 @@ async fn downtime_probe_recovery_cargo_fallback_expired_missing_ship_and_safe_lo
     assert!(ctx.db.get_online_session(1).is_none());
     assert!(ctx.bound_objects.read().unwrap().is_empty());
 }
+
+#[test]
+fn safe_logoff_transitions_live_closer_to_charsel_preserving_closer_and_clearing_bindings() {
+    let ctx = test_ctx();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(now_unix)));
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(888, close_tx);
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            1,
+            888,
+            Some(char_id),
+            Some("hash-1360".to_string()),
+            true,
+            now_unix,
+        )
+        .unwrap();
+    let sess_live = eve_machonet::SessionState {
+        session_id: 888,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    ctx.bind_object(&sess_live, "beyonce", sys_id as i64).unwrap();
+
+    // Also include a stale headless bound session to verify it is disconnected separately.
+    let (stale_tx, mut stale_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    ctx.register_session_closer(889, stale_tx);
+    let sess_stale = eve_machonet::SessionState {
+        session_id: 889,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+    ctx.bind_object(&sess_stale, "beyonce", sys_id as i64).unwrap();
+
+    crate::sp6_lifecycle::cluster_tick_downtime::disconnect_safe_logoff_sessions(&ctx, char_id);
+
+    // Live TCP session keeps its online lock (with character_id cleared), computer_hash,
+    // and closer channel so it transitions cleanly to character selection (#1360).
+    let (code, reason) = close_rx.try_recv().expect("live closer receives SafeLogoff");
+    assert_eq!(code, "SafeLogoff");
+    assert_eq!(reason, char_id.to_string());
+    assert!(
+        ctx.session_closers.read().unwrap().contains_key(&888),
+        "live closer must remain registered across safe logoff to character selection"
+    );
+    let online = ctx
+        .db
+        .get_online_session(1)
+        .expect("online lock must stay reserved at character selection");
+    assert_eq!(online.session_id, 888);
+    assert!(online.character_id.is_none());
+    assert_eq!(online.computer_hash.as_deref(), Some("hash-1360"));
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+
+    // Re-selecting a character on the same session succeeds; a different session cannot hijack it.
+    assert!(ctx
+        .db
+        .acquire_online_lock(1, 890, Some(char_id), false, now_unix + 5)
+        .is_err());
+    assert!(ctx
+        .db
+        .acquire_online_lock(1, 888, Some(char_id), false, now_unix + 5)
+        .is_ok());
+
+    // Stale bound-only session was disconnected normally and unregistered.
+    let (stale_code, _) = stale_rx.try_recv().expect("stale session disconnected");
+    assert_eq!(stale_code, "SafeLogoff");
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&889));
+}

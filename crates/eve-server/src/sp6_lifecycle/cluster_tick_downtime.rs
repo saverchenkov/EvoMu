@@ -554,7 +554,8 @@ pub fn clear_safe_logoff(db: &std::sync::Arc<eve_db::WorldRepository>, char_id: 
     });
 }
 
-/// Disconnects active client sessions and releases online locks for `char_id` after safe logoff.
+/// Transitions live client sessions to character selection (or disconnects headless/stale
+/// sessions) and releases character bindings/locks for `char_id` after safe logoff (#1360).
 pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_id: i64) {
     crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
         &ctx.db,
@@ -563,11 +564,12 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
     );
     let mut session_ids = std::collections::BTreeSet::new();
     let user_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
+    let mut online_sid_for_char = None;
     if let Some(uid) = user_id {
         if let Some(rec) = ctx.db.get_online_session(uid) {
             if rec.character_id.is_none_or(|cid| cid == char_id) {
                 session_ids.insert(rec.session_id);
-                ctx.db.release_online_lock(uid, rec.session_id);
+                online_sid_for_char = Some((uid, rec.session_id));
             }
         }
     }
@@ -578,7 +580,40 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
             }
         }
     }
+    let mut live_charsel_sid = None;
+    if let Some((uid, rec_sid)) = online_sid_for_char {
+        let live_tx = ctx
+            .session_closers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&rec_sid)
+            .filter(|tx| !tx.is_closed())
+            .cloned();
+        let transitioned = if let Some(tx) = live_tx {
+            // Clear character_id while preserving session_id, computer_hash, and peer IP
+            // BEFORE notifying the listener so notify_rx / sys_rx / frame_rx observe charsel state.
+            let lock_reset = ctx
+                .db
+                .acquire_online_lock(uid, rec_sid, None, false, ctx.now_unix())
+                .is_ok();
+            lock_reset
+                && tx
+                    .send(("SafeLogoff".to_string(), char_id.to_string()))
+                    .is_ok()
+        } else {
+            false
+        };
+        if transitioned {
+            live_charsel_sid = Some(rec_sid);
+            ctx.release_session_bindings(rec_sid);
+        } else {
+            ctx.db.release_online_lock(uid, rec_sid);
+        }
+    }
     for sid in session_ids {
+        if Some(sid) == live_charsel_sid {
+            continue;
+        }
         ctx.disconnect_session(sid, "SafeLogoff", "Safe logoff completed");
         ctx.release_session_bindings(sid);
     }
