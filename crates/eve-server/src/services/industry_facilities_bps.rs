@@ -1376,7 +1376,9 @@ pub fn handle_industry_facilities_bps(
                     );
                 }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-                if corp_id > 0 && (owner_filter.is_none() || owner_filter == Some(corp_id)) {
+                if !is_npc_corporation_id(ctx, corp_id)
+                    && (owner_filter.is_none() || owner_filter == Some(corp_id))
+                {
                     if let Some(corp) = snap.corporations.get(&corp_id) {
                         if corp.ceo_id == char_id || corp.members.is_empty() || corp.members.contains(&char_id) {
                             let (is_ceo, roles) = snap.effective_corp_roles_at(
@@ -1843,6 +1845,13 @@ pub fn handle_industry_facilities_bps(
     }
 }
 
+/// Returns `true` when `corp_id` is non-positive or identifies an NPC corporation.
+fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
 /// Returns `true` when `char_id` holds corporate industry blueprint access for `corp_id`.
 fn caller_has_corp_blueprint_access(
     ctx: &ServerContext,
@@ -1865,17 +1874,14 @@ fn caller_has_corp_blueprint_access(
         .map(|c| c.corporation_id)
         .or(session.corporation_id)
         .unwrap_or(0);
-    if corp_id <= 0
-        || corp_id != caller_corp_id
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-    {
+    if corp_id != caller_corp_id || is_npc_corporation_id(ctx, corp_id) {
         return false;
     }
-    if let Some(corp) = snap.corporations.get(&corp_id) {
-        if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
-            return false;
-        }
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return false;
+    };
+    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return false;
     }
     let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
         corp_id,

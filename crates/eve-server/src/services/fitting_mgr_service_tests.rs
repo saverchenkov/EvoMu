@@ -857,12 +857,13 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         .is_ok()
     );
 
-    // 2. Uninserted player corp (>= 98M) and uninserted member corp inside inserted alliance still enforce session.corp_role.
+    // 2. Uninserted player corp (>= 98M) and uninserted member corp inside inserted alliance fail closed
+    // even with session.corp_role = ROLE_FITTING_MANAGER; unregistered alliance also fails closed.
     let mut uninserted_sess = SessionState::new(91_802);
     uninserted_sess.user_id = Some(2);
     uninserted_sess.character_id = Some(uninserted_char);
     uninserted_sess.corporation_id = Some(uninserted_corp_id);
-    uninserted_sess.corp_role = 0;
+    uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
     assert_eq!(
         handle_fitting_mgr(
             &ctx,
@@ -879,20 +880,21 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         .code,
         "CorpRoleDenied"
     );
-    uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
-    assert!(
+    assert_eq!(
         handle_fitting_mgr(
             &ctx,
             &mut uninserted_sess,
             None,
             "corpFittingMgr",
-            "SaveFitting",
-            &[PyRep::Integer(uninserted_corp_id), fit_kv.clone()],
+            "GetFittings",
+            &[PyRep::Integer(uninserted_corp_id)],
             &kw,
         )
         .await
         .unwrap()
-        .is_ok()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
     );
 
     let mut ally_uninserted_sess = SessionState::new(91_803);
@@ -900,7 +902,7 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
     ally_uninserted_sess.character_id = Some(ally_uninserted_char);
     ally_uninserted_sess.corporation_id = Some(ally_uninserted_corp_id);
     ally_uninserted_sess.alliance_id = Some(alliance_id);
-    ally_uninserted_sess.corp_role = 0;
+    ally_uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
     assert_eq!(
         handle_fitting_mgr(
             &ctx,
@@ -917,21 +919,80 @@ async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_member
         .code,
         "CorpRoleDenied"
     );
-    ally_uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
-    assert!(
+    assert_eq!(
         handle_fitting_mgr(
             &ctx,
             &mut ally_uninserted_sess,
             None,
             "allianceFittingMgr",
-            "SaveFitting",
-            &[PyRep::Integer(alliance_id), fit_kv.clone()],
+            "GetFittings",
+            &[PyRep::Integer(alliance_id)],
             &kw,
         )
         .await
         .unwrap()
-        .is_ok()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
     );
+
+    // Seeded player corp claiming an unregistered alliance ID rejects allianceFittingMgr with NotInAlliance.
+    let unreg_ally_id = 99_777_899_i64;
+    let unreg_ally_corp_id = 98_777_899_i64;
+    let unreg_ally_ceo = 91_777_899_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut uc = CorporationRecord::default();
+        uc.corporation_id = unreg_ally_corp_id;
+        uc.name = "Unreg Ally Corp".into();
+        uc.ticker = "UAC".into();
+        uc.ceo_id = unreg_ally_ceo;
+        uc.alliance_id = Some(unreg_ally_id);
+        uc.members.insert(unreg_ally_ceo);
+        uc.ensure_wallet_divisions();
+        snap.corporations.insert(unreg_ally_corp_id, uc);
+        snap.characters.insert(
+            unreg_ally_ceo,
+            eve_db::CharacterRecord {
+                character_id: unreg_ally_ceo,
+                corporation_id: unreg_ally_corp_id,
+                alliance_id: Some(unreg_ally_id),
+                ..Default::default()
+            },
+        );
+    });
+    let mut unreg_ally_sess = SessionState::new(91_806);
+    unreg_ally_sess.user_id = Some(6);
+    unreg_ally_sess.character_id = Some(unreg_ally_ceo);
+    unreg_ally_sess.corporation_id = Some(unreg_ally_corp_id);
+    unreg_ally_sess.alliance_id = Some(unreg_ally_id);
+    let unreg_ally_err = handle_fitting_mgr(
+        &ctx,
+        &mut unreg_ally_sess,
+        None,
+        "allianceFittingMgr",
+        "SaveFitting",
+        &[PyRep::Integer(unreg_ally_id), fit_kv.clone()],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(unreg_ally_err.code, "UserError");
+    assert_eq!(unreg_ally_err.message, "NotInAlliance");
+    let unreg_ally_get_err = handle_fitting_mgr(
+        &ctx,
+        &mut unreg_ally_sess,
+        None,
+        "allianceFittingMgr",
+        "GetFittings",
+        &[PyRep::Integer(unreg_ally_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(unreg_ally_get_err.code, "UserError");
+    assert_eq!(unreg_ally_get_err.message, "NotInAlliance");
 
     // 3. Character omitted from non-empty corp.members is denied on corp & alliance FittingMgr even with ROLE_FITTING_MANAGER.
     let mut omitted_sess = SessionState::new(91_804);

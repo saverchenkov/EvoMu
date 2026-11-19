@@ -620,3 +620,57 @@ fn corp_gov_tail_update_attributes_rejects_stale_session_corp_role() {
         .is_ok()
     );
 }
+
+#[test]
+fn corp_gov_tail_rejects_npc_corp_even_if_corp_record_seeded() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let npc_corp_id = 1_000_009_i64;
+    let char_id = 91_600_901_i64;
+    let station_id = *ctx.sde.stations.keys().next().unwrap_or(&60_003_760);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut npc = CorporationRecord::default();
+        npc.corporation_id = npc_corp_id;
+        npc.name = "Seeded NPC Guard".into();
+        npc.ticker = "SNG".into();
+        npc.ceo_id = char_id;
+        npc.members.insert(char_id);
+        npc.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        npc.ensure_wallet_divisions();
+        snap.corporations.insert(npc_corp_id, npc);
+        if let Some(base) = snap.characters.values().next().cloned() {
+            let mut ch = base;
+            ch.character_id = char_id;
+            ch.corporation_id = npc_corp_id;
+            snap.characters.insert(char_id, ch);
+        }
+    });
+
+    let mut npc_sess = make_session(char_id, npc_corp_id);
+    for (svc, method, args) in [
+        ("corpStationMgr", "MoveCorpHQHere", vec![PyRep::Integer(station_id)]),
+        ("corpmgr", "GetAssetInventory", vec![PyRep::Integer(npc_corp_id), PyRep::String("offices".into())]),
+        (
+            "corpmgr",
+            "GetAssetInventoryForLocation",
+            vec![PyRep::Integer(npc_corp_id), PyRep::Integer(station_id), PyRep::String("offices".into())],
+        ),
+        ("corpRegistry", "RegisterNewAggressionSettings", vec![PyRep::Bool(true)]),
+    ] {
+        assert_eq!(
+            handle_corp_gov_tail(&ctx, &mut npc_sess, svc, method, &args, npc_corp_id, char_id, 1000)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied",
+            "{svc}.{method} must reject NPC corporation {npc_corp_id}"
+        );
+    }
+    assert_eq!(
+        handle_get_corp_applications_rpc(&ctx, &npc_sess, &[PyRep::Integer(npc_corp_id)], false)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+}

@@ -913,8 +913,8 @@ async fn get_items_in_safety_for_corp_rejects_npc_corp_and_omitted_members() {
         );
     });
 
-    // Non-GM pilot in an NPC corp or unseeded < 98M corp is denied even with ROLE_ACCOUNTANT.
-    for cid in [npc_corp_id, 500_001_i64] {
+    // Non-GM pilot in an NPC corp, unseeded < 98M corp, or unseeded >= 98M corp is denied even with ROLE_ACCOUNTANT.
+    for cid in [npc_corp_id, 500_001_i64, 98_777_999_i64] {
         let mut sess = make_session(90_000_862, cid, None, service_roles::ROLE_PLAYER);
         sess.corp_role = u64::MAX;
         assert_eq!(
@@ -1209,4 +1209,182 @@ async fn asset_safety_wrap_names_and_delivery_db_first_rbac() {
         delivered.dict_get("wrapID").and_then(PyRep::as_i64),
         Some(corp_wrap_id)
     );
+}
+
+#[tokio::test]
+async fn move_corp_assets_to_safety_enforces_db_first_rbac_and_rejects_stale_uninserted_and_npc() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let corp_id = 98_200_301_i64;
+    let unreg_corp_id = 98_200_399_i64;
+    let npc_corp_id = 1_000_009_i64;
+    let ceo_id = 90_200_301_i64;
+    let plain_id = 90_200_302_i64;
+    let omitted_id = 90_200_303_i64;
+    let unreg_char_id = 90_200_304_i64;
+    let npc_char_id = 90_200_305_i64;
+    let sid_corp = 10_000_926_301_i64;
+    let sid_unreg = 10_000_926_302_i64;
+    let sid_npc = 10_000_926_303_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Safety Move Guard Corp".into();
+        corp.ticker = "SMVC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = HashSet::from([ceo_id, plain_id]);
+        corp.member_roles.insert(omitted_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, owner_corp) in [
+            (ceo_id, corp_id),
+            (plain_id, corp_id),
+            (omitted_id, corp_id),
+            (unreg_char_id, unreg_corp_id),
+            (npc_char_id, npc_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: owner_corp,
+                    ..Default::default()
+                },
+            );
+        }
+
+        for (sid, owner_corp, item_id) in [
+            (sid_corp, corp_id, 991_201_i64),
+            (sid_unreg, unreg_corp_id, 991_202_i64),
+            (sid_npc, npc_corp_id, 991_203_i64),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35832,
+                    owner_corp_id: owner_corp,
+                    solar_system_id: 30_000_142,
+                    name: format!("Safety Guard Struct {sid}"),
+                    position: [1_000_000_000.0, 0.0, 0.0],
+                    state: STATE_SHIELD_VULNERABLE.into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 500_000.0,
+                    armor_hp: 500_000.0,
+                    hull_hp: 500_000.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            snap.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id: 34,
+                    owner_id: owner_corp,
+                    location_id: sid,
+                    flag: InventoryFlag::CorpSAG1,
+                    quantity: 100,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // 1. Plain member with stale session.corp_role = ROLE_DIRECTOR is rejected.
+    let mut plain_sess = make_session(plain_id, corp_id, None, service_roles::ROLE_PLAYER);
+    plain_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut plain_sess,
+            "structureAssetSafety",
+            "MoveCorpAssetsToSafety",
+            &[PyRep::Integer(30_000_142), PyRep::Integer(sid_corp)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+
+    // 2. Character omitted from non-empty corp.members (even with DB ROLE_DIRECTOR) is rejected.
+    let mut omitted_sess = make_session(omitted_id, corp_id, None, service_roles::ROLE_PLAYER);
+    omitted_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut omitted_sess,
+            "structureAssetSafety",
+            "MoveCorpAssetsToSafety",
+            &[PyRep::Integer(30_000_142), PyRep::Integer(sid_corp)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+
+    // 3. Uninserted player corp (>= 98M) and NPC corp are rejected even with session ROLE_DIRECTOR.
+    let mut unreg_sess = make_session(unreg_char_id, unreg_corp_id, None, service_roles::ROLE_PLAYER);
+    unreg_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut unreg_sess,
+            "structureAssetSafety",
+            "MoveCorpAssetsToSafety",
+            &[PyRep::Integer(30_000_142), PyRep::Integer(sid_unreg)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+    let mut npc_sess = make_session(npc_char_id, npc_corp_id, None, service_roles::ROLE_PLAYER);
+    npc_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut npc_sess,
+            "structureAssetSafety",
+            "MoveCorpAssetsToSafety",
+            &[PyRep::Integer(30_000_142), PyRep::Integer(sid_npc)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InsufficientCorpRoles"
+    );
+
+    // 4. Seeded corp CEO with session.corp_role = 0 succeeds.
+    let mut ceo_sess = make_session(ceo_id, corp_id, None, service_roles::ROLE_PLAYER);
+    ceo_sess.corp_role = 0;
+    let moved = handle(
+        &ctx,
+        &mut ceo_sess,
+        "structureAssetSafety",
+        "MoveCorpAssetsToSafety",
+        &[PyRep::Integer(30_000_142), PyRep::Integer(sid_corp)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(moved.dict_get("ownerID").and_then(PyRep::as_i64), Some(corp_id));
 }

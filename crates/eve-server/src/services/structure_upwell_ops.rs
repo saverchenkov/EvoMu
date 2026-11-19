@@ -468,11 +468,16 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
             if st.owner_corp_id != owner_id {
                 return Err(err("StructureOwnershipViolation", format!("Character {char_id} (corp {owner_id}) cannot move corporate assets from structure {structure_id} owned by corp {}", st.owner_corp_id)));
             }
-            let (is_ceo, roles) =
-                snap.effective_corp_roles_at(owner_id, char_id, Some(structure_id), session.corp_role, now_unix);
             let has_dir = session.has_gm_role()
-                || is_ceo
-                || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
+                || has_db_corp_asset_safety_role(
+                    ctx,
+                    snap,
+                    char_id,
+                    owner_id,
+                    Some(structure_id),
+                    eve_db::corp_roles::ROLE_DIRECTOR,
+                    now_unix,
+                );
             if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
         }
         let ext_active = load_ext_state(snap); let all_active_ships: HashSet<i64> = snap.characters.values().map(|c| c.active_ship_id).filter(|&id| id > 0).chain(session.ship_id.into_iter().filter(|&id| id > 0)).chain(ext_active.previous_ship_by_structure.iter().filter(|(sid, _)| ext_active.active_pilot_by_structure.contains_key(sid)).map(|(_, &sh)| sh).filter(|&id| id > 0)).collect();
@@ -664,27 +669,15 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
                     "Viewing corporate asset safety requires a player corporation",
                 ));
             }
-            if snap.corporations.contains_key(&owner_id) {
-                if !has_db_corp_asset_safety_role(
-                    ctx,
-                    snap,
-                    char_id,
-                    owner_id,
-                    None,
-                    eve_db::corp_roles::ROLE_ACCOUNTANT,
-                    now_unix,
-                ) {
-                    return Err(err(
-                        "CorpRoleDenied",
-                        "Viewing corporate asset safety requires Accountant or Director role",
-                    ));
-                }
-            } else if owner_id < 98_000_000
-                || !eve_db::corp_roles::has_role(
-                    session.corp_role,
-                    eve_db::corp_roles::ROLE_ACCOUNTANT,
-                )
-            {
+            if !has_db_corp_asset_safety_role(
+                ctx,
+                snap,
+                char_id,
+                owner_id,
+                None,
+                eve_db::corp_roles::ROLE_ACCOUNTANT,
+                now_unix,
+            ) {
                 return Err(err(
                     "CorpRoleDenied",
                     "Viewing corporate asset safety requires Accountant or Director role",

@@ -1370,7 +1370,18 @@ fn industry_facilities_bps_db_first_roles_and_corp_facility_locations() {
         .collect();
     assert_eq!(corp_flags, vec![116]);
 
-    // 3. Unregistered corp (>= 98M without DB CorporationRecord) is denied SetFacilityTaxes even with ROLE_DIRECTOR in session.
+    // 3. Unregistered corp (>= 98M without DB CorporationRecord) is denied SetFacilityTaxes and GetBlueprintDataByOwner
+    // even with ROLE_DIRECTOR in session and an orphaned corp_role_assignments row.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_role_assignments.insert(
+            (unreg_corp_id, unreg_id),
+            eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                character_id: unreg_id,
+                roles: corp_roles::ROLE_DIRECTOR,
+                ..Default::default()
+            },
+        );
+    });
     let mut unreg_sess = char_session(unreg_id, st_id);
     unreg_sess.corporation_id = Some(unreg_corp_id);
     unreg_sess.corp_role = corp_roles::ROLE_DIRECTOR;
@@ -1387,6 +1398,77 @@ fn industry_facilities_bps_db_first_roles_and_corp_facility_locations() {
         .unwrap_err()
         .code,
         "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut unreg_sess,
+            "blueprintManager",
+            "GetBlueprintDataByOwner",
+            &[PyRep::Integer(unreg_corp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OwnerAccessDenied"
+    );
+
+    // 4. NPC corp (even if CorporationRecord is seeded with CEO/director roles) emits zero corp facility locations
+    // and is denied GetBlueprintDataByOwner.
+    let npc_corp_id = 1_000_009_i64;
+    let npc_char_id = 2_900_925_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            npc_char_id,
+            eve_db::CharacterRecord {
+                character_id: npc_char_id,
+                corporation_id: npc_corp_id,
+                ..Default::default()
+            },
+        );
+        let mut npc_corp = CorporationRecord::default();
+        npc_corp.corporation_id = npc_corp_id;
+        npc_corp.ceo_id = npc_char_id;
+        npc_corp.members.insert(npc_char_id);
+        npc_corp.member_roles.insert(npc_char_id, corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(npc_corp_id, npc_corp);
+    });
+    let mut npc_sess = char_session(npc_char_id, st_id);
+    npc_sess.corporation_id = Some(npc_corp_id);
+    npc_sess.corp_role = corp_roles::ROLE_DIRECTOR;
+    let npc_locs = handle_industry_facilities_bps(
+        &ctx,
+        &mut npc_sess,
+        "facilityManager",
+        "GetFacilityLocations",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(npc_rows) = npc_locs else {
+        panic!("expected list from GetFacilityLocations");
+    };
+    assert!(
+        !npc_rows
+            .iter()
+            .any(|row| row.dict_get("ownerID").and_then(PyRep::as_i64) == Some(npc_corp_id)),
+        "NPC corp must not receive corp facility hangar locations"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut npc_sess,
+            "blueprintManager",
+            "GetBlueprintDataByOwner",
+            &[PyRep::Integer(npc_corp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OwnerAccessDenied"
     );
 }
 
