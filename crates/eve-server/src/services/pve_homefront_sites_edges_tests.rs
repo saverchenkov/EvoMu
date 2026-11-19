@@ -73,7 +73,8 @@ fn homefront_seeding_security_boundaries_templates_and_idempotency() {
         assert_eq!(list[1].dungeon_id, 99_001);
         assert_eq!(list[0].instance_id, 30_900_045_i64 * 1000 + 1);
         assert_eq!(list[1].instance_id, 30_900_045_i64 * 1000 + 2);
-        assert!(list[0].base_pilot_isk > list[1].base_pilot_isk);
+        assert_eq!(list[0].base_pilot_isk, 15_000_000);
+        assert_eq!(list[1].base_pilot_isk, 15_000_000);
 
         // Calling again is idempotent (early return on contains_key)
         reg.homefront_sites.get_mut(&30_900_045).unwrap()[0].completed = true;
@@ -169,4 +170,207 @@ fn homefront_rpc_auth_db_fallback_and_negative_system_errors() {
     let rep = handle_get_homefront_site_instances(&ctx, &sess, &[]).unwrap();
     let PyRep::Dict(outer) = rep else { panic!("expected dict") };
     assert_eq!(outer[0].0, PyRep::Integer(30_000_142));
+}
+
+mod multi_role_edge_tests {
+    use super::*;
+    use crate::services::pve_homefront_sites::{
+        activate_homefront_acceleration_gate, complete_homefront_operation_and_pay,
+        dread_assault_advance_siege, dread_assault_transfer_capacitor, emergency_aid_advance_defense,
+        metaliminal_mine_mutanite, raid_deliver_cargo_to_freighter,
+        raid_tackle_and_destroy_hauler, record_homefront_combat_and_logistics,
+        spawn_homefront_site_for_dungeon, suspicious_signal_attack_relay,
+        suspicious_signal_hack_array, traffic_stop_scan_and_intercept,
+    };
+    use crate::services::pve_special_sites_ops::resolve_homefront_archetype_blueprint;
+    use eve_db::clock::VirtualServerClock;
+    use eve_db::{InventoryItemRecord, IskCents, WorldRepository};
+    use eve_sde::{SolarSystemId, TypeId};
+    use std::sync::Arc;
+
+    fn test_ctx_with_pilot(
+        char_id: i64,
+        ship_id: i64,
+        ship_type_id: TypeId,
+        sys_id: SolarSystemId,
+    ) -> (ServerContext, SessionState) {
+        let sde = super::shared_sde();
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let db = Arc::new(WorldRepository::new_empty());
+        db.with_mut_snapshot(|snap| {
+            let mut ch = template_ch;
+            ch.character_id = char_id;
+            ch.user_id = 80;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents::from_isk(500_000);
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: ship_type_id,
+                    owner_id: char_id,
+                    location_id: char_id,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        let ctx = ServerContext::with_sde_and_repository(sde, db);
+        ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+        let mut sess = SessionState::new(80);
+        sess.user_id = Some(80);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        (ctx, sess)
+    }
+
+    #[tokio::test]
+    async fn homefront_runtime_rejects_invalid_gates_roles_and_timeouts() {
+        let jita: SolarSystemId = 30_000_142;
+
+        // 1. Spawn validation: low-sec (Tama) & unknown/non-Homefront dungeon rejected
+        let (ctx, mut sess_caracal) = test_ctx_with_pilot(930_001, 830_001, 621, jita);
+        assert_eq!(
+            spawn_homefront_site_for_dungeon(&ctx, 30_002_813, 10_347).unwrap_err().code,
+            "InvalidHomefrontSecurity"
+        );
+        assert_eq!(
+            spawn_homefront_site_for_dungeon(&ctx, jita, 999_999).unwrap_err().code,
+            "UnknownDungeon"
+        );
+
+        let raid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).unwrap();
+
+        // 2. Gate rejections: docked, wrong system, restricted ships (T2 Cerberus 11993, BC Drake 24698, Trig Vedmak 47270, Capsule 670)
+        sess_caracal.station_id = Some(60_003_760);
+        assert_eq!(
+            activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id).await.unwrap_err().code,
+            "ShipDocked"
+        );
+        sess_caracal.station_id = None;
+        assert_eq!(
+            record_homefront_combat_and_logistics(&ctx, &sess_caracal, raid.instance_id, 1_500.0, 0.0).unwrap_err().code,
+            "GateNotEntered"
+        );
+
+        for bad_tid in [11_993_u32, 24_698, 47_270, 670, 11_134] {
+            let (bad_ctx, bad_sess) = test_ctx_with_pilot(930_002, 830_002, bad_tid, jita);
+            let bad_raid = spawn_homefront_site_for_dungeon(&bad_ctx, jita, 10_347).unwrap();
+            assert_eq!(
+                activate_homefront_acceleration_gate(&bad_ctx, &bad_sess, bad_raid.instance_id)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "ShipRestrictedByGate",
+                "ship type {bad_tid} must be rejected by 5-pilot gate"
+            );
+        }
+
+        // 3-pilot site rejects Coercer Navy Issue (73789) and Caracal (621)
+        let sal = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).unwrap();
+        assert_eq!(
+            activate_homefront_acceleration_gate(&ctx, &sess_caracal, sal.instance_id).await.unwrap_err().code,
+            "ShipRestrictedByGate"
+        );
+
+        // 3. Raid edge failures: untackled hauler escapes; Caracal (<3500 m3) blocked from cargo delivery; incomplete objectives blocked
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id).await.unwrap();
+        assert_eq!(
+            raid_tackle_and_destroy_hauler(&ctx, &sess_caracal, raid.instance_id, false, 3_000.0)
+                .unwrap_err()
+                .code,
+            "TargetEscaped"
+        );
+        raid_tackle_and_destroy_hauler(&ctx, &sess_caracal, raid.instance_id, true, 3_000.0).unwrap();
+        assert_eq!(
+            raid_deliver_cargo_to_freighter(&ctx, &sess_caracal, raid.instance_id).unwrap_err().code,
+            "CargoCapacityTooSmall"
+        );
+        assert_eq!(
+            complete_homefront_operation_and_pay(&ctx, &sess_caracal, raid.instance_id)
+                .await
+                .unwrap_err()
+                .code,
+            "ObjectivesIncomplete"
+        );
+
+        // 4. Metaliminal requires Miner I / mining hull
+        let met = spawn_homefront_site_for_dungeon(&ctx, jita, 10_312).unwrap();
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, met.instance_id).await.unwrap();
+        assert_eq!(
+            metaliminal_mine_mutanite(&ctx, &sess_caracal, met.instance_id, 100, 0).unwrap_err().code,
+            "MiningModuleRequired"
+        );
+
+        // 5. Dread Assault rejects early Siege & cap transfer during Siege
+        let dread = spawn_homefront_site_for_dungeon(&ctx, jita, 10_320).unwrap();
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, dread.instance_id).await.unwrap();
+        assert_eq!(
+            dread_assault_advance_siege(&ctx, &sess_caracal, dread.instance_id, 30).unwrap_err().code,
+            "DreadNotInSiegeMode"
+        );
+        dread_assault_transfer_capacitor(&ctx, &sess_caracal, dread.instance_id, 30_000.0, 0.0).unwrap();
+        assert_eq!(
+            dread_assault_transfer_capacitor(&ctx, &sess_caracal, dread.instance_id, 5_000.0, 0.0).unwrap_err().code,
+            "DreadInSiegeMode"
+        );
+
+        // 6. Suspicious Signal rejects attacking relay before all 3 arrays are hacked
+        let sig = spawn_homefront_site_for_dungeon(&ctx, jita, 10_309).unwrap();
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, sig.instance_id).await.unwrap();
+        suspicious_signal_hack_array(&ctx, &sess_caracal, sig.instance_id, 0).unwrap();
+        assert_eq!(
+            suspicious_signal_attack_relay(&ctx, &sess_caracal, sig.instance_id, 50_000.0, 10).unwrap_err().code,
+            "StructureInvulnerable"
+        );
+
+        // 7. Failure states & timeout: Emergency Aid protectee death, Traffic Stop civilian collateral, time limit expiration
+        let aid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_238).unwrap();
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, aid.instance_id).await.unwrap();
+        assert_eq!(
+            emergency_aid_advance_defense(&ctx, &sess_caracal, aid.instance_id, 0.0, 50_000.0, 10).unwrap_err().code,
+            "OperationFailed"
+        );
+        assert_eq!(
+            emergency_aid_advance_defense(&ctx, &sess_caracal, aid.instance_id, 1_000.0, 0.0, 10).unwrap_err().code,
+            "OperationFailed"
+        );
+
+        let (ctx3, sess_frigate) = test_ctx_with_pilot(930_003, 830_003, 597, jita);
+        let traf = spawn_homefront_site_for_dungeon(&ctx3, jita, 10_705).unwrap();
+        activate_homefront_acceleration_gate(&ctx3, &sess_frigate, traf.instance_id).await.unwrap();
+        assert_eq!(
+            traffic_stop_scan_and_intercept(&ctx3, &sess_frigate, traf.instance_id, 1, 3, 2_000.0).unwrap_err().code,
+            "OperationFailed"
+        );
+
+        let timed = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).unwrap();
+        activate_homefront_acceleration_gate(&ctx, &sess_caracal, timed.instance_id).await.unwrap();
+        ctx.advance_secs(timed.blueprint.time_limit_secs + 5);
+        assert_eq!(
+            record_homefront_combat_and_logistics(&ctx, &sess_caracal, timed.instance_id, 1_000.0, 0.0)
+                .unwrap_err()
+                .code,
+            "OperationTimedOut"
+        );
+
+        // 8. Exordium halving verified against SDE starter school system (if present)
+        if let Some(ex_sys) = ctx
+            .sde
+            .schools
+            .values()
+            .map(|s| s.solar_system_id)
+            .find(|&sid| sid != jita)
+        {
+            let ex_bp = resolve_homefront_archetype_blueprint(&ctx.sde, 10_347, "Raid", ex_sys, 2);
+            if ex_bp.is_exordium_system {
+                assert_eq!(ex_bp.base_pilot_isk, 7_500_000);
+            }
+        }
+    }
 }

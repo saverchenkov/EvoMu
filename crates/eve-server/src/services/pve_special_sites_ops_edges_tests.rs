@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use eve_db::{TrainedSkillRecord, WorldRepository};
-use eve_sde::{DungeonTemplate, SdeRegistry, SolarSystem};
+use eve_sde::{DungeonTemplate, SdeRegistry};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -24,21 +24,21 @@ fn test_ctx() -> ServerContext {
 }
 
 #[test]
-fn resolve_homefront_templates_and_faction_boss_types_cover_all_factions() {
-    let mut ctx = test_ctx();
+fn resolve_homefront_archetype_blueprints_cover_all_factions_and_stripped_fallbacks() {
+    let ctx = test_ctx();
 
     let templates = resolve_sde_homefront_templates(&ctx.sde);
-    // Verify sorted order by dungeon_id
     for win in templates.windows(2) {
         assert!(win[0].dungeon_id <= win[1].dungeon_id);
     }
-    // Also verify synthetic archetype 70 dungeon fallback to d.name
+
+    // Synthetic archetype 70 dungeon fallback uses dungeon.name when operations.json lacks it
     let mut sde_clone = (*ctx.sde).clone();
     sde_clone.dungeons.insert(
         9_999_001,
         DungeonTemplate {
             dungeon_id: 9_999_001,
-            name: "Synthetic Homefront Op".to_string(),
+            name: "Synthetic Dread Assault Op".to_string(),
             archetype_id: Some(70),
             difficulty: None,
             faction_id: Some(500_001),
@@ -49,153 +49,96 @@ fn resolve_homefront_templates_and_faction_boss_types_cover_all_factions() {
         .iter()
         .find(|t| t.dungeon_id == 9_999_001)
         .expect("synthetic archetype 70 template");
-    assert_eq!(synth.dungeon_name, "Synthetic Homefront Op");
+    assert_eq!(synth.dungeon_name, "Synthetic Dread Assault Op");
     assert_eq!(synth.difficulty, 2);
 
-    // Unknown system falls back to Caldari (500_001 -> Guristas 500_010)
-    let (b1_unk, b2_unk) = resolve_homefront_faction_boss_types(&ctx.sde, 999_999_999);
-    assert!(b1_unk > 0 && b2_unk > 0);
-
-    // Exercise all 5 faction branches via synthetic solar systems + constellations/regions
-    let template_sys = ctx.sde.solar_systems[&30_000_142].clone();
-    {
-        let sde_mut = Arc::make_mut(&mut ctx.sde);
-        let template_type = sde_mut.types[&587].clone();
-        // Ensure each hostile faction has at least 2 candidate cruisers in group 550..=590 with shield cap > 0
-        for (idx, &hostile_fac) in [500_012u32, 500_020, 500_011, 500_010, 500_019]
-            .iter()
-            .enumerate()
-        {
-            for sub in 0..2u32 {
-                let tid = 998_100 + (idx as u32) * 10 + sub;
-                let mut t = template_type.clone();
-                t.type_id = tid;
-                t.published = true;
-                t.faction_id = Some(hostile_fac);
-                t.group_id = 560;
-                t.default_attributes
-                    .insert(eve_sde::attr_ids::SHIELD_CAPACITY, 5_000.0);
-                sde_mut.types.insert(tid, t);
-            }
-        }
-        // Create 5 systems with constellation/region/station fallback
-        for (idx, &sys_fac) in [500_003u32, 500_004, 500_002, 500_001, 500_007]
-            .iter()
-            .enumerate()
-        {
-            let sid = 39_800_000 + idx as u32;
-            let cid = 29_800_000 + idx as u32;
-            let rid = 19_800_000 + idx as u32;
-            // For idx == 1 (Gallente), put faction on region instead of constellation
-            let (cfac, rfac) = if idx == 1 {
-                (None, Some(sys_fac))
-            } else {
-                (Some(sys_fac), None)
-            };
-            sde_mut.constellations.insert(
-                cid,
-                eve_sde::ConstellationInfo {
-                    constellation_id: cid,
-                    region_id: rid,
-                    name: format!("HF-C{idx}"),
-                    center: [0.0; 3],
-                    faction_id: cfac,
-                    wormhole_class_id: None,
-                },
-            );
-            sde_mut.regions.insert(
-                rid,
-                eve_sde::RegionInfo {
-                    region_id: rid,
-                    name: format!("HF-R{idx}"),
-                    center: [0.0; 3],
-                    faction_id: rfac,
-                    wormhole_class_id: None,
-                },
-            );
-            let mut sys = template_sys.clone();
-            sys.solar_system_id = sid;
-            sys.constellation_id = cid;
-            sys.region_id = rid;
-            sde_mut.solar_systems.insert(sid, sys);
-        }
-    }
-
-    for idx in 0..5u32 {
-        let (b1, b2) = resolve_homefront_faction_boss_types(&ctx.sde, 39_800_000 + idx);
-        assert!(b1 > 0 && b2 > 0);
-    }
-
-    // Empty cruiser candidates fallback -> (48_090, 48_090)
-    let mut empty_sde = SdeRegistry::default();
-    empty_sde.solar_systems.insert(30_000_142, template_sys);
-    assert_eq!(
-        resolve_homefront_faction_boss_types(&empty_sde, 30_000_142),
-        (48_090, 48_090)
+    let synth_bp = resolve_homefront_archetype_blueprint(
+        &sde_clone,
+        synth.dungeon_id,
+        &synth.dungeon_name,
+        30_000_142,
+        synth.difficulty,
     );
+    assert_eq!(synth_bp.archetype, HomefrontArchetype::DreadAssault);
+    assert_eq!(synth_bp.objective_structure_type_id, Some(77_251));
+    assert_eq!(synth_bp.support_entity_type_id, Some(77_184));
+
+    // Regional filtering returns empire-appropriate + Abyssal 5-pilot sites across all 4 empires
+    for &(sys_id, exp_sov) in &[
+        (30_002_187_u32, 500_003_u32), // Amarr
+        (30_000_142, 500_001),         // Caldari
+        (30_002_659, 500_004),         // Gallente
+        (30_002_510, 500_002),         // Minmatar
+    ] {
+        assert_eq!(resolve_homefront_sovereign_faction(&ctx.sde, sys_id), exp_sov);
+        let regional = resolve_sde_homefront_templates_for_system(&ctx.sde, sys_id);
+        assert!(regional.len() >= 6);
+    }
+
+    // Stripped empty SdeRegistry falls back gracefully without 48_090 cruiser stub
+    let empty_sde = SdeRegistry::default();
+    let empty_bp = resolve_homefront_archetype_blueprint(
+        &empty_sde,
+        10_320,
+        "Dread Assault: Blood Raider Temple",
+        30_000_142,
+        2,
+    );
+    assert_ne!(empty_bp.dispatch_commander_type_id, 48_090);
+    assert_eq!(empty_bp.base_pilot_isk, 15_000_000);
 }
 
 #[test]
-fn compute_homefront_base_and_combat_pilot_isk_all_tiers_and_edge_cases() {
-    let mut sde = SdeRegistry::default();
-    sde.solar_systems.insert(
-        30_000_100,
-        SolarSystem {
-            solar_system_id: 30_000_100,
-            constellation_id: 20_000_001,
-            region_id: 10_000_001,
-            name: "High10".into(),
-            security_status: 1.0,
-            radius: 1.0e12,
-            galactic_pos_ly: [0.0; 3],
-            planet_ids: Vec::new(),
-            stations: Vec::new(),
-            wormhole_class_id: None,
-        },
+fn homefront_wave_exordium_and_3_vs_5_pilot_cap_edge_cases() {
+    let ctx = test_ctx();
+    let sde = Arc::clone(&ctx.sde);
+
+    // Abyssal Artifact Recovery 9-wave totals: 3*5M + 3*7.5M + 3*10M = 67.5M (halved in Exordium)
+    let aar_bp = resolve_homefront_archetype_blueprint(
+        &sde,
+        10_346,
+        "Abyssal Artifact Recovery",
+        30_000_142,
+        3,
     );
-    sde.solar_systems.insert(
-        30_000_101,
-        SolarSystem {
-            solar_system_id: 30_000_101,
-            constellation_id: 20_000_001,
-            region_id: 10_000_001,
-            name: "LowClamp".into(),
-            security_status: 0.1, // clamped to 0.45
-            radius: 1.0e12,
-            galactic_pos_ly: [0.0; 3],
-            planet_ids: Vec::new(),
-            stations: Vec::new(),
-            wormhole_class_id: None,
-        },
+    assert_eq!(aar_bp.abyssal_wave_payouts_isk.len(), 9);
+    assert_eq!(aar_bp.abyssal_wave_payouts_isk.iter().sum::<i64>(), 67_500_000);
+    assert_eq!(aar_bp.base_pilot_isk, 67_500_000);
+
+    let ex_aar = resolve_homefront_archetype_blueprint(
+        &sde,
+        10_346,
+        "Abyssal Artifact Recovery",
+        30_001_407, // Todaki starter system
+        3,
     );
+    assert!(ex_aar.is_exordium_system);
+    assert_eq!(ex_aar.abyssal_wave_payouts_isk.iter().sum::<i64>(), 33_750_000);
 
-    // Difficulty 0, 1, 2, 3, 4+ and even vs odd slot_index
-    let d0_even = compute_homefront_base_pilot_isk(&sde, 30_000_100, 0, 0);
-    let d1_even = compute_homefront_base_pilot_isk(&sde, 30_000_100, 1, 2);
-    assert_eq!(d0_even, 15_500_000);
-    assert_eq!(d1_even, 15_500_000);
+    // 3-pilot role cap (`opt = 3, max = 6`): <= 3 gets 12M each (36M), 6 get 6M (36M), 7th gets 0
+    let p3_contribs: Vec<HomefrontParticipantContribution> = (1..=8)
+        .map(|cid| HomefrontParticipantContribution {
+            character_id: cid,
+            ore_mined_units: if cid == 1 { 100 } else { 0 },
+            arrays_hacked: if cid != 1 { 1 } else { 0 },
+            ..Default::default()
+        })
+        .collect();
+    let p3_cap = compute_homefront_fleet_payouts(12_000_000, 60, 3, &p3_contribs[..3]);
+    assert_eq!(p3_cap.total_fleet_isk, 36_000_000);
+    assert_eq!(p3_cap.total_fleet_lp, 180);
 
-    let d2_odd = compute_homefront_base_pilot_isk(&sde, 30_000_100, 2, 1);
-    assert_eq!(d2_odd, 15_510_000); // 17_230_000 * 0.90 = 15_507_000 -> rounded to 10k = 15_510_000
+    let p3_over = compute_homefront_fleet_payouts(12_000_000, 60, 3, &p3_contribs);
+    assert_eq!(p3_over.eligible_pilot_count, 6);
+    assert_eq!(p3_over.total_fleet_isk, 36_000_000);
+    assert_eq!(p3_over.total_fleet_lp, 180);
+    assert!(!p3_over.payouts[6].eligible && p3_over.payouts[6].isk == 0);
+    assert!(!p3_over.payouts[7].eligible && p3_over.payouts[7].isk == 0);
 
-    let d3_even = compute_homefront_base_pilot_isk(&sde, 30_000_100, 3, 0);
-    assert_eq!(d3_even, 18_500_000);
-
-    let d4_even = compute_homefront_base_pilot_isk(&sde, 30_000_100, 4, 0);
-    assert_eq!(d4_even, 20_000_000);
-
-    // Clamped sec 0.45 -> sec_mult = 1 + 0.55 * 0.25 = 1.1375
-    let low_d4 = compute_homefront_base_pilot_isk(&sde, 30_000_101, 5, 0);
-    assert_eq!(low_d4, 22_750_000);
-
-    // Missing system -> default 0.5 security
-    let unk_d2 = compute_homefront_base_pilot_isk(&sde, 999_999, 2, 0);
-    assert!(unk_d2 > 17_230_000);
-
-    // Combat pilot ISK split
-    assert_eq!(compute_homefront_combat_pilot_isk(17_000_000, 5, 0), 17_000_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(17_000_000, 5, 5), 17_000_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(17_000_000, 5, 10), 8_500_000);
+    // Combat pilot ISK split edges + zero clamp
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 15_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 5), 15_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 10), 7_500_000);
     assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 0, 4), 2_500_000);
 }
 

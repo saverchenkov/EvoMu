@@ -6,62 +6,137 @@ use super::*;
 use crate::services::pve_metaliminal_storms::storm_weather_beacons;
 use crate::services::pve_special_sites_ops::{
     allocate_drifter_hive_bonus_loot, apply_triglavian_standings_and_isk,
-    build_triglavian_sites_from_sde, compute_homefront_base_pilot_isk,
-    compute_homefront_combat_pilot_isk, ensure_full_roaming_storm_set,
-    init_drifter_hives_from_sde, notify_storm_ship_dogma_updates,
-    resolve_homefront_faction_boss_types, resolve_sde_homefront_templates,
+    build_triglavian_sites_from_sde, compute_homefront_combat_pilot_isk,
+    compute_homefront_fleet_payouts, ensure_full_roaming_storm_set,
+    init_drifter_hives_from_sde, is_homefront_exordium_system,
+    notify_storm_ship_dogma_updates, resolve_homefront_archetype_blueprint,
+    resolve_sde_homefront_templates, resolve_sde_homefront_templates_for_system,
+    validate_homefront_ship_eligibility, HomefrontArchetype,
+    HomefrontParticipantContribution,
 };
 use eve_db::TrainedSkillRecord;
 use std::collections::{HashMap, HashSet};
 
 #[test]
-fn homefront_templates_factions_and_isk_payout_formulas() {
+fn homefront_archetypes_ship_restrictions_and_role_cap_payouts() {
     let sde = shared_sde();
 
     let templates = resolve_sde_homefront_templates(&sde);
-    assert!(!templates.is_empty());
+    assert!(templates.len() >= 24);
     assert!(templates.windows(2).all(|w| w[0].dungeon_id <= w[1].dungeon_id));
 
-    // Resolve faction bosses across all 4 empire factions + unknown fallback
-    let mut tested_factions = HashSet::new();
-    for sys in sde.solar_systems.values() {
-        let fid = sde
-            .constellations
-            .get(&sys.constellation_id)
-            .and_then(|c| c.faction_id)
-            .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id));
-        if let Some(f) = fid {
-            if matches!(f, 500_001 | 500_002 | 500_003 | 500_004) && tested_factions.insert(f) {
-                let (b1, b2) = resolve_homefront_faction_boss_types(&sde, sys.solar_system_id);
-                assert!(b1 > 0 && b2 > 0);
-            }
-        }
-        if tested_factions.len() == 4 {
-            break;
-        }
+    let covered: HashSet<HomefrontArchetype> = templates
+        .iter()
+        .map(|t| HomefrontArchetype::from_dungeon(t.dungeon_id, &t.dungeon_name))
+        .collect();
+    for arch in [
+        HomefrontArchetype::Raid,
+        HomefrontArchetype::EmergencyAid,
+        HomefrontArchetype::MetaliminalMeteoroid,
+        HomefrontArchetype::DreadAssault,
+        HomefrontArchetype::AbyssalArtifactRecovery,
+        HomefrontArchetype::SuspiciousSignal,
+        HomefrontArchetype::SalvageResearch,
+        HomefrontArchetype::StabilizeRift,
+        HomefrontArchetype::TrafficStop,
+    ] {
+        assert!(covered.contains(&arch), "Missing V24 SDE archetype {arch:?}");
     }
-    let fallback_bosses = resolve_homefront_faction_boss_types(&sde, 99_999_999);
-    assert!(fallback_bosses.0 > 0 && fallback_bosses.1 > 0);
 
-    // Difficulty tiers (0/1, 2, 3, 4+) and slot_index even vs odd (0.90x)
-    let sys_id = find_highsec_system(&sde);
-    let d1_even = compute_homefront_base_pilot_isk(&sde, sys_id, 1, 0);
-    let d1_odd = compute_homefront_base_pilot_isk(&sde, sys_id, 1, 1);
-    let d2 = compute_homefront_base_pilot_isk(&sde, sys_id, 2, 0);
-    let d3 = compute_homefront_base_pilot_isk(&sde, sys_id, 3, 0);
-    let d4 = compute_homefront_base_pilot_isk(&sde, sys_id, 5, 0);
-    assert!(d1_odd < d1_even);
-    assert!(d1_even < d2 && d2 < d3 && d3 < d4);
-    assert_eq!(d1_even % 10_000, 0);
-    // Unknown system falls back to sec = 0.5 -> sec_mult = 1.125
-    let unknown_d2 = compute_homefront_base_pilot_isk(&sde, 99_999_999, 2, 0);
-    assert_eq!(unknown_d2, 19_380_000);
+    // Verify real SDE multi-role blueprints across regional hubs (no cruiser stub 48_090)
+    let jita = 30_000_142_u32;
+    let amarr = 30_002_187_u32;
+    let jita_templates = resolve_sde_homefront_templates_for_system(&sde, jita);
+    assert!(jita_templates.len() >= 6);
+    for (did, sys_id, exp_isk, exp_opt) in [
+        (10_347_u32, amarr, 15_000_000_i64, 5_usize), // Raid: Hall of Sacrifice
+        (10_373, jita, 15_000_000, 5),                // Emergency Aid: Convoy
+        (10_387, jita, 12_000_000, 5),                // Metaliminal Meteoroid: Caldari Mining
+        (10_320, amarr, 15_000_000, 5),               // Dread Assault: Blood Raider Temple
+        (10_346, jita, 67_500_000, 5),                // Abyssal Artifact Recovery
+        (10_367, jita, 15_000_000, 5),                // Suspicious Signal: Block the Broadcast
+        (10_713, jita, 12_000_000, 3),                // 3-pilot Salvage Research
+    ] {
+        let tpl = templates.iter().find(|t| t.dungeon_id == did).unwrap();
+        let bp = resolve_homefront_archetype_blueprint(
+            &sde,
+            tpl.dungeon_id,
+            &tpl.dungeon_name,
+            sys_id,
+            tpl.difficulty,
+        );
+        assert_ne!(bp.dispatch_commander_type_id, 48_090);
+        assert_eq!(bp.base_pilot_isk, exp_isk);
+        assert_eq!(bp.optimal_fleet_size, exp_opt);
+        assert_eq!(bp.max_payout_pilots, exp_opt * 2);
+        let cmd_t = &sde.types[&bp.dispatch_commander_type_id];
+        assert!(cmd_t.default_attributes.get(&eve_sde::attr_ids::SHIELD_CAPACITY).copied().unwrap_or(0.0) > 0.0);
+        assert!(cmd_t.default_attributes.get(&eve_sde::attr_ids::ARMOR_HP).copied().unwrap_or(0.0) > 0.0);
+        assert!(cmd_t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied().unwrap_or(0.0) > 0.0);
+    }
 
-    // Combat fleet split: 0 clamped to 1, <= optimal is 1.0x, > optimal splits proportionally
-    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 5, 0), 10_000_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 5, 5), 10_000_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 5, 10), 5_000_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 0, 4), 2_500_000);
+    // Starter / Exordium system halves payout vs Jita
+    assert!(!is_homefront_exordium_system(&sde, jita));
+    assert!(is_homefront_exordium_system(&sde, 30_003_489)); // Imperial Academy (Chaven)
+    let ex_bp = resolve_homefront_archetype_blueprint(
+        &sde,
+        10_309,
+        "Suspicious Signal: Secure the Intel",
+        30_003_489,
+        2,
+    );
+    assert_eq!(ex_bp.base_pilot_isk, 7_500_000);
+
+    // Acceleration-gate ship restriction enforcement (5-pilot vs 3-pilot)
+    for &ok_5p in &[597_u32, 32_880, 89_648, 16_236, 89_240, 91_174, 621, 81_008, 2_998] {
+        assert!(
+            validate_homefront_ship_eligibility(&sde, ok_5p, HomefrontArchetype::Raid).is_ok(),
+            "Expected ship {ok_5p} allowed in 5-pilot Homefront"
+        );
+    }
+    for &bad_5p in &[670_u32, 11_134, 11_993, 17_709, 17_715, 47_270, 22_544, 24_698, 638, 28_606] {
+        assert_eq!(
+            validate_homefront_ship_eligibility(&sde, bad_5p, HomefrontArchetype::DreadAssault)
+                .expect_err("disallowed hull must fail gate")
+                .code,
+            "ShipRestrictedByGate"
+        );
+    }
+    assert!(validate_homefront_ship_eligibility(&sde, 32_880, HomefrontArchetype::TrafficStop).is_ok());
+    assert!(validate_homefront_ship_eligibility(&sde, 621, HomefrontArchetype::TrafficStop).is_err());
+    assert!(validate_homefront_ship_eligibility(&sde, 73_789, HomefrontArchetype::TrafficStop).is_err());
+
+    // Canonical 5-pilot role cap payout scaling (no infinite/linear-over-cap ISK/LP multiplication)
+    let contribs: Vec<HomefrontParticipantContribution> = (1..=12)
+        .map(|cid| HomefrontParticipantContribution {
+            character_id: cid,
+            damage_dealt: if cid == 12 { 500.0 } else { 2_500.0 },
+            ..Default::default()
+        })
+        .collect();
+    let p5 = compute_homefront_fleet_payouts(15_000_000, 100, 5, &contribs[..5]);
+    assert_eq!(p5.eligible_pilot_count, 5);
+    assert_eq!(p5.total_fleet_isk, 75_000_000);
+    assert_eq!(p5.total_fleet_lp, 500);
+
+    let p10 = compute_homefront_fleet_payouts(15_000_000, 100, 5, &contribs[..10]);
+    assert_eq!(p10.eligible_pilot_count, 10);
+    assert_eq!(p10.total_fleet_isk, 75_000_000);
+    assert_eq!(p10.payouts[0].isk, 7_500_000);
+    assert_eq!(p10.payouts[0].lp, 50);
+
+    // 11 qualified pilots (plus pilot 12 below interaction threshold) -> max 10 paid, pilot 11 & 12 earn 0
+    let p12 = compute_homefront_fleet_payouts(15_000_000, 100, 5, &contribs);
+    assert_eq!(p12.eligible_pilot_count, 10);
+    assert_eq!(p12.total_fleet_isk, 75_000_000);
+    assert!(!p12.payouts[10].eligible && p12.payouts[10].isk == 0 && p12.payouts[10].lp == 0);
+    assert!(!p12.payouts[11].eligible && p12.payouts[11].isk == 0);
+
+    // Combat helper preserves capped fleet pool
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 15_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 5), 15_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 10), 7_500_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 15), 5_000_000);
 }
 
 #[test]
