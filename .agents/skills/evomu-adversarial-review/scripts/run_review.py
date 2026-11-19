@@ -245,13 +245,13 @@ def env_audit(root):
 
 
 def _acquire_cargo_test_slot(root):
-    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 5) kernel flock slots so up to 5 reviews and their
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 10) kernel flock slots so up to 10 reviews and their
     workspace test runs can execute simultaneously."""
     try:
         import fcntl
     except ImportError:
         return None
-    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "5")))
+    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "10")))
     mdir = rl.main_state_dir(root)
     waited = False
     while True:
@@ -598,15 +598,19 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
                         diff_base = mb_sha
                     break
 
-    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/"], root)
+    _, diff_files_out = sh(["git", "diff", "--name-only", diff_base, head, "--", "crates/", "client-bridge/", "tools/client-harness/"], root)
     changed_all = [l.strip() for l in diff_files_out.splitlines() if l.strip()]
-    changed_crates = [f for f in changed_all if f.endswith((".rs", ".json", ".txt", ".toml", ".proto"))]
-    include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_all)
+    changed_crates = [f for f in changed_all if f.startswith("crates/") and f.endswith((".rs", ".json", ".txt", ".toml", ".proto"))]
+    harness_or_journeys_touched = any(
+        f.startswith(("client-bridge/", "tools/client-harness/", "crates/eve-server/src/bin/"))
+        for f in changed_all
+    )
+    include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_crates) or harness_or_journeys_touched
 
     lib_filters_by_crate = {}
     whole_lib_crates = set()
     non_server_integ = []
-    direct_server_it = []
+    direct_server_it = ["rpc_dispatch_and_client_harness_e2e"] if harness_or_journeys_touched else []
     changed_server_stems = set()
     quasar_crate_touched = False
 
@@ -695,6 +699,8 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         )
         if re.search(r"\bencode_(?:varint|bytes|string|fixed32|fixed64)_field\s*\(", all_added_src):
             lib_filters_by_crate.setdefault("eve-proto", set()).add("pb")
+        if re.search(r"\buser_error\s*\(", all_added_src):
+            lib_filters_by_crate.setdefault("eve-testkit", set()).add("client_contract")
         if re.search(
             r"\.(?:notify|push_notification|notify_remote_message)\s*\(|\b(?:build_macho_notification_packet|notify_char)\s*\(",
             all_added_src,

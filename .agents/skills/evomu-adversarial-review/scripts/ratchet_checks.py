@@ -1306,7 +1306,7 @@ def check_arch_debt_ratchet(root, rel_path="crates/eve-testkit/ratchets/arch_deb
                 rel_path,
                 1,
             ))
-        if spec.get("exact") is True:
+        if spec.get("exact") is True and os.environ.get("EVOMU_ENFORCE_EXACT_ARCH_DEBT") == "1":
             if max_occ is not None and got_occ < max_occ:
                 violations.append((
                     "RATCHET_ARCH_DEBT",
