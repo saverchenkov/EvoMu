@@ -1311,3 +1311,204 @@ async fn active_cloak_and_invalid_args_reject_eject_cleanly_while_gate_cloak_all
     assert_eq!(ok.dict_get("abandonedShipID").and_then(PyRep::as_i64), Some(ship_id));
     assert_ne!(sess.ship_id, Some(ship_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed_errors() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_501_411_i64;
+    let station_id = 60_003_760_i64;
+    let freighter_id = 96_501_420_i64;
+    let locked_ibis_id = 96_501_421_i64;
+    let non_racial_velator_id = 96_501_422_i64;
+    let ibis_a_id = 96_501_423_i64;
+    let ibis_b_id = 96_501_424_i64;
+    let capsule_id = 96_501_425_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.race_id = 1; // Caldari -> racial corvette Ibis (601)
+        ch.name = "CorvetteBoarder".into();
+        ch.corporation_id = 98_000_001;
+        ch.solar_system_id = 30_000_142;
+        ch.station_id = Some(station_id);
+        ch.structure_id = None;
+        ch.active_ship_id = freighter_id;
+        s.characters.insert(char_id, ch);
+
+        for (item_id, type_id, flag) in [
+            (freighter_id, 587_u32, InventoryFlag::Hangar),
+            (locked_ibis_id, 601_u32, InventoryFlag::Locked),
+            (non_racial_velator_id, 606_u32, InventoryFlag::Hangar),
+            (ibis_a_id, 601_u32, InventoryFlag::Hangar),
+            (ibis_b_id, 601_u32, InventoryFlag::Hangar),
+            (capsule_id, 670_u32, InventoryFlag::Hangar),
+        ] {
+            s.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let items_before = ctx.db.with_snapshot(|s| s.items.len());
+    let mut sess = SessionState::new(9_411);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    sess.station_id = Some(station_id);
+    sess.ship_id = Some(freighter_id);
+    ctx.db
+        .acquire_online_lock(1, sess.session_id, Some(char_id), true, ctx.now_unix())
+        .expect("register online session");
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Live V24 2-arg CreateNewbieShip(shipID, stationID) while docked in non-capsule ship
+    //    must board the deterministic existing racial corvette in Hangar without spawning duplicates (#1411).
+    let res = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("CreateNewbieShip handled")
+    .expect("CreateNewbieShip must board existing Hangar corvette");
+
+    assert_eq!(res.dict_get("shipID").and_then(PyRep::as_i64), Some(ibis_a_id));
+    assert_eq!(res.dict_get("typeID").and_then(PyRep::as_i64), Some(601));
+    assert_eq!(res.dict_get("raceID").and_then(PyRep::as_i64), Some(1));
+    assert_eq!(sess.ship_id, Some(ibis_a_id));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| (
+            s.items.len(),
+            s.characters.get(&char_id).map(|c| c.active_ship_id),
+            s.items.get(&freighter_id).map(|i| (i.location_id, i.flag)),
+            s.item_custom_names.contains_key(&(-8_800_000 - char_id)),
+        )),
+        (
+            items_before,
+            Some(ibis_a_id),
+            Some((station_id, InventoryFlag::Hangar)),
+            false,
+        )
+    );
+
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs.iter().any(|n| n.event == "OnItemChange"));
+    assert!(notifs.iter().any(|n| n.event == "OnSessionChanged"));
+    assert!(
+        !notifs.iter().any(|n| n.event == "OnPodOrCorvetteAssembly"),
+        "boarding existing corvette must not emit OnPodOrCorvetteAssembly"
+    );
+
+    // 2. Calling again while already in a corvette returns typed AlreadyInNewbieShip UserErrorKey.
+    let already_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(ibis_a_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("must reject when already in corvette");
+    assert_eq!(already_err.code, "AlreadyInNewbieShip");
+    assert!(matches!(
+        already_err.to_client_error("dogmaIM", "CreateNewbieShip"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::AlreadyInNewbieShip,
+            ..
+        }
+    ));
+
+    // 3. Legacy 0-arg call from capsule still preserves AlreadyHaveShipInStation, while V24 2-arg
+    //    call from capsule falls back to boarding any remaining Hangar corvette (even non-racial Velator).
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.remove(&ibis_a_id);
+        s.items.remove(&ibis_b_id);
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = capsule_id;
+    });
+    sess.ship_id = Some(capsule_id);
+
+    let legacy_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("legacy 0-arg call from capsule must preserve AlreadyHaveShipInStation");
+    assert_eq!(legacy_err.code, "AlreadyHaveShipInStation");
+
+    let capsule_2arg = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(capsule_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("V24 2-arg call from capsule must board remaining non-racial Hangar corvette");
+    assert_eq!(
+        capsule_2arg.dict_get("shipID").and_then(PyRep::as_i64),
+        Some(non_racial_velator_id)
+    );
+    assert_eq!(
+        capsule_2arg.dict_get("typeID").and_then(PyRep::as_i64),
+        Some(606)
+    );
+    assert_eq!(sess.ship_id, Some(non_racial_velator_id));
+
+    // 4. Undocked returns NotDocked backed by typed UserErrorKey::MustBeDocked.
+    sess.station_id = None;
+    sess.structure_id = None;
+    let undocked_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(non_racial_velator_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("undocked must fail");
+    assert_eq!(undocked_err.code, "NotDocked");
+    assert!(matches!(
+        undocked_err.to_client_error("dogmaIM", "CreateNewbieShip"),
+        eve_proto::ClientError::User {
+            key: eve_proto::UserErrorKey::MustBeDocked,
+            ..
+        }
+    ));
+}
