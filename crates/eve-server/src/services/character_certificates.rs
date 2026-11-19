@@ -7,6 +7,7 @@
 use crate::router::ServerContext;
 use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
+use crate::services::inventory_fitting::fitting_containers_ships::rpc_err;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
@@ -222,14 +223,33 @@ pub fn handle(
         "GetMyCertificates" => Some(get_my_certificates_pyrep(ctx, session)),
 
         "GetCertificatesByCharacter" => {
-            let target_char_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(char_id);
+            let target_char_id = match args.first() {
+                None | Some(PyRep::None) => char_id,
+                Some(arg) => match arg.as_i64() {
+                    Some(id) if id > 0 => id,
+                    _ => {
+                        return Some(Err(rpc_err(
+                            "InvalidCharacterID",
+                            "GetCertificatesByCharacter requires a positive characterID",
+                        )))
+                    }
+                },
+            };
+            let is_gm = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+            if target_char_id != char_id && !is_gm {
+                let char_exists = ctx
+                    .db
+                    .with_snapshot(|snap| snap.characters.contains_key(&target_char_id));
+                if !char_exists {
+                    return Some(Err(rpc_err(
+                        "CharacterNotFound",
+                        format!("Character {target_char_id} not found"),
+                    )));
+                }
+            }
             let mut cert_map = derive_certificate_levels(ctx, target_char_id);
-            if session.has_gm_role()
-                || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0
-            {
+            if is_gm {
                 ctx.db.with_snapshot(|snap| {
                     let state = load_certificate_state(snap, target_char_id);
                     for (cid, lvl) in state.certificates {
@@ -240,11 +260,35 @@ pub fn handle(
                     }
                 });
             }
+            let flags_map =
+                ctx.db.with_snapshot(|snap| load_certificate_state(snap, target_char_id).flags);
+            if target_char_id != char_id && !is_gm {
+                cert_map.retain(|cid, _| flags_map.get(cid).copied().unwrap_or(0) != 0);
+                if cert_map.is_empty() {
+                    return Some(Err(rpc_err(
+                        "CertificateAccessDenied",
+                        format!("Certificates for character {target_char_id} are private"),
+                    )));
+                }
+                let entries: Vec<(PyRep, PyRep)> = cert_map
+                    .into_iter()
+                    .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
+                    .collect();
+                let flag_entries: Vec<(PyRep, PyRep)> = flags_map
+                    .into_iter()
+                    .filter(|(_, f)| *f != 0)
+                    .map(|(cid, f)| (PyRep::Integer(cid as i64), PyRep::Integer(f as i64)))
+                    .collect();
+                return Some(Ok(PyRep::keyval([
+                    ("characterID", PyRep::Integer(target_char_id)),
+                    ("certificates", PyRep::Dict(entries)),
+                    ("certificateFlags", PyRep::Dict(flag_entries)),
+                ])));
+            }
             let entries: Vec<(PyRep, PyRep)> = cert_map
                 .into_iter()
                 .map(|(cid, lvl)| (PyRep::Integer(cid as i64), PyRep::Integer(lvl as i64)))
                 .collect();
-            let flags_map = ctx.db.with_snapshot(|snap| load_certificate_state(snap, target_char_id).flags);
             let flag_entries: Vec<(PyRep, PyRep)> = flags_map
                 .into_iter()
                 .map(|(cid, f)| (PyRep::Integer(cid as i64), PyRep::Integer(f as i64)))

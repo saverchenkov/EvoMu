@@ -27,11 +27,50 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into(), client_error: None }
 }
 
-fn check_starbase_auth(
+fn is_caller_ship_cloaked(ctx: &ServerContext, session: &SessionState) -> bool {
+    let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) else {
+        return false;
+    };
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return false;
+    };
+    sys_handle.view().is_ball_cloaked(ship_id)
+}
+
+fn check_starbase_corp_role(
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    corp_id: i64,
+    role_mask: u64,
+) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role() {
+        return Ok(());
+    }
+    if corp_id <= 0 {
+        return Err(rpc_err(
+            "RoleNotAuthorized",
+            "Starbase operations require player corporation membership",
+        ));
+    }
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+    if is_ceo || (eff_roles & role_mask) != 0 {
+        Ok(())
+    } else {
+        Err(rpc_err(
+            "RoleNotAuthorized",
+            "Starbase operations require Director or Starbase Operator role",
+        ))
+    }
+}
+
+fn check_starbase_auth_with_mask(
     snap: &WorldStateSnapshot,
     session: &SessionState,
     char_id: i64,
     structure_id: i64,
+    role_mask: u64,
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
@@ -43,13 +82,37 @@ fn check_starbase_auth(
         return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
     }
     if owner_corp == char_id { return Ok(()); }
-    let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(char_corp, char_id, None, session.corp_role, 0);
-    let has_role = is_ceo || (eff_roles & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40))) != 0;
-    if !has_role {
-        return Err(rpc_err("RoleNotAuthorized", "Starbase operations require Director or Starbase Operator role"));
-    }
-    Ok(())
+    check_starbase_corp_role(snap, session, char_id, char_corp, role_mask)
+}
+
+fn check_starbase_auth(
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    structure_id: i64,
+) -> Result<(), BridgeRpcError> {
+    check_starbase_auth_with_mask(
+        snap,
+        session,
+        char_id,
+        structure_id,
+        (1 << 0) | (1 << 24) | (1 << 25) | (1 << 40),
+    )
+}
+
+fn check_starbase_defense_auth(
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    structure_id: i64,
+) -> Result<(), BridgeRpcError> {
+    check_starbase_auth_with_mask(
+        snap,
+        session,
+        char_id,
+        structure_id,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+    )
 }
 
 fn compute_starbase_consumption_factor(
@@ -253,6 +316,12 @@ fn handle_run_moon_process_cycle_for_tower(
     let (_, char_id) = ServerContext::require_character(session)?;
     let rpc = RpcArgs::new(args, kwargs);
     let tower_id = rpc.req_positive_i64(0, "towerID")?;
+    if is_caller_ship_cloaked(ctx, session) {
+        return Err(rpc_err(
+            "ActionBlockedWhileCloaked",
+            "Cannot run moon process cycle while cloaked",
+        ));
+    }
     let harvest_amount_default = ctx
         .sde
         .types
@@ -782,6 +851,12 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if is_caller_ship_cloaked(ctx, session) {
+                return Some(Err(rpc_err(
+                    "ActionBlockedWhileCloaked",
+                    "Cannot assume structure control while cloaked",
+                )));
+            }
             let is_tower_owner = ctx.db.with_snapshot(|snap| {
                 let owner_id = snap.items.get(&item_id).map(|i| i.owner_id).or_else(|| snap.structures.get(&item_id).map(|s| s.owner_corp_id));
                 let corp_id = session
@@ -798,7 +873,7 @@ pub fn handle(
                 }
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_defense_auth(snap, session, char_id, item_id)?;
                 snap.starbase_settings.entry(item_id).or_default().active_controller_id = Some(char_id);
                 Ok(())
             });
@@ -817,7 +892,14 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if is_caller_ship_cloaked(ctx, session) {
+                return Some(Err(rpc_err(
+                    "ActionBlockedWhileCloaked",
+                    "Cannot relinquish structure control while cloaked",
+                )));
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_defense_auth(snap, session, char_id, item_id)?;
                 if let Some(st) = snap.starbase_settings.get_mut(&item_id) {
                     if st.active_controller_id == Some(char_id) { st.active_controller_id = None; }
                 }
@@ -844,10 +926,11 @@ pub fn handle(
         }
 
         ("posMgr", "GetStarbasePermissions") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (deploy_flags, usage_flags) = ctx.db.with_snapshot(|snap| {
+            let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
                 let settings = snap.starbase_settings.get(&item_id);
                 let (anchor, unanchor, online, offline) = if let Some(s) = settings {
                     (
@@ -870,9 +953,9 @@ pub fn handle(
                     vec!["structureID", "viewput", "viewputtake", "use"],
                     vec![vec![PyRep::Integer(item_id), PyRep::Integer(anchor), PyRep::Integer(unanchor), PyRep::Integer(online)]],
                 );
-                (deploy, usage)
+                Ok(PyRep::Tuple(vec![deploy, usage]))
             });
-            Some(Ok(PyRep::Tuple(vec![deploy_flags, usage_flags])))
+            Some(res)
         }
 
         ("posMgr", "SetStarbasePermissions") => {
@@ -934,19 +1017,25 @@ pub fn handle(
         }
 
         ("posMgr", "GetTowerNotificationSettings") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (send_fuel, show_cal) = ctx.db.with_snapshot(|snap| {
-                snap.starbase_settings.get(&item_id).map(|s| (s.notify_fuel, s.notify_calendar)).unwrap_or((true, false))
+            let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let (send_fuel, show_cal) = snap
+                    .starbase_settings
+                    .get(&item_id)
+                    .map(|s| (s.notify_fuel, s.notify_calendar))
+                    .unwrap_or((true, false));
+                Ok(PyRep::Object {
+                    type_name: "util.Row".into(),
+                    args: Box::new(PyRep::Tuple(vec![
+                        PyRep::List(vec![PyRep::String("sendFuelNotifications".into()), PyRep::String("showInCalendar".into())]),
+                        PyRep::List(vec![PyRep::Bool(send_fuel), PyRep::Bool(show_cal)]),
+                    ])),
+                })
             });
-            Some(Ok(PyRep::Object {
-                type_name: "util.Row".into(),
-                args: Box::new(PyRep::Tuple(vec![
-                    PyRep::List(vec![PyRep::String("sendFuelNotifications".into()), PyRep::String("showInCalendar".into())]),
-                    PyRep::List(vec![PyRep::Bool(send_fuel), PyRep::Bool(show_cal)]),
-                ])),
-            }))
+            Some(res)
         }
 
         ("posMgr", "SetTowerNotifications") => {
@@ -966,11 +1055,12 @@ pub fn handle(
         }
 
         ("posMgr", "GetTowerSentrySettings") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (standing, status, status_drop, corp_war, standing_owner_id) = ctx.db.with_snapshot(|snap| {
-                if let Some(s) = snap.starbase_settings.get(&item_id) {
+            let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let (standing, status, status_drop, corp_war, standing_owner_id) = if let Some(s) = snap.starbase_settings.get(&item_id) {
                     (
                         s.attack_standing_threshold.unwrap_or(0.0),
                         s.attack_security_status_threshold.unwrap_or(0.0),
@@ -984,27 +1074,28 @@ pub fn handle(
                     )
                 } else {
                     (0.0, 0.0, false, true, session.corporation_id.unwrap_or(0))
-                }
+                };
+                Ok(PyRep::Object {
+                    type_name: "util.Row".into(),
+                    args: Box::new(PyRep::Tuple(vec![
+                        PyRep::List(vec![
+                            PyRep::String("standing".into()),
+                            PyRep::String("status".into()),
+                            PyRep::String("statusDrop".into()),
+                            PyRep::String("corpWar".into()),
+                            PyRep::String("standingOwnerID".into()),
+                        ]),
+                        PyRep::List(vec![
+                            PyRep::Real(standing),
+                            PyRep::Real(status),
+                            PyRep::Bool(status_drop),
+                            PyRep::Bool(corp_war),
+                            PyRep::Integer(standing_owner_id),
+                        ]),
+                    ])),
+                })
             });
-            Some(Ok(PyRep::Object {
-                type_name: "util.Row".into(),
-                args: Box::new(PyRep::Tuple(vec![
-                    PyRep::List(vec![
-                        PyRep::String("standing".into()),
-                        PyRep::String("status".into()),
-                        PyRep::String("statusDrop".into()),
-                        PyRep::String("corpWar".into()),
-                        PyRep::String("standingOwnerID".into()),
-                    ]),
-                    PyRep::List(vec![
-                        PyRep::Real(standing),
-                        PyRep::Real(status),
-                        PyRep::Bool(status_drop),
-                        PyRep::Bool(corp_war),
-                        PyRep::Integer(standing_owner_id),
-                    ]),
-                ])),
-            }))
+            Some(res)
         }
 
         ("posMgr", "SetTowerSentrySettings") => {
@@ -1066,18 +1157,25 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let factor = ctx.db.with_snapshot(|snap| {
-                compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id).0
+            let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, tower_id)?;
+                let factor = compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id).0;
+                Ok(PyRep::Real(factor))
             });
-            Some(Ok(PyRep::Real(factor)))
+            Some(res)
         }
 
         ("posMgr", "GetSiloCapacityByItemID") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cap = ctx.db.with_snapshot(|snap| compute_silo_capacity(ctx, snap, item_id));
-            Some(Ok(PyRep::Real(cap)))
+            let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                if snap.structures.contains_key(&item_id) || snap.items.contains_key(&item_id) {
+                    check_starbase_auth(snap, session, char_id, item_id)?;
+                }
+                Ok(PyRep::Real(compute_silo_capacity(ctx, snap, item_id)))
+            });
+            Some(res)
         }
 
         ("posMgr", "LinkResourceForTower") => {

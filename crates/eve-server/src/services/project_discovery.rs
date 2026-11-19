@@ -319,6 +319,25 @@ where
     })
 }
 
+fn compute_player_bonus_samples_readonly(ctx: &ServerContext, char_id: i64) -> (i64, i64) {
+    ctx.db.with_snapshot(|snap| {
+        let mut st = snap
+            .seasons_and_campaigns
+            .project_discovery_players
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_default();
+        let store = load_discovery_store(snap);
+        let clone_grade = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.clone_grade)
+            .unwrap_or(1);
+        rewards::sync_player_bonus_samples(&mut st, &store, clone_grade, ctx.now_unix());
+        (st.bonus_samples_left, st.max_bonus_samples)
+    })
+}
+
 fn with_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
     F: FnOnce(&mut PlayerProjectState, &mut eve_db::WorldStateSnapshot) -> R,
@@ -487,6 +506,23 @@ pub fn handle_project_discovery(
         }
 
         "give_tutorial_rewards" | "give_tutorial_complete_experience" => {
+            let entitled = read_player_state(ctx, char_id, |st| {
+                st.tutorial_complete
+                    && st.tutorial_level >= 5
+                    && !st.tutorial_reward_claimed
+                    && !st.tutorial_skipped
+            });
+            if !entitled {
+                if method == "give_tutorial_complete_experience" {
+                    return Some(Err(
+                        crate::services::inventory_fitting::fitting_containers_ships::rpc_err(
+                            "TutorialNotCompleted",
+                            "Project Discovery tutorial has not been completed or reward was already claimed",
+                        ),
+                    ));
+                }
+                return Some(Ok(PyRep::Bool(false)));
+            }
             // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
             // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
             let (granted, _xp_gained, new_xp, old_rank, new_rank, xp_for_new_rank, xp_for_next_rank) = with_player_state(ctx, char_id, |st, snap| {
@@ -622,30 +658,12 @@ pub fn handle_project_discovery(
         }
 
         "get_remaining_bonus_samples" => {
-            let rem = with_player_state(ctx, char_id, |st, snap| {
-                let store = load_discovery_store(snap);
-                let clone_grade = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.clone_grade)
-                    .unwrap_or(1);
-                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
-                st.bonus_samples_left
-            });
+            let (rem, _) = compute_player_bonus_samples_readonly(ctx, char_id);
             Some(Ok(PyRep::Integer(rem)))
         }
 
         "get_maximum_bonus_samples" => {
-            let m = with_player_state(ctx, char_id, |st, snap| {
-                let store = load_discovery_store(snap);
-                let clone_grade = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.clone_grade)
-                    .unwrap_or(1);
-                rewards::sync_player_bonus_samples(st, &store, clone_grade, ctx.now_unix());
-                st.max_bonus_samples
-            });
+            let (_, m) = compute_player_bonus_samples_readonly(ctx, char_id);
             Some(Ok(PyRep::Integer(m)))
         }
 

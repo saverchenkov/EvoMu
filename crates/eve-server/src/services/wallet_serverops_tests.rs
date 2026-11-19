@@ -919,3 +919,166 @@ fn set_starbase_permissions_rejects_oversized_rep_flags_without_mutation() {
         assert_eq!(s.starbase_settings[&tower_id].offline, before.offline);
     });
 }
+
+#[tokio::test]
+async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
+    let ctx = make_test_context();
+    let sys_id = 30_000_142_u32;
+    let corp_a = 98_900_001_i64;
+    let corp_b = 98_900_002_i64;
+    let director_id = 90_900_001_i64;
+    let roleless_id = 90_900_002_i64;
+    let config_only_id = 90_900_003_i64;
+    let outsider_id = 90_900_004_i64;
+    let tower_id = 888_900_001_i64;
+    let ship_id = 777_900_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            tower_id,
+            UpwellStructureRecord {
+                structure_id: tower_id,
+                type_id: 12_235,
+                owner_corp_id: corp_a,
+                solar_system_id: sys_id,
+                name: "Test Tower".into(),
+                state: "Online".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(corp_a, {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = corp_a;
+            corp.name = "Corp A".into();
+            corp.ticker = "CA".into();
+            corp.ceo_id = director_id;
+            corp.member_roles = HashMap::from([
+                (director_id, eve_db::corp_roles::ROLE_DIRECTOR),
+                (roleless_id, 0),
+                (config_only_id, 1_u64 << 24),
+            ]);
+            corp
+        });
+        for (cid, corp) in [
+            (director_id, corp_a),
+            (roleless_id, corp_a),
+            (config_only_id, corp_a),
+            (outsider_id, corp_b),
+        ] {
+            let mut c = eve_db::CharacterRecord::default();
+            c.character_id = cid;
+            c.name = format!("Pilot {cid}");
+            c.corporation_id = corp;
+            c.solar_system_id = sys_id;
+            snap.characters.insert(cid, c);
+        }
+    });
+
+    let mut dir_sess = char_session(director_id, corp_a);
+    dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let mut roleless_sess = char_session(roleless_id, corp_a);
+    roleless_sess.corp_role = 0;
+    let mut config_sess = char_session(config_only_id, corp_a);
+    config_sess.corp_role = 1_u64 << 24;
+    let mut outsider_sess = char_session(outsider_id, corp_b);
+    outsider_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let kw = HashMap::new();
+
+    // Outsider director sees only corp_b (no corp_a towers); roleless corp_a member is rejected on config/query endpoints below.
+    assert_eq!(
+        handle(&ctx, &mut outsider_sess, "posMgr", "GetControlTowers", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::List(Vec::new())
+    );
+
+    // Outsider & roleless corp member are rejected across all posMgr config/query endpoints.
+    for (label, s, expected_err) in [
+        ("outsider", &mut outsider_sess, "NotStarbaseOwner"),
+        ("roleless", &mut roleless_sess, "RoleNotAuthorized"),
+    ] {
+        for method in [
+            "GetStarbasePermissions",
+            "GetTowerNotificationSettings",
+            "GetTowerSentrySettings",
+            "GetConsumptionFactor",
+            "GetSiloCapacityByItemID",
+            "RelinquishStructureControl",
+        ] {
+            assert_eq!(
+                handle(&ctx, s, "posMgr", method, &[PyRep::Integer(tower_id)], &kw)
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                expected_err,
+                "{label} {method}"
+            );
+        }
+    }
+
+    // Config-only role (1<<24) can read queries, but CANNOT assume/relinquish gunnery control.
+    assert!(handle(&ctx, &mut config_sess, "posMgr", "GetControlTowers", &[], &kw).unwrap().is_ok());
+    assert!(handle(&ctx, &mut config_sess, "posMgr", "GetStarbasePermissions", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    assert_eq!(
+        handle(&ctx, &mut config_sess, "posMgr", "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "RoleNotAuthorized"
+    );
+    assert_eq!(
+        handle(&ctx, &mut config_sess, "posMgr", "RelinquishStructureControl", &[PyRep::Integer(tower_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "RoleNotAuthorized"
+    );
+
+    // Cloaked director cannot Assume/Relinquish/RunMoonProcessCycleforTower.
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: eve_destiny::DVec3::ZERO,
+                velocity: eve_destiny::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                is_cloaked: true,
+                ..Default::default()
+            },
+            eve_destiny::SlimItemMeta {
+                is_cloaked: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    dir_sess.station_id = None;
+    dir_sess.solar_system_id = Some(sys_id);
+    dir_sess.ship_id = Some(ship_id);
+    let commits_before = ctx.db.tx_commit_count();
+    let blocked_cloaked = "ActionBlockedWhileCloaked";
+    for method in [
+        "AssumeStructureControl",
+        "RelinquishStructureControl",
+        "RunMoonProcessCycleforTower",
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut dir_sess, "posMgr", method, &[PyRep::Integer(tower_id)], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            blocked_cloaked,
+            "cloaked {method}"
+        );
+    }
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}

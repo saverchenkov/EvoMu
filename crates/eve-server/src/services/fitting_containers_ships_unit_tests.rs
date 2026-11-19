@@ -524,7 +524,7 @@ async fn invbroker_misc_and_encoded_items_decode_item() {
         ("invbroker", "FitFitting", vec![PyRep::Integer(100_000_001)]),
         ("invbroker", "GetAssetWorth", vec![]),
         ("invbroker", "GetPriceForItems", vec![PyRep::List(vec![PyRep::Integer(100_000_001)])]),
-        ("invbroker", "HasExistingPasswordSet", vec![PyRep::Integer(880_100), PyRep::Integer(1)]),
+        ("invbroker", "HasExistingPasswordSet", vec![PyRep::Integer(880_103), PyRep::Integer(1)]),
         (
             "invbroker",
             "ImportExportWithPlanet",
@@ -752,4 +752,138 @@ async fn invbroker_empty_station_hangar_no_fallback_and_fit_reprocess_real() {
             .sum();
         assert!(tritanium_qty > 0, "Tritanium minerals must be yielded in hangar");
     });
+}
+
+#[tokio::test]
+async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_unprivileged_corp_members() {
+    let (ctx, mut owner_sess) = make_ctx_and_session();
+    let owner_id = owner_sess.character_id.unwrap();
+    let corp_id = 98_000_001_i64;
+    let roleless_corp_mate_id = 90_000_011_i64;
+    let outsider_id = 90_000_002_i64;
+    let alsc_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 448)
+        .map(|t| t.type_id)
+        .expect("SDE must contain group 448 ALSC");
+    let personal_alsc = 990_501_i64;
+    let corp_alsc = 990_502_i64;
+    let trit_id = 990_503_i64;
+    let station_id = 60_003_760_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, oid) in [
+            (personal_alsc, alsc_type_id, owner_id),
+            (corp_alsc, alsc_type_id, corp_id),
+            (trit_id, 34, owner_id),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: oid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: iid != trit_id,
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(ch) = snap.characters.get_mut(&roleless_corp_mate_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(roleless_corp_mate_id, 0);
+        }
+    });
+
+    let mut roleless_sess = owner_sess.clone();
+    roleless_sess.character_id = Some(roleless_corp_mate_id);
+    roleless_sess.corporation_id = Some(corp_id);
+    roleless_sess.corp_role = 0;
+
+    let mut outsider_sess = owner_sess.clone();
+    outsider_sess.character_id = Some(outsider_id);
+    outsider_sess.corporation_id = Some(98_000_099);
+    outsider_sess.corp_role = 0;
+
+    let mut director_sess = owner_sess.clone();
+    director_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let kw = HashMap::new();
+    let alsc_denied = "ALSCAccessDenied";
+
+    // Non-container Tritanium must reject even for owner across all three endpoints.
+    for method in ["ALSCConfigGet", "ALSCLogGet", "HasExistingPasswordSet"] {
+        let err = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut owner_sess,
+            None,
+            "invbroker",
+            method,
+            &[PyRep::Integer(trit_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, alsc_denied, "{method} must reject non-container");
+
+        let err_out = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut outsider_sess,
+            None,
+            "invbroker",
+            method,
+            &[PyRep::Integer(personal_alsc)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_out.code, alsc_denied, "{method} must reject outsider");
+
+        let err_corp = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut roleless_sess,
+            None,
+            "invbroker",
+            method,
+            &[PyRep::Integer(corp_alsc)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_corp.code, alsc_denied, "{method} must reject roleless corp member");
+    }
+
+    // Owner on personal ALSC & Director on corp ALSC succeed.
+    assert!(handle_containers_ships_and_fitting(
+        &ctx,
+        &mut owner_sess,
+        None,
+        "invbroker",
+        "ALSCConfigGet",
+        &[PyRep::Integer(personal_alsc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
+    assert!(handle_containers_ships_and_fitting(
+        &ctx,
+        &mut director_sess,
+        None,
+        "invbroker",
+        "HasExistingPasswordSet",
+        &[PyRep::Integer(corp_alsc), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .is_ok());
 }

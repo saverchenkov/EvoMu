@@ -684,6 +684,15 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             };
             let sys = ctx.systems.get_or_spawn(sys_id);
+            let is_cloaked = sys.view().is_ball_cloaked(ship_id);
+            if is_cloaked {
+                return Some(Err(
+                    crate::services::inventory_fitting::fitting_containers_ships::rpc_err(
+                        "CannotRepairWhileCloaked",
+                        "Cannot initiate module repair while cloaked",
+                    ),
+                ));
+            }
 
             let mut mod_ids = Vec::new();
             if let Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) = args.first() {
@@ -711,6 +720,33 @@ pub(crate) async fn handle_dogma_ops(
                     message: "UserError: Cannot initiate in-space Nanite Repair Paste repair while modules are overheating".into(),
                     client_error: None,
                 }));
+            }
+
+            let has_damaged_module = !mod_ids.is_empty()
+                && ctx.db.with_snapshot(|snap| {
+                    mod_ids.iter().any(|mid| {
+                        snap.items.get(mid).is_some_and(|it| {
+                            it.owner_id == char_id
+                                && it.location_id == ship_id
+                                && matches!(
+                                    it.flag as u16,
+                                    11..=34 | 92..=94 | 125..=132 | 164..=171
+                                )
+                                && it.dynamic_attributes
+                                    .get(&attr_ids::DAMAGE)
+                                    .copied()
+                                    .unwrap_or(0.0)
+                                    > 1e-6
+                        })
+                    })
+                });
+            if !has_damaged_module {
+                return Some(Err(
+                    crate::services::inventory_fitting::fitting_containers_ships::rpc_err(
+                        "NoDamagedModulesToRepair",
+                        "No damaged fitted modules to repair",
+                    ),
+                ));
             }
 
             for module_id in mod_ids {

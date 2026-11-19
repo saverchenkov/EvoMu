@@ -557,7 +557,7 @@ pub(crate) async fn handle_ext_tail(
         }
 
         ("invbroker", "HasExistingPasswordSet") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -566,6 +566,16 @@ pub(crate) async fn handle_ext_tail(
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .unwrap_or(0);
+            if let Err(e) = super::fitting_containers_ships::authorize_container_inspect(
+                ctx,
+                session,
+                char_id,
+                container_id,
+                true,
+                false,
+            ) {
+                return Some(Err(e));
+            }
             let which = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let st = read_container_ship_state(ctx);
             let has_pw = st.get_container_password(container_id, which).is_some();

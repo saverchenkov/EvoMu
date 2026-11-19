@@ -875,6 +875,65 @@ fn upwell_clone_bay_scalar_setting_23_and_legacy_35894_pricing_across_rpcs() {
     assert_eq!(denied_err.code, "StructureAccessDenied");
 }
 
+#[test]
+fn destroy_installed_clone_unknown_id_does_not_create_empty_entry() {
+    let ctx = test_ctx();
+    let char_id = 90_000_088_i64;
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("demo char");
+        ch.character_id = char_id;
+        ch.station_id = Some(60_003_760);
+        let uid = ch.user_id;
+        snap.characters.insert(char_id, ch);
+        uid
+    });
+    let mut sess = make_session(uid, char_id, 98_000_001, Some(60_003_760), None);
+    let empty_kw = HashMap::new();
+    let commits_before = ctx.db.tx_commit_count();
+
+    let err = handle_clones_and_sheet(
+        &ctx,
+        &mut sess,
+        "jumpCloneSvc",
+        "DestroyInstalledClone",
+        &[PyRep::Integer(999_888)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .expect_err("unknown clone must return CloneNotFound");
+    assert_eq!(err.code, "CloneNotFound");
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.jump_clones.contains_key(&char_id));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.jump_clones.insert(
+            char_id,
+            vec![JumpCloneRecord {
+                jump_clone_id: 777_001,
+                character_id: char_id,
+                location_id: 60_003_760,
+                implants: Vec::new(),
+            }],
+        );
+    });
+    let ok = handle_clones_and_sheet(
+        &ctx,
+        &mut sess,
+        "jumpCloneSvc",
+        "DestroyInstalledClone",
+        &[PyRep::Integer(777_001)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .expect("existing jump clone must be destroyed");
+    assert_eq!(ok, PyRep::Bool(true));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.jump_clones.get(&char_id).is_some_and(Vec::is_empty));
+    });
+}
+
 #[cfg(test)]
 #[path = "character_clones_implants_extra_unit_tests.rs"]
 mod character_clones_implants_extra_unit_tests;

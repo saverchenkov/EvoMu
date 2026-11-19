@@ -368,3 +368,92 @@ fn project_discovery_organic_flow_starts_at_zero_and_emits_ak_change() {
         "accurate classification must emit OnAnalysisKreditsChange organically without test injection"
     );
 }
+
+#[test]
+fn project_discovery_bonus_getters_and_unentitled_tutorial_complete_experience() {
+    let ctx = test_ctx();
+    let cid = 90_000_077_i64;
+    let mut sess = auth_session(77, cid, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+    let tutorial_incomplete = "TutorialNotCompleted";
+
+    let commits_before = ctx.db.tx_commit_count();
+    assert_eq!(
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "get_maximum_bonus_samples", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(10)
+    );
+    assert_eq!(
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "get_remaining_bonus_samples", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(10)
+    );
+    assert_eq!(
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        handle_project_discovery(
+            &ctx,
+            &mut sess,
+            "ProjectDiscovery",
+            "give_tutorial_complete_experience",
+            &[],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        tutorial_incomplete
+    );
+    assert_eq!(
+        ctx.db.tx_commit_count(),
+        commits_before,
+        "bonus sample getters and rejected/unentitled tutorial claims must not mutate DB"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap
+                .seasons_and_campaigns
+                .project_discovery_players
+                .contains_key(&cid)
+        );
+    });
+
+    for _ in 0..4 {
+        handle_project_discovery(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[], &kw)
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(
+        handle_project_discovery(
+            &ctx,
+            &mut sess,
+            "ProjectDiscovery",
+            "give_tutorial_complete_experience",
+            &[],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_project_discovery(
+            &ctx,
+            &mut sess,
+            "ProjectDiscovery",
+            "give_tutorial_complete_experience",
+            &[],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        tutorial_incomplete
+    );
+}

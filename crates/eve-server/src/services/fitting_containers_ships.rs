@@ -1517,12 +1517,15 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "ALSCConfigGet") => {
-            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = crate::router::RpcArgs::new(args, kwargs);
             let container_id = match rpc.opt_positive_i64(0, "containerID") {
                 Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
                 Err(e) => return Some(Err(e)),
             };
+            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false, false) {
+                return Some(Err(e));
+            }
             let st = read_container_ship_state(ctx);
             let has_pw = st.get_container_password(container_id, 1).is_some() || st.get_container_password(container_id, 2).is_some();
             let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
@@ -1593,16 +1596,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 PyRep::Integer(n) => Some(*n != 0),
                 _ => None,
             });
-            let (auth_ok, flag_id, location_id, container_owner_id) = ctx.db.with_snapshot(|snap| {
-                let auth_ok = if let Some(cont) = snap.items.get(&container_id) {
-                    let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    // Owner, corp-owned container member, or a corp-mate of the owning pilot (who
-                    // must still pass the ALSC password check below); outsiders are denied outright.
-                    let owner_corp = snap.characters.get(&cont.owner_id).map(|c| c.corporation_id).unwrap_or(0);
-                    cont.owner_id == char_id || (corp_id > 0 && (cont.owner_id == corp_id || owner_corp == corp_id))
-                } else {
-                    true
-                };
+            if let Err(e) =
+                authorize_container_inspect(ctx, session, char_id, container_id, false, true)
+            {
+                return Some(Err(e));
+            }
+            let (flag_id, location_id, container_owner_id) = ctx.db.with_snapshot(|snap| {
                 let cont = snap.items.get(&container_id);
                 let flag_id = cont.map(|c| c.flag as i64).unwrap_or(4);
                 let container_owner_id = cont
@@ -1636,11 +1635,8 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                         .filter(|&v| v > 0)
                         .unwrap_or_else(|| container_id.max(1));
                 }
-                (auth_ok, flag_id, loc, container_owner_id)
+                (flag_id, loc, container_owner_id)
             });
-            if !auth_ok {
-                return Some(Err(BridgeRpcError { code: "ALSCAccessDenied".into(), message: format!("Not authorized to view audit log for container {container_id}"), client_error: None }));
-            }
             let mut st = read_container_ship_state(ctx);
             let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
             let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
@@ -2054,6 +2050,95 @@ pub(crate) async fn validate_ship_module_unfit_auth(
         }
     }
     Ok(())
+}
+
+pub(crate) fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+pub(super) fn authorize_container_inspect(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    container_id: i64,
+    allow_ship: bool,
+    allow_corp_mate_personal: bool,
+) -> Result<(), BridgeRpcError> {
+    if container_id <= 0 {
+        return Err(rpc_err(
+            "InvalidContainerID",
+            format!("Invalid container ID {container_id}"),
+        ));
+    }
+    let is_gm = session.has_gm_role()
+        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+    ctx.db.with_snapshot(|snap| {
+        let Some(cont) = snap.items.get(&container_id) else {
+            return Err(rpc_err(
+                "ContainerNotFound",
+                format!("Container {container_id} not found"),
+            ));
+        };
+        let type_info = ctx.sde.types.get(&cont.type_id);
+        let is_container = type_info.is_some_and(|t| {
+            matches!(t.group_id, 12 | 340 | 448 | 449) || (allow_ship && t.category_id == 6)
+        });
+        if !is_container {
+            return Err(rpc_err(
+                "ALSCAccessDenied",
+                format!("Item {container_id} is not an accessible secure container"),
+            ));
+        }
+        if is_gm || cont.owner_id == char_id {
+            return Ok(());
+        }
+        let caller_corp = session
+            .corporation_id
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            .unwrap_or(0);
+        if caller_corp > 0 && cont.owner_id == caller_corp {
+            let (is_ceo, eff_role) = snap.effective_corp_roles_at(
+                caller_corp,
+                char_id,
+                None,
+                session.corp_role,
+                ctx.now_unix(),
+            );
+            if is_ceo
+                || (eff_role
+                    & (eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG))
+                    != 0
+            {
+                return Ok(());
+            }
+            return Err(rpc_err(
+                "ALSCAccessDenied",
+                format!("Not authorized to access corporate container {container_id}"),
+            ));
+        }
+        if allow_corp_mate_personal && caller_corp > 0 {
+            let owner_corp = snap
+                .characters
+                .get(&cont.owner_id)
+                .map(|c| c.corporation_id)
+                .unwrap_or(0);
+            if owner_corp == caller_corp {
+                return Ok(());
+            }
+        }
+        Err(BridgeRpcError {
+            code: "ALSCAccessDenied".into(),
+            message: format!(
+                "Not authorized to view configuration or log for container {container_id}"
+            ),
+            client_error: None,
+        })
+    })
 }
 
 #[cfg(test)]

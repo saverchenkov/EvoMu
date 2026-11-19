@@ -989,8 +989,21 @@ pub fn handle_clones_and_sheet(
                     client_error: None,
                 }));
             }
+            let exists = ctx.db.with_snapshot(|snap| {
+                snap.jump_clones
+                    .get(&char_id)
+                    .is_some_and(|clones| clones.iter().any(|c| c.jump_clone_id == jc_id))
+            });
+            if !exists {
+                return Some(Err(
+                    crate::services::inventory_fitting::fitting_containers_ships::rpc_err(
+                        "CloneNotFound",
+                        format!("Jump clone {jc_id} not found for character {char_id}"),
+                    ),
+                ));
+            }
             let removed_loc = ctx.db.with_mut_snapshot(|snap| {
-                let clones = snap.jump_clones.entry(char_id).or_default();
+                let clones = snap.jump_clones.get_mut(&char_id)?;
                 let loc = clones.iter().find(|c| c.jump_clone_id == jc_id).map(|c| c.location_id);
                 clones.retain(|c| c.jump_clone_id != jc_id);
                 loc

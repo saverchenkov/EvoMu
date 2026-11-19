@@ -840,3 +840,102 @@ fn certificate_derivation_edge_cases_and_batch_variants() {
         assert_eq!(st_gm.certificates.get(&888_023), Some(&3));
     });
 }
+
+#[test]
+fn get_certificates_by_character_hides_private_and_non_character_targets() {
+    let ctx = test_ctx();
+    let caller_cid = 90_000_001_i64;
+    let target_cid = 90_000_002_i64;
+    let kw = HashMap::new();
+    let cert_svc = "certificateMgr"; // rpc-lint: allow crucible legacy service fixture
+
+    let mut caller_sess = auth_session(1, caller_cid, 98_000_001, 30_000_142);
+    let mut target_sess = auth_session(2, target_cid, 98_000_002, 30_000_142);
+
+    // Clear any pre-existing public flags on target_cid and verify private profile is rejected.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_certificate_state(snap, target_cid);
+        st.flags.clear();
+        save_certificate_state(snap, target_cid, &st);
+    });
+    let err_private = handle(
+        &ctx,
+        &mut caller_sess,
+        cert_svc,
+        "GetCertificatesByCharacter",
+        &[PyRep::Integer(target_cid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_private.code, "CertificateAccessDenied");
+
+    // Non-character / unknown ID (e.g. corp ID) is rejected cleanly.
+    let err_non_char = handle(
+        &ctx,
+        &mut caller_sess,
+        cert_svc,
+        "GetCertificatesByCharacter",
+        &[PyRep::Integer(98_000_001)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_non_char.code, "CharacterNotFound");
+
+    // Pick two derived certificates for target_cid, publish only one via UpdateCertificateFlags,
+    // and verify foreign caller sees ONLY the public certificate + its nonzero flag.
+    let own_rep = handle(
+        &ctx,
+        &mut target_sess,
+        cert_svc,
+        "GetMyCertificates",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(own_kv) = own_rep else {
+        panic!("expected KeyVal from GetMyCertificates");
+    };
+    let Some(PyRep::Dict(own_certs)) = own_kv.get("certificates") else {
+        panic!("expected Dict for certificates");
+    };
+    assert!(!own_certs.is_empty(), "demo target_cid should have derived certificates");
+    let public_cert_id = own_certs[0].0.as_i64().unwrap();
+
+    handle(
+        &ctx,
+        &mut target_sess,
+        cert_svc,
+        "UpdateCertificateFlags",
+        &[PyRep::Integer(public_cert_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+
+    let pub_rep = handle(
+        &ctx,
+        &mut caller_sess,
+        cert_svc,
+        "GetCertificatesByCharacter",
+        &[PyRep::Integer(target_cid)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(pub_kv) = pub_rep else {
+        panic!("expected KeyVal from public GetCertificatesByCharacter");
+    };
+    let Some(PyRep::Dict(pub_certs)) = pub_kv.get("certificates") else {
+        panic!("expected Dict for certificates");
+    };
+    let Some(PyRep::Dict(pub_flags)) = pub_kv.get("certificateFlags") else {
+        panic!("expected Dict for certificateFlags");
+    };
+    assert_eq!(pub_certs.len(), 1);
+    assert_eq!(pub_certs[0].0.as_i64(), Some(public_cert_id));
+    assert_eq!(pub_flags.len(), 1);
+    assert_eq!(pub_flags[0].0.as_i64(), Some(public_cert_id));
+}

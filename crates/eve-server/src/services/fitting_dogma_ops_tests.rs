@@ -1100,6 +1100,155 @@ async fn triage_target_cap_does_not_exceed_character_target_management_limit() {
     assert_eq!(fourth.unwrap_err().code, "TargetingFailed");
 }
 
+#[tokio::test]
+async fn initiate_module_repair_many_rejects_cloaked_and_undamaged_or_ship_targets() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 96_290_100_i64;
+    let undamaged_mod_id = 96_290_200_i64;
+    let damaged_mod_id = 96_290_201_i64;
+    let mod_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 7)
+        .map(|t| t.type_id)
+        .unwrap_or(17_938);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            undamaged_mod_id,
+            InventoryItemRecord {
+                item_id: undamaged_mod_id,
+                type_id: mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let mut dmg_attrs = HashMap::new();
+        dmg_attrs.insert(attr_ids::DAMAGE, 5.0);
+        snap.items.insert(
+            damaged_mod_id,
+            InventoryItemRecord {
+                item_id: damaged_mod_id,
+                type_id: mod_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot1,
+                quantity: 1,
+                singleton: true,
+                dynamic_attributes: dmg_attrs,
+                ..Default::default()
+            },
+        );
+    });
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                is_cloaked: false,
+                ..Default::default()
+            },
+            SlimItemMeta {
+                is_cloaked: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mut session = SessionState::default();
+    session.user_id = Some(96_201);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(1_000_009);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // Undamaged module, non-module ship ID, and empty list all reject with NoDamagedModulesToRepair.
+    for bad_args in [
+        vec![],
+        vec![PyRep::Integer(ship_id)],
+        vec![PyRep::List(vec![PyRep::Integer(undamaged_mod_id)])],
+    ] {
+        assert_eq!(
+            handle_dogma_ops(&ctx, &mut session, None, "dogmaIM", "InitiateModuleRepairMany", &bad_args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "NoDamagedModulesToRepair"
+        );
+    }
+
+    // Cloak ship -> rejects with CannotRepairWhileCloaked even for damaged fitted module.
+    let _ = sys.try_update_combat_state(ship_id, |cs| cs.is_cloaked = true);
+    assert_eq!(
+        handle_dogma_ops(
+            &ctx,
+            &mut session,
+            None,
+            "dogmaIM",
+            "InitiateModuleRepairMany",
+            &[PyRep::List(vec![PyRep::Integer(damaged_mod_id)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotRepairWhileCloaked"
+    );
+
+    // Uncloaked + damaged fitted module -> succeeds.
+    let _ = sys.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
+    assert!(
+        handle_dogma_ops(
+            &ctx,
+            &mut session,
+            None,
+            "dogmaIM",
+            "InitiateModuleRepairMany",
+            &[PyRep::List(vec![PyRep::Integer(damaged_mod_id)])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+}
+
 #[cfg(test)]
 #[path = "fitting_dogma_ops_extra_unit_tests.rs"]
 mod extra_unit_tests;

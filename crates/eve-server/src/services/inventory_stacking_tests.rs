@@ -4794,3 +4794,122 @@ async fn gh_1317_suspect_jetcan_wreck_looting_without_ball_preserves_range_and_a
     );
 }
 
+#[tokio::test]
+async fn get_container_contents_rejected_open_does_not_forge_alsc_log_or_unlock() {
+    let ctx = test_ctx();
+    let owner_id = 90_000_001_i64;
+    let intruder_id = 90_000_002_i64;
+    let station_id = 60_003_760_i64;
+    let owner_ship = 9_150_001_i64;
+    let intruder_ship = 9_150_002_i64;
+    let alsc_id = 9_250_001_i64;
+    let alsc_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 448)
+        .map(|t| t.type_id)
+        .expect("SDE must contain group 448 ALSC type");
+
+    ensure_char(&ctx, owner_id, 98_000_001, Some(station_id), 30_000_142, owner_ship);
+    ensure_char(&ctx, intruder_id, 98_000_002, Some(station_id), 30_000_142, intruder_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            owner_ship,
+            InventoryItemRecord {
+                item_id: owner_ship,
+                type_id: 587,
+                owner_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            intruder_ship,
+            InventoryItemRecord {
+                item_id: intruder_ship,
+                type_id: 587,
+                owner_id: intruder_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            alsc_id,
+            InventoryItemRecord {
+                item_id: alsc_id,
+                type_id: alsc_type_id,
+                owner_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::inventory_fitting::write_container_ship_state(&ctx, |st| {
+        st.container_passwords.insert(alsc_id, "vault-pw".into());
+    });
+
+    let mut owner_sess = make_session(owner_id, 98_000_001, Some(station_id), Some(30_000_142), Some(owner_ship));
+    let mut intruder_sess = make_session(intruder_id, 98_000_002, Some(station_id), Some(30_000_142), Some(intruder_ship));
+    let kw = HashMap::new();
+
+    // Intruder knowing the container password still fails container ownership check and MUST NOT
+    // record unlock state or ALSCActionOpen audit log entry.
+    let err = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut intruder_sess,
+        None,
+        "invbroker",
+        "GetContainerContents",
+        &[PyRep::Integer(alsc_id), PyRep::None, PyRep::String("vault-pw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(!err.code.is_empty());
+
+    let st_after_reject = read_container_ship_state(&ctx);
+    assert!(
+        !st_after_reject.unlocked_containers.contains(&(alsc_id, intruder_id)),
+        "rejected GetContainerContents must not mark container unlocked"
+    );
+    assert!(
+        st_after_reject.alsc_logs.get(&alsc_id).is_none_or(|v| v.is_empty()),
+        "rejected GetContainerContents must not append ALSCActionOpen log"
+    );
+
+    // Owner opening with valid password succeeds and appends ALSCActionOpen.
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut owner_sess,
+        None,
+        "invbroker",
+        "GetContainerContents",
+        &[PyRep::Integer(alsc_id), PyRep::None, PyRep::String("vault-pw".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("owner GetContainerContents with valid password succeeds");
+    let st_after_ok = read_container_ship_state(&ctx);
+    assert!(st_after_ok.unlocked_containers.contains(&(alsc_id, owner_id)));
+    assert_eq!(
+        st_after_ok
+            .alsc_logs
+            .get(&alsc_id)
+            .and_then(|v| v.last())
+            .map(|e| e.action.as_str()),
+        Some("ALSCActionOpen")
+    );
+}
+

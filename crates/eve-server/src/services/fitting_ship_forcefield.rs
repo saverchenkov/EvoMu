@@ -450,32 +450,62 @@ pub fn ship_configuration(
 ) -> Result<eve_proto::PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (ship_id, password_arg) = if method == "SetShipPassword" {
-        if args.len() == 1 {
-            (session.ship_id.unwrap_or(0), args.first())
-        } else if args.len() >= 2 {
-            if let Some(sid) = args[0].as_i64() {
-                (sid, args.get(1))
-            } else {
+        if args.is_empty() {
+            return Err(err(
+                "InvalidArgument",
+                "SetShipPassword requires a password argument",
+            ));
+        } else if args.len() == 1 {
+            if matches!(args[0], eve_proto::PyRep::String(_) | eve_proto::PyRep::None) {
                 (session.ship_id.unwrap_or(0), args.first())
+            } else {
+                return Err(err(
+                    "InvalidArgument",
+                    "SetShipPassword requires a string password or None",
+                ));
             }
+        } else if let Some(sid) = args[0].as_i64() {
+            if !matches!(args[1], eve_proto::PyRep::String(_) | eve_proto::PyRep::None) {
+                return Err(err(
+                    "InvalidArgument",
+                    "SetShipPassword requires a string password or None",
+                ));
+            }
+            (sid, args.get(1))
+        } else if matches!(args[0], eve_proto::PyRep::String(_) | eve_proto::PyRep::None) {
+            (session.ship_id.unwrap_or(0), args.first())
         } else {
-            (session.ship_id.unwrap_or(0), None)
+            return Err(err(
+                "InvalidArgument",
+                "SetShipPassword requires a ship ID and password",
+            ));
         }
     } else {
         let sid = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
         (sid, None)
     };
-    let owner = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.owner_id));
-    let Some(owner) = owner else {
+    let ship_meta = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&ship_id).map(|i| {
+            let cat_id = ctx
+                .sde
+                .types
+                .get(&i.type_id)
+                .map(|t| t.category_id)
+                .unwrap_or(0);
+            (i.owner_id, cat_id)
+        })
+    });
+    let Some((owner, cat_id)) = ship_meta else {
         return Err(err("ShipNotFound", format!("Ship {ship_id} not found")));
     };
-    let mut st = fitting_containers_ships::read_container_ship_state(ctx);
     if method == "GetShipConfiguration" {
+        let st = fitting_containers_ships::read_container_ship_state(ctx);
         return Ok(config_rep(&st.ship_configs.get(&ship_id).cloned().unwrap_or_default()));
     }
-    if owner != char_id {
+    if owner != char_id || cat_id != 6 {
         return Err(err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}")));
     }
+    let mut st = fitting_containers_ships::read_container_ship_state(ctx);
     let cfg = st.ship_configs.entry(ship_id).or_default();
     if method == "SetShipPassword" {
         let pw_opt = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);

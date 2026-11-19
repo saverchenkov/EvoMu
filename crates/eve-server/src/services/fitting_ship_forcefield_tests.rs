@@ -231,6 +231,93 @@ async fn forcefield_entry_permissions_and_ship_configuration_password_flow() {
     );
 }
 
+#[test]
+fn set_ship_password_rejects_missing_or_integer_password_without_mutating() {
+    let ctx = test_ctx_with_custom(|_| {});
+    let char_id = 90_000_001_i64;
+    let foreign_id = 90_000_002_i64;
+    let ship_id = 77_700_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let mut owner_sess = SessionState::default();
+    owner_sess.user_id = Some(char_id as u64);
+    owner_sess.character_id = Some(char_id);
+    owner_sess.ship_id = Some(ship_id);
+    let mut foreign_sess = SessionState::default();
+    foreign_sess.user_id = Some(foreign_id as u64);
+    foreign_sess.character_id = Some(foreign_id);
+    foreign_sess.ship_id = Some(ship_id);
+
+    ship_configuration(
+        &ctx,
+        &owner_sess,
+        "SetShipPassword",
+        &[PyRep::String("initial-pw".into())],
+    )
+    .expect("valid single-string SetShipPassword succeeds");
+
+    let commits_before = ctx.db.tx_commit_count();
+    for bad_args in [
+        vec![],
+        vec![PyRep::Integer(ship_id)],
+        vec![PyRep::Integer(ship_id), PyRep::Integer(123)],
+    ] {
+        assert_eq!(
+            ship_configuration(&ctx, &owner_sess, "SetShipPassword", &bad_args)
+                .unwrap_err()
+                .code,
+            "InvalidArgument"
+        );
+    }
+    assert_eq!(
+        ship_configuration(
+            &ctx,
+            &foreign_sess,
+            "SetShipPassword",
+            &[PyRep::Integer(ship_id), PyRep::String("hack".into())],
+        )
+        .unwrap_err()
+        .code,
+        "OwnershipViolation"
+    );
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+    assert_eq!(
+        fitting_containers_ships::read_container_ship_state(&ctx)
+            .ship_passwords
+            .get(&ship_id)
+            .map(String::as_str),
+        Some("initial-pw")
+    );
+
+    ship_configuration(
+        &ctx,
+        &owner_sess,
+        "SetShipPassword",
+        &[PyRep::Integer(ship_id), PyRep::String("updated-pw".into())],
+    )
+    .expect("explicit (ship_id, password) succeeds");
+    assert_eq!(
+        fitting_containers_ships::read_container_ship_state(&ctx)
+            .ship_passwords
+            .get(&ship_id)
+            .map(String::as_str),
+        Some("updated-pw")
+    );
+}
+
 #[cfg(test)]
 #[path = "fitting_ship_forcefield_cov_edges_tests.rs"]
 mod fitting_ship_forcefield_cov_edges_tests;
