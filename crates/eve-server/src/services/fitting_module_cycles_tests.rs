@@ -80,6 +80,191 @@ fn ensure_char(ctx: &ServerContext, char_id: i64, corp_id: i64, sys_id: u32, shi
         .acquire_online_lock(char_id as u64, char_id as u64, Some(char_id), true, ctx.now_unix_secs());
 }
 
+#[tokio::test]
+async fn handle_weapons_targetless_overload_bypasses_warp_cloak_tether_safety_and_salvager_branch() {
+    let sb_tid = 990_072_u32;
+    let salv_tid = 991_122_u32;
+    let turret_tid = 990_053_u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.effects.entry(3002).or_insert_with(|| eve_sde::DogmaEffectType {
+            effect_id: 3002,
+            name: "overloadSelfDurationBonus".into(),
+            effect_category: 5,
+            published: true,
+            ..Default::default()
+        });
+        let mut sb = custom_inv_type(
+            sde,
+            sb_tid,
+            72,
+            7,
+            5.0,
+            0.0,
+            "Test Smartbomb",
+            &[(1211, 6.7), (73, 7_500.0), (54, 5_000.0), (114, 200.0), (6, 50.0)],
+        );
+        sb.effect_ids = vec![38, 3002];
+        sde.types.insert(sb_tid, sb);
+
+        let mut salv = custom_inv_type(sde, salv_tid, 1122, 7, 5.0, 0.0, "Test Salvager", &[]);
+        salv.effect_ids = vec![2757];
+        sde.types.insert(salv_tid, salv);
+
+        let mut turret = custom_inv_type(
+            sde,
+            turret_tid,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Test Laser",
+            &[(1211, 0.6), (51, 2_000.0), (54, 10_000.0), (6, 10.0)],
+        );
+        turret.effect_ids = vec![10, 3002];
+        sde.types.insert(turret_tid, turret);
+    });
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 911_001_i64;
+    let ship_id = 912_001_i64;
+    let sb_id = 913_001_i64;
+    let salv_id = 913_002_i64;
+    let turret_id = 913_003_i64;
+    ensure_char(&ctx, char_id, 1_000_009, sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord { type_id: 28_164, level: 5, skill_points: 256_000.0 },
+        );
+        for (iid, tid, flag) in [
+            (ship_id, 587_u32, InventoryFlag::None),
+            (sb_id, sb_tid, InventoryFlag::HiSlot0),
+            (salv_id, salv_tid, InventoryFlag::HiSlot1),
+            (turret_id, turret_tid, InventoryFlag::HiSlot2),
+        ] {
+            let loc = if iid == ship_id { sys_id as i64 } else { ship_id };
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    // Seed Green safety in high-sec
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
+    });
+
+    for (mode, cloaked, gate_ticks, tethered) in [
+        (
+            MovementMode::Warp {
+                origin: DVec3::ZERO,
+                destination: DVec3::new(1_000_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 3.0,
+                total_distance: 1_000_000_000.0,
+                elapsed_warp_time: 1.0,
+                phase: eve_destiny::WarpPhase::Cruising,
+            },
+            false,
+            0_u32,
+            false,
+        ),
+        (MovementMode::Stop, true, 20, false),
+        (MovementMode::Stop, true, 0, false),
+        (MovementMode::Stop, false, 0, true),
+    ] {
+        let _ = sys.remove_ball(ship_id).await;
+        let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+        cs.capacitor = 1_000.0;
+        cs.max_capacitor = 1_000.0;
+        cs.is_cloaked = cloaked;
+        cs.gate_cloak_remaining_ticks = gate_ticks;
+        cs.is_tethered = tethered;
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 365.0,
+                inertia: 1.0,
+                mass: 1_067_000.0,
+                radius: 37.0,
+                speed_fraction: 0.0,
+                mode,
+            },
+            cs,
+            ctx.build_ship_slim_meta(char_id, 587),
+        )
+        .await
+        .unwrap();
+
+        let until = ctx.now_unix() + 60;
+        crate::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, until);
+
+        let sb_res = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+            &ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(sb_id)], &kw,
+        )
+        .await
+        .unwrap()
+        .expect("handle_weapons targetless Overload on Smartbomb must succeed");
+        assert_eq!(sb_res.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+        assert!(!sys.has_module_cycle(ship_id, sb_id).await);
+
+        let turret_res = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+            &ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(turret_id)], &kw,
+        )
+        .await
+        .unwrap()
+        .expect("handle_weapons targetless Overload on Turret must succeed");
+        assert_eq!(turret_res.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+        assert!(
+            crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            "Targetless Overload in handle_weapons must preserve location-change invulnerability"
+        );
+
+        if gate_ticks > 0 {
+            let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+            assert!(cs_after.is_cloaked && cs_after.gate_cloak_remaining_ticks == gate_ticks);
+        }
+
+        let salv_err = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+            &ctx, &mut sess, "dogmaIM", "Overload", &[PyRep::Integer(salv_id)], &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(salv_err.code, "CannotOverloadModule");
+
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(fi) = snap.ship_fit_inputs.get_mut(&ship_id) {
+                fi.overloaded_modules.clear();
+            }
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+    }
+}
+
 fn insert_item(
     ctx: &ServerContext,
     item_id: i64,
@@ -247,7 +432,7 @@ async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
         .is_err()
     );
 
-    // Overload Afterburner: succeeds, emits OnHeatAdded & OnGodmaShipEffect, and returns overloaded=true
+    // Overload Afterburner while idle: pre-arms overload without activating (emits OnHeatAdded, not OnGodmaShipEffect)
     let ov_rep = handle_module_cycles(
         &ctx,
         &mut sess,
@@ -263,7 +448,23 @@ async fn handle_module_cycles_basic_error_guards_and_overheat_activation() {
     assert_eq!(ov_rep.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
     let notifs = ctx.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnHeatAdded"));
-    assert!(notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+    assert!(!notifs.iter().any(|n| n.event == "OnGodmaShipEffect"));
+
+    // Activate Afterburner: emits OnGodmaShipEffect while remaining pre-overloaded
+    let act_rep = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ab_mod_id), PyRep::String("defaultEffect".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("activate afterburner");
+    assert!(act_rep.dict_get("active").and_then(|v| v.as_bool()).unwrap_or(false) || act_rep.dict_get("effectID").is_some());
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnGodmaShipEffect"));
 
     // Second Overload call while active succeeds with overloaded=true
     let toggle_rep = handle_module_cycles(
@@ -3200,6 +3401,152 @@ async fn mercden_remote_shield_repair_overload_persists_heat_and_guards() {
                 && n.args == vec![PyRep::Integer(1175), PyRep::Integer(rsb_id)]
         }),
         "expected OnHeatAdded([1175, rsb_id]) on pre-overloaded MercDen Activate"
+    );
+}
+
+#[tokio::test]
+async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerability() {
+    let ab_tid = 990_439_u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        sde.effects.entry(3002).or_insert_with(|| eve_sde::DogmaEffectType {
+            effect_id: 3002,
+            name: "overloadSelfSpeedFactorBonus".into(),
+            effect_category: 5,
+            published: true,
+            ..Default::default()
+        });
+        let mut ab = custom_inv_type(
+            sde,
+            ab_tid,
+            46,
+            7,
+            5.0,
+            0.0,
+            "Test Overload AB",
+            &[(1212, 1.0), (54, 10_000.0), (6, 10.0)],
+        );
+        ab.effect_ids = vec![16, 3002];
+        sde.types.insert(ab_tid, ab);
+    });
+
+    let sys_id = 30_000_142_u32;
+    let char_id = 911_055_i64;
+    let ship_id = 912_055_i64;
+    let ab_id = 913_055_i64;
+    ensure_char(&ctx, char_id, 1_000_009, sys_id, ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord { type_id: 28_164, level: 5, skill_points: 256_000.0 },
+        );
+        for (iid, tid, flag) in [
+            (ship_id, 587_u32, InventoryFlag::None),
+            (ab_id, ab_tid, InventoryFlag::MedSlot0),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: if iid == ship_id { sys_id as i64 } else { ship_id },
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(char_id as u64);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.ship_id = Some(ship_id);
+
+    for (station, structure, sys_opt, label) in [
+        (Some(60_003_760), None, Some(sys_id), "station with solar_system_id"),
+        (Some(60_003_760), None, None, "station without solar_system_id"),
+        (None, Some(1_000_000_777), Some(sys_id), "structure with solar_system_id"),
+    ] {
+        sess.station_id = station;
+        sess.structure_id = structure;
+        sess.solar_system_id = sys_opt;
+        let err = handle_module_cycles(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(ab_id), PyRep::Integer(3002)],
+            &kw,
+        )
+        .await
+        .expect("Overload must handle docked check")
+        .unwrap_err();
+        assert_eq!(err.code, "ShipDocked", "{label} must return ShipDocked");
+        assert!(
+            ctx.db.with_snapshot(|s| {
+                s.ship_fit_inputs
+                    .get(&ship_id)
+                    .is_none_or(|fi| !fi.overloaded_modules.contains(&ab_id))
+            }),
+            "{label} must not persist overload state"
+        );
+    }
+
+    // Undocked in space preserves active location-change invulnerability
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(sys_id);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    cs.capacitor = 1_000.0;
+    cs.max_capacitor = 1_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    )
+    .await
+    .unwrap();
+
+    crate::services::space_destiny::grant_location_change_invulnerability(
+        &ctx,
+        char_id,
+        ctx.now_unix() + 60,
+    );
+    let ok = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(ab_id)],
+        &kw,
+    )
+    .await
+    .expect("Overload in space handled")
+    .expect("Overload in space succeeds");
+    assert_eq!(ok.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert!(
+        crate::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        "Pre-overload in handle_module_cycles must preserve location-change invulnerability"
     );
 }
 

@@ -379,6 +379,15 @@ pub(super) async fn handle_fleet_ops(
             }
             let dir = (target_ball.position - caller_ball.position).normalize_or_zero();
             let dest = target_ball.position - dir * min_range;
+            if let Err(e) = crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+                ctx,
+                sys_id,
+                caller_ball.position.to_array(),
+                target_ball.position.to_array(),
+                dest.to_array(),
+            ) {
+                return Some(Err(e));
+            }
             if let Ok(Some(cs)) = sys.get_combat_state(caller_ship_id).await {
                 if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
                     let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
@@ -1259,6 +1268,15 @@ pub(crate) async fn handle_fleet_warp(
     {
         return Some(Err(e));
     }
+    if let Err(e) = crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+        ctx,
+        sys_id,
+        caller_pos.unwrap_or(dest_pos).to_array(),
+        dest_pos.to_array(),
+        dest_pos.to_array(),
+    ) {
+        return Some(Err(e));
+    }
 
     let fleet_warp_dir = caller_pos
         .map(|cp| (dest_pos - cp).normalize_or_zero())
@@ -1268,6 +1286,7 @@ pub(crate) async fn handle_fleet_warp(
     let mut warped_members = Vec::new();
     let mut landing_positions = Vec::new();
     let mut ess_bubble_blocked = false;
+    let mut deadspace_blocked = false;
     for (member_char_id, ship_id) in eligible_ship_ids {
         if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
             if ball.max_velocity <= 0.0 {
@@ -1318,6 +1337,18 @@ pub(crate) async fn handle_fleet_warp(
                     ess_bubble_blocked = true;
                     continue;
                 }
+                if crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+                    ctx,
+                    sys_id,
+                    ball.position.to_array(),
+                    dest_pos.to_array(),
+                    landing.to_array(),
+                )
+                .is_err()
+                {
+                    deadspace_blocked = true;
+                    continue;
+                }
                 if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                     if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
                         let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
@@ -1362,6 +1393,13 @@ pub(crate) async fn handle_fleet_warp(
             message: "Cannot fleet warp out from inside the 75 km ESS warp disruption bubble".into(),
             client_error: None,
         }));
+    }
+    if warped_members.is_empty() && deadspace_blocked {
+        return Some(Err(BridgeRpcError::with_client_error(
+            "NaturalPhenomenaDisruptingWarp",
+            "Natural phenomena are disrupting warp",
+            eve_proto::ClientError::CustomInfo("Natural phenomena are disrupting warp".into()),
+        )));
     }
 
     for &opt_out_cid in &skipped_opt_out_members {

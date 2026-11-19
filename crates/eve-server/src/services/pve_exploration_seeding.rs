@@ -623,8 +623,16 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     with_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.insert(solar_system_id, true);
         let existing = reg.sites_by_system.entry(solar_system_id).or_default();
-        existing.retain(|s| s.site_category == "Expedition");
-        existing.extend(sites);
+        existing.retain(|s| {
+            s.site_category == "Expedition"
+                || s.site_id.starts_with("SHK-")
+                || s.site_id.starts_with("GHK-")
+        });
+        for site in sites {
+            if !existing.iter().any(|x| x.site_id == site.site_id) {
+                existing.push(site);
+            }
+        }
     });
 }
 

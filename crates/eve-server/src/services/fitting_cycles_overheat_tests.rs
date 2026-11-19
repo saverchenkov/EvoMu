@@ -979,3 +979,386 @@ fn check_can_overload_module_and_bank_burnout_guards() {
         "ModuleBurnedOut"
     );
 }
+
+#[tokio::test]
+async fn overload_propulsion_module_ignores_effect_id_arg_without_target() {
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut eff = sde.effects.values().next().expect("seed effect").clone();
+        eff.effect_id = 3175;
+        eff.name = "overloadSelfSpeedBonus".into();
+        eff.effect_category = 5;
+        sde.effects.insert(3175, eff);
+
+        let mwd = custom_inv_type(
+            sde,
+            434,
+            46,
+            7,
+            "5MN Microwarpdrive I",
+            &[
+                (9, 40.0),    // hp
+                (6, 5.0),     // capacitorNeed
+                (30, 5.0),    // power
+                (50, 10.0),   // cpu
+                (73, 10_000.0), // duration
+                (1212, 1.0),  // Thermodynamics requiredLevel
+            ],
+            &[13, 3175], // req med slot + cat5 overload
+        );
+        sde.types.insert(434, mwd);
+    });
+
+    let char_id = 95_000_020_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_000_950_020_i64;
+    let mod_id = 1_000_950_021_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord {
+                type_id: 28_164,
+                level: 3,
+                skill_points: 8_000.0,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: 434,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(mod_id, true);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                shield_hp: 400.0,
+                max_shield_hp: 400.0,
+                armor_hp: 400.0,
+                max_armor_hp: 400.0,
+                structure_hp: 400.0,
+                max_structure_hp: 400.0,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mut sess = eve_machonet::SessionState::new(9520);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_001);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // #1336 + P1-OVERLOAD-IDLE-PROPULSION-ACTIVATES: client sends dogmaIM.Overload(moduleID, effectID=3175)
+    // on an idle MWD; must pre-overload WITHOUT starting an active cycle or draining capacitor.
+    let res = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(mod_id), PyRep::Integer(3175)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("Overload method must dispatch")
+    .expect("Overload(moduleID, 3175) must not treat effectID 3175 as a targetID");
+    assert_eq!(res.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        ctx.fit(char_id, ship_id).unwrap().modules[&mod_id].state,
+        ModuleState::Overloaded
+    );
+    assert!(
+        ctx.db.with_snapshot(|snap| !snap.module_active_states.contains(&mod_id)),
+        "pre-overloading an idle MWD must not insert module_active_states"
+    );
+    let pre_combat = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((pre_combat.capacitor - 500.0).abs() < 1e-6, "idle Overload must not drain capacitor");
+
+    // Subsequent Activate transitions the pre-overloaded MWD into an active overloaded cycle.
+    crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .expect("Activate method must dispatch")
+    .expect("Activate on pre-overloaded MWD must succeed");
+    assert!(
+        ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&mod_id)),
+        "Activate after Overload must start an active cycle"
+    );
+    assert_eq!(
+        ctx.fit(char_id, ship_id).unwrap().modules[&mod_id].state,
+        ModuleState::Overloaded
+    );
+
+    // Same pre-overload semantics must apply to local armor repairer (523) and shield booster (399).
+    for (offset, tid, flag) in [
+        (1, 523_u32, InventoryFlag::LoSlot0),
+        (2, 399_u32, InventoryFlag::MedSlot1),
+    ] {
+        let m_id = 88_004_001 + offset;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                m_id,
+                eve_db::InventoryItemRecord {
+                    item_id: m_id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(m_id, true);
+        });
+        let ovl = crate::services::inventory_fitting::handle(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Overload",
+            &[PyRep::Integer(m_id)],
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("Overload local module dispatches")
+        .expect("Overload local module succeeds");
+        assert_eq!(ovl.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            ctx.db.with_snapshot(|snap| !snap.module_active_states.contains(&m_id)),
+            "pre-overloading idle type {tid} must not activate cycle"
+        );
+    }
+}
+
+#[tokio::test]
+async fn idle_hardener_pre_overload_leaves_combat_state_resonances_untouched_until_activate() {
+    let ctx = ServerContext::new();
+    let char_id = 95_000_030_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_000_950_030_i64;
+    let hardener_id = 1_000_950_031_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            eve_db::TrainedSkillRecord { type_id: 28_164, level: 4, skill_points: 64_000.0 },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hardener_id,
+            InventoryItemRecord {
+                item_id: hardener_id,
+                type_id: 2281, // Multispectrum Shield Hardener II
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(hardener_id, true);
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState {
+                capacitor: 500.0,
+                max_capacitor: 500.0,
+                shield_hp: 400.0,
+                max_shield_hp: 400.0,
+                armor_hp: 400.0,
+                max_armor_hp: 400.0,
+                structure_hp: 400.0,
+                max_structure_hp: 400.0,
+                ..Default::default()
+            },
+        )
+        .await;
+    ctx.invalidate_and_push_fit(ship_id);
+    let _ = ctx.fit(char_id, ship_id).unwrap();
+
+    let mut sess = eve_machonet::SessionState::new(9530);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // Seed baseline resonances synchronously via Online projection
+    let base_res = ctx
+        .fit(char_id, ship_id)
+        .unwrap()
+        .to_projection(ctx.current_fit_rev(ship_id), &ctx.sde)
+        .baseline
+        .shield_resonance;
+    let _ = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(hardener_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("idle hardener Overload must succeed");
+    let after_pre_fit = ctx.fit(char_id, ship_id).unwrap();
+    assert!(after_pre_fit.pending_overload_modules.contains(&hardener_id));
+    let pre_proj_res = after_pre_fit
+        .to_projection(ctx.current_fit_rev(ship_id), &ctx.sde)
+        .baseline
+        .shield_resonance;
+    assert_eq!(pre_proj_res, base_res, "idle pre-overload must not grant active hardener resonances");
+
+    // StopOverload on idle hardener clears pending overload cleanly
+    let stop_res = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "StopOverload",
+        &[PyRep::Integer(hardener_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("StopOverload succeeds");
+    assert_eq!(stop_res.dict_get("overloaded").and_then(|v| v.as_bool()), Some(false));
+    assert!(!ctx.fit(char_id, ship_id).unwrap().pending_overload_modules.contains(&hardener_id));
+
+    // Re-Overload while idle, confirm still inactive, then Activate and verify resonances drop
+    let _ = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Overload",
+        &[PyRep::Integer(hardener_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ctx.fit(char_id, ship_id)
+            .unwrap()
+            .to_projection(ctx.current_fit_rev(ship_id), &ctx.sde)
+            .baseline
+            .shield_resonance,
+        base_res
+    );
+
+    let _ = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(hardener_id)],
+        &std::collections::HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .expect("Activate on pre-overloaded hardener must succeed");
+    let active_fit = ctx.fit(char_id, ship_id).unwrap();
+    assert!(!active_fit.pending_overload_modules.contains(&hardener_id));
+    let active_res = active_fit
+        .to_projection(ctx.current_fit_rev(ship_id), &ctx.sde)
+        .baseline
+        .shield_resonance;
+    assert!(
+        active_res[0] < base_res[0] && active_res[1] < base_res[1],
+        "activating overloaded hardener must apply resistance bonuses: base={base_res:?}, active={active_res:?}"
+    );
+    let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_after.shield_resonance[0] < base_res[0], "live CombatState resonance must update after Activate");
+}

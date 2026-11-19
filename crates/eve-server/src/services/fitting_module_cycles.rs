@@ -63,6 +63,15 @@ pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeR
     )
 }
 
+/// Builds a `ShipDocked` error for space-only module/overload calls made while docked.
+pub(crate) fn ship_docked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "ShipDocked".into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 enum ChargeVolatility {
     VolatileCrystal { damage: f64, chance: f64 },
     NonVolatileCrystal,
@@ -116,6 +125,29 @@ pub(crate) async fn handle_module_cycles(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    Box::pin(handle_module_cycles_inner(
+        ctx,
+        session,
+        _bound_entry,
+        service,
+        method,
+        args,
+        kwargs,
+    ))
+    .await
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+async fn handle_module_cycles_inner(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    _bound_entry: Option<&BoundObjectEntry>,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("dogmaIM", "Activate") | ("dogmaIM", "Overload") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -135,8 +167,12 @@ pub(crate) async fn handle_module_cycles(
             let target_id_opt = match rpc
                 .opt_i64(2, "target")
                 .transpose()
-                .or_else(|| args.get(1).and_then(|a| a.as_i64()).map(Ok))
-            {
+                .or_else(|| {
+                    (method != "Overload")
+                        .then(|| args.get(1).and_then(|a| a.as_i64()))
+                        .flatten()
+                        .map(Ok)
+                }) {
                 Some(Ok(v)) => Some(v),
                 Some(Err(e)) => return Some(Err(e)),
                 None => None,
@@ -195,6 +231,9 @@ pub(crate) async fn handle_module_cycles(
                     );
                 }
             }
+            if method == "Overload" && (session.station_id.is_some() || session.structure_id.is_some()) {
+                return Some(Err(ship_docked_rpc_error("Cannot overload modules while docked")));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into(), client_error: None }));
             };
@@ -232,7 +271,7 @@ pub(crate) async fn handle_module_cycles(
                 .get(&module_id)
                 .cloned()
                 .or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id));
-            let Some(m) = m_opt else {
+            let Some(mut m) = m_opt else {
                 let has_online_weapon = fit.modules.values().any(|wm| {
                     (27..=34).contains(&wm.flag_id)
                         && wm.state != eve_dogma::ModuleState::Offline
@@ -268,6 +307,35 @@ pub(crate) async fn handle_module_cycles(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None }));
             };
+            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
+            if method == "Overload" && matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
+                return Some(Err(
+                    crate::services::structure_weapons_ops::cannot_overload_structure_module_error(),
+                ));
+            }
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
+                &sys, ship_id, module_id, method, m.state,
+            ) {
+                return Some(Err(e));
+            }
+            if method == "Overload" && target_id_opt.is_none() {
+                return Some(
+                    crate::router::box_fut(|| {
+                        crate::services::fitting_cycles_overheat::handle_early_targetless_overload(
+                            ctx,
+                            &sys,
+                            char_id,
+                            ship_id,
+                            module_id,
+                            mod_type,
+                            is_weapon,
+                            &mut m,
+                            fit,
+                        )
+                    })
+                    .await,
+                );
+            }
             if effect_name != "online" && session.station_id.is_none() && session.structure_id.is_none() {
                 if let Err(e) = enforce_space_module_cloak_and_warp_guard(
                     ctx, &sys, char_id, ship_id, mod_type,
@@ -277,7 +345,6 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(e));
                 }
             }
-            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
@@ -355,11 +422,6 @@ pub(crate) async fn handle_module_cycles(
                 if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
                     return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
-            }
-            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
-                &sys, ship_id, module_id, method, m.state,
-            ) {
-                return Some(Err(e));
             }
             if method == "Overload" {
                 if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(
@@ -514,11 +576,9 @@ pub(crate) async fn handle_module_cycles(
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
             if mod_type.group_id == 589 {
                 if session.station_id.is_some() || session.structure_id.is_some() {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipDocked".into(),
-                        message: "Cannot activate Interdiction Sphere Launcher while docked".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(ship_docked_rpc_error(
+                        "Cannot activate Interdiction Sphere Launcher while docked",
+                    )));
                 }
                 if sys
                     .get_combat_state(ship_id)
@@ -835,55 +895,44 @@ pub(crate) async fn handle_module_cycles(
                     .reconcile_module_cycle_before_activate(ship_id, module_id, ctx.now_unix_secs())
                     .await;
                 let in_actor_cycle = actor_cycle_state.is_some();
-                let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
-                if cleaned_stale || (is_weapon && !in_delay && !in_actor_cycle) {
-                    ctx.db.with_mut_snapshot(|s| {
-                        s.module_active_states.remove(&module_id);
-                    });
-                }
-                let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
-                let mut m_effective_state = m.state;
-                // Why: Only clear stale Active state; pre-overloaded idle modules must keep Overloaded across failed activations.
-                if !in_db_active
-                    && !in_actor_cycle
-                    && m_effective_state == eve_dogma::ModuleState::Active
-                {
-                    m_effective_state = eve_dogma::ModuleState::Online;
-                    if let Some(fm) = fit.modules.get_mut(&module_id) {
-                        fm.state = eve_dogma::ModuleState::Online;
-                    }
-                    fit.recalculate_stats(&ctx.sde);
-                    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
-                    ctx.invalidate_and_push_fit(ship_id);
-                }
-                let already_active = m_effective_state == eve_dogma::ModuleState::Active
-                    || in_db_active
-                    || in_actor_cycle
-                    || in_delay;
                 let is_entropic = mod_type.group_id == 1986;
-                if method == "Overload" && (in_delay || already_active) && (!in_actor_cycle || is_entropic) {
-                    return Some(Err(module_already_active_rpc_error(
+                let (in_delay, already_active) = if method == "Overload" {
+                    match crate::services::fitting_cycles_overheat::check_overload_cycle_or_delay(
                         ctx,
-                        Some(m.type_id),
-                        format!("Module {module_id} cannot overload while active or in reactivation delay"),
-                    )));
-                }
-                if method == "Overload"
-                    && (already_active
-                        || (target_id_opt.is_none()
-                            && matches!(
-                                mod_type.group_id,
-                                291 | 208 | 379 | 65 | 1672 | 52 | 201 | 41 | 325 | 2018 | 585 | 67 | 74 | 55 | 53 | 1986 | 4060 | 506..=512 | 524 | 771 | 862 | 1245 | 1674 | 4500 | 4805 | 4807
-                            )))
-                {
-                    let rep = crate::router::box_fut(|| {
-                        crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                            ctx, &sys, char_id, ship_id, module_id, fit, already_active,
-                        )
-                    })
-                    .await;
-                    return Some(Ok(rep));
-                }
+                        char_id,
+                        ship_id,
+                        module_id,
+                        in_actor_cycle,
+                        cleaned_stale,
+                        is_weapon,
+                        is_entropic,
+                        &mut m,
+                        &mut fit,
+                    ) {
+                        Ok(true) => {
+                            let rep = crate::router::box_fut(|| {
+                                crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                                    ctx, &sys, char_id, ship_id, module_id, fit, true,
+                                )
+                            })
+                            .await;
+                            return Some(Ok(rep));
+                        }
+                        Ok(false) => (false, false),
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else {
+                    crate::services::fitting_cycles_overheat::reconcile_module_active_state(
+                        ctx,
+                        ship_id,
+                        module_id,
+                        in_actor_cycle,
+                        cleaned_stale,
+                        is_weapon,
+                        &mut m,
+                        &mut fit,
+                    )
+                };
                 if in_delay {
                     if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
                         return Some(Err(module_already_active_rpc_error(
@@ -1074,10 +1123,18 @@ pub(crate) async fn handle_module_cycles(
             } else if has_speed_factor_attr && speed_factor > 0.0 {
                 let speed_boost_attr = mod_state.get_attribute(567, &ctx.sde);
                 let ship_mass = fit.ship.get_attribute(attr_ids::MASS, &ctx.sde);
-                let mass_addition = mod_state.get_attribute(
-                    eve_dogma::propulsion_mass_addition_attr_id(&mod_state, &ctx.sde),
-                    &ctx.sde,
-                );
+                let mass_addition = if !fit.pending_overload_modules.contains(&module_id)
+                    && matches!(
+                        m.state,
+                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                    ) {
+                    0.0
+                } else {
+                    mod_state.get_attribute(
+                        eve_dogma::propulsion_mass_addition_attr_id(&mod_state, &ctx.sde),
+                        &ctx.sde,
+                    )
+                };
                 eve_dogma::compute_propulsion_speed_boost(
                     speed_factor,
                     speed_boost_attr,
@@ -1983,6 +2040,7 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
             });
+            fit.pending_overload_modules.remove(&module_id);
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
             if mod_type.group_id == 330 || m.type_id == 83485 {
                 crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
@@ -2110,34 +2168,19 @@ pub(crate) async fn handle_module_cycles(
                 ctx, sys_id, char_id, ship_id, module_id, m.type_id, mod_type, m.charge_type_id,
                 disables_target_mwd_mjd, hic_bubble_radius_m, target_id_opt,
             );
-            if let Some(tid) = target_id_opt {
-                if let Some(pre_cs) = pre_target_combat_state {
-                    if let Ok(Some(post_cs)) = sys.get_combat_state(tid).await {
-                        if cap_drain_target > 0.0 {
-                            let drained = (pre_cs.capacitor - post_cs.capacitor).max(0.0);
-                            if drained > 0.0 {
-                                crate::services::quasar_career_goals::record_cap_warfare_career(
-                                    ctx,
-                                    char_id,
-                                    ship_id,
-                                    tid,
-                                    "neutralizer",
-                                    drained,
-                                );
-                            }
-                        }
-                        if remote_shield_amount > 0.0 {
-                            let boosted = (post_cs.shield_hp - pre_cs.shield_hp).max(0.0);
-                            crate::services::quasar_career_goals::record_remote_repair_career(
-                                ctx,
-                                char_id,
-                                tid,
-                                "shield_boost",
-                                boosted,
-                            );
-                        }
-                    }
-                }
+            if let (Some(tid), Some(pre_cs)) = (target_id_opt, pre_target_combat_state) {
+                finalize_target_combat_hooks(
+                    ctx,
+                    &sys,
+                    char_id,
+                    ship_id,
+                    tid,
+                    pre_cs.shield_hp,
+                    pre_cs.capacitor,
+                    cap_drain_target,
+                    remote_shield_amount,
+                )
+                .await;
             }
 
             let mut volley_destroyed_target = false;
@@ -2191,7 +2234,7 @@ pub(crate) async fn handle_module_cycles(
                 let mut resp = vec![
                     ("moduleID", PyRep::Integer(module_id)),
                     ("active", PyRep::Bool(true)),
-                    ("overloaded", PyRep::Bool(false)),
+                    ("overloaded", PyRep::Bool(is_overloaded)),
                     ("effectiveMaxVelocity", PyRep::Real(max_vel)),
                     ("duration", PyRep::Real(duration_s)),
                 ];
@@ -2204,6 +2247,53 @@ pub(crate) async fn handle_module_cycles(
         }
         _ => None,
     }
+}
+
+/// Records post-cycle career goals outside `handle_module_cycles_inner`'s coroutine frame
+/// so debug builds stay under 2 MiB test stacks.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn finalize_target_combat_hooks<'a>(
+    ctx: &'a ServerContext,
+    sys: &'a crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    target_id: i64,
+    pre_shield_hp: f64,
+    pre_capacitor: f64,
+    cap_drain_target: f64,
+    remote_shield_amount: f64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let Ok(Some(post_cs)) = sys.get_combat_state(target_id).await else {
+            return;
+        };
+        let drained = if cap_drain_target > 0.0 {
+            (pre_capacitor - post_cs.capacitor).max(0.0)
+        } else {
+            0.0
+        };
+        if drained > 0.0 {
+            crate::services::quasar_career_goals::record_cap_warfare_career(
+                ctx,
+                char_id,
+                ship_id,
+                target_id,
+                "neutralizer",
+                drained,
+            );
+        }
+        if remote_shield_amount > 0.0 {
+            let boosted = (post_cs.shield_hp - pre_shield_hp).max(0.0);
+            crate::services::quasar_career_goals::record_remote_repair_career(
+                ctx,
+                char_id,
+                target_id,
+                "shield_boost",
+                boosted,
+            );
+        }
+    })
 }
 
 #[cfg(test)]

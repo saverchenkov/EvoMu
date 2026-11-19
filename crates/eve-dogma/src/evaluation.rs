@@ -141,6 +141,7 @@ struct EvalInputsSnapshot {
     gang_bursts: Vec<GangBurstEffect>,
     active_stance_type_id: Option<TypeId>,
     drones: Vec<(i64, TypeId)>,
+    pending_overload_modules: BTreeSet<i64>,
 }
 
 impl EvalInputsSnapshot {
@@ -158,6 +159,7 @@ impl EvalInputsSnapshot {
             gang_bursts: eng.gang_bursts.clone(),
             active_stance_type_id: eng.active_stance_type_id,
             drones: eng.drones.clone(),
+            pending_overload_modules: eng.pending_overload_modules.clone(),
         }
     }
 
@@ -173,6 +175,7 @@ impl EvalInputsSnapshot {
             && self.projected_ewar == eng.projected_ewar
             && self.gang_bursts == eng.gang_bursts
             && self.drones == eng.drones
+            && self.pending_overload_modules == eng.pending_overload_modules
             && self.ship_base_attributes == eng.ship.base_attributes
     }
 }
@@ -225,6 +228,10 @@ pub struct ShipFittingEngine {
     /// Persisted evaluated owned drone states (`drone_item_id -> DogmaItemState`) from `recalculate_stats`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub evaluated_drones: HashMap<i64, DogmaItemState>,
+    /// Idle pre-overloaded modules queued for overload on their next activation (`#1336`);
+    /// kept distinct from an active overload cycle so `effectCategory` 1..=3 and 5 stay inactive until `Activate`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pending_overload_modules: BTreeSet<i64>,
     /// Internal fingerprint of the inputs evaluated into `evaluated_context_cache`.
     #[serde(skip)]
     eval_inputs_snapshot: Option<Box<EvalInputsSnapshot>>,
@@ -610,6 +617,7 @@ impl ShipFittingEngine {
             evaluated_modules: HashMap::new(),
             evaluated_charges: HashMap::new(),
             evaluated_drones: HashMap::new(),
+            pending_overload_modules: BTreeSet::new(),
             eval_inputs_snapshot: None,
         }
     }
@@ -1215,7 +1223,7 @@ impl ShipFittingEngine {
         //    such as `3175` `overloadSelfSpeedBonus`, `3174` `overloadSelfRangeBonus`, `3200` `overloadSelfArmorDamageAmountDurationBonus`)
         //    onto the module's own state in `ctx.ship_located_items` before evaluating active effects that read those modified module attributes.
         for (idx, m) in sorted_modules.iter().enumerate() {
-            if m.state == ModuleState::Overloaded {
+            if m.state == ModuleState::Overloaded && !self.pending_overload_modules.contains(&m.item_id) {
                 if let Some(mod_type) = sde.types.get(&m.type_id) {
                     for &eid in &mod_type.effect_ids {
                         if let Some(effect) = sde.effects.get(&eid) {
@@ -1250,7 +1258,10 @@ impl ShipFittingEngine {
             let Some(mod_type) = sde.types.get(&m.type_id) else {
                 continue;
             };
-            let is_active = matches!(m.state, ModuleState::Active | ModuleState::Overloaded);
+            let is_pending_pre_overload = self.pending_overload_modules.contains(&m.item_id);
+            let is_active =
+                matches!(m.state, ModuleState::Active | ModuleState::Overloaded) && !is_pending_pre_overload;
+            let is_actively_overloaded = m.state == ModuleState::Overloaded && !is_pending_pre_overload;
             for &eid in &mod_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
                     let should_apply = match effect.effect_category {
@@ -1285,7 +1296,7 @@ impl ShipFittingEngine {
                     let should_apply = match effect.effect_category {
                         0 | 4 => true,
                         1..=3 => is_active,
-                        5 => m.state == ModuleState::Overloaded,
+                        5 => is_actively_overloaded,
                         _ => false,
                     };
                     let skip_actor_managed = scope == EvalScope::ActorBaseline
@@ -1748,6 +1759,11 @@ impl ShipFittingEngine {
     /// over real V24.01 SDE `modifierInfo` records, persisting the evaluated
     /// context, module states, charge states, and drone states on `self`.
     pub fn recalculate_stats(&mut self, sde: &SdeRegistry) {
+        self.pending_overload_modules.retain(|id| {
+            self.modules
+                .get(id)
+                .is_some_and(|m| m.state == ModuleState::Overloaded)
+        });
         let mut hi_mod = 0.0;
         let mut med_mod = 0.0;
         let mut low_mod = 0.0;
@@ -1908,12 +1924,14 @@ impl ShipFittingEngine {
         sde: &SdeRegistry,
     ) -> DogmaItemState {
         if overloaded
-            && self
-                .modules
-                .get(&module_item_id)
-                .is_some_and(|m| m.state != ModuleState::Overloaded)
+            && (self.pending_overload_modules.contains(&module_item_id)
+                || self
+                    .modules
+                    .get(&module_item_id)
+                    .is_some_and(|m| m.state != ModuleState::Overloaded))
         {
             let mut tmp = self.clone();
+            tmp.pending_overload_modules.remove(&module_item_id);
             if let Some(m) = tmp.modules.get_mut(&module_item_id) {
                 m.state = ModuleState::Overloaded;
             }
@@ -1986,9 +2004,18 @@ impl ShipFittingEngine {
         let mut changed = false;
         for &mid in &inputs.overloaded_modules {
             if let Some(m) = self.modules.get_mut(&mid) {
-                if matches!(m.state, ModuleState::Active | ModuleState::Online) {
-                    m.state = ModuleState::Overloaded;
-                    changed = true;
+                match m.state {
+                    ModuleState::Active => {
+                        self.pending_overload_modules.remove(&mid);
+                        m.state = ModuleState::Overloaded;
+                        changed = true;
+                    }
+                    ModuleState::Online => {
+                        m.state = ModuleState::Overloaded;
+                        self.pending_overload_modules.insert(mid);
+                        changed = true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2326,8 +2353,12 @@ impl ShipFittingEngine {
                 0.0
             };
 
-            let is_overloaded = fitted.state == ModuleState::Overloaded;
-            let is_active = matches!(fitted.state, ModuleState::Active | ModuleState::Overloaded);
+            let is_pending_pre_overload = self.pending_overload_modules.contains(&module_id);
+            let is_overloaded =
+                fitted.state == ModuleState::Overloaded && !is_pending_pre_overload;
+            let is_active =
+                matches!(fitted.state, ModuleState::Active | ModuleState::Overloaded)
+                    && !is_pending_pre_overload;
             if is_active && (is_mwd || is_afterburner) {
                 active_propulsion = Some(PropulsionParams {
                     module_id,

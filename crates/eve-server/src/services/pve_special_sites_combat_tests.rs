@@ -63,7 +63,7 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
         }
     });
 
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_600_000)));
     ensure_special_sites_initialized(&ctx);
 
@@ -156,12 +156,26 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     });
     let seasonal = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
     assert_eq!(seasonal.len(), 1);
+    assert_ne!(seasonal[0].dungeon_id, 47, "must select authentic SDE seasonal dungeon rather than stub 47");
+    let details = crate::services::pve_special_sites_combat::get_seasonal_site_details(&ctx, seasonal[0].instance_id)
+        .expect("companion seasonal details stored");
+    assert_ne!(details.relay_ball_id, 0);
+    assert_eq!(seasonal[0].escort_ball_ids.len(), 2);
     let s_boss = seasonal[0].boss_npc_ball_id;
     let s_changes = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, s_boss, Some(90_060_001)).await;
     assert_eq!(s_changes.len(), 1);
     ctx.db.with_snapshot(|snap| {
         let st = crate::services::season_manager::load_season_state(snap, 90_060_001);
-        assert!(st.season_points >= 25);
+        assert!(st.season_points >= seasonal[0].reward_points);
+        assert!(seasonal[0].reward_points > 0);
+        assert!(
+            sde.types.len() <= 100
+                || crate::services::season_fsd::fsd_challenge_definitions(&sde)
+                    .iter()
+                    .any(|d| d.points == seasonal[0].reward_points),
+            "seasonal reward_points ({}) must match an FSD challenge definition",
+            seasonal[0].reward_points
+        );
     });
 }
 
@@ -204,7 +218,7 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
         }
     });
 
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_600_000)));
     ensure_special_sites_initialized(&ctx);
 
@@ -387,4 +401,155 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
             .get(&sys_id)
             .is_some_and(|l| l.iter().any(|a| a.anomaly_id == anom_key))
     }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_boss_consecutive_kills_allocate_disjoint_item_ids_for_both_pilots() {
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let sys_1: SolarSystemId = 30_000_142;
+    let sys_2: SolarSystemId = 30_000_144;
+    let pilot_1: i64 = 90_060_201;
+    let pilot_2: i64 = 90_060_202;
+    let ship_1: i64 = 1_060_201;
+    let ship_2: i64 = 1_060_202;
+
+    let ship_tid = sde
+        .types
+        .values()
+        .filter(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 50.0)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(587);
+
+    let extra_pool: Vec<u32> = sde
+        .types
+        .keys()
+        .copied()
+        .filter(|tid| *tid != 9950 && *tid != 15457 && *tid != 23 && *tid != ship_tid)
+        .take(3)
+        .collect();
+
+    db.provision_gm_account("season_p1", "pw", pilot_1, "SeasonP1");
+    db.provision_gm_account("season_p2", "pw", pilot_2, "SeasonP2");
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, sid, sys) in [(pilot_1, ship_1, sys_1), (pilot_2, ship_2, sys_2)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = sid;
+            }
+            snap.items.insert(
+                sid,
+                InventoryItemRecord {
+                    item_id: sid,
+                    type_id: ship_tid,
+                    owner_id: cid,
+                    location_id: i64::from(sys),
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut cfg = crate::services::season_fsd::load_season_config(snap);
+        cfg.start_time_ft = now_ft - 1_000_000;
+        cfg.end_time_ft = now_ft + 10_000_000_000;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+
+    let sites_1 = ensure_seasonal_event_sites_for_system(&ctx, sys_1).await;
+    let sites_2 = ensure_seasonal_event_sites_for_system(&ctx, sys_2).await;
+    assert_eq!(sites_1.len(), 1);
+    assert_eq!(sites_2.len(), 1);
+
+    // Enable hacked relay crate pool on both sites so each boss kill awards multiple distinct items
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut dmap = load_seasonal_site_details_map(snap);
+        for (iid, ltid) in [
+            (sites_1[0].instance_id, sites_1[0].loot_type_id),
+            (sites_2[0].instance_id, sites_2[0].loot_type_id),
+        ] {
+            if let Some(d) = dmap.get_mut(&iid) {
+                d.relay_hacked = true;
+                if d.crate_loot_pool.is_empty() {
+                    for &ptid in extra_pool.iter().filter(|t| **t != ltid).take(2) {
+                        d.crate_loot_pool.push((ptid, 5));
+                    }
+                }
+            }
+        }
+        save_seasonal_site_details_map(snap, &dmap);
+    });
+
+    let ch1 = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_1,
+        sites_1[0].boss_npc_ball_id,
+        Some(pilot_1),
+    )
+    .await;
+    assert_eq!(ch1.len(), 1);
+
+    let p1_items_after_kill1: Vec<(i64, u32, i32)> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == ship_1 && i.flag == InventoryFlag::Cargo)
+            .map(|i| (i.item_id, i.type_id, i.quantity))
+            .collect()
+    });
+    assert!(
+        p1_items_after_kill1.len() >= 2,
+        "First seasonal boss kill must deposit multiple items: {p1_items_after_kill1:?}"
+    );
+
+    let ch2 = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_2,
+        sites_2[0].boss_npc_ball_id,
+        Some(pilot_2),
+    )
+    .await;
+    assert_eq!(ch2.len(), 1);
+
+    ctx.db.with_snapshot(|snap| {
+        for &(iid, tid, qty) in &p1_items_after_kill1 {
+            let kept = snap
+                .items
+                .get(&iid)
+                .expect("Second seasonal boss kill must not overwrite pilot 1's loot item ID");
+            assert_eq!(kept.owner_id, pilot_1);
+            assert_eq!(kept.location_id, ship_1);
+            assert_eq!(kept.type_id, tid);
+            assert_eq!(kept.quantity, qty);
+        }
+        let p2_items: Vec<(i64, u32, i32)> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_2 && i.flag == InventoryFlag::Cargo)
+            .map(|i| (i.item_id, i.type_id, i.quantity))
+            .collect();
+        assert!(
+            p2_items.len() >= 2,
+            "Second seasonal boss kill must deposit multiple items: {p2_items:?}"
+        );
+        let p1_ids: std::collections::HashSet<i64> =
+            p1_items_after_kill1.iter().map(|&(id, _, _)| id).collect();
+        for &(p2_id, _, _) in &p2_items {
+            assert!(
+                !p1_ids.contains(&p2_id),
+                "Consecutive seasonal boss loot item IDs must be strictly disjoint"
+            );
+        }
+    });
 }

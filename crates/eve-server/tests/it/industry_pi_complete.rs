@@ -821,7 +821,9 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         )
         .await
         .expect("GetResourceData");
-    assert_eq!(heatmap.dict_get("numBands").and_then(|v| v.as_i64()), Some(9));
+    // V24 BF-2: Jita IV in-system (proximity=3: min_b=10, max_b=20) with PL=3, APL=2 -> (10 + 3 + 2*2).min(20) = 17
+    assert_eq!(heatmap.dict_get("numBands").and_then(|v| v.as_i64()), Some(17));
+    assert_eq!(heatmap.dict_get("proximity").and_then(|v| v.as_i64()), Some(3));
 
     let (p1_schem_id, p1_out_tid, p1_out_qty) = ctx
         .sde

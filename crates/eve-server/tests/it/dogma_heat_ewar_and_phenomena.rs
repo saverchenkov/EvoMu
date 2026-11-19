@@ -758,8 +758,13 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     let ovl_rep = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mwd_mod_id)], &kw, None).await.expect("Overload MWD");
     assert_eq!(ovl_rep.dict_get("overloaded").and_then(|v| v.as_bool()), Some(true));
     assert!(
+        ctx.db.with_snapshot(|snap| !snap.module_active_states.contains(&mwd_mod_id)),
+        "Overload on inactive MWD pre-overloads without starting a cycle"
+    );
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_mod_id)], &kw, None).await.expect("Activate pre-overloaded MWD");
+    assert!(
         ctx.db.with_snapshot(|snap| snap.module_active_states.contains(&mwd_mod_id)),
-        "Overload on inactive MWD activates it in overload mode"
+        "Activate on pre-overloaded MWD runs it in overload mode"
     );
 
     // Step cycle ticks so probabilistic heat damage rolls and burns out the module at 40 HP

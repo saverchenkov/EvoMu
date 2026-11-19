@@ -397,6 +397,16 @@ pub fn list_sde_planet_p0_resources(
     resources
 }
 
+fn resolve_planet_celestial(
+    sde: &eve_sde::SdeRegistry,
+    sys_id: u32,
+    planet_id: i64,
+) -> Option<eve_sde::CelestialInfo> {
+    sde.celestials_in_system(sys_id)
+        .into_iter()
+        .find(|cel| cel.celestial_id == planet_id && cel.group_id == 7)
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -462,48 +472,51 @@ pub fn handle(
                     client_error: None,
                 }));
             };
-            let planet_type_id = ctx
-                .sde
-                .celestials_in_system(sys_id)
-                .into_iter()
-                .find(|c| c.celestial_id == planet_id && c.group_id == 7)
+            let planet_celestial = resolve_planet_celestial(&ctx.sde, sys_id, planet_id);
+            let planet_type_id = planet_celestial
+                .as_ref()
                 .map(|c| c.type_id)
                 .unwrap_or(11);
+            let celestial_index = planet_celestial
+                .as_ref()
+                .and_then(|c| c.celestial_index)
+                .unwrap_or(1);
+            let planet_radius = planet_celestial
+                .as_ref()
+                .map(|c| c.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(5_000_000.0);
             let p0_resources = list_sde_planet_p0_resources(ctx, sys_id, planet_id);
             let res_types_rep: Vec<PyRep> = p0_resources
                 .iter()
                 .map(|&tid| PyRep::Integer(tid as i64))
                 .collect();
 
-            let (colony_opt, net) = ctx.db.with_snapshot(|snap| {
+            let (colony_opt, net, res_entries) = ctx.db.with_snapshot(|snap| {
                 let col = snap.planetary_colonies.get(&(char_id, planet_id)).cloned();
                 let cc_lvl = col.as_ref().map(|c| c.command_center_level).unwrap_or(0);
                 let net_state = pi_colonies::load_pi_network(snap, char_id, planet_id, cc_lvl);
-                (col, net_state)
+                let entries: Vec<PyRep> = p0_resources
+                    .iter()
+                    .map(|&tid| {
+                        let quality = compute_planet_resource_quality(ctx, snap, planet_id, tid);
+                        PyRep::keyval([
+                            ("resourceTypeID", PyRep::Integer(tid as i64)),
+                            ("quality", PyRep::Real(quality)),
+                        ])
+                    })
+                    .collect();
+                (col, net_state, entries)
             });
             let (pins_rep, links_rep, routes_rep) = pi_colonies::format_pi_pins_links(&net);
-
-            let mut res_entries = Vec::with_capacity(p0_resources.len());
-            for (idx, &tid) in p0_resources.iter().enumerate() {
-                let extracted_qty = colony_opt
-                    .as_ref()
-                    .and_then(|c| c.extracted_commodities.get(&tid).copied())
-                    .unwrap_or(0);
-                let depletion = ((extracted_qty as f64) / 100_000.0).min(0.40);
-                let quality = (0.85 - (idx as f64) * 0.08 - depletion).clamp(0.25, 1.0);
-                res_entries.push(PyRep::keyval([
-                    ("resourceTypeID", PyRep::Integer(tid as i64)),
-                    ("quality", PyRep::Real(quality)),
-                ]));
-            }
 
             Some(Ok(PyRep::keyval([
                 ("planetID", PyRep::Integer(planet_id)),
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
                 ("planetTypeID", PyRep::Integer(planet_type_id as i64)),
-                ("celestialIndex", PyRep::Integer(1)),
+                ("celestialIndex", PyRep::Integer(celestial_index as i64)),
                 ("currentSimTime", PyRep::Integer(ctx.now_blueos_filetime_ticks())),
-                ("radius", PyRep::Real(5_000_000.0)),
+                ("radius", PyRep::Real(planet_radius)),
                 ("hasColony", PyRep::Bool(colony_opt.is_some())),
                 (
                     "commandCenterLevel",
@@ -531,7 +544,7 @@ pub fn handle(
         }
 
         ("planetMgr", "GetPlanetResourceInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -564,21 +577,16 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let extracted_map = ctx.db.with_snapshot(|snap| {
-                snap.planetary_colonies
-                    .get(&(char_id, planet_id))
-                    .map(|c| c.extracted_commodities.clone())
-                    .unwrap_or_default()
+            let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+                p0_resources
+                    .iter()
+                    .map(|&tid| {
+                        let norm_qual = compute_planet_resource_quality(ctx, snap, planet_id, tid);
+                        let wire_qual = norm_qual * MAX_DISPLAY_QUALITY;
+                        (PyRep::Integer(tid as i64), PyRep::Real(wire_qual))
+                    })
+                    .collect()
             });
-            let mut entries = Vec::with_capacity(p0_resources.len());
-            for (idx, &tid) in p0_resources.iter().enumerate() {
-                let extracted_qty = extracted_map.get(&tid).copied().unwrap_or(0);
-                let depletion = ((extracted_qty as f64) / 100_000.0).min(0.40);
-                // DERIVED: SDE omits per-planet P0 density maps; deterministic rank-decay curve
-                // `(0.85 - 0.08 * rank) - min(extracted / 100k, 0.40)` clamped to `[0.25, 1.0]`.
-                let quality = (0.85 - (idx as f64) * 0.08 - depletion).clamp(0.25, 1.0);
-                entries.push((PyRep::Integer(tid as i64), PyRep::Real(quality)));
-            }
             Some(Ok(PyRep::Dict(entries)))
         }
 
@@ -609,7 +617,6 @@ pub fn handle(
                 (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()))
             };
             let requested_band = info_field("newBand");
-            let requested_proximity = info_field("proximity");
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -644,13 +651,18 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl) =
+            let (remote_sensing_lvl, planetology_lvl, adv_planetology_lvl, has_colony, char_sys_id) =
                 ctx.db.with_snapshot(|snap| {
                     let sk = snap.skills.get(&char_id);
                     let rs = sk.and_then(|m| m.get(&13279)).map(|s| s.level).unwrap_or(0);
                     let pl = sk.and_then(|m| m.get(&2406)).map(|s| s.level).unwrap_or(0);
                     let apl = sk.and_then(|m| m.get(&2403)).map(|s| s.level).unwrap_or(0);
-                    (rs, pl, apl)
+                    let has_col = snap.planetary_colonies.contains_key(&(char_id, planet_id));
+                    let csys = session
+                        .solar_system_id
+                        .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+                        .unwrap_or(sys_id);
+                    (rs, pl, apl, has_col, csys)
                 });
             if remote_sensing_lvl < 1 {
                 return Some(Err(BridgeRpcError {
@@ -659,55 +671,63 @@ pub fn handle(
                     client_error: None,
                 }));
             }
-            let (col_depletion, gm_depletion) = ctx.db.with_snapshot(|snap| {
-                let mut colony_extracted_qty = 0_u64;
-                for col in snap.planetary_colonies.values() {
-                    if col.planet_id == planet_id {
-                        colony_extracted_qty += col
-                            .extracted_commodities
-                            .get(&req_res_tid)
-                            .copied()
-                            .unwrap_or(0);
+            let planet_sys = ctx.sde.solar_systems.get(&sys_id);
+            let char_sys = ctx.sde.solar_systems.get(&char_sys_id);
+            if !has_colony && char_sys_id != sys_id {
+                if let (Some(cs), Some(ps)) = (char_sys, planet_sys) {
+                    let dx = cs.galactic_pos_ly[0] - ps.galactic_pos_ly[0];
+                    let dy = cs.galactic_pos_ly[1] - ps.galactic_pos_ly[1];
+                    let dz = cs.galactic_pos_ly[2] - ps.galactic_pos_ly[2];
+                    let dist_ly = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let max_ly = f64::from(2 * u32::from(remote_sensing_lvl.min(5)) - 1);
+                    if dist_ly > max_ly + 1e-6 {
+                        let msg = format!(
+                            "Planet {planet_id} in system {sys_id} is {dist_ly:.2} ly away (Remote Sensing level {remote_sensing_lvl} max {max_ly:.0} ly)"
+                        );
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "PlanetOutOfScanRange",
+                            msg.clone(),
+                            eve_proto::ClientError::CustomInfo(msg),
+                        )));
                     }
                 }
-                let c_dep = ((colony_extracted_qty as f32) / 100_000.0).min(0.40);
-                let depl_state = load_planet_depletion(snap, planet_id);
-                let g_dep = (depl_state
-                    .resource_depletion
-                    .get(&req_res_tid)
-                    .copied()
-                    .unwrap_or(0.0) as f32)
-                    .max(depl_state.gm_depletion_rate as f32);
-                (c_dep, g_dep)
-            });
-            let total_depletion = (col_depletion + gm_depletion).min(0.85);
-
-            // DERIVED: server-side band cap from the pilot's Planetology / Advanced Planetology levels
-            // (mirrors the client's `minBand + planetology + 2 * advancedPlanetology` rule); the client's
-            // requested `newBand` is honoured up to this cap.
-            let skill_cap =
-                (2 + (planetology_lvl as usize) + 2 * (adv_planetology_lvl as usize)).clamp(2, 16);
+            }
+            let server_proximity: usize = if has_colony {
+                4
+            } else {
+                match (char_sys, planet_sys) {
+                    _ if char_sys_id == sys_id => 3,
+                    (Some(cs), Some(ps)) if cs.constellation_id == ps.constellation_id => 2,
+                    (Some(cs), Some(ps)) if cs.region_id == ps.region_id => 1,
+                    _ => 0,
+                }
+            };
+            let (min_b, prox_max_b) = PLANET_RESOURCE_PROXIMITY_LIMITS[server_proximity];
+            let max_allowed = (min_b
+                + (planetology_lvl as usize)
+                + 2 * (adv_planetology_lvl as usize))
+                .min(prox_max_b);
             let num_bands = requested_band
-                .map(|b| (b.max(1) as usize).min(skill_cap))
-                .unwrap_or(skill_cap);
-            // DERIVED: deterministic harmonic resource-band samples (no CCP resource map is available);
-            // seeded by planet/resource/band index and scaled down by colony + GM depletion.
-            let mut sh_bytes = Vec::with_capacity(num_bands * num_bands * 4);
-            for b in 0..(num_bands * num_bands) {
-                let base_sample = ((planet_id as u64)
-                    .wrapping_mul(31)
-                    .wrapping_add((req_res_tid as u64).wrapping_mul(17))
-                    .wrapping_add(b as u64)
-                    % 100) as f32
-                    / 100.0;
-                let sample = (base_sample * (1.0 - total_depletion)).max(0.01);
-                sh_bytes.extend_from_slice(&sample.to_le_bytes());
+                .map(|b| (b.max(1) as usize).min(max_allowed))
+                .unwrap_or(max_allowed);
+            let sh_coeffs = ctx.db.with_snapshot(|snap| {
+                compute_planet_resource_sh_coefficients(
+                    ctx,
+                    snap,
+                    planet_id,
+                    req_res_tid,
+                    num_bands,
+                )
+            });
+            let mut sh_bytes = Vec::with_capacity(sh_coeffs.len() * 4);
+            for c in sh_coeffs {
+                sh_bytes.extend_from_slice(&c.to_le_bytes());
             }
             // Client reads exactly `data`, `numBands`, `proximity` (clientPlanet.pyj GetResourceData).
             Some(Ok(PyRep::keyval([
                 ("data", PyRep::Bytes(sh_bytes)),
                 ("numBands", PyRep::Integer(num_bands as i64)),
-                ("proximity", requested_proximity.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("proximity", PyRep::Integer(server_proximity as i64)),
             ])))
         }
 
@@ -739,11 +759,7 @@ pub fn handle(
             let rows = colonies
                 .into_iter()
                 .map(|(c, net)| {
-                    let planet_celestial = ctx
-                        .sde
-                        .celestials_in_system(c.solar_system_id)
-                        .into_iter()
-                        .find(|cel| cel.celestial_id == c.planet_id && cel.group_id == 7);
+                    let planet_celestial = resolve_planet_celestial(&ctx.sde, c.solar_system_id, c.planet_id);
                     let planet_type_id = planet_celestial
                         .as_ref()
                         .map(|cel| cel.type_id)

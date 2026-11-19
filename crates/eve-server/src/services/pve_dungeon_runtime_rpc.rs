@@ -556,9 +556,91 @@ fn resolve_dungeon_faction_npc_types(
     (frig_tid, cruiser_tid, boss_tid)
 }
 
+/// Appends SDE-authored asteroid rocks (`sde.dungeon_asteroids`) and gas clouds (`sde.dungeon_gas_types`)
+/// for `dungeon_id` when present in `evomu_sde.sqlite`, preserving index `0` beacon/container objects.
+// DERIVED: Per-object spatial ring offsets around room anchor positions and the per-entry ball cap (<= 4)
+// are derived placement rules; `type_id`s, `room_id` split, and `asteroid_count > 0` bounds come from SDE.
+fn append_sde_dungeon_environmental_objects(
+    sde: &eve_sde::SdeRegistry,
+    dungeon_id: u32,
+    r1_pos: [f64; 3],
+    r2_pos: [f64; 3],
+    r1_objects: &mut Vec<DungeonRuntimeObject>,
+    r2_objects: &mut Vec<DungeonRuntimeObject>,
+) {
+    if let Some(entries) = sde.dungeon_asteroids.get(&dungeon_id).filter(|v| !v.is_empty()) {
+        let mut sde_rooms: Vec<u32> = entries.iter().map(|e| e.room_id).collect();
+        sde_rooms.sort_unstable();
+        sde_rooms.dedup();
+        let first_sde_room = sde_rooms[0];
+        let mut r1_idx = 0usize;
+        let mut r2_idx = 0usize;
+        for entry in entries {
+            let in_r1 = sde_rooms.len() == 1 || entry.room_id == first_sde_room;
+            let (target, anchor, idx_ref) = if in_r1 {
+                (&mut *r1_objects, r1_pos, &mut r1_idx)
+            } else {
+                (&mut *r2_objects, r2_pos, &mut r2_idx)
+            };
+            let base_name = sde
+                .types
+                .get(&entry.type_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| format!("Asteroid {}", entry.type_id));
+            let count = entry.asteroid_count.clamp(1, 4);
+            for _ in 0..count {
+                let angle = (*idx_ref as f64) * 0.7;
+                let dist = 3_200.0 + ((*idx_ref % 4) as f64) * 600.0;
+                *idx_ref += 1;
+                target.push(DungeonRuntimeObject {
+                    ball_id: 0,
+                    type_id: entry.type_id,
+                    name: base_name.clone(),
+                    position: [
+                        anchor[0] + angle.cos() * dist,
+                        anchor[1],
+                        anchor[2] + angle.sin() * dist,
+                    ],
+                    radius: 350.0,
+                    is_container: false,
+                    loot_items: Vec::new(),
+                    spawned: false,
+                });
+            }
+        }
+    }
+
+    if let Some(gas_types) = sde.dungeon_gas_types.get(&dungeon_id).filter(|v| !v.is_empty()) {
+        for (idx, &gas_tid) in gas_types.iter().enumerate() {
+            let angle = (idx as f64) * 1.3;
+            let dist = 4_500.0 + (idx as f64) * 900.0;
+            let name = sde
+                .types
+                .get(&gas_tid)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| format!("Gas Cloud {gas_tid}"));
+            r1_objects.push(DungeonRuntimeObject {
+                ball_id: 0,
+                type_id: gas_tid,
+                name,
+                position: [
+                    r1_pos[0] + angle.cos() * dist,
+                    r1_pos[1],
+                    r1_pos[2] + angle.sin() * dist,
+                ],
+                radius: 2_500.0,
+                is_container: false,
+                loot_items: Vec::new(),
+                spawned: false,
+            });
+        }
+    }
+}
+
 // DERIVED: Server-side 2-room Deadspace pocket & trigger topology synthesized from `sde.dungeons`
-// (`faction_id`, `archetype_id`, `difficulty`) + `sde.npc_spawn_groups` (`62..=86`), since CCP
-// Tranquility room trigger graphs are server-authored and absent from client FSD static data.
+// (`name`, `archetype_id`, `faction_id`, `difficulty`), `sde_dungeon_asteroid_counts`,
+// `sde_dungeon_gas_types`, and `sde.npc_spawn_groups` (`62..=86`), since CCP Tranquility FSD
+// omits server-authored room trigger graphs and wave scripts.
 pub(crate) fn build_sde_deadspace_rooms(
     ctx: &ServerContext,
     sys_id: u32,
@@ -592,6 +674,34 @@ pub(crate) fn build_sde_deadspace_rooms(
     let r2_pos = [r1_pos[0] + 600_000.0, r1_pos[1], r1_pos[2]];
     let relay_pos = [r1_pos[0] + 2_200.0, r1_pos[1], r1_pos[2]];
     let strongbox_pos = [r2_pos[0] + 1_500.0, r2_pos[1], r2_pos[2]];
+    let mut r1_objects = vec![DungeonRuntimeObject {
+        ball_id: 0,
+        type_id: 23,
+        name: "Deadspace Relay Beacon".into(),
+        position: relay_pos,
+        radius: 250.0,
+        is_container: false,
+        loot_items: Vec::new(),
+        spawned: false,
+    }];
+    let mut r2_objects = vec![DungeonRuntimeObject {
+        ball_id: 0,
+        type_id: 23,
+        name: "Overseer Strongbox".into(),
+        position: strongbox_pos,
+        radius: 400.0,
+        is_container: true,
+        loot_items: vec![(loot_tid, 1)],
+        spawned: false,
+    }];
+    append_sde_dungeon_environmental_objects(
+        &ctx.sde,
+        dungeon_id,
+        r1_pos,
+        r2_pos,
+        &mut r1_objects,
+        &mut r2_objects,
+    );
     vec![
         DungeonRuntimeRoom {
             room_index: 1,
@@ -603,16 +713,7 @@ pub(crate) fn build_sde_deadspace_rooms(
             disallow_mwd: r1_mwd_override,
             gate_ball_id: None,
             gate_locked: true,
-            objects: vec![DungeonRuntimeObject {
-                ball_id: 0,
-                type_id: 23,
-                name: "Deadspace Relay Beacon".into(),
-                position: relay_pos,
-                radius: 250.0,
-                is_container: false,
-                loot_items: Vec::new(),
-                spawned: false,
-            }],
+            objects: r1_objects,
             npc_groups: vec![
                 DungeonNpcGroup {
                     group_id: 1,
@@ -668,16 +769,7 @@ pub(crate) fn build_sde_deadspace_rooms(
             disallow_mwd: r2_mwd_override,
             gate_ball_id: None,
             gate_locked: false,
-            objects: vec![DungeonRuntimeObject {
-                ball_id: 0,
-                type_id: 23,
-                name: "Overseer Strongbox".into(),
-                position: strongbox_pos,
-                radius: 400.0,
-                is_container: true,
-                loot_items: vec![(loot_tid, 1)],
-                spawned: false,
-            }],
+            objects: r2_objects,
             npc_groups: vec![
                 DungeonNpcGroup {
                     group_id: 1,
@@ -725,7 +817,18 @@ pub(crate) fn build_sde_deadspace_rooms(
     ]
 }
 
-fn instance_to_pyrep(inst: &DungeonRuntimeInstance) -> PyRep {
+fn sde_dungeon_archetype_label(sde_dungeon: Option<&eve_sde::DungeonTemplate>) -> String {
+    sde_dungeon
+        .and_then(|d| d.archetype_id)
+        .map(|id| format!("archetype:{id}"))
+        .unwrap_or_else(|| "Deadspace".to_string())
+}
+
+fn instance_to_pyrep(
+    inst: &DungeonRuntimeInstance,
+    sde: Option<&eve_sde::SdeRegistry>,
+) -> PyRep {
+    let sde_dungeon = sde.and_then(|s| s.dungeons.get(&inst.dungeon_id));
     let rooms_py: Vec<PyRep> = inst
         .rooms
         .iter()
@@ -773,6 +876,16 @@ fn instance_to_pyrep(inst: &DungeonRuntimeInstance) -> PyRep {
                     ),
                 ),
                 (
+                    "objectTypeIDs",
+                    PyRep::List(
+                        r.objects
+                            .iter()
+                            .filter(|o| o.ball_id > 0)
+                            .map(|o| PyRep::Integer(i64::from(o.type_id)))
+                            .collect(),
+                    ),
+                ),
+                (
                     "npcBallIDs",
                     PyRep::List(
                         r.npc_groups
@@ -795,6 +908,28 @@ fn instance_to_pyrep(inst: &DungeonRuntimeInstance) -> PyRep {
         ("dungeonID", PyRep::Integer(i64::from(inst.dungeon_id))),
         ("dungeonName", PyRep::String(inst.dungeon_name.clone())),
         ("category", PyRep::String(inst.category.clone())),
+        ("archetype", PyRep::String(inst.archetype.clone())),
+        (
+            "archetypeID",
+            sde_dungeon
+                .and_then(|d| d.archetype_id)
+                .map(|v| PyRep::Integer(i64::from(v)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "factionID",
+            sde_dungeon
+                .and_then(|d| d.faction_id)
+                .map(|v| PyRep::Integer(i64::from(v)))
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "difficulty",
+            sde_dungeon
+                .and_then(|d| d.difficulty)
+                .map(|v| PyRep::Integer(i64::from(v)))
+                .unwrap_or(PyRep::None),
+        ),
         ("solarSystemID", PyRep::Integer(i64::from(inst.solar_system_id))),
         ("disallowMWD", PyRep::Bool(inst.disallow_mwd)),
         (
@@ -877,7 +1012,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
                 dungeon_id,
                 dungeon_name: dungeon_name.clone(),
                 category: category.to_string(),
-                archetype: dungeon_name,
+                archetype: sde_dungeon_archetype_label(sde_dungeon),
                 solar_system_id: sys_id,
                 owner_char_id,
                 base_position: base_pos,
@@ -980,7 +1115,7 @@ pub async fn spawn_dungeon_instance(
                 dungeon_id,
                 dungeon_name: dungeon_name.clone(),
                 category: category.clone(),
-                archetype: dungeon_name.clone(),
+                archetype: sde_dungeon_archetype_label(sde_dungeon),
                 solar_system_id: sys_id,
                 owner_char_id: char_id,
                 base_position: base_pos,
@@ -1007,7 +1142,7 @@ pub async fn spawn_dungeon_instance(
         store
             .instances
             .get(&inst_id)
-            .map(instance_to_pyrep)
+            .map(|inst| instance_to_pyrep(inst, Some(&ctx.sde)))
             .unwrap_or(PyRep::None)
     });
     Ok(rep)
@@ -1018,7 +1153,7 @@ pub fn get_dungeon_instance_state(ctx: &ServerContext, inst_id: i64) -> Result<P
         store
             .instances
             .get(&inst_id)
-            .map(instance_to_pyrep)
+            .map(|inst| instance_to_pyrep(inst, Some(&ctx.sde)))
             .ok_or_else(|| BridgeRpcError::user_error("DungeonInstanceNotFound"))
     })
 }
@@ -1360,7 +1495,7 @@ pub fn register_sde_operation_dungeon_instance(
                 dungeon_id,
                 dungeon_name: dungeon_name.clone(),
                 category: "Operation".to_string(),
-                archetype: dungeon_name.clone(),
+                archetype: sde_dungeon_archetype_label(sde_dungeon),
                 solar_system_id: sys_id,
                 owner_char_id,
                 base_position: base_pos,

@@ -54,14 +54,24 @@ pub fn handle_pi_colonies(
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let baseline = if col.last_extracted_unix > 0 { col.last_extracted_unix } else { net.last_simulated_unix };
+                let baseline = crate::services::industry_pi::pi_helpers::colony_sim_baseline(&col, &net);
                 let elapsed = if baseline > 0 && now_unix > baseline {
                     now_unix.saturating_sub(baseline)
                 } else {
                     0
                 };
                 let (sim_extracted, sim_processed) = if elapsed > 0 {
-                    let (e, p) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                    let (e, p) = crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+                        ctx,
+                        snap,
+                        planet_id,
+                        &mut col,
+                        &mut net,
+                        baseline,
+                        elapsed,
+                        now_unix,
+                        true,
+                    );
                     let tot_e = e.saturating_add(std::mem::take(&mut net.pending_login_extracted));
                     let tot_p = p.saturating_add(std::mem::take(&mut net.pending_login_processed));
                     snap.planetary_colonies.insert((char_id, planet_id), col.clone());
@@ -76,8 +86,13 @@ pub fn handle_pi_colonies(
                     (0, 0)
                 };
                 let (pins_rep, links_rep, routes_rep) = format_pi_pins_links(&net);
-                let stored_entries: Vec<(PyRep, PyRep)> = col
-                    .extracted_commodities
+                let pin_totals = crate::services::industry_pi::pi_helpers::sum_pi_pin_contents(&net.pins);
+                let stored_source = if net.pins.is_empty() {
+                    &col.extracted_commodities
+                } else {
+                    &pin_totals
+                };
+                let stored_entries: Vec<(PyRep, PyRep)> = stored_source
                     .iter()
                     .map(|(&tid, &q)| (PyRep::Integer(tid as i64), PyRep::Integer(q as i64)))
                     .collect();
@@ -1247,10 +1262,21 @@ pub fn handle_pi_colonies(
                                     })
                                     .unwrap_or(86_400);
                                 let prog_dur = requested_dur.clamp(cyc_secs, MAX_EXTRACTOR_PROGRAM_SECS);
+                                let prev_expiry_unix = pin.expiry_time_unix;
                                 pin.expiry_time_unix = Some(now_unix.saturating_add(prog_dur));
                                 if let Some((depl_tid, elapsed_c, plat, plon, heads, rad)) = deferred_depl_update {
                                     let mut depl_state = load_planet_depletion(snap, planet_id);
                                     depl_state.planet_id = planet_id;
+                                    // Only replenish over idle time strictly after the prior program expired.
+                                    let idle_start = prev_expiry_unix.unwrap_or(now_unix);
+                                    if now_unix > idle_start {
+                                        if depl_state.last_updated_unix < idle_start {
+                                            depl_state.last_updated_unix = idle_start;
+                                        }
+                                        crate::services::industry_pi::pi_resource_helpers::regenerate_planet_depletion(&mut depl_state, now_unix);
+                                    } else if now_unix > 0 {
+                                        depl_state.last_updated_unix = now_unix;
+                                    }
                                     let res_depl = depl_state.resource_depletion.entry(depl_tid).or_insert(0.0);
                                     let depl_delta = (0.015 * elapsed_c * 0.25).min(0.45);
                                     *res_depl = (*res_depl + depl_delta).min(0.90);

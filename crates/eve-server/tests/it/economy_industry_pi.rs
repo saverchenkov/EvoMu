@@ -11,6 +11,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, T
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::industry_pi::MAX_DISPLAY_QUALITY;
 use std::collections::HashMap;
 
 const JITA_STATION_ID: i64 = 60_003_760;
@@ -869,6 +870,16 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .expect("GetPlanetResourceInfo");
     let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
     assert!(!res_entries.is_empty());
+    let initial_res_qualities: HashMap<i64, f64> = res_entries
+        .iter()
+        .filter_map(|(k, v)| Some((k.as_i64()?, v.as_f64()?)))
+        .collect();
+    for &q in initial_res_qualities.values() {
+        assert!(
+            q > 0.0 && q <= MAX_DISPLAY_QUALITY && (q / MAX_DISPLAY_QUALITY) <= 1.0,
+            "V24 GetPlanetResourceInfo quality {q} out of (0, MAX_DISPLAY_QUALITY]"
+        );
+    }
     let first_res_type_id = res_entries[0].0.as_i64().unwrap();
 
     ctx.db.with_mut_snapshot(|snap| { snap.skills.entry(90_000_001).or_default().remove(&13279); });
@@ -902,15 +913,22 @@ async fn test_pi_colony_command_center_pins_and_links() {
             ("planetID", PyRep::Integer(JITA_PLANET_ID)),
             ("resourceTypeID", PyRep::Integer(first_res_type_id)),
             ("advancedPlanetology", PyRep::Integer(2)), ("planetology", PyRep::Integer(4)), ("remoteSensing", PyRep::Integer(3)),
-            ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(10)), // client CreateResourceInfo fields
+            ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(25)),
         ])],
     )
     .await
     .expect("GetResourceData");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
-    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(10)));
-    assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(5))), "exactly data/numBands/proximity");
-    assert!(matches!(rd_kv.get("data"), Some(PyRep::Bytes(b)) if b.len() == 10 * 10 * 4));
+    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(18)));
+    assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(3))), "server computes proximity=3 (System) and clamps newBand");
+    let Some(PyRep::Bytes(sh_b)) = rd_kv.get("data") else { panic!("Expected SH bytes"); };
+    assert_eq!(sh_b.len(), 18 * 18 * 4);
+    let sh_vals: Vec<f32> = sh_b
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(sh_vals.iter().all(|v| v.is_finite()));
+    assert!(sh_vals[0] > 0.0 && sh_vals[1..9].iter().any(|v| v.abs() > 1e-5));
 
     let docked_cc_err = rpc(
         &ctx,
@@ -1293,7 +1311,15 @@ async fn test_pi_colony_command_center_pins_and_links() {
         .iter()
         .find_map(|(k, v)| (k.as_i64() == Some(extracted_type_id)).then(|| v.as_f64()).flatten())
         .unwrap();
-    assert!(depleted_qual < 0.85);
+    let initial_qual = initial_res_qualities[&extracted_type_id];
+    assert!(
+        depleted_qual > 0.0 && depleted_qual < initial_qual,
+        "Harvested resource quality must strictly deplete: before={initial_qual}, after={depleted_qual}"
+    );
+    assert!(
+        (depleted_qual / MAX_DISPLAY_QUALITY) < (initial_qual / MAX_DISPLAY_QUALITY),
+        "Normalized V24 quality must strictly deplete under MAX_DISPLAY_QUALITY scaling"
+    );
 
     let bad_schem_err = rpc(
         &ctx,

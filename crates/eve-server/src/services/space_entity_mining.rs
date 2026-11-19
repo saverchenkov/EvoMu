@@ -1960,6 +1960,7 @@ pub async fn handle(
                 // and cumulative m³ capacity before mutating snapshot items or balances.
                 let mut planned: Vec<PlannedReprocessItem> =
                     Vec::with_capacity(parsed.item_ids.len());
+                let mut skipped_insufficient_err: Option<BridgeRpcError> = None;
                 let mut sim_next_entity_id = snap.next_entity_id;
 
                 for &item_id in &parsed.item_ids {
@@ -2113,14 +2114,19 @@ pub async fn handle(
                         });
                     };
                     if item.quantity < portion_size {
-                        return Err(BridgeRpcError {
+                        let err = BridgeRpcError {
                             code: "InsufficientBatchPortion".into(),
                             message: format!(
                                 "Need at least {portion_size} units to reprocess type {} (have {})",
                                 item.type_id, item.quantity
                             ),
                             client_error: None,
-                        });
+                        };
+                        if parsed.item_ids.len() > 1 {
+                            skipped_insufficient_err.get_or_insert(err);
+                            continue;
+                        }
+                        return Err(err);
                     }
 
                     let dest = resolve_reprocess_output_dest(
@@ -2185,6 +2191,11 @@ pub async fn handle(
                         station_tax_rate,
                         tax_cents,
                     });
+                }
+                if planned.is_empty() {
+                    if let Some(err) = skipped_insufficient_err {
+                        return Err(err);
+                    }
                 }
 
                 let total_tax_cents = planned
