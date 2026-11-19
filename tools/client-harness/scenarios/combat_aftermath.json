@@ -74,6 +74,7 @@
     {
       "id": "wait_npc_ball",
       "action": {"type": "wait", "wait_ms": 1500},
+      "wait_until": {"timeout_ms": 10000, "poll_interval_ms": 800, "checks": {"expect_ball_present": "Pithi Invader"}},
       "checks": {"expect_ball_present": "Pithi Invader", "no_client_exception": true, "no_error_reply": true}
     },
     {
@@ -112,6 +113,7 @@
     {
       "id": "wait_wreck_spawn",
       "action": {"type": "wait", "wait_ms": 2500},
+      "wait_until": {"timeout_ms": 30000, "poll_interval_ms": 800, "checks": {"expect_ball_present": "Guristas Small Wreck"}},
       "checks": {"expect_ball_present": "Guristas Small Wreck", "no_client_exception": true, "no_error_reply": true}
     },
     {
@@ -264,9 +266,10 @@
     {"id": "rclick_shuttle", "action": {"type": "click_widget", "target": "ItemEntry_672", "right_click": true, "wait_ms": 800}, "checks": {"expect_context_menu_item": "Board Ship", "no_client_exception": true, "no_error_reply": true}},
     {"id": "board_shuttle", "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "wait_session_timer_undock_shuttle", "action": {"type": "wait", "wait_ms": 11000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
-    {"id": "undock_shuttle", "action": {"type": "undock", "wait_ms": 3500}, "checks": {"expect_session_field": "!stationid", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "undock_shuttle", "action": {"type": "undock", "wait_ms": 3500}, "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}},
     {"id": "stop_shuttle", "action": {"type": "stop", "wait_ms": 500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "wait_session_timer_safelogoff", "action": {"type": "wait", "wait_ms": 16000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "tc_clear_npc_timer_safelogoff", "time_control": true, "action": {"type": "advance_server_time", "seconds": 305}},
     {
       "id": "rclick_ship_for_safelogoff",
       "action": {"type": "click_widget", "target": "capacitorContainer", "right_click": true, "wait_ms": 800},
@@ -274,6 +277,6 @@
     },
     {"id": "click_safe_logoff", "action": {"type": "click_widget", "target": "context_menu_Log Off Safely", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
     {"id": "tc_safe_logoff", "time_control": true, "action": {"type": "advance_server_time", "seconds": 35}},
-    {"id": "wait_after_safe_logoff", "action": {"type": "wait", "wait_ms": 4000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}}
+    {"id": "wait_after_safe_logoff", "action": {"type": "wait", "wait_ms": 4000, "strict_wait": true}, "wait_until": {"timeout_ms": 15000, "poll_interval_ms": 800, "checks": {"state_checks": [{"field": "charsel_active", "equals": true}]}}, "checks": {"expect_modal_absent": true, "state_checks": [{"field": "charsel_active", "equals": true}], "no_client_exception": true, "no_error_reply": true, "no_server_unimplemented_rpc": true}}
   ]
 }
