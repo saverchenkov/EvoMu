@@ -450,9 +450,27 @@ async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
         .copied()
         .find(|&sid| {
             let (c, _, shat, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, sid);
-            (1..=6).contains(&c) && !shat
+            (1..=4).contains(&c) && !shat
         })
-        .expect("SDE contains non-shattered C1-C6 wormhole");
+        .expect("SDE contains non-shattered C1-C4 wormhole");
+    let c56_wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            let (c, _, shat, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, sid);
+            (5..=6).contains(&c) && !shat
+        })
+        .expect("SDE contains non-shattered C5-C6 wormhole");
+    let shat_wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            let (c, _, _, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, sid);
+            c == 13
+        })
+        .expect("SDE contains C13 shattered wormhole");
 
     let db = Arc::new(WorldRepository::new_empty());
     db.provision_gm_account("dng_poch_wh", "pw", char_id, "DngPochWh");
@@ -485,6 +503,8 @@ async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
 
     let err_ship_not_in_space = "ShipNotInSpace";
     let err_sig_not_scanned = "SignatureNotScanned";
+    let err_site_not_found = "SiteNotFound";
+    let err_unknown_solar_system = "UnknownSolarSystem";
     let e0 = ctx.db.state_epoch();
     let c0 = ctx.db.tx_commit_count();
 
@@ -542,6 +562,89 @@ async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
     .expect_err("unscanned WH gas signature must reject with SignatureNotScanned");
     assert_eq!(err_wh_gas.code, err_sig_not_scanned);
 
+    // Non-deterministic C5/C6 WH ore (4-of-10 random draw) must reject with SiteNotFound read-only (F-03).
+    sess.solar_system_id = Some(c56_wh_sys);
+    let (c56_c, _, _, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, c56_wh_sys);
+    let c56_ore_did = crate::services::mining_sites::wormhole_ore_sites_for_class(c56_c)
+        .into_iter()
+        .filter_map(|d| crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&sde, d).ok())
+        .map(|(did, _)| did)
+        .next()
+        .expect("C5-C6 WH ore dungeon");
+    let err_c56_ore = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(c56_ore_did)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unseeded C5/C6 WH ore must reject with SiteNotFound without mutating DB");
+    assert_eq!(err_c56_ore.code, err_site_not_found);
+
+    // Shattered WH guarantees Shattered Debris Field deterministically while rejecting non-guaranteed draws.
+    sess.solar_system_id = Some(shat_wh_sys);
+    let shat_defs = crate::services::mining_sites::wormhole_ore_sites_for_class(13);
+    let debris_did = shat_defs
+        .iter()
+        .find(|d| d.dungeon_name == "Shattered Debris Field")
+        .and_then(|d| crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&sde, d).ok())
+        .map(|(did, _)| did)
+        .expect("Shattered Debris Field dungeon");
+    let non_debris_did = shat_defs
+        .iter()
+        .find(|d| d.dungeon_name != "Shattered Debris Field")
+        .and_then(|d| crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&sde, d).ok())
+        .map(|(did, _)| did)
+        .expect("non-debris shattered WH ore dungeon");
+    let err_debris = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(debris_did)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("deterministic Shattered Debris Field must reach ShipNotInSpace");
+    assert_eq!(err_debris.code, err_ship_not_in_space);
+    let err_non_debris = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(non_debris_did)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("non-guaranteed shattered WH ore must reject with SiteNotFound read-only");
+    assert_eq!(err_non_debris.code, err_site_not_found);
+
+    // Unknown solar system on get_content_data (P2 #3) and negative dungeonID wrap rejection (P2 #4).
+    sess.solar_system_id = Some(99_999_999);
+    let err_unk_sys = handle(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("unknown SDE solar system must reject with UnknownSolarSystem");
+    assert_eq!(err_unk_sys.code, err_unknown_solar_system);
+    sess.solar_system_id = Some(pochven_sys);
+    let err_neg_did = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(-1))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("negative dungeonID must reject with SiteNotFound");
+    assert_eq!(err_neg_did.code, err_site_not_found);
+
     assert_eq!(ctx.db.state_epoch(), e0);
     assert_eq!(ctx.db.tx_commit_count(), c0);
 
@@ -582,5 +685,259 @@ async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
         snap.cosmic_anomalies
             .get(&pochven_sys)
             .is_some_and(|list| list.iter().any(|a| a.anomaly_id.starts_with("DNG-8974-")))
+    }));
+
+    // 4. F-04: Unseeded designated IceBelt + respawn-ready cleared IceBelt + cleared SovOre deposit
+    //    must resolve and seed/respawn cleanly even when OreAnomaly already exists (`mining_seeded = true`).
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+
+    let ice_sys: u32 = 30_000_180;
+    let ice_site = crate::services::mining_sites::resolve_regional_ice_belt(&sde, ice_sys)
+        .expect("designated ice system")
+        .expect("resolved regional ice belt");
+    sess.solar_system_id = Some(ice_sys);
+    let err_ice_unspawned = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ice_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unseeded designated IceBelt must hit ShipNotInSpace read-only before ship spawn");
+    assert_eq!(err_ice_unspawned.code, err_ship_not_in_space);
+    assert!(ctx.db.with_snapshot(|snap| !snap.cosmic_anomalies.contains_key(&ice_sys)));
+
+    let _ = ctx
+        .systems
+        .get_or_spawn(ice_sys)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    // Pre-seed OreAnomaly so `mining_seeded == true`, yet no IceBelt exists yet.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies.entry(ice_sys).or_default().push(eve_db::CosmicAnomalyRecord {
+            anomaly_id: "DNG-1-101".into(),
+            solar_system_id: ice_sys,
+            name: "Preexisting Ore".into(),
+            anomaly_type: "OreAnomaly".into(),
+            position: [1_000_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            ore_types: vec![1230],
+            remaining_volume: 1_000.0,
+            created_unix: ctx.now_unix_secs(),
+            lifetime_seconds: 0,
+            cleared: false,
+        });
+    });
+    let ice_warp = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ice_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("designated IceBelt warp_to_content must seed and succeed even with OreAnomaly present");
+    assert_eq!(ice_warp, PyRep::None);
+    let ice_prefix = format!("DNG-{}-", ice_site.dungeon_id);
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies.get(&ice_sys).is_some_and(|list| {
+            list.iter()
+                .any(|a| a.anomaly_type == "IceBelt" && !a.cleared && a.anomaly_id.starts_with(&ice_prefix))
+        })
+    }));
+
+    // Cleared IceBelt on cooldown must fail with SiteNotFound read-only; once respawn-ready, warp respawns it.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.asteroids.retain(|_, a| !(a.solar_system_id == ice_sys && a.belt_id == 0));
+        if let Some(list) = snap.cosmic_anomalies.get_mut(&ice_sys) {
+            for a in list.iter_mut().filter(|a| a.anomaly_type == "IceBelt") {
+                a.cleared = true;
+                a.created_unix = ctx.now_unix_secs();
+            }
+        }
+    });
+    let ice_cooldown_e = ctx.db.state_epoch();
+    let ice_cooldown_c = ctx.db.tx_commit_count();
+    let err_ice_cd = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ice_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cleared IceBelt on cooldown must return SiteNotFound without DB mutation");
+    assert_eq!(err_ice_cd.code, err_site_not_found);
+    assert_eq!(ctx.db.state_epoch(), ice_cooldown_e);
+    assert_eq!(ctx.db.tx_commit_count(), ice_cooldown_c);
+
+    ctx.advance_secs(crate::services::mining_sites::ICE_BELT_RESPAWN_DELAY_SECS + 5);
+    let ice_respawn_warp = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ice_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("respawn-ready designated IceBelt must respawn and warp");
+    assert_eq!(ice_respawn_warp, PyRep::None);
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&ice_sys)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "IceBelt" && !a.cleared))
+    }));
+
+    // Cleared SovOre + installed SOV_PROSPECTING_DEPOSITS upgrade respects cooldown and respawns when elapsed.
+    let sov_sys: u32 = 30_004_759;
+    let dep = &crate::services::mining_sites::SOV_PROSPECTING_DEPOSITS[0];
+    let sov_site = crate::services::mining_sites::resolve_ore_site(&sde, &dep.site)
+        .expect("resolved SOV prospecting deposit");
+    let hub_id = 1_055_777_001_i64;
+    let sov_now = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            hub_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: 32_458,
+                owner_corp_id: 98_000_001,
+                solar_system_id: sov_sys,
+                name: "Sov Hub".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            1_055_777_002,
+            eve_db::InventoryItemRecord {
+                item_id: 1_055_777_002,
+                type_id: dep.upgrade_type_id,
+                owner_id: 98_000_001,
+                location_id: hub_id,
+                flag: eve_db::InventoryFlag::SubSystemSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_anomalies.entry(sov_sys).or_default().extend([
+            eve_db::CosmicAnomalyRecord {
+                anomaly_id: "DNG-1-202".into(),
+                solar_system_id: sov_sys,
+                name: "Preexisting Null Ore".into(),
+                anomaly_type: "OreAnomaly".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![1230],
+                remaining_volume: 1_000.0,
+                created_unix: sov_now,
+                lifetime_seconds: 0,
+                cleared: false,
+            },
+            eve_db::CosmicAnomalyRecord {
+                anomaly_id: "DNG-OLD-SOV-2".into(),
+                solar_system_id: sov_sys,
+                name: "Cleared Sov Ore".into(),
+                anomaly_type: "SovOre".into(),
+                position: [2_000_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: vec![1230],
+                remaining_volume: 0.0,
+                created_unix: sov_now,
+                lifetime_seconds: dep.respawn_seconds,
+                cleared: true,
+            },
+        ]);
+    });
+    sess.solar_system_id = Some(sov_sys);
+    let _ = ctx
+        .systems
+        .get_or_spawn(sov_sys)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    let sov_cd_e = ctx.db.state_epoch();
+    let sov_cd_c = ctx.db.tx_commit_count();
+    let err_sov_cd = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(sov_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("cleared SovOre on cooldown must return SiteNotFound without DB mutation");
+    assert_eq!(err_sov_cd.code, err_site_not_found);
+    assert_eq!(ctx.db.state_epoch(), sov_cd_e);
+    assert_eq!(ctx.db.tx_commit_count(), sov_cd_c);
+
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        sov_now + dep.respawn_seconds + 10,
+    )));
+    let sov_respawn_warp = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(sov_site.dungeon_id)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("elapsed cleared SovOre must respawn and warp");
+    assert_eq!(sov_respawn_warp, PyRep::None);
+    let sov_prefix = format!("DNG-{}-", sov_site.dungeon_id);
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies.get(&sov_sys).is_some_and(|list| {
+            list.iter().any(|a| {
+                a.anomaly_type == "SovOre"
+                    && !a.cleared
+                    && a.anomaly_id != "DNG-OLD-SOV-2"
+                    && a.anomaly_id.starts_with(&sov_prefix)
+            })
+        })
     }));
 }

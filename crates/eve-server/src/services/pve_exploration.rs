@@ -338,6 +338,31 @@ pub async fn handle_pve_site_npc_destruction_core(
     killer_char_id: i64,
     drop_npc_wreck: bool,
 ) -> (Option<String>, Option<EscalatingPathEntry>, Option<EscalatingPathEntry>) {
+    Box::pin(handle_pve_site_npc_destruction_core_inner(
+        systems,
+        db,
+        sde,
+        rng,
+        combat_ephemeral,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+        drop_npc_wreck,
+    ))
+    .await
+}
+
+async fn handle_pve_site_npc_destruction_core_inner(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    sde: &std::sync::Arc<eve_sde::SdeRegistry>,
+    rng: &std::sync::Arc<crate::rng::MechanicRng>,
+    combat_ephemeral: &dyn AnyRwLock<crate::services::combat_crimewatch::CombatRuntimeState>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+    drop_npc_wreck: bool,
+) -> (Option<String>, Option<EscalatingPathEntry>, Option<EscalatingPathEntry>) {
     let now_unix = db.clock().now_unix_secs();
     let site_info = with_pve_exploration_reg_db(db, now_unix, |reg| {
         let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
@@ -383,15 +408,15 @@ pub async fn handle_pve_site_npc_destruction_core(
     if let Some(wh) = sleeper_class {
         if drop_npc_wreck {
             let wreck_pos = glam::DVec3::from_array(pos) + glam::DVec3::new(0.0, 0.0, 1_000.0);
-            crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
+            Box::pin(crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
                 db, systems, sde, solar_system_id, killer_char_id, wreck_pos, wh,
-            ).await;
+            )).await;
         }
         if was_wave_trigger && current_wave < total_waves {
             let next_wave = current_wave + 1;
-            let new_ids = crate::services::pve_exploration_sites::spawn_sleeper_wave_core(
+            let new_ids = Box::pin(crate::services::pve_exploration_sites::spawn_sleeper_wave_core(
                 systems, db, sde, combat_ephemeral, solar_system_id, wh, next_wave, glam::DVec3::from_array(pos),
-            ).await;
+            )).await;
             with_pve_exploration_reg_db(db, now_unix, |reg| {
                 if let Some(site) = reg
                     .sites_by_system
@@ -420,9 +445,9 @@ pub async fn handle_pve_site_npc_destruction_core(
     if current_wave < total_waves {
         let next_wave = current_wave + 1;
         let spawned_ids = if let Some(wh) = sleeper_class {
-            crate::services::pve_exploration_sites::spawn_sleeper_wave_core(
+            Box::pin(crate::services::pve_exploration_sites::spawn_sleeper_wave_core(
                 systems, db, sde, combat_ephemeral, solar_system_id, wh, next_wave, glam::DVec3::from_array(pos),
-            ).await
+            )).await
         } else {
             let mut ids = Vec::new();
             for b in build_wave_npc_balls(sde, solar_system_id, dungeon_id, next_wave, pos, wh_class) {
@@ -484,7 +509,7 @@ pub async fn handle_pve_site_npc_destruction_core(
         });
 
         if let Some(rating) = ded_rating {
-            crate::services::pve_exploration_sites::spawn_ded_overseer_wreck_core(
+            Box::pin(crate::services::pve_exploration_sites::spawn_ded_overseer_wreck_core(
                 db,
                 systems,
                 sde,
@@ -492,39 +517,39 @@ pub async fn handle_pve_site_npc_destruction_core(
                 killer_char_id,
                 glam::DVec3::from_array(pos),
                 rating,
-            ).await;
+            )).await;
         } else if let Some(wh_c) = wh_class {
             // Site-completion Blue Loot from SDE group 880 "Sleeper Components" (class-scaled pick).
             if let Some((blue_tid, _)) = crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(sde, wh_c) {
-                drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3).await;
+                Box::pin(drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3)).await;
             }
             if matches!(wh_c, 5 | 6)
                 && matches!(site_category.as_str(), "WormholeCombat" | "Data" | "Relic")
             {
-                let _ = crate::services::wormhole_pve_escalations::spawn_decloaked_transmission_relay_core(
+                let _ = Box::pin(crate::services::wormhole_pve_escalations::spawn_decloaked_transmission_relay_core(
                     systems, db, sde, combat_ephemeral, solar_system_id, &site_id, pos,
-                ).await;
+                )).await;
             }
         } else if site_category == "CombatAnomaly" || site_category == "CombatSignature" {
             let (cmd_tid, _) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(sde, solar_system_id);
-            drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, cmd_tid, 1).await;
+            Box::pin(drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, cmd_tid, 1)).await;
         }
 
         let mut new_escalation = None;
         let mut advanced_step = None;
 
         if let Some(inst_id) = expedition_instance_id {
-            advanced_step = crate::services::pve_expeditions::advance_expedition_step_core(
+            advanced_step = Box::pin(crate::services::pve_expeditions::advance_expedition_step_core(
                 db,
                 sde,
                 systems,
                 killer_char_id,
                 inst_id,
-            ).await.ok().flatten();
+            )).await.ok().flatten();
         } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED") {
             let should_escalate = rng.roll(0.20);
             if should_escalate {
-                new_escalation = crate::services::pve_expeditions::create_escalation_expedition_core(
+                new_escalation = Box::pin(crate::services::pve_expeditions::create_escalation_expedition_core(
                     db,
                     sde,
                     systems,
@@ -533,7 +558,7 @@ pub async fn handle_pve_site_npc_destruction_core(
                     dungeon_id,
                     &dungeon_name,
                     pos,
-                ).await;
+                )).await;
             }
         }
         (Some(site_id), new_escalation, advanced_step)
@@ -723,12 +748,12 @@ pub async fn handle_pve_site_npc_destruction(
         new_escalation,
         advanced_step,
     );
-    crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
+    Box::pin(crate::services::pve_dungeon_runtime::on_dungeon_npc_killed(
         ctx,
         solar_system_id,
         npc_ball_id,
         killer_char_id,
-    )
+    ))
     .await;
 }
 
@@ -1190,145 +1215,7 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
         ("keeper", "GetDungeonShipRestrictions") | ("keeper", "CanEnterDungeonInCurrentShip") => {
-            let require_ship = method == "CanEnterDungeonInCurrentShip";
-            let (_, sys_id) = match require_undocked_exploration_space(ctx, session, require_ship) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let arg0_int = args.first().and_then(|a| a.as_i64());
-            let arg0_str = args.first().and_then(|a| a.as_str());
-
-            let mut sleeper_tier_opt: Option<(SleeperCacheTier, u32, &'static str)> = None;
-            let mut ded_rating_opt: Option<u8> = None;
-            let mut explicit_sde_dungeon: Option<(u32, String)> = None;
-
-            if let Some(did) = arg0_int {
-                if did > 10 {
-                    let did_u32 = u32::try_from(did).ok();
-                    if let Some(tier) = did_u32.and_then(sleeper_cache_tier_for_dungeon) {
-                        let name = match tier {
-                            SleeperCacheTier::Limited => "Limited Sleeper Cache",
-                            SleeperCacheTier::Standard => "Standard Sleeper Cache",
-                            SleeperCacheTier::Superior => "Superior Sleeper Cache",
-                        };
-                        sleeper_tier_opt = Some((tier, did as u32, name));
-                    } else if let Some(d) = did_u32.and_then(|id| ctx.sde.dungeons.get(&id)) {
-                        let dname = if d.name.trim().is_empty() {
-                            format!("Dungeon {did}")
-                        } else {
-                            d.name.trim().to_string()
-                        };
-                        explicit_sde_dungeon = Some((did as u32, dname));
-                    } else {
-                        return Some(Err(rpc_msg_err(
-                            "DungeonNotFound",
-                            format!("Dungeon {did} not found"),
-                        )));
-                    }
-                } else {
-                    ded_rating_opt = Some(did.clamp(1, 10) as u8);
-                }
-            } else if let Some(sid) = arg0_str {
-                let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
-                    let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
-                    if let Some(sites) = reg.sites_by_system.get(&sys_id) {
-                        if let Some(s) = sites.iter().find(|x| x.site_id == sid || x.dungeon_id.to_string() == sid) {
-                            if s.site_category == "SleeperCache" {
-                                if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
-                                    sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
-                                }
-                            } else if let Some(r) = s.ded_rating {
-                                ded_rating_opt = Some(r);
-                            }
-                            return (true, seeded);
-                        }
-                    }
-                    (false, seeded)
-                });
-                if !matched_seeded && !already_seeded {
-                    if let Some((sig_did, sig_id)) = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
-                        .into_iter()
-                        .find(|(sig_did, sig_id)| sig_id == sid || sig_did.to_string() == sid)
-                    {
-                        matched_seeded = true;
-                        if let Some(tier) = sleeper_cache_tier_for_dungeon(sig_did) {
-                            let name = match tier {
-                                SleeperCacheTier::Limited => "Limited Sleeper Cache",
-                                SleeperCacheTier::Standard => "Standard Sleeper Cache",
-                                SleeperCacheTier::Superior => "Superior Sleeper Cache",
-                            };
-                            sleeper_tier_opt = Some((tier, sig_did, name));
-                        } else if let Some(rating) = sig_id
-                            .strip_prefix("DED-")
-                            .and_then(|rest| rest.rsplit('-').next())
-                            .and_then(|r| r.parse::<u8>().ok())
-                        {
-                            ded_rating_opt = Some(rating);
-                        } else if let Some(d) = ctx.sde.dungeons.get(&sig_did) {
-                            let dname = if d.name.trim().is_empty() {
-                                format!("Dungeon {sig_did}")
-                            } else {
-                                d.name.trim().to_string()
-                            };
-                            explicit_sde_dungeon = Some((sig_did, dname));
-                        } else {
-                            explicit_sde_dungeon = Some((sig_did, sig_id));
-                        }
-                    } else if let Some(spec) = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
-                        .into_iter()
-                        .find(|spec| spec.site_id == sid || spec.dungeon_id.to_string() == sid)
-                    {
-                        matched_seeded = true;
-                        explicit_sde_dungeon = Some((spec.dungeon_id, spec.dungeon_name));
-                    }
-                }
-                if !matched_seeded {
-                    return Some(Err(rpc_msg_err(
-                        "DungeonNotFound",
-                        format!("Dungeon site {sid} not found"),
-                    )));
-                }
-            }
-
-            let (did, dname, ded_rating_val, max_mass, label, allowed_groups) = if let Some((tier, d_id, name)) = sleeper_tier_opt {
-                let (mass, lbl, grps) = sleeper_cache_ship_restrictions(tier);
-                (d_id, name.to_string(), 0u8, mass, lbl, grps)
-            } else if let Some((d_id, d_name)) = explicit_sde_dungeon {
-                let rating = ded_rating_opt.unwrap_or(3);
-                let (mass, lbl, grps) = ded_ship_restriction_for_rating(rating);
-                (d_id, d_name, rating, mass, lbl, grps)
-            } else {
-                let rating = ded_rating_opt.unwrap_or(3);
-                let (mass, lbl, grps) = ded_ship_restriction_for_rating(rating);
-                let (d_id, d_name) = ded_complex_for_rating(&ctx.sde, sys_id, rating);
-                (d_id, d_name.to_string(), rating, mass, lbl, grps)
-            };
-
-            let (ship_type_id, ship_group_id, ship_mass) = session
-                .ship_id
-                .and_then(|sid| {
-                    ctx.db.with_snapshot(|snap| {
-                        snap.items.get(&sid).map(|item| {
-                            let t = ctx.sde.types.get(&item.type_id);
-                            (item.type_id, t.map(|x| x.group_id).unwrap_or(25), t.map(|x| x.mass).unwrap_or(1_200_000.0))
-                        })
-                    })
-                })
-                .unwrap_or((587, 25, 1_067_000.0));
-
-            let can_enter = allowed_groups.contains(&ship_group_id) && ship_mass <= max_mass;
-            Some(Ok(PyRep::keyval([
-                ("dungeonID", PyRep::Integer(did as i64)),
-                ("dungeonName", PyRep::String(dname)),
-                ("dedRating", PyRep::Integer(ded_rating_val as i64)),
-                ("maxShipMass", PyRep::Real(max_mass)),
-                ("restrictionDescription", PyRep::String(label.into())),
-                ("allowedGroupIDs", PyRep::List(allowed_groups.iter().map(|&g| PyRep::Integer(g as i64)).collect())),
-                ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
-                ("shipGroupID", PyRep::Integer(ship_group_id as i64)),
-                ("canEnter", PyRep::Bool(can_enter)),
-            ])))
+            handle_dungeon_ship_restrictions(ctx, session, method, args)
         }
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
@@ -1358,6 +1245,176 @@ pub async fn handle_pve_exploration(
 
         _ => None,
     }
+}
+
+/// Evaluates ship restrictions for `keeper.GetDungeonShipRestrictions` and
+/// `keeper.CanEnterDungeonInCurrentShip` without mutating `EveDb` or seeding registries.
+fn handle_dungeon_ship_restrictions(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let require_ship = method == "CanEnterDungeonInCurrentShip";
+    let (_, sys_id) = match require_undocked_exploration_space(ctx, session, require_ship) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let arg0_int = args.first().and_then(|a| a.as_i64());
+    let arg0_str = args.first().and_then(|a| a.as_str());
+
+    let mut sleeper_tier_opt: Option<(SleeperCacheTier, u32, &'static str)> = None;
+    let mut ded_rating_opt: Option<u8> = None;
+    let mut explicit_sde_dungeon: Option<(u32, String)> = None;
+
+    if let Some(did) = arg0_int {
+        if did > 10 {
+            let did_u32 = u32::try_from(did).ok();
+            if let Some(tier) = did_u32.and_then(sleeper_cache_tier_for_dungeon) {
+                let name = match tier {
+                    SleeperCacheTier::Limited => "Limited Sleeper Cache",
+                    SleeperCacheTier::Standard => "Standard Sleeper Cache",
+                    SleeperCacheTier::Superior => "Superior Sleeper Cache",
+                };
+                sleeper_tier_opt = Some((tier, did as u32, name));
+            } else if let Some(d) = did_u32.and_then(|id| ctx.sde.dungeons.get(&id)) {
+                let dname = if d.name.trim().is_empty() {
+                    format!("Dungeon {did}")
+                } else {
+                    d.name.trim().to_string()
+                };
+                explicit_sde_dungeon = Some((did as u32, dname));
+            } else {
+                return Some(Err(rpc_msg_err(
+                    "DungeonNotFound",
+                    format!("Dungeon {did} not found"),
+                )));
+            }
+        } else {
+            ded_rating_opt = Some(did.clamp(1, 10) as u8);
+        }
+    } else if let Some(sid) = arg0_str {
+        let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+            let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
+            if let Some(sites) = reg.sites_by_system.get(&sys_id) {
+                if let Some(s) = sites.iter().find(|x| x.site_id == sid || x.dungeon_id.to_string() == sid) {
+                    if s.site_category == "SleeperCache" {
+                        if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
+                            sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
+                        } else {
+                            let dname = if !s.dungeon_name.trim().is_empty() {
+                                s.dungeon_name.trim().to_string()
+                            } else {
+                                s.site_id.clone()
+                            };
+                            explicit_sde_dungeon = Some((s.dungeon_id, dname));
+                        }
+                    } else if let Some(r) = s.ded_rating {
+                        ded_rating_opt = Some(r);
+                    } else {
+                        let dname = if !s.dungeon_name.trim().is_empty() {
+                            s.dungeon_name.trim().to_string()
+                        } else if let Some(d) = ctx
+                            .sde
+                            .dungeons
+                            .get(&s.dungeon_id)
+                            .filter(|d| !d.name.trim().is_empty())
+                        {
+                            d.name.trim().to_string()
+                        } else {
+                            s.site_id.clone()
+                        };
+                        explicit_sde_dungeon = Some((s.dungeon_id, dname));
+                    }
+                    return (true, seeded);
+                }
+            }
+            (false, seeded)
+        });
+        if !matched_seeded && !already_seeded {
+            if let Some((sig_did, sig_id)) = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
+                .into_iter()
+                .find(|(sig_did, sig_id)| sig_id == sid || sig_did.to_string() == sid)
+            {
+                matched_seeded = true;
+                if let Some(tier) = sleeper_cache_tier_for_dungeon(sig_did) {
+                    let name = match tier {
+                        SleeperCacheTier::Limited => "Limited Sleeper Cache",
+                        SleeperCacheTier::Standard => "Standard Sleeper Cache",
+                        SleeperCacheTier::Superior => "Superior Sleeper Cache",
+                    };
+                    sleeper_tier_opt = Some((tier, sig_did, name));
+                } else if let Some(rating) = sig_id
+                    .strip_prefix("DED-")
+                    .and_then(|rest| rest.rsplit('-').next())
+                    .and_then(|r| r.parse::<u8>().ok())
+                {
+                    ded_rating_opt = Some(rating);
+                } else if let Some(d) = ctx.sde.dungeons.get(&sig_did) {
+                    let dname = if d.name.trim().is_empty() {
+                        format!("Dungeon {sig_did}")
+                    } else {
+                        d.name.trim().to_string()
+                    };
+                    explicit_sde_dungeon = Some((sig_did, dname));
+                } else {
+                    explicit_sde_dungeon = Some((sig_did, sig_id));
+                }
+            } else if let Some(spec) = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
+                .into_iter()
+                .find(|spec| spec.site_id == sid || spec.dungeon_id.to_string() == sid)
+            {
+                matched_seeded = true;
+                explicit_sde_dungeon = Some((spec.dungeon_id, spec.dungeon_name));
+            }
+        }
+        if !matched_seeded {
+            return Some(Err(rpc_msg_err(
+                "DungeonNotFound",
+                format!("Dungeon site {sid} not found"),
+            )));
+        }
+    }
+
+    let (did, dname, ded_rating_val, max_mass, label, allowed_groups) = if let Some((tier, d_id, name)) = sleeper_tier_opt {
+        let (mass, lbl, grps) = sleeper_cache_ship_restrictions(tier);
+        (d_id, name.to_string(), 0u8, mass, lbl, grps)
+    } else if let Some((d_id, d_name)) = explicit_sde_dungeon {
+        let rating = ded_rating_opt.unwrap_or(3);
+        let (mass, lbl, grps) = ded_ship_restriction_for_rating(rating);
+        (d_id, d_name, rating, mass, lbl, grps)
+    } else {
+        let rating = ded_rating_opt.unwrap_or(3);
+        let (mass, lbl, grps) = ded_ship_restriction_for_rating(rating);
+        let (d_id, d_name) = ded_complex_for_rating(&ctx.sde, sys_id, rating);
+        (d_id, d_name.to_string(), rating, mass, lbl, grps)
+    };
+
+    let (ship_type_id, ship_group_id, ship_mass) = session
+        .ship_id
+        .and_then(|sid| {
+            ctx.db.with_snapshot(|snap| {
+                snap.items.get(&sid).map(|item| {
+                    let t = ctx.sde.types.get(&item.type_id);
+                    (item.type_id, t.map(|x| x.group_id).unwrap_or(25), t.map(|x| x.mass).unwrap_or(1_200_000.0))
+                })
+            })
+        })
+        .unwrap_or((587, 25, 1_067_000.0));
+
+    let can_enter = allowed_groups.contains(&ship_group_id) && ship_mass <= max_mass;
+    Some(Ok(PyRep::keyval([
+        ("dungeonID", PyRep::Integer(did as i64)),
+        ("dungeonName", PyRep::String(dname)),
+        ("dedRating", PyRep::Integer(ded_rating_val as i64)),
+        ("maxShipMass", PyRep::Real(max_mass)),
+        ("restrictionDescription", PyRep::String(label.into())),
+        ("allowedGroupIDs", PyRep::List(allowed_groups.iter().map(|&g| PyRep::Integer(g as i64)).collect())),
+        ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
+        ("shipGroupID", PyRep::Integer(ship_group_id as i64)),
+        ("canEnter", PyRep::Bool(can_enter)),
+    ])))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1573,11 +1630,21 @@ async fn handle_activate_acceleration_gate(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let gate_ball_arg = args.first().and_then(|a| a.as_i64());
     let has_runtime_gate = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime
             .instances
             .values()
             .any(|i| !i.completed && !i.despawned && i.solar_system_id == sys_id)
+            || gate_ball_arg.is_some_and(|gate_id| {
+                // Delegate active Homefront outer gates through `try_activate_dungeon_runtime_gate`.
+                snap.dungeon_runtime.homefront_runtimes.values().any(|r| {
+                    r.solar_system_id == sys_id
+                        && r.outer_gate_ball_id == gate_id
+                        && !r.completed
+                        && !r.failed
+                })
+            })
     });
     if has_runtime_gate {
         if session.ship_id.is_none() {

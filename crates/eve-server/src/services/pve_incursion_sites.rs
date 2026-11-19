@@ -1039,6 +1039,25 @@ pub async fn on_incursion_boss_destroyed_core(
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
 ) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
+    Box::pin(on_incursion_boss_destroyed_core_inner(
+        systems,
+        db,
+        sde,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    ))
+    .await
+}
+
+async fn on_incursion_boss_destroyed_core_inner(
+    systems: &Arc<SystemRegistry>,
+    db: &Arc<WorldRepository>,
+    sde: &Arc<SdeRegistry>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: Option<CharacterId>,
+) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
     let killer_fleet_id = killer_char_id.and_then(|cid| {
         db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.fleet_id))
     });
@@ -1143,25 +1162,25 @@ pub async fn on_incursion_boss_destroyed_core(
         )));
     }
     if is_escort {
-        crate::services::pve_incursion_lifecycle::advance_incursion_wave_on_escort_kill(
+        Box::pin(crate::services::pve_incursion_lifecycle::advance_incursion_wave_on_escort_kill(
             systems,
             db,
             sde,
             solar_system_id,
             &site_id,
-        )
+        ))
         .await;
         return None;
     }
     Some(
-        check_and_complete_incursion_wave_server_side_core(
+        Box::pin(check_and_complete_incursion_wave_server_side_core(
             systems,
             db,
             sde,
             solar_system_id,
             &site_id,
             completion_killer_opt.or(killer_char_id),
-        )
+        ))
         .await,
     )
 }

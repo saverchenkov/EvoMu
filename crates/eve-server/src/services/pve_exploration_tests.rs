@@ -1154,6 +1154,7 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
     let anom_specs = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(&ctx, sys_id);
     assert!(!anom_specs.is_empty());
 
+    let mut pre_sig_replies: Vec<(u32, String, PyRep)> = Vec::new();
     for (sig_did, sig_id) in &sig_specs {
         for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
             let rep = handle_pve_exploration(
@@ -1174,10 +1175,14 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
                     "{meth} must preserve unseeded signature dungeonID for {sig_id}"
                 );
             }
+            if meth == "GetDungeonShipRestrictions" {
+                pre_sig_replies.push((*sig_did, sig_id.clone(), rep));
+            }
         }
     }
 
     let first_anom = &anom_specs[0];
+    let mut pre_anom_rep: Option<PyRep> = None;
     for query in [first_anom.site_id.clone(), first_anom.dungeon_id.to_string()] {
         for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
             let rep = handle_pve_exploration(
@@ -1195,6 +1200,9 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
                 rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
                 Some(i64::from(first_anom.dungeon_id))
             );
+            if meth == "GetDungeonShipRestrictions" && pre_anom_rep.is_none() {
+                pre_anom_rep = Some(rep);
+            }
         }
     }
 
@@ -1274,7 +1282,8 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
         reg.seeded_systems.get(&sys_id).copied() == Some(true)
     }));
 
-    // Once seeded, missing dungeon strings still reject with DungeonNotFound in GetDungeonShipRestrictions.
+    // Once seeded, missing dungeon strings still reject with DungeonNotFound in GetDungeonShipRestrictions,
+    // and non-SleeperCache seeded anomalies/signatures preserve pre-seeding dungeonID/dungeonName/dedRating (F-02).
     let seeded_err = handle_pve_exploration(
         &ctx,
         &mut sess,
@@ -1287,6 +1296,54 @@ async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion
     .expect("handled")
     .expect_err("missing string in seeded system must return DungeonNotFound");
     assert_eq!(seeded_err.code, "DungeonNotFound");
+
+    let pre_anom = pre_anom_rep.expect("captured unseeded anomaly restriction reply");
+    for query in [first_anom.site_id.clone(), first_anom.dungeon_id.to_string()] {
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let post = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(query.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_or_else(|e| panic!("seeded {meth} for anomaly {query} failed: {e:?}"));
+            assert_eq!(post.dict_get("dungeonID"), pre_anom.dict_get("dungeonID"), "{meth}({query})");
+            assert_eq!(post.dict_get("dungeonName"), pre_anom.dict_get("dungeonName"), "{meth}({query})");
+            assert_eq!(post.dict_get("dedRating"), pre_anom.dict_get("dedRating"), "{meth}({query})");
+        }
+    }
+    for (sig_did, sig_id, pre_sig) in &pre_sig_replies {
+        if sig_id.starts_with("SLC-") {
+            continue;
+        }
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let post = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(sig_id.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_or_else(|e| panic!("seeded {meth} for sig {sig_id} failed: {e:?}"));
+            if !sig_id.starts_with("DED-") {
+                assert_eq!(
+                    post.dict_get("dungeonID").and_then(|v| v.as_i64()),
+                    Some(i64::from(*sig_did)),
+                    "seeded {meth} for {sig_id}"
+                );
+            }
+            assert_eq!(post.dict_get("dungeonID"), pre_sig.dict_get("dungeonID"), "{meth}({sig_id})");
+            assert_eq!(post.dict_get("dungeonName"), pre_sig.dict_get("dungeonName"), "{meth}({sig_id})");
+            assert_eq!(post.dict_get("dedRating"), pre_sig.dict_get("dedRating"), "{meth}({sig_id})");
+        }
+    }
 
     // 3. P2 #3: Ended / Withdrawing incursion tales must not satisfy INC-* ActivateAccelerationGate probes.
     let (const_id, _) = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx)
