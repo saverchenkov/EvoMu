@@ -2355,7 +2355,12 @@ pub async fn handle_with_bound(
                                 .get(&m_agent_id)
                                 .and_then(|a| a.station_id)
                                 .or_else(|| meta_opt.as_ref().and_then(|mt| mt.origin_station_id));
-                            let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
+                            let active_ship_id = snap
+                                .characters
+                                .get(&char_id)
+                                .map(|c| c.active_ship_id)
+                                .filter(|&id| id > 0)
+                                .or(session.ship_id);
                             let dest_station_id = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
                             let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
                             super::agents_mission_delivery::verify_and_consume_mission_delivery_items(

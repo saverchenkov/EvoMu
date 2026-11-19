@@ -3,24 +3,31 @@
 use eve_proto::BridgeRpcError;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 
-/// Evaluates whether `item` is unlocked, non-fitted, non-courier-tagged, and in an
-/// eligible delivery location (`Hangar` at `agent_station_id`, or active ship `Cargo` /
-/// `SpecializedOreHold` for mining missions or Tritanium).
+fn mission_delivery_consume_opts(
+    char_id: i64,
+    active_ship_id: Option<i64>,
+) -> eve_db::ConsumeExactOptions {
+    eve_db::ConsumeExactOptions {
+        active_ship_id,
+        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
+    }
+}
+
+/// Evaluates whether `item` passes consumption safety checks (ownership, positive quantity,
+/// lock/impound/War-HQ/structure-controller/boarded-ship/structure-ACL, fitted-slot, and non-empty
+/// container guards), is not courier-tagged, and sits in an eligible delivery location (`Hangar`
+/// at `agent_station_id`, or active ship `Cargo` / `SpecializedOreHold` for mining missions or
+/// Tritanium).
 fn is_eligible_mission_delivery_item(
     snap: &WorldStateSnapshot,
-    char_id: i64,
+    delivery_opts: &eve_db::ConsumeExactOptions,
     req_tid: u32,
     is_mining_mission: bool,
     agent_station_id: Option<i64>,
-    active_ship_id: Option<i64>,
     item: &InventoryItemRecord,
 ) -> bool {
-    item.owner_id == char_id
-        && item.type_id == req_tid
-        && item.quantity > 0
-        && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
-        && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
-        && !snap.is_container_non_empty(item.item_id)
+    item.type_id == req_tid
+        && snap.validate_item_for_consumption(item, delivery_opts).is_ok()
         && !snap
             .item_custom_names
             .get(&item.item_id)
@@ -28,7 +35,7 @@ fn is_eligible_mission_delivery_item(
         && ((item.flag == InventoryFlag::Hangar
             && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
             || ((is_mining_mission || req_tid == 34)
-                && active_ship_id == Some(item.location_id)
+                && delivery_opts.active_ship_id == Some(item.location_id)
                 && matches!(
                     item.flag,
                     InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo
@@ -44,16 +51,16 @@ pub(crate) fn count_eligible_mission_delivery_items(
     agent_station_id: Option<i64>,
     active_ship_id: Option<i64>,
 ) -> i64 {
+    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id);
     snap.items
         .values()
         .filter(|it| {
             is_eligible_mission_delivery_item(
                 snap,
-                char_id,
+                &delivery_opts,
                 req_tid,
                 is_mining_mission,
                 agent_station_id,
-                active_ship_id,
                 it,
             )
         })
@@ -190,27 +197,23 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     }
 
     let mut rem = req_units;
+    let delivery_opts = mission_delivery_consume_opts(char_id, active_ship_id);
     let mut matching_ids: Vec<i64> = snap
         .items
         .values()
         .filter(|it| {
             is_eligible_mission_delivery_item(
                 snap,
-                char_id,
+                &delivery_opts,
                 req_tid,
                 is_mining_mission,
                 agent_station_id,
-                active_ship_id,
                 it,
             )
         })
         .map(|it| it.item_id)
         .collect();
     matching_ids.sort_unstable();
-    let delivery_opts = eve_db::ConsumeExactOptions {
-        active_ship_id,
-        ..eve_db::ConsumeExactOptions::for_owner_exact(Some(char_id), char_id)
-    };
     for iid in matching_ids {
         if rem <= 0 {
             break;
@@ -222,6 +225,15 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         if take > 0 && snap.consume_exact_item_quantity(iid, take, delivery_opts).is_ok() {
             rem -= take;
         }
+    }
+    if rem > 0 {
+        return Err(BridgeRpcError {
+            code: "MissionIncomplete".into(),
+            message: format!(
+                "Mission {mission_id} delivery failed to consume {rem} remaining units of type {req_tid}"
+            ),
+            client_error: None,
+        });
     }
     Ok(())
 }

@@ -2919,7 +2919,8 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
         .stations
         .keys()
         .copied()
-        .find(|&s| s != rnd_st)
+        .filter(|&s| s != rnd_st)
+        .min()
         .unwrap_or(rnd_st);
     let dest_sys = ctx
         .sde
@@ -3088,4 +3089,296 @@ async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
     .await
     .expect("R&D courier DoAction(6) must not require Tritanium turn-in");
     assert_eq!(done.dict_get("state"), Some(&PyRep::String("Completed".into())));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_objective_and_completion_exclude_boarded_active_ship() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let ag = find_standard_agent(&ctx, 1);
+    let sys_id = ag.solar_system_id.unwrap();
+    let st_id = ag.station_id.unwrap();
+    let mid_ship = 999_931_u32;
+    let mut sde = (*ctx.sde).clone();
+    sde.missions.insert(
+        mid_ship,
+        eve_sde::MissionTemplate {
+            mission_id: mid_ship,
+            title: "Deliver Velator Hull".into(),
+            is_courier: false,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicTradeMission".into()),
+            dungeon_id: None,
+        },
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let now = ctx.now_unix();
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        let ship_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.active_ship_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(100_000_001);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(st_id);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mid_ship),
+            make_active_mission(mid_ship, char_id, ag.agent_id, sys_id, "Accepted", None),
+        );
+        let mut meta = make_meta(mid_ship, ag.agent_id, now + 3_600, Some(now + 7_200));
+        meta.origin_station_id = Some(st_id);
+        meta.required_delivery_type_id = Some(606);
+        meta.required_delivery_qty = 1;
+        save_mission_meta(snap, char_id, &meta);
+        ship_id
+    });
+
+    let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+    let fetch_has_cargo = |obj: &PyRep| -> Option<PyRep> {
+        let Some(PyRep::List(objs)) = obj.dict_get("objectives") else {
+            return None;
+        };
+        let PyRep::Tuple(entry) = &objs[1] else {
+            return None;
+        };
+        let PyRep::Tuple(args) = &entry[1] else {
+            return None;
+        };
+        args[2].dict_get("hasCargo").cloned()
+    };
+
+    // Boarded active_ship with no spare hull -> hasCargo == false and DoAction(6) fails closed
+    let obj_one = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(mid_ship as i64)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo with boarded ship only");
+    assert_eq!(fetch_has_cargo(&obj_one), Some(PyRep::Bool(false)));
+    let err_one = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag.agent_id), PyRep::Integer(mid_ship as i64)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_one.code, "MissionIncomplete");
+
+    // req_units == 2 with boarded active_ship + 1 spare hull -> still hasCargo == false & fails closed
+    let spare_ship = 990_102_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            spare_ship,
+            InventoryItemRecord {
+                item_id: spare_ship,
+                type_id: 606,
+                owner_id: char_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let mut meta = make_meta(mid_ship, ag.agent_id, now + 3_600, Some(now + 7_200));
+        meta.origin_station_id = Some(st_id);
+        meta.required_delivery_type_id = Some(606);
+        meta.required_delivery_qty = 2;
+        save_mission_meta(snap, char_id, &meta);
+    });
+    let obj_two = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(ag.agent_id), PyRep::Integer(mid_ship as i64)],
+        &kw,
+    )
+    .await
+    .expect("GetMissionObjectiveInfo with boarded ship + 1 spare hull for qty=2");
+    assert_eq!(fetch_has_cargo(&obj_two), Some(PyRep::Bool(false)));
+    let err_two = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag.agent_id), PyRep::Integer(mid_ship as i64)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_two.code, "MissionIncomplete");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions[&(char_id, mid_ship)].state, "Accepted");
+        assert!(snap.items.contains_key(&ship_id));
+        assert!(snap.items.contains_key(&spare_ship));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_space_agent_excludes_acl_denied_structure_hangar_delivery() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let mut dc_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 5 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("Data Center agent in SDE");
+    dc_ag.station_id = None;
+    let dc_sys = dc_ag.solar_system_id.unwrap();
+    let mid_inspace = 999_932_u32;
+    let mut sde = (*ctx.sde).clone();
+    sde.agents.insert(dc_ag.agent_id, dc_ag.clone());
+    sde.missions.insert(
+        mid_inspace,
+        eve_sde::MissionTemplate {
+            mission_id: mid_inspace,
+            title: "In-Space Tag Turn-In".into(),
+            is_courier: false,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicKillMission".into()),
+            dungeon_id: None,
+        },
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let now = ctx.now_unix();
+    let struct_id = 1_000_000_777_i64;
+    let tag_id = 990_201_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+        snap.items.insert(
+            tag_id,
+            InventoryItemRecord {
+                item_id: tag_id,
+                type_id: 17202,
+                owner_id: char_id,
+                location_id: struct_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.structure_docking_acl_denied
+            .entry(struct_id)
+            .or_default()
+            .insert(char_id);
+        snap.active_missions.insert(
+            (char_id, mid_inspace),
+            make_active_mission(mid_inspace, char_id, dc_ag.agent_id, dc_sys, "Accepted", None),
+        );
+        let mut meta = make_meta(mid_inspace, dc_ag.agent_id, now + 3_600, Some(now + 7_200));
+        meta.origin_station_id = None;
+        meta.required_delivery_type_id = Some(17202);
+        meta.required_delivery_qty = 1;
+        save_mission_meta(snap, char_id, &meta);
+    });
+
+    let mut sess = char_session(char_id, Some(dc_sys), None);
+    let kw = HashMap::new();
+    let fetch_has_cargo = |obj: &PyRep| -> Option<PyRep> {
+        let Some(PyRep::List(objs)) = obj.dict_get("objectives") else {
+            return None;
+        };
+        let PyRep::Tuple(entry) = &objs[1] else {
+            return None;
+        };
+        let PyRep::Tuple(args) = &entry[1] else {
+            return None;
+        };
+        args[2].dict_get("hasCargo").cloned()
+    };
+
+    let denied_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_inspace as i64)],
+        &kw,
+    )
+    .await
+    .expect("in-space GetMissionObjectiveInfo ACL denied");
+    assert_eq!(fetch_has_cargo(&denied_obj), Some(PyRep::Bool(false)));
+    let denied_err = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_inspace as i64)],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied_err.code, "MissionIncomplete");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions[&(char_id, mid_inspace)].state, "Accepted");
+        assert_eq!(snap.items.get(&tag_id).map(|i| i.quantity), Some(1));
+    });
+
+    // Clearing structure ACL denial makes the item eligible for both hasCargo and completion
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.remove(&struct_id);
+    });
+    let allowed_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_inspace as i64)],
+        &kw,
+    )
+    .await
+    .expect("in-space GetMissionObjectiveInfo ACL allowed");
+    assert_eq!(fetch_has_cargo(&allowed_obj), Some(PyRep::Bool(true)));
+    let done = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_inspace as i64)],
+        &kw,
+    )
+    .await
+    .expect("in-space DoAction(6) completes once ACL allowed");
+    assert_eq!(done.dict_get("state"), Some(&PyRep::String("Completed".into())));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&tag_id));
+    });
 }
