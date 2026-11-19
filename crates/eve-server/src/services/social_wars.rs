@@ -190,28 +190,80 @@ fn parse_war_unix_timestamp(rep: &PyRep) -> Option<u64> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum WarGmError {
+    InvalidArgument,
+    CannotAllyOwnWar,
+    InvalidWarTarget,
+    WarNotFound,
+    AllyNotFound,
+}
+
+impl WarGmError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidArgument => "InvalidArgument",
+            Self::CannotAllyOwnWar => "CannotAllyOwnWar",
+            Self::InvalidWarTarget => "InvalidWarTarget",
+            Self::WarNotFound => "WarNotFound",
+            Self::AllyNotFound => "AllyNotFound",
+        }
+    }
+
+    fn with_message(self, message: impl Into<String>) -> BridgeRpcError {
+        BridgeRpcError {
+            code: self.code().into(),
+            message: message.into(),
+            client_error: None,
+        }
+    }
+}
+
+struct WarGmCall<'a> {
+    war_id: i64,
+    second: Option<&'a PyRep>,
+    third: Option<&'a PyRep>,
+}
+
+fn parse_war_gm_call<'a>(method: &str, params: &'a [PyRep]) -> Result<WarGmCall<'a>, BridgeRpcError> {
+    let [war_rep, rest @ ..] = params else {
+        return Err(WarGmError::InvalidArgument
+            .with_message(format!("warRegistry.{method} requires positive warID")));
+    };
+    let Some(war_id) = war_rep.as_i64().filter(|&id| id > 0) else {
+        return Err(WarGmError::InvalidArgument
+            .with_message(format!("warRegistry.{method} requires positive warID")));
+    };
+    let (second, third) = match rest {
+        [s, t, ..] => (Some(s), Some(t)),
+        [s] => (Some(s), None),
+        [] => (None, None),
+    };
+    Ok(WarGmCall {
+        war_id,
+        second,
+        third,
+    })
+}
+
 fn resolve_gm_ally_record(
     snap: &WorldStateSnapshot,
     war: &WarRecord,
     ally_id: i64,
 ) -> Result<eve_db::snapshot_ext::WarAllyRecord, BridgeRpcError> {
     if ally_id <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidArgument".into(),
-            message: "allyID must be a positive corporation or alliance ID".into(),
-            client_error: None,
-        });
+        return Err(WarGmError::InvalidArgument
+            .with_message("allyID must be a positive corporation or alliance ID"));
     }
     if ally_id == war.aggressor_corp_id
         || ally_id == war.defender_corp_id
         || same_alliance(snap, ally_id, war.aggressor_corp_id)
         || same_alliance(snap, ally_id, war.defender_corp_id)
     {
-        return Err(BridgeRpcError {
-            code: "CannotAllyOwnWar".into(),
-            message: format!("Target {ally_id} cannot ally with its own war {}", war.war_id),
-            client_error: None,
-        });
+        return Err(WarGmError::CannotAllyOwnWar.with_message(format!(
+            "Target {ally_id} cannot ally with its own war {}",
+            war.war_id
+        )));
     }
     if snap.corporations.contains_key(&ally_id) {
         Ok(eve_db::snapshot_ext::WarAllyRecord {
@@ -228,11 +280,8 @@ fn resolve_gm_ally_record(
             alliance_id: Some(ally_id),
         })
     } else {
-        Err(BridgeRpcError {
-            code: "InvalidWarTarget".into(),
-            message: format!("Unknown corporation or alliance allyID {ally_id}"),
-            client_error: None,
-        })
+        Err(WarGmError::InvalidWarTarget
+            .with_message(format!("Unknown corporation or alliance allyID {ally_id}")))
     }
 }
 
@@ -240,7 +289,7 @@ fn handle_war_registry_gm_rpc(
     ctx: &ServerContext,
     session: &SessionState,
     method: &str,
-    args: &[PyRep],
+    params: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (session.role
         & (eve_machonet::service_roles::ROLE_GMH
@@ -254,33 +303,28 @@ fn handle_war_registry_gm_rpc(
             format!("warRegistry.{method} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"),
         );
     }
-    let Some(war_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-        return err("InvalidArgument", format!("warRegistry.{method} requires positive warID"));
+    let call = match parse_war_gm_call(method, params) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
     };
+    let war_id = call.war_id;
     let now = ctx.now_unix();
     let res = ctx.db.with_mut_snapshot(|snap| -> Result<Vec<(&'static str, PyRep, PyRep)>, BridgeRpcError> {
         let Some(war) = snap.wars.get(&war_id).cloned() else {
-            return Err(BridgeRpcError {
-                code: "WarNotFound".into(),
-                message: format!("War {war_id} not found"),
-                client_error: None,
-            });
+            return Err(WarGmError::WarNotFound.with_message(format!("War {war_id} not found")));
         };
         match method {
             "GMJoinDefender" => {
-                let Some(ally_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMJoinDefender requires positive allyID".into(),
-                        client_error: None,
-                    });
+                let Some(ally_id) = call.second.and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                    return Err(WarGmError::InvalidArgument
+                        .with_message("GMJoinDefender requires positive allyID"));
                 };
                 let ally_rec = resolve_gm_ally_record(snap, &war, ally_id)?;
-                let effective = match args.get(2) {
-                    Some(rep) => parse_war_unix_timestamp(rep).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMJoinDefender effective time must be a valid timestamp".into(),
-                        client_error: None,
+                let effective = match call.third {
+                    Some(rep) => parse_war_unix_timestamp(rep).ok_or_else(|| {
+                        WarGmError::InvalidArgument.with_message(
+                            "GMJoinDefender effective time must be a valid timestamp",
+                        )
                     })?,
                     None => now,
                 };
@@ -318,13 +362,12 @@ fn handle_war_registry_gm_rpc(
                 ])
             }
             "GMActivateDefender" => {
-                let ally_target = match args.get(1) {
+                let ally_target = match call.second {
                     Some(PyRep::None) | None => None,
                     Some(rep) => {
-                        let aid = rep.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "GMActivateDefender allyID must be a positive integer".into(),
-                            client_error: None,
+                        let aid = rep.as_i64().filter(|&id| id > 0).ok_or_else(|| {
+                            WarGmError::InvalidArgument
+                                .with_message("GMActivateDefender allyID must be a positive integer")
                         })?;
                         Some((aid, resolve_gm_ally_record(snap, &war, aid)?))
                     }
@@ -389,12 +432,11 @@ fn handle_war_registry_gm_rpc(
                 ])
             }
             "GMDeactivateDefender" => {
-                let ally_id = match args.get(1) {
+                let ally_id = match call.second {
                     Some(PyRep::None) | None => None,
-                    Some(rep) => Some(rep.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMDeactivateDefender allyID must be a positive integer".into(),
-                        client_error: None,
+                    Some(rep) => Some(rep.as_i64().filter(|&id| id > 0).ok_or_else(|| {
+                        WarGmError::InvalidArgument
+                            .with_message("GMDeactivateDefender allyID must be a positive integer")
                     })?),
                 };
                 if let Some(aid) = ally_id {
@@ -410,11 +452,9 @@ fn handle_war_registry_gm_rpc(
                             .any(|a| a.corporation_id == Some(aid) || a.alliance_id == Some(aid))
                     });
                     if !has_neg && !has_lm {
-                        return Err(BridgeRpcError {
-                            code: "AllyNotFound".into(),
-                            message: format!("Defender ally {aid} is not active in war {war_id}"),
-                            client_error: None,
-                        });
+                        return Err(WarGmError::AllyNotFound.with_message(format!(
+                            "Defender ally {aid} is not active in war {war_id}"
+                        )));
                     }
                     for neg in &mut snap.war_state.negotiations {
                         if neg.war_id == war_id
@@ -451,19 +491,14 @@ fn handle_war_registry_gm_rpc(
                 }
             }
             "GMExtendAllyContract" => {
-                let Some(ally_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMExtendAllyContract requires positive allyID".into(),
-                        client_error: None,
-                    });
+                let Some(ally_id) = call.second.and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                    return Err(WarGmError::InvalidArgument
+                        .with_message("GMExtendAllyContract requires positive allyID"));
                 };
-                let Some(ts_or_delta) = args.get(2).and_then(parse_war_unix_timestamp) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMExtendAllyContract requires valid extension duration or timestamp".into(),
-                        client_error: None,
-                    });
+                let Some(ts_or_delta) = call.third.and_then(parse_war_unix_timestamp) else {
+                    return Err(WarGmError::InvalidArgument.with_message(
+                        "GMExtendAllyContract requires valid extension duration or timestamp",
+                    ));
                 };
                 let Some(neg) = snap.war_state.negotiations.iter_mut().find(|n| {
                     n.war_id == war_id
@@ -471,11 +506,9 @@ fn handle_war_registry_gm_rpc(
                         && n.from_corp == ally_id
                         && n.status == "Accepted"
                 }) else {
-                    return Err(BridgeRpcError {
-                        code: "AllyNotFound".into(),
-                        message: format!("Accepted ally {ally_id} not found in war {war_id}"),
-                        client_error: None,
-                    });
+                    return Err(WarGmError::AllyNotFound.with_message(format!(
+                        "Accepted ally {ally_id} not found in war {war_id}"
+                    )));
                 };
                 const MAX_EXTEND_SECS: u64 = 365 * 86_400;
                 let updated = if ts_or_delta > 0 && ts_or_delta <= MAX_EXTEND_SECS {
@@ -487,12 +520,9 @@ fn handle_war_registry_gm_rpc(
                 Ok(vec![("allyID", PyRep::Integer(ally_id), PyRep::Integer(ally_id))])
             }
             "GMSetDeclareTime" => {
-                let Some(declared_unix) = args.get(1).and_then(parse_war_unix_timestamp) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMSetDeclareTime requires a valid timestamp".into(),
-                        client_error: None,
-                    });
+                let Some(declared_unix) = call.second.and_then(parse_war_unix_timestamp) else {
+                    return Err(WarGmError::InvalidArgument
+                        .with_message("GMSetDeclareTime requires a valid timestamp"));
                 };
                 let prev_declared = war.started_unix;
                 if let Some(w_mut) = snap.wars.get_mut(&war_id) {
@@ -515,19 +545,17 @@ fn handle_war_registry_gm_rpc(
                 ])
             }
             "GMSetWarFinishTime" => {
-                let new_finish = match args.get(1) {
+                let new_finish = match call.second {
                     Some(PyRep::None) => None,
-                    Some(rep) => Some(parse_war_unix_timestamp(rep).ok_or_else(|| BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "GMSetWarFinishTime requires a valid timestamp or None".into(),
-                        client_error: None,
+                    Some(rep) => Some(parse_war_unix_timestamp(rep).ok_or_else(|| {
+                        WarGmError::InvalidArgument.with_message(
+                            "GMSetWarFinishTime requires a valid timestamp or None",
+                        )
                     })?),
                     None => {
-                        return Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "GMSetWarFinishTime requires timeFinished or None".into(),
-                            client_error: None,
-                        });
+                        return Err(WarGmError::InvalidArgument.with_message(
+                            "GMSetWarFinishTime requires timeFinished or None",
+                        ));
                     }
                 };
                 let prev_finish = snap
