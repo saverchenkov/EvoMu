@@ -1095,7 +1095,7 @@ async fn get_alliance_applications_enforces_director_and_blocks_npc_and_cross_co
             ));
         }
     });
-    clock.set_unix(1_700_000_020);
+    clock.advance_secs(20);
 
     // Roleless member in executor corp, NPC corp pilot, and foreign bystander corp are denied.
     let mut plain_sess = SessionState {

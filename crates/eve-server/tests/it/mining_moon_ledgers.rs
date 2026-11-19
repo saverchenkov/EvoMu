@@ -630,8 +630,6 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut corp = eve_db::CorporationRecord::new(char_corp_id, "Moon Test Corp", "MTC", 90_000_002);
         corp.members.extend([char_id, 90_000_002]);
-        corp.member_roles
-            .insert(char_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
         snap.corporations.insert(char_corp_id, corp);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = char_corp_id;
