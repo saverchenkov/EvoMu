@@ -1292,10 +1292,10 @@ impl ServerContext {
                     is_blueprint_copy: false,
                     blueprint_runs_remaining: None,
                 });
-            } else if !snap.items.contains_key(&100_000_001)
-                && !snap.structures.contains_key(&100_000_001)
-                && !snap.characters.contains_key(&100_000_001)
-            {
+            } else if !crate::services::inventory_bound::snapshot_contains_entity_id(
+                snap,
+                100_000_001,
+            ) {
                 // Purge items left orphaned inside removed starter ship `100_000_001`
                 // across persistent SQLite `--seed-demo` restarts (GH `#1371`).
                 snap.items.retain(|_, item| item.location_id != 100_000_001);

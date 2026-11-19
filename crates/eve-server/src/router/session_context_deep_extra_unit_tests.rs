@@ -926,6 +926,15 @@ fn issue_1371_seed_demo_world_fixtures_skips_missing_ship_and_purges_orphans() {
                 ..Default::default()
             },
         );
+        // 3a. Non-item entity collision (e.g. corporation/structure/fleet ID) skips purge.
+        snap.corporations
+            .insert(starter_ship_id, eve_db::CorporationRecord::default());
+    });
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(snap.items.contains_key(&filament_id));
+        assert!(snap.transient_items.contains_key(&orphan_transient_id));
+        snap.corporations.remove(&starter_ship_id);
     });
     ctx.seed_demo_world_fixtures();
     ctx.db.with_snapshot(|snap| {

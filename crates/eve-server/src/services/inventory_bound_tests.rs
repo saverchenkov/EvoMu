@@ -3161,7 +3161,67 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         ..Default::default()
     };
 
-    // 1. Stub resolver boundaries: Rifter (587) only for owner when docked or in non-capsule hull.
+    // 0. With `seed_demo = false` (non-demo production / AdminAccountConfig char `90_000_001`),
+    //    removed starter ship IDs fail closed everywhere (`FakeItemNotFound` / `BindAuthorizationDenied`).
+    assert!(!ctx.feature_flags_snapshot().seed_demo);
+    let b_station = bound_invbroker(char_id, station_id);
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(&ctx, &docked_sess, char_id, removed_starter_id),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &space_venture_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id(&ctx, char_id, removed_starter_id, true, true, None),
+        None
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &docked_sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "FakeItemNotFound"
+    );
+    assert_eq!(
+        ctx.bind_object(&docked_sess, "invbroker", removed_starter_id)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &docked_sess,
+            Some(&bound_invbroker(char_id, removed_starter_id)),
+            "invbroker",
+            "GetSelfInvItem",
+            &[],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "UnimplementedRPC"
+    );
+
+    ctx.feature_flags.write().unwrap().seed_demo = true;
+
+    // 1. Stub resolver boundaries (`seed_demo = true`): Rifter (587) only for owner when docked or in non-capsule hull.
     assert_eq!(
         resolve_missing_ship_stub_type_id_for_session(&ctx, &docked_sess, char_id, removed_starter_id),
         Some(587)
@@ -3235,7 +3295,6 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
     );
 
     // 2. Docked `GetInventoryFromId(100_000_001, 0)` + `GetSelfInvItem` + `GetAvailableTurretSlots` + `List`.
-    let b_station = bound_invbroker(char_id, station_id);
     let docked_inv_rep = handle(
         &ctx,
         &docked_sess,
@@ -3369,6 +3428,24 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         panic!("expected CRowset ObjectEx from List, got {listed:?}");
     };
     assert!(rows.is_empty());
+
+    // Stale remote station `invbroker` moniker (`!at_location`) is rejected for removed starter ship stub.
+    let b_remote_station = bound_invbroker(char_id, remote_station_id);
+    assert_eq!(
+        handle(
+            &ctx,
+            &docked_sess,
+            Some(&b_remote_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
 
     // 3. Undocked in non-capsule Venture also resolves `100_000_001` cleanly with solar-system location.
     let b_sys = bound_invbroker(char_id, i64::from(system_id));
@@ -3522,4 +3599,100 @@ async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
         .code,
         "InventoryNotAccessible"
     );
+
+    //    (e) Non-item entity-table collisions (`structures`, `characters`, `corporations`, `alliances`,
+    //        `wars`, `fleets`) block stub synthesis even when `seed_demo = true`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&removed_starter_id);
+    });
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(&ctx, &docked_sess, char_id, removed_starter_id),
+        Some(587)
+    );
+
+    // Check every non-item entity table independently.
+    let sample_char = ctx.db.with_snapshot(|snap| snap.characters[&char_id].clone());
+    for table in ["structures", "characters", "corporations", "alliances", "wars", "fleets"] {
+        ctx.db.with_mut_snapshot(|snap| match table {
+            "structures" => {
+                snap.structures.insert(removed_starter_id, UpwellStructureRecord::default());
+            }
+            "characters" => {
+                let mut ch = sample_char.clone();
+                ch.character_id = removed_starter_id;
+                snap.characters.insert(removed_starter_id, ch);
+            }
+            "corporations" => {
+                snap.corporations.insert(removed_starter_id, CorporationRecord::default());
+            }
+            "alliances" => {
+                snap.alliances.insert(removed_starter_id, eve_db::AllianceRecord::default());
+            }
+            "wars" => {
+                snap.wars.insert(removed_starter_id, eve_db::WarRecord::default());
+            }
+            "fleets" => {
+                snap.fleets.insert(removed_starter_id, eve_db::FleetRecord::default());
+            }
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            resolve_missing_ship_stub_type_id_for_session(
+                &ctx,
+                &docked_sess,
+                char_id,
+                removed_starter_id,
+            ),
+            None,
+            "collision in {table} must block stub synthesis"
+        );
+        assert_eq!(
+            ctx.bind_object(&docked_sess, "invbroker", removed_starter_id)
+                .unwrap_err()
+                .code,
+            "BindAuthorizationDenied", // rpc-lint: allow error code assertion
+            "collision in {table} must fail bind authorization"
+        );
+        let expected_inv_err = if table == "structures" {
+            "InventoryNotAccessible"
+        } else {
+            "FakeItemNotFound"
+        };
+        assert_eq!(
+            handle(
+                &ctx,
+                &docked_sess,
+                Some(&b_station),
+                "invbroker",
+                "GetInventoryFromId",
+                &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            expected_inv_err
+        );
+        ctx.db.with_mut_snapshot(|snap| match table {
+            "structures" => {
+                snap.structures.remove(&removed_starter_id);
+            }
+            "characters" => {
+                snap.characters.remove(&removed_starter_id);
+            }
+            "corporations" => {
+                snap.corporations.remove(&removed_starter_id);
+            }
+            "alliances" => {
+                snap.alliances.remove(&removed_starter_id);
+            }
+            "wars" => {
+                snap.wars.remove(&removed_starter_id);
+            }
+            "fleets" => {
+                snap.fleets.remove(&removed_starter_id);
+            }
+            _ => unreachable!(),
+        });
+    }
 }
