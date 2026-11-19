@@ -145,21 +145,34 @@ pub struct EnergyNeutralizerResult {
     pub target_remaining_cap: f64,
 }
 
-/// Helper to extract range falloff for modules (checking falloffEffectiveness attr 2044 first, then falloff attr 158).
+/// Helper to extract range falloff for modules (checking falloffEffectiveness attr 2044 first, then falloff attr 158),
+/// evaluating any active Dogma modifiers on the resolved attribute (`#1363`).
 #[inline]
 pub fn get_module_falloff(module: &DogmaItemState, sde: &SdeRegistry) -> f64 {
+    let eval_with_fallback = |attr_id: u16, fallback_val: f64| -> f64 {
+        if module.base_attributes.contains_key(&attr_id) {
+            return module.get_attribute(attr_id, sde);
+        }
+        if module.modifiers.iter().any(|m| m.target_attribute_id == attr_id) {
+            let mut tmp = module.clone();
+            tmp.base_attributes.insert(attr_id, fallback_val);
+            return tmp.get_attribute(attr_id, sde);
+        }
+        fallback_val
+    };
+
     if let Some(&f) = module.base_attributes.get(&2044) {
-        return f;
+        return eval_with_fallback(2044, f);
     }
     if let Some(t) = sde.types.get(&module.type_id) {
         if let Some(&f) = t.default_attributes.get(&2044) {
-            return f;
+            return eval_with_fallback(2044, f);
         }
-        if let Some(&f) = module.base_attributes.get(&158) {
-            return f;
+        if let Some(&f) = module.base_attributes.get(&attr_ids::FALLOFF) {
+            return eval_with_fallback(attr_ids::FALLOFF, f);
         }
-        if let Some(&f) = t.default_attributes.get(&158) {
-            return f;
+        if let Some(&f) = t.default_attributes.get(&attr_ids::FALLOFF) {
+            return eval_with_fallback(attr_ids::FALLOFF, f);
         }
     }
     0.0
