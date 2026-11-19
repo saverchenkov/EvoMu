@@ -297,15 +297,8 @@ impl PublicGatewayRouter {
                 }
                 None
             }
-            // SendRequest and Send are V24 publicGatewaySvc client methods; CallQuasar is a
-            // non-client internal alias retained only for existing direct-helper unit tests and
-            // rpc_negative_matrix allowlist parity (rejected unauthenticated and not in dispatch.rs).
-            "SendRequest" | "Send" | "CallQuasar" => {
-                if method == "CallQuasar" {
-                    if let Err(err) = crate::router::ServerContext::require_auth(session) {
-                        return Some(Err(err));
-                    }
-                }
+            // SendRequest and Send are V24 publicGatewaySvc client methods.
+            "SendRequest" | "Send" => {
                 let explicit_idem = kwargs.get("idempotency_key").and_then(|v| match v {
                     PyRep::Bytes(b) | PyRep::Buffer(b) => Some(b.clone()),
                     PyRep::String(s) => Some(s.as_bytes().to_vec()),

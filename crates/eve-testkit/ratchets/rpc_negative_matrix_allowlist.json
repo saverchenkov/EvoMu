@@ -1560,7 +1560,6 @@
     "posMgr.SetTowerPassword": {},
     "posMgr.SetTowerSentrySettings": {},
     "posMgr.UnanchorOrbital": {},
-    "publicGatewaySvc.CallQuasar": {},
     "publicGatewaySvc.ConsumeNotices": {},
     "publicGatewaySvc.PollNotices": {},
     "publicGatewaySvc.PublishEvent": {},

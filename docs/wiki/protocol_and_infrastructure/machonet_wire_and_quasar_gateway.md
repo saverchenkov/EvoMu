@@ -398,7 +398,7 @@ flowchart TD
 ```
 
 #### Specialized Service Handlers:
-- **`publicGatewaySvc`:** Decodes inner Quasar protobuf envelopes and delegates to [`quasar_gateway::handle_client_public_gateway_rpc`](../../../crates/eve-server/src/quasar_gateway.rs#L1234-L1250). Handles `SendRequest`, `CallQuasar`, `Send`, `PublishEvent`, and `ConsumeNotices`.
+- **`publicGatewaySvc`:** Decodes inner Quasar protobuf envelopes and delegates to [`quasar_gateway::handle_client_public_gateway_rpc`](../../../crates/eve-server/src/quasar_gateway.rs#L1234-L1250). Handles `SendRequest`, `Send`, `PublishEvent`, and `ConsumeNotices`.
 - **`charUnboundMgr` & `charMgr`:** Manages character selection, doll creation, attribute point remapping, and skill queue training.
 - **`dogmaIM`:** Dispatches Dogma module activation, ship fitting modifications, and real-time attribute evaluations.
 - **`alert`:** Client diagnostic and telemetry logging service.
