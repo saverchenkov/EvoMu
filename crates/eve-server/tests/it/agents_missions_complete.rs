@@ -1431,7 +1431,21 @@ async fn test_agent_dialogue_and_access_standings() {
     assert!(l1_info.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     let briefing_info = rpc_call(&ctx, &mut sess, "agentMgr", "GetMissionBriefingInfo", &[PyRep::Integer(l1_mid)]).await.expect("GetMissionBriefingInfo");
     assert_eq!(briefing_info.dict_get("ContentID").and_then(|v| v.as_i64()), Some(l1_mid));
-    assert!(!briefing_info.dict_get("Mission Briefing ID").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    let l1_briefing_str = briefing_info
+        .dict_get("Mission Briefing ID")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(!l1_briefing_str.is_empty());
+    assert!(
+        !l1_briefing_str.contains("Execute objectives in system"),
+        "Mission Briefing ID must not emit fixed template sentence: {l1_briefing_str}"
+    );
+    if let Some(title) = ctx.sde.missions.get(&(l1_mid as u32)).map(|m| m.title.as_str()).filter(|s| !s.is_empty()) {
+        assert!(
+            l1_briefing_str.contains(title),
+            "Mission Briefing ID must reference mission title {title:?}: {l1_briefing_str}"
+        );
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

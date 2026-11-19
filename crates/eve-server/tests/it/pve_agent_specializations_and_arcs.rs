@@ -639,6 +639,29 @@ async fn test_pve_research_locator_and_epic_arcs() {
         assert_eq!(lookup_msg(completed, mid), Some(exp_comp), "mission {mid} completedMessage mismatch (#1114)");
     }
 
+    // Over V24 wire (machoNet:26000), GetMessagesForEpicArcMissions wraps the 3-key Dict in
+    // CachedMethodCallResult with versionCheck=("never", None, None) to prevent Epic Arc polling storms (#1204).
+    let cached_msg_rep = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "GetMessagesForEpicArcMissions", &[], &kw, Some("machoNet:26000"))
+        .await
+        .expect("GetMessagesForEpicArcMissions machoNet:26000");
+    let PyRep::Object { type_name, args } = cached_msg_rep else {
+        panic!("Expected CachedMethodCallResult over machoNet:26000 (#1204)");
+    };
+    assert_eq!(type_name, eve_proto::marshal::V24_CACHED_METHOD_CALL_RESULT_CLASS);
+    let PyRep::Tuple(cached_items) = *args else { panic!("Expected 3-tuple CachedMethodCallResult args") };
+    assert_eq!(cached_items.len(), 3);
+    let PyRep::Dict(details) = &cached_items[0] else { panic!("Expected details dict") };
+    assert_eq!(
+        details.iter().find(|(k, _)| k.as_str() == Some("versionCheck")).map(|(_, v)| v),
+        Some(&PyRep::Tuple(vec![PyRep::String("never".into()), PyRep::None, PyRep::None]))
+    );
+    let PyRep::SubStream(inner_msgs) = &cached_items[1] else { panic!("Expected SubStream payload") };
+    let PyRep::Dict(inner_top) = inner_msgs.as_ref() else { panic!("Expected 3-key Dict inside SubStream") };
+    assert!(inner_top.iter().any(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.chapterTitle")));
+    assert!(inner_top.iter().any(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.inProgressMessage")));
+    assert!(inner_top.iter().any(|(k, _)| k.as_str() == Some("messages.epicMission.journalText.completedMessage")));
+
     // Complete epic arc with 90-day cooldown (7,776,000s)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

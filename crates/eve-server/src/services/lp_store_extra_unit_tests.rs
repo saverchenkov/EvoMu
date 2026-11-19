@@ -124,6 +124,260 @@ fn mission_reward_corp_tax_player_vs_npc_and_station_hosted_corps() {
 }
 
 #[test]
+fn take_offer_emits_item_wallet_and_lp_notifications_char_corp_and_zero_isk() {
+    let ctx = make_ctx();
+    let char_id = 90_000_001_i64;
+    let player_corp = 98_700_099_i64;
+    let station_id = 60_003_760_i64;
+    let npc_corp = 1_000_035_i64;
+    let bp_type_id = ctx.sde.blueprints.keys().next().copied();
+
+    let mut sess = make_session(char_id, player_corp, Some(station_id));
+    sess.corp_role = corp_roles::ROLE_DIRECTOR;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = player_corp;
+            ch.station_id = Some(station_id);
+            ch.balance = IskCents::from_isk(10_000_000);
+            ch.loyalty_points.insert(npc_corp, 50_000);
+            ch.standings.insert(npc_corp, 5.0);
+        }
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = player_corp;
+        corp.name = "Notify Unit Corp".into();
+        corp.ticker = "NUC".into();
+        corp.ceo_id = char_id;
+        corp.members = [char_id].into_iter().collect();
+        corp.member_roles = [(char_id, corp_roles::ROLE_DIRECTOR)].into_iter().collect();
+        corp.hq_station_id = Some(station_id);
+        corp.set_division_balance(1, IskCents::from_isk(25_000_000));
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(player_corp, corp);
+        save_corp_lp_balances(snap, player_corp, &[(npc_corp, 50_000)].into_iter().collect());
+
+        // Offer 1: trade-in + ISK + LP -> item reward
+        register_lp_store_offer(
+            snap,
+            LPOffer {
+                offer_id: 779_001,
+                corp_id: npc_corp,
+                type_id: 34,
+                quantity: 50,
+                lp_cost: 200,
+                isk_cost: IskCents::from_isk(500),
+                ak_cost: 0,
+                req_items: vec![(35, 20)],
+                min_standing: None,
+            },
+        );
+        // Offer 2: 0 ISK -> must emit OnItemChange + OnLPChange without OnAccountChange
+        register_lp_store_offer(
+            snap,
+            LPOffer {
+                offer_id: 779_002,
+                corp_id: npc_corp,
+                type_id: 34,
+                quantity: 25,
+                lp_cost: 100,
+                isk_cost: IskCents(0),
+                ak_cost: 0,
+                req_items: Vec::new(),
+                min_standing: None,
+            },
+        );
+        if let Some(bp_tid) = bp_type_id {
+            register_lp_store_offer(
+                snap,
+                LPOffer {
+                    offer_id: 779_003,
+                    corp_id: npc_corp,
+                    type_id: bp_tid,
+                    quantity: 1,
+                    lp_cost: 300,
+                    isk_cost: IskCents::from_isk(1_000),
+                    ak_cost: 0,
+                    req_items: Vec::new(),
+                    min_standing: None,
+                },
+            );
+        }
+
+        // Clear any demo-seed Pyerite stacks so trade-in consumption hits exactly 910_501 -> 910_502 / 910_601.
+        snap.items
+            .retain(|_, it| !(it.type_id == 35 && (it.owner_id == char_id || it.owner_id == player_corp)));
+
+        // Personal trade-in stacks: 910_501 (10 -> tombstone) + 910_502 (25 -> 15)
+        snap.items.insert(
+            910_501,
+            InventoryItemRecord {
+                item_id: 910_501,
+                type_id: 35,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            910_502,
+            InventoryItemRecord {
+                item_id: 910_502,
+                type_id: 35,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 25,
+                ..Default::default()
+            },
+        );
+        // Corp trade-in stack in CorpSAG1
+        snap.items.insert(
+            910_601,
+            InventoryItemRecord {
+                item_id: 910_601,
+                type_id: 35,
+                owner_id: player_corp,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 30,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 0. Failed TakeOfferForCharacter must emit zero notifications.
+    let fail = call_lp(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(npc_corp), PyRep::Integer(779_001), PyRep::Integer(100)],
+    );
+    assert!(fail.is_err());
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 1. Personal TakeOfferForCharacter with trade-in + ISK + LP
+    let ok1 = call_lp(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(npc_corp), PyRep::Integer(779_001), PyRep::Integer(1)],
+    )
+    .expect("TakeOfferForCharacter 779_001");
+    let deliv1 = ok1.dict_get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
+    let n1 = ctx.drain_notifications_for_char(char_id);
+    assert!(n1.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(910_501)
+            && n.args.first().and_then(|a| a.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(6)
+            && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(0)
+            && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(9), PyRep::Integer(10))))
+    }));
+    assert!(n1.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(910_502)
+            && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(15)
+            && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(9), PyRep::Integer(25))))
+    }));
+    assert!(n1.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(deliv1)
+            && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(50)
+            && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(3), PyRep::Integer(0))))
+    }));
+    assert!(n1.iter().any(|n| {
+        n.event == "OnAccountChange"
+            && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+            && n.args.get(1).and_then(|a| a.as_i64()) == Some(char_id)
+            && n.args.get(2).and_then(|a| a.as_f64()) == Some(9_999_500.0)
+    }));
+    assert!(n1.iter().any(|n| {
+        n.event == "OnLPChange"
+            && n.args.first().and_then(|a| a.as_str()) == Some("take_offer")
+            && n.args.get(1).and_then(|a| a.as_i64()) == Some(npc_corp)
+            && n.args.get(2).and_then(|a| a.as_i64()) == Some(50_000)
+            && n.args.get(3).and_then(|a| a.as_i64()) == Some(49_800)
+    }));
+
+    // 2. Zero-ISK offer emits OnItemChange + OnLPChange without OnAccountChange
+    let ok2 = call_lp(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(npc_corp), PyRep::Integer(779_002), PyRep::Integer(1)],
+    )
+    .expect("TakeOfferForCharacter 779_002");
+    let deliv2 = ok2.dict_get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
+    let n2 = ctx.drain_notifications_for_char(char_id);
+    assert!(n2.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(deliv2)
+    }));
+    assert!(n2.iter().any(|n| n.event == "OnLPChange"));
+    assert!(!n2.iter().any(|n| n.event == "OnAccountChange"));
+
+    // 3. BPC offer (if blueprints present in SDE) emits per-copy OnItemChange + OnBlueprintsUpdated
+    if bp_type_id.is_some() {
+        let _ok_bp = call_lp(
+            &ctx,
+            &mut sess,
+            "LPStoreMgr",
+            "TakeOfferForCharacter",
+            &[PyRep::Integer(npc_corp), PyRep::Integer(779_003), PyRep::Integer(2)],
+        )
+        .expect("TakeOfferForCharacter BPC 2x");
+        let n_bp = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(n_bp.iter().filter(|n| n.event == "OnItemChange").count(), 2);
+        assert!(n_bp.iter().any(|n| n.event == "OnBlueprintsUpdated"));
+        assert!(n_bp.iter().any(|n| n.event == "OnAccountChange"));
+        assert!(n_bp.iter().any(|n| n.event == "OnLPChange"));
+    }
+
+    // 4. Corporate TakeOfferForCorporation emits corpid OnItemChange + CorpDeliveries + corp OnAccountChange + OnCorpLPChange
+    let ok_corp = call_lp(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[PyRep::Integer(npc_corp), PyRep::Integer(779_001), PyRep::Integer(1)],
+    )
+    .expect("TakeOfferForCorporation 779_001");
+    let corp_deliv = ok_corp.dict_get("deliveredItemID").and_then(|v| v.as_i64()).unwrap();
+    let n_corp = ctx.drain_notifications_for_char(char_id);
+    assert!(n_corp.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.id_type == "corpid"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(910_601)
+            && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(10)
+    }));
+    assert!(n_corp.iter().any(|n| {
+        n.event == "OnItemChange"
+            && n.id_type == "corpid"
+            && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(corp_deliv)
+            && n.args.first().and_then(|a| a.dbrow_get("flagID")).and_then(|v| v.as_i64()) == Some(InventoryFlag::CorpDeliveries as i64)
+            && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(50)
+    }));
+    assert!(n_corp.iter().any(|n| {
+        n.event == "OnAccountChange"
+            && n.id_type == "corpid"
+            && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+            && n.args.get(1).and_then(|a| a.as_i64()) == Some(player_corp)
+            && n.args.get(2).and_then(|a| a.as_f64()) == Some(24_999_500.0)
+    }));
+    assert!(n_corp.iter().any(|n| {
+        n.event == "OnCorpLPChange"
+            && n.id_type == "corpid"
+            && n.args.first().and_then(|a| a.as_str()) == Some("take_offer")
+            && n.args.get(1).and_then(|a| a.as_i64()) == Some(npc_corp)
+    }));
+}
+
+#[test]
 fn take_offer_standing_militia_locked_tradein_and_corp_role_guards() {
     let ctx = make_ctx();
     let char_id = 90_000_001_i64;

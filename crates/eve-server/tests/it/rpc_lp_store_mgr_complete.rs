@@ -446,6 +446,255 @@ async fn test_lp_store_mgr_take_offer_for_character() {
 }
 
 #[tokio::test]
+async fn test_lp_store_mgr_take_offer_notifications_character_and_corporation() {
+    // parity: rpc:LPStoreMgr.TakeOfferForCharacter, rpc:LPStoreMgr.TakeOfferForCorporation
+    eve_testkit::attest(&[
+        "rpc:LPStoreMgr.TakeOfferForCharacter",
+        "rpc:LPStoreMgr.TakeOfferForCorporation",
+    ]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess = setup_docked_session(&ctx).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.corporation_id = CORP_ID;
+            ch.balance = IskCents::from_isk(50_000_000);
+            ch.loyalty_points.insert(CALDARI_NAVY_CORP, 20_000);
+        }
+        let mut corp = eve_db::types::CorporationRecord::default();
+        corp.corporation_id = CORP_ID;
+        corp.name = "LP Notify Corp".into();
+        corp.ticker = "LPNC".into();
+        corp.ceo_id = CHAR_ID;
+        corp.tax_rate = 0.05;
+        corp.members = [CHAR_ID].into_iter().collect();
+        corp.member_roles = [(CHAR_ID, eve_db::corp_roles::ROLE_DIRECTOR)]
+            .into_iter()
+            .collect();
+        corp.hq_station_id = Some(STATION_ID);
+        corp.set_division_balance(1, IskCents::from_isk(100_000_000));
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(CORP_ID, corp);
+
+        let mut corp_lp = HashMap::new();
+        corp_lp.insert(CALDARI_NAVY_CORP, 20_000);
+        eve_server::services::lp_store::save_corp_lp_balances(snap, CORP_ID, &corp_lp);
+
+        snap.items
+            .retain(|_, it| !(it.type_id == IRON_CHARGE_S_TYPE_ID && (it.owner_id == CHAR_ID || it.owner_id == CORP_ID)));
+        // Two personal stacks so offer 3565 (5,000 required) deletes stack 1 and decrements stack 2.
+        snap.items.insert(
+            995_100_001,
+            eve_db::InventoryItemRecord {
+                item_id: 995_100_001,
+                type_id: IRON_CHARGE_S_TYPE_ID,
+                owner_id: CHAR_ID,
+                location_id: STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 3_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            995_100_002,
+            eve_db::InventoryItemRecord {
+                item_id: 995_100_002,
+                type_id: IRON_CHARGE_S_TYPE_ID,
+                owner_id: CHAR_ID,
+                location_id: STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 4_500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            996_100_001,
+            eve_db::InventoryItemRecord {
+                item_id: 996_100_001,
+                type_id: IRON_CHARGE_S_TYPE_ID,
+                owner_id: CORP_ID,
+                location_id: STATION_ID,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(CHAR_ID);
+
+    // Failed offer must emit zero item/wallet/LP notifications.
+    let err_lp = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(OFFER_3415), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_lp.code, "InsufficientLoyaltyPoints");
+    assert!(
+        ctx.drain_notifications_for_char(CHAR_ID).is_empty(),
+        "Failed LP offer purchase must emit zero notifications"
+    );
+
+    // 1. Personal purchase without trade-in items: OnItemChange (create) + OnAccountChange + OnLPChange
+    let res_char_simple = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(OFFER_3414), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCharacter 3414 1x");
+    let delivered_3414 = k_i64(&res_char_simple, "deliveredItemID").expect("deliveredItemID");
+    let n1 = ctx.drain_notifications_for_char(CHAR_ID);
+    assert!(
+        n1.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.id_type == "charid"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(delivered_3414)
+                && n.args.first().and_then(|a| a.dbrow_get("typeID")).and_then(|v| v.as_i64()) == Some(REWARD_3414_TYPE_ID as i64)
+                && n.args.first().and_then(|a| a.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(STATION_ID)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(1)
+                && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(3), PyRep::Integer(0))))
+        }),
+        "TakeOfferForCharacter must emit OnItemChange for granted item {delivered_3414}: {n1:?}"
+    );
+    assert!(
+        n1.iter().any(|n| {
+            n.event == "OnAccountChange"
+                && n.id_type == "charid"
+                && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+                && n.args.get(1).and_then(|a| a.as_i64()) == Some(CHAR_ID)
+                && n.args.get(2).and_then(|a| a.as_f64()) == Some(44_750_000.0)
+        }),
+        "TakeOfferForCharacter must emit OnAccountChange for buyer wallet: {n1:?}"
+    );
+    assert!(
+        n1.iter().any(|n| {
+            n.event == "OnLPChange"
+                && n.args.first().and_then(|a| a.as_str()) == Some("take_offer")
+                && n.args.get(1).and_then(|a| a.as_i64()) == Some(CALDARI_NAVY_CORP)
+        }),
+        "TakeOfferForCharacter must emit OnLPChange: {n1:?}"
+    );
+
+    // 2. Personal purchase with trade-in items: deleted stack tombstone + decremented stack + granted item + wallet + LP
+    let res_char_trade = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(OFFER_3565), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCharacter 3565 1x");
+    let delivered_3565 = k_i64(&res_char_trade, "deliveredItemID").expect("deliveredItemID");
+    let n2 = ctx.drain_notifications_for_char(CHAR_ID);
+    assert!(
+        n2.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(995_100_001)
+                && n.args.first().and_then(|a| a.dbrow_get("locationID")).and_then(|v| v.as_i64()) == Some(6)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(0)
+                && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(9), PyRep::Integer(3_000))))
+        }),
+        "Fully consumed trade-in stack must emit tombstone OnItemChange: {n2:?}"
+    );
+    assert!(
+        n2.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(995_100_002)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(2_500)
+                && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(9), PyRep::Integer(4_500))))
+        }),
+        "Partially consumed trade-in stack must emit quantity delta OnItemChange: {n2:?}"
+    );
+    assert!(
+        n2.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(delivered_3565)
+                && n.args.first().and_then(|a| a.dbrow_get("typeID")).and_then(|v| v.as_i64()) == Some(REWARD_3565_TYPE_ID as i64)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(5_000)
+        }),
+        "Granted trade-in reward must emit OnItemChange: {n2:?}"
+    );
+    assert!(
+        n2.iter().any(|n| {
+            n.event == "OnAccountChange"
+                && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+                && n.args.get(1).and_then(|a| a.as_i64()) == Some(CHAR_ID)
+                && n.args.get(2).and_then(|a| a.as_f64()) == Some(42_350_000.0)
+        }),
+        "Trade-in LP purchase must emit OnAccountChange: {n2:?}"
+    );
+    assert!(n2.iter().any(|n| n.event == "OnLPChange"));
+
+    // 3. Corporate purchase: corp trade-in OnItemChange + CorpDeliveries OnItemChange + corp OnAccountChange + OnCorpLPChange
+    let res_corp = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(OFFER_3565), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCorporation 3565 1x");
+    let corp_delivered_id = k_i64(&res_corp, "deliveredItemID").expect("deliveredItemID");
+    let n3 = ctx.drain_notifications_for_char(CHAR_ID);
+    assert!(
+        n3.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.id_type == "corpid"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(996_100_001)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(5_000)
+                && matches!(n.args.get(1), Some(PyRep::Dict(d)) if d.contains(&(PyRep::Integer(9), PyRep::Integer(10_000))))
+        }),
+        "Corp trade-in stack must emit corpid OnItemChange: {n3:?}"
+    );
+    assert!(
+        n3.iter().any(|n| {
+            n.event == "OnItemChange"
+                && n.id_type == "corpid"
+                && n.args.first().and_then(|a| a.dbrow_get("itemID")).and_then(|v| v.as_i64()) == Some(corp_delivered_id)
+                && n.args.first().and_then(|a| a.dbrow_get("ownerID")).and_then(|v| v.as_i64()) == Some(CORP_ID)
+                && n.args.first().and_then(|a| a.dbrow_get("flagID")).and_then(|v| v.as_i64()) == Some(InventoryFlag::CorpDeliveries as i64)
+                && n.args.first().and_then(|a| a.dbrow_get("quantity")).and_then(|v| v.as_i64()) == Some(5_000)
+        }),
+        "Corp LP delivery must emit CorpDeliveries OnItemChange: {n3:?}"
+    );
+    assert!(
+        n3.iter().any(|n| {
+            n.event == "OnAccountChange"
+                && n.id_type == "corpid"
+                && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+                && n.args.get(1).and_then(|a| a.as_i64()) == Some(CORP_ID)
+                && n.args.get(2).and_then(|a| a.as_f64()) == Some(97_600_000.0)
+        }),
+        "Corp LP purchase must emit corp OnAccountChange: {n3:?}"
+    );
+    assert!(
+        n3.iter().any(|n| {
+            n.event == "OnCorpLPChange"
+                && n.id_type == "corpid"
+                && n.args.first().and_then(|a| a.as_str()) == Some("take_offer")
+                && n.args.get(1).and_then(|a| a.as_i64()) == Some(CALDARI_NAVY_CORP)
+        }),
+        "Corp LP purchase must emit OnCorpLPChange: {n3:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_lp_store_mgr_take_offer_for_corporation() {
     // parity: rpc:LPStoreMgr.TakeOfferForCorporation
     eve_testkit::attest(&["rpc:LPStoreMgr.TakeOfferForCorporation"]);
