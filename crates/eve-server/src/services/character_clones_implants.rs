@@ -1586,13 +1586,73 @@ fn parse_py_bool_flag(rep: &PyRep) -> Option<bool> {
     rep.as_bool().or_else(|| rep.as_i64().map(|v| v != 0))
 }
 
+fn resolve_list_stations_location(
+    snap: &eve_db::WorldStateSnapshot,
+    is_corp: bool,
+    corp_id: i64,
+    raw_loc: i64,
+) -> i64 {
+    if !is_corp {
+        return raw_loc;
+    }
+    if let Some(parent) = snap
+        .items
+        .get(&raw_loc)
+        .filter(|p| p.type_id == 27 && p.owner_id == corp_id)
+    {
+        return parent.location_id;
+    }
+    if let Some(offices) = snap.corp_governance.get(&corp_id).map(|g| &g.offices) {
+        for (&k, &v) in offices {
+            if v == raw_loc {
+                return k;
+            }
+            if k == raw_loc
+                && ((60_000_000..=69_999_999).contains(&v)
+                    || snap.structures.contains_key(&v))
+            {
+                return v;
+            }
+        }
+    }
+    raw_loc
+}
+
+fn corp_item_visible_to_role(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    loc_id: i64,
+    flag: InventoryFlag,
+    full_corp_roles: u64,
+    now_unix: u64,
+) -> bool {
+    let (is_ceo_loc, loc_role) =
+        snap.effective_corp_roles_at(corp_id, char_id, Some(loc_id), 0, now_unix);
+    if is_ceo_loc || loc_role == u64::MAX || (loc_role & full_corp_roles) != 0 {
+        return true;
+    }
+    let div_role = match flag {
+        InventoryFlag::CorpSAG1 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0],
+        InventoryFlag::CorpSAG2 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1],
+        InventoryFlag::CorpSAG3 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[2],
+        InventoryFlag::CorpSAG4 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[3],
+        InventoryFlag::CorpSAG5 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[4],
+        InventoryFlag::CorpSAG6 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[5],
+        InventoryFlag::CorpSAG7 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[6],
+        InventoryFlag::Deliveries => eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY,
+        _ => return false,
+    };
+    eve_db::corp_roles::has_role(loc_role, div_role)
+}
+
 /// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr` (#1369).
 ///
 /// Matches V24 `assetsWindow.py:1131-1135` and `invbroker.ListStations` by returning
-/// `["stationID", "solarSystemID", "itemCount", "typeID"]` for both NPC stations and Upwell
-/// structures while scoping ownership strictly to `char_id` (or the caller's session
-/// corporation when `is_corp` is set).
-fn handle_list_stations(
+/// `["stationID", "solarSystemID", "itemCount", "typeID"]` for both NPC stations and in-space
+/// Upwell structures while scoping ownership strictly to `char_id` (or the caller's authorized
+/// player corporation when `is_corp` is set, resolving rented offices and enforcing corp RBAC).
+pub(crate) fn handle_list_stations(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1608,60 +1668,135 @@ fn handle_list_stations(
         .get_raw_any(1, &["isCorp", "isCorporation", "is_corp"])
         .and_then(parse_py_bool_flag)
         .unwrap_or(false);
-    let target_owner_id = if is_corp {
-        session.corporation_id.filter(|&cid| cid > 0)
+    let owner_id = if is_corp {
+        session
+            .corporation_id
+            .filter(|&cid| cid > 0)
+            .ok_or_else(|| BridgeRpcError {
+                code: "CorporationNotFound".into(),
+                message: "No corporation in active session".into(),
+                client_error: None,
+            })?
     } else {
-        Some(char_id)
+        char_id
     };
-    let rows = match target_owner_id {
-        None => Vec::new(),
-        Some(owner_id) => ctx.db.with_snapshot(|snap| {
-            let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
-                std::collections::BTreeMap::new();
-            for item in snap.items.values() {
-                if item.owner_id != owner_id {
-                    continue;
-                }
-                if blueprint_only
-                    && !ctx
-                        .sde
-                        .types
-                        .get(&item.type_id)
-                        .is_some_and(|t| t.category_id == 9)
+    let now_unix = ctx.now_unix();
+    let full_corp_roles = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_TRADER
+        | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let all_hangar_query_roles = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY
+        .iter()
+        .copied()
+        .fold(0u64, |acc, r| acc | r);
+    let any_asset_query_roles =
+        full_corp_roles | all_hangar_query_roles | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY;
+
+    let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
+        let has_full_global_corp_access = if is_corp {
+            if !snap.corporations.contains_key(&owner_id) {
+                return Err(BridgeRpcError {
+                    code: "CorporationNotFound".into(),
+                    message: format!("Corporation {owner_id} not found"),
+                    client_error: None,
+                });
+            }
+            let (is_ceo, global_role) =
+                snap.effective_corp_roles_at(owner_id, char_id, None, 0, now_unix);
+            let has_scoped_query_role = snap
+                .corp_role_assignments
+                .get(&(owner_id, char_id))
+                .is_some_and(|ra| {
+                    ((ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other)
+                        & any_asset_query_roles)
+                        != 0
+                });
+            if !is_ceo
+                && global_role != u64::MAX
+                && (global_role & any_asset_query_roles) == 0
+                && !has_scoped_query_role
+            {
+                return Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Viewing corporation asset stations requires Director, Accountant, Trader, Station Manager, or Hangar Query role".into(),
+                    client_error: None,
+                });
+            }
+            is_ceo || global_role == u64::MAX || (global_role & full_corp_roles) != 0
+        } else {
+            false
+        };
+
+        let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
+            std::collections::BTreeMap::new();
+        for item in snap.items.values() {
+            if item.owner_id != owner_id || item.quantity <= 0 || item.type_id == 27 {
+                continue;
+            }
+            if eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
+                || item.flag == InventoryFlag::StructureFuel
+            {
+                continue;
+            }
+            if blueprint_only
+                && !ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .is_some_and(|t| t.category_id == 9)
+            {
+                continue;
+            }
+            let loc_id = resolve_list_stations_location(snap, is_corp, owner_id, item.location_id);
+            let st_info = if (60_000_000..=69_999_999).contains(&loc_id) {
+                ctx.sde
+                    .stations
+                    .get(&loc_id)
+                    .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
+            } else {
+                snap.structures
+                    .get(&loc_id)
+                    .filter(|st| {
+                        crate::services::station_structure::structure_lifecycle::is_in_space_structure_state(
+                            &st.state,
+                        )
+                    })
+                    .map(|st| (i64::from(st.solar_system_id), i64::from(st.type_id)))
+            };
+            if let Some((sys_id, st_type_id)) = st_info {
+                if is_corp
+                    && !has_full_global_corp_access
+                    && !corp_item_visible_to_role(
+                        snap,
+                        owner_id,
+                        char_id,
+                        loc_id,
+                        item.flag,
+                        full_corp_roles,
+                        now_unix,
+                    )
                 {
                     continue;
                 }
-                let loc_id = item.location_id;
-                let st_info = if (60_000_000..=69_999_999).contains(&loc_id) {
-                    ctx.sde
-                        .stations
-                        .get(&loc_id)
-                        .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
-                } else {
-                    snap.structures
-                        .get(&loc_id)
-                        .map(|st| (i64::from(st.solar_system_id), i64::from(st.type_id)))
-                };
-                if let Some((sys_id, st_type_id)) = st_info {
-                    let entry = counts_by_station
-                        .entry(loc_id)
-                        .or_insert((sys_id, 0, st_type_id));
-                    entry.1 += 1;
-                }
+                let entry = counts_by_station
+                    .entry(loc_id)
+                    .or_insert((sys_id, 0, st_type_id));
+                entry.1 += 1;
             }
-            counts_by_station
-                .into_iter()
-                .map(|(station_id, (solar_system_id, item_count, st_type_id))| {
-                    vec![
-                        PyRep::Integer(station_id),
-                        PyRep::Integer(solar_system_id),
-                        PyRep::Integer(item_count),
-                        PyRep::Integer(st_type_id),
-                    ]
-                })
-                .collect()
-        }),
-    };
+        }
+        Ok(counts_by_station
+            .into_iter()
+            .map(|(station_id, (solar_system_id, item_count, st_type_id))| {
+                vec![
+                    PyRep::Integer(station_id),
+                    PyRep::Integer(solar_system_id),
+                    PyRep::Integer(item_count),
+                    PyRep::Integer(st_type_id),
+                ]
+            })
+            .collect())
+    })?;
     Ok(PyRep::rowset(
         vec!["stationID", "solarSystemID", "itemCount", "typeID"],
         rows,
