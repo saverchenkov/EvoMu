@@ -523,7 +523,7 @@ fn public_gateway_rpc_subscribe_poll_publish_and_send_request_edges() {
     let bad_req_rep = router
         .dispatch_public_gateway_rpc(
             &auth,
-            "CallQuasar",
+            "SendRequest",
             &[PyRep::Bytes(vec![0xFF, 0xFF, 0xFF])],
             &empty_kw,
             now,
@@ -560,4 +560,42 @@ fn public_gateway_rpc_subscribe_poll_publish_and_send_request_edges() {
         kv_field(&ok_rep, "status_code"),
         Some(PyRep::Integer(_))
     ));
+}
+
+#[test]
+fn dispatch_public_gateway_rpc_rejects_removed_call_quasar_alias() {
+    let router = new_router();
+    let now = 1_700_000_600;
+    let empty_kw = HashMap::new();
+
+    let unauth = SessionState::new(60);
+    let mut auth = SessionState::new(61);
+    auth.user_id = Some(1002);
+    auth.character_id = Some(90_000_002);
+
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: now as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: vec![0x22; 16],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
+            value: GoogleEmpty.encode_proto(),
+        }),
+        external_origin: "client".into(),
+        ..Default::default()
+    };
+    let raw_req = req.encode_proto();
+    let mut req_kw = HashMap::new();
+    req_kw.insert("request".into(), PyRep::Buffer(raw_req.clone()));
+
+    for sess in [&auth, &unauth] {
+        assert!(router
+            .dispatch_public_gateway_rpc(sess, "CallQuasar", &[PyRep::Bytes(raw_req.clone())], &empty_kw, now)
+            .is_none());
+        assert!(router
+            .dispatch_public_gateway_rpc(sess, "CallQuasar", &[], &req_kw, now)
+            .is_none());
+    }
 }

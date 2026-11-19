@@ -319,7 +319,7 @@ fn hijack_arg_parsing_and_all_rpc_method_aliases_and_error_paths() {
         .dispatch_public_gateway_rpc(&sess, "PublishEvent", &[PyRep::Integer(1)], &kwargs, now)
         .is_none());
 
-    // CallQuasar / Send with kwargs["request"] and bytes idempotency_key, plus missing request -> None
+    // SendRequest / Send with kwargs["request"] and bytes idempotency_key, plus missing request -> None
     let req_bytes = EvePublicRequest {
         correlation_uuid: vec![3; 16],
         payload: Some(GoogleEmpty.to_any()),
@@ -331,7 +331,7 @@ fn hijack_arg_parsing_and_all_rpc_method_aliases_and_error_paths() {
         ("request".to_string(), PyRep::Buffer(req_bytes)),
         ("idempotency_key".to_string(), PyRep::Bytes(vec![1, 2, 3, 4])),
     ]);
-    for m in ["CallQuasar", "Send"] {
+    for m in ["SendRequest", "Send"] {
         assert!(router
             .dispatch_public_gateway_rpc(&sess, m, &[], &call_kw, now)
             .unwrap()
