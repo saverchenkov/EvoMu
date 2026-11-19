@@ -362,7 +362,7 @@ impl_decomposed_domain_struct!(
 
 impl_decomposed_domain_struct!(
     PersistedWarState,
-    maps: [wars, mutual_invites, blocked_mutual_invites],
+    maps: [wars, mutual_invites, blocked_mutual_invites, ally_expires_unix],
     sorted_set_maps: [],
     sets: [],
     scalars: [negotiations, next_negotiation_id, peace_treaties],

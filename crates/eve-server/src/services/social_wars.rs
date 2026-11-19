@@ -20,10 +20,11 @@ use std::collections::BTreeMap;
 #[path = "social_wars_helpers.rs"]
 pub(crate) mod social_wars_helpers;
 use social_wars_helpers::{
-    already_at_war, credit_corp, debit_corp, emit_mutual_wars_updated, emit_war_changed, err,
-    is_valid_war_hq, is_war_participant_corp, neg_rows_for_caller, resolve_war_stat_id,
-    same_alliance, sync_wars, war_crowset, war_eligible, war_row, NEG_COLUMNS, PEACE_TREATY_SECS,
-    WAR_COLUMNS, WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
+    already_at_war, credit_corp, debit_corp, emit_mutual_wars_updated, emit_war_changed,
+    entity_matches_war_owner, err, is_ally_neg_active_at, is_valid_war_hq, is_war_participant_corp,
+    neg_rows_for_caller, resolve_entity_alliance_id, resolve_war_stat_id, same_alliance, sync_wars,
+    war_crowset, war_eligible, war_row, NEG_COLUMNS, PEACE_TREATY_SECS, WAR_COLUMNS,
+    WAR_DECLARATION_FEE_ISK, WAR_TIMER_SECS,
 };
 
 struct WarKill {
@@ -54,19 +55,22 @@ struct WarKillsSummary {
 fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64) -> Option<WarKillsSummary> {
     let w = snap.wars.get(&war_id)?;
     let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
+    let now = ctx.now_unix();
     let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
-    let allies: Vec<(i64, u64)> = snap
+    let accepted_allies: Vec<&eve_db::PersistedWarNegotiation> = snap
         .war_state
         .negotiations
         .iter()
         .filter(|n| n.war_id == war_id && n.kind == NegKind::Ally && n.status == "Accepted")
-        .map(|n| (n.from_corp, n.effective_unix.unwrap_or(0)))
         .collect();
-    let is_def_side = |cid: i64, ts: u64| {
-        cid == def
-            || allies
-                .iter()
-                .any(|&(ally_cid, eff)| ally_cid == cid && (ts == 0 || ts >= eff))
+    let is_agg_side = |cid: i64, all: Option<i64>| entity_matches_war_owner(snap, cid, all, agg);
+    let is_def_side = |cid: i64, all: Option<i64>, ts: u64| {
+        let check_at = if ts == 0 { now } else { ts };
+        entity_matches_war_owner(snap, cid, all, def)
+            || accepted_allies.iter().any(|n| {
+                is_ally_neg_active_at(snap, n, check_at)
+                    && entity_matches_war_owner(snap, cid, all, n.from_corp)
+            })
     };
     let corp_of = |cid: i64, explicit: i64| {
         if explicit > 0 { explicit } else { snap.characters.get(&cid).map(|c| c.corporation_id).unwrap_or(0) }
@@ -85,11 +89,23 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
             }
             let a = corp_of(km.attacker_character_id, km.attacker_corp_id);
             let v = corp_of(km.victim_character_id, km.victim_corp_id);
-            ((a == agg && is_def_side(v, km.killed_unix)) || (is_def_side(a, km.killed_unix) && v == agg)).then(|| {
-                let att_corp = if a == agg { agg } else { def };
-                let vic_corp = if v == agg { agg } else { def };
-                let att_all = snap.corporations.get(&att_corp).and_then(|c| c.alliance_id);
-                let vic_all = snap.corporations.get(&vic_corp).and_then(|c| c.alliance_id);
+            let a_all = km
+                .attacker_alliance_id
+                .filter(|&id| id > 0)
+                .or_else(|| resolve_entity_alliance_id(snap, a));
+            let v_all = km
+                .victim_alliance_id
+                .filter(|&id| id > 0)
+                .or_else(|| resolve_entity_alliance_id(snap, v));
+            let agg_att = is_agg_side(a, a_all);
+            let agg_vic = is_agg_side(v, v_all);
+            let def_att = is_def_side(a, a_all, km.killed_unix);
+            let def_vic = is_def_side(v, v_all, km.killed_unix);
+            ((agg_att && !agg_vic && def_vic) || (def_att && !def_vic && agg_vic)).then(|| {
+                let att_corp = if agg_att { agg } else { def };
+                let vic_corp = if agg_vic { agg } else { def };
+                let att_all = resolve_entity_alliance_id(snap, att_corp);
+                let vic_all = resolve_entity_alliance_id(snap, vic_corp);
                 WarKill {
                     kill_id: km.kill_id,
                     attacker_char: km.attacker_character_id,
@@ -108,7 +124,11 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
         })
         .collect();
     kills.sort_by_key(|k| k.kill_id);
-    let ally_ids = allies.into_iter().map(|(cid, _)| cid).collect();
+    let ally_ids = accepted_allies
+        .into_iter()
+        .filter(|n| is_ally_neg_active_at(snap, n, now))
+        .map(|n| n.from_corp)
+        .collect();
     Some(WarKillsSummary {
         aggressor_corp_id: agg,
         defender_corp_id: def,
@@ -270,11 +290,7 @@ fn resolve_gm_ally_record(
             corporation_id: Some(ally_id),
             alliance_id: None,
         })
-    } else if snap
-        .corporations
-        .values()
-        .any(|c| c.alliance_id == Some(ally_id))
-    {
+    } else if resolve_entity_alliance_id(snap, ally_id) == Some(ally_id) {
         Ok(eve_db::snapshot_ext::WarAllyRecord {
             corporation_id: None,
             alliance_id: Some(ally_id),
@@ -349,6 +365,7 @@ fn handle_war_registry_gm_rpc(
                         effective_unix: Some(effective),
                     });
                 }
+                snap.war_state.ally_expires_unix.remove(&(war_id, ally_id));
                 let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
                 if !lm.allies.iter().any(|a| a == &ally_rec) {
                     lm.allies.push(ally_rec);
@@ -394,6 +411,14 @@ fn handle_war_registry_gm_rpc(
                             status: "Accepted".into(),
                             effective_unix: Some(now),
                         });
+                    }
+                    if snap
+                        .war_state
+                        .ally_expires_unix
+                        .get(&(war_id, aid))
+                        .is_some_and(|&exp| exp <= now)
+                    {
+                        snap.war_state.ally_expires_unix.remove(&(war_id, aid));
                     }
                     let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
                     if !lm.allies.iter().any(|a| a == &ally_rec) {
@@ -468,6 +493,7 @@ fn handle_war_registry_gm_rpc(
                     if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
                         lm.allies.retain(|a| a.corporation_id != Some(aid) && a.alliance_id != Some(aid));
                     }
+                    snap.war_state.ally_expires_unix.remove(&(war_id, aid));
                     Ok(vec![("allyID", PyRep::Integer(aid), PyRep::None)])
                 } else {
                     for neg in &mut snap.war_state.negotiations {
@@ -484,6 +510,7 @@ fn handle_war_registry_gm_rpc(
                     } else {
                         snap.war_lifecycle_meta.entry(war_id).or_default().open_for_allies = Some(false);
                     }
+                    snap.war_state.ally_expires_unix.retain(|&(wid, _), _| wid != war_id);
                     let meta = snap.war_state.wars.entry(war_id).or_default();
                     let prev_open = meta.open_for_allies;
                     meta.open_for_allies = false;
@@ -500,23 +527,33 @@ fn handle_war_registry_gm_rpc(
                         "GMExtendAllyContract requires valid extension duration or timestamp",
                     ));
                 };
-                let Some(neg) = snap.war_state.negotiations.iter_mut().find(|n| {
+                let has_accepted_ally = snap.war_state.negotiations.iter().any(|n| {
                     n.war_id == war_id
                         && n.kind == NegKind::Ally
                         && n.from_corp == ally_id
                         && n.status == "Accepted"
-                }) else {
+                });
+                if !has_accepted_ally {
                     return Err(WarGmError::AllyNotFound.with_message(format!(
                         "Accepted ally {ally_id} not found in war {war_id}"
                     )));
-                };
+                }
                 const MAX_EXTEND_SECS: u64 = 365 * 86_400;
-                let updated = if ts_or_delta > 0 && ts_or_delta <= MAX_EXTEND_SECS {
-                    neg.effective_unix.unwrap_or(now).max(now) + ts_or_delta
+                let current_exp = snap
+                    .war_state
+                    .ally_expires_unix
+                    .get(&(war_id, ally_id))
+                    .copied();
+                let updated_exp = if ts_or_delta > 0 && ts_or_delta <= MAX_EXTEND_SECS {
+                    current_exp
+                        .map_or(now, |exp| exp.max(now))
+                        .saturating_add(ts_or_delta)
                 } else {
                     ts_or_delta
                 };
-                neg.effective_unix = Some(updated);
+                snap.war_state
+                    .ally_expires_unix
+                    .insert((war_id, ally_id), updated_exp);
                 Ok(vec![("allyID", PyRep::Integer(ally_id), PyRep::Integer(ally_id))])
             }
             "GMSetDeclareTime" => {
@@ -1271,6 +1308,7 @@ pub(super) fn handle_wars(
                 st.negotiations[idx].status = status.into();
                 if accepting {
                     st.negotiations[idx].effective_unix = Some(effective);
+                    st.ally_expires_unix.remove(&(n.war_id, n.from_corp));
                     for (i, other) in st.negotiations.iter_mut().enumerate() {
                         if i != idx
                             && other.war_id == n.war_id
@@ -1388,7 +1426,7 @@ pub(super) fn handle_wars(
                             PyRep::Integer(n.from_corp),
                             PyRep::Integer(start as i64),
                             PyRep::Real(n.isk.to_wire_f64()),
-                            PyRep::Bool(now >= start),
+                            PyRep::Bool(is_ally_neg_active_at(snap, n, now)),
                         ]
                     })
                     .collect()
@@ -1630,25 +1668,49 @@ pub(super) fn handle_wars(
             else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
-            let (mutual, open_for_allies, war_hq) = ctx.db.with_snapshot(|snap| {
+            let (mutual, open_for_allies, war_hq, ally_windows) = ctx.db.with_snapshot(|snap| {
                 let mutual = snap.wars.get(&war_id).is_some_and(|w| w.mutual);
                 let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
-                (mutual, meta.open_for_allies, meta.war_hq_id)
+                let windows: Vec<(i64, u64, u64)> = allies
+                    .iter()
+                    .map(|&aid| {
+                        let started = snap
+                            .war_state
+                            .negotiations
+                            .iter()
+                            .find(|n| {
+                                n.war_id == war_id
+                                    && n.kind == NegKind::Ally
+                                    && n.status == "Accepted"
+                                    && n.from_corp == aid
+                            })
+                            .and_then(|n| n.effective_unix)
+                            .unwrap_or(now);
+                        let finished = snap
+                            .war_state
+                            .ally_expires_unix
+                            .get(&(war_id, aid))
+                            .copied()
+                            .unwrap_or(started + WAR_TIMER_SECS);
+                        (aid, started, finished)
+                    })
+                    .collect();
+                (mutual, meta.open_for_allies, meta.war_hq_id, windows)
             });
             let (mut k_agg, mut k_def, mut isk_agg, mut isk_def) = (0i64, 0i64, 0.0f64, 0.0f64);
             for k in &kills {
                 if k.attacker_corp == agg_id { k_agg += 1; isk_agg += k.isk; } else { k_def += 1; isk_def += k.isk; }
             }
             let allies_dict = PyRep::Dict(
-                allies
+                ally_windows
                     .into_iter()
-                    .map(|aid| {
+                    .map(|(aid, started, finished)| {
                         (
                             PyRep::Integer(aid),
                             PyRep::keyval([
                                 ("allyID", PyRep::Integer(aid)),
-                                ("timeStarted", PyRep::Integer(now as i64)),
-                                ("timeFinished", PyRep::Integer((now + WAR_TIMER_SECS) as i64)),
+                                ("timeStarted", PyRep::Integer(started as i64)),
+                                ("timeFinished", PyRep::Integer(finished as i64)),
                             ]),
                         )
                     })
