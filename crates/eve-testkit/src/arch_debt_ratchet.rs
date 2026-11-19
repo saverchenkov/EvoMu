@@ -2,9 +2,11 @@
 //!
 //! Scans non-test `.rs` sources under `crates/eve-server/src/` (ignoring `#[cfg(test)]` items,
 //! comments, and—unless explicitly enabled per rule—string/char literals) for every tracked debt
-//! counter in `crates/eve-testkit/ratchets/arch_debt_ratchet.json`. Both total occurrence counts
-//! and distinct file counts are enforced with `exact: true` so debt can neither silently increase
-//! nor drop without tightening the JSON baseline in the same commit.
+//! counter in `crates/eve-testkit/ratchets/arch_debt_ratchet.json`. Non-zero rules act as upper
+//! bounds (`exact: false`) for both occurrence counts and distinct file counts so parallel tracks
+//! lowering debt do not break each other, while `zero_required: true` rules remain strictly pinned
+//! at `0` (`exact: true`). Rules configured with `exact: true` also fail if counts drop below
+//! their configured floor without tightening the JSON baseline in the same commit.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1160,9 +1162,23 @@ mod tests {
         assert_eq!(report.patterns["direct_member_roles_get"].occurrences, 0);
         assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].occurrences, 0);
         assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].files, 0);
+        for (name, rule) in &ratchet.patterns {
+            if rule.zero_required {
+                assert!(
+                    rule.exact && rule.max_occurrences == 0 && rule.max_files == 0,
+                    "zero_required rule '{name}' must remain pinned at 0 with exact=true: {rule:?}"
+                );
+            } else {
+                assert!(
+                    !rule.exact,
+                    "non-zero rule '{name}' must use upper-bound ceiling (exact=false): {rule:?}"
+                );
+            }
+        }
 
         // 2. Synthetic tempdir workspace verifies comment/cfg(test)/literal filtering, regression
-        //    blocking, exact-drop rejection (both occurrence and file count), and zero_required guard.
+        //    blocking, upper-bound drops (exact=false), exact-drop rejection (exact=true, both
+        //    occurrence and file count), and zero_required guard.
         let tmp = make_temp_dir("synth");
         let src = tmp.join("src");
         std::fs::create_dir_all(src.join("router")).expect("create router dir");
@@ -1225,13 +1241,13 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
         let mut rules = BTreeMap::new();
         rules.insert("master_wallet".into(), mk_rule(0, 0, true, true));
         rules.insert("direct_member_roles_get".into(), mk_rule(0, 0, true, true));
-        rules.insert("hardcoded_fallback_entity_ids".into(), mk_rule(1, 1, true, false));
-        rules.insert("positional_rpc_args_index".into(), mk_rule(1, 1, true, false));
-        rules.insert("slash_command_prefix_parse".into(), mk_rule(1, 1, true, false));
-        let mut grace_rule = mk_rule(1, 1, true, false);
+        rules.insert("hardcoded_fallback_entity_ids".into(), mk_rule(1, 1, false, false));
+        rules.insert("positional_rpc_args_index".into(), mk_rule(1, 1, false, false));
+        rules.insert("slash_command_prefix_parse".into(), mk_rule(1, 1, false, false));
+        let mut grace_rule = mk_rule(1, 1, false, false);
         grace_rule.path_include = Some("router/binding.rs".into());
         rules.insert("router_binding_grace_helpers".into(), grace_rule);
-        let mut bp_rule = mk_rule(0, 0, true, false);
+        let mut bp_rule = mk_rule(0, 0, false, false);
         bp_rule.path_exclude_substring = Some("system_actor".into());
         rules.insert("ballpark_locks_outside_system_actor".into(), bp_rule);
 
@@ -1254,10 +1270,21 @@ pub fn grace_bound_object_for_inflight_invbroker() {}
         assert!(err.contains("ballpark_locks_outside_system_actor"), "{err}");
         std::fs::remove_file(src.join("services/extra.rs")).expect("remove extra.rs");
 
-        // Exact drop check: lowering actual occurrences or file count without tightening JSON fails.
+        // Upper-bound drop check (exact=false): lowering occurrences and files passes without JSON edits.
         std::fs::write(src.join("router/binding.rs"), "pub fn clean() {}\n")
             .expect("clean binding.rs");
-        let drop_err = synth_ratchet.verify_dir(&src).unwrap_err();
+        synth_ratchet
+            .verify_dir(&src)
+            .expect("exact=false upper-bound rule must allow occurrence/file drops");
+
+        // Exact drop check (exact=true): lowering occurrences without tightening JSON fails.
+        let mut exact_ratchet = synth_ratchet.clone();
+        exact_ratchet
+            .patterns
+            .get_mut("router_binding_grace_helpers")
+            .expect("router_binding_grace_helpers rule")
+            .exact = true;
+        let drop_err = exact_ratchet.verify_dir(&src).unwrap_err();
         assert!(
             drop_err.contains("dropped below exact ratchet")
                 && drop_err.contains("router_binding_grace_helpers"),
@@ -1353,7 +1380,7 @@ pub fn member_base_roles() {}
             ArchDebtRule {
                 max_occurrences: 2,
                 max_files: 2,
-                exact: true,
+                exact: false,
                 zero_required: false,
                 owning_issue: Some(1197),
                 strip_literals: Some(false),
