@@ -8,9 +8,18 @@ use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use std::collections::HashMap;
 
+fn has_valid_classification_payload(rep: &PyRep) -> bool {
+    ops::extract_submission_polygons(rep).is_some()
+}
+
 #[test]
 fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
-    // 1. json_has_non_empty_classification_content & has_valid_classification_payload across all variants
+    // 1. has_valid_classification_payload across all PyRep variants requires >= 3 finite polygon vertices
+    let tri = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.1), PyRep::Real(0.2)]),
+        PyRep::Tuple(vec![PyRep::Real(0.4), PyRep::Real(0.2)]),
+        PyRep::Tuple(vec![PyRep::Real(0.2), PyRep::Real(0.5)]),
+    ]);
     assert!(!has_valid_classification_payload(&PyRep::None));
     assert!(!has_valid_classification_payload(&PyRep::Bool(false)));
     assert!(!has_valid_classification_payload(&PyRep::Bool(true)));
@@ -23,42 +32,65 @@ fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
     assert!(!has_valid_classification_payload(&PyRep::String("none".into())));
     assert!(!has_valid_classification_payload(&PyRep::String("{\"polygons\":[]}".into())));
     assert!(!has_valid_classification_payload(&PyRep::String("{\"gates\":[null,false]}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"polygons\":[[1,2]]}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("[1, 2]".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"other\":true}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"other\":42}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("plain_gate".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"polygons\":[[1,2]]}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"accurate\":true}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("[1, 2]".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"other\":true}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"other\":42}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("plain_gate".into())));
+    assert!(has_valid_classification_payload(&PyRep::String(
+        "{\"polygons\":[[[0.1,0.2],[0.4,0.2],[0.2,0.5]]]}".into()
+    )));
+    assert!(has_valid_classification_payload(&PyRep::String(
+        "[[[0.1,0.2],[0.4,0.2],[0.2,0.5]]]".into()
+    )));
     assert!(!has_valid_classification_payload(&PyRep::Bytes(vec![])));
-    assert!(has_valid_classification_payload(&PyRep::Bytes(vec![1])));
+    assert!(!has_valid_classification_payload(&PyRep::Bytes(vec![1])));
     assert!(!has_valid_classification_payload(&PyRep::Buffer(vec![])));
-    assert!(has_valid_classification_payload(&PyRep::Buffer(vec![2])));
+    assert!(!has_valid_classification_payload(&PyRep::Buffer(vec![2])));
     assert!(!has_valid_classification_payload(&PyRep::Dict(vec![])));
     assert!(!has_valid_classification_payload(&PyRep::Dict(vec![(
         PyRep::String("polygons".into()),
         PyRep::List(vec![]),
     )])));
-    assert!(has_valid_classification_payload(&PyRep::Dict(vec![(
+    assert!(!has_valid_classification_payload(&PyRep::Dict(vec![(
         PyRep::String("gates".into()),
         PyRep::Tuple(vec![PyRep::Integer(1)]),
+    )])));
+    assert!(has_valid_classification_payload(&PyRep::Dict(vec![(
+        PyRep::String("gates".into()),
+        PyRep::Tuple(vec![tri.clone()]),
     )])));
     assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::new())));
     assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
         "gates".into(),
         PyRep::Integer(1),
     )]))));
-    assert!(has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+    assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+        "accurate".into(),
+        PyRep::Bool(true),
+    )]))));
+    assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
         "score".into(),
         PyRep::Real(0.9),
     )]))));
-    assert!(has_valid_classification_payload(&PyRep::Object {
+    assert!(has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+        "polygons".into(),
+        PyRep::List(vec![tri.clone()]),
+    )]))));
+    assert!(!has_valid_classification_payload(&PyRep::Object {
         type_name: "cls".into(),
         args: Box::new(PyRep::List(vec![PyRep::Integer(1)])),
+    }));
+    assert!(has_valid_classification_payload(&PyRep::Object {
+        type_name: "cls".into(),
+        args: Box::new(PyRep::List(vec![tri])),
     }));
     assert!(!has_valid_classification_payload(&PyRep::Rowset {
         columns: vec!["id".into()],
         rows: vec![],
     }));
-    assert!(has_valid_classification_payload(&PyRep::Rowset {
+    assert!(!has_valid_classification_payload(&PyRep::Rowset {
         columns: vec!["id".into()],
         rows: vec![vec![PyRep::Integer(1)]],
     }));
@@ -256,24 +288,45 @@ fn project_discovery_tutorial_crates_url_classification_and_slash_edges() {
     .unwrap();
     assert!(fetched_8_corrupt.as_str().unwrap().contains("\"fetch_count\":2"));
 
-    // post_classification invalid task_id format & level-up notification branch
+    // post_classification invalid task_id format, <3 vertex rejection & level-up notification branch
     let sub_err = handle_project_discovery(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "submit",
-        &[PyRep::String("not_a_number".into()), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &[
+            PyRep::String("not_a_number".into()),
+            PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+        ],
         &kw,
     )
     .unwrap()
     .unwrap_err();
     assert!(sub_err.code.eq_ignore_ascii_case("invalidtaskid"), "got {}", sub_err.code);
+    let coord_free_err = handle_project_discovery(
+        &ctx,
+        &mut sess,
+        "ProjectDiscovery",
+        "submit",
+        &[PyRep::Integer(8), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        coord_free_err.code.eq_ignore_ascii_case("invalidclassification"),
+        "got {}",
+        coord_free_err.code
+    );
     let sub8 = handle_project_discovery(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "submit_classification",
-        &[PyRep::Integer(8), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &[
+            PyRep::Integer(8),
+            PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+        ],
         &kw,
     )
     .unwrap()
@@ -322,4 +375,107 @@ fn project_discovery_tutorial_crates_url_classification_and_slash_edges() {
         assert_eq!(persisted.analysis_kredits, 20);
         assert_eq!(persisted.rank, 9);
     });
+
+    // F-03 regressions:
+    // (a) get_data_from_url strips `control_solution` from control tasks (idx % 5 == 0)
+    //     and `crowd_consensus_polygons` from standard tasks;
+    // (b) a second pilot calling get_data_from_url before get_new_task does not overwrite
+    //     persisted `crowd_consensus_polygons` in store.tasks.
+    let f03_ctx = test_ctx();
+    let p1_cid = 90_888_001_i64;
+    let p2_cid = 90_888_002_i64;
+    let mut sess_p1 = auth_session(1, p1_cid, 98_888_001, 30_000_142);
+    let mut sess_p2 = auth_session(2, p2_cid, 98_888_002, 30_000_142);
+
+    // Advance Pilot 1 to task 1 (standard) and submit valid gate to persist crowd_consensus_polygons
+    let t1 = handle_project_discovery(&f03_ctx, &mut sess_p1, "ProjectDiscovery", "get_new_task", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let t1_url = t1.dict_get("url").and_then(|v| v.as_str()).unwrap().to_string();
+    let [c1x, c1y] = ops::sample_target_center_norm(1);
+    let box1 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(c1x - 0.12), PyRep::Real(c1y - 0.12)]),
+        PyRep::Tuple(vec![PyRep::Real(c1x + 0.12), PyRep::Real(c1y - 0.12)]),
+        PyRep::Tuple(vec![PyRep::Real(c1x + 0.12), PyRep::Real(c1y + 0.12)]),
+        PyRep::Tuple(vec![PyRep::Real(c1x - 0.12), PyRep::Real(c1y + 0.12)]),
+    ])]);
+    handle_project_discovery(
+        &f03_ctx,
+        &mut sess_p1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::Integer(1), box1],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+
+    // Pilot 2 has current_task_index == 1 (without get_new_task char_task entry yet) and calls
+    // get_data_from_url: must succeed without clobbering store.tasks[1] crowd_consensus_polygons
+    // and must strip it from the returned JSON.
+    super::with_player_state(&f03_ctx, p2_cid, |st, _| {
+        st.current_task_index = 1;
+    });
+    let p2_url1 = handle_project_discovery(
+        &f03_ctx,
+        &mut sess_p2,
+        "ProjectDiscovery",
+        "get_data_from_url",
+        &[PyRep::String(t1_url)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let p2_json1: serde_json::Value = serde_json::from_str(p2_url1.as_str().unwrap()).unwrap();
+    assert!(p2_json1.get("crowd_consensus_polygons").is_none());
+    f03_ctx.db.with_snapshot(|snap| {
+        let store = load_discovery_store(snap);
+        let persisted_pl = store.tasks.get(&1).and_then(|t| t.payload_json.as_deref()).unwrap();
+        let val: serde_json::Value = serde_json::from_str(persisted_pl).unwrap();
+        assert!(
+            val.get("crowd_consensus_polygons").is_some(),
+            "get_data_from_url must not clobber crowd_consensus_polygons"
+        );
+    });
+    let miss_box = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.01), PyRep::Real(0.01)]),
+        PyRep::Tuple(vec![PyRep::Real(0.09), PyRep::Real(0.01)]),
+        PyRep::Tuple(vec![PyRep::Real(0.09), PyRep::Real(0.09)]),
+        PyRep::Tuple(vec![PyRep::Real(0.01), PyRep::Real(0.09)]),
+    ])]);
+    let p2_sub = handle_project_discovery(
+        &f03_ctx,
+        &mut sess_p2,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::Integer(1), miss_box],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(p2_sub.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
+
+    // Advance Pilot 1 to control task 5 and verify get_data_from_url strips `control_solution`
+    for _ in 2..=5 {
+        handle_project_discovery(&f03_ctx, &mut sess_p1, "ProjectDiscovery", "get_new_task", &[], &kw)
+            .unwrap()
+            .unwrap();
+    }
+    let ctrl_url_res = handle_project_discovery(
+        &f03_ctx,
+        &mut sess_p1,
+        "ProjectDiscovery",
+        "get_data_from_url",
+        &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/task_5".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let ctrl_json: serde_json::Value =
+        serde_json::from_str(ctrl_url_res.as_str().unwrap()).unwrap();
+    assert_eq!(ctrl_json["task_type"], "control");
+    assert!(
+        ctrl_json.get("control_solution").is_none(),
+        "get_data_from_url must strip control_solution"
+    );
 }

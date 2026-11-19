@@ -282,7 +282,12 @@ async fn test_analysis_kredits_and_expedition_dungeon_instance_notifications_liv
     assert_eq!(t1.dict_get("task_id").and_then(PyRep::as_str), Some("task_1"));
     rpc(&ctx, &mut sess_a, "ProjectDiscovery", "post_classification", &[
         PyRep::String("task_1".into()),
-        PyRep::List(vec![PyRep::Real(1.0)]),
+        PyRep::List(vec![PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+        ])]),
     ]).await.expect("post_classification");
     let ak_ev = ctx.drain_notifications_for_char(PILOT_A).into_iter().find(|n| n.event == "OnAnalysisKreditsChange").expect("OnAnalysisKreditsChange");
     assert!(ak_ev.args.is_empty());

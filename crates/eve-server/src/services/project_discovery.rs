@@ -40,18 +40,13 @@ fn insert_bounded_char_task(
         .iter()
         .filter_map(|(k, v)| k.starts_with(&prefix).then_some((v.task_number, k.clone())))
         .collect();
-    if char_keys.len() >= 64 {
+    if char_keys.len() >= ops::MAX_CACHED_TASKS {
         if let Some((_, oldest_key)) = char_keys.into_iter().min_by_key(|(n, _)| *n) {
             store.char_tasks.remove(&oldest_key);
         }
     }
-    if !store.tasks.contains_key(&task_idx) && store.tasks.len() >= 64 {
-        if let Some(&oldest_idx) = store.tasks.keys().min() {
-            store.tasks.remove(&oldest_idx);
-        }
-    }
     store.char_tasks.insert(char_task_key(char_id, task_idx), task.clone());
-    store.tasks.insert(task_idx, task);
+    ops::insert_bounded_store_task_if_absent(store, task_idx, task);
 }
 
 /// Server-side Analysis Kredits (AK) debit helper for AK-priced rewards and store offers.
@@ -184,106 +179,21 @@ pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank:
 
 pub use eve_db::PlayerProjectState;
 
-fn json_has_non_empty_classification_content(val: &serde_json::Value) -> bool {
-    match val {
-        serde_json::Value::Null | serde_json::Value::Bool(false) => false,
-        serde_json::Value::Bool(true) | serde_json::Value::Number(_) => true,
-        serde_json::Value::String(s) => !s.trim().is_empty(),
-        serde_json::Value::Array(arr) => {
-            !arr.is_empty() && arr.iter().any(json_has_non_empty_classification_content)
-        }
-        serde_json::Value::Object(map) => {
-            if map.is_empty() {
-                return false;
-            }
-            for key in ["polygons", "gates"] {
-                if let Some(poly_val) = map.get(key) {
-                    return matches!(poly_val, serde_json::Value::Array(arr) if !arr.is_empty() && arr.iter().any(json_has_non_empty_classification_content));
-                }
-            }
-            map.values().any(json_has_non_empty_classification_content)
-        }
-    }
-}
-
-fn pyrep_has_non_empty_classification_content(rep: &PyRep, top_level: bool) -> bool {
-    match rep {
-        PyRep::None | PyRep::Bool(false) => false,
-        PyRep::Bool(true) | PyRep::Integer(_) | PyRep::Real(_) => !top_level,
-        PyRep::String(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty()
-                || trimmed == "[]"
-                || trimmed == "{}"
-                || trimmed.eq_ignore_ascii_case("null")
-                || trimmed.eq_ignore_ascii_case("none")
-            {
-                return false;
-            }
-            if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    return json_has_non_empty_classification_content(&json_val);
-                }
-            }
-            true
-        }
-        PyRep::Bytes(b) | PyRep::Buffer(b) => !b.is_empty(),
-        PyRep::List(items) | PyRep::Tuple(items) => {
-            !items.is_empty()
-                && items
-                    .iter()
-                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
-        }
-        PyRep::Dict(entries) => {
-            if entries.is_empty() {
-                return false;
-            }
-            for (k, v) in entries {
-                if matches!(k.as_str(), Some("polygons" | "gates")) {
-                    return match v {
-                        PyRep::List(items) | PyRep::Tuple(items) => {
-                            !items.is_empty()
-                                && items
-                                    .iter()
-                                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
-                        }
-                        _ => false,
-                    };
-                }
-            }
-            entries
-                .iter()
-                .any(|(_, v)| pyrep_has_non_empty_classification_content(v, false))
-        }
-        PyRep::KeyVal(entries) => {
-            if entries.is_empty() {
-                return false;
-            }
-            for (k, v) in entries {
-                if k == "polygons" || k == "gates" {
-                    return match v {
-                        PyRep::List(items) | PyRep::Tuple(items) => {
-                            !items.is_empty()
-                                && items
-                                    .iter()
-                                    .any(|item| pyrep_has_non_empty_classification_content(item, false))
-                        }
-                        _ => false,
-                    };
-                }
-            }
-            entries
-                .iter()
-                .any(|(_, v)| pyrep_has_non_empty_classification_content(v, false))
-        }
-        PyRep::Object { args, .. } => pyrep_has_non_empty_classification_content(args, top_level),
-        PyRep::Rowset { rows, .. } => !rows.is_empty(),
-        _ => false,
-    }
-}
-
-fn has_valid_classification_payload(rep: &PyRep) -> bool {
-    pyrep_has_non_empty_classification_content(rep, true)
+fn invalid_classification_error() -> BridgeRpcError {
+    BridgeRpcError::with_client_error(
+        "InvalidClassification",
+        "Classification payload requires at least one non-degenerate 2D polygon with >= 3 finite vertices",
+        eve_proto::ClientError::user_with_args(
+            eve_proto::UserErrorKey::CustomNotify,
+            [(
+                "notify",
+                eve_proto::UserErrorArg::Str(
+                    "Invalid classification: draw a valid 2D gate polygon with at least 3 points."
+                        .into(),
+                ),
+            )],
+        ),
+    )
 }
 
 /// Global config key (`machoNet.SetGlobalConfigValue`) controlling Project Discovery enablement.
@@ -679,14 +589,15 @@ pub fn handle_project_discovery(
 
         "post_classification" | "submit" | "submit_classification" => {
             if args.len() < 2 {
-                return Some(Err(BridgeRpcError::user_error("InvalidClassification")));
+                return Some(Err(invalid_classification_error()));
             }
             let task_arg = &args[0];
             let classification_arg = &args[1];
 
-            if !has_valid_classification_payload(classification_arg) {
-                return Some(Err(BridgeRpcError::user_error("InvalidClassification")));
-            }
+            let Some(parsed_polys) = ops::extract_submission_polygons(classification_arg) else {
+                return Some(Err(invalid_classification_error()));
+            };
+            let normalized_classification = ops::polygons_to_pyrep(&parsed_polys);
 
             let task_index = match task_arg {
                 PyRep::Integer(i) => Some(*i),
@@ -713,7 +624,7 @@ pub fn handle_project_discovery(
                     st,
                     char_id,
                     req_task_index,
-                    classification_arg,
+                    &normalized_classification,
                     now_unix,
                 )
             });
@@ -918,6 +829,8 @@ pub fn handle_project_discovery(
                         })
                     });
                     if let Some(obj) = val.as_object_mut() {
+                        obj.remove("crowd_consensus_polygons");
+                        obj.remove("control_solution");
                         obj.insert("fetch_count".into(), serde_json::json!(fetch_cnt));
                         obj.insert("url".into(), serde_json::json!(entry.url));
                         obj.insert("task_id".into(), serde_json::json!(entry.task_id));

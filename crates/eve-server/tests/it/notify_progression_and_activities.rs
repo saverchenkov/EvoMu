@@ -2579,7 +2579,15 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[task_id, PyRep::List(vec![PyRep::Integer(1)])],
+        &[
+            task_id,
+            PyRep::List(vec![PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+            ])]),
+        ],
     )
     .await
     .unwrap();

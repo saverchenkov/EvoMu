@@ -2186,7 +2186,10 @@ async fn test_agent_mail_calendar_petition_discovery_season_map_report_and_tourn
         &mut s1,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("not_a_task".into()), PyRep::Dict(vec![(PyRep::String("x".into()), PyRep::Integer(1))])],
+        &[
+            PyRep::String("not_a_task".into()),
+            PyRep::String("{\"polygons\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+        ],
     )
     .await
     .unwrap_err();

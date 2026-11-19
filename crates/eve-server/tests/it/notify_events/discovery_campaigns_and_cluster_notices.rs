@@ -129,7 +129,12 @@ async fn test_parity_notify_analysis_kredits_and_campaign_enrollment() {
         "post_classification",
         &[
             PyRep::String(task_id),
-            PyRep::List(vec![PyRep::Real(0.42), PyRep::Real(0.88)]),
+            PyRep::List(vec![PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+            ])]),
         ],
     )
     .await

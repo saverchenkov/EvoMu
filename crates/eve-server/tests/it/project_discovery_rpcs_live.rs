@@ -232,12 +232,18 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     assert_eq!(payload2["fetch_count"], 2);
 
     // 2. post_classification on accurate task_1
+    let box1 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+    ])]);
     let post1 = rpc(
         &ctx,
         &mut pilot,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.0)])],
+        &[PyRep::String("task_1".into()), box1.clone()],
     )
     .await
     .expect("post_classification 1");
@@ -256,12 +262,18 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     let _t2 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task 2");
+    let box2 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.25), PyRep::Real(0.15)]),
+        PyRep::Tuple(vec![PyRep::Real(0.49), PyRep::Real(0.15)]),
+        PyRep::Tuple(vec![PyRep::Real(0.49), PyRep::Real(0.39)]),
+        PyRep::Tuple(vec![PyRep::Real(0.25), PyRep::Real(0.39)]),
+    ])]);
     let post2 = rpc(
         &ctx,
         &mut pilot,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_2".into()), PyRep::List(vec![PyRep::Real(2.0)])],
+        &[PyRep::String("task_2".into()), box2],
     )
     .await
     .expect("post_classification 2");
@@ -273,12 +285,18 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     let _t3 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task 3");
+    let box3 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.48), PyRep::Real(0.56)]),
+        PyRep::Tuple(vec![PyRep::Real(0.72), PyRep::Real(0.56)]),
+        PyRep::Tuple(vec![PyRep::Real(0.72), PyRep::Real(0.80)]),
+        PyRep::Tuple(vec![PyRep::Real(0.48), PyRep::Real(0.80)]),
+    ])]);
     let post3 = rpc(
         &ctx,
         &mut pilot,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_3".into()), PyRep::List(vec![PyRep::Real(1.0)])],
+        &[PyRep::String("task_3".into()), box3],
     )
     .await
     .expect("post_classification 3");
@@ -299,4 +317,105 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
             .expect("get_remaining_bonus_samples after 3"),
         PyRep::Integer(7)
     );
+
+    // 6. Reject coordinate-free / <3-vertex / spoof-only payloads and grade control tasks strictly by 2D polygon IoU
+    ctx.advance_secs(5);
+    let _t4 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
+        .await
+        .expect("get_new_task 4");
+    for bad_payload in [
+        PyRep::List(vec![PyRep::Real(1.0)]),
+        PyRep::String("{\"accurate\":true,\"is_accurate\":true,\"consensus\":true}".into()),
+        PyRep::String("{\"gates\":[[[0.4,0.4],[0.6,0.6]]]}".into()),
+        PyRep::String("{\"accurate\":true,\"polygons\":[[[1.25,1.25],[1.45,1.25],[1.45,1.45],[1.25,1.45]]]}".into()),
+        PyRep::String("{\"polygons\":[[[25.6,25.6],[460.8,25.6],[460.8,460.8],[25.6,460.8]],[[0.0,0.0],[2359.296,0.0],[256.0,256.0]],[[5.12,163072.0],[10.24,163072.0],[10.24,163840.0],[5.12,163840.0]]]}".into()),
+    ] {
+        let err = rpc(
+            &ctx,
+            &mut pilot,
+            "ProjectDiscovery",
+            "post_classification",
+            &[PyRep::String("task_4".into()), bad_payload],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "InvalidClassification"); // rpc-lint: allow error code assertion
+    }
+    rpc(
+        &ctx,
+        &mut pilot,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_4".into()), box1.clone()],
+    )
+    .await
+    .expect("post_classification 4");
+
+    ctx.advance_secs(5);
+    let t5 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
+        .await
+        .expect("get_new_task 5 (control)");
+    let t5_url = t5.dict_get("url").and_then(|v| v.as_str()).unwrap().to_string();
+    let t5_payload_str = match rpc(
+        &ctx,
+        &mut pilot,
+        "ProjectDiscovery",
+        "get_data_from_url",
+        &[PyRep::String(t5_url)],
+    )
+    .await
+    .expect("get_data_from_url 5")
+    {
+        PyRep::String(s) => s,
+        other => panic!("expected String payload, got {other:?}"),
+    };
+    let t5_payload: serde_json::Value = serde_json::from_str(&t5_payload_str).expect("valid JSON");
+    assert_eq!(t5_payload["task_type"], "control");
+    assert!(t5_payload.get("control_solution").is_none());
+    let spoofed_miss = PyRep::String(
+        "{\"accurate\":true,\"polygons\":[[[0.01,0.01],[0.09,0.01],[0.09,0.09],[0.01,0.09]]]}".into(),
+    );
+    let post5 = rpc(
+        &ctx,
+        &mut pilot,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_5".into()), spoofed_miss],
+    )
+    .await
+    .expect("post_classification 5");
+    assert_eq!(post5.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(0));
+
+    for idx in 6..=9 {
+        ctx.advance_secs(5);
+        let _ti = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
+            .await
+            .expect("get_new_task filler");
+        rpc(
+            &ctx,
+            &mut pilot,
+            "ProjectDiscovery",
+            "post_classification",
+            &[PyRep::Integer(idx), box1.clone()],
+        )
+        .await
+        .expect("post_classification filler");
+    }
+    ctx.advance_secs(5);
+    let _t10 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
+        .await
+        .expect("get_new_task 10 (control)");
+    let spoofed_false_hit = PyRep::String(
+        "{\"accurate\":false,\"is_accurate\":false,\"polygons\":[[[0.59,0.43],[0.83,0.43],[0.83,0.67],[0.59,0.67]]]}".into(),
+    );
+    let post10 = rpc(
+        &ctx,
+        &mut pilot,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_10".into()), spoofed_false_hit],
+    )
+    .await
+    .expect("post_classification 10");
+    assert_eq!(post10.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(25));
 }

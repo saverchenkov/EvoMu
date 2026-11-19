@@ -1089,7 +1089,13 @@ async fn project_discovery_classification_rewards_notify_and_reload() {
     );
 
     // 3. Valid accurate classification -> grants AK, XP, ISK, decrements bonus samples, emits OnAnalysisKreditsChange
-    let cls_args = [PyRep::String(task_id.clone()), PyRep::List(vec![PyRep::Real(1.0)])];
+    let box1 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+    ])]);
+    let cls_args = [PyRep::String(task_id.clone()), box1];
     let cls_res = rpc_ok(
         &ctx,
         &mut sess,
@@ -1171,12 +1177,18 @@ async fn project_discovery_classification_rewards_notify_and_reload() {
         .unwrap()
         .to_string();
     let _ = drain_all_notifications(&ctx, &mut sess, char_id);
+    let box2 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.25), PyRep::Real(0.15)]),
+        PyRep::Tuple(vec![PyRep::Real(0.49), PyRep::Real(0.15)]),
+        PyRep::Tuple(vec![PyRep::Real(0.49), PyRep::Real(0.39)]),
+        PyRep::Tuple(vec![PyRep::Real(0.25), PyRep::Real(0.39)]),
+    ])]);
     let miss_res = rpc_ok(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String(t2_id), PyRep::List(vec![PyRep::Real(2.0)])],
+        &[PyRep::String(t2_id), box2],
     )
     .await;
     let miss_ak = miss_res
