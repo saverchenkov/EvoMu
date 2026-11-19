@@ -4726,13 +4726,17 @@ def _read_client_boot_build(staged_app: Optional[Path] = None) -> Optional[int]:
                 for line in ini_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                     m = re.match(r"^\s*build\s*=\s*(\d+)\s*$", line)
                     if m:
-                        return int(m.group(1))
+                        val = int(m.group(1))
+                        if val > 0:
+                            return val
         except Exception:
             pass
     if staged_app is not None:
         m_dir = re.search(r"client_build_(\d+)", staged_app.name)
         if m_dir:
-            return int(m_dir.group(1))
+            val = int(m_dir.group(1))
+            if val > 0:
+                return val
     return None
 
 
@@ -6664,7 +6668,7 @@ class PlaytesterRunner:
             return
         resolved_client = _coerce_int_client_build(client_build)
         if resolved_client <= 0:
-            resolved_client = _read_client_boot_build(getattr(self, "staged_app", None))
+            resolved_client = _read_client_boot_build(getattr(self, "staged_app", None)) or 0
         oracle.set_handshake_builds(
             client_boot_build=resolved_client if resolved_client > 0 else None,
             server_boot_build=_read_server_boot_build(getattr(self, "worktree_dir", REPO_ROOT)),

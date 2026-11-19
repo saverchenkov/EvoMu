@@ -1120,12 +1120,15 @@ impl FlightRecorder {
         session_id: u64,
         user_id: Option<u64>,
     ) -> SessionRpcTelemetry {
-        let server_request_count = self
-            .session_request_counts
-            .read()
-            .ok()
-            .and_then(|lock| lock.get(&session_id).copied())
-            .unwrap_or(0);
+        let server_request_count = if session_id > 0 {
+            self.session_request_counts
+                .read()
+                .ok()
+                .and_then(|lock| lock.get(&session_id).copied())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let gateway_request_count = if session_id > 0 {
             self.session_gateway_counts
                 .read()

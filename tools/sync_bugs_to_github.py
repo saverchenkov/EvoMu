@@ -424,14 +424,30 @@ def _first_present_count(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) ->
     return None
 
 
-def _first_present_scalar(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[str]:
+def _normalize_build_scalar(val: Any) -> Optional[str]:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return str(val) if val > 0 else None
+    if isinstance(val, float):
+        if not (val > 0) or val != val or val == float("inf"):
+            return None
+        return str(int(val)) if val.is_integer() else str(val)
+    s = str(val).strip()
+    if not s:
+        return None
+    if re.fullmatch(r"[+-]?\d+", s):
+        n = int(s)
+        return str(n) if n > 0 else None
+    return s
+
+
+def _first_present_build(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[str]:
     for scope in scopes:
         for key in keys:
-            val = scope.get(key)
-            if val is not None and not isinstance(val, bool):
-                s = str(val).strip()
-                if s:
-                    return s
+            val = _normalize_build_scalar(scope.get(key))
+            if val is not None:
+                return val
     return None
 
 
@@ -490,31 +506,31 @@ def _is_client_transport_failure_call(call: Any) -> bool:
         return False
 
     svc = str(call.get("service") or "").lower()
-    method = str(call.get("method") or "").lower()
-    err_str = str(call.get("error") or "").strip()
+    explicit_err = str(call.get("error") or "").strip()
     raw_status = call.get("status")
     if raw_status is None or not str(raw_status).strip():
-        status_str = f"ERR({err_str})" if err_str else ""
+        status_str = f"ERR({explicit_err})" if explicit_err else "OK"
     else:
         status_str = str(raw_status).strip()
-    combined_status = f"{status_str} {err_str}".strip()
+    detail_str = explicit_err or str(call.get("result") or "").strip()
+    combined_status = f"{status_str} {detail_str}".strip()
     is_gateway = _is_quasar_call(call)
 
-    if status_str.upper().startswith("OK") and not err_str:
+    if status_str.upper().startswith("OK") and not explicit_err:
         return False
 
-    # Server-recorded gateway services only appear in FlightRecorder after hitting eve-server.
-    if svc in ("quasar_grpc", "publicgatewaysvc") and not _CLIENT_TRANSPORT_FAILURE_RE.search(combined_status):
-        return False
+    # Server-recorded gateway services only appear in FlightRecorder after hitting eve-server,
+    # unless the entry carries an explicit client-side transport failure signal.
+    if svc in ("quasar_grpc", "publicgatewaysvc"):
+        return bool(_CLIENT_TRANSPORT_FAILURE_RE.search(combined_status))
 
-    if is_gateway and (status_str.upper().startswith(("ERR", "FAIL", "TIMEOUT")) or bool(err_str)):
-        if _CLIENT_TRANSPORT_FAILURE_RE.search(combined_status):
-            return True
-        if not _GATEWAY_SERVER_STATUS_RE.search(combined_status):
-            return True
-        return False
+    if is_gateway:
+        return bool(
+            _CLIENT_TRANSPORT_FAILURE_RE.search(combined_status)
+            or not _GATEWAY_SERVER_STATUS_RE.search(combined_status)
+        )
 
-    if (status_str.upper().startswith(("ERR", "FAIL", "TIMEOUT")) or bool(err_str)) and re.search(
+    if re.search(
         r"connection\s*refused|connection\s*reset|socket\s*error|connect\s*timeout|transport\s*closed",
         combined_status,
         re.IGNORECASE,
@@ -585,13 +601,13 @@ def _extract_session_request_counts(bundle: Dict[str, Any]) -> Dict[str, Any]:
 def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
     """Inspects client and server build numbers reported in handshake/session metadata or logs."""
     scopes = _iter_bundle_scopes(bundle)
-    client_build = _first_present_scalar(scopes, _CLIENT_BUILD_KEYS)
-    server_build = _first_present_scalar(scopes, _SERVER_BUILD_KEYS)
+    client_build = _first_present_build(scopes, _CLIENT_BUILD_KEYS)
+    server_build = _first_present_build(scopes, _SERVER_BUILD_KEYS)
 
     explicit_mismatch = any(scope.get("build_mismatch") is True for scope in scopes)
     explicit_compatible = not explicit_mismatch and any(
         scope.get("build_mismatch") is False
-        and _first_present_scalar([scope], _CLIENT_BUILD_KEYS) is not None
+        and _first_present_build([scope], _CLIENT_BUILD_KEYS) is not None
         for scope in scopes
     )
 
@@ -605,8 +621,8 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
             continue
         m_boot = re.search(r"Boot Build is (\d+)\s+but should be(?:\s+at least)?\s+(\d+)", text, re.IGNORECASE)
         if m_boot:
-            client_build = client_build or m_boot.group(1)
-            server_build = server_build or m_boot.group(2)
+            client_build = client_build or _normalize_build_scalar(m_boot.group(1))
+            server_build = server_build or _normalize_build_scalar(m_boot.group(2))
             explicit_mismatch = True
         m_kv = re.search(
             r"client_build\s*[=:]\s*([^\s,;]+).*?(?:server_build|expected_build)\s*[=:]\s*([^\s,;]+)",
@@ -614,13 +630,13 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
             re.IGNORECASE,
         )
         if m_kv:
-            client_build = client_build or m_kv.group(1)
-            server_build = server_build or m_kv.group(2)
+            client_build = client_build or _normalize_build_scalar(m_kv.group(1))
+            server_build = server_build or _normalize_build_scalar(m_kv.group(2))
         if re.search(r"Boot Build Mismatch|Handshake Failed.*Build Mismatch", text, re.IGNORECASE):
             explicit_mismatch = True
 
-    norm_client = client_build.strip() if client_build else None
-    norm_server = server_build.strip() if server_build else None
+    norm_client = _normalize_build_scalar(client_build)
+    norm_server = _normalize_build_scalar(server_build)
     builds_differ = (
         norm_client is not None and norm_server is not None and norm_client != norm_server
     )
@@ -669,10 +685,17 @@ def _is_gateway_failure_bundle(bundle: Dict[str, Any]) -> bool:
             return True
 
     for call in bundle.get("flight_recorder") or []:
-        if isinstance(call, dict) and _is_quasar_call(call) and (
+        if not isinstance(call, dict) or not _is_quasar_call(call):
+            continue
+        status_str = str(call.get("status") or "").strip()
+        if (
             _is_client_transport_failure_call(call)
-            or bool(call.get("error"))
-            or str(call.get("status") or "").strip().upper().startswith(("ERR", "FAIL", "TIMEOUT"))
+            or bool(str(call.get("error") or "").strip())
+            or (
+                bool(status_str)
+                and not status_str.upper().startswith("OK")
+                and not re.search(r"\bstatus\s*=\s*2\d\d\b", status_str, re.IGNORECASE)
+            )
         ):
             return True
     return False

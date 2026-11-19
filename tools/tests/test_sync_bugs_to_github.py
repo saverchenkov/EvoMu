@@ -895,6 +895,114 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         self.assertEqual(fault[0], "zero_gateway_requests")
         self.assertEqual(fault[1], "env:zero_gateway_requests")
 
+    def test_gh1358_r3_02_non_positive_client_build_never_classifies_as_build_mismatch(self) -> None:
+        for bad_build in (0, "0", -1, "-42", " 0 "):
+            f12_bundle = _make_crash_bundle(
+                stack_hash=0,
+                trace="",
+                session={},
+                extra={
+                    "report_source": "f12_manual",
+                    "server_request_count": 0,
+                    "handshake": {"server_boot_build": 3698585},
+                    "manual_report": {
+                        "category_id": "UI",
+                        "title": "F12 report with sentinel zero build",
+                        "description": "Submitted without numeric client build",
+                        "client_build": bad_build,
+                    },
+                },
+            )
+            build_info = sync_mod._extract_build_info(f12_bundle)
+            self.assertIsNone(build_info["client_build"], f"expected None client_build for {bad_build!r}")
+            self.assertEqual(build_info["server_build"], "3698585")
+            self.assertFalse(build_info["mismatch"], f"unexpected mismatch for {bad_build!r}")
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(f12_bundle),
+                f"non-positive client_build {bad_build!r} misclassified as env fault",
+            )
+            title, labels = sync_mod.build_issue_title_and_labels(f12_bundle)
+            self.assertEqual(title, "[Bug Report][UI] F12 report with sentinel zero build")
+            self.assertNotIn("environment", labels)
+
+            # Even with an exception traceback and authenticated session, Build=0 must not trigger build_mismatch.
+            exc_bundle = _make_crash_bundle(
+                stack_hash=-9100,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "eve/client/ui/overview.py", line 44, in Refresh\n'
+                    "KeyError: 'solarSystemID'\n"
+                ),
+                extra={
+                    "server_request_count": 4,
+                    "handshake": {"client_boot_build": bad_build, "server_boot_build": 3698585},
+                },
+            )
+            self.assertIsNone(sync_mod.classify_environment_fault(exc_bundle))
+
+    def test_gh1358_r3_03_grpc_unavailable_status_without_error_key_is_transport_failure(self) -> None:
+        transport_calls = [
+            {
+                "kind": "quasar",
+                "service": "eve_public.character.api.CreateRequest",
+                "method": "Send",
+                "status": "UNAVAILABLE(Connection refused)",
+            },
+            {
+                "kind": "quasar",
+                "service": "publicGateway",
+                "method": "Send",
+                "status": "UNAVAILABLE",
+            },
+            {
+                "service": "quasar_grpc",
+                "method": "Send",
+                "status": "UNAVAILABLE(Connection refused)",
+            },
+        ]
+        for idx, call in enumerate(transport_calls):
+            self.assertTrue(
+                sync_mod._is_client_transport_failure_call(call),
+                f"expected transport failure for call={call}",
+            )
+            bundle = _make_crash_bundle(
+                stack_hash=9920 + idx,
+                trace=(
+                    "Traceback (most recent call last):\n"
+                    '  File "char.py", line 10, in Create\n'
+                    "RuntimeError: request failed\n"
+                ),
+                flight_recorder=[call],
+                extra={"server_request_count": 5, "gateway_request_count": 0},
+            )
+            counts = sync_mod._extract_session_request_counts(bundle)
+            self.assertEqual(counts["gateway_requests"], 0, f"call={call} miscounted as observed_gateway")
+            self.assertFalse(counts["reached_gateway"], f"call={call} falsely set reached_gateway")
+            self.assertTrue(
+                sync_mod._is_gateway_failure_bundle(bundle),
+                f"call={call} not recognized by _is_gateway_failure_bundle",
+            )
+            fault = sync_mod.classify_environment_fault(bundle)
+            self.assertIsNotNone(fault, f"expected zero_gateway_requests for call={call}")
+            assert fault is not None
+            self.assertEqual(fault[0], "zero_gateway_requests")
+            self.assertEqual(fault[1], "env:zero_gateway_requests")
+
+        # Server-recorded non-transport gRPC status (e.g. UNAUTHENTICATED) still counts as reaching gateway.
+        server_reached_call = {
+            "service": "publicGatewaySvc",
+            "method": "SendRequest",
+            "status": "UNAUTHENTICATED",
+        }
+        self.assertFalse(sync_mod._is_client_transport_failure_call(server_reached_call))
+        reached_bundle = _make_crash_bundle(
+            stack_hash=9930,
+            trace="quasar gateway returned UNAUTHENTICATED",
+            flight_recorder=[server_reached_call],
+            extra={"server_request_count": 5, "gateway_request_count": 0},
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(reached_bundle))
+
 
 if __name__ == "__main__":
     unittest.main()
