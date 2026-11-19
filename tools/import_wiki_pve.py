@@ -13,8 +13,9 @@ Verification (--verify) enforces two distinct thresholds without conflating buck
   strict sde_types.name matching has an empirical ceiling ~87.1% due to blank wiki
   cells (293), bare family prefixes / '?' placeholders (201), and CCP custom dungeon
   display names absent from sde_types (994 mapped to faction/class candidates).
-- --min-candidate-mapped-percent (default 90.0): gates concrete + non-empty
-  candidate_type_ids across all candidate-mapped rows.
+- --min-candidate-mapped-percent (default 90.0): gates concrete type_ids plus rows
+  carrying both faction and ship class with non-empty candidate_type_ids
+  (resolved_class_candidates).
 
 IMPORTANT: Generated output contains CC BY-SA wiki-derived data and must never be committed.
 """
@@ -2943,10 +2944,9 @@ def run_import(
                         res = sp["resolution"]
                         st = res["status"]
                         status_counts[st] += 1
-                        if res.get("type_ids") or res.get("candidate_type_ids"):
-                            npc_candidate_mapped_total += 1
                         if st in ("resolved_exact", "resolved_structure_faction") and res.get("type_ids"):
                             p_rows_resolved += 1
+                            npc_candidate_mapped_total += 1
                         elif st == "partly_resolved":
                             p_rows_partial += 1
                             partly_resolved_rows.append(
@@ -2964,6 +2964,8 @@ def run_import(
                                 }
                             )
                         else:
+                            if st == "resolved_class_candidates" and res.get("candidate_type_ids"):
+                                npc_candidate_mapped_total += 1
                             p_rows_unresolved += 1
                             unres_entry: dict[str, Any] = {
                                 "page": art["title"],
@@ -3128,8 +3130,9 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=90.0,
         help=(
-            "Minimum NPC row percentage with concrete type_ids or non-empty candidate_type_ids "
-            "enforced by --verify (default: 90.0)"
+            "Minimum NPC row percentage with concrete type_ids plus faction+class candidate rows "
+            "(resolved_class_candidates with non-empty candidate_type_ids) enforced by --verify "
+            "(default: 90.0)"
         ),
     )
     args = parser.parse_args(argv)
@@ -3211,7 +3214,8 @@ def main(argv: list[str] | None = None) -> int:
                                 errors.append(f"resolved status without concrete type_ids in {u['entry_id']}: {sp['raw_name']}")
                                 break
                             verified_concrete += 1
-                        if sres.get("type_ids") or sres.get("candidate_type_ids"):
+                            verified_candidate_mapped += 1
+                        elif sres["status"] == "resolved_class_candidates" and sres.get("candidate_type_ids"):
                             verified_candidate_mapped += 1
         if verified_concrete != totals["npc_rows_resolved_total"]:
             errors.append("concrete resolved count accounting mismatch")

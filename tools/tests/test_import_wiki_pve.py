@@ -642,8 +642,8 @@ class TestWikiPveImporter(unittest.TestCase):
         rep = json.loads(out_r.read_text(encoding="utf-8"))
         self.assertEqual(rep["totals"]["npc_rows_resolved_total"], 0)
         self.assertEqual(rep["totals"]["npc_rows_resolved_percent"], 0.0)
-        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_total"], 2)
-        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_percent"], 100.0)
+        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_total"], 1)
+        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_percent"], 50.0)
         self.assertEqual(len(rep["unresolved_rows"]), 2)
         reasons = {r["raw_name"]: r["reason"] for r in rep["unresolved_rows"]}
         self.assertEqual(reasons["Angel Security Guard"], "custom_spawn_name_mapped_via_faction_class")
@@ -757,9 +757,10 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertIn("VERIFY FAIL: NPC concrete resolved percent 80.0% < 85.0%", err_fail_conc)
         self.assertNotIn("candidate-mapped percent", err_fail_conc)
 
-        # 17 concrete + 3 unmatched = 85.0% concrete (>= 85.0%), 85.0% candidate_mapped (< 90.0%) -> FAIL candidate
+        # 17 concrete + 1 bare family prefix (resolved_family_candidates) + 2 unmatched = 85.0% concrete (>= 85.0%),
+        # 85.0% candidate_mapped (< 90.0%) -> FAIL candidate (family prefix must NOT count as faction+class candidate)
         rc_fail_cand, _, err_fail_cand = run_case(
-            ["SynthOrder SynthAlpha"] * 17 + ["Totally Missing Name"] * 3
+            ["SynthOrder SynthAlpha"] * 17 + ["Gistum"] + ["Totally Missing Name"] * 2
         )
         self.assertEqual(rc_fail_cand, 1)
         self.assertIn("VERIFY FAIL: NPC candidate-mapped percent 85.0% < 90.0%", err_fail_cand)
