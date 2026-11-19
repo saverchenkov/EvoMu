@@ -1063,6 +1063,7 @@ impl ServerContext {
         crate::services::combat_crimewatch::sync_combat_runtime_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
+        crate::services::quasar_payment_store_types::register_item_mutation_notifier(&ctx);
         crate::services::cosmetics_ui_ops::ensure_rookie_overview_seeded(&ctx);
         ctx.install_tx_post_commit_listener(); ctx.wire_module_deactivation_hook();
         ctx
@@ -1174,7 +1175,10 @@ impl ServerContext {
                 db.provision_gm_account(a.username.trim(), a.password_token.trim(), a.character_id, a.character_name.trim());
             }
         }
-        let ctx = Self::with_sde_repository_and_descriptors(sde, db, quasar_descriptors);
+        let ctx = crate::services::quasar_payment_store::suppress_auto_store_seed_when(
+            !cfg.feature_flags.seed_demo,
+            || Self::with_sde_repository_and_descriptors(sde, db, quasar_descriptors),
+        );
         ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
         ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         *ctx.feature_flags.write().unwrap_or_else(|e| e.into_inner()) = cfg.feature_flags.clone();

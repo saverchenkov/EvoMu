@@ -232,7 +232,7 @@ fn handle_store_get_offers(
     let offers: Vec<PyRep> = catalog
         .offers
         .into_iter()
-        .filter(|o| !o.targeted)
+        .filter(|o| !o.targeted && !(o.price_plex == 0 && o.price_cents.is_some_and(|c| c > 0)))
         .map(|o| {
             let prod_reps: Vec<PyRep> = o
                 .product_ids
@@ -391,26 +391,28 @@ pub fn handle(
                     )))
                 }
             };
-            if offer.targeted && user_id == 0 {
+            let now_unix = ctx.now_unix();
+            let ineligible_targeted = offer.targeted
+                && ctx.db.with_snapshot(|snap| {
+                    !crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
+                        snap,
+                        &offer,
+                        user_id as u64,
+                        now_unix,
+                    )
+                });
+            if ineligible_targeted {
                 return Some(Err(rpc_err(
                     "TargetedOfferNotEligible",
                     format!("Character {char_id} is not eligible for targeted offer {offer_id}"),
                 )));
             }
-            let has_omega_weekly_tag = offer_tags.get(&offer.id).is_some_and(|tags| {
-                tags.iter().any(|t| {
-                    let lc = t.to_ascii_lowercase();
-                    lc == "omega-weekly-free-sp" || lc == "omega-weekly"
-                })
-            });
-            let free_sp_from_products: i64 = catalog
-                .products
-                .iter()
-                .filter(|p| offer.product_ids.contains(&p.id) && p.type_id == 0 && p.quantity > 1)
-                .map(|p| i64::from(p.quantity))
-                .sum();
-            if offer.price_plex == 0 && (has_omega_weekly_tag || free_sp_from_products > 0) {
-                let sp_grant = if free_sp_from_products > 0 { free_sp_from_products } else { 15_000 };
+            if let Some(sp_grant) = ctx.db.with_snapshot(|snap| {
+                crate::services::quasar_payment_store_types::resolve_omega_weekly_free_sp_grant(
+                    snap,
+                    offer_id,
+                )
+            }) {
                 return Some(super::character_skill_ops::handle_omega_weekly_free_sp_offer(
                     ctx,
                     session,
@@ -440,9 +442,34 @@ pub fn handle(
                     .with_snapshot(|snap| snap.plex_vault_balance(char_id) >= total_plex);
                 return Some(Ok(PyRep::Bool(can_buy)));
             }
+            let offer_tags_slice = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+            let omega_duration_secs =
+                crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
+                    &offer,
+                    &catalog,
+                    offer_tags_slice,
+                    u32::try_from(qty).unwrap_or(1),
+                );
+            let has_physical_items = offer.product_ids.iter().any(|pid| {
+                catalog
+                    .products
+                    .iter()
+                    .any(|p| p.id == *pid && p.type_id > 0 && p.quantity > 0)
+            });
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let ch = snap.characters.get(&char_id).ok_or_else(|| rpc_err("CharacterNotFound", "character not found"))?;
-                let station_id = session.station_id.or(session.structure_id).unwrap_or(ch.home_station_id);
+                let delivery_station = session
+                    .station_id
+                    .or(session.structure_id)
+                    .filter(|&s| s > 0)
+                    .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id));
+                if has_physical_items && delivery_station.is_none() {
+                    return Err(rpc_err(
+                        "InvalidLocation",
+                        format!("Character {char_id} has no valid delivery station"),
+                    ));
+                }
+                let station_id = delivery_station.unwrap_or(0);
                 let cur_plex = snap.plex_vault_balance(char_id);
                 if cur_plex < total_plex {
                     return Err(rpc_err(
@@ -462,14 +489,14 @@ pub fn handle(
                     -total_plex,
                     rem_plex,
                     &format!("NES purchase: {}", offer.name),
-                    ctx.now_unix(),
+                    now_unix,
                 );
 
                 let mut delivered_item_id = 0_i64;
                 let mut delivered_items: Vec<InventoryItemRecord> = Vec::new();
                 for pid in &offer.product_ids {
                     if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                        if prod.type_id > 0 {
+                        if prod.type_id > 0 && prod.quantity > 0 {
                             let total_qty = i32::try_from(
                                 (prod.quantity as i64)
                                     .checked_mul(qty)
@@ -491,17 +518,24 @@ pub fn handle(
                             };
                             snap.items.insert(delivered_item_id, rec.clone());
                             delivered_items.push(rec);
-                        } else if offer.category_id == 1 {
-                            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                                ch.clone_grade = 2;
-                            }
                         }
                     }
                 }
-                Ok((rem_plex, delivered_item_id, delivered_items, tx_id))
+                let omega_notice = if let Some(duration_secs) = omega_duration_secs {
+                    crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
+                        snap,
+                        user_id,
+                        duration_secs,
+                        now_unix,
+                    )
+                    .1
+                } else {
+                    None
+                };
+                Ok((rem_plex, delivered_item_id, delivered_items, tx_id, omega_notice))
             });
             match res {
-                Ok((rem_plex, item_id, delivered_items, tx_id)) => {
+                Ok((rem_plex, item_id, delivered_items, tx_id, omega_notice)) => {
                     let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
                     for rec in &delivered_items {
                         ctx.notify_item_mutation(char_id, None, Some(rec));
@@ -513,16 +547,14 @@ pub fn handle(
                         -total_plex,
                         rem_plex,
                         &format!("NES purchase: {}", offer.name),
-                        ctx.now_unix(),
+                        now_unix,
                     );
-                    if offer.category_id == 1 {
-                        crate::services::quasar_auth_user::activate_user_omega_license(
-                            &ctx.db,
-                            &ctx.quasar_gateway.pending_notices,
-                            user_id,
-                            30 * 86_400 * (qty as u64),
-                            ctx.now_unix(),
-                        );
+                    if let Some(notice) = omega_notice {
+                        ctx.quasar_gateway
+                            .pending_notices
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((crate::quasar_gateway::NoticeScope::User(user_id as i32), notice));
                     }
                     Some(Ok(PyRep::keyval([
                         ("success", PyRep::Bool(true)),

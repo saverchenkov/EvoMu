@@ -1472,3 +1472,41 @@ fn w4_mutant_killers_context_runtime_is_empty_ewar_probes_legacy_and_sync() {
     }
 }
 
+#[test]
+fn from_config_with_static_data_gates_store_catalog_seeding_on_seed_demo() {
+    let sde = shared_sde();
+    let descriptors = eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty();
+
+    let mut prod_cfg = crate::config::ServerConfig::default();
+    prod_cfg.storage.backend = "memory".into();
+    prod_cfg.feature_flags.seed_demo = false;
+    let prod_ctx = ServerContext::from_config_with_static_data(
+        &prod_cfg,
+        Arc::clone(&sde),
+        Arc::clone(&descriptors),
+    )
+    .expect("from_config prod");
+    assert!(
+        prod_ctx
+            .db
+            .with_snapshot(|s| s.quasar_commerce.nes_store_catalog.is_none()),
+        "non-demo ServerContext::from_config_with_static_data must not synthesize NES offers at boot"
+    );
+
+    let mut demo_cfg = crate::config::ServerConfig::default();
+    demo_cfg.storage.backend = "memory".into();
+    demo_cfg.feature_flags.seed_demo = true;
+    let demo_ctx = ServerContext::from_config_with_static_data(
+        &demo_cfg,
+        Arc::clone(&sde),
+        descriptors,
+    )
+    .expect("from_config demo");
+    assert!(
+        demo_ctx
+            .db
+            .with_snapshot(|s| s.quasar_commerce.nes_store_catalog.is_some()),
+        "seed_demo = true should seed NES demo catalog on boot"
+    );
+}
+

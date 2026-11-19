@@ -1027,7 +1027,23 @@ async fn test_q3_store_offers_and_targetaudience() {
     assert_eq!(rsp.status_code, STATUS_OK);
     assert!(rsp.payload.unwrap().type_url.ends_with("ListResponse"));
 
-    // 5. Store targetaudience get with explicit ID 2001
+    // 5. Store targetaudience get with explicit ID 2001 (fails closed unpromoted -> 404, promoted -> 200)
+    let ta_unprom = dispatch_req(&ctx, &mut session, "eve_public.store.targetaudience.offer.api.GetRequest", make_ta_offer_request(2001)).await;
+    assert_eq!(ta_unprom.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
+    let uid = session.user_id.expect("uid");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:2001"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "2001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let rsp = dispatch_req(&ctx, &mut session, "eve_public.store.targetaudience.offer.api.GetRequest", make_ta_offer_request(2001)).await;
     assert_eq!(rsp.status_code, STATUS_OK);
     assert!(rsp.payload.unwrap().type_url.ends_with("GetResponse"));

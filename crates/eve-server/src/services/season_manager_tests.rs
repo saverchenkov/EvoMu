@@ -1022,3 +1022,82 @@ fn issue_1053_get_character_progress_suppresses_stale_expiry_and_tick_emits_for_
         "reload_fsd_data must not emit OnChallengeExpired ahead of OnSeasonsFsdDataChanged re-fetch"
     );
 }
+
+#[test]
+fn season_end_time_honors_operator_override_expired_none_and_fsd_reload() {
+    use eve_db::service_domains::progression_seasons::SeasonConfig;
+
+    let ctx = test_ctx();
+    let uid = ctx.db.provision_player_account("season_end_tester", "pw");
+    let cid = ctx
+        .db
+        .create_character(uid, "Season Tester", 1, 1, 11, 17, &ctx.sde)
+        .expect("create char")
+        .character_id;
+    let mut sess = season_session(cid, false);
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid, sess.session_id, Some(cid), false, ctx.now_unix());
+    let mut gm_sess = season_session(cid, true);
+    let kw = HashMap::new();
+    let now_ft = ctx.now_blueos_filetime_ticks();
+
+    // 1. Default FSD-derived window produces a future end time without mutating state
+    let fsd_end = handle_season_manager(&ctx, &mut sess, "seasonManager", "get_season_end_time", &[], &kw)
+        .unwrap()
+        .expect("get_season_end_time");
+    assert!(fsd_end.as_i64().unwrap_or(0) > now_ft);
+
+    // 2. Active operator SeasonConfig override returns configured `end_time_ft`
+    const TICKS_PER_SEC: i64 = 10_000_000;
+    let override_end_ft = now_ft + 7_200 * TICKS_PER_SEC;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.season_configuration = Some(SeasonConfig {
+            season_id: 1,
+            end_time_ft: override_end_ft,
+            start_time_ft: now_ft - 3_600 * TICKS_PER_SEC,
+            ..Default::default()
+        });
+    });
+    assert_eq!(
+        handle_season_manager(&ctx, &mut sess, "seasonManager", "get_season_end_time", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(override_end_ft)
+    );
+
+    // 3. Expired operator SeasonConfig returns PyRep::None cleanly
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns
+            .season_configuration
+            .as_mut()
+            .unwrap()
+            .end_time_ft = now_ft - 10;
+    });
+    assert_eq!(
+        handle_season_manager(&ctx, &mut sess, "seasonManager", "get_season_end_time", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+
+    // 4. Clearing override & calling reload_fsd_data restores FSD schedule + emits OnSeasonsFsdDataChanged
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.season_configuration = None;
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    assert_eq!(
+        handle_season_manager(&ctx, &mut gm_sess, "seasonManager", "reload_fsd_data", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(ctx
+        .drain_notifications_for_char(cid)
+        .iter()
+        .any(|n| n.event == "OnSeasonsFsdDataChanged"));
+    let restored_end = handle_season_manager(&ctx, &mut sess, "seasonManager", "get_season_end_time", &[], &kw)
+        .unwrap()
+        .expect("restored fsd end time");
+    assert!(restored_end.as_i64().unwrap_or(0) > now_ft);
+}

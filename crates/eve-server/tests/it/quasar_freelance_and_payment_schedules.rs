@@ -458,7 +458,34 @@ async fn test_quasar_batch2_store_catalog_and_target_audience_e2e() {
     encode_string_field(2, "featured", &mut tag_req);
     assert_eq!(quasar_call(&ctx, &admin, "eve_public.store.offer.api.GetAllByTagRequest", tag_req).status_code, STATUS_OK);
 
-    // 3. Target-audience ListRequest pagination (page.size = 1 -> next_page.token = "1") & GetRequest
+    // 3. Target-audience ListRequest fails closed unpromoted; promoting 1002 + 1003 tests pagination & GetRequest
+    let ta_empty_rsp = quasar_call(&ctx, &admin, "eve_public.store.targetaudience.offer.api.ListRequest", Vec::new());
+    assert_eq!(ta_empty_rsp.status_code, STATUS_OK);
+    let ta_empty_dyn = reg.decode_dynamic(
+        "eve_public.store.targetaudience.offer.api.ListResponse",
+        &ta_empty_rsp.payload.as_ref().unwrap().value,
+    ).unwrap();
+    assert!(
+        matches!(ta_empty_dyn.get(1), None)
+            || matches!(ta_empty_dyn.get(1), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.is_empty())
+    );
+    let admin_uid = admin.user_id.expect("admin uid");
+    ctx.db.with_mut_snapshot(|snap| {
+        for offer_name in ["1002", "1003"] {
+            snap.quasar_commerce.targeted_offers.insert(
+                format!("{admin_uid}:{offer_name}"),
+                eve_db::TargetedOfferAdminRecord {
+                    user_id: admin_uid,
+                    catalogue_entry_name: offer_name.into(),
+                    promoted: true,
+                    retracted: false,
+                    earliest_reissue_unix: 0,
+                    partner_code: String::new(),
+                },
+            );
+        }
+    });
+
     let mut page1 = Vec::new();
     encode_varint_field(1, 1, &mut page1);
     let mut list_req1 = Vec::new();

@@ -240,7 +240,31 @@ async fn test_store_manager_categories_offers_and_purchases() {
     assert!(has_bal_notice, "BalanceChangedNotice must be emitted on buy_offer");
     drop(notices);
 
-    // 6. storeManager.buy_offer with PLEX (apparel offer 1004)
+    // 6. storeManager.buy_offer with PLEX (targeted apparel offer 1004 fails closed until promoted)
+    let unpromoted_err = rpc(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1004), PyRep::String("PLX".into()), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("Unpromoted targeted offer 1004 must fail closed");
+    assert_eq!(unpromoted_err.code, "TargetedOfferNotEligible");
+    let uid = sess.user_id.expect("user_id");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:1004"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "1004".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let vgs_res = rpc(
         &ctx,
         &mut sess,

@@ -1,15 +1,19 @@
 //! Shared types and default data for Quasar Payment, PLEX Vault, and NES Store.
 
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
+    require_admin_role, MachoNotifySink, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    STATUS_FORBIDDEN, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
 };
-use eve_db::WorldRepository;
-use eve_proto::pb;
+use crate::router::NotificationTarget;
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
+use eve_db::{WorldRepository, WorldStateSnapshot};
+use eve_proto::{pb, PyRep};
 use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::sync::{Arc, RwLock};
+use eve_sde::SdeRegistry;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 fn try_encode_plex_balance_changed_notice(
     tx_id: u64,
@@ -394,6 +398,224 @@ pub(crate) fn offer_matches_catalog(offer: &StoreOffer, catalog: u32) -> bool {
     }
 }
 
+pub fn is_omega_license_product(product: &StoreProduct) -> bool {
+    if product.type_id != 0 {
+        return false;
+    }
+    if product.id == 101 {
+        return true;
+    }
+    let lower = product.name.to_ascii_lowercase();
+    lower.contains("omega") && !lower.contains("skill point") && !lower.contains(" sp")
+}
+
+pub fn is_omega_weekly_sp_offer(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+) -> bool {
+    if offer.price_plex != 0 || offer.price_cents.is_some_and(|c| c > 0) {
+        return false;
+    }
+    if !offer_tags.is_empty() {
+        return offer_tags.iter().any(|t| {
+            let lc = t.to_ascii_lowercase();
+            matches!(
+                lc.as_str(),
+                "omega-weekly-free-sp" | "omega-weekly" | "omega_weekly_sp" | "weekly-free-sp"
+            )
+        });
+    }
+    let offer_lc = offer.name.to_ascii_lowercase();
+    if offer_lc.contains("weekly") && (offer_lc.contains("skill point") || offer_lc.contains(" sp")) {
+        return true;
+    }
+    catalog.products.iter().any(|p| {
+        offer.product_ids.contains(&p.id)
+            && p.type_id == 0
+            && p.quantity > 1
+            && {
+                let plc = p.name.to_ascii_lowercase();
+                plc.contains("weekly") && (plc.contains("skill point") || plc.contains(" sp"))
+            }
+    })
+}
+
+pub fn resolve_omega_weekly_free_sp_grant(
+    snap: &WorldStateSnapshot,
+    offer_id: i64,
+) -> Option<i64> {
+    let catalog = read_store_catalog(snap);
+    let offer = catalog.offers.iter().find(|o| i64::from(o.id) == offer_id)?;
+    let offer_tags = read_store_offer_tags(snap);
+    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+    if !is_omega_weekly_sp_offer(offer, &catalog, tags) {
+        return None;
+    }
+    let sp_from_products: i64 = catalog
+        .products
+        .iter()
+        .filter(|p| offer.product_ids.contains(&p.id) && p.type_id == 0 && p.quantity > 1)
+        .map(|p| i64::from(p.quantity))
+        .sum();
+    Some(if sp_from_products > 0 { sp_from_products } else { 15_000 })
+}
+
+fn is_omega_product_entry(product: &StoreProduct) -> bool {
+    is_omega_license_product(product) || {
+        let lc = product.name.to_ascii_lowercase();
+        lc.contains("omega") && !lc.contains("skill point") && !lc.contains(" sp")
+    }
+}
+
+pub fn is_omega_store_offer(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+) -> bool {
+    if is_omega_weekly_sp_offer(offer, catalog, offer_tags) {
+        return false;
+    }
+    if offer_tags.iter().any(|t| {
+        let lc = t.to_ascii_lowercase();
+        lc == "omega" || lc == "upsellstarterpack"
+    }) {
+        return true;
+    }
+    if catalog
+        .products
+        .iter()
+        .any(|p| offer.product_ids.contains(&p.id) && is_omega_product_entry(p))
+    {
+        return true;
+    }
+    let offer_lc = offer.name.to_ascii_lowercase();
+    if offer_lc.contains("omega") && !offer_lc.contains("skill point") && !offer_lc.contains(" sp") {
+        return true;
+    }
+    offer.category_id == 1
+        && offer.product_ids.is_empty()
+        && !offer_lc.contains("skin")
+        && !offer_lc.contains("plex")
+        && !offer_lc.contains("skill")
+}
+
+pub fn compute_omega_license_duration_secs(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+    purchase_qty: u32,
+) -> Option<u64> {
+    if !is_omega_store_offer(offer, catalog, offer_tags) {
+        return None;
+    }
+    let omega_months: u64 = catalog
+        .products
+        .iter()
+        .filter(|p| offer.product_ids.contains(&p.id) && is_omega_product_entry(p))
+        .map(|p| u64::from(p.quantity.max(1)))
+        .sum();
+    let base_months = if omega_months > 0 { omega_months } else { 1 };
+    Some(
+        base_months
+            .saturating_mul(30 * 86_400)
+            .saturating_mul(u64::from(purchase_qty.max(1))),
+    )
+}
+
+pub(crate) fn find_targeted_offer_record_for_user<'a>(
+    snap: &'a WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+) -> Option<&'a eve_db::TargetedOfferAdminRecord> {
+    let id_str = offer.id.to_string();
+    let direct_key = format!("{uid}:{id_str}");
+    snap.quasar_commerce
+        .targeted_offers
+        .get(&direct_key)
+        .or_else(|| {
+            snap.quasar_commerce.targeted_offers.values().find(|r| {
+                let stripped = r
+                    .catalogue_entry_name
+                    .strip_prefix("VEVC-")
+                    .or_else(|| r.catalogue_entry_name.strip_prefix("vevc-"))
+                    .unwrap_or(&r.catalogue_entry_name);
+                r.user_id == uid
+                    && (stripped == id_str || r.catalogue_entry_name == offer.name)
+            })
+        })
+}
+
+pub fn is_user_eligible_for_targeted_offer(
+    snap: &WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+    now_unix: u64,
+) -> bool {
+    if !offer.targeted {
+        return true;
+    }
+    if uid == 0 {
+        return false;
+    }
+    let Some(rec) = find_targeted_offer_record_for_user(snap, offer, uid) else {
+        return false;
+    };
+    rec.promoted
+        && !rec.retracted
+        && (rec.earliest_reissue_unix <= 0 || now_unix >= rec.earliest_reissue_unix as u64)
+}
+
+pub fn is_user_eligible_for_target_audience_offer(
+    snap: &WorldStateSnapshot,
+    offer: &StoreOffer,
+    uid: u64,
+    now_unix: u64,
+) -> bool {
+    if uid == 0 {
+        return false;
+    }
+    if offer.targeted {
+        return is_user_eligible_for_targeted_offer(snap, offer, uid, now_unix);
+    }
+    find_targeted_offer_record_for_user(snap, offer, uid).is_some_and(|rec| {
+        rec.promoted
+            && !rec.retracted
+            && (rec.earliest_reissue_unix <= 0 || now_unix >= rec.earliest_reissue_unix as u64)
+    })
+}
+
+pub fn encode_eligible_targeted_offer_list_response(
+    snap: &WorldStateSnapshot,
+    uid: u64,
+    dyn_msg: &DynamicQuasarMessage,
+    now_unix: u64,
+) -> Vec<u8> {
+    let cat = read_store_catalog(snap);
+    let eligible: Vec<StoreOffer> = cat
+        .offers
+        .into_iter()
+        .filter(|o| is_user_eligible_for_target_audience_offer(snap, o, uid, now_unix))
+        .collect();
+    let (page_size, offset) = parse_page_request(dyn_msg, 1, 50);
+    let (slice, next_tok) = paginate_slice(&eligible, offset, page_size);
+    let mut out = pb::message("eve_public.store.targetaudience.offer.api.ListResponse");
+    for off in slice {
+        out = out.add_with("offer_ids", |entry| {
+            entry
+                .set("user_id.sequential", uid as i32)
+                .set("catalogue_entry.name", off.id.to_string())
+        });
+    }
+    if let Some(tok) = next_tok {
+        out = out.set("next_page.token", tok);
+    }
+    out.encode().unwrap_or_else(|e| {
+        tracing::warn!("failed to encode targetaudience ListResponse: {e}");
+        Vec::new()
+    })
+}
+
 pub fn encode_targeted_offer_list_response(
     offers: &[StoreOffer],
     uid: u64,
@@ -692,6 +914,126 @@ pub fn save_store_offer_tags(
     snap.quasar_commerce.nes_store_offer_tags = tags.clone();
 }
 
+fn store_ctx_notifier_map() -> &'static Mutex<HashMap<u64, crate::router::context::ServerContextWeak>>
+{
+    static MAP: OnceLock<Mutex<HashMap<u64, crate::router::context::ServerContextWeak>>> =
+        OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn register_item_mutation_notifier(ctx: &crate::router::ServerContext) {
+    let db_id = ctx.db.instance_id();
+    let weak = ctx.downgrade();
+    let mut map = store_ctx_notifier_map().lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() > 256 {
+        map.retain(|_, w| w.upgrade().is_some());
+    }
+    map.insert(db_id, weak);
+}
+
+pub(crate) fn deliver_store_hangar_items_in_snapshot(
+    snap: &mut WorldStateSnapshot,
+    cid: i64,
+    target_station: i64,
+    items_to_deliver: &[(u32, i32)],
+) -> Vec<(
+    i64,
+    Option<eve_db::InventoryItemRecord>,
+    Option<eve_db::InventoryItemRecord>,
+)> {
+    let mut mutations = Vec::with_capacity(items_to_deliver.len());
+    for &(type_id, deliver_qty) in items_to_deliver {
+        if let Some(existing) = snap.items.values_mut().find(|it| {
+            it.owner_id == cid
+                && it.location_id == target_station
+                && it.flag == eve_db::InventoryFlag::Hangar
+                && it.type_id == type_id
+                && !it.singleton
+        }) {
+            let pre = existing.clone();
+            existing.quantity = existing.quantity.saturating_add(deliver_qty);
+            existing.version += 1;
+            mutations.push((cid, Some(pre), Some(existing.clone())));
+        } else {
+            snap.next_entity_id += 1;
+            let item_id = snap.next_entity_id;
+            let rec = eve_db::InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id: cid,
+                location_id: target_station,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: deliver_qty,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            };
+            snap.items.insert(item_id, rec.clone());
+            mutations.push((cid, None, Some(rec)));
+        }
+    }
+    mutations
+}
+
+pub(crate) fn emit_store_item_mutations(
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    macho_sink_lock: &Arc<RankedRwLock<Option<MachoNotifySink>, RANK_LEAF>>,
+    mutations: &[(
+        i64,
+        Option<eve_db::InventoryItemRecord>,
+        Option<eve_db::InventoryItemRecord>,
+    )],
+) {
+    if mutations.is_empty() {
+        return;
+    }
+    let ctx_opt = {
+        let mut map = store_ctx_notifier_map().lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = map
+            .get(&db.instance_id())
+            .and_then(crate::router::context::ServerContextWeak::upgrade);
+        if ctx.is_none() {
+            map.remove(&db.instance_id());
+        }
+        ctx
+    };
+    if let Some(ctx) = ctx_opt {
+        for (cid, pre, post) in mutations {
+            ctx.notify_item_mutation(*cid, pre.as_ref(), post.as_ref());
+        }
+        return;
+    }
+    let Some(sink) = macho_sink_lock
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
+        return;
+    };
+    for (cid, pre, post) in mutations {
+        if let Some(new_item) = post {
+            let changes = match pre {
+                None => vec![(3, PyRep::Integer(0))],
+                Some(old) => vec![(6, PyRep::Integer(old.quantity as i64))],
+            };
+            let row = crate::router::delta_projection::build_inv_item_dbrow(new_item, sde, "");
+            let change_dict = PyRep::Dict(
+                changes
+                    .into_iter()
+                    .map(|(ix, old)| (PyRep::Integer(ix), old))
+                    .collect(),
+            );
+            sink(
+                NotificationTarget::Character(*cid),
+                "OnItemChange",
+                "charid",
+                vec![row, change_dict],
+            );
+        }
+    }
+}
+
 pub fn register_plex_vault_extra_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -700,6 +1042,8 @@ pub fn register_plex_vault_extra_handlers(
     // 1. eve_public.plex.vault.api.PurchaseRequest -> PurchaseResponse
     let db_purch = Arc::clone(&db);
     let pending_purch = Arc::clone(&router.pending_notices);
+    let macho_sink_purch = Arc::clone(&router.macho_notify_sink);
+    let sde_purch = Arc::clone(&router.sde);
     let allow_free_plex = free_fast_checkout_plex;
     router.register_handler(
         "eve_public.plex.vault.api.PurchaseRequest",
@@ -754,7 +1098,7 @@ pub fn register_plex_vault_extra_handlers(
             let active_cid = gift_char_id.or_else(|| ctx.effective_character_id().map(|c| c as i64));
             let now_unix = ctx.now_unix();
 
-            let (tx_id, total_plex, new_bal, desc, maybe_omega) = db_purch
+            let (tx_id, total_plex, new_bal, desc, maybe_omega, delivered_mutations) = db_purch
                 .try_with_mut_snapshot(|snap| {
                     if let Some(gift_cid) = gift_char_id {
                         if !snap.characters.contains_key(&gift_cid) {
@@ -762,12 +1106,16 @@ pub fn register_plex_vault_extra_handlers(
                         }
                     }
                     let catalog = read_store_catalog(snap);
+                    let offer_tags = read_store_offer_tags(snap);
                     let offer = catalog
                         .offers
                         .iter()
                         .find(|o| o.id == offer_id)
                         .cloned()
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Offer {offer_id} not found"))?;
+                    if offer.targeted && !is_user_eligible_for_targeted_offer(snap, &offer, uid, now_unix) {
+                        return Err(format!("{STATUS_FORBIDDEN}:User {uid} is not eligible for targeted offer {offer_id}"));
+                    }
                     if offer.price_plex < 0 {
                         return Err(format!("{STATUS_BAD_REQUEST}:Offer {offer_id} has invalid negative PLEX price"));
                     }
@@ -776,7 +1124,22 @@ pub fn register_plex_vault_extra_handlers(
                     }
                     let total_cost = offer.price_plex.saturating_mul(qty as i64);
 
-                    // Validate recipient character and station BEFORE deducting PLEX
+                    let mut items_to_deliver = Vec::new();
+                    for pid in &offer.product_ids {
+                        if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
+                            if prod.type_id > 0 && prod.quantity > 0 {
+                                let deliver_qty = prod
+                                    .quantity
+                                    .checked_mul(qty)
+                                    .and_then(|q| i32::try_from(q).ok())
+                                    .ok_or_else(|| {
+                                        format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow")
+                                    })?;
+                                items_to_deliver.push((prod.type_id, deliver_qty));
+                            }
+                        }
+                    }
+                    // Validate recipient character and station BEFORE deducting PLEX when delivering physical items
                     let recipient_cid = active_cid.or_else(|| {
                         let mut chars: Vec<_> = snap
                             .characters
@@ -787,27 +1150,21 @@ pub fn register_plex_vault_extra_handlers(
                         chars.sort_unstable();
                         chars.first().copied()
                     });
-                    let delivery_target = if !offer.product_ids.is_empty() {
+                    let delivery_target = if !items_to_deliver.is_empty() {
                         let Some(cid) = recipient_cid else {
                             return Err(format!("{STATUS_BAD_REQUEST}:No valid recipient character for store delivery"));
                         };
                         let Some(ch) = snap.characters.get(&cid).cloned() else {
                             return Err(format!("{STATUS_NOT_FOUND}:Recipient character {cid} not found"));
                         };
-                        let target_station = ch.station_id.or(ch.structure_id).unwrap_or(ch.home_station_id);
-                        if target_station <= 0 {
+                        let Some(target_station) = ch
+                            .station_id
+                            .filter(|&st| st > 0)
+                            .or_else(|| ch.structure_id.filter(|&st| st > 0))
+                            .or_else(|| (ch.home_station_id > 0).then_some(ch.home_station_id))
+                        else {
                             return Err(format!("{STATUS_BAD_REQUEST}:Target character {cid} has no valid delivery station"));
-                        }
-                        let mut items_to_deliver = Vec::new();
-                        for pid in &offer.product_ids {
-                            if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                                if prod.type_id > 0 && prod.quantity > 0 {
-                                    let deliver_qty = i32::try_from(prod.quantity.saturating_mul(qty))
-                                        .map_err(|_| format!("{STATUS_BAD_REQUEST}:Delivery quantity overflow"))?;
-                                    items_to_deliver.push((prod.type_id, deliver_qty));
-                                }
-                            }
-                        }
+                        };
                         Some((cid, target_station, items_to_deliver))
                     } else if let Some(cid) = active_cid {
                         if !snap.characters.contains_key(&cid) {
@@ -826,41 +1183,35 @@ pub fn register_plex_vault_extra_handlers(
                     let desc = format!("NES Purchase: {}", offer.name);
                     record_plex_transaction(snap, tx_id, uid, -total_cost, bal, &desc, now_unix);
 
-                    if let Some((cid, target_station, items_to_deliver)) = delivery_target {
-                        for (type_id, deliver_qty) in items_to_deliver {
-                            snap.next_entity_id += 1;
-                            let item_id = snap.next_entity_id;
-                            snap.items.insert(
-                                item_id,
-                                eve_db::InventoryItemRecord {
-                                    item_id,
-                                    type_id,
-                                    owner_id: cid,
-                                    location_id: target_station,
-                                    flag: eve_db::InventoryFlag::Hangar,
-                                    quantity: deliver_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                    }
-                    let omega_notice = if offer.category_id == 1 {
+                    let delivered_mutations =
+                        if let Some((cid, target_station, items_to_deliver)) = delivery_target {
+                            deliver_store_hangar_items_in_snapshot(
+                                snap,
+                                cid,
+                                target_station,
+                                &items_to_deliver,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
+                    let omega_notice = if let Some(duration_secs) =
+                        compute_omega_license_duration_secs(&offer, &catalog, tags, qty)
+                    {
                         let omega_target_uid = recipient_cid
                             .and_then(|cid| snap.characters.get(&cid).map(|c| c.user_id))
                             .unwrap_or(uid);
                         let (_, n) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                             snap,
                             omega_target_uid,
-                            30 * 86_400 * u64::from(qty),
+                            duration_secs,
                             now_unix,
                         );
                         n.map(|notice| (omega_target_uid, notice))
                     } else {
                         None
                     };
-                    Ok((tx_id, total_cost, bal, desc, omega_notice))
+                    Ok((tx_id, total_cost, bal, desc, omega_notice, delivered_mutations))
                 })
                 .map_err(|e| {
                     if let Some((c, m)) = e.split_once(':') {
@@ -871,6 +1222,7 @@ pub fn register_plex_vault_extra_handlers(
                     (STATUS_BAD_REQUEST, e)
                 })?;
 
+            emit_store_item_mutations(&db_purch, &sde_purch, &macho_sink_purch, &delivered_mutations);
             emit_balance_changed_notice(&pending_purch, uid, tx_id, -total_plex, new_bal, &desc, now_unix);
             if let Some((omega_target_uid, n)) = maybe_omega {
                 pending_purch.write().unwrap_or_else(|e| e.into_inner()).push((NoticeScope::User(omega_target_uid as i32), n));

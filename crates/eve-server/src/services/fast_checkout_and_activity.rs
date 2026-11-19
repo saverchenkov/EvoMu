@@ -129,12 +129,28 @@ fn default_free_plex_pack_offers() -> Vec<FastCheckoutOfferRecord> {
     ]
 }
 
+fn fc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn is_synthetic_default_free_pack(o: &FastCheckoutOfferRecord) -> bool {
+    (1..=4).contains(&o.offer_id)
+        && o.price_plex == 0
+        && o.products.is_empty()
+        && o.tags.iter().any(|t| t == "plex")
+}
+
 fn load_fast_checkout_offers_for_ctx(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
 ) -> Vec<FastCheckoutOfferRecord> {
     let catalog_offers = load_catalog_plex_offers(snap);
-    let need_default_packs = !catalog_offers.iter().any(|o| o.plex_amount > 0);
+    let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
+    let need_default_packs = free_plex_mode && !catalog_offers.iter().any(|o| o.plex_amount > 0);
     let mut offers = Vec::new();
     if need_default_packs {
         offers.extend(default_free_plex_pack_offers());
@@ -144,6 +160,53 @@ fn load_fast_checkout_offers_for_ctx(
             offers.push(o);
         }
     }
+    offers
+}
+
+fn resolve_fast_checkout_offers_for_user(
+    ctx: &ServerContext,
+    user_id: u64,
+    cached_offers: Option<&Vec<FastCheckoutOfferRecord>>,
+    free_plex_mode: bool,
+) -> Vec<FastCheckoutOfferRecord> {
+    let mut offers = if let Some(cached) = cached_offers {
+        let usable = !cached.is_empty()
+            && if free_plex_mode {
+                cached.iter().any(|o| o.plex_amount > 0)
+            } else {
+                !cached.iter().any(is_synthetic_default_free_pack)
+            };
+        if usable {
+            cached.clone()
+        } else {
+            ctx.db
+                .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap))
+        }
+    } else {
+        ctx.db
+            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap))
+    };
+    let now_unix = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
+        offers.retain(|fc_off| {
+            match store_catalog
+                .offers
+                .iter()
+                .find(|so| i64::from(so.id) == fc_off.offer_id)
+            {
+                Some(store_off) if store_off.targeted => {
+                    crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
+                        snap,
+                        store_off,
+                        user_id,
+                        now_unix,
+                    )
+                }
+                _ => true,
+            }
+        });
+    });
     offers
 }
 
@@ -776,21 +839,18 @@ fn handle_get_offers_for_user(
     }
     let free_plex_mode = ctx.feature_flags_snapshot().free_fast_checkout_plex;
     let mut st = get_user_fast_checkout_state(ctx, user_id);
-    let offers = match st.cached_offers.clone() {
-        Some(cached)
-            if !cached.is_empty()
-                && (!free_plex_mode || cached.iter().any(|o| o.plex_amount > 0)) =>
-        {
-            cached
-        }
-        _ => ctx
-            .db
-            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap)),
-    };
+    let offers = resolve_fast_checkout_offers_for_user(
+        ctx,
+        user_id,
+        st.cached_offers.as_ref(),
+        free_plex_mode,
+    );
     let session_token = format!("fc_token_{}_{}", user_id, ctx.now_unix());
     st.cached_session_token = Some(session_token);
     if !offers.is_empty() {
         st.cached_offers = Some(offers.clone());
+    } else if !free_plex_mode {
+        st.cached_offers = None;
     }
     save_user_fast_checkout_state(ctx, user_id, &st);
 
@@ -984,17 +1044,12 @@ fn handle_buy_offer(
     }
 
     let st = get_user_fast_checkout_state(ctx, user_id);
-    let offers = match st.cached_offers {
-        Some(cached)
-            if !cached.is_empty()
-                && (!free_plex_mode || cached.iter().any(|o| o.plex_amount > 0)) =>
-        {
-            cached
-        }
-        _ => ctx
-            .db
-            .with_snapshot(|snap| load_fast_checkout_offers_for_ctx(ctx, snap)),
-    };
+    let offers = resolve_fast_checkout_offers_for_user(
+        ctx,
+        user_id,
+        st.cached_offers.as_ref(),
+        free_plex_mode,
+    );
     let Some(offer) = offers.iter().find(|o| o.offer_id == offer_id).cloned() else {
         return Err(BridgeRpcError {
             code: "OfferNotFound".into(),
@@ -1065,7 +1120,61 @@ fn handle_buy_offer(
         });
     }
 
-    let (tx_id, rem_plex, delivered_items_count, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
+    let has_physical_items = offer
+        .products
+        .iter()
+        .any(|p| p.type_id > 0 && p.quantity > 0);
+    let (tx_id, rem_plex, delivered_items_count, delivered_items, omega_notice) = ctx.db.try_with_mut_snapshot(|snap| {
+        let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
+        let store_tags = crate::services::quasar_payment_store::read_store_offer_tags(snap);
+        let store_offer_opt = store_catalog
+            .offers
+            .iter()
+            .find(|o| i64::from(o.id) == offer_id)
+            .cloned();
+        if let Some(ref store_off) = store_offer_opt {
+            if store_off.targeted
+                && !crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
+                    snap,
+                    store_off,
+                    user_id,
+                    now_unix,
+                )
+            {
+                return Err(fc_err(
+                    "TargetedOfferNotEligible",
+                    format!("User {user_id} is not eligible for targeted offer {offer_id}"),
+                ));
+            }
+        }
+        let delivery_target = if has_physical_items {
+            let char_id = active_char_id.ok_or_else(|| {
+                fc_err(
+                    "CharacterNotFound",
+                    "Active character required for physical store item delivery",
+                )
+            })?;
+            let ch = snap.characters.get(&char_id).ok_or_else(|| {
+                fc_err("CharacterNotFound", format!("Character {char_id} not found"))
+            })?;
+            let station_id = active_station_id
+                .filter(|&id| id > 0)
+                .or_else(|| {
+                    ch.station_id
+                        .or(ch.structure_id)
+                        .or(Some(ch.home_station_id))
+                        .filter(|&id| id > 0)
+                })
+                .ok_or_else(|| {
+                    fc_err(
+                        "InvalidLocation",
+                        format!("Character {char_id} has no valid delivery station"),
+                    )
+                })?;
+            Some((char_id, station_id))
+        } else {
+            None
+        };
         if amount_in_cents > 0 {
             let Some(token) = snap
                 .quasar_commerce
@@ -1131,35 +1240,19 @@ fn handle_buy_offer(
         }
 
         let mut delivered_count = 0_i64;
-        let char_id = active_char_id.unwrap_or(user_id as i64);
-        let station_id = active_station_id
-            .or_else(|| {
-                snap.characters
-                    .get(&char_id)
-                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.home_station_id)).filter(|&id| id > 0))
-            })
-            .unwrap_or(0);
-        for prod in &offer.products {
-            if prod.type_id > 0 && prod.quantity > 0 {
-                let total_item_qty = i32::try_from(
-                    (prod.quantity as i64)
-                        .checked_mul(quantity)
-                        .ok_or_else(|| BridgeRpcError {
-                            code: "ArithmeticOverflow".into(),
-                            message: "Product quantity overflows i32".into(),
-                            client_error: None,
-                        })?,
-                )
-                .map_err(|_| BridgeRpcError {
-                    code: "ArithmeticOverflow".into(),
-                    message: "Product quantity overflows i32".into(),
-                    client_error: None,
-                })?;
-                snap.next_entity_id += 1;
-                let item_id = snap.next_entity_id;
-                snap.items.insert(
-                    item_id,
-                    eve_db::InventoryItemRecord {
+        let mut delivered_items: Vec<eve_db::InventoryItemRecord> = Vec::new();
+        if let Some((char_id, station_id)) = delivery_target {
+            for prod in &offer.products {
+                if prod.type_id > 0 && prod.quantity > 0 {
+                    let total_item_qty = i32::try_from(
+                        (prod.quantity as i64)
+                            .checked_mul(quantity)
+                            .ok_or_else(|| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?,
+                    )
+                    .map_err(|_| fc_err("ArithmeticOverflow", "Product quantity overflows i32"))?;
+                    snap.next_entity_id += 1;
+                    let item_id = snap.next_entity_id;
+                    let rec = eve_db::InventoryItemRecord {
                         item_id,
                         type_id: prod.type_id,
                         owner_id: char_id,
@@ -1169,16 +1262,49 @@ fn handle_buy_offer(
                         singleton: false,
                         version: 1,
                         ..Default::default()
-                    },
-                );
-                delivered_count += total_item_qty as i64;
+                    };
+                    snap.items.insert(item_id, rec.clone());
+                    delivered_items.push(rec);
+                    delivered_count += total_item_qty as i64;
+                }
             }
         }
 
-        let omega_notice = if offer.category_id == 1 {
-            let duration_secs = u64::try_from(quantity)
-                .unwrap_or(1)
-                .saturating_mul(30 * 86_400);
+        let omega_duration_secs = if let Some(ref store_off) = store_offer_opt {
+            let tags = store_tags.get(&store_off.id).map(Vec::as_slice).unwrap_or(&[]);
+            crate::services::quasar_payment_store_types::compute_omega_license_duration_secs(
+                store_off,
+                &store_catalog,
+                tags,
+                u32::try_from(quantity).unwrap_or(1),
+            )
+        } else {
+            let offer_lc = offer.name.to_ascii_lowercase();
+            let is_standalone_omega = (offer.tags.iter().any(|t| {
+                let lc = t.to_ascii_lowercase();
+                lc == "omega" || lc == "upsellstarterpack"
+            }) || (offer_lc.contains("omega")
+                && !offer_lc.contains("skill point")
+                && !offer_lc.contains(" sp")))
+                || (offer.category_id == 1
+                    && offer.products.is_empty()
+                    && !offer_lc.contains("skin")
+                    && !offer_lc.contains("plex")
+                    && !offer_lc.contains("skill"));
+            is_standalone_omega.then(|| {
+                let months: u64 = offer
+                    .products
+                    .iter()
+                    .filter(|p| p.type_id == 0 && p.quantity > 0)
+                    .map(|p| u64::from(p.quantity))
+                    .sum::<u64>()
+                    .max(1);
+                months
+                    .saturating_mul(30 * 86_400)
+                    .saturating_mul(u64::try_from(quantity).unwrap_or(1))
+            })
+        };
+        let omega_notice = if let Some(duration_secs) = omega_duration_secs {
             let (_, notice) =
                 crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                     snap,
@@ -1204,8 +1330,12 @@ fn handle_buy_offer(
             );
         }
 
-        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, omega_notice))
+        Ok::<_, BridgeRpcError>((tid, cur_rem, delivered_count, delivered_items, omega_notice))
     })?;
+
+    for rec in &delivered_items {
+        ctx.notify_item_mutation(rec.owner_id, None, Some(rec));
+    }
 
     if let Some(notice) = omega_notice {
         ctx.quasar_gateway

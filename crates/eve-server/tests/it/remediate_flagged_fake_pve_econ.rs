@@ -1527,7 +1527,68 @@ async fn fast_checkout_mining_details_and_plex_conservation_lifecycle() {
         &[],
     )
     .await;
-    assert!(offers_rep.dict_get("offers").is_some());
+    let PyRep::List(ref offers_before) = offers_rep
+        .dict_get("offers")
+        .cloned()
+        .expect("offers list")
+    else {
+        panic!("expected offers list from GetOffersForUser");
+    };
+    assert!(
+        !offers_before.iter().any(|o| matches!(
+            o.dict_get("offerID").and_then(PyRep::as_i64),
+            Some(1..=4)
+        )),
+        "production paid mode must not expose synthetic free PLEX packs 1..=4 before explicit catalog entry"
+    );
+    let unseeded_offer_err = rpc_err(
+        &prod_ctx,
+        &mut sess_prod,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[
+            PyRep::Integer(4),
+            PyRep::Integer(1),
+            PyRep::String("fc_miner1-secret".into()),
+        ],
+    )
+    .await;
+    assert_eq!(unseeded_offer_err.code, "OfferNotFound");
+
+    // Seed an explicit catalog real-money PLEX offer `4` ($49.99 for 1100 PLEX) to test paid token/password gates
+    prod_ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = eve_server::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products
+            .push(eve_db::service_domains::quasar_and_social::StoreProduct {
+                id: 9404,
+                name: "1100 PLEX".into(),
+                description: "1100 PLEX Vault Pack".into(),
+                type_id: 44_992,
+                quantity: 1100,
+            });
+        cat.offers
+            .push(eve_db::service_domains::quasar_and_social::StoreOffer {
+                id: 4,
+                name: "1100 PLEX".into(),
+                description: "1100 PLEX Pack".into(),
+                category_id: 2,
+                price_plex: 0,
+                product_ids: vec![9404],
+                targeted: false,
+                price_cents: Some(4999),
+                currency: Some("USD".into()),
+            });
+        eve_server::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+    });
+
+    rpc_ok(
+        &prod_ctx,
+        &mut sess_prod,
+        "FastCheckoutService",
+        "ClearFastCheckoutCacheForUser",
+        &[],
+    )
+    .await;
 
     // Wrong password -> InvalidPassword
     let bad_pw = rpc_err(
@@ -1727,6 +1788,36 @@ async fn nes_store_sde_catalog_plex_purchase_and_reload() {
         .and_then(PyRep::as_i64)
         .expect("skin offer plexPrice");
     assert!(skin_price > 0);
+    if ctx.db.with_snapshot(|s| {
+        eve_server::services::quasar_payment_store::read_store_catalog(s)
+            .offers
+            .iter()
+            .any(|o| o.id as i64 == skin_offer_id && o.targeted)
+    }) {
+        let ta_err = rpc_err(
+            &ctx,
+            &mut sess,
+            "storeManager",
+            "buy_offer",
+            &[PyRep::Integer(skin_offer_id), PyRep::String("PLX".into()), PyRep::Integer(1)],
+        )
+        .await;
+        assert_eq!(ta_err.code, "TargetedOfferNotEligible");
+        let uid = sess.user_id.expect("uid");
+        ctx.db.with_mut_snapshot(|s| {
+            s.quasar_commerce.targeted_offers.insert(
+                format!("{uid}:{skin_offer_id}"),
+                eve_db::TargetedOfferAdminRecord {
+                    user_id: uid,
+                    catalogue_entry_name: skin_offer_id.to_string(),
+                    promoted: true,
+                    retracted: false,
+                    earliest_reissue_unix: 0,
+                    partner_code: String::new(),
+                },
+            );
+        });
+    }
 
     // 1. Negative paths: insufficient vault balance, removed AUR currency, invalid currency
     let vault_before = ctx.db.with_snapshot(|s| s.plex_vault_balance(char_id));

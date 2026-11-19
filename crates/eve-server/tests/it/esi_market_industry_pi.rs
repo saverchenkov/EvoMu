@@ -8552,6 +8552,30 @@ pub(crate) mod esi_corp_blueprints_structures_live {
         assert_eq!(rpc(&ctx, &mut s, "eve_public.store.category.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
         assert_eq!(rpc(&ctx, &mut s, "eve_public.store.product.api.GetRequest", id_req(1, 101)).await.status_code, STATUS_OK);
         assert_eq!(rpc(&ctx, &mut s, "eve_public.store.offer.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
+        let ta_unprom = rpc(
+            &ctx,
+            &mut s,
+            "eve_public.store.targetaudience.offer.api.ListRequest",
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(ta_unprom.status_code, STATUS_OK);
+        assert!(fields(&ta_unprom.payload.unwrap().value, 1).is_empty());
+
+        let uid = s.user_id.expect("uid");
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.quasar_commerce.targeted_offers.insert(
+                format!("{uid}:1001"),
+                eve_db::TargetedOfferAdminRecord {
+                    user_id: uid,
+                    catalogue_entry_name: "1001".into(),
+                    promoted: true,
+                    retracted: false,
+                    earliest_reissue_unix: 0,
+                    partner_code: String::new(),
+                },
+            );
+        });
         let ta_rsp = rpc(
             &ctx,
             &mut s,

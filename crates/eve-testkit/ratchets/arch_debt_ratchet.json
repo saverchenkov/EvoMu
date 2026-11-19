@@ -53,7 +53,7 @@
       "description": "Direct mutation of solar_system_id/station_id/structure_id/active_ship_id outside canonical transition helpers (#1197)."
     },
     "direct_items_map_mut": {
-      "max_occurrences": 519,
+      "max_occurrences": 518,
       "max_files": 152,
       "exact": true,
       "owning_issue": 1194,
@@ -61,7 +61,7 @@
       "description": "Combined direct items.{insert,remove,get_mut}(...) mutations bypassing typed inventory gateway (#1194)."
     },
     "items_insert": {
-      "max_occurrences": 192,
+      "max_occurrences": 191,
       "max_files": 108,
       "exact": true,
       "owning_issue": 1194,
@@ -85,7 +85,7 @@
       "description": "Direct items.get_mut(...) bypassing typed inventory gateway (#1194)."
     },
     "positional_rpc_args_index": {
-      "max_occurrences": 1903,
+      "max_occurrences": 1902,
       "max_files": 183,
       "exact": true,
       "owning_issue": 1194,
@@ -93,7 +93,7 @@
       "description": "Unstructured positional RPC argument reads (args.first(), args.get(N)) instead of typed RPC arg codecs (#1194)."
     },
     "stringly_bridge_rpc_error_code": {
-      "max_occurrences": 4371,
+      "max_occurrences": 4369,
       "max_files": 193,
       "exact": true,
       "owning_issue": 1195,

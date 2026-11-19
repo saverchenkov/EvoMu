@@ -140,6 +140,7 @@ async fn test_unified_plex_vault_and_transactions() {
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
     let mut sess = build_sess(3501, uid, cid);
+    let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid as i64), false, ctx.now_unix());
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
     // 1. Initial BalanceRequest -> matches canonical seeded vault balance (500)
@@ -171,7 +172,7 @@ async fn test_unified_plex_vault_and_transactions() {
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.plex.vault.assetholding.operation.api.WithdrawRequest", with_payload).await.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800);
 
-    // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: buy offer 2001
+    // 4. NES Purchase via eve_public.plex.vault.api.PurchaseRequest: buy offer 2001 (targeted -> fail closed until promoted)
     let offer_2001_plex = ctx.db.with_snapshot(|snap| {
         eve_server::services::quasar_payment_store::read_store_catalog(snap)
             .offers
@@ -181,6 +182,24 @@ async fn test_unified_plex_vault_and_transactions() {
             .price_plex
     });
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("9999")).await.status_code, STATUS_NOT_FOUND);
+    assert_eq!(
+        quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("2001")).await.status_code,
+        STATUS_FORBIDDEN,
+        "Unpromoted targeted offer 2001 must fail closed before promotion"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:2001"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "2001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let mut over_purch = make_str_id_request("1001");
     encode_varint_field(2, 10, &mut over_purch); // 10 * 500 = 5000 PLEX > 800
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", over_purch).await.status_code, STATUS_BAD_REQUEST);
@@ -190,8 +209,14 @@ async fn test_unified_plex_vault_and_transactions() {
     encode_bytes_field(3, &gm, &mut bad_gift);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", bad_gift).await.status_code, STATUS_NOT_FOUND);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800, "Missing gift recipient must not debit PLEX");
+    let _ = ctx.drain_notifications_for_char(cid as i64);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", make_str_id_request("2001")).await.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(cid as i64)), 800 - offer_2001_plex, "PurchaseRequest deducts offer 2001 PLEX");
+    let purchase_notifs = ctx.drain_notifications_for_char(cid as i64);
+    assert!(
+        purchase_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "PurchaseRequest delivering hangar items must emit OnItemChange via ServerContext"
+    );
 
     // 5. GetAllLoggedForUserRequest & GetLogRequest & operation.api.GetRequest & RecordInvoiceRequest
     let tx_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest", vec![]).await;
@@ -319,7 +344,22 @@ async fn test_quasar_store_catalog_products_and_offers() {
     assert_eq!(ta_list.status_code, STATUS_OK);
     assert_eq!(ta_list.payload.as_ref().unwrap().normalized_type_name(), "eve_public.store.targetaudience.offer.api.ListResponse");
 
-    // 8. targetaudience.offer.api.GetRequest (offer 2001)
+    // 8. targetaudience.offer.api.GetRequest (offer 2001: fail closed unpromoted -> 404, promoted -> 200)
+    let ta_unprom = quasar_rpc(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.GetRequest", make_ta_offer_request(2001)).await;
+    assert_eq!(ta_unprom.status_code, STATUS_NOT_FOUND, "Unpromoted targeted offer 2001 must fail closed");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{}:2001", sess.user_id.unwrap()),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: sess.user_id.unwrap(),
+                catalogue_entry_name: "2001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let ta_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.store.targetaudience.offer.api.GetRequest", make_ta_offer_request(2001)).await;
     assert_eq!(ta_rsp.status_code, STATUS_OK, "targetaudience offer 2001 failed: {}", ta_rsp.status_message);
     assert_eq!(ta_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.store.targetaudience.offer.api.GetResponse");
@@ -337,6 +377,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     common::pin_clock(&ctx);
     let (uid, cid) = (1u64, 90_000_001);
     let mut sess = build_sess(3503, uid, cid);
+    let _ = ctx.db.acquire_online_lock(uid, sess.session_id, Some(cid as i64), false, ctx.now_unix());
     let mut notice_rx = ctx.quasar_gateway.subscribe_session(&sess, vec![], ctx.now_unix());
 
     // 1. User license before activation: inactive
@@ -512,8 +553,14 @@ async fn test_payment_schedules_tokens_and_user_license() {
     encode_varint_field(1, 2, &mut tok2_msg);
     encode_bytes_field(2, &tok2_msg, &mut skin_req);
 
+    let _ = ctx.drain_notifications_for_char(cid as i64);
     let skin_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.purchase.api.TokenRequest", skin_req).await;
     assert_eq!(skin_rsp.status_code, STATUS_OK, "TokenRequest for skin offer failed: {}", skin_rsp.status_message);
+    let tok_notifs = ctx.drain_notifications_for_char(cid as i64);
+    assert!(
+        tok_notifs.iter().any(|n| n.event == "OnItemChange"),
+        "TokenRequest delivering hangar items must emit OnItemChange via ServerContext"
+    );
     let char_items = ctx.db.get_items_for_character(cid as i64);
     assert!(char_items.iter().any(|it| it.type_id == 34599), "Purchased SKIN 34599 must be delivered to character hangar");
 }

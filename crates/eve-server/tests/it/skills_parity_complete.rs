@@ -579,7 +579,10 @@ async fn test_skills_alpha_5m_cap_direct_purchase_weekly_sp_and_history() {
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
     let ctx = ServerContext::with_repository(repo);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-    ctx.db.with_mut_snapshot(|snap| *snap = demo);
+    ctx.db.with_mut_snapshot(|snap| {
+        *snap = demo;
+        eve_server::services::quasar_payment_store::ensure_store_catalog_seeded(snap, &ctx.sde);
+    });
     common::pin_clock(&ctx);
 
     let kw = HashMap::new();

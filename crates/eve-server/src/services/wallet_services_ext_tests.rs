@@ -785,3 +785,526 @@ fn station_direct_trade_rejects_offline_duplicate_and_blocked_and_cleans_bounds(
     .unwrap();
     assert!(next_trade.is_ok());
 }
+
+#[test]
+fn store_manager_enforces_targeted_audience_and_product_omega_without_cat_1() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+    use eve_db::TargetedOfferAdminRecord;
+
+    const ERR_TARGETED_NOT_ELIGIBLE: &str = "TargetedOfferNotEligible";
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 1;
+        }
+        snap.account_plex_vault.insert(1, 2_000);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 7001,
+            name: "30 Days Omega Time".into(),
+            description: "Omega license via non-cat-1 offer".into(),
+            type_id: 0,
+            quantity: 1,
+        });
+        cat.products.push(StoreProduct {
+            id: 7002,
+            name: "Promo Ship SKIN".into(),
+            description: "Bonus SKIN item".into(),
+            type_id: 34_599,
+            quantity: 1,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7001,
+            name: "Pilot Bundle".into(),
+            description: "Non-cat-1 Omega + SKIN".into(),
+            category_id: 3,
+            price_plex: 250,
+            product_ids: vec![7001, 7002],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7002,
+            name: "Targeted Promo SKIN".into(),
+            description: "Audience-restricted SKIN".into(),
+            category_id: 2,
+            price_plex: 100,
+            product_ids: vec![7002],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce.targeted_offers.insert(
+            "999:7002".into(),
+            TargetedOfferAdminRecord {
+                user_id: 999,
+                catalogue_entry_name: "7002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+
+    // 1. Targeted offer owned by another user is denied cleanly
+    let denied = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "can_purchase_offer",
+        &[PyRep::Integer(7002)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(denied.code, ERR_TARGETED_NOT_ELIGIBLE);
+
+    // Promote for user 1 -> allowed; then retract -> denied again
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:7002".into(),
+            TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "7002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut session,
+            "storeManager",
+            "can_purchase_offer",
+            &[PyRep::Integer(7002)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce
+            .targeted_offers
+            .get_mut("1:7002")
+            .unwrap()
+            .retracted = true;
+    });
+    let retracted_err = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(7002)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(retracted_err.code, ERR_TARGETED_NOT_ELIGIBLE);
+
+    // 2. Non-category-1 Omega + SKIN bundle activates Omega (`ActivatedNotice`) AND delivers SKIN
+    let _ = ctx
+        .quasar_gateway
+        .pending_notices
+        .write()
+        .unwrap()
+        .drain(..)
+        .count();
+    let buy_omega = handle(
+        &ctx,
+        &mut session,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(7001)],
+        &kw,
+    )
+    .unwrap()
+    .expect("non-cat-1 Omega bundle purchase must succeed");
+    assert_eq!(
+        buy_omega.dict_get("plexRemaining").and_then(|v| v.as_i64()),
+        Some(1_750)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters.get(&char_id).map(|c| c.clone_grade), Some(2));
+        assert!(snap
+            .items
+            .values()
+            .any(|it| it.owner_id == char_id && it.type_id == 34_599));
+    });
+    assert!(
+        ctx.quasar_gateway
+            .pending_notices
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(scope, any)| {
+                matches!(scope, crate::quasar_gateway::NoticeScope::User(1))
+                    && any.type_url.contains("ActivatedNotice")
+            }),
+        "storeManager non-cat-1 Omega bundle must queue ActivatedNotice"
+    );
+}
+
+#[tokio::test]
+async fn store_manager_dispatch_rpc_enforces_weekly_sp_eligibility_station_and_omega_months() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+    use eve_db::TargetedOfferAdminRecord;
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.free_skill_points = 1_000.0;
+        }
+        snap.account_plex_vault.insert(1, 2_000);
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 7101,
+            name: "Targeted Weekly 15k SP".into(),
+            description: "Targeted weekly SP reward".into(),
+            type_id: 0,
+            quantity: 15_000,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7101,
+            name: "Targeted Weekly Free SP".into(),
+            description: "Targeted weekly SP reward".into(),
+            category_id: 3,
+            price_plex: 0,
+            product_ids: vec![7101],
+            targeted: true,
+            price_cents: None,
+            currency: None,
+        });
+        cat.products.push(StoreProduct {
+            id: 7102,
+            name: "30 Days Omega Clone State".into(),
+            description: "3-month pack via quantity=3".into(),
+            type_id: 0,
+            quantity: 3,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7102,
+            name: "90 Days Omega License Pack".into(),
+            description: "3 months Omega".into(),
+            category_id: 1,
+            price_plex: 1_200,
+            product_ids: vec![7102],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        cat.products.push(StoreProduct {
+            id: 7103,
+            name: "Delivered Crate".into(),
+            description: "Physical hangar item".into(),
+            type_id: 40_519,
+            quantity: 1,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7103,
+            name: "Physical Crate Offer".into(),
+            description: "Needs station".into(),
+            category_id: 3,
+            price_plex: 10,
+            product_ids: vec![7103],
+            targeted: false,
+            price_cents: None,
+            currency: None,
+        });
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(7101, vec!["omega-weekly-free-sp".into()]);
+    });
+
+    // 1. Real dispatch_rpc must reject unpromoted targeted weekly SP offer (`BF-01`/`BF-02`) without minting SP
+    let expected_targeted_err = "TargetedOfferNotEligible";
+    let err_ineligible = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7101)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_ineligible.code, expected_targeted_err);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.free_skill_points)),
+        Some(1_000.0)
+    );
+
+    // Promote offer 7101 for user 1; AUR currency must still be rejected even on weekly SP
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:7101".into(),
+            TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "7101".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    let err_aur = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::String("VEVC-7101".into()), PyRep::String("AUR".into())],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_aur.code, "AurumCurrencyRemoved");
+
+    // Promoted weekly SP claim via real dispatch_rpc succeeds
+    let granted = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7101)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("promoted weekly SP offer should succeed via dispatch_rpc");
+    assert_eq!(
+        granted.dict_get("freeSkillPointsGranted"),
+        Some(&PyRep::Integer(15_000))
+    );
+
+    // 2. Multi-month Omega pack (`product.quantity = 3`) grants 90 days instead of 30 (`BF-05`)
+    let before_now = ctx.now_unix();
+    let buy_90d = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7102), PyRep::String("PLX".into()), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("90-day Omega pack must succeed");
+    assert_eq!(buy_90d.dict_get("plexSpent"), Some(&PyRep::Integer(1_200)));
+    let exp = crate::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
+        st.omega_subscriptions.get(&1).copied().unwrap_or(0)
+    });
+    assert!(
+        exp >= before_now + 90 * 86_400,
+        "expected >= 90d expiry, got delta {}",
+        exp.saturating_sub(before_now)
+    );
+
+    // 3. Physical store item delivery without valid station/home_station fails (`InvalidLocation`)
+    let (orig_station, orig_struct, orig_home) = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        let prev = (ch.station_id, ch.structure_id, ch.home_station_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.home_station_id = 0;
+        prev
+    });
+    session.station_id = None;
+    session.structure_id = None;
+    let err_loc = ctx
+        .dispatch_rpc(
+            &mut session,
+            "storeManager",
+            None,
+            "buy_offer",
+            &[PyRep::Integer(7103), PyRep::String("PLX".into()), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_loc.code, "InvalidLocation");
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = orig_station;
+        ch.structure_id = orig_struct;
+        ch.home_station_id = orig_home;
+    });
+}
+
+#[tokio::test]
+async fn store_manager_rejects_real_money_and_untagged_sp_and_hides_cash_offers_from_catalog() {
+    use eve_db::service_domains::quasar_and_social::{StoreOffer, StoreProduct};
+
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let kw = HashMap::new();
+    let expected_invalid = "InvalidOffer";
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.free_skill_points = 1_000.0;
+        }
+        let mut cat = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+        cat.products.extend([
+            StoreProduct {
+                id: 7201,
+                name: "250,000 Skill Points".into(),
+                description: "Real-money SP pack".into(),
+                type_id: 0,
+                quantity: 250_000,
+            },
+            StoreProduct {
+                id: 7202,
+                name: "250,000 Skill Points".into(),
+                description: "Unpriced untagged SP offer".into(),
+                type_id: 0,
+                quantity: 250_000,
+            },
+            StoreProduct {
+                id: 7203,
+                name: "Weekly SP Pack".into(),
+                description: "Real-money SP offer with weekly tag".into(),
+                type_id: 0,
+                quantity: 15_000,
+            },
+            StoreProduct {
+                id: 7204,
+                name: "Public PLEX SKIN".into(),
+                description: "Regular PLEX offer".into(),
+                type_id: 34_599,
+                quantity: 1,
+            },
+        ]);
+        cat.offers.extend([
+            StoreOffer {
+                id: 7201,
+                name: "250,000 Skill Points Pack".into(),
+                description: "Cash SP pack".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7201],
+                targeted: false,
+                price_cents: Some(1_999),
+                currency: Some("USD".into()),
+            },
+            StoreOffer {
+                id: 7202,
+                name: "250,000 Skill Points".into(),
+                description: "Free unpriced SP without weekly tag".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7202],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            },
+            StoreOffer {
+                id: 7203,
+                name: "Omega Weekly Free SP Cash Mistake".into(),
+                description: "Weekly tag with cash price".into(),
+                category_id: 3,
+                price_plex: 0,
+                product_ids: vec![7203],
+                targeted: false,
+                price_cents: Some(499),
+                currency: Some("USD".into()),
+            },
+            StoreOffer {
+                id: 7204,
+                name: "Public PLEX SKIN".into(),
+                description: "Visible PLEX SKIN".into(),
+                category_id: 2,
+                price_plex: 110,
+                product_ids: vec![7204],
+                targeted: false,
+                price_cents: None,
+                currency: None,
+            },
+        ]);
+        crate::services::quasar_payment_store_types::save_store_catalog(snap, &cat);
+        snap.quasar_commerce
+            .nes_store_offer_tags
+            .insert(7203, vec!["omega-weekly-free-sp".into()]);
+    });
+
+    // 1. storeManager.get_offers must exclude price_cents > 0 / price_plex == 0 offers while keeping PLEX offers.
+    let offers_rep = ctx
+        .dispatch_rpc(&mut session, "storeManager", None, "get_offers", &[], &kw, None)
+        .await
+        .expect("get_offers succeeds");
+    let PyRep::List(offers) = offers_rep else {
+        panic!("expected PyRep::List from get_offers");
+    };
+    let offer_ids: Vec<i64> = offers
+        .iter()
+        .filter_map(|o| match o.dict_get("id") {
+            Some(PyRep::Integer(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(offer_ids.contains(&7204), "expected PLEX offer 7204 in get_offers: {offer_ids:?}");
+    assert!(!offer_ids.contains(&7201), "real-money offer 7201 leaked into get_offers: {offer_ids:?}");
+    assert!(!offer_ids.contains(&7203), "real-money weekly offer 7203 leaked into get_offers: {offer_ids:?}");
+
+    // 2. can_purchase_offer & buy_offer must reject real-money and unpriced untagged SP offers without granting SP.
+    for oid in [7201_i64, 7202, 7203] {
+        let can_err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "storeManager",
+                None,
+                "can_purchase_offer",
+                &[PyRep::Integer(oid)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(can_err.code, expected_invalid, "offer {oid} can_purchase_offer mismatch");
+
+        let buy_err = ctx
+            .dispatch_rpc(
+                &mut session,
+                "storeManager",
+                None,
+                "buy_offer",
+                &[PyRep::Integer(oid)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(buy_err.code, expected_invalid, "offer {oid} buy_offer mismatch");
+    }
+
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.free_skill_points)),
+        Some(1_000.0)
+    );
+}

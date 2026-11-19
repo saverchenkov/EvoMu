@@ -292,7 +292,7 @@ fn store_catalog_offers_targeted_pagination_and_redeem_code() {
     let rsp_ta_list = call(&router, &player, "eve_public.store.targetaudience.offer.api.ListRequest", page_req, now);
     assert_eq!(rsp_ta_list.status_code, STATUS_OK);
 
-    // Targeted GetRequest: missing -> 400, unknown -> 404, valid nested field 2 -> 200
+    // Targeted GetRequest: missing -> 400, unknown -> 404, unpromoted targeted -> 404, promoted -> 200
     assert_eq!(call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", Vec::new(), now).status_code, STATUS_BAD_REQUEST);
     let ta_req_bad = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
         .set("offer_id.catalogue_entry.name", "9999")
@@ -302,6 +302,23 @@ fn store_catalog_offers_targeted_pagination_and_redeem_code() {
     let ta_req_ok = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
         .set("offer_id.catalogue_entry.name", "1003")
         .must_encode();
+    assert_eq!(
+        call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", ta_req_ok.clone(), now).status_code,
+        STATUS_NOT_FOUND
+    );
+    router.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "10:1003".into(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: 10,
+                catalogue_entry_name: "1003".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     assert_eq!(call(&router, &player, "eve_public.store.targetaudience.offer.api.GetRequest", ta_req_ok, now).status_code, STATUS_OK);
 
     // Code redeem is unimplemented (501)
@@ -1143,6 +1160,582 @@ fn v2402_omega_upsell_offer_and_product_proto_attributes() {
         .status_code,
         STATUS_NOT_FOUND
     );
+}
+
+#[test]
+fn targeted_offer_audience_and_non_1001_omega_delivery_parity() {
+    use eve_db::service_domains::quasar_and_social::{
+        PaymentTokenRecord, StoreCategory, StoreOffer, StoreProduct,
+    };
+    use eve_db::TargetedOfferAdminRecord;
+
+    let now = 1_760_000_000_u64;
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let router = PublicGatewayRouter::new(
+        QuasarDescriptorRegistry::open_default_or_empty(),
+        Arc::clone(&db),
+        shared_sde(),
+    );
+
+    let uid_ok = db.provision_player_account("ta_ok", "pw");
+    let cid_ok = db
+        .create_character(uid_ok, "TA Eligible", 1, 1, 11, 17, &shared_sde())
+        .expect("create ok char")
+        .character_id;
+    let uid_ret = db.provision_player_account("ta_ret", "pw");
+    let uid_wait = db.provision_player_account("ta_wait", "pw");
+    let uid_nochar = db.provision_player_account("omega_virtual_only", "pw");
+
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid_ok) {
+            ch.clone_grade = 1;
+            ch.home_station_id = 60_003_760;
+        }
+        snap.account_plex_vault.insert(uid_ok, 500);
+        snap.account_plex_vault.insert(uid_ret, 500);
+        snap.account_plex_vault.insert(uid_wait, 500);
+        let cat = StoreCatalog {
+            categories: vec![
+                StoreCategory { id: 1, name: "Omega".into(), description: "Omega".into() },
+                StoreCategory { id: 2, name: "SKINs".into(), description: "SKINs".into() },
+                StoreCategory { id: 3, name: "Bundles".into(), description: "Bundles".into() },
+            ],
+            products: vec![
+                StoreProduct {
+                    id: 201,
+                    name: "30d Omega Pass".into(),
+                    description: "Virtual Omega time".into(),
+                    type_id: 0,
+                    quantity: 1,
+                },
+                StoreProduct {
+                    id: 202,
+                    name: "Bundle SKIN".into(),
+                    description: "Physical SKIN".into(),
+                    type_id: 34_599,
+                    quantity: 1,
+                },
+            ],
+            offers: vec![
+                StoreOffer {
+                    id: 8001,
+                    name: "Virtual Omega Bundle".into(),
+                    description: "Non-1001 non-cat-1 virtual Omega".into(),
+                    category_id: 3,
+                    price_plex: 0,
+                    product_ids: vec![201],
+                    targeted: false,
+                    price_cents: Some(1_499),
+                    currency: Some("USD".into()),
+                },
+                StoreOffer {
+                    id: 8002,
+                    name: "Targeted Promo Pack".into(),
+                    description: "User-restricted offer".into(),
+                    category_id: 2,
+                    price_plex: 100,
+                    product_ids: vec![202],
+                    targeted: true,
+                    price_cents: Some(399),
+                    currency: Some("USD".into()),
+                },
+                StoreOffer {
+                    id: 8003,
+                    name: "Combo Omega Physical Bundle".into(),
+                    description: "Non-1001 non-cat-1 Omega + SKIN".into(),
+                    category_id: 3,
+                    price_plex: 0,
+                    product_ids: vec![201, 202],
+                    targeted: false,
+                    price_cents: Some(1_999),
+                    currency: Some("USD".into()),
+                },
+            ],
+        };
+        save_store_catalog(snap, &cat);
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid_ok}:8002"),
+            TargetedOfferAdminRecord {
+                user_id: uid_ok,
+                catalogue_entry_name: "8002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid_ret}:8002"),
+            TargetedOfferAdminRecord {
+                user_id: uid_ret,
+                catalogue_entry_name: "8002".into(),
+                promoted: true,
+                retracted: true,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid_wait}:8002"),
+            TargetedOfferAdminRecord {
+                user_id: uid_wait,
+                catalogue_entry_name: "8002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: (now + 3_600) as i64,
+                partner_code: String::new(),
+            },
+        );
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 701,
+                user_id: uid_ok,
+                token_str: "tok_ok".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 702,
+                user_id: uid_nochar,
+                token_str: "tok_nochar".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+    });
+
+    let sess_ok = make_sess(Some(uid_ok), Some(cid_ok), service_roles::ROLE_PLAYER_DEFAULT);
+    let sess_ret = make_sess(Some(uid_ret), None, service_roles::ROLE_PLAYER_DEFAULT);
+    let sess_wait = make_sess(Some(uid_wait), None, service_roles::ROLE_PLAYER_DEFAULT);
+    let sess_nochar = make_sess(Some(uid_nochar), None, service_roles::ROLE_PLAYER_DEFAULT);
+
+    // 1. targetaudience.offer.api.ListRequest filters per-user eligibility
+    let list_ok = call(&router, &sess_ok, "eve_public.store.targetaudience.offer.api.ListRequest", Vec::new(), now);
+    assert_eq!(list_ok.status_code, STATUS_OK);
+    assert!(
+        String::from_utf8_lossy(&list_ok.payload.as_ref().unwrap().value).contains("8002"),
+        "eligible user must receive targeted offer 8002 in ListResponse"
+    );
+
+    for denied_sess in [&sess_ret, &sess_wait] {
+        let list_denied = call(
+            &router,
+            denied_sess,
+            "eve_public.store.targetaudience.offer.api.ListRequest",
+            Vec::new(),
+            now,
+        );
+        assert_eq!(list_denied.status_code, STATUS_OK);
+        assert!(
+            !String::from_utf8_lossy(&list_denied.payload.as_ref().unwrap().value).contains("8002"),
+            "retracted or future-reissue user must NOT receive targeted offer 8002"
+        );
+    }
+
+    // 2. targetaudience.offer.api.GetRequest checks cross-user isolation & eligibility
+    let get_req_ok = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid_ok as i32)
+        .set("offer_id.catalogue_entry.name", "8002")
+        .must_encode();
+    assert_eq!(
+        call(&router, &sess_ok, "eve_public.store.targetaudience.offer.api.GetRequest", get_req_ok.clone(), now).status_code,
+        STATUS_OK
+    );
+    assert_eq!(
+        call(&router, &sess_ret, "eve_public.store.targetaudience.offer.api.GetRequest", get_req_ok, now).status_code,
+        STATUS_FORBIDDEN
+    );
+    let get_req_ret = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid_ret as i32)
+        .set("offer_id.catalogue_entry.name", "8002")
+        .must_encode();
+    assert_eq!(
+        call(&router, &sess_ret, "eve_public.store.targetaudience.offer.api.GetRequest", get_req_ret, now).status_code,
+        STATUS_NOT_FOUND
+    );
+    let get_req_wait = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid_wait as i32)
+        .set("offer_id.catalogue_entry.name", "8002")
+        .must_encode();
+    assert_eq!(
+        call(&router, &sess_wait, "eve_public.store.targetaudience.offer.api.GetRequest", get_req_wait, now).status_code,
+        STATUS_NOT_FOUND
+    );
+
+    // 3. PurchaseRequest enforces targeted audience eligibility
+    let purch_8002 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8002) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call(&router, &sess_ret, "eve_public.plex.vault.api.PurchaseRequest", purch_8002.clone(), now).status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(&router, &sess_wait, "eve_public.plex.vault.api.PurchaseRequest", purch_8002.clone(), now).status_code,
+        STATUS_FORBIDDEN
+    );
+    assert_eq!(
+        call(&router, &sess_ok, "eve_public.plex.vault.api.PurchaseRequest", purch_8002, now).status_code,
+        STATUS_OK
+    );
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid_ok).copied()), Some(400));
+
+    // 4. TokenRequest activates non-1001 non-cat-1 virtual Omega offer 8001 without a character/station
+    let tok_8001 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8001) },
+            WireField { field_number: 2, value: WireValue::Varint(702) },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call(&router, &sess_nochar, "eve_public.payment.purchase.api.TokenRequest", tok_8001, now).status_code,
+        STATUS_OK
+    );
+    assert!(
+        db.with_snapshot(|s| {
+            s.owner_notes
+                .values()
+                .find(|n| n.label == "S:QUASAR_IDENTITY_STORE")
+                .and_then(|n| {
+                    serde_json::from_str::<crate::services::quasar_auth_user::QuasarIdentityStore>(&n.note)
+                        .ok()
+                })
+                .and_then(|st| st.omega_subscriptions.get(&uid_nochar).copied())
+                .unwrap_or(0)
+                > now
+        }),
+        "virtual non-1001 Omega offer 8001 must activate Omega entitlement without station"
+    );
+
+    // 5. TokenRequest on non-1001 combo offer 8003 activates Omega AND delivers physical SKIN
+    let tok_8003 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8003) },
+            WireField { field_number: 2, value: WireValue::Varint(701) },
+        ],
+    }
+    .encode();
+    assert_eq!(
+        call(&router, &sess_ok, "eve_public.payment.purchase.api.TokenRequest", tok_8003, now).status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.characters.get(&cid_ok).map(|c| c.clone_grade), Some(2));
+        let skin_qty: i32 = s
+            .items
+            .values()
+            .filter(|it| it.owner_id == cid_ok && it.type_id == 34_599)
+            .map(|it| it.quantity)
+            .sum();
+        assert!(skin_qty >= 2, "expected targeted 8002 SKIN + combo 8003 SKIN delivered");
+    });
+}
+
+#[test]
+fn targeted_fail_closed_string_offer_id_multi_month_omega_and_item_notifications() {
+    let router = new_router();
+    let db = Arc::clone(&router.db);
+    let uid = 42_001u64;
+    let cid = 94_200_001i64;
+    let station_id = 60_003_760i64;
+    let now = 1_700_000_000u64;
+
+    let emitted_items: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_log = Arc::clone(&emitted_items);
+    *router.macho_notify_sink.write().unwrap() = Some(Arc::new(move |target, event, _service, _args| {
+        if let crate::router::NotificationTarget::Character(c) = target {
+            sink_log.lock().unwrap().push((c, event.to_string()));
+        }
+    }));
+
+    let mut sess = make_sess(Some(uid), Some(cid), 0);
+    sess.station_id = Some(station_id);
+    let mut sess_nostation = make_sess(Some(uid), Some(94_200_002), 0);
+    sess_nostation.station_id = None;
+
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 5_000);
+        let mut ch = snap.characters.get(&90_000_001).cloned().expect("template char");
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.clone_grade = 1;
+        ch.station_id = Some(station_id);
+        ch.home_station_id = station_id;
+        snap.characters.insert(cid, ch.clone());
+
+        let mut ch_nostat = ch;
+        ch_nostat.character_id = 94_200_002;
+        ch_nostat.station_id = None;
+        ch_nostat.structure_id = None;
+        ch_nostat.home_station_id = 0;
+        snap.characters.insert(94_200_002, ch_nostat);
+
+        snap.quasar_commerce.targeted_offers.clear();
+        snap.quasar_commerce.payment_tokens = vec![
+            PaymentTokenRecord {
+                id: 801,
+                user_id: uid,
+                token_str: "tok-801".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 802,
+                user_id: uid,
+                token_str: "tok-802".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 803,
+                user_id: uid,
+                token_str: "tok-803".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+
+        save_store_catalog(
+            snap,
+            &StoreCatalog {
+                categories: Vec::new(),
+                products: vec![
+                    StoreProduct {
+                        id: 8201,
+                        name: "Targeted Bundle SKIN".into(),
+                        description: "Targeted SKIN".into(),
+                        type_id: 34_599,
+                        quantity: 1,
+                    },
+                    StoreProduct {
+                        id: 8202,
+                        name: "3 Months Omega Clone State".into(),
+                        description: "90 days Omega".into(),
+                        type_id: 0,
+                        quantity: 3,
+                    },
+                ],
+                offers: vec![
+                    StoreOffer {
+                        id: 8201,
+                        name: "starter-pack-alpha".into(),
+                        description: "Targeted offer".into(),
+                        category_id: 2,
+                        price_plex: 100,
+                        product_ids: vec![8201],
+                        targeted: true,
+                        price_cents: Some(499),
+                        currency: Some("USD".into()),
+                    },
+                    StoreOffer {
+                        id: 8202,
+                        name: "90 Days Omega".into(),
+                        description: "Multi-month Omega".into(),
+                        category_id: 1,
+                        price_plex: 1_200,
+                        product_ids: vec![8202],
+                        targeted: false,
+                        price_cents: Some(4_999),
+                        currency: Some("USD".into()),
+                    },
+                ],
+            },
+        );
+    });
+
+    // 1. BF-02: Even with targeted_offers completely empty, targeted offer 8201 fails closed on Get, Purchase, and Token.
+    assert!(db.with_snapshot(|s| s.quasar_commerce.targeted_offers.is_empty()));
+    let ta_get_8201 = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid as i32)
+        .set("offer_id.catalogue_entry.name", "8201")
+        .must_encode();
+    assert_eq!(call(&router, &sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get_8201, now).status_code, STATUS_NOT_FOUND);
+
+    let purch_8201 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8201) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+    assert_eq!(call(&router, &sess, "eve_public.plex.vault.api.PurchaseRequest", purch_8201.clone(), now).status_code, STATUS_FORBIDDEN);
+
+    let tok_8201 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8201) },
+            WireField { field_number: 2, value: WireValue::Varint(801) },
+        ],
+    }
+    .encode();
+    assert_eq!(call(&router, &sess, "eve_public.payment.purchase.api.TokenRequest", tok_8201, now).status_code, STATUS_FORBIDDEN);
+
+    // 2. BF-04: Missing station rejects physical PurchaseRequest & TokenRequest BEFORE debit/token consumption.
+    assert_eq!(call(&router, &sess_nostation, "eve_public.plex.vault.api.PurchaseRequest", purch_8201.clone(), now).status_code, STATUS_FORBIDDEN);
+    // Promote non-numeric offer name AND test VEVC-8201 resolution in targetaudience GetRequest.
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            format!("{uid}:starter-pack-alpha"),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: uid,
+                catalogue_entry_name: "starter-pack-alpha".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+    let ta_get_named = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid as i32)
+        .set("offer_id.catalogue_entry.name", "starter-pack-alpha")
+        .must_encode();
+    assert_eq!(call(&router, &sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get_named, now).status_code, STATUS_OK);
+    let ta_get_vevc = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid as i32)
+        .set("offer_id.catalogue_entry.name", "VEVC-8201")
+        .must_encode();
+    assert_eq!(call(&router, &sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get_vevc, now).status_code, STATUS_OK);
+    let ta_get_empty = pb::message("eve_public.store.targetaudience.offer.api.GetRequest")
+        .set("offer_id.user_id.sequential", uid as i32)
+        .set("offer_id.catalogue_entry.name", "")
+        .must_encode();
+    assert_eq!(call(&router, &sess, "eve_public.store.targetaudience.offer.api.GetRequest", ta_get_empty, now).status_code, STATUS_BAD_REQUEST);
+
+    // Missing station on promoted targeted offer rejects without PLEX deduction or consuming token 801.
+    assert_eq!(call(&router, &sess_nostation, "eve_public.plex.vault.api.PurchaseRequest", purch_8201.clone(), now).status_code, STATUS_BAD_REQUEST);
+    let tok_8201_nostat = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8201) },
+            WireField { field_number: 2, value: WireValue::Varint(801) },
+        ],
+    }
+    .encode();
+    assert_eq!(call(&router, &sess_nostation, "eve_public.payment.purchase.api.TokenRequest", tok_8201_nostat.clone(), now).status_code, STATUS_BAD_REQUEST);
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid).copied()), Some(5_000));
+    assert!(db.with_snapshot(|s| !s.quasar_commerce.payment_tokens[0].consumed));
+
+    // 3. Valid physical PurchaseRequest & TokenRequest emit OnItemChange via macho_notify_sink.
+    assert_eq!(call(&router, &sess, "eve_public.plex.vault.api.PurchaseRequest", purch_8201, now).status_code, STATUS_OK);
+    assert_eq!(call(&router, &sess, "eve_public.payment.purchase.api.TokenRequest", tok_8201_nostat, now).status_code, STATUS_OK);
+    let item_notifs = emitted_items.lock().unwrap();
+    let on_item_count = item_notifs.iter().filter(|(c, ev)| *c == cid && ev == "OnItemChange").count();
+    assert!(on_item_count >= 2, "expected OnItemChange for both PurchaseRequest and TokenRequest, got {on_item_count}");
+    drop(item_notifs);
+
+    // 4. BF-05: 3-month Omega (product.quantity = 3) grants 90 days (90 * 86_400s) and sets schedule interval_days = 90.
+    let tok_8202 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8202) },
+            WireField { field_number: 2, value: WireValue::Varint(802) },
+        ],
+    }
+    .encode();
+    assert_eq!(call(&router, &sess, "eve_public.payment.purchase.api.TokenRequest", tok_8202, now).status_code, STATUS_OK);
+    let purch_8202 = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(8202) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+    assert_eq!(call(&router, &sess, "eve_public.plex.vault.api.PurchaseRequest", purch_8202, now).status_code, STATUS_OK);
+    db.with_snapshot(|s| {
+        assert_eq!(s.characters.get(&cid).map(|c| c.clone_grade), Some(2));
+        let sched = s.quasar_commerce.payment_schedules.iter().find(|p| p.user_id == uid).expect("payment schedule");
+        assert_eq!(sched.interval_days, 90);
+        let id_note = s.owner_notes.values().find(|n| n.label == "S:QUASAR_IDENTITY_STORE").expect("identity store");
+        let st: crate::services::quasar_auth_user::QuasarIdentityStore = serde_json::from_str(&id_note.note).unwrap();
+        let expiry = st.omega_subscriptions.get(&uid).copied().unwrap_or(0);
+        assert!(expiry >= now + 180 * 86_400, "expected >= 180d Omega from two 3-month purchases, got {expiry} (now={now})");
+    });
+}
+
+#[test]
+fn plex_vault_purchase_allows_virtual_omega_without_char_or_station_and_blocks_physical() {
+    let router = new_router();
+    let db = Arc::clone(&router.db);
+    seed_catalog(&db);
+    let now = 1_700_000_000u64;
+
+    let uid_charless = 43_001u64;
+    let uid_nostat = 43_002u64;
+    let cid_nostat = 94_300_002i64;
+
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid_charless, 2_000);
+        snap.account_plex_vault.insert(uid_nostat, 2_000);
+        let mut ch = snap.characters.get(&90_000_001).cloned().expect("template char");
+        ch.character_id = cid_nostat;
+        ch.user_id = uid_nostat;
+        ch.clone_grade = 1;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.home_station_id = 0;
+        snap.characters.insert(cid_nostat, ch);
+    });
+
+    let sess_charless = make_sess(Some(uid_charless), None, 0);
+    let mut sess_nostat = make_sess(Some(uid_nostat), Some(cid_nostat), 0);
+    sess_nostat.station_id = None;
+
+    let purch_virtual_omega = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(1001) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+    let purch_physical_skin = WireMessage {
+        fields: vec![
+            WireField { field_number: 1, value: WireValue::Varint(1002) },
+            WireField { field_number: 2, value: WireValue::Varint(1) },
+        ],
+    }
+    .encode();
+
+    // 1. Charless user: physical offer 1002 fails 400 without PLEX deduction; virtual Omega 1001 succeeds.
+    assert_eq!(
+        call(&router, &sess_charless, "eve_public.plex.vault.api.PurchaseRequest", purch_physical_skin.clone(), now).status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid_charless).copied()), Some(2_000));
+
+    assert_eq!(
+        call(&router, &sess_charless, "eve_public.plex.vault.api.PurchaseRequest", purch_virtual_omega.clone(), now).status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault.get(&uid_charless).copied(), Some(1_500));
+        let id_note = s.owner_notes.values().find(|n| n.label == "S:QUASAR_IDENTITY_STORE").expect("identity store");
+        let st: crate::services::quasar_auth_user::QuasarIdentityStore = serde_json::from_str(&id_note.note).unwrap();
+        let expiry = st.omega_subscriptions.get(&uid_charless).copied().unwrap_or(0);
+        assert!(expiry >= now + 30 * 86_400, "expected >= 30d Omega for charless account, got {expiry}");
+    });
+
+    // 2. Stationless character: physical offer 1002 fails 400 without PLEX deduction; virtual Omega 1001 succeeds.
+    assert_eq!(
+        call(&router, &sess_nostat, "eve_public.plex.vault.api.PurchaseRequest", purch_physical_skin, now).status_code,
+        STATUS_BAD_REQUEST
+    );
+    assert_eq!(db.with_snapshot(|s| s.account_plex_vault.get(&uid_nostat).copied()), Some(2_000));
+
+    assert_eq!(
+        call(&router, &sess_nostat, "eve_public.plex.vault.api.PurchaseRequest", purch_virtual_omega, now).status_code,
+        STATUS_OK
+    );
+    db.with_snapshot(|s| {
+        assert_eq!(s.account_plex_vault.get(&uid_nostat).copied(), Some(1_500));
+        assert_eq!(s.characters.get(&cid_nostat).map(|c| c.clone_grade), Some(2));
+        let id_note = s.owner_notes.values().find(|n| n.label == "S:QUASAR_IDENTITY_STORE").expect("identity store");
+        let st: crate::services::quasar_auth_user::QuasarIdentityStore = serde_json::from_str(&id_note.note).unwrap();
+        let expiry = st.omega_subscriptions.get(&uid_nostat).copied().unwrap_or(0);
+        assert!(expiry >= now + 30 * 86_400, "expected >= 30d Omega for stationless char, got {expiry}");
+    });
 }
 
 

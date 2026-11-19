@@ -20,15 +20,27 @@ pub use crate::services::quasar_payment_store_types::*;
 
 const OMEGA_LICENSE_TYPE: &str = "eve_clonestate_omega";
 
-fn is_omega_license_product(product: &StoreProduct) -> bool {
-    if product.type_id != 0 {
-        return false;
+thread_local! {
+    static SUPPRESS_AUTO_STORE_SEED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct SuppressAutoStoreSeedGuard;
+
+impl Drop for SuppressAutoStoreSeedGuard {
+    fn drop(&mut self) {
+        SUPPRESS_AUTO_STORE_SEED.with(|c| c.set(c.get().saturating_sub(1)));
     }
-    if product.id == 101 {
-        return true;
-    }
-    let lower = product.name.to_ascii_lowercase();
-    lower.contains("omega") && !lower.contains("skill point") && !lower.contains(" sp")
+}
+
+/// Runs `f` with automatic boot-time store catalog seeding suppressed on this thread.
+pub(crate) fn suppress_auto_store_seed_when<R>(suppress: bool, f: impl FnOnce() -> R) -> R {
+    let _guard = if suppress {
+        SUPPRESS_AUTO_STORE_SEED.with(|c| c.set(c.get().saturating_add(1)));
+        Some(SuppressAutoStoreSeedGuard)
+    } else {
+        None
+    };
+    f()
 }
 
 fn primary_offer_catalog_name(offer: &StoreOffer) -> &'static str {
@@ -260,7 +272,9 @@ fn extract_u64_id(raw_bytes: &[u8], dyn_msg: &DynamicQuasarMessage) -> Option<u6
 }
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
-    db.with_mut_snapshot(|snap| ensure_store_catalog_seeded(snap, &router.sde));
+    if !SUPPRESS_AUTO_STORE_SEED.with(|c| c.get() > 0) {
+        db.with_mut_snapshot(|snap| ensure_store_catalog_seeded(snap, &router.sde));
+    }
     // 1. eve_public.plex.vault.api.BalanceRequest -> eve_public.plex.vault.api.BalanceResponse
     let db_plex_bal = Arc::clone(&db);
     router.register_handler(
@@ -589,9 +603,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.store.targetaudience.offer.api.ListRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
-            let cat = db_ta_list.with_snapshot(read_store_catalog);
-            let out = encode_targeted_offer_list_response(&cat.offers, uid, dyn_msg);
+            let uid = ctx
+                .effective_user_id()
+                .filter(|&u| u > 0)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?
+                as u64;
+            let now_unix = ctx.now_unix();
+            let out = db_ta_list.with_snapshot(|snap| {
+                encode_eligible_targeted_offer_list_response(snap, uid, dyn_msg, now_unix)
+            });
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.targetaudience.offer.api.ListResponse"
@@ -605,40 +625,90 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_ta_get = Arc::clone(&db);
     router.register_handler(
         "eve_public.store.targetaudience.offer.api.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let offer_id = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::String(s) => s.parse::<u32>().ok(),
-                    DynamicValue::Message(m) => m
-                        .get(1)
-                        .and_then(|val| match val {
-                            DynamicValue::Uint32(u) => Some(*u),
-                            DynamicValue::Int32(i) => Some(*i as u32),
-                            DynamicValue::String(s) => s.parse::<u32>().ok(),
-                            _ => None,
-                        })
-                        .or_else(|| {
-                            m.get(2).and_then(|val| match val {
-                                DynamicValue::Message(entry) => entry.get(1).and_then(|s| match s {
-                                    DynamicValue::String(str_val) => str_val.parse::<u32>().ok(),
-                                    _ => None,
-                                }),
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_uid = ctx
+                .effective_user_id()
+                .filter(|&u| u > 0)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?
+                as u64;
+            let extract_offer_key = |v: &DynamicValue| -> Option<String> {
+                match v {
+                    DynamicValue::Uint32(u) if *u > 0 => Some(u.to_string()),
+                    DynamicValue::Int32(i) if *i > 0 => Some(i.to_string()),
+                    DynamicValue::Uint64(u) if *u > 0 => Some(u.to_string()),
+                    DynamicValue::Int64(i) if *i > 0 => Some(i.to_string()),
+                    DynamicValue::String(s) => {
+                        let trimmed = s.trim();
+                        (!trimmed.is_empty() && trimmed != "0").then(|| trimmed.to_string())
+                    }
+                    _ => None,
+                }
+            };
+            let (req_uid, offer_key) = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => {
+                    let parsed_uid = match m.get(1) {
+                        Some(DynamicValue::Message(u_msg)) => {
+                            u_msg.get(1).and_then(|v| match v {
+                                DynamicValue::Uint64(u) => Some(*u),
+                                DynamicValue::Int64(i) if *i > 0 => Some(*i as u64),
+                                DynamicValue::Sint64(i) if *i > 0 => Some(*i as u64),
+                                DynamicValue::Uint32(u) => Some(*u as u64),
+                                DynamicValue::Int32(i) if *i > 0 => Some(*i as u64),
+                                DynamicValue::Sint32(i) if *i > 0 => Some(*i as u64),
                                 _ => None,
                             })
-                        }),
-                    _ => None,
-                })
-                .filter(|&id| id > 0)
+                        }
+                        _ => None,
+                    };
+                    let parsed_offer = m.get(1).and_then(&extract_offer_key).or_else(|| {
+                        m.get(2).and_then(|val| match val {
+                            DynamicValue::Message(entry) => entry.get(1).and_then(&extract_offer_key),
+                            _ => None,
+                        })
+                    });
+                    (parsed_uid, parsed_offer)
+                }
+                Some(other) => (None, extract_offer_key(other)),
+                None => (None, None),
+            };
+            let offer_key = offer_key
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid targeted offer ID".to_string()))?;
-
-            let cat = db_ta_get.with_snapshot(read_store_catalog);
-            let offer = cat
-                .offers
-                .iter()
-                .find(|o| o.id == offer_id)
+            let is_admin = require_admin_role(ctx).is_ok();
+            let eval_uid = match req_uid.filter(|&u| u > 0) {
+                Some(target_uid) if target_uid != caller_uid && !is_admin => {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Cannot access another user's targeted offer".to_string(),
+                    ));
+                }
+                Some(target_uid) => target_uid,
+                None => caller_uid,
+            };
+            let now_unix = ctx.now_unix();
+            let stripped_key = offer_key
+                .strip_prefix("VEVC-")
+                .or_else(|| offer_key.strip_prefix("vevc-"))
+                .unwrap_or(&offer_key);
+            let offer = db_ta_get
+                .with_snapshot(|snap| {
+                    let cat = read_store_catalog(snap);
+                    cat.offers.into_iter().find(|o| {
+                        let id_str = o.id.to_string();
+                        let matches_key = id_str == offer_key
+                            || id_str == stripped_key
+                            || o.name == offer_key
+                            || find_targeted_offer_record_for_user(snap, o, eval_uid).is_some_and(
+                                |rec| {
+                                    rec.catalogue_entry_name == offer_key
+                                        || rec.catalogue_entry_name == stripped_key
+                                },
+                            );
+                        matches_key
+                            && is_user_eligible_for_target_audience_offer(
+                                snap, o, eval_uid, now_unix,
+                            )
+                    })
+                })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Targeted offer not found".to_string()))?;
 
             pb::message("eve_public.store.targetaudience.offer.api.GetResponse")
@@ -1022,6 +1092,8 @@ fn register_payment_token_and_purchase_handlers(
 
     let db_purchase = Arc::clone(&db);
     let router_pending_purchase = Arc::clone(&router.pending_notices);
+    let macho_sink_purchase = Arc::clone(&router.macho_notify_sink);
+    let sde_purchase = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.payment.purchase.api.TokenRequest",
         Arc::new(move |ctx, any, dyn_msg| {
@@ -1099,14 +1171,23 @@ fn register_payment_token_and_purchase_handlers(
             let now_unix = ctx.now_unix();
             let active_char_id = ctx.effective_character_id().map(|c| c as i64);
 
-            let (receipt_id, maybe_omega_notice, maybe_sched_id) = db_purchase
-                .try_with_mut_snapshot(|snap| -> Result<(u64, Option<GoogleAny>, Option<u64>), String> {
+            let (receipt_id, maybe_omega_notice, maybe_sched_id, delivered_mutations) = db_purchase
+                .try_with_mut_snapshot(|snap| -> Result<_, String> {
                     let catalog = read_store_catalog(snap);
+                    let offer_tags = read_store_offer_tags(snap);
                     let offer = catalog
                         .offers
-                        .into_iter()
+                        .iter()
                         .find(|o| o.id as u64 == offer_id)
+                        .cloned()
                         .ok_or_else(|| format!("{STATUS_NOT_FOUND}:Store offer {offer_id} not found"))?;
+                    if offer.targeted
+                        && !is_user_eligible_for_targeted_offer(snap, &offer, uid, now_unix)
+                    {
+                        return Err(format!(
+                            "{STATUS_FORBIDDEN}:User {uid} is not eligible for targeted offer {offer_id}"
+                        ));
+                    }
                     if offer.price_plex < 0 {
                         return Err(format!("{STATUS_BAD_REQUEST}:Store offer {offer_id} has invalid negative PLEX price"));
                     }
@@ -1117,7 +1198,7 @@ fn register_payment_token_and_purchase_handlers(
                     })?;
                     let amount_in_cents = (unit_cents.min(u64::from(u32::MAX)) as u32)
                         .saturating_mul(qty);
-                    let currency = offer.currency.unwrap_or_else(|| "USD".to_string());
+                    let currency = offer.currency.clone().unwrap_or_else(|| "USD".to_string());
 
                     let tok_idx = snap
                         .quasar_commerce
@@ -1166,17 +1247,7 @@ fn register_payment_token_and_purchase_handlers(
                         user_chars.first().cloned()
                     };
 
-                    let delivery_target = if offer_id != 1001 && !offer.product_ids.is_empty() {
-                        let ch = chosen_char.as_ref().ok_or_else(|| {
-                            format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
-                        })?;
-                        let target_station = ch
-                            .station_id
-                            .or(ch.structure_id)
-                            .or((ch.home_station_id > 0).then_some(ch.home_station_id))
-                            .ok_or_else(|| {
-                                format!("{STATUS_BAD_REQUEST}:Target character has no valid station")
-                            })?;
+                    let delivery_target = if !offer.product_ids.is_empty() {
                         let mut items_to_deliver = Vec::new();
                         for pid in &offer.product_ids {
                             if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
@@ -1187,56 +1258,62 @@ fn register_payment_token_and_purchase_handlers(
                                 }
                             }
                         }
-                        Some((ch.character_id, target_station, items_to_deliver))
+                        if items_to_deliver.is_empty() {
+                            None
+                        } else {
+                            let ch = chosen_char.as_ref().ok_or_else(|| {
+                                format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
+                            })?;
+                            let target_station = ch
+                                .station_id
+                                .or(ch.structure_id)
+                                .or((ch.home_station_id > 0).then_some(ch.home_station_id))
+                                .ok_or_else(|| {
+                                    format!("{STATUS_BAD_REQUEST}:Target character has no valid station")
+                                })?;
+                            Some((ch.character_id, target_station, items_to_deliver))
+                        }
                     } else {
                         None
                     };
 
                     snap.quasar_commerce.payment_tokens[tok_idx].consumed = true;
 
-                    if let Some((cid, target_station, items_to_deliver)) = delivery_target {
-                        for (type_id, deliver_qty) in items_to_deliver {
-                            if let Some(existing) = snap.items.values_mut().find(|it| {
-                                it.owner_id == cid
-                                    && it.location_id == target_station
-                                    && it.flag == eve_db::InventoryFlag::Hangar
-                                    && it.type_id == type_id
-                                    && !it.singleton
-                            }) {
-                                existing.quantity = existing.quantity.saturating_add(deliver_qty);
-                                existing.version += 1;
-                            } else {
-                                snap.next_entity_id += 1;
-                                let item_id = snap.next_entity_id;
-                                snap.items.insert(
-                                    item_id,
-                                    eve_db::InventoryItemRecord {
-                                        item_id,
-                                        type_id,
-                                        owner_id: cid,
-                                        location_id: target_station,
-                                        flag: eve_db::InventoryFlag::Hangar,
-                                        quantity: deliver_qty,
-                                        singleton: false,
-                                        version: 1,
-                                        ..Default::default()
-                                    },
-                                );
-                            }
-                        }
-                    }
+                    let delivered_mutations =
+                        if let Some((cid, target_station, items_to_deliver)) = delivery_target {
+                            deliver_store_hangar_items_in_snapshot(
+                                snap,
+                                cid,
+                                target_station,
+                                &items_to_deliver,
+                            )
+                        } else {
+                            Vec::new()
+                        };
 
-                    let is_omega = offer_id == 1001 || offer.category_id == 1;
+                    let tags = offer_tags.get(&offer.id).map(Vec::as_slice).unwrap_or(&[]);
                     let mut omega_notice = None;
                     let mut sched_id_opt = None;
-                    if is_omega {
+                    if let Some(duration_secs) =
+                        compute_omega_license_duration_secs(&offer, &catalog, tags, qty)
+                    {
                         let (new_expiry, notice) = crate::services::quasar_auth_user::try_activate_user_omega_license_in_snapshot(
                             snap,
                             uid,
-                            30 * 86_400 * u64::from(qty),
+                            duration_secs,
                             now_unix,
                         );
-                        let sched_id = upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
+                        let interval_days =
+                            u32::try_from(duration_secs / 86_400).unwrap_or(u32::MAX);
+                        let sched_id = upsert_user_payment_schedule_in_snapshot(
+                            snap,
+                            uid,
+                            1,
+                            new_expiry,
+                            &format!("VEVC-{}", offer.id),
+                            interval_days,
+                            now_unix,
+                        );
                         sched_id_opt = Some(sched_id);
                         omega_notice = notice;
                     }
@@ -1252,7 +1329,7 @@ fn register_payment_token_and_purchase_handlers(
                         timestamp_unix: now_unix,
                     });
 
-                    Ok((rid, omega_notice, sched_id_opt))
+                    Ok((rid, omega_notice, sched_id_opt, delivered_mutations))
                 })
                 .map_err(|err_str| {
                     if let Some((code_str, msg)) = err_str.split_once(':') {
@@ -1263,6 +1340,12 @@ fn register_payment_token_and_purchase_handlers(
                     (STATUS_BAD_REQUEST, err_str)
                 })?;
 
+            emit_store_item_mutations(
+                &db_purchase,
+                &sde_purchase,
+                &macho_sink_purchase,
+                &delivered_mutations,
+            );
             if let Some(notice) = maybe_omega_notice {
                 router_pending_purchase
                     .write()

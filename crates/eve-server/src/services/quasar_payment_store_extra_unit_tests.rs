@@ -187,6 +187,17 @@ fn deposit_withdraw_default_nested_amounts_and_direct_scalar_catalog_lookups() {
     seed_store_catalog(&db);
     db.with_mut_snapshot(|s| {
         s.account_plex_vault.insert(1, 0);
+        s.quasar_commerce.targeted_offers.insert(
+            "1:1002".into(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "1002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
     });
     let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_GM_DEFAULT);
 
@@ -350,6 +361,19 @@ fn deliver_item_fallbacks_default_type_qty_and_station_resolution() {
 fn cost_and_token_purchase_prefix_stripping_negative_price_and_recipient_validation() {
     let (router, db) = new_router();
     seed_store_catalog(&db);
+    db.with_mut_snapshot(|s| {
+        s.quasar_commerce.targeted_offers.insert(
+            "1:1002".into(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "1002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
     let sess = make_sess(Some(1), Some(90_000_001), service_roles::ROLE_PLAYER_DEFAULT);
 
     // CostRequest for offer 1002 -> STATUS_OK
@@ -506,6 +530,17 @@ fn schedule_token_quickpay_and_purchase_idor_and_predicate_isolation() {
                 consumed: false,
             },
         ];
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:1002".into(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "1002".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
     });
 
     // 1. schedule.api.GetRequest: u1 gets 101 ("offer-u1-s1"), NOT 103; cross-user 102 is NOT_FOUND

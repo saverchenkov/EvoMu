@@ -306,6 +306,24 @@ fn vault_deposit_withdraw_variants_and_store_catalog_token_schedule_getters() {
     for v in [DynamicValue::Uint32(101), DynamicValue::Int32(101), sub_val(DynamicValue::Int32(101))] {
         assert!(handlers["eve_public.store.product.api.GetRequest"](&gm, &any, &msg_with(1, v)).is_ok());
     }
+    // Unpromoted targeted offer 1001 fails closed on targetaudience GetRequest while regular GetRequest succeeds.
+    assert!(handlers["eve_public.store.offer.api.GetRequest"](&gm, &any, &msg_with(1, DynamicValue::Uint32(1001))).is_ok());
+    assert!(handlers["eve_public.store.targetaudience.offer.api.GetRequest"](&gm, &any, &msg_with(1, DynamicValue::Uint32(1001))).is_err());
+
+    db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.targeted_offers.insert(
+            "1:1001".into(),
+            eve_db::TargetedOfferAdminRecord {
+                user_id: 1,
+                catalogue_entry_name: "1001".into(),
+                promoted: true,
+                retracted: false,
+                earliest_reissue_unix: 0,
+                partner_code: String::new(),
+            },
+        );
+    });
+
     for v in [
         DynamicValue::Uint32(1001),
         DynamicValue::Int32(1001),
