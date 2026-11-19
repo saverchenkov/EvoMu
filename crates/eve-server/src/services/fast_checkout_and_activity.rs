@@ -39,6 +39,98 @@ pub use eve_db::{
     UserFastCheckoutState,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FastCheckoutBilling {
+    Free,
+    Plex { plex_cost: i64 },
+    FiatUsd { unit_cents: u32, price_usd: f64 },
+}
+
+impl FastCheckoutBilling {
+    fn display_price(self) -> f64 {
+        match self {
+            Self::Free => 0.0,
+            Self::Plex { plex_cost } => plex_cost as f64,
+            Self::FiatUsd { price_usd, .. } => price_usd,
+        }
+    }
+
+    fn currency(self) -> &'static str {
+        match self {
+            Self::Free => "FREE",
+            Self::Plex { .. } => "PLX",
+            Self::FiatUsd { .. } => "USD",
+        }
+    }
+
+    fn unit_cents(self) -> u32 {
+        match self {
+            Self::FiatUsd { unit_cents, .. } => unit_cents,
+            Self::Free | Self::Plex { .. } => 0,
+        }
+    }
+
+    fn unit_plex_cost(self) -> i64 {
+        match self {
+            Self::Plex { plex_cost } => plex_cost,
+            Self::Free | Self::FiatUsd { .. } => 0,
+        }
+    }
+}
+
+/// Resolves canonical FastCheckout billing mode so `GetOffersForUser` and `BuyOffer`
+/// always agree on currency, advertised price, vault PLEX debit, and payment-token checks.
+fn resolve_fast_checkout_billing(
+    offer: &FastCheckoutOfferRecord,
+    free_plex_mode: bool,
+) -> Result<FastCheckoutBilling, BridgeRpcError> {
+    let invalid_offer = |message: String| BridgeRpcError {
+        code: "InvalidOffer".into(),
+        message,
+        client_error: None,
+    };
+    if offer.price_plex < 0 {
+        return Err(invalid_offer(format!(
+            "Offer {} has invalid negative PLEX price",
+            offer.offer_id
+        )));
+    }
+    if !offer.price_usd.is_finite() || offer.price_usd < 0.0 {
+        return Err(invalid_offer(format!(
+            "Offer {} has invalid USD price",
+            offer.offer_id
+        )));
+    }
+    if offer.price_plex > 0 {
+        return Ok(FastCheckoutBilling::Plex {
+            plex_cost: offer.price_plex,
+        });
+    }
+    let rounded_cents = (offer.price_usd * 100.0).round();
+    if rounded_cents > f64::from(u32::MAX) {
+        return Err(BridgeRpcError {
+            code: "ArithmeticOverflow".into(),
+            message: "Payment amount overflows u32".into(),
+            client_error: None,
+        });
+    }
+    let unit_cents = rounded_cents as u32;
+    if unit_cents == 0 {
+        return Err(invalid_offer(format!(
+            "Offer {} has no valid price",
+            offer.offer_id
+        )));
+    }
+    if free_plex_mode {
+        Ok(FastCheckoutBilling::Free)
+    } else {
+        Ok(FastCheckoutBilling::FiatUsd {
+            unit_cents,
+            price_usd: f64::from(unit_cents) / 100.0,
+        })
+    }
+}
+
 fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastCheckoutOfferRecord> {
     let catalog = crate::services::quasar_payment_store_types::read_store_catalog(snap);
     let tags_map = crate::services::quasar_payment_store_types::read_store_offer_tags(snap);
@@ -46,12 +138,20 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
         .offers
         .iter()
         .filter_map(|offer| {
+            let tags = tags_map.get(&offer.id).cloned().unwrap_or_default();
+            if !crate::services::quasar_payment_store_types::is_fast_checkout_catalog_offer(
+                offer, &catalog, &tags,
+            ) {
+                return None;
+            }
             let cents = offer.price_cents.unwrap_or(0);
             let mut plex_amount: i64 = 0;
             let mut products = Vec::new();
             for pid in &offer.product_ids {
                 if let Some(p) = catalog.products.iter().find(|prod| prod.id == *pid) {
-                    if p.type_id == crate::services::market_contracts::PLEX_TYPE_ID && p.quantity > 0 {
+                    if p.type_id == crate::services::market_contracts::PLEX_TYPE_ID
+                        && p.quantity > 0
+                    {
                         plex_amount += i64::from(p.quantity);
                     } else if p.quantity > 0 {
                         products.push(FastCheckoutProductRecord {
@@ -64,7 +164,6 @@ fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastChecko
             if plex_amount <= 0 && products.is_empty() {
                 return None;
             }
-            let tags = tags_map.get(&offer.id).cloned().unwrap_or_default();
             Some(FastCheckoutOfferRecord {
                 offer_id: i64::from(offer.id),
                 plex_amount,
@@ -189,21 +288,37 @@ fn resolve_fast_checkout_offers_for_user(
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let store_catalog = crate::services::quasar_payment_store::read_store_catalog(snap);
+        let store_tags = crate::services::quasar_payment_store::read_store_offer_tags(snap);
         offers.retain(|fc_off| {
             match store_catalog
                 .offers
                 .iter()
                 .find(|so| i64::from(so.id) == fc_off.offer_id)
             {
-                Some(store_off) if store_off.targeted => {
-                    crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
-                        snap,
+                Some(store_off) => {
+                    let tags = store_tags
+                        .get(&store_off.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !crate::services::quasar_payment_store_types::is_fast_checkout_catalog_offer(
                         store_off,
-                        user_id,
-                        now_unix,
-                    )
+                        &store_catalog,
+                        tags,
+                    ) {
+                        return false;
+                    }
+                    if store_off.targeted {
+                        crate::services::quasar_payment_store_types::is_user_eligible_for_targeted_offer(
+                            snap,
+                            store_off,
+                            user_id,
+                            now_unix,
+                        )
+                    } else {
+                        true
+                    }
                 }
-                _ => true,
+                None => true,
             }
         });
     });
@@ -856,19 +971,15 @@ fn handle_get_offers_for_user(
 
     let plex_offers: Vec<PyRep> = offers
         .into_iter()
-        .map(|o| {
+        .filter_map(|o| {
+            let billing = resolve_fast_checkout_billing(&o, free_plex_mode).ok()?;
             let base_qty = if o.plex_amount > 0 {
                 o.plex_amount
             } else {
                 o.products.first().map(|p| p.quantity as i64).unwrap_or(1)
             };
-            let display_price = if free_plex_mode {
-                0.0
-            } else if o.price_usd > 0.0 {
-                o.price_usd
-            } else {
-                o.price_plex as f64
-            };
+            let display_price = billing.display_price();
+            let display_currency = billing.currency();
             let mut prod_reps: Vec<PyRep> = o
                 .products
                 .iter()
@@ -888,7 +999,7 @@ fn handle_get_offers_for_user(
                     (PyRep::String("quantity".into()), PyRep::Integer(base_qty)),
                 ]));
             }
-            PyRep::Dict(vec![
+            Some(PyRep::Dict(vec![
                 (PyRep::String("offerId".into()), PyRep::Integer(o.offer_id)),
                 (PyRep::String("offerID".into()), PyRep::Integer(o.offer_id)),
                 (PyRep::String("baseQuantity".into()), PyRep::Integer(base_qty)),
@@ -896,13 +1007,17 @@ fn handle_get_offers_for_user(
                 (PyRep::String("price".into()), PyRep::Real(display_price)),
                 (PyRep::String("pricePlex".into()), PyRep::Integer(o.price_plex)),
                 (
+                    PyRep::String("currency".into()),
+                    PyRep::String(display_currency.into()),
+                ),
+                (
                     PyRep::String("tags".into()),
                     PyRep::List(o.tags.into_iter().map(PyRep::String).collect()),
                 ),
                 (PyRep::String("name".into()), PyRep::String(o.name)),
                 (PyRep::String("description".into()), PyRep::String(o.description)),
                 (PyRep::String("products".into()), PyRep::List(prod_reps)),
-            ])
+            ]))
         })
         .collect();
 
@@ -1071,13 +1186,7 @@ fn handle_buy_offer(
         });
     }
 
-    if offer.price_plex < 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidOffer".into(),
-            message: format!("Offer {offer_id} has invalid negative PLEX price"),
-            client_error: None,
-        });
-    }
+    let billing = resolve_fast_checkout_billing(&offer, free_plex_mode)?;
 
     let total_plex = offer
         .plex_amount
@@ -1088,8 +1197,8 @@ fn handle_buy_offer(
             message: "Total PLEX quantity overflows i64".into(),
             client_error: None,
         })?;
-    let total_cost_plex = offer
-        .price_plex
+    let total_cost_plex = billing
+        .unit_plex_cost()
         .checked_mul(quantity)
         .filter(|&v| v >= 0)
         .ok_or_else(|| BridgeRpcError {
@@ -1099,11 +1208,7 @@ fn handle_buy_offer(
         })?;
 
     let now_unix = ctx.now_unix();
-    let unit_cents = if free_plex_mode || offer.price_plex > 0 {
-        0_u32
-    } else {
-        (offer.price_usd * 100.0).round().max(0.0) as u32
-    };
+    let unit_cents = billing.unit_cents();
     let amount_in_cents = u32::try_from(quantity)
         .ok()
         .and_then(|q| unit_cents.checked_mul(q))
@@ -1112,13 +1217,6 @@ fn handle_buy_offer(
             message: "Payment amount overflows u32".into(),
             client_error: None,
         })?;
-    if !free_plex_mode && offer.price_plex <= 0 && amount_in_cents == 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidOffer".into(),
-            message: format!("Offer {offer_id} has no valid price"),
-            client_error: None,
-        });
-    }
 
     let has_physical_items = offer
         .products
@@ -1363,7 +1461,7 @@ fn handle_buy_offer(
         let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
     }
 
-    let status_str = if free_plex_mode {
+    let status_str = if matches!(billing, FastCheckoutBilling::Free) {
         "COMPLETED"
     } else {
         "CONFIRMED"
