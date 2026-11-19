@@ -279,11 +279,26 @@ async fn test_slash_teleport_evicts_space_and_pi_bindings_and_blocks_cross_syste
     let sys_id = sess.solar_system_id.expect("in system") as i64;
     assert_eq!(sys_id, 30_000_142);
 
-    // Non-system keeper (1) succeeds, while cross-system keeper & planetOrbitalRegistryBroker fail
+    // Real SDE dungeon keeper binds with GM role, while invalid keeper(1), cross-system keeper & planetOrbitalRegistryBroker fail
     let bind_denied = ["BindAuthorization", "Denied"].concat();
-    let keep_global = bind_wire(&ctx, &mut sess, "keeper", 1)
+    let dungeon_id = ctx
+        .sde
+        .dungeons
+        .keys()
+        .copied()
+        .map(i64::from)
+        .find(|id| !(30_000_000..=39_999_999).contains(id))
+        .expect("non-solar-system SDE dungeon");
+    let keep_global = bind_wire(&ctx, &mut sess, "keeper", dungeon_id)
         .await
-        .expect("keeper global bind");
+        .expect("keeper GM dungeon bind");
+    assert_eq!(
+        bind_wire(&ctx, &mut sess, "keeper", 1)
+            .await
+            .expect_err("non-dungeon keeper(1) bind denied")
+            .code,
+        bind_denied
+    );
     assert_eq!(
         bind_wire(&ctx, &mut sess, "keeper", 30_000_144)
             .await

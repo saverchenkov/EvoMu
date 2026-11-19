@@ -270,8 +270,8 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
     sess.alliance_id = Some(99_000_111);
     sess.fleet_id = Some(77_000_111);
     for (svc, allowed_id, denied_id) in [
-        ("agentMgr", 3_018_922_i64, 0_i64),
-        ("keeper", 1_i64, -5_i64),
+        ("agentMgr", 3_008_416_i64, 0_i64),
+        ("keeper", i64::from(sys_id), 1_i64),
         ("corpRegistry", 98_000_111_i64, 98_000_222_i64),
         ("corpmgr", 98_000_111_i64, 98_000_222_i64),
         ("allianceRegistry", 99_000_111_i64, 99_000_222_i64),
@@ -290,6 +290,16 @@ fn moniker_bind_and_verify_authorization_matrix_across_all_services() {
             "{svc} denied"
         );
     }
+    assert_eq!(
+        ctx.bind_object(&sess, "agentMgr", 3_018_922_i64)
+            .unwrap_err()
+            .code,
+        EXPECTED_BIND_DENIED_CODE
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "keeper", -5_i64).unwrap_err().code,
+        EXPECTED_BIND_DENIED_CODE
+    );
 }
 
 #[test]
@@ -320,7 +330,17 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
         .bind_object(&sess, "planetOrbitalRegistryBroker", sys_id as i64)
         .unwrap();
     let b_keep_sys = ctx.bind_object(&sess, "keeper", sys_id as i64).unwrap();
-    let b_keep_global = ctx.bind_object(&sess, "keeper", 1).unwrap();
+    let dungeon_id = ctx
+        .sde
+        .dungeons
+        .keys()
+        .copied()
+        .map(i64::from)
+        .find(|id| !(30_000_000..=39_999_999).contains(id))
+        .expect("non-solar-system SDE dungeon");
+    let mut gm_sess = sess.clone();
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    let b_keep_global = ctx.bind_object(&gm_sess, "keeper", dungeon_id).unwrap();
     let b_pos_sys = ctx.bind_object(&sess, "posMgr", sys_id as i64).unwrap();
     let b_pos_non_sys = ctx.bind_object(&sess, "posMgr", 500).unwrap();
     let b_dev_sys = ctx
@@ -328,7 +348,7 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
         .unwrap();
     let b_repair = ctx.bind_object(&sess, "repairSvc", st_id).unwrap();
 
-    // Cross-system planetOrbitalRegistryBroker and solar-system-scoped keeper are denied
+    // Cross-system planetOrbitalRegistryBroker and solar-system-scoped / unauthorized keeper are denied
     assert_eq!(
         ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 30_000_144)
             .unwrap_err()
@@ -339,6 +359,10 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
         ctx.bind_object(&sess, "keeper", 30_000_144)
             .unwrap_err()
             .code,
+        EXPECTED_BIND_DENIED_CODE
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "keeper", 1).unwrap_err().code,
         EXPECTED_BIND_DENIED_CODE
     );
 
@@ -487,6 +511,15 @@ fn verify_all_remaining_services_and_invalidation_transitions() {
                 active: true,
             },
         );
+        let mut tourney_match =
+            eve_db::TourneyMatch::new(5_001, 77, i64::from(other_sys), 100, 600, 120, 1);
+        tourney_match.red_players.push(eve_db::TourneyPilot {
+            character_id: char_id,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 5,
+        });
+        snap.tourney_state.matches.insert(5_001, tourney_match);
         snap.items.insert(
             item_in_ship,
             InventoryItemRecord {
@@ -544,9 +577,9 @@ fn verify_all_remaining_services_and_invalidation_transitions() {
         ("devIndexManager", sys_id as i64),
         ("voucher", 98_000_111),
         ("contractProxy", 98_000_111),
-        ("agentMgr", 3_018_922),
-        ("keeper", 1),
-        ("tourneyMgr", 1),
+        ("agentMgr", 3_008_416),
+        ("keeper", sys_id as i64),
+        ("tourneyMgr", 5_001),
         ("crimewatch", sys_id as i64),
         ("skillMgr2", st_id),
     ] {
@@ -554,9 +587,23 @@ fn verify_all_remaining_services_and_invalidation_transitions() {
         assert!(ctx.verify_bound_object(&sess, bid).is_ok(), "verify {svc}");
         bids.push((svc, bid));
     }
+    assert_eq!(
+        ctx.bind_object(&sess, "agentMgr", 3_018_922)
+            .unwrap_err()
+            .code,
+        err_bind_denied
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "keeper", 1).unwrap_err().code,
+        err_bind_denied
+    );
+    assert_eq!(
+        ctx.bind_object(&sess, "tourneyMgr", 1).unwrap_err().code,
+        err_bind_denied
+    );
 
     // Negative object_id on bound entry fails verify_service_binding_context
-    let neg_bid = ctx.bind_object(&sess, "keeper", 1).unwrap();
+    let neg_bid = ctx.bind_object(&sess, "keeper", sys_id as i64).unwrap();
     if let Some(entry) = ctx.bound_objects.write().unwrap().get_mut(&neg_bid) {
         entry.object_id = -1;
     }

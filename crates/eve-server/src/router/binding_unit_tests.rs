@@ -364,7 +364,13 @@ fn session_closers_object_binding_verification_and_transition_invalidation_work(
     let b_inv = ctx.bind_object(&pre_sess, "invbroker", st_id).unwrap();
     let b_skill = ctx.bind_object(&pre_sess, "skillMgr2", char_id).unwrap();
     let b_cw = ctx.bind_object(&pre_sess, "crimewatch", 0).unwrap();
-    let b_agent = ctx.bind_object(&pre_sess, "agentMgr", 3018922).unwrap();
+    let b_agent = ctx.bind_object(&pre_sess, "agentMgr", 3_008_416).unwrap();
+    assert_eq!(
+        ctx.bind_object(&pre_sess, "agentMgr", 3_018_922)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
     let b_sub = ctx.bind_verified_sub_object(&pre_sess, "invbroker", 555_001).unwrap();
 
     // GM-only service requires GM role
