@@ -426,14 +426,11 @@ pub async fn handle(
                 | "CmdOrbit"
                 | "CmdFollowBall"
                 | "CmdAlignTo"
-                | "CmdWarpToStuff"
         )
     {
         if let Some(cid) = session.character_id {
             if method != "CmdStop" {
                 break_location_change_invulnerability(ctx, cid);
-            }
-            if method != "CmdStop" && method != "CmdWarpToStuff" {
                 if let Some(sys_id) = session.solar_system_id {
                     if let Err(e) = crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, cid) {
                         return Some(Err(e));

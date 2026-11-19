@@ -1578,3 +1578,186 @@ async fn self_destruct_and_abort_validate_optional_pickid() {
     assert_eq!(abort_none.dict_get("aborted"), Some(&PyRep::Bool(true)));
     assert_eq!(ctx.db.get_character(char_id).unwrap().active_ship_id, ship_id);
 }
+
+#[tokio::test]
+async fn cloaked_self_destruct_and_docked_abort_reject_without_mutating_db_or_runtime() {
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let ship_type = ctx.db.with_snapshot(|snap| snap.items[&ship_id].type_id);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_type,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    let kw = HashMap::new();
+    let expected_ship_cloaked_ce =
+        BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ShipCloaked).client_error;
+
+    // 1. Active module cloak (both normal and covert) rejects SelfDestruct
+    //    without mutating DB epoch, commit count, runtime countdowns, or cloak state.
+    for is_covert_cloak in [false, true] {
+        sys_h
+            .set_combat_state(
+                ship_id,
+                CombatState {
+                    is_cloaked: true,
+                    gate_cloak_remaining_ticks: 0,
+                    is_covert_cloak,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+        let epoch_0 = ctx.db.state_epoch();
+        let tx_0 = ctx.db.tx_commit_count();
+        let err = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+            .await
+            .unwrap()
+            .expect_err("ship.SelfDestruct must reject active module cloak");
+        assert_eq!(err.code, "ShipCloaked");
+        assert_eq!(err.client_error, expected_ship_cloaked_ce);
+        assert_eq!(ctx.db.state_epoch(), epoch_0);
+        assert_eq!(ctx.db.tx_commit_count(), tx_0);
+        assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.self_destructs.is_empty()));
+        assert!(with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.is_empty()));
+        assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+    }
+
+    // 1b. Unsynced active cloak module in `snap.module_active_states` (`CombatState.is_cloaked == false`)
+    //     must ALSO reject both SelfDestruct and CmdSelfDestruct with UserErrorKey::ShipCloaked.
+    sys_h
+        .set_combat_state(ship_id, CombatState::default())
+        .await
+        .unwrap();
+    let cloak_mod_id = 99_500_777_i64;
+    let cloak_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 330)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_577);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: cloak_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    let epoch_unsynced = ctx.db.state_epoch();
+    let tx_unsynced = ctx.db.tx_commit_count();
+    let err = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .expect_err("unsynced active cloak module must reject self-destruct");
+    assert_eq!(err.code, "ShipCloaked");
+    assert_eq!(err.client_error, expected_ship_cloaked_ce);
+    assert_eq!(ctx.db.state_epoch(), epoch_unsynced);
+    assert_eq!(ctx.db.tx_commit_count(), tx_unsynced);
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.self_destructs.is_empty()));
+    assert!(with_combat_runtime(&ctx, |rt| rt.self_destruct_countdowns.is_empty()));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+        snap.items.remove(&cloak_mod_id);
+    });
+
+    // 2. Gate cloak (`gate_cloak_remaining_ticks > 0`) permits SelfDestruct, and mismatched
+    //    AbortSelfDestruct pickid rejects cleanly without cancelling countdown or bumping DB.
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 5,
+                is_covert_cloak: false,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+    let sd_ok = handle_wrecks_killmails(&ctx, &mut session, "ship", "SelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .expect("gate-cloaked SelfDestruct must succeed");
+    assert_eq!(sd_ok.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+
+    let epoch_armed = ctx.db.state_epoch();
+    let tx_armed = ctx.db.tx_commit_count();
+    let bad_abort = handle_wrecks_killmails(
+        &ctx,
+        &mut session,
+        "ship",
+        "AbortSelfDestruct",
+        &[PyRep::Integer(ship_id + 99)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("mismatched AbortSelfDestruct pickid must reject");
+    assert_eq!(bad_abort.code, "InvalidShip");
+    assert_eq!(ctx.db.state_epoch(), epoch_armed);
+    assert_eq!(ctx.db.tx_commit_count(), tx_armed);
+
+    // 3. Docked session OR DB-docked character must reject SelfDestruct and
+    //    AbortSelfDestruct cleanly before mutating DB or cancelling armed state.
+    let expected_docked_code = "CannotSelfDestructWhileDocked";
+    session.station_id = Some(60_003_760);
+    for meth in ["SelfDestruct", "AbortSelfDestruct"] {
+        let dock_err = handle_wrecks_killmails(&ctx, &mut session, "ship", meth, &[], &kw)
+            .await
+            .unwrap()
+            .expect_err(&format!("docked {meth} must fail"));
+        assert_eq!(dock_err.code, expected_docked_code);
+        assert_eq!(ctx.db.state_epoch(), epoch_armed);
+        assert_eq!(ctx.db.tx_commit_count(), tx_armed);
+    }
+    session.station_id = None;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
+    let epoch_db_dock = ctx.db.state_epoch();
+    let tx_db_dock = ctx.db.tx_commit_count();
+    for (svc, meth) in [("ship", "SelfDestruct"), ("ship", "AbortSelfDestruct")] {
+        let db_dock_err = handle_wrecks_killmails(&ctx, &mut session, svc, meth, &[], &kw)
+            .await
+            .unwrap()
+            .expect_err(&format!("DB-docked ({svc}, {meth}) must fail"));
+        assert_eq!(db_dock_err.code, expected_docked_code);
+        assert_eq!(ctx.db.state_epoch(), epoch_db_dock);
+        assert_eq!(ctx.db.tx_commit_count(), tx_db_dock);
+    }
+
+    // 4. Undock in DB -> AbortSelfDestruct cancels the armed countdown.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
+    let abort_ok = handle_wrecks_killmails(&ctx, &mut session, "ship", "AbortSelfDestruct", &[], &kw)
+        .await
+        .unwrap()
+        .expect("in-space AbortSelfDestruct must succeed");
+    assert_eq!(abort_ok.dict_get("aborted"), Some(&PyRep::Bool(true)));
+}

@@ -88,6 +88,32 @@ fn spawn_ship_in_space(
     );
 }
 
+fn mark_char_online(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) {
+    let char_uid = ctx.db.with_mut_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| c.user_id)
+            .filter(|uid| snap.accounts.values().any(|a| a.user_id == *uid))
+            .unwrap_or_else(|| {
+                let demo_uid = snap.accounts.values().next().map(|a| a.user_id).unwrap_or(1);
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.user_id = demo_uid;
+                }
+                demo_uid
+            })
+    });
+    sess.user_id = Some(char_uid);
+    ctx.db
+        .acquire_online_lock(
+            char_uid,
+            sess.session_id,
+            Some(char_id),
+            true,
+            ctx.now_unix_secs(),
+        )
+        .expect("acquire online lock for character notification delivery");
+}
+
 #[test]
 fn resolve_bound_or_session_sys_and_bookmark_expired_err_cover_branches() {
     let mut sess = SessionState::default();
@@ -2712,4 +2738,790 @@ async fn merlin_3_95au_warp_under_dedicated_ticker_avoids_spurious_tidi_and_dock
     .await
     .unwrap()
     .expect("CmdStop after arrival must succeed without ShipAlreadyInWarp");
+}
+
+#[tokio::test]
+async fn cmd_warp_rejected_paths_do_not_clear_cloak_or_mutate_db_gh_1351() {
+    let ctx = test_ctx();
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let sys_id = 30_000_142_u32;
+    let (st_id, st_pos) = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(_, st)| st.solar_system_id == sys_id)
+        .map(|(&id, st)| (id, st.position))
+        .expect("station in Jita");
+    let ship_id = 88_511_001_i64;
+    let cloak_mod_id = 88_511_002_i64;
+    let far_pos = st_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, far_pos);
+
+    let non_covert_cloak_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| {
+            t.group_id == 330
+                && !t.effect_ids.iter().any(|&eid| {
+                    ctx.sde
+                        .effects
+                        .get(&eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+        })
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_577);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: far_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 320.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship ball");
+
+    let mut sess = SessionState {
+        session_id: 88_511,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    mark_char_online(&ctx, &mut sess, char_id);
+    let beyonce_id = ctx
+        .bind_object(&mut sess, "beyonce", sys_id as i64)
+        .expect("bind beyonce");
+    let kw = HashMap::new();
+
+    let arm_invuln_and_safe_logoff = || {
+        let now = ctx.now_unix();
+        grant_location_change_invulnerability(&ctx, char_id, now + 60);
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
+            st.safe_logoffs.insert(
+                char_id,
+                eve_db::SafeLogoffEntry {
+                    char_id,
+                    ship_id,
+                    solar_system_id: sys_id,
+                    started_unix: now,
+                    complete_at_unix: now + 30,
+                    completed: false,
+                },
+            );
+        });
+    };
+
+    // Seed default crimewatch entry and PvE exploration registry once in setup before
+    // snapshotting read-purity DB epochs, and arm active location-change invulnerability + safe logoff.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let _ = cw.get_or_create(char_id);
+    }
+    arm_invuln_and_safe_logoff();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Cloaked (stale CombatState flag with empty module_active_states) + warp-scrambled:
+    //    CmdWarpToStuff & CmdWarpToStuffAutopilot via full `dispatch_rpc` reject without clearing
+    //    `cs.is_cloaked`, cancelling invulnerability/safe-logoff, or mutating DB.
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = false;
+        cs.gate_cloak_remaining_ticks = 0;
+        cs.warp_scramble_strength = 1;
+        cs.capacitor = 500.0;
+        cs.max_capacitor = 500.0;
+    });
+    let epoch_0 = ctx.db.state_epoch();
+    let tx_0 = ctx.db.tx_commit_count();
+    for method in ["CmdWarpToStuff", "CmdWarpToStuffAutopilot"] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                Some(beyonce_id),
+                method,
+                &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+                &kw,
+                None,
+            )
+            .await
+            .expect_err(&format!("{method} must reject when scrambled + cloaked"));
+        assert_eq!(err.code, "WarpScrambled");
+        let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked, "{method} rejection must preserve is_cloaked");
+        assert_eq!(cs.capacitor, 500.0, "{method} rejection must preserve capacitor");
+        assert!(
+            is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            "{method} rejection must preserve location_change_invuln"
+        );
+        assert!(
+            ctx.db
+                .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)),
+            "{method} rejection must preserve active safe_logoff"
+        );
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(
+            !notifs
+                .iter()
+                .any(|n| n.event == "OnInvulnCancelled" || n.event == "OnSafeLogoffAborted"),
+            "{method} rejection must not emit cancellation notifications: {notifs:?}"
+        );
+        assert_eq!(ctx.db.state_epoch(), epoch_0);
+        assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    }
+
+    // 2. Clear scramble while keeping active non-covert cloak:
+    //    regular warp AND unseeded dungeon warp (`needs_pve_seed`) must reject with CloakedCannotWarp
+    //    without clearing `is_cloaked`, invulnerability, safe logoff, or seeding PvE anomalies.
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.warp_scramble_strength = 0;
+    });
+    for args in [
+        vec![PyRep::String("item".into()), PyRep::Integer(st_id)],
+        vec![PyRep::String("dungeon".into()), PyRep::Integer(99_999_001)],
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "beyonce",
+                Some(beyonce_id),
+                "CmdWarpToStuff",
+                &args,
+                &kw,
+                None,
+            )
+            .await
+            .expect_err("non-covert cloak must reject CmdWarpToStuff");
+        assert_eq!(err.code, "CloakedCannotWarp");
+        let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked, "CloakedCannotWarp must preserve is_cloaked");
+        let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        assert!(matches!(ball.mode, MovementMode::Stop));
+        assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+        assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(!notifs
+            .iter()
+            .any(|n| n.event == "OnInvulnCancelled" || n.event == "OnSafeLogoffAborted"));
+        assert_eq!(ctx.db.state_epoch(), epoch_0);
+        assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    }
+
+    // 2b. Unsynced non-covert cloak in `snap.module_active_states` (`cs.is_cloaked == false`)
+    //     must ALSO reject with CloakedCannotWarp without mutating invuln, safe-logoff, or DB.
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.is_covert_cloak = false;
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: non_covert_cloak_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    let mod_epoch_0 = ctx.db.state_epoch();
+    let mod_tx_0 = ctx.db.tx_commit_count();
+    let mod_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unsynced active non-covert cloak module must reject warp");
+    assert_eq!(mod_err.code, "CloakedCannotWarp");
+    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
+    assert_eq!(ctx.db.state_epoch(), mod_epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), mod_tx_0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+        snap.items.remove(&cloak_mod_id);
+    });
+
+    // 3. Covert-cloak state with insufficient capacitor (`NotEnoughCapacitor`) must preserve
+    //    cloak, capacitor, ball mode, invulnerability, safe-logoff, and DB state.
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |_| {});
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = true;
+        cs.capacitor = 0.0;
+    });
+    let cap_epoch_0 = ctx.db.state_epoch();
+    let cap_tx_0 = ctx.db.tx_commit_count();
+    let cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("0 capacitor must reject CmdWarpToStuff");
+    assert_eq!(cap_err.code, "NotEnoughCapacitor");
+    let cs_after_cap = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_after_cap.is_cloaked, "NotEnoughCapacitor must preserve is_cloaked");
+    assert_eq!(cs_after_cap.capacitor, 0.0, "NotEnoughCapacitor must not mutate capacitor");
+    let (_, cap_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(cap_ball.mode, MovementMode::Stop));
+    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
+    let cap_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(!cap_notifs
+        .iter()
+        .any(|n| n.event == "OnInvulnCancelled" || n.event == "OnSafeLogoffAborted"));
+    assert_eq!(ctx.db.state_epoch(), cap_epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), cap_tx_0);
+
+    // 4. Valid uncloaked warp with sufficient capacitor succeeds cleanly AND aborts
+    //    location_change_invuln and safe_logoff only when committed.
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.is_covert_cloak = false;
+        cs.capacitor = 500.0;
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("valid CmdWarpToStuff must succeed");
+    let (_, warp_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(warp_ball.mode, MovementMode::Warp { .. }));
+    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx.db.with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&char_id)));
+    let commit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        commit_notifs.iter().any(|n| n.event == "OnInvulnCancelled"),
+        "committed warp must emit OnInvulnCancelled: {commit_notifs:?}"
+    );
+    assert!(
+        commit_notifs.iter().any(|n| n.event == "OnSafeLogoffAborted"),
+        "committed warp must emit OnSafeLogoffAborted: {commit_notifs:?}"
+    );
+}
+
+#[tokio::test]
+async fn tethered_warp_no_cap_refund_and_unsynced_covert_cloak_preserved_gh_1351() {
+    let ctx = test_ctx();
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let corp_id = ctx.db.with_snapshot(|snap| snap.characters[&char_id].corporation_id);
+    let sys_id = 30_000_142_u32;
+    let (st_id, st_pos) = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(_, st)| st.solar_system_id == sys_id)
+        .map(|(&id, st)| (id, st.position))
+        .expect("station in Jita");
+
+    // Seed an operational quantum-cored Astrahus at origin within tether perimeter (~15 km)
+    // and warp toward the far Jita station (~2 AU away).
+    let astra_id = 1_001_999_888_777_i64;
+    let astra_pos = st_pos + DVec3::new(300_000_000_000.0, 0.0, 0.0); // ~2.0 AU from target station
+    let ship_start = astra_pos + DVec3::new(15_000.0, 0.0, 0.0);
+    let ship_id = 88_512_001_i64;
+    let cloak_mod_id = 88_512_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            astra_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: astra_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Tether Warp Astrahus".into(),
+                state: "ShieldVulnerable".into(),
+                position: astra_pos.to_array(),
+                shield_hp: 500.0,
+                armor_hp: 500.0,
+                hull_hp: 500.0,
+                quantum_core_installed: true,
+                fuel_blocks: 1000,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, ship_start);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Heavy mass (100_000_000 kg) ensures a partial warp from 10.0 GJ drains capacitor to 0.0 GJ
+    // cleanly (> 150 km affordable) so any +25% tether refund (+250 GJ) would be unmistakable.
+    sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: ship_start,
+            velocity: DVec3::ZERO,
+            max_velocity: 320.0,
+            inertia: 2.0,
+            mass: 100_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .expect("spawn ship ball");
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.max_capacitor = 1_000.0;
+        cs.capacitor = 1_000.0;
+    });
+    crate::services::space_destiny::space_nav_travel::sync_tether(&ctx, char_id, sys_id, ship_id).await;
+    assert!(
+        sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered,
+        "ship at cored friendly Astrahus must start tethered"
+    );
+
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.capacitor = 10.0;
+    });
+    let mut sess = SessionState {
+        session_id: 88_512,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let beyonce_id = ctx
+        .bind_object(&mut sess, "beyonce", sys_id as i64)
+        .expect("bind beyonce");
+    let kw = HashMap::new();
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("tethered partial warp must succeed");
+
+    let (_, warp_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(warp_ball.mode, MovementMode::Warp { .. }));
+    let cs_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(
+        !cs_after.is_tethered,
+        "warping must break tether cleanly"
+    );
+    assert!(
+        cs_after.capacitor.abs() < 1e-6,
+        "tethered warp must NOT refund +25% max capacitor (expected 0.0, got {})",
+        cs_after.capacitor
+    );
+
+    // Unsynced active Covert Ops cloak (`snap.module_active_states` active while `cs.is_cloaked == false`)
+    // must warp without decloaking and reconcile `cs.is_cloaked && cs.is_covert_cloak`.
+    let covert_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| {
+            t.group_id == 330
+                && t.effect_ids.iter().any(|&eid| {
+                    ctx.sde
+                        .effects
+                        .get(&eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+        })
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_578);
+    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.is_covert_cloak = false;
+        cs.capacitor = 1_000.0;
+        cs.max_capacitor = 1_000.0;
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: covert_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("unsynced Covert Ops cloak warp must succeed");
+
+    let (_, cov_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(cov_ball.mode, MovementMode::Warp { .. }));
+    let cov_cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(
+        cov_cs.is_cloaked && cov_cs.is_covert_cloak,
+        "unsynced Covert Ops cloak must remain cloaked after warp (is_cloaked={}, is_covert_cloak={})",
+        cov_cs.is_cloaked,
+        cov_cs.is_covert_cloak
+    );
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
+}
+
+#[tokio::test]
+async fn committed_warp_emits_gate_cloak_and_invuln_cancelled_while_rejected_warp_preserves_them_gh_1351() {
+    let ctx = test_ctx();
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let sys_id = 30_000_142_u32;
+    let (st_id, st_pos) = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(_, st)| st.solar_system_id == sys_id)
+        .map(|(&id, st)| (id, st.position))
+        .expect("station in Jita");
+    let ship_id = 88_513_001_i64;
+    let far_pos = st_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
+    spawn_ship_in_space(&ctx, char_id, ship_id, 606, sys_id, far_pos);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = true;
+            cs.gate_cloak_remaining_ticks = 30;
+            cs.undock_invulnerable_remaining_ticks = 15;
+            cs.warp_scramble_strength = 1;
+            cs.capacitor = 500.0;
+            cs.max_capacitor = 500.0;
+        })
+        .await
+        .expect("seed gate cloak + undock invuln combat state");
+
+    let mut sess = SessionState {
+        session_id: 88_513,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        station_id: None,
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    mark_char_online(&ctx, &mut sess, char_id);
+    let beyonce_id = ctx
+        .bind_object(&mut sess, "beyonce", sys_id as i64)
+        .expect("bind beyonce");
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Rejected warp while scrambled must NOT emit OnJumpCloakCancelled/OnInvulnCancelled
+    //    and must preserve gate cloak and undock invulnerability ticks.
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("scrambled warp must fail");
+    assert_eq!(err.code, "WarpScrambled");
+    let rejected_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !rejected_notifs
+            .iter()
+            .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"),
+        "rejected warp must not emit cloak/invuln cancellation notifications: {rejected_notifs:?}"
+    );
+    let cs_after_reject = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_after_reject.is_cloaked);
+    assert_eq!(cs_after_reject.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_after_reject.undock_invulnerable_remaining_ticks, 15);
+
+    // 2. Unscrambled committed warp breaks both timers and emits BOTH notifications.
+    sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.warp_scramble_strength = 0;
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("gate-cloaked undock-invuln warp must succeed");
+
+    let commit_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        commit_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"),
+        "committed warp must emit OnJumpCloakCancelled: {commit_notifs:?}"
+    );
+    assert!(
+        commit_notifs.iter().any(|n| n.event == "OnInvulnCancelled"),
+        "committed warp must emit OnInvulnCancelled: {commit_notifs:?}"
+    );
+    let cs_after_commit = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_after_commit.is_cloaked);
+    assert_eq!(cs_after_commit.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs_after_commit.undock_invulnerable_remaining_ticks, 0);
+}
+
+#[tokio::test]
+async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_safelogoff_gh_1351() {
+    let ctx = test_ctx();
+    let (_fleet_id, mut fc_sess) =
+        crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::seed_multi_member_fleet(&ctx).await;
+    let fc_char_id = fc_sess.character_id.unwrap();
+    let fc_ship_id = fc_sess.ship_id.unwrap();
+    let sys_id = 30_000_142_u32;
+    fc_sess.station_id = None;
+    fc_sess.solar_system_id = Some(sys_id);
+    mark_char_online(&ctx, &mut fc_sess, fc_char_id);
+    let beyonce_id = ctx
+        .bind_object(&mut fc_sess, "beyonce", sys_id as i64)
+        .expect("bind beyonce for FC");
+    let st_id = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(_, st)| st.solar_system_id == sys_id && st.position.length() > 1_000_000.0)
+        .map(|(&id, _)| id)
+        .expect("distant station in Jita");
+
+    let arm_fc_timers = || {
+        let now = ctx.now_unix();
+        grant_location_change_invulnerability(&ctx, fc_char_id, now + 60);
+        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st| {
+            st.safe_logoffs.insert(
+                fc_char_id,
+                eve_db::SafeLogoffEntry {
+                    char_id: fc_char_id,
+                    ship_id: fc_ship_id,
+                    solar_system_id: sys_id,
+                    started_unix: now,
+                    complete_at_unix: now + 30,
+                    completed: false,
+                },
+            );
+        });
+    };
+    arm_fc_timers();
+    let _ = ctx.drain_notifications_for_char(fc_char_id);
+
+    // 1. Scramble FC (`100_000_001`) while fleetmate (`100_000_002`) warps:
+    //    `handle_fleet_warp` returns Ok(keyval) excluding `fc_char_id` from `warpedMemberIDs`,
+    //    so FC must keep location_change_invuln and SafeLogoffEntry.
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.try_update_combat_state(fc_ship_id, |cs| {
+        cs.warp_scramble_strength = 1;
+    });
+    let mut fleet_kw = HashMap::new();
+    fleet_kw.insert("fleet".to_string(), PyRep::Bool(true));
+    let fw_res = ctx
+        .dispatch_rpc(
+            &mut fc_sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &fleet_kw,
+            None,
+        )
+        .await
+        .expect("fleet warp skipping scrambled FC must still succeed for fleetmate");
+    let warped_ids: Vec<i64> = fw_res
+        .dict_get("warpedMemberIDs")
+        .and_then(|v| match v {
+            PyRep::List(items) => Some(items.iter().filter_map(PyRep::as_i64).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        !warped_ids.contains(&fc_char_id),
+        "scrambled FC must be excluded from warpedMemberIDs: {warped_ids:?}"
+    );
+    assert!(
+        !warped_ids.is_empty(),
+        "unscrambled fleetmate should still fleet-warp: {warped_ids:?}"
+    );
+    assert!(
+        is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()),
+        "FC excluded from warpedMemberIDs must keep location_change_invuln"
+    );
+    assert!(
+        ctx.db
+            .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)),
+        "FC excluded from warpedMemberIDs must keep active safe_logoff"
+    );
+    let skipped_notifs = ctx.drain_notifications_for_char(fc_char_id);
+    assert!(
+        !skipped_notifs
+            .iter()
+            .any(|n| n.event == "OnInvulnCancelled" || n.event == "OnSafeLogoffAborted"),
+        "FC excluded from warpedMemberIDs must not receive cancellation notices: {skipped_notifs:?}"
+    );
+
+    // 2. Tourney `move_restrict` and `warp_restrict` reject both solo & fleet CmdWarpToStuff
+    //    WITHOUT breaking FC location_change_invuln or safe_logoff.
+    sys_handle.try_update_combat_state(fc_ship_id, |cs| {
+        cs.warp_scramble_strength = 0;
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut tm = eve_db::TourneyMatch::new(9_101, 1, i64::from(sys_id), 100, 600, 120, 1);
+        tm.state = eve_db::TourneyMatchState::InProgress;
+        tm.move_restrict = true;
+        tm.warp_restrict = false;
+        tm.red_players.push(eve_db::TourneyPilot {
+            character_id: fc_char_id,
+            ship_type_id: 587,
+            ship_id: fc_ship_id,
+            points: 10,
+        });
+        snap.tourney_state.matches.insert(9_101, tm);
+    });
+    for (kw_ref, label) in [(&HashMap::new(), "solo"), (&fleet_kw, "fleet")] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut fc_sess,
+                "beyonce",
+                Some(beyonce_id),
+                "CmdWarpToStuff",
+                &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+                kw_ref,
+                None,
+            )
+            .await
+            .expect_err(&format!("{label} CmdWarpToStuff must reject MoveRestrictedInTourney"));
+        assert_eq!(err.code, "MoveRestrictedInTourney");
+        assert!(is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()));
+        assert!(ctx
+            .db
+            .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.tourney_state.matches.get_mut(&9_101).unwrap().warp_restrict = true;
+    });
+    let warp_err = ctx
+        .dispatch_rpc(
+            &mut fc_sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &fleet_kw,
+            None,
+        )
+        .await
+        .expect_err("fleet CmdWarpToStuff must reject WarpRestrictedInTourney before handle_fleet_warp");
+    assert_eq!(warp_err.code, "WarpRestrictedInTourney");
+    assert!(is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()));
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)));
+
+    // 3. Clear tourney match: fleet warp including `fc_char_id` clears both invuln and safe logoff.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.tourney_state.matches.remove(&9_101);
+    });
+    let fw_ok = ctx
+        .dispatch_rpc(
+            &mut fc_sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(st_id)],
+            &fleet_kw,
+            None,
+        )
+        .await
+        .expect("unrestricted fleet warp including FC must succeed");
+    let warped_ok_ids: Vec<i64> = fw_ok
+        .dict_get("warpedMemberIDs")
+        .and_then(|v| match v {
+            PyRep::List(items) => Some(items.iter().filter_map(PyRep::as_i64).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        warped_ok_ids.contains(&fc_char_id),
+        "unscrambled FC must appear in warpedMemberIDs: {warped_ok_ids:?}"
+    );
+    assert!(
+        !is_location_change_invulnerable(&ctx, fc_char_id, ctx.now_unix()),
+        "fleet warp including FC must break location_change_invuln"
+    );
+    assert!(
+        !ctx.db
+            .with_snapshot(|s| s.sp6_lifecycle.safe_logoffs.contains_key(&fc_char_id)),
+        "fleet warp including FC must abort active safe_logoff"
+    );
+    let fw_notifs = ctx.drain_notifications_for_char(fc_char_id);
+    assert!(
+        fw_notifs.iter().any(|n| n.event == "OnInvulnCancelled"),
+        "fleet warp including FC must emit OnInvulnCancelled: {fw_notifs:?}"
+    );
+    assert!(
+        fw_notifs.iter().any(|n| n.event == "OnSafeLogoffAborted"),
+        "fleet warp including FC must emit OnSafeLogoffAborted: {fw_notifs:?}"
+    );
 }

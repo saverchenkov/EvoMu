@@ -304,10 +304,37 @@ async fn test_c3_ship_and_pod_self_destruct() {
     )
     .await
     .expect("SelectCharacterID");
+    // Docked AbortSelfDestruct must be rejected before any state mutation.
+    let docked_abort_err = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "AbortSelfDestruct", &[], &kw, None)
+        .await
+        .expect_err("docked AbortSelfDestruct must fail");
+    assert_eq!(docked_abort_err.code, "CannotSelfDestructWhileDocked");
+
+    // Undock into space: idle AbortSelfDestruct succeeds (`aborted: false`), and an armed
+    // SelfDestruct countdown cancels cleanly (`aborted: true`).
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock before in-space SelfDestruct");
+    let idle_abort = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "AbortSelfDestruct", &[], &kw, None)
+        .await
+        .expect("in-space idle AbortSelfDestruct");
+    assert_eq!(idle_abort.dict_get("aborted"), Some(&PyRep::Bool(false)));
+
+    let start_sd = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "SelfDestruct", &[], &kw, None)
+        .await
+        .expect("in-space SelfDestruct");
+    assert_eq!(
+        start_sd.dict_get("countdownStarted"),
+        Some(&PyRep::Bool(true))
+    );
     let abort_res = ctx
         .dispatch_rpc(&mut sess, "ship", None, "AbortSelfDestruct", &[], &kw, None)
-        .await;
-    assert!(abort_res.is_ok());
+        .await
+        .expect("in-space AbortSelfDestruct");
+    assert_eq!(abort_res.dict_get("aborted"), Some(&PyRep::Bool(true)));
 }
 
 #[tokio::test]
