@@ -424,10 +424,43 @@ fn authorize_and_verify_binding_cover_every_service_and_edge_case() {
     assert_both(&sess, "contractProxy", i64::from(sys_id), true);
     assert_both(&sess, "contractProxy", char_id + 1, false);
 
-    for svc in ["agentMgr", "keeper", "tourneyMgr"] {
-        assert_both(&sess, svc, 1, true);
-        assert_both(&sess, svc, 0, false);
+    assert_both(&sess, "agentMgr", 3_008_416, true);
+    assert_both(&sess, "agentMgr", 1, false);
+    assert_both(&sess, "agentMgr", 0, false);
+
+    assert_both(&sess, "keeper", i64::from(sys_id), true);
+    assert_both(&sess, "keeper", i64::from(other_sys_id), false);
+    assert_both(&sess, "keeper", 1, false);
+    assert_both(&sess, "keeper", 0, false);
+    if let Some(&dungeon_id) = ctx.sde.dungeons.keys().next() {
+        assert_both(&sess, "keeper", i64::from(dungeon_id), true);
+        let mut player_sess = sess.clone();
+        player_sess.role = 0;
+        assert_both(&player_sess, "keeper", i64::from(dungeon_id), false);
     }
+
+    assert_both(&sess, "tourneyMgr", 1, false);
+    assert_both(&sess, "tourneyMgr", 0, false);
+    let tourney_match_id = 5_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut m = eve_db::TourneyMatch::new(
+            tourney_match_id,
+            77,
+            i64::from(other_sys_id),
+            100,
+            600,
+            120,
+            1,
+        );
+        m.red_players.push(eve_db::TourneyPilot {
+            character_id: char_id,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 5,
+        });
+        snap.tourney_state.matches.insert(tourney_match_id, m);
+    });
+    assert_both(&sess, "tourneyMgr", tourney_match_id, true);
     assert_both(&sess, "unknownService", 1, false);
 
     // invbroker docked vs undocked branches
@@ -852,5 +885,1040 @@ fn invbroker_solar_system_binding_and_invalidation_for_upwell_structures() {
         char_id,
         "invbroker",
         i64::from(sys_id)
+    ));
+}
+
+#[test]
+fn binding_auth_1350_invbroker_office_war_keeper_agent_tourney_boundaries() {
+    use eve_db::{
+        corp_roles, CorporationRecord, PersistedNegKind, PersistedWarNegotiation, TourneyArenaSystem,
+        TourneyMatch, TourneyPilot,
+    };
+    use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let other_sys_id = 30_000_144_u32;
+    let st_id = 60_003_760_i64;
+    let ceo_char = 90_000_001_i64;
+    let member_char = 90_000_002_i64;
+    let outsider_char = 90_000_777_i64;
+    let corp_id = 98_000_001_i64;
+    let same_ally_corp = 98_000_050_i64;
+    let accepted_ally_corp = 98_000_051_i64;
+    let future_ally_corp = 98_000_052_i64;
+    let unrelated_corp = 98_000_099_i64;
+    let war_id = 700_555_001_i64;
+    let alliance_id = 99_555_001_i64;
+
+    let other_ship_in_station = 880_555_001_i64;
+    let corp_item_in_station = 880_555_002_i64;
+    let own_item_in_station = 880_555_003_i64;
+    let other_item_in_space = 880_555_004_i64;
+    let tourney_match_id = 910_001_i64;
+    let tourney_id = 42_i64;
+
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.alliance_id = Some(alliance_id);
+        }
+        snap.corporations.insert(
+            same_ally_corp,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = same_ally_corp;
+                c.name = "Same Ally".into();
+                c.ticker = "SAL".into();
+                c.ceo_id = outsider_char;
+                c.alliance_id = Some(alliance_id);
+                c
+            },
+        );
+        for cid in [accepted_ally_corp, future_ally_corp, unrelated_corp] {
+            snap.corporations.insert(
+                cid,
+                {
+                    let mut c = CorporationRecord::default();
+                    c.corporation_id = cid;
+                    c.name = format!("Corp {cid}");
+                    c.ticker = "CRP".into();
+                    c.ceo_id = outsider_char;
+                    c
+                },
+            );
+        }
+        snap.items.insert(
+            other_ship_in_station,
+            InventoryItemRecord {
+                item_id: other_ship_in_station,
+                type_id: 587,
+                owner_id: outsider_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_item_in_station,
+            InventoryItemRecord {
+                item_id: corp_item_in_station,
+                type_id: 3293,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            own_item_in_station,
+            InventoryItemRecord {
+                item_id: own_item_in_station,
+                type_id: 34,
+                owner_id: member_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            other_item_in_space,
+            InventoryItemRecord {
+                item_id: other_item_in_space,
+                type_id: 3293,
+                owner_id: outsider_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: corp_id,
+                defender_corp_id: unrelated_corp,
+                mutual: false,
+                started_unix: now_unix.saturating_sub(100),
+                active: true,
+            },
+        );
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 1,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: accepted_ally_corp,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(now_unix.saturating_sub(10)),
+        });
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 2,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: future_ally_corp,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(now_unix + 3_600),
+        });
+        let mut tm = TourneyMatch::new(
+            tourney_match_id,
+            tourney_id,
+            i64::from(other_sys_id),
+            100,
+            600,
+            120,
+            1,
+        );
+        tm.blue_players.push(TourneyPilot {
+            character_id: member_char,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 10,
+        });
+        tm.referees.push(ceo_char);
+        snap.tourney_state.matches.insert(tourney_match_id, tm);
+        snap.tourney_state
+            .tournaments
+            .insert(tourney_id, "AT".into());
+        snap.tourney_state.arena_systems.insert(
+            i64::from(other_sys_id),
+            TourneyArenaSystem::default(),
+        );
+    });
+
+    let before = ctx.db.snapshot_tables();
+
+    let mut member_sess = SessionState {
+        session_id: 601,
+        user_id: Some(2),
+        character_id: Some(member_char),
+        solar_system_id: Some(sys_id),
+        station_id: Some(st_id),
+        corporation_id: Some(corp_id),
+        role: ROLE_PLAYER_DEFAULT,
+        ..Default::default()
+    };
+
+    // 1. invbroker item ownership + corp hangar role checks (including pending role exclusion)
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        other_ship_in_station
+    ));
+    assert!(!verify_service_binding_context(
+        &ctx,
+        &member_sess,
+        &make_entry("invbroker", other_ship_in_station, member_char)
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        own_item_in_station
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+
+    assert_eq!(ctx.db.snapshot_tables(), before);
+
+    // Pending (unmatured) corp hangar grant must NOT authorize corp item bind yet;
+    // matured hangar take role / director / CEO must authorize it.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(
+                member_char,
+                (corp_roles::ROLE_HANGAR_CAN_TAKE[0], now_unix + 86_400),
+            );
+    });
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(gov) = snap.corp_governance.get_mut(&corp_id) {
+            gov.pending_role_grants.remove(&member_char);
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles
+                .insert(member_char, corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        }
+    });
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+    assert!(verify_service_binding_context(
+        &ctx,
+        &member_sess,
+        &make_entry("invbroker", corp_item_in_station, member_char)
+    ));
+
+    // Undocked space items still reject cross-owner binding
+    member_sess.station_id = None;
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        other_item_in_space
+    ));
+
+    // 2. officeManager: docked corp members may bind corp_id or docked station/structure; undocked & foreign corps denied.
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        st_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    ));
+    member_sess.station_id = Some(st_id);
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    )); // holds ROLE_HANGAR_CAN_QUERY[0]
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(member_char, 0);
+        }
+    });
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    )); // docked corp member allowed even with 0 corp roles
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        st_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        unrelated_corp
+    ));
+
+    // Capture snapshot baseline after role transitions so read-only checks prove zero mutation.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(member_char, 0);
+        }
+    });
+    let before = ctx.db.snapshot_tables();
+
+    // 3. warStatisticMgr: involvement + existence checks (participant, same alliance, active ally, GM)
+    let mut ally_sess = SessionState {
+        session_id: 602,
+        user_id: Some(3),
+        character_id: Some(outsider_char),
+        corporation_id: Some(same_ally_corp),
+        ..Default::default()
+    };
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(accepted_ally_corp);
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(future_ally_corp);
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(98_999_888);
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.role = ROLE_GMH;
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id + 999
+    )); // nonexistent war rejected even for GM
+
+    // 4. tourneyMgr & keeper & agentMgr scoping
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        tourney_match_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        tourney_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    )); // via participant match in other_sys_id
+    let mut unrelated_sess = SessionState {
+        session_id: 603,
+        user_id: Some(4),
+        character_id: Some(outsider_char),
+        solar_system_id: Some(sys_id),
+        corporation_id: Some(98_999_888),
+        ..Default::default()
+    };
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_match_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    ));
+    unrelated_sess.solar_system_id = Some(other_sys_id);
+    // Solar-system bystanders must NOT bind tourneyMgr matches, tournaments, or arena systems.
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_match_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    ));
+    unrelated_sess.role = ROLE_GMH;
+    assert!(authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "agentMgr",
+        1
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "agentMgr",
+        3_008_416
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "keeper",
+        1
+    ));
+    assert_eq!(ctx.db.snapshot_tables(), before);
+}
+
+#[test]
+fn binding_auth_war_stat_resolves_alliance_wars_without_session_alliance_id() {
+    use eve_db::{CorporationRecord, PersistedNegKind, PersistedWarNegotiation};
+
+    let ctx = test_ctx();
+    let alliance_id = 99_777_001_i64;
+    let enemy_alliance_id = 99_777_002_i64;
+    let member_corp = 98_777_001_i64;
+    let bystander_corp = 98_777_002_i64;
+    let member_char = 90_000_002_i64;
+    let alliance_war_id = 700_777_001_i64;
+    let alliance_ally_war_id = 700_777_002_i64;
+    let now_unix = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(member_corp, {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = member_corp;
+            c.name = "Ally Member".into();
+            c.ticker = "ALM".into();
+            c.ceo_id = member_char;
+            c.alliance_id = Some(alliance_id);
+            c
+        });
+        snap.corporations.insert(bystander_corp, {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = bystander_corp;
+            c.name = "No Alliance".into();
+            c.ticker = "NOA".into();
+            c.ceo_id = 90_999_777;
+            c.alliance_id = None;
+            c
+        });
+        snap.wars.insert(
+            alliance_war_id,
+            WarRecord {
+                war_id: alliance_war_id,
+                aggressor_corp_id: alliance_id,
+                defender_corp_id: enemy_alliance_id,
+                mutual: false,
+                started_unix: now_unix,
+                active: true,
+            },
+        );
+        snap.wars.insert(
+            alliance_ally_war_id,
+            WarRecord {
+                war_id: alliance_ally_war_id,
+                aggressor_corp_id: enemy_alliance_id,
+                defender_corp_id: bystander_corp,
+                mutual: false,
+                started_unix: now_unix,
+                active: true,
+            },
+        );
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 90_777,
+            war_id: alliance_ally_war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: alliance_id,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(now_unix),
+        });
+    });
+
+    let sess = SessionState {
+        session_id: 610,
+        user_id: Some(2),
+        character_id: Some(member_char),
+        corporation_id: Some(member_corp),
+        alliance_id: None,
+        ..Default::default()
+    };
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        member_char,
+        "warStatisticMgr",
+        alliance_war_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &sess,
+        member_char,
+        "warStatisticMgr",
+        alliance_ally_war_id
+    ));
+
+    let bystander_sess = SessionState {
+        session_id: 611,
+        user_id: Some(3),
+        character_id: Some(90_999_777),
+        corporation_id: Some(bystander_corp),
+        alliance_id: None,
+        ..Default::default()
+    };
+    assert!(!authorize_service_binding(
+        &ctx,
+        &bystander_sess,
+        90_999_777,
+        "warStatisticMgr",
+        alliance_war_id
+    ));
+}
+
+#[tokio::test]
+async fn dispatch_rpc_invbroker_bound_handles_subobjects_end_to_end() {
+    use eve_db::{corp_roles, CorporationRecord, CrabBeaconPhase, CrabBeaconRecord, FleetRecord};
+    use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
+    use eve_proto::PyRep;
+    use std::collections::HashMap;
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let st_id = 60_003_760_i64;
+    let now_u = ctx.now_unix();
+
+    let owner_char = 90_000_001_i64;
+    let guest_char = 90_000_002_i64;
+    let corp_id = 98_000_001_i64;
+
+    let fh_ship_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 6 && t.default_attributes.get(&912).copied().unwrap_or(0.0) > 0.0)
+        .map(|t| t.type_id)
+        .unwrap_or(11_567);
+    let container_type = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 12 && t.capacity > 0.0)
+        .map(|t| t.type_id)
+        .unwrap_or(3_293);
+
+    let fleet_ship_id = 881_100_001_i64;
+    let nested_fh_can_id = 881_100_002_i64;
+    let jetcan_id = 881_100_003_i64;
+    let corp_office_id = 881_100_004_i64;
+    let nested_office_can_id = 881_100_005_i64;
+    let crab_beacon_id = 881_100_006_i64;
+    let storage_unit_id = 881_100_007_i64;
+    let guest_ship_id = 881_100_008_i64;
+    let outsider_item_id = 881_100_009_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(guest_char);
+            corp.member_roles
+                .insert(guest_char, corp_roles::ROLE_HANGAR_CAN_TAKE[0]);
+        } else {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = corp_id;
+            c.name = "Corp".into();
+            c.ticker = "CRP".into();
+            c.ceo_id = owner_char;
+            c.members.insert(owner_char);
+            c.members.insert(guest_char);
+            c.member_roles
+                .insert(guest_char, corp_roles::ROLE_HANGAR_CAN_TAKE[0]);
+            snap.corporations.insert(corp_id, c);
+        }
+        let mut guest_ch = snap.characters[&owner_char].clone();
+        guest_ch.character_id = guest_char;
+        guest_ch.user_id = 2;
+        guest_ch.corporation_id = corp_id;
+        guest_ch.station_id = Some(st_id);
+        guest_ch.structure_id = None;
+        guest_ch.solar_system_id = sys_id;
+        snap.characters.insert(guest_char, guest_ch);
+
+        snap.fleets.insert(
+            777_135,
+            FleetRecord {
+                fleet_id: 777_135,
+                boss_id: owner_char,
+                members: vec![owner_char, guest_char],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fleet_ship_id,
+            InventoryItemRecord {
+                item_id: fleet_ship_id,
+                type_id: fh_ship_type,
+                owner_id: owner_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            nested_fh_can_id,
+            InventoryItemRecord {
+                item_id: nested_fh_can_id,
+                type_id: container_type,
+                owner_id: owner_char,
+                location_id: fleet_ship_id,
+                flag: InventoryFlag::FleetHangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            guest_ship_id,
+            InventoryItemRecord {
+                item_id: guest_ship_id,
+                type_id: 587,
+                owner_id: guest_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            jetcan_id,
+            InventoryItemRecord {
+                item_id: jetcan_id,
+                type_id: 23,
+                owner_id: 0,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_office_id,
+            InventoryItemRecord {
+                item_id: corp_office_id,
+                type_id: 27,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            nested_office_can_id,
+            InventoryItemRecord {
+                item_id: nested_office_can_id,
+                type_id: container_type,
+                owner_id: corp_id,
+                location_id: corp_office_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            crab_beacon_id,
+            InventoryItemRecord {
+                item_id: crab_beacon_id,
+                type_id: crate::services::pve_crab_beacons::TYPE_CRAB_BEACON,
+                owner_id: guest_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.crab_beacons.beacons.insert(
+            crab_beacon_id,
+            CrabBeaconRecord {
+                beacon_id: crab_beacon_id,
+                type_id: crate::services::pve_crab_beacons::TYPE_CRAB_BEACON,
+                deployer_char_id: guest_char,
+                solar_system_id: sys_id,
+                position: [0.0, 0.0, 0.0],
+                deployed_at_sec: now_u.saturating_sub(1_000),
+                phase: CrabBeaconPhase::LootRestricted,
+                linked_char_id: Some(guest_char),
+                linked_ship_id: Some(guest_ship_id),
+                link_started_at_sec: 0,
+                link_completes_at_sec: 0,
+                scan_completes_at_sec: now_u.saturating_sub(10),
+                self_destruct_at_sec: now_u + 120,
+                waves_spawned: 3,
+                wave_npc_ball_ids: Vec::new(),
+                open_container_id: None,
+            },
+        );
+        snap.items.insert(
+            storage_unit_id,
+            InventoryItemRecord {
+                item_id: storage_unit_id,
+                type_id: container_type,
+                owner_id: owner_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            outsider_item_id,
+            InventoryItemRecord {
+                item_id: outsider_item_id,
+                type_id: container_type,
+                owner_id: 90_999_999,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::fitting_containers_ships::write_container_ship_state(&ctx, |st| {
+        st.ship_configs.insert(
+            fleet_ship_id,
+            crate::services::fitting_containers_ships::ShipAccessConfig {
+                allow_fleet_hangar: true,
+                password: None,
+                ..Default::default()
+            },
+        );
+    });
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.authorized_shipping_storage
+            .insert((storage_unit_id, guest_char));
+    });
+    {
+        use eve_destiny::{Ball, DVec3, MovementMode};
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: guest_ship_id,
+                type_id: 587,
+                position: DVec3::new(1_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        let _ = sys_handle
+            .spawn_ball(Ball {
+                id: storage_unit_id,
+                type_id: container_type,
+                position: DVec3::new(2_500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 100_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
+    let mut guest_sess = SessionState {
+        session_id: 620,
+        user_id: Some(2),
+        character_id: Some(guest_char),
+        corporation_id: Some(corp_id),
+        solar_system_id: Some(sys_id),
+        station_id: Some(st_id),
+        fleet_id: Some(777_135),
+        role: ROLE_PLAYER_DEFAULT,
+        ..Default::default()
+    };
+
+    // Docked: GetInventoryFromId -> GetSelfInvItem / List / ListByFlags for FleetHangar + nested corp-office container
+    let PyRep::Tuple(st_bind) = ctx
+        .dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(st_id), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bind docked invbroker")
+    else {
+        panic!("expected tuple from MachoBindObject");
+    };
+    let st_mgr_bid = st_bind[0].as_i64().unwrap() as u64;
+
+    for target_id in [fleet_ship_id, nested_fh_can_id, nested_office_can_id] {
+        let sub_bid = ctx
+            .dispatch_rpc(
+                &mut guest_sess,
+                "invbroker",
+                Some(st_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(target_id), PyRep::Integer(0)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("GetInventoryFromId({target_id}) failed: {e:?}"))
+            .as_i64()
+            .unwrap() as u64;
+        ctx.dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            Some(sub_bid),
+            "GetSelfInvItem",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("GetSelfInvItem({target_id}) failed: {e:?}"));
+        let list_method = if target_id == fleet_ship_id {
+            "ListByFlags"
+        } else {
+            "List"
+        };
+        let list_args = if target_id == fleet_ship_id {
+            vec![PyRep::List(vec![PyRep::Integer(155)])]
+        } else {
+            vec![]
+        };
+        ctx.dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            Some(sub_bid),
+            list_method,
+            &list_args,
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{list_method}({target_id}) failed: {e:?}"));
+    }
+
+    // Outsider docked item cannot be bound or opened via GetInventoryFromId
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(outsider_item_id), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+
+    // Undocked space checks: open jetcan, read-pure CRAB loot, authorized shipping storage (<=5000m)
+    guest_sess.station_id = None;
+    guest_sess.ship_id = Some(guest_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&guest_char).unwrap();
+        ch.station_id = None;
+        ch.active_ship_id = guest_ship_id;
+    });
+    let PyRep::Tuple(sys_bind) = ctx
+        .dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(sys_id)), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("bind system invbroker")
+    else {
+        panic!("expected tuple from MachoBindObject");
+    };
+    let sys_mgr_bid = sys_bind[0].as_i64().unwrap() as u64;
+
+    for space_target in [jetcan_id, crab_beacon_id, storage_unit_id] {
+        let before_space = (space_target == crab_beacon_id).then(|| ctx.db.snapshot_tables());
+        let ok = authorize_service_binding(&ctx, &guest_sess, guest_char, "invbroker", space_target);
+        assert!(ok, "authorize_service_binding failed for {space_target}");
+        if let Some(before) = before_space {
+            assert_eq!(ctx.db.snapshot_tables(), before, "CRAB auth check must stay read-pure");
+        }
+        let sub_bid = ctx
+            .dispatch_rpc(
+                &mut guest_sess,
+                "invbroker",
+                Some(sys_mgr_bid),
+                "GetInventoryFromId",
+                &[PyRep::Integer(space_target), PyRep::Integer(0)],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("GetInventoryFromId({space_target}) failed: {e:?}"))
+            .as_i64()
+            .unwrap() as u64;
+        ctx.dispatch_rpc(
+            &mut guest_sess,
+            "invbroker",
+            Some(sub_bid),
+            "List",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("List({space_target}) failed: {e:?}"));
+    }
+
+    // Shipping storage > 5_000m is denied
+    {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_handle
+            .set_ball_position(storage_unit_id, eve_destiny::DVec3::new(10_000.0, 0.0, 0.0))
+            .await;
+    }
+    assert!(!authorize_service_binding(
+        &ctx,
+        &guest_sess,
+        guest_char,
+        "invbroker",
+        storage_unit_id
+    ));
+
+    // GM role authorizes cross-owner invbroker target
+    guest_sess.role = ROLE_GMH;
+    guest_sess.station_id = Some(st_id);
+    assert!(authorize_service_binding(
+        &ctx,
+        &guest_sess,
+        guest_char,
+        "invbroker",
+        outsider_item_id
     ));
 }

@@ -110,8 +110,24 @@ fn unbound_mgr_slots_locks_starter_systems_and_resculpt_branches_kill_mutations(
         snap.cluster_and_runtime.character_locks.remove(&cid);
     });
 
-    // GetQAStarterSystemIDs across all 4 fallback branches
+    // GetQAStarterSystemIDs denies player/QA roles and resolves all 4 fallback branches for GM
     sess.solar_system_id = Some(30_002_510);
+    assert_eq!(
+        call_unbound(&ctx, &mut sess, "GetQAStarterSystemIDs", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    sess.role = service_roles::ROLE_QA;
+    assert_eq!(
+        call_unbound(&ctx, &mut sess, "GetQAStarterSystemIDs", &[], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    sess.role = service_roles::ROLE_GMH;
     let l1 = call_unbound(&ctx, &mut sess, "GetQAStarterSystemIDs", &[], &kw).unwrap().unwrap();
     assert_eq!(l1, PyRep::List(vec![PyRep::Integer(30_002_510), PyRep::Integer(30_000_144), PyRep::Integer(30_002_187), PyRep::Integer(30_002_510)]));
     sess.solar_system_id = None;
@@ -122,10 +138,12 @@ fn unbound_mgr_slots_locks_starter_systems_and_resculpt_branches_kill_mutations(
     assert!(l3.as_list().unwrap()[0].as_i64().unwrap() > 0);
 
     let mut empty_user_sess = auth_session(999_999, cid, corp_id, 0);
+    empty_user_sess.role = service_roles::ROLE_GMH;
     empty_user_sess.solar_system_id = None;
     empty_user_sess.character_id = None;
     let l4 = call_unbound(&ctx, &mut empty_user_sess, "GetQAStarterSystemIDs", &[], &kw).unwrap().unwrap();
     assert_eq!(l4.as_list().unwrap()[0], PyRep::Integer(0));
+    sess.role = 0;
     sess.character_id = Some(cid);
     sess.solar_system_id = Some(30_000_142);
 

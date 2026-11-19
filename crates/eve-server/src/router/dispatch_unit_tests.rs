@@ -148,7 +148,7 @@ async fn macho_resolve_bind_object_and_session_revocation() {
         .expect("MachoBindObject int");
     assert!(matches!(bind_int, PyRep::Tuple(_)));
 
-    let bind_str = ctx
+    let bind_str_err = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
@@ -159,8 +159,22 @@ async fn macho_resolve_bind_object_and_session_revocation() {
             None,
         )
         .await
-        .expect("MachoBindObject str");
-    assert!(matches!(bind_str, PyRep::Tuple(_)));
+        .unwrap_err();
+    assert_eq!(bind_str_err.code, "BindAuthorizationDenied");
+
+    let bind_agent = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(3_008_416), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MachoBindObject valid SDE agent");
+    assert!(matches!(bind_agent, PyRep::Tuple(_)));
 
     let bind_tuple_piggy = ctx
         .dispatch_rpc(
@@ -476,7 +490,11 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         ch.station_id = None;
         ch.structure_id = None;
         ch.solar_system_id = 30_000_142;
-        ch.active_ship_id
+        let active_ship_id = ch.active_ship_id;
+        if let Some(ship_item) = snap.items.get_mut(&active_ship_id) {
+            ship_item.location_id = 30_000_142;
+        }
+        active_ship_id
     });
     ctx.active_warps.lock().unwrap().insert(ship_id, 60_003_760);
 
@@ -494,7 +512,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
         .unwrap_err();
     assert_eq!(err_empty_tuple.code, "InvalidArgument");
 
-    let tuple_str_ok = ctx
+    let tuple_str_err = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
@@ -505,10 +523,10 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
             None,
         )
         .await
-        .expect("Tuple(String) binds");
-    assert!(matches!(tuple_str_ok, PyRep::Tuple(_)));
+        .unwrap_err();
+    assert_eq!(tuple_str_err.code, "BindAuthorizationDenied");
 
-    let token_bind_ok = ctx
+    let token_bind_err = ctx
         .dispatch_rpc(
             &mut sess,
             "agentMgr",
@@ -519,8 +537,22 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
             None,
         )
         .await
-        .expect("Token binds on agentMgr");
-    assert!(matches!(token_bind_ok, PyRep::Tuple(_)));
+        .unwrap_err();
+    assert_eq!(token_bind_err.code, "BindAuthorizationDenied");
+
+    let agent_tuple_ok = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "MachoBindObject",
+            &[PyRep::Tuple(vec![PyRep::Integer(3_008_416)]), PyRep::None],
+            &kw,
+            None,
+        )
+        .await
+        .expect("valid SDE agent tuple binds");
+    assert!(matches!(agent_tuple_ok, PyRep::Tuple(_)));
 
     let bad_piggy = ctx
         .dispatch_rpc(
@@ -529,7 +561,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
             None,
             "MachoBindObject",
             &[
-                PyRep::Integer(30_000_142),
+                PyRep::Integer(3_008_416),
                 PyRep::Tuple(vec![PyRep::Integer(42)]),
             ],
             &kw,
@@ -1550,5 +1582,527 @@ async fn ship_macho_bind_dirt_timestamp_grace_survives_undock_and_slash_moveme_w
                         || e.object_id == struct_id)
             }),
         "station-scoped or structure-scoped ship bindings must never linger in active bound_objects after transitions"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
+    use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, TourneyMatch, TourneyPilot, WarRecord};
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let kw = HashMap::new();
+
+    // 1. Central pre-auth gate (`session.user_id.is_none()`): reject gameplay/service RPCs
+    //    without mutating state while permitting genuine pre-auth endpoints.
+    let before_preauth = ctx.db.snapshot_tables();
+    let mut unauth_sess = SessionState::new(94_500);
+    for (svc, method, args) in [
+        ("charUnboundMgr", "GetNumCharacters", vec![]),
+        ("config", "GetMap", vec![PyRep::Integer(30_000_142)]),
+        ("stationSvc", "GetStation", vec![PyRep::Integer(60_003_760)]),
+        ("wormholeMgr", "GetWormholePolarization", vec![PyRep::Integer(30_000_142)]),
+        ("timeControl", "AdvanceClock", vec![PyRep::Integer(1)]),
+        ("publicQaToolsServer", "MoveMeTo", vec![]),
+        ("slash", "SlashCmd", vec![PyRep::String("/moveme".into())]),
+        ("invbroker", "MachoResolveObject", vec![]),
+        ("keeper", "MachoBindObject", vec![PyRep::Integer(30_000_142), PyRep::None]),
+        ("warRegistry", "GetWars", vec![]),
+        ("machoNet", "GetConnectedClusterMode", vec![]),
+        ("machoNet", "GetConnectedClusterName", vec![]),
+        ("machoNet", "GetConnectionProperties", vec![]),
+        ("petitioner", "MayPetition", vec![]),
+        ("pingService", "Ping", vec![]),
+        ("ship", "ClientHasReleasedTheseObjects", vec![]),
+    ] {
+        let err = ctx
+            .dispatch_rpc(&mut unauth_sess, svc, None, method, &args, &kw, None)
+            .await
+            .expect_err(&format!("{svc}.{method} must require authentication"));
+        assert_eq!(err.code, "Unauthorized", "{svc}.{method}");
+    }
+    assert_eq!(ctx.db.snapshot_tables(), before_preauth);
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+
+    for (svc, method, args) in [
+        ("authentication", "Ping", vec![]),
+        ("machoNet", "GetTime", vec![]),
+        ("machoNet", "GetServiceInfo", vec![]),
+        ("machoNet", "NoBlock", vec![]),
+        ("machoNet", "GetGlobalConfig", vec![]),
+        ("machoNet", "ClientHasReleasedTheseObjects", vec![]),
+        ("cache", "GetServerVersionAndBuild", vec![]),
+    ] {
+        let res = ctx
+            .dispatch_rpc(&mut unauth_sess, svc, None, method, &args, &kw, None)
+            .await;
+        if let Err(err) = res {
+            assert_ne!(
+                err.code, "Unauthorized",
+                "genuine pre-auth endpoint {svc}.{method} must not fail Unauthorized"
+            );
+        }
+    }
+
+    // 2. GM / QA camelCase role gates reject player roles and ROLE_QA without state mutation,
+    //    allowing ROLE_GMH, ROLE_GML, and ROLE_ADMIN.
+    let mut sess = SessionState::new(94_501);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.station_id = Some(60_003_760);
+    sess.solar_system_id = Some(30_000_142);
+    sess.corporation_id = Some(98_000_001);
+
+    let before_gm = ctx.db.snapshot_tables();
+    for bad_role in [0u64, service_roles::ROLE_PLAYER_DEFAULT, service_roles::ROLE_QA] {
+        sess.role = bad_role;
+        for (svc, method) in [
+            ("warRegistry", "GMActivateDefender"),
+            ("warRegistry", "GMDeactivateDefender"),
+            ("warRegistry", "GMExtendAllyContract"),
+            ("warRegistry", "GMJoinDefender"),
+            ("warRegistry", "GMSetDeclareTime"),
+            ("warRegistry", "GMSetWarFinishTime"),
+            ("charUnboundMgr", "ToggleValidation"),
+            ("charUnboundMgr", "GetQAStarterSystemIDs"),
+        ] {
+            let err = ctx
+                .dispatch_rpc(&mut sess, svc, None, method, &[], &kw, None)
+                .await
+                .expect_err(&format!("{svc}.{method} must deny role {bad_role:#x}"));
+            assert_eq!(err.code, "InsufficientRole", "{svc}.{method} role={bad_role:#x}");
+        }
+    }
+    assert_eq!(ctx.db.snapshot_tables(), before_gm);
+
+    let gm_war_id = 700_910_099_i64;
+    let gm_ally_corp = 98_999_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            gm_ally_corp,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = gm_ally_corp;
+                c.name = "GM Test Ally".into();
+                c.ticker = "GMA".into();
+                c.ceo_id = 90_999_001;
+                c
+            },
+        );
+        snap.wars.insert(
+            gm_war_id,
+            WarRecord {
+                war_id: gm_war_id,
+                aggressor_corp_id: 98_000_001,
+                defender_corp_id: 98_000_002,
+                mutual: false,
+                started_unix: 100,
+                active: true,
+            },
+        );
+    });
+    for ok_role in [
+        service_roles::ROLE_GMH,
+        service_roles::ROLE_GML,
+        service_roles::ROLE_GMS,
+        service_roles::ROLE_ADMIN,
+    ] {
+        sess.role = ok_role;
+        let now_u = ctx.now_unix();
+        for (method, gm_args) in [
+            ("GMJoinDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            (
+                "GMExtendAllyContract",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer(gm_ally_corp),
+                    PyRep::Integer(86_400),
+                ],
+            ),
+            ("GMActivateDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            ("GMDeactivateDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            (
+                "GMSetDeclareTime",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer(now_u.saturating_sub(1_000) as i64),
+                ],
+            ),
+            (
+                "GMSetWarFinishTime",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer((now_u + 14_400) as i64),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                ctx.dispatch_rpc(&mut sess, "warRegistry", None, method, &gm_args, &kw, None)
+                    .await
+                    .expect("GM warRegistry call"),
+                PyRep::Bool(true)
+            );
+        }
+        assert!(matches!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "charUnboundMgr",
+                None,
+                "GetQAStarterSystemIDs",
+                &[],
+                &kw,
+                None
+            )
+            .await
+            .expect("GM GetQAStarterSystemIDs"),
+            PyRep::List(_)
+        ));
+        assert!(matches!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "charUnboundMgr",
+                None,
+                "ToggleValidation",
+                &[],
+                &kw,
+                None
+            )
+            .await
+            .expect("GM ToggleValidation"),
+            PyRep::Bool(_)
+        ));
+    }
+
+    // 3. MachoResolveObject & MachoBindObject scoping on keeper, tourneyMgr, planetMgr,
+    //    agentMgr, officeManager, warStatisticMgr, and invbroker.
+    let valid_dungeon_id = ctx
+        .sde
+        .dungeons
+        .keys()
+        .next()
+        .copied()
+        .expect("SDE dungeons seeded");
+    let jita_planet = ctx
+        .sde
+        .solar_systems
+        .get(&30_000_142)
+        .and_then(|s| s.planet_ids.first().copied())
+        .expect("Jita planet");
+    let foreign_planet = ctx
+        .sde
+        .solar_systems
+        .get(&30_000_144)
+        .and_then(|s| s.planet_ids.first().copied())
+        .unwrap_or(40_999_999);
+    let war_own_id = 700_910_001_i64;
+    let war_foreign_id = 700_910_002_i64;
+    let tourney_match_id = 800_910_001_i64;
+    let other_char_item_id = 880_910_001_i64;
+    let rank_char_id = 90_000_777_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut rank_ch = snap.characters[&90_000_001].clone();
+        rank_ch.character_id = rank_char_id;
+        rank_ch.user_id = 777;
+        rank_ch.corporation_id = 98_000_001;
+        rank_ch.station_id = Some(60_003_760);
+        rank_ch.structure_id = None;
+        rank_ch.solar_system_id = 30_000_142;
+        snap.characters.insert(rank_char_id, rank_ch);
+        if let Some(corp) = snap.corporations.get_mut(&98_000_001) {
+            corp.members.insert(rank_char_id);
+            corp.member_roles.insert(rank_char_id, 0);
+        }
+        snap.corporations.insert(
+            98_888_111,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = 98_888_111;
+                c.name = "Other Corp A".into();
+                c.ticker = "OCA".into();
+                c.ceo_id = 90_999_111;
+                c
+            },
+        );
+        snap.corporations.insert(
+            98_888_222,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = 98_888_222;
+                c.name = "Other Corp B".into();
+                c.ticker = "OCB".into();
+                c.ceo_id = 90_999_222;
+                c
+            },
+        );
+        snap.wars.insert(
+            war_own_id,
+            WarRecord {
+                war_id: war_own_id,
+                aggressor_corp_id: 98_000_001,
+                defender_corp_id: 98_888_111,
+                mutual: false,
+                started_unix: 10,
+                active: true,
+            },
+        );
+        snap.wars.insert(
+            war_foreign_id,
+            WarRecord {
+                war_id: war_foreign_id,
+                aggressor_corp_id: 98_888_111,
+                defender_corp_id: 98_888_222,
+                mutual: false,
+                started_unix: 10,
+                active: true,
+            },
+        );
+        let mut m = TourneyMatch::new(tourney_match_id, 77, 30_000_144, 100, 600, 120, 1);
+        m.red_players.push(TourneyPilot {
+            character_id: 90_000_001,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 5,
+        });
+        snap.tourney_state.matches.insert(tourney_match_id, m);
+        snap.items.insert(
+            other_char_item_id,
+            InventoryItemRecord {
+                item_id: other_char_item_id,
+                type_id: 587,
+                owner_id: rank_char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+    ctx.bound_objects.write().unwrap().clear();
+
+    // keeper & planetMgr & tourneyMgr MachoResolveObject checks
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    for bad_keeper in [1i64, 30_000_144, i64::from(valid_dungeon_id)] {
+        assert_eq!(
+            ctx.dispatch_rpc(
+                &mut sess,
+                "keeper",
+                None,
+                "MachoResolveObject",
+                &[PyRep::Integer(bad_keeper)],
+                &kw,
+                None
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "BindAuthorizationDenied"
+        );
+    }
+    sess.role = service_roles::ROLE_GMH;
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(i64::from(valid_dungeon_id))],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    sess.role = service_roles::ROLE_PLAYER_DEFAULT;
+
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(jita_planet)],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "planetMgr",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(foreign_planet)],
+            &kw,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "tourneyMgr",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(tourney_match_id)],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "tourneyMgr",
+            None,
+            "MachoResolveObject",
+            &[PyRep::Integer(1)],
+            &kw,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+
+    // Non-participant/cross-owner MachoBindObject rejections must leave zero new bindings
+    let mut rank_sess = SessionState::new(94_502);
+    rank_sess.user_id = Some(777);
+    rank_sess.character_id = Some(rank_char_id);
+    rank_sess.corporation_id = Some(98_000_001);
+    rank_sess.station_id = Some(60_003_760);
+    rank_sess.solar_system_id = Some(30_000_142);
+
+    let denied_binds: Vec<(&str, i64)> = vec![
+        ("keeper", 1),
+        ("agentMgr", 999_999_999),
+        ("tourneyMgr", tourney_match_id), // rank_char_id is not participant
+        ("warStatisticMgr", war_foreign_id),
+        ("officeManager", 98_888_111), // cross-corp officeManager bind denied
+    ];
+    for (svc, oid) in denied_binds {
+        assert_eq!(
+            ctx.dispatch_rpc(
+                &mut rank_sess,
+                svc,
+                None,
+                "MachoBindObject",
+                &[PyRep::Integer(oid), PyRep::None],
+                &kw,
+                None
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "BindAuthorizationDenied",
+            "{svc}({oid}) must be denied"
+        );
+    }
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(other_char_item_id), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+
+    // Positive authorized binds
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "warStatisticMgr",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(war_own_id), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(98_000_001), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut rank_sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(98_000_001), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut rank_sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(60_003_760), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    let mut undocked_rank_sess = rank_sess.clone();
+    undocked_rank_sess.station_id = None;
+    undocked_rank_sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&rank_char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut undocked_rank_sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(98_000_001), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
     );
 }

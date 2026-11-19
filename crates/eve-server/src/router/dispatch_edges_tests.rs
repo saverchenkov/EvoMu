@@ -547,9 +547,24 @@ async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_r
         .is_ok());
     expected_collapsed += 1;
 
-    // Pre-auth `ClientHasReleasedTheseObjects` with a forged bound_id returns `Ok(None)` early
-    // before ownership check, so latency classification must still collapse it to `<unknown>`.
+    // Unbound pre-auth `machoNet.ClientHasReleasedTheseObjects` succeeds, yet collapses to `<unknown>`.
     assert!(ctx
+        .dispatch_rpc(
+            &mut unauth,
+            "machoNet",
+            None,
+            "ClientHasReleasedTheseObjects",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .is_ok());
+    expected_collapsed += 1;
+
+    // Pre-auth `machoNet.ClientHasReleasedTheseObjects` with a forged bound_id must be rejected
+    // by `verify_bound_object` and collapse to `<unknown>`.
+    let forged_rel_err = ctx
         .dispatch_rpc(
             &mut unauth,
             "machoNet",
@@ -560,7 +575,24 @@ async fn forged_bound_id_and_kicked_session_probes_collapse_preserving_preauth_r
             None,
         )
         .await
-        .is_ok());
+        .unwrap_err();
+    assert_eq!(forged_rel_err.code, "BoundObjectOwnershipViolation");
+    expected_collapsed += 1;
+
+    // Unauthenticated non-machoNet `ClientHasReleasedTheseObjects` must reject with `Unauthorized`.
+    let non_macho_rel_err = ctx
+        .dispatch_rpc(
+            &mut unauth,
+            "ship",
+            None,
+            "ClientHasReleasedTheseObjects",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(non_macho_rel_err.code, "Unauthorized");
     expected_collapsed += 1;
 
     // Authenticated cross-session forged bound_id must collapse to `<unknown>`, not attribute to `beyonce`.

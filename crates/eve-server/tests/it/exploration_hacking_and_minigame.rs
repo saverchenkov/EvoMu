@@ -3132,10 +3132,18 @@ async fn test_petitioner_may_petition_codes() {
     let res_cd = ctx.dispatch_rpc(&mut sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
     assert_eq!(res_cd, PyRep::Integer(-7), "Recent petition within 60s cooldown must return -7");
 
-    // 5. Unauthenticated / missing character -> code -6
-    let mut unauth_sess = SessionState::new(88_999);
-    let res_unauth = ctx.dispatch_rpc(&mut unauth_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
-    assert_eq!(res_unauth, PyRep::Integer(-6), "Missing character session must return -6");
+    // 5. Unauthenticated call is blocked at router gate; authenticated without character -> code -6
+    let mut unauth_sess = SessionState::new(88_998);
+    let err_unauth = ctx
+        .dispatch_rpc(&mut unauth_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None)
+        .await
+        .expect_err("unauthenticated petitioner.MayPetition must be rejected");
+    assert_eq!(err_unauth.code, "Unauthorized");
+
+    let mut no_char_sess = SessionState::new(88_999);
+    no_char_sess.user_id = Some(88_999);
+    let res_no_char = ctx.dispatch_rpc(&mut no_char_sess, "petitioner", None, "MayPetition", &[PyRep::Integer(401), PyRep::Integer(0)], &kw, None).await.unwrap();
+    assert_eq!(res_no_char, PyRep::Integer(-6), "Missing character session must return -6");
 
     // 6. Banned account -> code -1
     ctx.db.with_mut_snapshot(|snap| {
