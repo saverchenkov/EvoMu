@@ -121,6 +121,31 @@ struct MissionArchetype {
     is_kill: bool,
 }
 
+/// Transitions a character's active mission state, removes any mission bookmark, and reclaims
+/// mission-scoped courier cargo.
+fn finalize_mission_state_cleanup(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+    new_state: &str,
+    zero_npcs: bool,
+) {
+    let bmid = snap
+        .active_missions
+        .get_mut(&(char_id, mission_id))
+        .and_then(|m| {
+            m.state = new_state.into();
+            if zero_npcs {
+                m.npcs_remaining = 0;
+            }
+            m.bookmark_id.take()
+        });
+    if let Some(bmid) = bmid {
+        snap.bookmarks.remove(&bmid);
+    }
+    reclaim_courier_cargo(snap, char_id, mission_id);
+}
+
 /// Classifies an agent mission into server gameplay archetypes from its SDE template, optional
 /// offer/delivery metadata, and optional agent record.
 ///
@@ -599,32 +624,11 @@ pub async fn handle_with_bound(
                         let st = snap.active_missions.get(&(char_id, mid)).map(|m| m.state.clone()).unwrap_or_default();
                         if st == "Offered" && meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix
                         {
-                            let expired_bmid = snap
-                                .active_missions
-                                .get_mut(&(char_id, mid))
-                                .and_then(|m| {
-                                    m.state = "Expired".into();
-                                    m.bookmark_id.take()
-                                });
-                            if let Some(bmid) = expired_bmid {
-                                snap.bookmarks.remove(&bmid);
-                            }
-                            reclaim_courier_cargo(snap, char_id, mid);
+                            finalize_mission_state_cleanup(snap, char_id, mid, "Expired", false);
                         } else if st == "Accepted"
                             && meta.accept_expiry_unix.is_some_and(|exp| exp > 0 && now > exp)
                         {
-                            let failed_bmid = snap
-                                .active_missions
-                                .get_mut(&(char_id, mid))
-                                .and_then(|m| {
-                                    m.state = "Failed".into();
-                                    m.npcs_remaining = 0;
-                                    m.bookmark_id.take()
-                                });
-                            if let Some(bmid) = failed_bmid {
-                                snap.bookmarks.remove(&bmid);
-                            }
-                            reclaim_courier_cargo(snap, char_id, mid);
+                            finalize_mission_state_cleanup(snap, char_id, mid, "Failed", true);
                         }
                     }
                 }
@@ -1189,21 +1193,26 @@ pub async fn handle_with_bound(
                     PyRep::String("agent".into()),
                     PyRep::Tuple(vec![PyRep::Integer(m.agent_id), origin_loc.clone()]),
                 ])];
-                let make_cargo_dict = |tid: i64, qty: i64| {
+                let make_cargo_dict = |tid: i64, qty: i64, has_cargo: bool| {
+                    let unit_vol = u32::try_from(tid)
+                        .ok()
+                        .and_then(|u_tid| ctx.sde.types.get(&u_tid))
+                        .map_or(1.0, |t| t.volume);
                     PyRep::Dict(vec![
                         (PyRep::String("typeID".into()), PyRep::Integer(tid)),
                         (PyRep::String("quantity".into()), PyRep::Integer(qty)),
-                        (PyRep::String("volume".into()), PyRep::Real(qty as f64)),
                         (
-                            PyRep::String("hasCargo".into()),
-                            PyRep::Bool(completion_status > 0 || mission_state >= 2),
+                            PyRep::String("volume".into()),
+                            PyRep::Real((qty as f64) * unit_vol),
                         ),
+                        (PyRep::String("hasCargo".into()), PyRep::Bool(has_cargo)),
                     ])
                 };
                 let req_tid_opt = meta.as_ref().and_then(|mt| mt.required_delivery_type_id);
                 if let Some(dest_loc) = dest_loc_opt {
                     let cargo_tid = req_tid_opt.map(i64::from).unwrap_or(34);
                     let cargo_qty = if req_qty > 0 { req_qty } else { 1 };
+                    let has_transport_cargo = completion_status > 0 || mission_state >= 2;
                     v24_objectives.push(PyRep::Tuple(vec![
                         PyRep::String("transport".into()),
                         PyRep::Tuple(vec![
@@ -1211,7 +1220,7 @@ pub async fn handle_with_bound(
                             origin_loc,
                             PyRep::Integer(dropoff_owner_id),
                             dest_loc,
-                            make_cargo_dict(cargo_tid, cargo_qty),
+                            make_cargo_dict(cargo_tid, cargo_qty, has_transport_cargo),
                         ]),
                     ]));
                 } else if is_rnd_turnin || is_data_center || is_mining || is_trade {
@@ -1258,12 +1267,40 @@ pub async fn handle_with_bound(
                             },
                         )
                     };
+                    let fetch_req_tid = u32::try_from(fetch_tid).unwrap_or(0);
+                    let agent_station_id = ctx
+                        .sde
+                        .agents
+                        .get(&m.agent_id)
+                        .and_then(|a| a.station_id)
+                        .or_else(|| meta.as_ref().and_then(|mt| mt.origin_station_id));
+                    let eligible_qty = if completion_status > 0 || fetch_req_tid == 0 {
+                        0
+                    } else {
+                        ctx.db.with_snapshot(|snap| {
+                            let active_ship_id = snap
+                                .characters
+                                .get(&char_id)
+                                .map(|c| c.active_ship_id)
+                                .filter(|&id| id > 0)
+                                .or(session.ship_id);
+                            super::agents_mission_delivery::count_eligible_mission_delivery_items(
+                                snap,
+                                char_id,
+                                fetch_req_tid,
+                                is_mining,
+                                agent_station_id,
+                                active_ship_id,
+                            )
+                        })
+                    };
+                    let has_fetch_cargo = completion_status > 0 || eligible_qty >= fetch_qty;
                     v24_objectives.push(PyRep::Tuple(vec![
                         PyRep::String("fetch".into()),
                         PyRep::Tuple(vec![
                             PyRep::Integer(dropoff_owner_id),
                             origin_loc,
-                            make_cargo_dict(fetch_tid, fetch_qty),
+                            make_cargo_dict(fetch_tid, fetch_qty, has_fetch_cargo),
                         ]),
                     ]));
                 }
@@ -1943,10 +1980,7 @@ pub async fn handle_with_bound(
                         if state == "Offered" {
                             if is_expired {
                                 ctx.db.with_mut_snapshot(|snap| {
-                                    if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-                                        m.state = "Expired".into();
-                                    }
-                                    reclaim_courier_cargo(snap, char_id, mission_id);
+                                    finalize_mission_state_cleanup(snap, char_id, mission_id, "Expired", false);
                                 });
                                 return Some(Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired"), client_error: None }));
                             }
@@ -2209,11 +2243,7 @@ pub async fn handle_with_bound(
                     });
                     if is_expired {
                         ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-                                m.state = "Failed".into();
-                                m.npcs_remaining = 0;
-                            }
-                            reclaim_courier_cargo(snap, char_id, mission_id);
+                            finalize_mission_state_cleanup(snap, char_id, mission_id, "Failed", true);
                             if let Some(ch) = snap.characters.get_mut(&char_id) {
                                 let cur_ag = ch.standings.get(&active_agent_id).copied().unwrap_or(0.0);
                                 ch.standings.insert(active_agent_id, (cur_ag - 0.10).max(-10.0));
@@ -2262,8 +2292,8 @@ pub async fn handle_with_bound(
                             return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
                         };
                         let agent_opt = ctx.sde.agents.get(&m.agent_id);
-                        let is_rnd = agent_opt.is_some_and(is_rnd_agent);
                         let arch = classify_mission_archetype(Some(&tmpl), meta_opt.as_ref(), agent_opt);
+                        let is_rnd = arch.is_rnd_turnin;
                         let is_dc = arch.is_data_center;
                         let is_heraldry = arch.is_heraldry;
                         let is_trade = arch.is_trade;
@@ -2344,17 +2374,7 @@ pub async fn handle_with_bound(
                             )?;
                         }
 
-                        let completed_bmid = snap
-                            .active_missions
-                            .get_mut(&(char_id, mission_id))
-                            .and_then(|m_mut| {
-                                m_mut.state = "Completed".into();
-                                m_mut.bookmark_id.take()
-                            });
-                        if let Some(bmid) = completed_bmid {
-                            snap.bookmarks.remove(&bmid);
-                        }
-                        reclaim_courier_cargo(snap, char_id, mission_id);
+                        finalize_mission_state_cleanup(snap, char_id, mission_id, "Completed", false);
 
                         let bonus_granted = meta_opt
                             .as_ref().and_then(|mt| mt.bonus_expiry_unix)

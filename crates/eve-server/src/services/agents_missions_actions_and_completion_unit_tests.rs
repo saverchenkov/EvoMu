@@ -2456,6 +2456,15 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
     };
     assert_eq!(dc_fetch_args[2].dict_get("typeID"), Some(&PyRep::Integer(17202)));
     assert_eq!(dc_fetch_args[2].dict_get("quantity"), Some(&PyRep::Integer(1)));
+    assert_eq!(dc_fetch_args[2].dict_get("hasCargo"), Some(&PyRep::Bool(false)));
+    let dc_expected_vol = ctx.sde.types.get(&17202).map_or(1.0, |t| t.volume);
+    let Some(PyRep::Real(dc_vol)) = dc_fetch_args[2].dict_get("volume") else {
+        panic!("expected Real volume on DC fetch cargo dict");
+    };
+    assert!(
+        (dc_vol - dc_expected_vol).abs() < 1e-6,
+        "DC fetch volume must equal qty * type.volume ({dc_expected_vol}), got {dc_vol}"
+    );
     let Some(PyRep::List(dc_locs)) = dc_obj.dict_get("locations") else {
         panic!("expected DC locations");
     };
@@ -2494,6 +2503,16 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
     };
     assert_eq!(rnd_fetch_args[2].dict_get("typeID"), Some(&PyRep::Integer(34)));
     assert_eq!(rnd_fetch_args[2].dict_get("quantity"), Some(&PyRep::Integer(300)));
+    assert_eq!(rnd_fetch_args[2].dict_get("hasCargo"), Some(&PyRep::Bool(false)));
+    let trit_unit_vol = ctx.sde.types.get(&34).expect("Tritanium in SDE").volume;
+    let rnd_expected_vol = 300.0 * trit_unit_vol;
+    let Some(PyRep::Real(rnd_vol)) = rnd_fetch_args[2].dict_get("volume") else {
+        panic!("expected Real volume on R&D fetch cargo dict");
+    };
+    assert!(
+        (rnd_vol - rnd_expected_vol).abs() < 1e-6 && (rnd_vol - 3.0).abs() < 1e-6,
+        "R&D Tritanium volume must be 300 * 0.01 = 3.0 m3, got {rnd_vol}"
+    );
     let Some(PyRep::List(rnd_locs)) = rnd_obj.dict_get("locations") else {
         panic!("expected R&D locations");
     };
@@ -2552,4 +2571,521 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
         combat_duns[0].dict_get("locationID"),
         Some(&PyRep::Integer(i64::from(combat_sys)))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_objective_has_cargo_eligibility_and_volume_parity() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let rnd_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("R&D agent in SDE");
+    let mine_ag = find_standard_agent(&ctx, 1);
+    let rnd_sys = rnd_ag.solar_system_id.unwrap();
+    let rnd_st = rnd_ag.station_id.unwrap();
+    let mine_sys = mine_ag.solar_system_id.unwrap();
+    let mine_st = mine_ag.station_id.unwrap();
+
+    let mid_rnd = 999_911_u32;
+    let mid_mine = 999_912_u32;
+    let mut sde = (*ctx.sde).clone();
+    sde.missions.insert(
+        mid_rnd,
+        eve_sde::MissionTemplate {
+            mission_id: mid_rnd,
+            title: "R&D Tritanium Delivery".into(),
+            is_courier: false,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_Research".into()),
+            dungeon_id: None,
+        },
+    );
+    sde.missions.insert(
+        mid_mine,
+        eve_sde::MissionTemplate {
+            mission_id: mid_mine,
+            title: "Mine Veldspar".into(),
+            is_courier: false,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicMiningMission".into()),
+            dungeon_id: None,
+        },
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let now = ctx.now_unix();
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        let ship_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.active_ship_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(100_000_001);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.station_id = Some(rnd_st);
+        }
+        snap.active_missions.insert(
+            (char_id, mid_rnd),
+            make_active_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None),
+        );
+        let mut rnd_meta = make_meta(mid_rnd, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
+        rnd_meta.origin_station_id = Some(rnd_st);
+        rnd_meta.required_delivery_type_id = Some(34);
+        rnd_meta.required_delivery_qty = 300;
+        save_mission_meta(snap, char_id, &rnd_meta);
+
+        snap.active_missions.insert(
+            (char_id, mid_mine),
+            make_active_mission(mid_mine, char_id, mine_ag.agent_id, mine_sys, "Accepted", None),
+        );
+        let mut mine_meta = make_meta(mid_mine, mine_ag.agent_id, now + 3_600, Some(now + 7_200));
+        mine_meta.origin_station_id = Some(mine_st);
+        mine_meta.required_delivery_type_id = Some(1230);
+        mine_meta.required_delivery_qty = 500;
+        save_mission_meta(snap, char_id, &mine_meta);
+        ship_id
+    });
+
+    let mut sess = char_session(char_id, Some(rnd_sys), Some(rnd_st));
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+    let fetch_cargo_dict = |obj: &PyRep| -> PyRep {
+        let Some(PyRep::List(objs)) = obj.dict_get("objectives") else {
+            panic!("expected objectives list");
+        };
+        let PyRep::Tuple(entry) = &objs[1] else {
+            panic!("expected fetch tuple");
+        };
+        assert_eq!(entry[0], PyRep::String("fetch".into()));
+        let PyRep::Tuple(args) = &entry[1] else {
+            panic!("expected fetch args");
+        };
+        args[2].clone()
+    };
+
+    // 1. Accepted with 0 items -> hasCargo == false, volume == 300 * 0.01 = 3.0
+    let empty_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo empty");
+    let empty_dict = fetch_cargo_dict(&empty_obj);
+    assert_eq!(empty_dict.dict_get("hasCargo"), Some(&PyRep::Bool(false)));
+    let Some(PyRep::Real(empty_vol)) = empty_dict.dict_get("volume") else {
+        panic!("expected Real volume");
+    };
+    assert!((empty_vol - 3.0).abs() < 1e-6, "expected 3.0 m3, got {empty_vol}");
+
+    // 2. Contract-locked, fitted, courier-tagged, and wrong-station stacks must all keep hasCargo == false
+    let (id_locked, id_fitted, id_courier, id_wrong_st) = (990_001, 990_002, 990_003, 990_004);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, loc, flag) in [
+            (id_locked, rnd_st, InventoryFlag::Hangar),
+            (id_fitted, ship_id, InventoryFlag::HiSlot0),
+            (id_courier, rnd_st, InventoryFlag::Hangar),
+            (id_wrong_st, rnd_st + 1, InventoryFlag::Hangar),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: 34,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 300,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.contracts.insert(
+            990_901,
+            eve_db::ContractRecord {
+                contract_id: 990_901,
+                status: "Outstanding".into(),
+                item_ids: vec![id_locked],
+                ..Default::default()
+            },
+        );
+        snap.item_custom_names
+            .insert(id_courier, format!("courier_cargo:{char_id}:777"));
+    });
+    let ineligible_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo ineligible");
+    assert_eq!(
+        fetch_cargo_dict(&ineligible_obj).dict_get("hasCargo"),
+        Some(&PyRep::Bool(false)),
+        "contract-locked, fitted, courier-tagged, and wrong-station items must not set hasCargo"
+    );
+
+    // 3. 299 eligible units (< 300) still false; adding 1 more eligible unit in ship Cargo flips true
+    let (id_hangar, id_cargo) = (990_005, 990_006);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            id_hangar,
+            InventoryItemRecord {
+                item_id: id_hangar,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: rnd_st,
+                flag: InventoryFlag::Hangar,
+                quantity: 299,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let partial_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo partial");
+    assert_eq!(
+        fetch_cargo_dict(&partial_obj).dict_get("hasCargo"),
+        Some(&PyRep::Bool(false))
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            id_cargo,
+            InventoryItemRecord {
+                item_id: id_cargo,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let ready_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo ready");
+    assert_eq!(
+        fetch_cargo_dict(&ready_obj).dict_get("hasCargo"),
+        Some(&PyRep::Bool(true))
+    );
+
+    // 4. Turn-in succeeds using the exact same eligible items, leaving locked/fitted/courier/wrong-st intact;
+    // Completed mission still reports hasCargo == true via completion_status > 0
+    let done = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(mid_rnd as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("R&D DoAction(6) complete");
+    assert_eq!(done.dict_get("state"), Some(&PyRep::String("Completed".into())));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&id_hangar));
+        assert!(!snap.items.contains_key(&id_cargo));
+        for iid in [id_locked, id_fitted, id_courier, id_wrong_st] {
+            assert_eq!(snap.items.get(&iid).map(|i| i.quantity), Some(300));
+        }
+    });
+    let completed_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo completed");
+    assert_eq!(
+        fetch_cargo_dict(&completed_obj).dict_get("hasCargo"),
+        Some(&PyRep::Bool(true))
+    );
+
+    // 5. Mining fetch checks SpecializedOreHold eligibility and Veldspar volume (500 * 0.1 = 50.0 m3)
+    let mut sess_mine = char_session(char_id, Some(mine_sys), Some(mine_st));
+    sess_mine.ship_id = Some(ship_id);
+    let mine_empty = call_agent_mgr(
+        &ctx,
+        &mut sess_mine,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(mine_ag.agent_id), PyRep::Integer(mid_mine as i64)],
+        &kw,
+    )
+    .await
+    .expect("Mining GetMissionObjectiveInfo empty");
+    let mine_empty_dict = fetch_cargo_dict(&mine_empty);
+    assert_eq!(mine_empty_dict.dict_get("hasCargo"), Some(&PyRep::Bool(false)));
+    let Some(PyRep::Real(mine_vol)) = mine_empty_dict.dict_get("volume") else {
+        panic!("expected Real volume on mining objective");
+    };
+    let veldspar_unit_vol = ctx.sde.types.get(&1230).expect("Veldspar in SDE").volume;
+    assert!(
+        (mine_vol - 500.0 * veldspar_unit_vol).abs() < 1e-6 && (mine_vol - 50.0).abs() < 1e-6,
+        "Mining Veldspar volume must be 500 * 0.1 = 50.0 m3, got {mine_vol}"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_007,
+            InventoryItemRecord {
+                item_id: 990_007,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::SpecializedOreHold,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    let mine_ready = call_agent_mgr(
+        &ctx,
+        &mut sess_mine,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(mine_ag.agent_id), PyRep::Integer(mid_mine as i64)],
+        &kw,
+    )
+    .await
+    .expect("Mining GetMissionObjectiveInfo ore hold ready");
+    assert_eq!(
+        fetch_cargo_dict(&mine_ready).dict_get("hasCargo"),
+        Some(&PyRep::Bool(true))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn do_action_expiry_cleans_bookmarks_and_rnd_courier_uses_archetype() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let std_ag = find_standard_agent(&ctx, 1);
+    let std_sys = std_ag.solar_system_id.unwrap();
+    let std_st = std_ag.station_id.unwrap();
+    let rnd_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("R&D agent in SDE");
+    let rnd_sys = rnd_ag.solar_system_id.unwrap();
+    let rnd_st = rnd_ag.station_id.unwrap();
+    let dest_st = ctx
+        .sde
+        .stations
+        .keys()
+        .copied()
+        .find(|&s| s != rnd_st)
+        .unwrap_or(rnd_st);
+    let dest_sys = ctx
+        .sde
+        .stations
+        .get(&dest_st)
+        .map_or(rnd_sys, |s| s.solar_system_id);
+
+    let (mid_offer, mid_accept, mid_rnd_courier) = (999_921_u32, 999_922_u32, 999_923_u32);
+    let mut sde = (*ctx.sde).clone();
+    for (mid, title, is_courier, ct) in [
+        (mid_offer, "Expiring Offer", false, "agent.missionTemplatizedContent_BasicKillMission"),
+        (mid_accept, "Expiring Accept", false, "agent.missionTemplatizedContent_BasicKillMission"),
+        (mid_rnd_courier, "R&D Courier", true, "agent.missionTemplatizedContent_BasicCourierMission"),
+    ] {
+        sde.missions.insert(
+            mid,
+            eve_sde::MissionTemplate {
+                mission_id: mid,
+                title: title.into(),
+                is_courier,
+                lp_alpha: 0,
+                lp_omega: 0,
+                has_standing_rewards: true,
+                content_template: Some(ct.into()),
+                dungeon_id: None,
+            },
+        );
+    }
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let now = ctx.now_unix();
+    let (bm_offer, bm_accept) = (888_999_201_i64, 888_999_202_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        for (bmid, label) in [(bm_offer, "Offer BM"), (bm_accept, "Accept BM")] {
+            snap.bookmarks.insert(
+                bmid,
+                BookmarkRecord {
+                    bookmark_id: bmid,
+                    owner_id: char_id,
+                    solar_system_id: std_sys,
+                    label: label.into(),
+                    x: 10.0,
+                    y: 20.0,
+                    z: 30.0,
+                    item_id: None,
+                    memo: "Mission Pocket Destination".into(),
+                    folder_id: None,
+                    is_shared: false,
+                },
+            );
+        }
+        snap.active_missions.insert(
+            (char_id, mid_offer),
+            make_active_mission(mid_offer, char_id, std_ag.agent_id, std_sys, "Offered", Some(bm_offer)),
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &make_meta(mid_offer, std_ag.agent_id, now.saturating_sub(10), None),
+        );
+
+        snap.active_missions.insert(
+            (char_id, mid_accept),
+            make_active_mission(mid_accept, char_id, std_ag.agent_id, std_sys, "Accepted", Some(bm_accept)),
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &make_meta(mid_accept, std_ag.agent_id, now + 1000, Some(now.saturating_sub(5))),
+        );
+
+        snap.active_missions.insert(
+            (char_id, mid_rnd_courier),
+            make_active_mission(mid_rnd_courier, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", None),
+        );
+        let mut rnd_courier_meta =
+            make_meta(mid_rnd_courier, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
+        rnd_courier_meta.origin_station_id = Some(rnd_st);
+        rnd_courier_meta.destination_station_id = Some(dest_st);
+        save_mission_meta(snap, char_id, &rnd_courier_meta);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(dest_st);
+        }
+    });
+
+    let mut sess_std = char_session(char_id, Some(std_sys), Some(std_st));
+    let kw = HashMap::new();
+
+    // P2-1: DoAction Offer expiry clears stale bookmark_id and removes bookmark
+    let offer_err = call_agent_mgr(
+        &ctx,
+        &mut sess_std,
+        "DoAction",
+        &[
+            PyRep::Integer(3),
+            PyRep::Integer(std_ag.agent_id),
+            PyRep::Integer(mid_offer as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(offer_err.code, "MissionOfferExpired");
+
+    // P2-1: DoAction Accept expiry clears stale bookmark_id and removes bookmark
+    let accept_err = call_agent_mgr(
+        &ctx,
+        &mut sess_std,
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(std_ag.agent_id),
+            PyRep::Integer(mid_accept as i64),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(accept_err.code, "MissionExpired");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions[&(char_id, mid_offer)].state, "Expired");
+        assert_eq!(snap.active_missions[&(char_id, mid_offer)].bookmark_id, None);
+        assert!(!snap.bookmarks.contains_key(&bm_offer));
+
+        assert_eq!(snap.active_missions[&(char_id, mid_accept)].state, "Failed");
+        assert_eq!(snap.active_missions[&(char_id, mid_accept)].npcs_remaining, 0);
+        assert_eq!(snap.active_missions[&(char_id, mid_accept)].bookmark_id, None);
+        assert!(!snap.bookmarks.contains_key(&bm_accept));
+    });
+
+    // P2-2: R&D agent courier mission uses arch.is_rnd_turnin == false (does not force Tritanium turn-in)
+    let mut sess_rnd = char_session(char_id, Some(dest_sys), Some(dest_st));
+    let rnd_courier_obj = call_agent_mgr(
+        &ctx,
+        &mut sess_rnd,
+        "GetMissionObjectiveInfo",
+        &[
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(mid_rnd_courier as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("R&D courier GetMissionObjectiveInfo");
+    let Some(PyRep::List(objs)) = rnd_courier_obj.dict_get("objectives") else {
+        panic!("expected objectives");
+    };
+    let PyRep::Tuple(second_obj) = &objs[1] else {
+        panic!("expected second objective tuple");
+    };
+    assert_eq!(second_obj[0], PyRep::String("transport".into()));
+
+    let done = call_agent_mgr(
+        &ctx,
+        &mut sess_rnd,
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(mid_rnd_courier as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("R&D courier DoAction(6) must not require Tritanium turn-in");
+    assert_eq!(done.dict_get("state"), Some(&PyRep::String("Completed".into())));
 }

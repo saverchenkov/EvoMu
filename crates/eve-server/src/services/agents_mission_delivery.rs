@@ -3,6 +3,64 @@
 use eve_proto::BridgeRpcError;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
 
+/// Evaluates whether `item` is unlocked, non-fitted, non-courier-tagged, and in an
+/// eligible delivery location (`Hangar` at `agent_station_id`, or active ship `Cargo` /
+/// `SpecializedOreHold` for mining missions or Tritanium).
+fn is_eligible_mission_delivery_item(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    req_tid: u32,
+    is_mining_mission: bool,
+    agent_station_id: Option<i64>,
+    active_ship_id: Option<i64>,
+    item: &InventoryItemRecord,
+) -> bool {
+    item.owner_id == char_id
+        && item.type_id == req_tid
+        && item.quantity > 0
+        && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
+        && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
+        && !snap.is_container_non_empty(item.item_id)
+        && !snap
+            .item_custom_names
+            .get(&item.item_id)
+            .is_some_and(|n| n.starts_with("courier_cargo:"))
+        && ((item.flag == InventoryFlag::Hangar
+            && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
+            || ((is_mining_mission || req_tid == 34)
+                && active_ship_id == Some(item.location_id)
+                && matches!(
+                    item.flag,
+                    InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo
+                )))
+}
+
+/// Counts unlocked, non-fitted, non-courier-tagged delivery items eligible for mission turn-in.
+pub(crate) fn count_eligible_mission_delivery_items(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    req_tid: u32,
+    is_mining_mission: bool,
+    agent_station_id: Option<i64>,
+    active_ship_id: Option<i64>,
+) -> i64 {
+    snap.items
+        .values()
+        .filter(|it| {
+            is_eligible_mission_delivery_item(
+                snap,
+                char_id,
+                req_tid,
+                is_mining_mission,
+                agent_station_id,
+                active_ship_id,
+                it,
+            )
+        })
+        .map(|it| i64::from(it.quantity))
+        .sum()
+}
+
 /// Verifies and consumes mission completion delivery items.
 ///
 /// For courier missions, only items created for the specific courier mission
@@ -113,34 +171,15 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
         }
     }
 
-    let is_valid_delivery_item = |item: &InventoryItemRecord| -> bool {
-        item.owner_id == char_id
-            && item.type_id == req_tid
-            && item.quantity > 0
-            && !snap.is_item_or_ancestor_locked_or_impounded(item.item_id)
-            && !eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
-            && !snap.is_container_non_empty(item.item_id)
-            && !snap
-                .item_custom_names
-                .get(&item.item_id)
-                .is_some_and(|n| n.starts_with("courier_cargo:"))
-            && ((item.flag == InventoryFlag::Hangar
-                && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
-                || ((is_mining_mission || req_tid == 34)
-                    && active_ship_id == Some(item.location_id)
-                    && matches!(
-                        item.flag,
-                        InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo
-                    )))
-    };
-
-    let found_qty: i32 = snap
-        .items
-        .values()
-        .filter(|it| is_valid_delivery_item(it))
-        .map(|it| it.quantity)
-        .sum();
-    if found_qty < req_units {
+    let found_qty = count_eligible_mission_delivery_items(
+        snap,
+        char_id,
+        req_tid,
+        is_mining_mission,
+        agent_station_id,
+        active_ship_id,
+    );
+    if found_qty < i64::from(req_units) {
         return Err(BridgeRpcError {
             code: "MissionIncomplete".into(),
             message: format!(
@@ -154,7 +193,17 @@ pub(crate) fn verify_and_consume_mission_delivery_items(
     let mut matching_ids: Vec<i64> = snap
         .items
         .values()
-        .filter(|it| is_valid_delivery_item(it))
+        .filter(|it| {
+            is_eligible_mission_delivery_item(
+                snap,
+                char_id,
+                req_tid,
+                is_mining_mission,
+                agent_station_id,
+                active_ship_id,
+                it,
+            )
+        })
         .map(|it| it.item_id)
         .collect();
     matching_ids.sort_unstable();
