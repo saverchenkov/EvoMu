@@ -1,0 +1,1124 @@
+{
+  "id": "agent_missions_lp_store",
+  "title": "Security & Distribution Agent Missions (Combat + Cargo Delivery) + Caldari Navy LP Store (#1204)",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001,
+    "defer_char_select": false
+  },
+  "steps": [
+    {
+      "id": "setup_grant_gunnery",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/giveskill 90000001 3300 5",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_grant_small_proj",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/giveskill 90000001 3331 5",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_grant_warp_drive_op",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/giveskill 90000001 3455 5",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_grant_cap_mgmt",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/giveskill 90000001 3452 5",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_grant_cap_ops",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/giveskill 90000001 3453 5",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_fit_second_autocannon",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/fit 2889",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_load_ammo",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/load 185 400",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_heal_ship",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/heal",
+        "wait_ms": 200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_move_to_inoue",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/tr 90000001 60003910",
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 15000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "expect_ball_present": "60003910"
+        }
+      },
+      "checks": {
+        "expect_ball_present": "60003910",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true,
+        "ui_delta_without_relog": false
+      }
+    },
+    {
+      "id": "dock_at_inoue_initial",
+      "action": {
+        "type": "dock",
+        "target": "60003910",
+        "item_id": 60003910,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 20000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==60003910",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60003910",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "select_lobby_agents_tab",
+      "action": {
+        "type": "click_widget",
+        "target": "stationInformationTabAgents",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_security_agent_velmudainen",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/lobbyWnd/content/main/panelsCont/agentsPanel/scroll/maincontainer/__clipper/__content/Velmudainen Tykigi",
+        "double_click": true,
+        "wait_ms": 1200
+      },
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 400,
+        "checks": {
+          "expect_window_open": "AgentConversation_3012050",
+          "window_populated": {
+            "window": "AgentConversation_3012050",
+            "min_populated": 1
+          }
+        }
+      },
+      "checks": {
+        "expect_window_open": "AgentConversation_3012050",
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "agentMgr.GetMyJournalDetails",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "accept_security_mission",
+      "action": {
+        "type": "click_widget",
+        "target": "AgentConversation_3012050/content/main/ButtonGroup/btns/ButtonWrapper/AcceptMission_Button",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "agentMgr.GetMissionBriefingInfo",
+            "min_count": 1,
+            "require_ok": true
+          },
+          {
+            "name": "agentMgr.GetMissionObjectiveInfo",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "wait_after_accept_security",
+      "action": {
+        "type": "wait",
+        "wait_ms": 2000
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "open_journal_security_active",
+      "action": {
+        "type": "open_window",
+        "target": "journal",
+        "wait_ms": 900
+      },
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 400,
+        "checks": {
+          "window_populated": {
+            "window": "journal",
+            "min_populated": 1
+          }
+        }
+      },
+      "checks": {
+        "expect_window_open": "journal",
+        "window_populated": {
+          "window": "journal",
+          "contains_text": "Velmudainen Tykigi",
+          "min_populated": 1
+        },
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_security_telecom_popup",
+      "action": {
+        "type": "close_window",
+        "target": "telecom",
+        "wait_ms": 400
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_security_agent_conversation",
+      "action": {
+        "type": "close_window",
+        "target": "AgentConversation_3012050",
+        "wait_ms": 400
+      },
+      "checks": {
+        "expect_window_closed": "AgentConversation_3012050",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_journal_security",
+      "action": {
+        "type": "close_window",
+        "target": "journal",
+        "wait_ms": 300
+      },
+      "checks": {
+        "expect_window_closed": "journal",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "undock_for_security_encounter",
+      "action": {
+        "type": "undock"
+      },
+      "wait_until": {
+        "timeout_ms": 25000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==None",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "inflight"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==None",
+        "expect_ball_present": "60003910",
+        "state_checks": [
+          {
+            "field": "active_view",
+            "equals": "inflight"
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_locations_in_space",
+      "action": {
+        "type": "open_window",
+        "target": "locations",
+        "wait_ms": 800
+      },
+      "checks": {
+        "expect_window_open": "locations",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "wait_for_locations_populate",
+      "action": {
+        "type": "wait",
+        "wait_ms": 2000
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "right_click_encounter_coordinate",
+      "action": {
+        "type": "click_widget",
+        "target": "Encounter Coordinate",
+        "right_click": true,
+        "wait_ms": 500
+      },
+      "checks": {
+        "expect_context_menu_item": "Warp to Location",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_to_encounter_coordinate",
+      "action": {
+        "type": "click_widget",
+        "target": "context_menu_Warp to Location",
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "warp_started": true
+        }
+      },
+      "checks": {
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "agentMgr.WarpToLocation",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "warp_started": true,
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_locations_after_warp",
+      "action": {
+        "type": "close_window",
+        "target": "locations",
+        "wait_ms": 300
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "advance_time_encounter_warp",
+      "time_control": true,
+      "action": {
+        "type": "advance_server_time",
+        "seconds": 35,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 15000,
+        "poll_interval_ms": 600,
+        "checks": {
+          "expect_ball_present": "Guristas Arrogator",
+          "state_checks": [
+            {
+              "field": "ship_mode",
+              "not_equals": 3
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_ball_present": "Guristas Arrogator",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "lock_guristas_arrogator",
+      "action": {
+        "type": "lock_target",
+        "target": "Guristas Arrogator",
+        "wait_ms": 500
+      },
+      "wait_until": {
+        "timeout_ms": 12000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "state_checks": [
+            {
+              "field": "locked_targets",
+              "non_empty": true
+            }
+          ]
+        }
+      },
+      "checks": {
+        "state_checks": [
+          {
+            "field": "locked_targets",
+            "non_empty": true
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "activate_high_slot_1",
+      "action": {
+        "type": "activate_module",
+        "target": "inFlightHighSlot1",
+        "wait_ms": 400
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "activate_high_slot_2",
+      "action": {
+        "type": "activate_module",
+        "target": "inFlightHighSlot2",
+        "wait_ms": 500
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "wait_for_guristas_arrogator_kill",
+      "action": {
+        "type": "wait",
+        "wait_ms": 2000
+      },
+      "wait_until": {
+        "timeout_ms": 25000,
+        "poll_interval_ms": 1000,
+        "checks": {
+          "state_checks": [
+            {
+              "field": "locked_targets",
+              "equals": []
+            }
+          ]
+        }
+      },
+      "checks": {
+        "state_checks": [
+          {
+            "field": "locked_targets",
+            "equals": []
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "recharge_cap_after_security_kill",
+      "action": {
+        "type": "wait",
+        "wait_ms": 9000
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "warp_back_to_inoue_station",
+      "action": {
+        "type": "warp_to",
+        "target": "60003910",
+        "item_id": 60003910,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 45000,
+        "poll_interval_ms": 1200,
+        "checks": {
+          "target_distance": {
+            "target_id": 60003910,
+            "max": 250000
+          },
+          "state_checks": [
+            {
+              "field": "ship_mode",
+              "not_equals": 3
+            }
+          ]
+        }
+      },
+      "checks": {
+        "target_distance": {
+          "target_id": 60003910,
+          "max": 250000
+        },
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "dock_at_inoue_security_turnin",
+      "action": {
+        "type": "dock",
+        "target": "60003910",
+        "item_id": 60003910,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 20000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==60003910",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60003910",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "select_lobby_agents_tab_after_security_dock",
+      "action": {
+        "type": "click_widget",
+        "target": "stationInformationTabAgents",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "reopen_velmudainen_for_turnin",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/lobbyWnd/content/main/panelsCont/agentsPanel/scroll/maincontainer/__clipper/__content/Velmudainen Tykigi",
+        "double_click": true,
+        "wait_ms": 1200
+      },
+      "checks": {
+        "expect_window_open": "AgentConversation_3012050",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "complete_security_mission",
+      "action": {
+        "type": "click_widget",
+        "target": "AgentConversation_3012050/content/main/ButtonGroup/btns/ButtonWrapper/CompleteMission_Button",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "state_checks": [
+          {
+            "field": "wallet_isk",
+            "increased": 10000
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_velmudainen_after_turnin",
+      "action": {
+        "type": "close_window",
+        "target": "AgentConversation_3012050",
+        "wait_ms": 400
+      },
+      "checks": {
+        "expect_window_closed": "AgentConversation_3012050",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "open_distribution_agent_ousia",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/lobbyWnd/content/main/panelsCont/agentsPanel/scroll/maincontainer/__clipper/__content/Ousia Ikoskio",
+        "double_click": true,
+        "wait_ms": 1200
+      },
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 400,
+        "checks": {
+          "expect_window_open": "AgentConversation_3016809",
+          "window_populated": {
+            "window": "AgentConversation_3016809",
+            "min_populated": 1
+          }
+        }
+      },
+      "checks": {
+        "expect_window_open": "AgentConversation_3016809",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "accept_distribution_mission",
+      "action": {
+        "type": "click_widget",
+        "target": "AgentConversation_3016809/content/main/ButtonGroup/btns/ButtonWrapper/AcceptMission_Button",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "agentMgr.GetMissionBriefingInfo",
+            "min_count": 1,
+            "require_ok": true
+          },
+          {
+            "name": "agentMgr.GetMissionObjectiveInfo",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_ousia_telecom",
+      "action": {
+        "type": "close_window",
+        "target": "telecom",
+        "wait_ms": 300
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "open_inventory_for_cargo_pickup",
+      "action": {
+        "type": "open_window",
+        "target": "inventory",
+        "wait_ms": 900
+      },
+      "checks": {
+        "expect_window_open": "InventoryStation",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "select_item_hangar_pickup",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/InventoryStation/content/main/dividerCont/mainCont/Container/tree/clipCont/mainCont/ItemHangar",
+        "wait_ms": 700
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "drag_reports_to_ship_cargo",
+      "action": {
+        "type": "drag_widget",
+        "target": "ItemEntry_3814",
+        "dest_x": 173,
+        "dest_y": 366,
+        "wait_ms": 800
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "select_ship_cargo_verify_pickup",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/InventoryStation/content/main/dividerCont/mainCont/Container/tree/clipCont/mainCont/ShipHangar",
+        "wait_ms": 800
+      },
+      "checks": {
+        "window_populated": {
+          "window": "InventoryStation",
+          "contains_text": "3 Items",
+          "require_rpc_or_data": false
+        },
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_inventory_before_dropoff_transit",
+      "action": {
+        "type": "close_window",
+        "target": "InventoryStation",
+        "wait_ms": 300
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_move_to_dropoff_station",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/tr 90000001 60002296",
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 15000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "expect_ball_present": "60002296"
+        }
+      },
+      "checks": {
+        "expect_ball_present": "60002296",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "ui_delta_without_relog": false
+      }
+    },
+    {
+      "id": "dock_at_dropoff_station",
+      "action": {
+        "type": "dock",
+        "target": "60002296",
+        "item_id": 60002296,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 20000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==60002296",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60002296",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_inventory_for_cargo_dropoff",
+      "action": {
+        "type": "open_window",
+        "target": "inventory",
+        "wait_ms": 900
+      },
+      "checks": {
+        "expect_window_open": "InventoryStation",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "select_ship_cargo_for_dropoff",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/InventoryStation/content/main/dividerCont/mainCont/Container/tree/clipCont/mainCont/ShipHangar",
+        "wait_ms": 800
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "drag_reports_to_dropoff_hangar",
+      "action": {
+        "type": "drag_widget",
+        "target": "ItemEntry_3814",
+        "dest_x": 173,
+        "dest_y": 446,
+        "wait_ms": 800
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "select_item_hangar_verify_dropoff",
+      "action": {
+        "type": "click_widget",
+        "target": "main/l_main/InventoryStation/content/main/dividerCont/mainCont/Container/tree/clipCont/mainCont/ItemHangar",
+        "wait_ms": 800
+      },
+      "checks": {
+        "expect_window_open": "InventoryStation",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "verify_reports_present_in_dropoff_hangar",
+      "action": {
+        "type": "click_widget",
+        "target": "ItemEntry_3814",
+        "wait_ms": 400
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "close_inventory_after_delivery",
+      "action": {
+        "type": "close_window",
+        "target": "InventoryStation",
+        "wait_ms": 300
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "complete_distribution_mission",
+      "action": {
+        "type": "click_widget",
+        "target": "AgentConversation_3016809/content/main/ButtonGroup/btns/ButtonWrapper/CompleteMission_Button",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "state_checks": [
+          {
+            "field": "wallet_isk",
+            "increased": 10000
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "close_ousia_after_turnin",
+      "action": {
+        "type": "close_window",
+        "target": "AgentConversation_3016809",
+        "wait_ms": 400
+      },
+      "checks": {
+        "expect_window_closed": "AgentConversation_3016809",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "setup_return_to_inoue_for_turnin",
+      "setup": true,
+      "action": {
+        "type": "slash_command",
+        "command": "/tr 90000001 60003910",
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 15000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "expect_ball_present": "60003910"
+        }
+      },
+      "checks": {
+        "expect_ball_present": "60003910",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "ui_delta_without_relog": false
+      }
+    },
+    {
+      "id": "dock_at_inoue_distribution_turnin",
+      "action": {
+        "type": "dock",
+        "target": "60003910",
+        "item_id": 60003910,
+        "wait_ms": 1500
+      },
+      "wait_until": {
+        "timeout_ms": 20000,
+        "poll_interval_ms": 800,
+        "checks": {
+          "expect_session_field": "stationid==60003910",
+          "state_checks": [
+            {
+              "field": "active_view",
+              "equals": "hangar"
+            }
+          ]
+        }
+      },
+      "checks": {
+        "expect_session_field": "stationid==60003910",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_caldari_navy_lp_store",
+      "action": {
+        "type": "open_window",
+        "target": "lpstore",
+        "wait_ms": 1200
+      },
+      "wait_until": {
+        "timeout_ms": 10000,
+        "poll_interval_ms": 500,
+        "checks": {
+          "expect_window_open": "lpstore",
+          "window_populated": {
+            "window": "lpstore",
+            "min_populated": 1
+          }
+        }
+      },
+      "checks": {
+        "expect_window_open": "lpstore",
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "LPStoreMgr.GetAvailableOffersFromCorp",
+            "min_count": 1,
+            "require_ok": true
+          },
+          {
+            "name": "LPSvc.GetAllMyCharacterWalletLPBalances",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "click_lp_offer_buy",
+      "action": {
+        "type": "click_widget",
+        "target": "main/lpstore/content/main/tabParent/LPStorePanel/lpStoreScroll/maincontainer/__clipper/__content/entry_2/costCont/Button",
+        "wait_ms": 800
+      },
+      "wait_until": {
+        "timeout_ms": 8000,
+        "poll_interval_ms": 400,
+        "checks": {
+          "expect_window_open": "lpstore.ConfirmAmount"
+        }
+      },
+      "checks": {
+        "expect_window_open": "lpstore.ConfirmAmount",
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "confirm_lp_offer_quantity",
+      "action": {
+        "type": "click_widget",
+        "target": "lpstore.ConfirmAmount/content/main/Container/ButtonGroup/btns/ButtonWrapper/Button",
+        "wait_ms": 800
+      },
+      "checks": {
+        "no_client_exception": true,
+        "no_error_reply": true
+      }
+    },
+    {
+      "id": "confirm_lp_purchase_modal",
+      "action": {
+        "type": "click_widget",
+        "target": "ok_dialog_button",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "include_startup_rpcs": false,
+        "rpc_sent": [
+          {
+            "name": "LPStoreMgr.TakeOfferForCharacter",
+            "min_count": 1,
+            "require_ok": true
+          }
+        ],
+        "state_checks": [
+          {
+            "field": "wallet_isk",
+            "decreased": 10000
+          }
+        ],
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    },
+    {
+      "id": "open_inventory_verify_lp_item",
+      "action": {
+        "type": "open_window",
+        "target": "inventory",
+        "wait_ms": 1200
+      },
+      "checks": {
+        "expect_window_open": "InventoryStation",
+        "no_client_exception": true,
+        "no_error_reply": true,
+        "no_server_unimplemented_rpc": true
+      }
+    }
+  ]
+}
