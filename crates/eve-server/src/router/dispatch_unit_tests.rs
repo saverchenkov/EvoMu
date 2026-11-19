@@ -255,7 +255,7 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
     let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
     let kw = HashMap::new();
 
-    // 1. publicGatewaySvc.SendRequest/CallQuasar errors: require_character, UnknownQuasarDomain, UnimplementedRPC
+    // 1. publicGatewaySvc.SendRequest errors: require_character, UnknownQuasarDomain, UnimplementedRPC
     let mut no_char_sess = SessionState::new(94_100);
     no_char_sess.user_id = Some(1);
     let err_no_char = ctx
@@ -263,7 +263,7 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
             &mut no_char_sess,
             "publicGatewaySvc",
             None,
-            "CallQuasar", // rpc-lint: allow test fixture
+            "SendRequest",
             &[PyRep::String("eve_public.character".into())],
             &kw,
             None,
@@ -299,7 +299,7 @@ async fn dispatch_rpc_downtime_exemptions_public_gateway_and_role_gate_matrix() 
                 &mut sess,
                 "publicGatewaySvc",
                 None,
-                "CallQuasar", // rpc-lint: allow test fixture
+                "SendRequest",
                 &[
                     PyRep::String(known_domain),
                     PyRep::String("CustomMsgRequest".into()),
@@ -2157,7 +2157,7 @@ async fn dispatch_rpc_p0_1393_preauth_quasar_framed_and_feature_flags_gates() {
                 &mut unauth_sess,
                 "publicGatewaySvc",
                 None,
-                "SendRequest", // rpc-lint: allow verified publicGatewaySvc method
+                "SendRequest",
                 &args,
                 &kw,
                 None,
@@ -2180,8 +2180,9 @@ async fn dispatch_rpc_p0_1393_preauth_quasar_framed_and_feature_flags_gates() {
     kw_req.insert("request".into(), PyRep::Bytes(req_bytes.clone()));
     for (method, args, call_kw) in [
         ("SendRequest", vec![PyRep::Bytes(req_bytes.clone())], &kw),
-        ("CallQuasar", vec![PyRep::Buffer(req_bytes.clone())], &kw),
+        ("SendRequest", vec![PyRep::Buffer(req_bytes.clone())], &kw),
         ("Send", Vec::new(), &kw_req),
+        ("Send", vec![PyRep::Buffer(req_bytes.clone())], &kw),
     ] {
         let rep = ctx
             .dispatch_rpc(
@@ -2208,13 +2209,15 @@ async fn dispatch_rpc_p0_1393_preauth_quasar_framed_and_feature_flags_gates() {
     for (method, args) in [
         ("SendRequest", Vec::new()),
         ("SendRequest", vec![PyRep::Integer(90_000_001)]),
-        ("CallQuasar", Vec::new()),
         ("Send", Vec::new()),
+        ("Send", vec![PyRep::Integer(90_000_001)]),
         ("PollNotices", Vec::new()),
         ("Subscribe", Vec::new()),
+        ("Subscribe", vec![PyRep::Bytes(req_bytes.clone())]),
         ("SubscribeToNotice", Vec::new()),
         ("ConsumeNotices", Vec::new()),
         ("PublishEvent", Vec::new()),
+        ("PublishEvent", vec![PyRep::Bytes(req_bytes.clone())]),
         ("PublishEventPayload", Vec::new()),
     ] {
         let err = ctx
