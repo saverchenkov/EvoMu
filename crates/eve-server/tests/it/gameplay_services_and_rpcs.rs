@@ -3148,12 +3148,19 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
     .unwrap_err();
     assert_eq!(err_empty.code.to_ascii_lowercase(), "invalidclassification");
 
+    let valid_box1 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+    ])]);
+
     let err_mismatch = rpc(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_99".into()), PyRep::List(vec![PyRep::Real(1.0)])],
+        &[PyRep::String("task_99".into()), valid_box1.clone()],
     )
     .await
     .unwrap_err();
@@ -3164,7 +3171,7 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.0)])],
+        &[PyRep::String("task_1".into()), valid_box1.clone()],
     )
     .await
     .expect("post_classification task_1");
@@ -3181,7 +3188,7 @@ async fn test_parity_project_discovery_tasks_stats_xp_and_tutorial() {
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.0)])],
+        &[PyRep::String("task_1".into()), valid_box1],
     )
     .await
     .unwrap_err();

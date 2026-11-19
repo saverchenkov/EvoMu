@@ -726,8 +726,13 @@ async fn notify_batch9_password_player_state_brain_and_subscription() {
     let payload = PyRep::Dict(vec![
         (PyRep::String("task_id".into()), PyRep::Integer(1)),
         (
-            PyRep::String("classification".into()),
-            PyRep::List(vec![PyRep::Integer(1)]),
+            PyRep::String("polygons".into()),
+            PyRep::List(vec![PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+                PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+                PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+            ])]),
         ),
     ]);
     let task_res = rpc(&ctx, &mut sess_a, "ProjectDiscovery", "get_new_task", &[])

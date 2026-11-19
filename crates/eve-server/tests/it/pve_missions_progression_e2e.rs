@@ -313,8 +313,13 @@ async fn test_project_discovery_rpcs_ak_notify_and_login_campaigns_e2e() {
         &[
             PyRep::Integer(task_num),
             PyRep::Dict(vec![(
-                PyRep::String("classification".into()),
-                PyRep::List(vec![PyRep::Integer(1)]),
+                PyRep::String("polygons".into()),
+                PyRep::List(vec![PyRep::List(vec![
+                    PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+                ])]),
             )]),
         ],
     )

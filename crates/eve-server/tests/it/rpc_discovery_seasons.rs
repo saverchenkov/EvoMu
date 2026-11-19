@@ -144,7 +144,13 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits pre"), PyRep::Integer(0));
 
     // Valid post_classification (also verify ISK_Reward from const.pyj ISK_MULTIPLIERS = [500, 800, 1000] doubled by bonus sample)
-    let post = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.23)])]).await.expect("post_classification");
+    let box1 = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+        PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+        PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+    ])]);
+    let post = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), box1]).await.expect("post_classification");
     assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(300.0));
     assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
     assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(2_000.0));

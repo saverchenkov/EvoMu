@@ -212,7 +212,10 @@ fn execute_post_classification_exercises_guards_rewards_tiers_crates_and_mmos() 
             current_task_index: 1,
             ..Default::default()
         };
-        let out = execute_post_classification(snap, &mut st, 888_888_888, 1, &PyRep::None, 3_000)
+        let valid_poly = PyRep::String(
+            "{\"polygons\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into(),
+        );
+        let out = execute_post_classification(snap, &mut st, 888_888_888, 1, &valid_poly, 3_000)
             .unwrap();
         assert_eq!(out.xp_gain, 300.0); // 150.0 * 2.0 bonus
         assert_eq!(out.ak_gain, 20);

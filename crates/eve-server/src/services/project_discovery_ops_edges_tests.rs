@@ -96,75 +96,158 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             (0.0, false)
         );
 
-        // 2. Explicit false flags via String / Dict / KeyVal / JSON String / Object wrapper
+        // 2. Coord-free, <3-vertex, degenerate, non-finite, and spoof-flag-only payloads return (0.0, false)
         for bad_arg in [
             PyRep::String("false".into()),
             PyRep::String("INVALID".into()),
-            PyRep::Dict(vec![(
-                PyRep::String("accurate".into()),
-                PyRep::Bool(false),
-            )]),
-            PyRep::keyval([("consensus", PyRep::Bool(false))]),
-            PyRep::String(r#"{"is_accurate": false, "points": [[0.5, 0.5]]}"#.into()),
+            PyRep::String("accurate".into()),
+            PyRep::Dict(vec![(PyRep::String("accurate".into()), PyRep::Bool(true))]),
+            PyRep::keyval([("consensus", PyRep::Bool(true))]),
+            PyRep::String(r#"{"is_accurate": true, "points": [[0.5, 0.5], [0.6, 0.6]]}"#.into()),
             PyRep::Object {
                 type_name: "util.KeyVal".into(),
-                args: Box::new(PyRep::keyval([("is_accurate", PyRep::Bool(false))])),
+                args: Box::new(PyRep::keyval([("is_accurate", PyRep::Bool(true))])),
             },
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(0.5), PyRep::Real(0.5)]),
+                PyRep::List(vec![PyRep::Real(0.6), PyRep::Real(0.5)]),
+                PyRep::List(vec![PyRep::Real(0.7), PyRep::Real(0.5)]),
+            ]),
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(0.5)]),
+                PyRep::List(vec![PyRep::Real(0.6), PyRep::Real(0.5)]),
+                PyRep::List(vec![PyRep::Real(0.5), PyRep::Real(0.6)]),
+            ]),
         ] {
             assert_eq!(
                 grade_and_record_classification(snap, &mut store, 1, 10, &bad_arg),
-                (0.0, false)
+                (0.0, false),
+                "unexpected pass for {bad_arg:?}"
             );
         }
 
-        // 3. Control task (idx % 5 == 0): exact hit, pixel-space (>1.5) hit, far miss, empty centroid
+        // 3. Control task (idx % 5 == 0): exact polygon IoU, pixel scaling, concave L-shape, boundary thresholds, spoof resistance
         let [tx, ty] = sample_target_center_norm(10);
-        let (acc_exact, ok_exact) = grade_and_record_classification(
-            snap,
-            &mut store,
-            101,
-            10,
-            &PyRep::List(vec![PyRep::Real(tx), PyRep::Real(ty)]),
-        );
+        let box_poly = |cx: f64, cy: f64, half: f64| {
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(cx - half), PyRep::Real(cy - half)]),
+                PyRep::List(vec![PyRep::Real(cx + half), PyRep::Real(cy - half)]),
+                PyRep::List(vec![PyRep::Real(cx + half), PyRep::Real(cy + half)]),
+                PyRep::List(vec![PyRep::Real(cx - half), PyRep::Real(cy + half)]),
+            ])
+        };
+
+        // Exact control square (with spoofed accurate=false key ignored) -> IoU 1.0
+        let exact_spoof_false = PyRep::Dict(vec![
+            (PyRep::String("accurate".into()), PyRep::Bool(false)),
+            (PyRep::String("is_accurate".into()), PyRep::Bool(false)),
+            (PyRep::String("consensus".into()), PyRep::Bool(false)),
+            (PyRep::String("polygons".into()), PyRep::List(vec![box_poly(tx, ty, 0.12)])),
+        ]);
+        let (acc_exact, ok_exact) =
+            grade_and_record_classification(snap, &mut store, 101, 10, &exact_spoof_false);
         assert!(ok_exact);
-        assert!((acc_exact - 1.0).abs() < 1e-9);
+        assert!((acc_exact - 1.0).abs() < 1e-9, "expected IoU 1.0, got {acc_exact}");
 
-        let (acc_px, ok_px) = grade_and_record_classification(
-            snap,
-            &mut store,
-            102,
-            10,
-            &PyRep::Tuple(vec![
-                PyRep::Integer((tx * 512.0).round() as i64),
-                PyRep::Real(ty * 512.0),
+        // Pixel-space (>1.5) polygon near control box -> IoU >= 0.90
+        let px_poly = PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::Integer(((tx - 0.12) * 512.0).round() as i64),
+                PyRep::Real((ty - 0.12) * 512.0),
             ]),
-        );
-        assert!(ok_px);
-        assert!(acc_px >= 0.75);
+            PyRep::Tuple(vec![
+                PyRep::Integer(((tx + 0.12) * 512.0).round() as i64),
+                PyRep::Real((ty - 0.12) * 512.0),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(((tx + 0.12) * 512.0).round() as i64),
+                PyRep::Real((ty + 0.12) * 512.0),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Integer(((tx - 0.12) * 512.0).round() as i64),
+                PyRep::Real((ty + 0.12) * 512.0),
+            ]),
+        ]);
+        let (acc_px, ok_px) =
+            grade_and_record_classification(snap, &mut store, 102, 10, &px_poly);
+        assert!(ok_px && acc_px >= 0.90, "expected pixel IoU >= 0.90, got {acc_px}");
 
-        // Mixed Integer/Real pair far from target -> inaccurate
-        let (acc_miss, ok_miss) = grade_and_record_classification(
+        // Concave L-shape covering 3 quadrants of control_solution -> exact analytical IoU 0.75
+        let concave_l = PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(tx - 0.12), PyRep::Real(ty - 0.12)]),
+            PyRep::List(vec![PyRep::Real(tx + 0.12), PyRep::Real(ty - 0.12)]),
+            PyRep::List(vec![PyRep::Real(tx + 0.12), PyRep::Real(ty)]),
+            PyRep::List(vec![PyRep::Real(tx), PyRep::Real(ty)]),
+            PyRep::List(vec![PyRep::Real(tx), PyRep::Real(ty + 0.12)]),
+            PyRep::List(vec![PyRep::Real(tx - 0.12), PyRep::Real(ty + 0.12)]),
+        ]);
+        let (acc_l, ok_l) =
+            grade_and_record_classification(snap, &mut store, 103, 10, &concave_l);
+        assert!(ok_l);
+        assert!((acc_l - 0.75).abs() < 1e-9, "expected L-shape IoU 0.75, got {acc_l}");
+
+        // Pass boundary: 0.15 x 0.15 centered square -> IoU = 0.0225 / 0.0576 = 0.390625 >= 0.35
+        let (acc_pass_b, ok_pass_b) = grade_and_record_classification(
             snap,
             &mut store,
-            103,
+            104,
             10,
-            &PyRep::List(vec![PyRep::Integer(1), PyRep::Real(1.4)]),
+            &box_poly(tx, ty, 0.075),
         );
-        assert!(!ok_miss);
-        assert!(acc_miss <= 0.35);
+        assert!(ok_pass_b);
+        assert!((acc_pass_b - 0.390625).abs() < 1e-6, "got {acc_pass_b}");
 
-        // Empty payload -> (1.0, true)
+        // Fail boundary: 0.24 x 0.24 shifted by 0.15 -> IoU = 0.0216 / 0.0936 = 0.230769 < 0.35
+        let (acc_fail_b, ok_fail_b) = grade_and_record_classification(
+            snap,
+            &mut store,
+            105,
+            10,
+            &box_poly(tx + 0.15, ty, 0.12),
+        );
+        assert!(!ok_fail_b);
+        assert!((acc_fail_b - (0.0216 / 0.0936)).abs() < 1e-6, "got {acc_fail_b}");
+
+        // Far polygon with spoofed accurate=true fails IoU == 0.0
+        let far_spoof = PyRep::Dict(vec![
+            (PyRep::String("accurate".into()), PyRep::Bool(true)),
+            (PyRep::String("polygons".into()), PyRep::List(vec![box_poly(1.25, 1.25, 0.12)])),
+        ]);
+        let (acc_miss, ok_miss) =
+            grade_and_record_classification(snap, &mut store, 106, 10, &far_spoof);
+        assert!(!ok_miss && acc_miss == 0.0);
+
+        // Full-canvas cheat box [0..1]^2 fails IoU = 0.0576 < 0.35
+        let (acc_giant, ok_giant) = grade_and_record_classification(
+            snap,
+            &mut store,
+            107,
+            10,
+            &box_poly(0.5, 0.5, 0.5),
+        );
+        assert!(!ok_giant && acc_giant < 0.1);
+
+        // Empty list returns (0.0, false) — never (1.0, true)
         assert_eq!(
-            grade_and_record_classification(snap, &mut store, 104, 10, &PyRep::List(vec![])),
-            (1.0, true)
+            grade_and_record_classification(snap, &mut store, 108, 10, &PyRep::List(vec![])),
+            (0.0, false)
         );
 
-        // 4. Standard task (idx % 5 != 0): crowd consensus workflow
+        // Overlapping duplicate gates use grid fallback and remain <= 1.0
+        let ctrl_poly = control_solution_polygon(10);
+        let dup_iou = compute_polygons_iou(&[ctrl_poly.clone(), ctrl_poly.clone()], &[ctrl_poly]);
+        assert!((0.95..=1.0).contains(&dup_iou), "got {dup_iou}");
+
+        // 4. Standard task (idx % 5 != 0): crowd consensus via 2D polygon IoU
         let std_idx = 13;
         let [sx, sy] = sample_target_center_norm(std_idx);
-        // First responder via JSON string polygon -> plausible -> establishes consensus_centroid
         let json_poly = serde_json::json!({
-            "gates": [[[sx - 0.02, sy], [sx + 0.02, sy]]]
+            "gates": [[
+                [sx - 0.12, sy - 0.12],
+                [sx + 0.12, sy - 0.12],
+                [sx + 0.12, sy + 0.12],
+                [sx - 0.12, sy + 0.12]
+            ]]
         })
         .to_string();
         let (a1, ok1) = grade_and_record_classification(
@@ -174,47 +257,59 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             std_idx,
             &PyRep::String(json_poly),
         );
-        assert!(ok1);
-        assert_eq!(a1, 1.0);
+        assert!(ok1 && a1 == 1.0);
 
-        // Second responder far away -> disagrees -> (0.2, false)
+        // Second responder far away -> disagrees -> (0.0, false)
         let (a2, ok2) = grade_and_record_classification(
             snap,
             &mut store,
             202,
             std_idx,
-            &PyRep::List(vec![PyRep::Real(1.4), PyRep::Integer(1)]),
+            &box_poly(1.3, 1.3, 0.1),
         );
-        assert!(!ok2);
-        assert_eq!(a2, 0.2);
+        assert!(!ok2 && a2 == 0.0);
 
-        // Third responder close to consensus -> updates running centroid & locks task_consensus_by_index
+        // Third responder overlaps consensus polygon (0.20x0.20 -> IoU = 0.04/0.0576) -> locks task_consensus_by_index
         let (a3, ok3) = grade_and_record_classification(
             snap,
             &mut store,
             203,
             std_idx,
-            &PyRep::List(vec![PyRep::Real(sx), PyRep::Real(sy)]),
+            &box_poly(sx, sy, 0.10),
         );
         assert!(ok3);
-        assert_eq!(a3, 1.0);
+        assert!((a3 - (0.04 / 0.0576)).abs() < 1e-6, "got {a3}");
         assert_eq!(store.task_consensus_by_index.get(&std_idx), Some(&true));
 
-        // 5. First responder implausible (> 0.65 from target) -> (0.2, false)
+        // Fourth responder discordant MUST still fail IoU grading (no cached consensus bypass)
+        let (a4, ok4) = grade_and_record_classification(
+            snap,
+            &mut store,
+            204,
+            std_idx,
+            &box_poly(1.3, 1.3, 0.1),
+        );
+        assert!(!ok4 && a4 == 0.0);
+
+        // 5. First responder implausible (out of canvas bounds or full-canvas) -> (0.0, false), no consensus stored
         let (bad_first_acc, bad_first_ok) = grade_and_record_classification(
             snap,
             &mut store,
             301,
             14,
-            &PyRep::List(vec![PyRep::Real(1.4), PyRep::Real(1.4)]),
+            &box_poly(1.3, 1.3, 0.1),
         );
-        assert!(!bad_first_ok);
-        assert_eq!(bad_first_acc, 0.2);
+        assert!(!bad_first_ok && bad_first_acc == 0.0);
+        assert!(snap
+            .seasons_and_campaigns
+            .project_discovery_votes
+            .get(&14)
+            .is_none_or(|b| b.consensus_centroid.is_none()));
 
-        // 6. Standard task with None centroid -> (1.0, true)
+        // 6. Standard task with None payload -> (0.0, false)
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 302, 16, &PyRep::None),
-            (1.0, true)
+            (0.0, false)
         );
     });
 }

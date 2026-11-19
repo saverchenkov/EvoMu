@@ -10,7 +10,12 @@ use std::collections::HashMap;
 
 #[test]
 fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
-    // 1. json_has_non_empty_classification_content & has_valid_classification_payload across all variants
+    // 1. has_valid_classification_payload across all PyRep variants requires >= 3 finite polygon vertices
+    let tri = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(0.1), PyRep::Real(0.2)]),
+        PyRep::Tuple(vec![PyRep::Real(0.4), PyRep::Real(0.2)]),
+        PyRep::Tuple(vec![PyRep::Real(0.2), PyRep::Real(0.5)]),
+    ]);
     assert!(!has_valid_classification_payload(&PyRep::None));
     assert!(!has_valid_classification_payload(&PyRep::Bool(false)));
     assert!(!has_valid_classification_payload(&PyRep::Bool(true)));
@@ -23,42 +28,65 @@ fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
     assert!(!has_valid_classification_payload(&PyRep::String("none".into())));
     assert!(!has_valid_classification_payload(&PyRep::String("{\"polygons\":[]}".into())));
     assert!(!has_valid_classification_payload(&PyRep::String("{\"gates\":[null,false]}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"polygons\":[[1,2]]}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("[1, 2]".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"other\":true}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("{\"other\":42}".into())));
-    assert!(has_valid_classification_payload(&PyRep::String("plain_gate".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"polygons\":[[1,2]]}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"accurate\":true}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("[1, 2]".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"other\":true}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("{\"other\":42}".into())));
+    assert!(!has_valid_classification_payload(&PyRep::String("plain_gate".into())));
+    assert!(has_valid_classification_payload(&PyRep::String(
+        "{\"polygons\":[[[0.1,0.2],[0.4,0.2],[0.2,0.5]]]}".into()
+    )));
+    assert!(has_valid_classification_payload(&PyRep::String(
+        "[[[0.1,0.2],[0.4,0.2],[0.2,0.5]]]".into()
+    )));
     assert!(!has_valid_classification_payload(&PyRep::Bytes(vec![])));
-    assert!(has_valid_classification_payload(&PyRep::Bytes(vec![1])));
+    assert!(!has_valid_classification_payload(&PyRep::Bytes(vec![1])));
     assert!(!has_valid_classification_payload(&PyRep::Buffer(vec![])));
-    assert!(has_valid_classification_payload(&PyRep::Buffer(vec![2])));
+    assert!(!has_valid_classification_payload(&PyRep::Buffer(vec![2])));
     assert!(!has_valid_classification_payload(&PyRep::Dict(vec![])));
     assert!(!has_valid_classification_payload(&PyRep::Dict(vec![(
         PyRep::String("polygons".into()),
         PyRep::List(vec![]),
     )])));
-    assert!(has_valid_classification_payload(&PyRep::Dict(vec![(
+    assert!(!has_valid_classification_payload(&PyRep::Dict(vec![(
         PyRep::String("gates".into()),
         PyRep::Tuple(vec![PyRep::Integer(1)]),
+    )])));
+    assert!(has_valid_classification_payload(&PyRep::Dict(vec![(
+        PyRep::String("gates".into()),
+        PyRep::Tuple(vec![tri.clone()]),
     )])));
     assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::new())));
     assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
         "gates".into(),
         PyRep::Integer(1),
     )]))));
-    assert!(has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+    assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+        "accurate".into(),
+        PyRep::Bool(true),
+    )]))));
+    assert!(!has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
         "score".into(),
         PyRep::Real(0.9),
     )]))));
-    assert!(has_valid_classification_payload(&PyRep::Object {
+    assert!(has_valid_classification_payload(&PyRep::KeyVal(HashMap::from([(
+        "polygons".into(),
+        PyRep::List(vec![tri.clone()]),
+    )]))));
+    assert!(!has_valid_classification_payload(&PyRep::Object {
         type_name: "cls".into(),
         args: Box::new(PyRep::List(vec![PyRep::Integer(1)])),
+    }));
+    assert!(has_valid_classification_payload(&PyRep::Object {
+        type_name: "cls".into(),
+        args: Box::new(PyRep::List(vec![tri])),
     }));
     assert!(!has_valid_classification_payload(&PyRep::Rowset {
         columns: vec!["id".into()],
         rows: vec![],
     }));
-    assert!(has_valid_classification_payload(&PyRep::Rowset {
+    assert!(!has_valid_classification_payload(&PyRep::Rowset {
         columns: vec!["id".into()],
         rows: vec![vec![PyRep::Integer(1)]],
     }));
@@ -256,24 +284,45 @@ fn project_discovery_tutorial_crates_url_classification_and_slash_edges() {
     .unwrap();
     assert!(fetched_8_corrupt.as_str().unwrap().contains("\"fetch_count\":2"));
 
-    // post_classification invalid task_id format & level-up notification branch
+    // post_classification invalid task_id format, <3 vertex rejection & level-up notification branch
     let sub_err = handle_project_discovery(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "submit",
-        &[PyRep::String("not_a_number".into()), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &[
+            PyRep::String("not_a_number".into()),
+            PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+        ],
         &kw,
     )
     .unwrap()
     .unwrap_err();
     assert!(sub_err.code.eq_ignore_ascii_case("invalidtaskid"), "got {}", sub_err.code);
+    let coord_free_err = handle_project_discovery(
+        &ctx,
+        &mut sess,
+        "ProjectDiscovery",
+        "submit",
+        &[PyRep::Integer(8), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        coord_free_err.code.eq_ignore_ascii_case("invalidclassification"),
+        "got {}",
+        coord_free_err.code
+    );
     let sub8 = handle_project_discovery(
         &ctx,
         &mut sess,
         "ProjectDiscovery",
         "submit_classification",
-        &[PyRep::Integer(8), PyRep::String("{\"gates\":[[1,2]]}".into())],
+        &[
+            PyRep::Integer(8),
+            PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+        ],
         &kw,
     )
     .unwrap()

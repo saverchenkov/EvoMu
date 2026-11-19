@@ -174,7 +174,12 @@ fn test_project_discovery_tasks_tutorials_classifications_and_slash() {
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::String("{\"gates\":[[1,2,3]]}".into())],
+        &[
+            PyRep::String("task_1".into()),
+            PyRep::String(
+                "{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into(),
+            ),
+        ],
         &kw,
     )
     .unwrap()
@@ -188,7 +193,12 @@ fn test_project_discovery_tasks_tutorials_classifications_and_slash() {
         &mut sess,
         "ProjectDiscovery",
         "post_classification",
-        &[PyRep::Integer(1), PyRep::String("{\"gates\":[[1,2,3]]}".into())],
+        &[
+            PyRep::Integer(1),
+            PyRep::String(
+                "{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into(),
+            ),
+        ],
         &kw
     )
     .unwrap()

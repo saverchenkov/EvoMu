@@ -149,9 +149,10 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
             "InvalidClassification"
         );
     }
+    let valid_poly_json = "{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}";
     for bad_tid in [PyRep::String("not_a_number".into()), PyRep::Bool(true)] {
         assert_eq!(
-            call_pd(&ctx, &mut sess, "submit", &[bad_tid, PyRep::String("ok".into())])
+            call_pd(&ctx, &mut sess, "submit", &[bad_tid, PyRep::String(valid_poly_json.into())])
                 .unwrap_err()
                 .code,
             "InvalidTaskId"
@@ -162,12 +163,19 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     handle_project_discovery_slash(&ctx, "/pd consensus 1 false").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
     assert_eq!(
-        call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(999), PyRep::String("ok".into())])
+        call_pd(
+            &ctx,
+            &mut sess,
+            "submit",
+            &[PyRep::Integer(999), PyRep::String(valid_poly_json.into())],
+        )
             .unwrap_err()
             .code,
         "InvalidTaskId"
     );
-    let sub1 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())]).unwrap();
+    let sub1 =
+        call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), PyRep::String(valid_poly_json.into())])
+            .unwrap();
     assert_eq!(sub1.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
     assert_eq!(sub1.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(0.0));
     assert_eq!(sub1.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.0));
@@ -178,7 +186,9 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     handle_project_discovery_slash(&ctx, "/pd consensus 2 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
-    let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String("ok".into())]).unwrap();
+    let sub2 =
+        call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String(valid_poly_json.into())])
+            .unwrap();
     assert_eq!(sub2.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(3_000.0));
     assert_eq!(
         sub2.dict_get("loot_crates"),
@@ -193,7 +203,9 @@ fn classification_isk_tiers_loot_crates_task_eviction_url_fallbacks_and_slash_er
     handle_project_discovery_slash(&ctx, "/pd config 100 250 2500 10 15").unwrap().unwrap();
     handle_project_discovery_slash(&ctx, "/pd consensus 3 true").unwrap().unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
-    let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String("ok".into())]).unwrap();
+    let sub3 =
+        call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String(valid_poly_json.into())])
+            .unwrap();
     let crates3 = match sub3.dict_get("loot_crates") {
         Some(PyRep::List(v) | PyRep::Tuple(v)) => v,
         other => panic!("expected loot_crates list, got {other:?}"),
@@ -246,12 +258,13 @@ fn project_discovery_ema_accuracy_avoids_binary64_drift() {
     let ctx = test_ctx();
     let mut sess = auth_session(1, 90_000_888, 98_000_001, 30_000_142);
 
+    let valid_poly = PyRep::String("{\"gates\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into());
     // Task 1: accurate -> 1.0
     handle_project_discovery_slash(&ctx, "/pd consensus 1 true")
         .unwrap()
         .unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
-    let sub1 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())]).unwrap();
+    let sub1 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(1), valid_poly.clone()]).unwrap();
     assert_eq!(sub1.dict_get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
 
     // Task 2: inaccurate -> 0.9
@@ -260,7 +273,7 @@ fn project_discovery_ema_accuracy_avoids_binary64_drift() {
         .unwrap()
         .unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
-    let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), PyRep::String("ok".into())]).unwrap();
+    let sub2 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(2), valid_poly.clone()]).unwrap();
     assert_eq!(sub2.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.9));
 
     // Task 3: accurate -> exact 0.91 and score 91.0 (not 0.9099999999999999)
@@ -269,7 +282,7 @@ fn project_discovery_ema_accuracy_avoids_binary64_drift() {
         .unwrap()
         .unwrap();
     call_pd(&ctx, &mut sess, "get_new_task", &[]).unwrap();
-    let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), PyRep::String("ok".into())]).unwrap();
+    let sub3 = call_pd(&ctx, &mut sess, "submit", &[PyRep::Integer(3), valid_poly]).unwrap();
     assert_eq!(sub3.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.91));
     assert_eq!(sub3.dict_get("score").and_then(|v| v.as_f64()), Some(91.0));
 
@@ -350,7 +363,7 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
     assert_ne!(tr_1.dict_get("task_id"), tr_6.dict_get("task_id"));
     assert!(tr_1.dict_get("solution").is_some());
 
-    // 5. Payload validation edge cases: JSON booleans/empty polygons, PyRep::Bytes, Rowset, Object, Dict polygons
+    // 5. Payload validation edge cases: coordinate-free, spoof-only, <3 vertex, collinear, NaN, and empty containers
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // task 1
     for invalid_pl in [
         PyRep::Bool(true),
@@ -359,10 +372,27 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
         PyRep::String("NONE".into()),
         PyRep::String("[]".into()),
         PyRep::String("{}".into()),
+        PyRep::String("ok".into()),
         PyRep::String("{\"polygons\":[]}".into()),
+        PyRep::String("{\"accurate\":true,\"is_accurate\":true,\"consensus\":true}".into()),
         PyRep::Bytes(vec![]),
         PyRep::Dict(vec![(PyRep::String("polygons".into()), PyRep::List(vec![]))]),
         PyRep::keyval([("gates", PyRep::Tuple(vec![]))]),
+        PyRep::List(vec![PyRep::List(vec![PyRep::Real(0.5), PyRep::Real(0.5)])]),
+        PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(0.4), PyRep::Real(0.4)]),
+            PyRep::List(vec![PyRep::Real(0.6), PyRep::Real(0.6)]),
+        ]),
+        PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.2)]),
+            PyRep::List(vec![PyRep::Real(0.4), PyRep::Real(0.4)]),
+            PyRep::List(vec![PyRep::Real(0.6), PyRep::Real(0.6)]),
+        ]),
+        PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(f64::NAN), PyRep::Real(0.2)]),
+            PyRep::List(vec![PyRep::Real(0.4), PyRep::Real(0.2)]),
+            PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.5)]),
+        ]),
         PyRep::Rowset {
             columns: vec![],
             rows: vec![],
@@ -386,19 +416,41 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
         let arr = v["clusters"][0]["center_norm"].as_array().unwrap();
         [arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap()]
     };
+    let sample_box = |idx: i64| -> PyRep {
+        let [cx, cy] = sample_center(idx);
+        PyRep::List(vec![PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Real(cx - 0.12), PyRep::Real(cy - 0.12)]),
+            PyRep::Tuple(vec![PyRep::Real(cx + 0.12), PyRep::Real(cy - 0.12)]),
+            PyRep::Tuple(vec![PyRep::Real(cx + 0.12), PyRep::Real(cy + 0.12)]),
+            PyRep::Tuple(vec![PyRep::Real(cx - 0.12), PyRep::Real(cy + 0.12)]),
+        ])])
+    };
+    let far_poly = PyRep::List(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(1.25), PyRep::Real(1.25)]),
+        PyRep::Tuple(vec![PyRep::Real(1.45), PyRep::Real(1.25)]),
+        PyRep::Tuple(vec![PyRep::Real(1.45), PyRep::Real(1.45)]),
+        PyRep::Tuple(vec![PyRep::Real(1.25), PyRep::Real(1.45)]),
+    ])]);
     let sample_uuid = |idx: i64| -> String {
         let task = generate_authentic_task_data(idx, ACTIVE_PROJECT_ID, 10);
         let v: serde_json::Value = serde_json::from_str(task.payload_json.as_deref().unwrap()).unwrap();
         v["task_uuid"].as_str().unwrap().to_string()
     };
 
-    // 6. Rate-limit TooFast + TaskAlreadySubmitted + non-control multi-player crowd consensus
+    // 6. Rate-limit TooFast + TaskAlreadySubmitted + non-control multi-player 2D polygon IoU consensus
     let target_1 = sample_center(1);
     let concordant_json_obj = PyRep::Object {
         type_name: "Classification".into(),
         args: Box::new(PyRep::String(format!(
-            "{{\"gates\":[[[{:.4},{:.4}],[{:.4},{:.4}]]]}}",
-            target_1[0], target_1[1], target_1[0], target_1[1]
+            "{{\"gates\":[[[{:.4},{:.4}],[{:.4},{:.4}],[{:.4},{:.4}],[{:.4},{:.4}]]]}}",
+            target_1[0] - 0.12,
+            target_1[1] - 0.12,
+            target_1[0] + 0.12,
+            target_1[1] - 0.12,
+            target_1[0] + 0.12,
+            target_1[1] + 0.12,
+            target_1[0] - 0.12,
+            target_1[1] + 0.12
         ))),
     };
     let sub_a1 = call_pd(&ctx, &mut sess_a, "submit_classification", &[PyRep::Integer(1), concordant_json_obj]).unwrap();
@@ -408,7 +460,7 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
 
     // Immediate resubmit before MIN_SUBMISSION_INTERVAL_SECS -> ProjectDiscoverySubmissionTooFast
     assert_eq!(
-        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())])
+        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(1), sample_box(1)])
             .unwrap_err()
             .code,
         "ProjectDiscoverySubmissionTooFast"
@@ -416,7 +468,7 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     // Still same current_task_index (1) -> TaskAlreadySubmitted
     assert_eq!(
-        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())])
+        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(1), sample_box(1)])
             .unwrap_err()
             .code,
         "TaskAlreadySubmitted"
@@ -424,22 +476,25 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
 
     // Pilot B joins task 1 concordantly in pixel space -> confirms crowd consensus in ProjectDiscoveryStore
     call_pd(&ctx, &mut sess_b, "get_new_task", &[]).unwrap(); // task 1
-    let px = (target_1[0] * 512.0).round();
-    let py = (target_1[1] * 512.0).round() as i64;
-    let pixel_tuple = PyRep::Tuple(vec![PyRep::List(vec![PyRep::Real(px), PyRep::Integer(py)])]);
+    let px0 = ((target_1[0] - 0.12) * 512.0).round();
+    let px1 = ((target_1[0] + 0.12) * 512.0).round();
+    let py0 = ((target_1[1] - 0.12) * 512.0).round() as i64;
+    let py1 = ((target_1[1] + 0.12) * 512.0).round() as i64;
+    let pixel_tuple = PyRep::Tuple(vec![PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Real(px0), PyRep::Integer(py0)]),
+        PyRep::Tuple(vec![PyRep::Real(px1), PyRep::Integer(py0)]),
+        PyRep::Tuple(vec![PyRep::Real(px1), PyRep::Integer(py1)]),
+        PyRep::Tuple(vec![PyRep::Real(px0), PyRep::Integer(py1)]),
+    ])]);
     let sub_b1 = call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(1), pixel_tuple]).unwrap();
-    assert_eq!(sub_b1.dict_get("accuracy").and_then(|v| v.as_f64()), Some(1.0));
+    let b1_acc = sub_b1.dict_get("accuracy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(b1_acc >= 0.99 && b1_acc <= 1.0, "expected pixel polygon IoU ~1.0, got {b1_acc}");
     assert_eq!(sub_b1.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(20));
 
-    // Pilot C submits discordant coordinates to task 2 after Pilot A establishes consensus centroid
-    let target_2 = sample_center(2);
+    // Pilot C submits discordant polygon to task 2 after Pilot A establishes crowd consensus polygon
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // task 2
-    let a2_payload = PyRep::List(vec![PyRep::Tuple(vec![
-        PyRep::Real(target_2[0]),
-        PyRep::Real(target_2[1]),
-    ])]);
     assert_eq!(
-        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(2), a2_payload])
+        call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(2), sample_box(2)])
             .unwrap()
             .dict_get("accuracy")
             .and_then(|v| v.as_f64()),
@@ -447,68 +502,66 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
     );
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_c, "get_new_task", &[]).unwrap(); // task 1 for C
-    call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(1), PyRep::String("ok".into())]).unwrap();
+    call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(1), sample_box(1)]).unwrap();
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_c, "get_new_task", &[]).unwrap(); // task 2 for C
-    // Far away in normalized coords (max_coord <= 1.5 so no /512 normalization) -> sample_acc = 0.2 -> EMA (1.0 * 9.0 + 0.2) / 10.0 = 0.92, AK_Reward = 0
-    let far_c2 = PyRep::List(vec![PyRep::List(vec![PyRep::Real(1.45), PyRep::Real(1.45)])]);
-    let sub_c2 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(2), far_c2]).unwrap();
-    assert_eq!(sub_c2.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.92));
+    // Far away disjoint polygon (max_coord <= 1.5 so normalized) -> IoU = 0.0 -> EMA (1.0 * 9.0 + 0.0) / 10.0 = 0.9, AK_Reward = 0
+    let sub_c2 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(2), far_poly.clone()]).unwrap();
+    assert_eq!(sub_c2.dict_get("accuracy").and_then(|v| v.as_f64()), Some(0.9));
     assert_eq!(sub_c2.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
 
-    // Explicit flag overrides ("false" / "invalid" string and Dict/KeyVal explicit flags) + implausible first vote on task 3
+    // Implausible first vote on task 3 + spoofed consensus/accurate flags ignored on task 4
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_c, "get_new_task", &[]).unwrap(); // task 3
-    let bad_first_vote = PyRep::List(vec![PyRep::List(vec![PyRep::Real(1.45), PyRep::Real(1.45)])]);
-    let sub_c3 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(3), bad_first_vote]).unwrap();
+    let sub_c3 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(3), far_poly.clone()]).unwrap();
     assert_eq!(sub_c3.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
 
-    // Task 4: explicit string "invalid" & KeyVal consensus=false
+    // Task 4: spoofed consensus=true/accurate=true on far polygon still fails geometry check
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_c, "get_new_task", &[]).unwrap(); // task 4
-    let kv_false = PyRep::keyval([
-        ("consensus", PyRep::Bool(false)),
-        ("gates", PyRep::List(vec![PyRep::List(vec![PyRep::Real(0.5), PyRep::Real(0.5)])])),
+    let kv_spoof_far = PyRep::keyval([
+        ("consensus", PyRep::Bool(true)),
+        ("accurate", PyRep::Bool(true)),
+        ("gates", far_poly.clone()),
     ]);
-    let sub_c4 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(4), kv_false]).unwrap();
+    let sub_c4 = call_pd(&ctx, &mut sess_c, "submit", &[PyRep::Integer(4), kv_spoof_far]).unwrap();
     assert_eq!(sub_c4.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
 
-    // Task 5: Control task (`5 % 5 == 0`) graded against `sample_target_center_norm(5)` directly
+    // Task 5: Control task (`5 % 5 == 0`) graded strictly by 2D polygon IoU against `control_solution`
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
-    let target_5 = sample_center(5);
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // A on 3
-    call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(3), PyRep::String("invalid".into())]).unwrap();
+    call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(3), far_poly.clone()]).unwrap();
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // A on 4
-    let dict_false = PyRep::Dict(vec![
-        (PyRep::String("is_accurate".into()), PyRep::Bool(false)),
-        (PyRep::String("accurate".into()), PyRep::Bool(false)),
-        (
-            PyRep::String("polygons".into()),
-            PyRep::List(vec![PyRep::List(vec![PyRep::Real(0.5), PyRep::Real(0.5)])]),
-        ),
+    let dict_spoof_true = PyRep::Dict(vec![
+        (PyRep::String("is_accurate".into()), PyRep::Bool(true)),
+        (PyRep::String("accurate".into()), PyRep::Bool(true)),
+        (PyRep::String("polygons".into()), far_poly.clone()),
     ]);
-    call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(4), dict_false]).unwrap();
+    call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(4), dict_spoof_true]).unwrap();
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap(); // A on 5 (control)
-    let near_5 = PyRep::List(vec![PyRep::List(vec![
-        PyRep::Real(target_5[0] + 0.05),
-        PyRep::Real(target_5[1] + 0.05),
-    ])]);
-    let sub_a5 = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(5), near_5]).unwrap();
+    let near_5_spoof_false = PyRep::Dict(vec![
+        (PyRep::String("accurate".into()), PyRep::Bool(false)),
+        (PyRep::String("is_accurate".into()), PyRep::Bool(false)),
+        (PyRep::String("polygons".into()), sample_box(5)),
+    ]);
+    let sub_a5 = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(5), near_5_spoof_false]).unwrap();
     assert_eq!(sub_a5.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(20));
 
-    // Pilot B on control task 5 submits far away -> fails control check
+    // Pilot B on control task 5 submits far away with spoofed accurate=true -> fails control IoU
     call_pd(&ctx, &mut sess_b, "get_new_task", &[]).unwrap();
-    call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(2), PyRep::String("false".into())]).unwrap();
+    call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(2), far_poly.clone()]).unwrap();
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     for t in 3..=4 {
         call_pd(&ctx, &mut sess_b, "get_new_task", &[]).unwrap();
-        call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(t), PyRep::String("false".into())]).unwrap();
+        call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(t), far_poly.clone()]).unwrap();
         ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     }
     call_pd(&ctx, &mut sess_b, "get_new_task", &[]).unwrap(); // B on 5 (control)
-    let far_5 = PyRep::String("{\"accurate\":true,\"polygons\":[[[1.45,1.45]]]}".into());
+    let far_5 = PyRep::String(
+        "{\"accurate\":true,\"polygons\":[[[1.25,1.25],[1.45,1.25],[1.45,1.45],[1.25,1.45]]]}".into(),
+    );
     let sub_b5 = call_pd(&ctx, &mut sess_b, "submit", &[PyRep::Integer(5), far_5]).unwrap();
     assert_eq!(sub_b5.dict_get("AK_Reward").and_then(|v| v.as_i64()), Some(0));
 
@@ -516,12 +569,12 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
     for t in 6..=20 {
         ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
         call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap();
-        let res = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(t), PyRep::String("ok".into())]).unwrap();
+        let res = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(t), sample_box(t)]).unwrap();
         assert_eq!(res.dict_get("gotBonusXP"), Some(&PyRep::Bool(true)));
     }
     ctx.advance_secs(MIN_SUBMISSION_INTERVAL_SECS);
     call_pd(&ctx, &mut sess_a, "get_new_task", &[]).unwrap();
-    let res_no_bonus = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(21), PyRep::String("ok".into())]).unwrap();
+    let res_no_bonus = call_pd(&ctx, &mut sess_a, "submit", &[PyRep::Integer(21), sample_box(21)]).unwrap();
     assert_eq!(res_no_bonus.dict_get("gotBonusXP"), Some(&PyRep::Bool(false)));
     assert_eq!(res_no_bonus.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
 
@@ -614,7 +667,7 @@ fn ops_crowd_consensus_control_grading_payload_centroids_omega_bonus_and_url_fal
         &ctx,
         &mut sess_a,
         "submit",
-        &[PyRep::Integer(23), PyRep::String("invalid".into())],
+        &[PyRep::Integer(23), far_poly],
     )
     .unwrap();
     assert_eq!(zero_inacc.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(0.0));

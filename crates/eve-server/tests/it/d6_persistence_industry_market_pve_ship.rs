@@ -648,7 +648,18 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         for _ in 0..4 { call(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level"); }
         assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
         call(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
-        call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("consensus".into())]).await.expect("post_classification");
+        call(
+            &ctx,
+            &mut sess,
+            "ProjectDiscovery",
+            "post_classification",
+            &[
+                PyRep::String("task_1".into()),
+                PyRep::String("{\"polygons\":[[[0.52,0.24],[0.76,0.24],[0.76,0.48],[0.52,0.48]]]}".into()),
+            ],
+        )
+        .await
+        .expect("post_classification");
         let lic_initial = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.user.legal.agreement.api.AcceptRequest", Vec::new()).await.status_code, STATUS_OK);
         let mut ent_payload = Vec::new(); encode_string_field(3, "omega_veteran_reward", &mut ent_payload);

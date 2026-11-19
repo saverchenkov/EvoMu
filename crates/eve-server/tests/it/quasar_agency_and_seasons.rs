@@ -302,9 +302,15 @@ async fn test_pve_seasons_events_and_project_discovery() {
         .or_else(|| task_rep.dict_get("task_id"))
         .cloned()
         .unwrap_or(PyRep::Integer(1));
-    let sub_payload = PyRep::Dict(vec![
-        (PyRep::String("classification".into()), PyRep::List(vec![PyRep::Integer(1)])),
-    ]);
+    let sub_payload = PyRep::Dict(vec![(
+        PyRep::String("polygons".into()),
+        PyRep::List(vec![PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+        ])]),
+    )]);
     let sub_rep = rpc(
         &ctx,
         &mut sess,

@@ -27,7 +27,7 @@ fn training_tasks_grading_formats_control_and_multiplayer_consensus() {
     ctx.db.with_mut_snapshot(|snap| {
         let mut store = ProjectDiscoveryStore::default();
 
-        // Explicit rejection strings & Dict/JSON flags
+        // Coord-free strings & Dict/JSON flags without valid >=3-vertex polygon return (0.0, false)
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_001, 1, &PyRep::String("false".into())),
             (0.0, false)
@@ -42,7 +42,7 @@ fn training_tasks_grading_formats_control_and_multiplayer_consensus() {
                 &mut store,
                 90_000_001,
                 1,
-                &PyRep::String(r#"{"accurate": false, "gates": [[0.5, 0.5]]}"#.into()),
+                &PyRep::String(r#"{"accurate": true, "gates": [[0.5, 0.5]]}"#.into()),
             ),
             (0.0, false)
         );
@@ -52,84 +52,105 @@ fn training_tasks_grading_formats_control_and_multiplayer_consensus() {
                 &mut store,
                 90_000_001,
                 1,
-                &PyRep::Dict(vec![(PyRep::String("is_accurate".into()), PyRep::Bool(false))]),
+                &PyRep::Dict(vec![(PyRep::String("is_accurate".into()), PyRep::Bool(true))]),
             ),
             (0.0, false)
         );
 
-        // Control task (index 10 % 5 == 0): None centroid -> (1.0, true); close pixel centroid -> accurate; far -> inaccurate
+        let poly_rep = |cx: f64, cy: f64, half: f64| {
+            PyRep::List(vec![PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(cx - half), PyRep::Real(cy - half)]),
+                PyRep::List(vec![PyRep::Real(cx + half), PyRep::Real(cy - half)]),
+                PyRep::List(vec![PyRep::Real(cx + half), PyRep::Real(cy + half)]),
+                PyRep::List(vec![PyRep::Real(cx - half), PyRep::Real(cy + half)]),
+            ])])
+        };
+
+        // Control task (index 10 % 5 == 0): empty -> (0.0, false); close pixel polygon -> accurate; far with spoofed consensus -> inaccurate
         let [tx, ty] = sample_target_center_norm(10);
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_001, 10, &PyRep::List(vec![])),
-            (1.0, true)
+            (0.0, false)
         );
         let close_px = PyRep::Tuple(vec![PyRep::List(vec![
-            PyRep::Real(tx * 512.0),
-            PyRep::Integer((ty * 512.0).round() as i64),
+            PyRep::Tuple(vec![
+                PyRep::Real((tx - 0.12) * 512.0),
+                PyRep::Integer(((ty - 0.12) * 512.0).round() as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Real((tx + 0.12) * 512.0),
+                PyRep::Integer(((ty - 0.12) * 512.0).round() as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Real((tx + 0.12) * 512.0),
+                PyRep::Integer(((ty + 0.12) * 512.0).round() as i64),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::Real((tx - 0.12) * 512.0),
+                PyRep::Integer(((ty + 0.12) * 512.0).round() as i64),
+            ]),
         ])]);
         let (acc_close, ok_close) =
             grade_and_record_classification(snap, &mut store, 90_000_001, 10, &close_px);
-        assert!(ok_close && acc_close >= 0.75);
+        assert!(ok_close && acc_close >= 0.90, "got {acc_close}");
 
+        let far_cx = if tx > 0.5 { 0.10 } else { 0.90 };
+        let far_cy = if ty > 0.5 { 0.10 } else { 0.90 };
         let far_pt = PyRep::Object {
             type_name: "Gate".into(),
             args: Box::new(PyRep::KeyVal(HashMap::from([
                 ("consensus".into(), PyRep::Bool(true)),
-                (
-                    "pts".into(),
-                    PyRep::List(vec![PyRep::Tuple(vec![
-                        PyRep::Integer(if tx > 0.5 { 0 } else { 1 }),
-                        PyRep::Real(if ty > 0.5 { 0.0 } else { 1.0 }),
-                    ])]),
-                ),
+                ("gates".into(), poly_rep(far_cx, far_cy, 0.08)),
             ]))),
         };
         let (acc_far, ok_far) =
             grade_and_record_classification(snap, &mut store, 90_000_002, 10, &far_pt);
-        assert!(!ok_far && acc_far <= 0.35);
+        assert!(!ok_far && acc_far == 0.0);
 
-        // Standard task (index 11): multi-player crowd consensus
+        // Standard task (index 11): multi-player crowd consensus via 2D polygon IoU
         let [sx, sy] = sample_target_center_norm(11);
-        // First responder near target -> plausible (1.0, true), establishes consensus_centroid
-        let first_sub = PyRep::String(format!(r#"{{"gates": [[{sx:.3}, {sy:.3}]]}}"#));
+        let first_sub = PyRep::String(format!(
+            r#"{{"gates": [[[{:.4}, {:.4}], [{:.4}, {:.4}], [{:.4}, {:.4}], [{:.4}, {:.4}]]]}}"#,
+            sx - 0.12,
+            sy - 0.12,
+            sx + 0.12,
+            sy - 0.12,
+            sx + 0.12,
+            sy + 0.12,
+            sx - 0.12,
+            sy + 0.12,
+        ));
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_001, 11, &first_sub),
             (1.0, true)
         );
-        // Second responder far from consensus_centroid -> discordant (0.2, false)
-        let far_sub = PyRep::List(vec![PyRep::List(vec![
-            PyRep::Real(if sx > 0.5 { 0.0 } else { 1.0 }),
-            PyRep::Real(if sy > 0.5 { 0.0 } else { 1.0 }),
-        ])]);
+        // Second responder far from consensus polygon -> discordant (0.0, false)
+        let far_sub = poly_rep(
+            if sx > 0.5 { 0.08 } else { 0.92 },
+            if sy > 0.5 { 0.08 } else { 0.92 },
+            0.06,
+        );
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_002, 11, &far_sub),
-            (0.2, false)
+            (0.0, false)
         );
         // Second concordant responder establishes task_consensus_by_index = true
-        let concordant_sub = PyRep::List(vec![PyRep::List(vec![
-            PyRep::Real(sx + 0.02),
-            PyRep::Real(sy - 0.02),
-        ])]);
-        assert_eq!(
-            grade_and_record_classification(snap, &mut store, 90_000_003, 11, &concordant_sub),
-            (1.0, true)
-        );
+        let concordant_sub = poly_rep(sx, sy, 0.10);
+        let (acc_c, ok_c) =
+            grade_and_record_classification(snap, &mut store, 90_000_003, 11, &concordant_sub);
+        assert!(ok_c && (acc_c - (0.04 / 0.0576)).abs() < 1e-6, "got {acc_c}");
         assert_eq!(store.task_consensus_by_index.get(&11), Some(&true));
-        // Subsequent responder hits cached consensus early return
+        // Subsequent discordant responder must STILL fail polygon IoU (never bypassed by cached consensus)
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_004, 11, &far_sub),
-            (1.0, true)
+            (0.0, false)
         );
 
-        // Standard task (index 12): first responder implausible (> 0.65 away from target) -> (0.2, false)
-        let [t12x, t12y] = sample_target_center_norm(12);
-        let implausible = PyRep::List(vec![PyRep::List(vec![
-            PyRep::Real(if t12x < 0.5 { 0.99 } else { 0.01 }),
-            PyRep::Real(if t12y < 0.5 { 0.99 } else { 0.01 }),
-        ])]);
+        // Standard task (index 12): first responder implausible (outside canvas bounds) -> (0.0, false)
+        let implausible = poly_rep(1.35, 1.35, 0.10);
         assert_eq!(
             grade_and_record_classification(snap, &mut store, 90_000_001, 12, &implausible),
-            (0.2, false)
+            (0.0, false)
         );
         assert!(!snap.seasons_and_campaigns.project_discovery_votes.is_empty());
     });
@@ -231,8 +252,15 @@ fn rewards_bonus_alpha_omega_xp_curve_crate_spawn_and_execute_post_classificatio
 
         // Accurate submission with bonus_samples_left == 0 -> gotBonusXP = false, 1x ISK (1000 * rank 1 = 1000)
         pstate.last_submitted_task_index = 0;
+        let [t1x, t1y] = sample_target_center_norm(1);
+        let poly_t1 = PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(t1x - 0.12), PyRep::Real(t1y - 0.12)]),
+            PyRep::List(vec![PyRep::Real(t1x + 0.12), PyRep::Real(t1y - 0.12)]),
+            PyRep::List(vec![PyRep::Real(t1x + 0.12), PyRep::Real(t1y + 0.12)]),
+            PyRep::List(vec![PyRep::Real(t1x - 0.12), PyRep::Real(t1y + 0.12)]),
+        ]);
         let out =
-            execute_post_classification(snap, &mut pstate, char_id, 1, &PyRep::List(vec![]), 1_010)
+            execute_post_classification(snap, &mut pstate, char_id, 1, &poly_t1, 1_010)
                 .unwrap();
         assert_eq!(out.rep.dict_get("gotBonusXP"), Some(&PyRep::Bool(false)));
         assert_eq!(out.rep.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
@@ -241,11 +269,18 @@ fn rewards_bonus_alpha_omega_xp_curve_crate_spawn_and_execute_post_classificatio
         assert!(out.new_bal.is_some());
 
         // Second submission on task 2 with inaccurate grade drops EMA accuracy into [0.5, 0.9) tier
-        // (1.0 * 9 + 0.0) / 10 = 0.9; force accuracy to 0.7 -> tier 1 (800 ISK)
+        // (1.0 * 9 + 0.0) / 10 = 0.9; force accuracy to 0.65 -> tier 1 (800 ISK)
         pstate.current_task_index = 2;
         pstate.accuracy = 0.65;
+        let [t2x, t2y] = sample_target_center_norm(2);
+        let poly_t2 = PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(t2x - 0.12), PyRep::Real(t2y - 0.12)]),
+            PyRep::List(vec![PyRep::Real(t2x + 0.12), PyRep::Real(t2y - 0.12)]),
+            PyRep::List(vec![PyRep::Real(t2x + 0.12), PyRep::Real(t2y + 0.12)]),
+            PyRep::List(vec![PyRep::Real(t2x - 0.12), PyRep::Real(t2y + 0.12)]),
+        ]);
         let out2 =
-            execute_post_classification(snap, &mut pstate, char_id, 2, &PyRep::List(vec![]), 1_020)
+            execute_post_classification(snap, &mut pstate, char_id, 2, &poly_t2, 1_020)
                 .unwrap();
         // (0.65 * 9 + 1.0) / 10 = 0.685 -> tier 1 -> 800.0 ISK * rank 1
         assert_eq!(out2.rep.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(800.0));

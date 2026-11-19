@@ -1940,9 +1940,29 @@ async fn test_project_discovery_sample_classification_and_tutorial_edges() {
     )
     .await;
     assert_eq!(invalid_class_err, ERR_INVALID_CLASSIFICATION);
-    let valid_payload = PyRep::keyval([(
+    let one_pt_payload = PyRep::keyval([(
         "polygons",
         PyRep::List(vec![PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(2.0)])]),
+    )]);
+    assert_eq!(
+        rpc_err_code(
+            &ctx,
+            &mut sess,
+            "ProjectDiscovery",
+            "post_classification",
+            &[PyRep::String("nonexistent-task-id".into()), one_pt_payload],
+        )
+        .await,
+        ERR_INVALID_CLASSIFICATION
+    );
+    let valid_payload = PyRep::keyval([(
+        "polygons",
+        PyRep::List(vec![PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.24)]),
+            PyRep::Tuple(vec![PyRep::Real(0.76), PyRep::Real(0.48)]),
+            PyRep::Tuple(vec![PyRep::Real(0.52), PyRep::Real(0.48)]),
+        ])]),
     )]);
     assert_eq!(
         rpc_err_code(
