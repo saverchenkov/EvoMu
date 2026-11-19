@@ -53,7 +53,14 @@ fn require_undocked_probe_space(
     {
         return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
     }
-    Ok((char_id, resolve_caller_solar_system(ctx, session, char_id)))
+    let sys_id = resolve_caller_solar_system(ctx, session, char_id);
+    if sys_id == 0 {
+        return Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    }
+    Ok((char_id, sys_id))
 }
 
 /// Reads cached cosmic signatures & anomalies purely from snapshot when native sites are
@@ -1130,7 +1137,7 @@ async fn handle_request_scans(
     }
 
     if let Some(b) = bound_entry {
-        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
+        if u32::try_from(b.object_id).ok() != Some(caller_sys) && !session.has_gm_role() {
             return Some(Err(probe_rpc_err(
                 "AccessDenied",
                 "Cannot request probe scans for a remote solar system",
@@ -1932,7 +1939,7 @@ async fn handle_recover_probes(
         Err(e) => return Some(Err(e)),
     };
     let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
+        .and_then(|b| u32::try_from(b.object_id).ok())
         .filter(|&v| v > 0)
         .unwrap_or(caller_sys);
 
@@ -2276,7 +2283,7 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
 async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>, args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
     let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
+        .and_then(|b| u32::try_from(b.object_id).ok())
         .filter(|&v| v > 0)
         .unwrap_or(caller_sys);
     let target_pid = args.first().and_then(|a| a.as_i64());

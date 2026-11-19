@@ -835,8 +835,34 @@ async fn test_plan_so5_exploration_anomalies_probes_dscan_and_dungeons() {
         .expect_err("unauthenticated scanSvc.GetCombatAnomalyInstances must fail");
     assert!(!format!("{err:?}").is_empty());
 
-    // Authenticated anomaly & signature query
+    // Docked session must be rejected cleanly before undocking to query combat anomalies
     let mut authed = authed_demo_session(&ctx, 7202).await;
+    let docked_err = ctx
+        .dispatch_rpc(
+            &mut authed,
+            "scanSvc",
+            None,
+            "GetCombatAnomalyInstances",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("docked scanSvc.GetCombatAnomalyInstances must fail");
+    assert_eq!(docked_err.code, "NotInSpace");
+
+    // Undocked authenticated anomaly & signature query
+    place_ship(
+        &ctx,
+        &mut authed,
+        90_000_001,
+        30_000_142,
+        710_999_001,
+        587,
+        DVec3::ZERO,
+        1_000_000.0,
+    )
+    .await;
     let anomalies = ctx
         .dispatch_rpc(
             &mut authed,

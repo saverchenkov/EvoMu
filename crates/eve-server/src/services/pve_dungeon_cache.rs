@@ -284,12 +284,40 @@ fn registry_instances(
     })
 }
 
-/// Computes unseeded deterministic combat-anomaly `(dungeon_id, instance_id)` entries read-only
-/// so `custom_agency_provider.get_content_data` stays pure without mutating DB state.
-fn unseeded_agency_anomaly_instances(
+pub(crate) struct UnseededCombatAnomalySpec {
+    pub site_id: String,
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub site_category: &'static str,
+    pub wormhole_class: Option<u8>,
+    pub current_wave: u8,
+    pub total_waves: u8,
+}
+
+fn combat_dungeon_info_for_wh_class(wh_class: u8, variant: usize) -> (u32, &'static str, u8) {
+    match wh_class {
+        1 => (3707, "Perimeter Ambush Point", 3),
+        2 => (3708, "Perimeter Camp", 3),
+        3 => (3710, "Fortification Frontier Stronghold", 3),
+        4 => (3713, "Outpost Frontier Stronghold", 3),
+        5 => {
+            if variant % 2 == 0 {
+                (3704, "Core Citadel", 4)
+            } else {
+                (3716, "Core Garrison", 4)
+            }
+        }
+        _ => (3716, "Core Garrison", 4),
+    }
+}
+
+/// Computes unseeded deterministic combat-anomaly site metadata read-only
+/// so `custom_agency_provider.get_content_data` and remote `scanSvc.GetCombatAnomalyInstances`
+/// remain read-pure without mutating DB state or spawning NPCs.
+pub(crate) fn unseeded_combat_anomaly_specs(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
-) -> BTreeMap<u32, Vec<i64>> {
+) -> Vec<UnseededCombatAnomalySpec> {
     let cleared_ids: std::collections::HashSet<String> = ctx.db.with_snapshot(|snap| {
         snap.cosmic_anomalies
             .get(&sys_id)
@@ -299,7 +327,74 @@ fn unseeded_agency_anomaly_instances(
             .map(|a| a.anomaly_id.clone())
             .collect()
     });
-    let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    let mut specs = Vec::new();
+    let (wh_class, _, is_shattered, _) =
+        crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, sys_id);
+    if (14..=18).contains(&wh_class) {
+        return specs;
+    }
+    let sde_dungeon_name = |did: u32, fallback: &str| {
+        ctx.sde
+            .dungeons
+            .get(&did)
+            .map(|d| d.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    if wh_class == 13 || ((1..=6).contains(&wh_class) && is_shattered) {
+        let is_c13 = wh_class == 13;
+        let combat_classes: Vec<u8> = if is_c13 {
+            vec![1, 2, 3, 2, 3]
+        } else {
+            let min_c = wh_class.saturating_sub(1).max(1);
+            let max_c = (wh_class + 1).min(6);
+            (min_c..=max_c).collect()
+        };
+        for (idx, &site_c) in combat_classes.iter().enumerate() {
+            let (did, default_name, waves) = combat_dungeon_info_for_wh_class(site_c, idx);
+            let site_id = format!("PVE-ANOM-{sys_id}-{}", idx + 1);
+            if !cleared_ids.contains(&site_id) {
+                specs.push(UnseededCombatAnomalySpec {
+                    site_id,
+                    dungeon_id: did,
+                    dungeon_name: sde_dungeon_name(did, default_name),
+                    site_category: "WormholeCombat",
+                    wormhole_class: Some(site_c),
+                    current_wave: 1,
+                    total_waves: waves,
+                });
+            }
+        }
+        if !is_c13 && is_shattered {
+            for (site_id, did, name, cat) in [
+                (
+                    format!("SHD-{sys_id}"),
+                    3790_u32,
+                    "Shattered Debris Field",
+                    "ShatteredDebris",
+                ),
+                (
+                    format!("SHI-{sys_id}"),
+                    3791_u32,
+                    "Shattered Ice Field",
+                    "ShatteredIce",
+                ),
+            ] {
+                if !cleared_ids.contains(&site_id) {
+                    specs.push(UnseededCombatAnomalySpec {
+                        site_id,
+                        dungeon_id: did,
+                        dungeon_name: name.to_string(),
+                        site_category: cat,
+                        wormhole_class: Some(wh_class),
+                        current_wave: 0,
+                        total_waves: 1,
+                    });
+                }
+            }
+        }
+        return specs;
+    }
     if ctx
         .sde
         .solar_systems
@@ -308,9 +403,17 @@ fn unseeded_agency_anomaly_instances(
     {
         let site_id = format!("PVE-POCHVEN-HIVE-{sys_id}");
         if !cleared_ids.contains(&site_id) {
-            out.entry(9006).or_default().push(registry_instance_id(&site_id));
+            specs.push(UnseededCombatAnomalySpec {
+                site_id,
+                dungeon_id: 9006,
+                dungeon_name: sde_dungeon_name(9006, "Torpid Sleeper Hive"),
+                site_category: "Combat",
+                wormhole_class: None,
+                current_wave: 1,
+                total_waves: 1,
+            });
         }
-        return out;
+        return specs;
     }
     let true_sec = ctx
         .sde
@@ -318,14 +421,38 @@ fn unseeded_agency_anomaly_instances(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(0.5);
-    for (idx, (did, _, _, _, _)) in anomaly_dungeons_for_system(&ctx.sde, sys_id, true_sec)
-        .into_iter()
-        .enumerate()
+    for (idx, (did, default_name, cat, waves, wh_c)) in
+        anomaly_dungeons_for_system(&ctx.sde, sys_id, true_sec)
+            .into_iter()
+            .enumerate()
     {
         let site_id = format!("PVE-ANOM-{sys_id}-{}", idx + 1);
         if !cleared_ids.contains(&site_id) {
-            out.entry(did).or_default().push(registry_instance_id(&site_id));
+            specs.push(UnseededCombatAnomalySpec {
+                site_id,
+                dungeon_id: did,
+                dungeon_name: sde_dungeon_name(did, default_name),
+                site_category: cat,
+                wormhole_class: wh_c,
+                current_wave: 1,
+                total_waves: waves,
+            });
         }
+    }
+    specs
+}
+
+/// Computes unseeded deterministic combat-anomaly `(dungeon_id, instance_id)` entries read-only
+/// so `custom_agency_provider.get_content_data` stays pure without mutating DB state.
+fn unseeded_agency_anomaly_instances(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> BTreeMap<u32, Vec<i64>> {
+    let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    for spec in unseeded_combat_anomaly_specs(ctx, sys_id) {
+        out.entry(spec.dungeon_id)
+            .or_default()
+            .push(registry_instance_id(&spec.site_id));
     }
     out
 }
@@ -407,17 +534,79 @@ fn resolve_warp_target_readonly(
     (resolved_pos, unscanned_blocked, pve_seeded, mining_seeded)
 }
 
-/// Returns `(needs_pve_seed, needs_mining_seed)` if `(target_iid, target_did)` can match
-/// deterministic sites not yet materialized in `sys_id`.
+fn unseeded_pve_signature_specs(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> Vec<(u32, String)> {
+    let (wh_class, _, is_shattered, _) =
+        crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, sys_id);
+    if (14..=18).contains(&wh_class)
+        || ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .is_some_and(|s| s.region_id == 10_000_070)
+    {
+        return Vec::new();
+    }
+    if wh_class == 13 || ((1..=6).contains(&wh_class) && is_shattered) {
+        let count = if wh_class == 13 { 4 } else { 2 };
+        return (0..count)
+            .map(|s_idx| {
+                let is_relic = s_idx % 2 == 1;
+                let did = if is_relic { 3722 } else { 3729 };
+                let sig_id = format!(
+                    "{}-{sys_id}-{}",
+                    if is_relic { "REL" } else { "DAT" },
+                    s_idx + 1
+                );
+                (did, sig_id)
+            })
+            .collect();
+    }
+    let true_sec = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.5);
+    let wh_c = wormhole_class_for_system(sys_id);
+    let ded_r = if true_sec >= 0.5 { 3 } else if true_sec > 0.0 { 5 } else { 10 };
+    let ded_did = ded_complex_for_rating(&ctx.sde, sys_id, ded_r).0;
+    let dsg_did = match pirate_faction_for_system(&ctx.sde, sys_id) {
+        PirateFaction::Guristas => 98,
+        PirateFaction::BloodRaiders => 106,
+        PirateFaction::Sansha => 110,
+        PirateFaction::Serpentis => 119,
+        PirateFaction::AngelCartel => 59,
+    };
+    let guarded = wh_c.is_some() || true_sec <= 0.0;
+    let (gho_did, _) = ghost_site_dungeon_for_system(&ctx.sde, sys_id, true_sec, wh_c);
+    let (slc_did, _) = sleeper_cache_dungeon_for_system(&ctx.sde, true_sec, wh_c);
+    vec![
+        (ded_did, format!("DED-{sys_id}-{ded_r}")),
+        (dsg_did, format!("DSG-{sys_id}")),
+        (if guarded { 3729 } else { 1133 }, format!("DAT-{sys_id}")),
+        (if guarded { 3722 } else { 1286 }, format!("REL-{sys_id}")),
+        (gho_did, format!("GHO-{sys_id}")),
+        (slc_did, format!("SLC-{sys_id}")),
+    ]
+}
+
+/// Returns `(needs_pve_seed, needs_mining_seed, unscanned_signature)` if `(target_iid, target_did)`
+/// matches unseeded combat/ore anomalies (requiring seeding before warp) or unseeded probe-required
+/// signatures (which fail with `SignatureNotScanned` without seeding DB).
 fn matching_unseeded_seed_needs(
     ctx: &ServerContext,
+    char_id: i64,
     sys_id: SolarSystemId,
     target_iid: Option<i64>,
     target_did: Option<u32>,
     pve_seeded: bool,
     mining_seeded: bool,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let mut need_pve = false;
+    let mut unscanned_sig = false;
     if !pve_seeded {
         for (did, iids) in unseeded_agency_anomaly_instances(ctx, sys_id) {
             if target_iid.is_some_and(|iid| iids.contains(&iid))
@@ -427,59 +616,53 @@ fn matching_unseeded_seed_needs(
                 break;
             }
         }
-        if !need_pve && target_iid.is_none() {
-            if let Some(did) = target_did {
-                let true_sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .map(|s| s.security_status)
-                    .unwrap_or(0.5);
-                let wh_c = wormhole_class_for_system(sys_id);
-                let ded_r = if true_sec >= 0.5 { 3 } else if true_sec > 0.0 { 5 } else { 10 };
-                let ded_did = ded_complex_for_rating(&ctx.sde, sys_id, ded_r).0;
-                let dsg_did = match pirate_faction_for_system(&ctx.sde, sys_id) {
-                    PirateFaction::Guristas => 98,
-                    PirateFaction::BloodRaiders => 106,
-                    PirateFaction::Sansha => 110,
-                    PirateFaction::Serpentis => 119,
-                    PirateFaction::AngelCartel => 59,
-                };
-                let guarded = wh_c.is_some() || true_sec <= 0.0;
-                let (gho_did, _) = ghost_site_dungeon_for_system(&ctx.sde, sys_id, true_sec, wh_c);
-                let (slc_did, _) = sleeper_cache_dungeon_for_system(&ctx.sde, true_sec, wh_c);
-                need_pve = [
-                    ded_did,
-                    dsg_did,
-                    if guarded { 3729 } else { 1133 },
-                    if guarded { 3722 } else { 1286 },
-                    gho_did,
-                    slc_did,
-                ]
-                .contains(&did);
+        if !need_pve {
+            for (sig_did, sig_id) in unseeded_pve_signature_specs(ctx, sys_id) {
+                let sig_iid = registry_instance_id(&sig_id);
+                if target_iid == Some(sig_iid)
+                    || (target_iid.is_none() && target_did == Some(sig_did))
+                {
+                    if is_site_scanned_by_character(ctx, char_id, sys_id, &sig_id) {
+                        need_pve = true;
+                    } else {
+                        unscanned_sig = true;
+                    }
+                    break;
+                }
             }
         }
     }
     let mut need_mining = false;
-    if !mining_seeded && target_iid.is_none() {
+    if !mining_seeded && !unscanned_sig && target_iid.is_none() {
         if let (Some(did), Some(sys)) = (target_did, ctx.sde.solar_systems.get(&sys_id)) {
+            use crate::services::mining_sites::SiteKind;
             let region = crate::services::mining_sites::region_name(&ctx.sde, sys_id);
             need_mining = COSMIC_ORE_SITES
                 .iter()
-                .filter(|d| d.band.matches_system(sys))
+                .filter(|d| d.kind == SiteKind::Anomaly && d.band.matches_system(sys))
                 .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
-                .any(|s| s.dungeon_id == did)
-                || GAS_SITES
+                .any(|s| s.dungeon_id == did);
+            if !need_mining && !need_pve {
+                let matches_mining_sig = COSMIC_ORE_SITES
                     .iter()
-                    .find(|d| {
-                        d.band.matches_system(sys)
-                            && region.is_some_and(|r| d.region_names.contains(&r))
-                    })
-                    .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
-                    .is_some_and(|s| s.dungeon_id == did);
+                    .filter(|d| d.kind == SiteKind::Signature && d.band.matches_system(sys))
+                    .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
+                    .any(|s| s.dungeon_id == did)
+                    || GAS_SITES
+                        .iter()
+                        .find(|d| {
+                            d.band.matches_system(sys)
+                                && region.is_some_and(|r| d.region_names.contains(&r))
+                        })
+                        .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
+                        .is_some_and(|s| s.dungeon_id == did);
+                if matches_mining_sig {
+                    unscanned_sig = true;
+                }
+            }
         }
     }
-    (need_pve, need_mining)
+    (need_pve, need_mining, unscanned_sig)
 }
 
 // DERIVED: V24 client SDE `dungeons.fsdbinary` stores numeric `archetypeID` on each dungeon but does not
@@ -1116,14 +1299,22 @@ pub async fn handle(
         }
 
         if resolved_pos.is_none() {
-            let (need_pve, need_mining) = matching_unseeded_seed_needs(
+            let (need_pve, need_mining, unscanned_unseeded) = matching_unseeded_seed_needs(
                 ctx,
+                char_id,
                 sys_id,
                 target_iid,
                 target_did,
                 pve_seeded,
                 mining_seeded,
             );
+            if unscanned_unseeded {
+                return Some(Err(BridgeRpcError {
+                    code: "SignatureNotScanned".into(),
+                    message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
+                    client_error: None,
+                }));
+            }
             if !need_pve && !need_mining {
                 return Some(Err(rpc_msg_err(
                     "SiteNotFound",

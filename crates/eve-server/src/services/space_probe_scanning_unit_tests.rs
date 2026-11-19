@@ -1073,3 +1073,69 @@ async fn unbound_request_scans_rejects_docked_and_shipless_before_fallthrough() 
     assert_eq!(ctx.db.state_epoch(), e1);
     assert_eq!(ctx.db.tx_commit_count(), c1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_solar_system_rejected_purely_across_probe_rpcs_and_multi_arg_unbound_falls_through() {
+    let err_no_solar_system = "NoSolarSystem";
+    let svc_scan_mgr = "scanMgr";
+    let (ctx, _) = make_scan_ctx_and_session();
+    let kw = HashMap::new();
+
+    // Character absent from DB with solar_system_id == None -> resolve_caller_solar_system == 0.
+    let mut sess = SessionState::new(92_099);
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_999);
+    sess.station_id = None;
+    sess.solar_system_id = None;
+    sess.ship_id = Some(500_000_999);
+
+    let bound_entry = BoundObjectEntry {
+        bound_id: 1,
+        session_id: 92_099,
+        user_id: 1,
+        character_id: 90_000_999,
+        service: svc_scan_mgr.into(),
+        object_id: 30_000_142,
+        oid_str: "N=1:scanMgr".into(),
+        ref_id: 1,
+    };
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    for (bound, meth, args) in [
+        (None, "RequestScans", vec![]),
+        (
+            Some(&bound_entry),
+            "RequestScans",
+            vec![PyRep::Integer(42), PyRep::Real(149_597_870_700.0)],
+        ),
+        (None, "RecoverProbes", vec![PyRep::List(vec![PyRep::Integer(1)])]),
+        (None, "ReconnectToLostProbes", vec![]),
+        (None, "DestroyProbe", vec![PyRep::Integer(1)]),
+    ] {
+        let err = handle_scan_and_wormhole_extras(&ctx, &mut sess, bound, svc_scan_mgr, meth, &args, &kw)
+            .await
+            .expect("handled")
+            .expect_err("NoSolarSystem must reject missing active system");
+        assert_eq!(err.code, err_no_solar_system, "{meth} missing solar system");
+    }
+
+    assert!(ctx.systems.get_handle(0).is_none(), "must never spawn system 0");
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Unbound multi-arg RequestScans([Real, Real]) returns None so fleet_social_scanning handles fleet/scan fallback.
+    let (_, mut undocked) = make_scan_ctx_and_session();
+    let res = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut undocked,
+        None,
+        svc_scan_mgr,
+        "RequestScans",
+        &[PyRep::Real(1.0), PyRep::Real(2.0)],
+        &kw,
+    )
+    .await;
+    assert!(res.is_none(), "unbound [Real, Real] RequestScans must fall through");
+}

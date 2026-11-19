@@ -270,6 +270,7 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
     }
 
     for (svc, meth, args) in [
+        ("scanSvc", "GetCombatAnomalyInstances", vec![]),
         ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Integer(2)]),
         ("keeper", "CanEnterDungeonInCurrentShip", vec![PyRep::Integer(2)]),
         ("keeper", "GetDungeonInfo", vec![PyRep::String("DED-30000142-3".into())]),
@@ -294,6 +295,7 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
     no_ship.character_id = Some(char_id);
     no_ship.solar_system_id = Some(sys_id);
     for (svc, meth, args) in [
+        ("scanSvc", "GetCombatAnomalyInstances", vec![]),
         ("keeper", "CanEnterDungeonInCurrentShip", vec![PyRep::Integer(2)]),
         ("scanSvc", "EnterCombatAnomaly", vec![PyRep::String("PVE-ANOM-30000142-1".into())]),
         ("keeper", "EnterNextDungeonRoom", vec![PyRep::Integer(999_999)]),
@@ -535,4 +537,193 @@ async fn escalation_queries_and_special_gate_guards_are_read_pure() {
     assert_eq!(docked_err.code, err_not_in_space);
     assert_eq!(ctx.db.state_epoch(), e1);
     assert_eq!(ctx.db.tx_commit_count(), c1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2_review_anomaly_query_incursion_seeding_and_dungeon_id_gate_alias() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_050_511;
+    let ship_id: i64 = 1_050_401_511;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("exp_r2", "pw", char_id, "ExpR2");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_820_000)));
+    let kw = HashMap::new();
+
+    let mut sess = SessionState::new(511);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Invalid, negative, and unknown solarSystemID args must fail cleanly before seeding.
+    for (arg, expected_code) in [
+        (PyRep::Integer(-1), "InvalidArguments"),
+        (PyRep::String("bad".into()), "InvalidArguments"),
+        (PyRep::Integer(39_999_999), "UnknownSolarSystem"),
+    ] {
+        let err = handle_pve_exploration(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect_err("invalid solarSystemID must fail");
+        assert_eq!(err.code, expected_code);
+    }
+
+    // 2. Unseeded remote-system query serves anomalies read-only without mutating DB/reg/systems.
+    let remote_sys: SolarSystemId = 30_002_187;
+    let remote_rep = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "scanSvc",
+        "GetCombatAnomalyInstances",
+        &[PyRep::Integer(i64::from(remote_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("remote unseeded GetCombatAnomalyInstances succeeds read-only");
+    let PyRep::List(remote_items) = remote_rep else {
+        panic!("expected list from remote GetCombatAnomalyInstances");
+    };
+    assert!(
+        remote_items
+            .iter()
+            .filter_map(|x| x.dict_get("dungeonName").and_then(|v| v.as_str()))
+            .any(|n| n.contains("Blood")),
+        "remote Blood Raiders system must report Blood anomalies read-only"
+    );
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.contains_key(&remote_sys)
+            && !reg.sites_by_system.contains_key(&remote_sys)
+    }));
+    assert!(ctx.systems.get_handle(remote_sys).is_none());
+
+    // 3. Non-natural INC-* acceleration gate probes stay read-only without initializing incursions.
+    let eligible_inc_sys = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx)
+        .into_iter()
+        .next()
+        .and_then(|(cid, _)| {
+            ctx.sde
+                .solar_systems
+                .values()
+                .find(|s| s.constellation_id == cid)
+                .map(|s| s.solar_system_id)
+        })
+        .unwrap_or(sys_id);
+    for probe_sys in [sys_id, eligible_inc_sys] {
+        sess.solar_system_id = Some(probe_sys);
+        for fake_inc in ["INC-99999-2134", "INC-99999-5165"] {
+            let err = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                "ActivateAccelerationGate",
+                &[PyRep::String(fake_inc.into())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect_err("fabricated INC-* site must fail with DungeonNotFound");
+            assert_eq!(err.code, "DungeonNotFound", "{fake_inc} in {probe_sys}");
+        }
+    }
+    assert!(crate::services::pve_special_sites::read_pve_special_reg(&ctx, |r| !r.initialized));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 4. keeper.ActivateAccelerationGate accepts numeric dungeon_id strings for multi-room DED gates.
+    sess.solar_system_id = Some(sys_id);
+    let site_pos = [35_000_000_000.0, 12_000_000_000.0, -8_000_000_000.0];
+    with_pve_exploration_reg(&ctx, |reg| {
+        let now = now_sec(reg);
+        reg.seeded_systems.insert(sys_id, true);
+        reg.sites_by_system.entry(sys_id).or_default().push(PveSiteInstance {
+            site_id: "DED-30000142-ALIAS".into(),
+            dungeon_id: 424_242,
+            dungeon_name: "Test Multi-Room DED".into(),
+            solar_system_id: sys_id,
+            site_category: "DEDComplex".into(),
+            ded_rating: Some(3),
+            position: site_pos,
+            probe_required: false,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 2,
+            current_wave: 1,
+            total_waves: 1,
+            created_unix: now,
+            lifetime_seconds: 86_400,
+            ..Default::default()
+        });
+    });
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::from_array(site_pos),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    let res = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String("424242".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ActivateAccelerationGate by str(dungeon_id) must advance room");
+    assert_eq!(
+        res.dict_get("siteID"),
+        Some(&PyRep::String("DED-30000142-ALIAS".into()))
+    );
+    assert_eq!(res.dict_get("dungeonID"), Some(&PyRep::Integer(424_242)));
+    assert_eq!(
+        read_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system
+                .get(&sys_id)
+                .and_then(|l| l.iter().find(|s| s.site_id == "DED-30000142-ALIAS"))
+                .map(|s| s.cleared)
+        }),
+        Some(true)
+    );
 }

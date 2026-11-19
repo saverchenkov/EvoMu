@@ -278,3 +278,155 @@ async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_d
     assert_eq!(ctx.db.state_epoch(), epoch0);
     assert_eq!(ctx.db.tx_commit_count(), commits0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r2_review_unseeded_wh_alignment_and_signature_warp_purity() {
+    use crate::services::mining_sites::{resolve_gas_site, resolve_ore_site, SiteKind, COSMIC_ORE_SITES, GAS_SITES};
+    use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
+
+    let sde = shared_sde();
+    let kw = HashMap::new();
+
+    // Locate Drifter WH (14..=18), C13 (13), shattered C1..=6, and Low-Sec The Forge dynamically in SDE.
+    let drifter_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| (14..=18).contains(&system_wormhole_profile_sde(&sde, sid).0))
+        .unwrap_or(31_000_001);
+    let c13_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| system_wormhole_profile_sde(&sde, sid).0 == 13)
+        .expect("SDE contains C13 wormhole");
+    let shattered_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            let (c, _, shat, _) = system_wormhole_profile_sde(&sde, sid);
+            (1..=6).contains(&c) && shat
+        })
+        .expect("SDE contains shattered C1-C6 wormhole");
+    let lowsec_forge_sys = sde
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_002 && s.security_status > 0.0 && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .expect("SDE contains Low-Sec system in The Forge");
+
+    // 1. Compare unseeded get_content_data vs freshly seeded systems for Drifter WH, C13, and Shattered WH.
+    for wh_sys in [drifter_sys, c13_sys, shattered_sys] {
+        let unseeded_ctx = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            Arc::new(WorldRepository::new_empty()),
+        ));
+        let mut sess = SessionState::new(921);
+        sess.user_id = Some(92);
+        sess.character_id = Some(90_000_001);
+        sess.solar_system_id = Some(wh_sys);
+
+        let e0 = unseeded_ctx.db.state_epoch();
+        let c0 = unseeded_ctx.db.tx_commit_count();
+        let rep = handle(&unseeded_ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
+            .await
+            .expect("handled")
+            .expect("get_content_data");
+        let PyRep::List(items) = rep else {
+            panic!("expected list from get_content_data");
+        };
+        assert_eq!(unseeded_ctx.db.state_epoch(), e0);
+        assert_eq!(unseeded_ctx.db.tx_commit_count(), c0);
+        assert!(unseeded_ctx.systems.get_handle(wh_sys).is_none());
+
+        let mut unseeded_pairs: Vec<(i64, i64)> = items
+            .iter()
+            .filter_map(|it| {
+                Some((
+                    it.dict_get("dungeonID").and_then(|v| v.as_i64())?,
+                    it.dict_get("instanceID").and_then(|v| v.as_i64())?,
+                ))
+            })
+            .collect();
+        unseeded_pairs.sort_unstable();
+
+        let seeded_ctx = Arc::new(ServerContext::with_sde_and_repository(
+            Arc::clone(&sde),
+            Arc::new(WorldRepository::new_empty()),
+        ));
+        ensure_system_pve_sites_seeded(&seeded_ctx, wh_sys).await;
+        let mut expected_pairs: Vec<(i64, i64)> = read_pve_exploration_reg(&seeded_ctx, |reg| {
+            reg.sites_by_system
+                .get(&wh_sys)
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.probe_required && !s.cleared)
+                .map(|s| (i64::from(s.dungeon_id), registry_instance_id(&s.site_id)))
+                .collect()
+        });
+        expected_pairs.sort_unstable();
+        assert_eq!(
+            unseeded_pairs, expected_pairs,
+            "unseeded agency anomalies must match seeded anomalies for WH system {wh_sys}"
+        );
+        if wh_sys == drifter_sys {
+            assert!(unseeded_pairs.is_empty(), "Drifter WH must not emit combat anomalies");
+        }
+    }
+
+    // 2. Unseeded probe-required signatures (PvE DED/DSG/DAT/REL/GHO/SLC, Ore Signature, Gas) return SignatureNotScanned read-only.
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&sde), db));
+    let mut sess = SessionState::new(922);
+    sess.user_id = Some(93);
+    sess.character_id = Some(90_000_001);
+    sess.ship_id = Some(777_000_002);
+    sess.solar_system_id = Some(lowsec_forge_sys);
+
+    let err_sig_not_scanned = "SignatureNotScanned";
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    for (sig_did, sig_id) in unseeded_pve_signature_specs(&ctx, lowsec_forge_sys) {
+        let sig_iid = registry_instance_id(&sig_id);
+        for arg in [
+            PyRep::Integer(sig_iid),
+            PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(sig_did)))]),
+        ] {
+            let err = handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[arg], &kw)
+                .await
+                .expect("handled")
+                .expect_err("unscanned PvE signature must reject");
+            assert_eq!(err.code, err_sig_not_scanned, "{sig_id}");
+        }
+    }
+
+    let ls_sys = sde.solar_systems.get(&lowsec_forge_sys).unwrap();
+    let ore_sig_did = COSMIC_ORE_SITES
+        .iter()
+        .filter(|d| d.kind == SiteKind::Signature && d.band.matches_system(ls_sys))
+        .filter_map(|d| resolve_ore_site(&sde, d).ok())
+        .map(|s| s.dungeon_id)
+        .next()
+        .expect("Low-Sec ore signature");
+    let gas_did = GAS_SITES
+        .iter()
+        .find(|d| d.band.matches_system(ls_sys) && d.region_names.contains(&"The Forge"))
+        .and_then(|d| resolve_gas_site(&sde, d).ok())
+        .map(|s| s.dungeon_id)
+        .expect("The Forge Low-Sec gas signature");
+    for did in [ore_sig_did, gas_did] {
+        let arg = PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(did)))]);
+        let err = handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect_err("unscanned ore/gas signature must reject");
+        assert_eq!(err.code, err_sig_not_scanned, "dungeon {did}");
+    }
+
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+    assert!(read_pve_exploration_reg(&ctx, |r| r.seeded_systems.is_empty()));
+    assert!(ctx.systems.get_handle(lowsec_forge_sys).is_none());
+}

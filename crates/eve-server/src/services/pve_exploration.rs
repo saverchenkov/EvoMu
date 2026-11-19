@@ -1086,6 +1086,70 @@ fn is_naturally_seedable_ded_gate_ball(sys_id: SolarSystemId, item_id: i64) -> b
         && (item_id - 1_864_000_000) / 10 == i64::from(sys_id % 100_000)
 }
 
+fn is_naturally_seedable_incursion_site(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    site_id: &str,
+) -> bool {
+    let Some(const_id) = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.constellation_id)
+    else {
+        return false;
+    };
+    let eligible = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(ctx);
+    if !eligible.into_iter().take(3).any(|(cid, _)| cid == const_id) {
+        return false;
+    }
+    let middle_matches = site_id
+        .strip_prefix("INC-")
+        .and_then(|r| r.split_once('-'))
+        .is_some_and(|(mid, _)| mid.parse::<u32>().map_or(true, |cid| cid == const_id));
+    if !middle_matches {
+        return false;
+    }
+    let mut sys_list: Vec<SolarSystemId> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.constellation_id == const_id)
+        .map(|s| s.solar_system_id)
+        .collect();
+    sys_list.sort_unstable();
+    let (stg, vg, as_s, hq) =
+        crate::services::pve_incursion_lifecycle::assign_constellation_system_roles(
+            &ctx.sde,
+            const_id,
+            &sys_list,
+        );
+    let vg1 = vg[0];
+    let vg2 = vg.get(1).copied().unwrap_or(vg1);
+    let as1 = as_s[0];
+    let as2 = as_s.get(1).copied().unwrap_or(as1);
+    [
+        (stg, 5164_u32),
+        (vg1, 5165),
+        (as1, 5168),
+        (hq, 5175),
+        (hq, 5158),
+        (vg2, 5166),
+        (as2, 5167),
+        (hq, 5171),
+    ]
+    .into_iter()
+    .any(|(expected_sys, did)| {
+        if expected_sys != sys_id {
+            return false;
+        }
+        let canonical = format!("INC-{const_id}-{did}");
+        canonical == site_id
+            || canonical.ends_with(site_id)
+            || site_id.ends_with(&format!("-{did}"))
+    })
+}
+
 pub async fn handle_pve_exploration(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1235,71 +1299,132 @@ pub async fn handle_pve_exploration(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn combat_anomaly_keyval(
+    site_id: String,
+    dungeon_id: u32,
+    dungeon_name: String,
+    site_category: String,
+    wormhole_class: Option<u8>,
+    current_wave: u8,
+    total_waves: u8,
+    active_npc_ball_ids: Vec<i64>,
+) -> PyRep {
+    PyRep::keyval([
+        ("siteID", PyRep::String(site_id)),
+        ("dungeonID", PyRep::Integer(dungeon_id as i64)),
+        ("dungeonName", PyRep::String(dungeon_name)),
+        ("siteCategory", PyRep::String(site_category)),
+        (
+            "wormholeClass",
+            wormhole_class
+                .map(|c| PyRep::Integer(c as i64))
+                .unwrap_or(PyRep::None),
+        ),
+        ("currentWave", PyRep::Integer(current_wave as i64)),
+        ("totalWaves", PyRep::Integer(total_waves as i64)),
+        (
+            "activeNpcBallIDs",
+            PyRep::List(active_npc_ball_ids.into_iter().map(PyRep::Integer).collect()),
+        ),
+        ("probeRequired", PyRep::Bool(false)),
+        ("overviewVisible", PyRep::Bool(true)),
+    ])
+}
+
 async fn handle_get_combat_anomaly_instances(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    ServerContext::require_character(session)?;
-    let sys_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .map(|v| v as SolarSystemId)
-        .map(Ok)
-        .unwrap_or_else(|| resolve_session_system_id(ctx, session))?;
-    let needs_seed = !read_pve_exploration_reg(ctx, |reg| {
+    let (char_id, caller_sys) = require_undocked_exploration_space(ctx, session, true)?;
+    let sys_id = match args.first() {
+        None | Some(PyRep::None) => caller_sys,
+        Some(arg) => {
+            let Some(raw) = arg.as_i64() else {
+                return Err(rpc_msg_err(
+                    "InvalidArguments",
+                    "solarSystemID must be an integer",
+                ));
+            };
+            let Ok(id) = u32::try_from(raw) else {
+                return Err(rpc_msg_err(
+                    "InvalidArguments",
+                    format!("Invalid solarSystemID {raw}"),
+                ));
+            };
+            if !ctx.sde.solar_systems.contains_key(&id) {
+                return Err(rpc_msg_err(
+                    "UnknownSolarSystem",
+                    format!("Unknown solar system {id}"),
+                ));
+            }
+            id
+        }
+    };
+    let is_seeded = read_pve_exploration_reg(ctx, |reg| {
         reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
             || reg.sites_by_system.get(&sys_id).is_some_and(|s| !s.is_empty())
     });
-    if needs_seed {
+    if !is_seeded && sys_id == caller_sys {
         ensure_system_pve_sites_seeded(ctx, sys_id).await;
     }
 
-    let char_id = session.character_id.unwrap_or(0);
-    let list = read_pve_exploration_reg(ctx, |reg| {
-        let now = now_sec(reg);
-        let owned_exp_ids: std::collections::HashSet<i64> = reg
-            .escalations_by_char
-            .get(&char_id)
-            .map(|list| list.iter().map(|e| e.instance_id).collect())
-            .unwrap_or_default();
-        reg.sites_by_system
-            .get(&sys_id)
-            .map(|sites| {
-                sites
-                    .iter()
-                    .filter(|s| {
-                        !s.probe_required
-                            && !s.cleared
-                            && (s.site_category != "Expedition"
-                                || s.expedition_instance_id
-                                    .is_some_and(|id| owned_exp_ids.contains(&id)))
-                            && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
-                    })
-                    .map(|s| {
-                        PyRep::keyval([
-                            ("siteID", PyRep::String(s.site_id.clone())),
-                            ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
-                            ("dungeonName", PyRep::String(s.dungeon_name.clone())),
-                            ("siteCategory", PyRep::String(s.site_category.clone())),
-                            (
-                                "wormholeClass",
-                                s.wormhole_class.map(|c| PyRep::Integer(c as i64)).unwrap_or(PyRep::None),
-                            ),
-                            ("currentWave", PyRep::Integer(s.current_wave as i64)),
-                            ("totalWaves", PyRep::Integer(s.total_waves as i64)),
-                            (
-                                "activeNpcBallIDs",
-                                PyRep::List(s.active_npc_ball_ids.iter().copied().map(PyRep::Integer).collect()),
-                            ),
-                            ("probeRequired", PyRep::Bool(false)),
-                            ("overviewVisible", PyRep::Bool(true)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
+    let list = if is_seeded || sys_id == caller_sys {
+        read_pve_exploration_reg(ctx, |reg| {
+            let now = now_sec(reg);
+            let owned_exp_ids: std::collections::HashSet<i64> = reg
+                .escalations_by_char
+                .get(&char_id)
+                .map(|list| list.iter().map(|e| e.instance_id).collect())
+                .unwrap_or_default();
+            reg.sites_by_system
+                .get(&sys_id)
+                .map(|sites| {
+                    sites
+                        .iter()
+                        .filter(|s| {
+                            !s.probe_required
+                                && !s.cleared
+                                && (s.site_category != "Expedition"
+                                    || s.expedition_instance_id
+                                        .is_some_and(|id| owned_exp_ids.contains(&id)))
+                                && (s.lifetime_seconds == 0
+                                    || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                        })
+                        .map(|s| {
+                            combat_anomaly_keyval(
+                                s.site_id.clone(),
+                                s.dungeon_id,
+                                s.dungeon_name.clone(),
+                                s.site_category.clone(),
+                                s.wormhole_class,
+                                s.current_wave,
+                                s.total_waves,
+                                s.active_npc_ball_ids.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    } else {
+        crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
+            .into_iter()
+            .map(|s| {
+                combat_anomaly_keyval(
+                    s.site_id,
+                    s.dungeon_id,
+                    s.dungeon_name,
+                    s.site_category.into(),
+                    s.wormhole_class,
+                    s.current_wave,
+                    s.total_waves,
+                    Vec::new(),
+                )
             })
-            .unwrap_or_default()
-    });
+            .collect()
+    };
     Ok(PyRep::List(list))
 }
 
@@ -1494,24 +1619,34 @@ async fn handle_activate_acceleration_gate(
         return Some(Err(rpc_msg_err("DungeonNotFound", "Dungeon siteID is required")));
     }
     if site_id.starts_with("INC-") {
-        let mut inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-            reg.incursions
-                .values()
-                .any(|inc| inc.sites.iter().any(|s| s.site_id == site_id))
-        });
+        let (mut inc_exists, special_initialized) =
+            crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+                let exists = reg.incursions.values().any(|inc| {
+                    inc.sites.iter().any(|s| {
+                        s.solar_system_id == sys_id
+                            && (s.site_id == site_id
+                                || s.site_id.ends_with(&site_id)
+                                || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                    })
+                });
+                (exists, reg.initialized)
+            });
         if !inc_exists {
-            let valid_inc_fmt = site_id.split('-').collect::<Vec<_>>();
-            let can_seed_inc = valid_inc_fmt.len() == 3
-                && valid_inc_fmt[1].parse::<u32>().is_ok()
-                && valid_inc_fmt[2]
-                    .parse::<u32>()
-                    .is_ok_and(|did| ctx.sde.dungeons.contains_key(&did));
-            if can_seed_inc {
-                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(ctx, sys_id).await;
+            if !special_initialized && is_naturally_seedable_incursion_site(ctx, sys_id, &site_id)
+            {
+                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                    ctx, sys_id,
+                )
+                .await;
                 inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-                    reg.incursions
-                        .values()
-                        .any(|inc| inc.sites.iter().any(|s| s.site_id == site_id))
+                    reg.incursions.values().any(|inc| {
+                        inc.sites.iter().any(|s| {
+                            s.solar_system_id == sys_id
+                                && (s.site_id == site_id
+                                    || s.site_id.ends_with(&site_id)
+                                    || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                        })
+                    })
                 });
             }
             if !inc_exists {
@@ -1536,9 +1671,10 @@ async fn handle_activate_acceleration_gate(
     }
     let (site_exists, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
         (
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|l| l.iter().any(|s| s.site_id == site_id)),
+            reg.sites_by_system.get(&sys_id).is_some_and(|l| {
+                l.iter()
+                    .any(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
+            }),
             reg.seeded_systems.get(&sys_id).copied().unwrap_or(false),
         )
     });
@@ -1547,9 +1683,10 @@ async fn handle_activate_acceleration_gate(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system
-                .get(&sys_id)
-                .is_some_and(|l| l.iter().any(|s| s.site_id == site_id))
+            reg.sites_by_system.get(&sys_id).is_some_and(|l| {
+                l.iter()
+                    .any(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
+            })
         });
         if !exists_after {
             return Some(Err(rpc_msg_err(
