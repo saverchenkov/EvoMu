@@ -175,6 +175,143 @@ pub async fn apply_damage_to_fighter_squadron(
     (lost, squad.squadron_size, wiped_out)
 }
 
+fn fighter_rpc_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn parse_fighter_id_filter(
+    args: &[PyRep],
+    allow_zero_tube_index: bool,
+) -> Result<Option<Vec<i64>>, BridgeRpcError> {
+    let min_id = if allow_zero_tube_index { 0 } else { 1 };
+    match args.first() {
+        None | Some(PyRep::None) => Ok(None),
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            if items.is_empty() {
+                return Err(fighter_rpc_err(
+                    "InvalidArgument",
+                    "Fighter selector list cannot be empty",
+                ));
+            }
+            let ids: Vec<i64> = items
+                .iter()
+                .filter_map(|x| x.as_i64())
+                .filter(|&id| id >= min_id)
+                .collect();
+            if ids.is_empty() {
+                return Err(fighter_rpc_err(
+                    "FighterNotFound",
+                    "No valid fighter IDs specified",
+                ));
+            }
+            Ok(Some(ids))
+        }
+        Some(PyRep::Integer(id)) => {
+            if *id >= min_id {
+                Ok(Some(vec![*id]))
+            } else {
+                Err(fighter_rpc_err(
+                    "FighterNotFound",
+                    "Invalid fighter or tube ID",
+                ))
+            }
+        }
+        Some(_) => Err(fighter_rpc_err(
+            "InvalidArgument",
+            "Expected fighter ID, tube index, or list",
+        )),
+    }
+}
+
+/// Resolves an undocked in-space ship session and ball, tolerating stale session station/structure
+/// flags only when the ship ball is actively spawned in space and the DB item is located in `sys_id`.
+async fn resolve_in_space_fighter_ship(
+    ctx: &ServerContext,
+    session: &SessionState,
+    action_label: &str,
+) -> Result<
+    (
+        i64,
+        i64,
+        u32,
+        crate::system_actor::SystemHandle,
+        eve_destiny::Ball,
+    ),
+    BridgeRpcError,
+> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(fighter_rpc_err(
+            "NoActiveShip",
+            "Session has no active ship",
+        ));
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(fighter_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    };
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
+        Ok(Some((_, b))) => b,
+        Ok(None) => {
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Err(fighter_rpc_err(
+                    "ShipDocked",
+                    format!("Cannot {action_label} while docked"),
+                ));
+            }
+            return Err(fighter_rpc_err(
+                "ShipNotInSpace",
+                "Active ship is not spawned in space",
+            ));
+        }
+        Err(e) => return Err(fighter_rpc_err("DestinyCommandFailed", e)),
+    };
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        let ship_in_space_db = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&ship_id)
+                .is_some_and(|it| it.location_id == i64::from(sys_id))
+        });
+        if !ship_in_space_db {
+            return Err(fighter_rpc_err(
+                "ShipDocked",
+                format!("Cannot {action_label} while docked"),
+            ));
+        }
+    }
+    Ok((char_id, ship_id, sys_id, sys_handle, ship_ball))
+}
+
+/// Validates that the caller's session is undocked with an active ship ball in space and is not actively cloaked.
+async fn require_undocked_uncloaked_fighter_ship(
+    ctx: &ServerContext,
+    session: &SessionState,
+    action_label: &str,
+) -> Result<(i64, i64, u32, crate::system_actor::SystemHandle), BridgeRpcError> {
+    let (char_id, ship_id, sys_id, sys_handle, _) =
+        resolve_in_space_fighter_ship(ctx, session, action_label).await?;
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+        ctx,
+        &sys_handle,
+        ship_id,
+    )
+    .await
+    {
+        return Err(fighter_rpc_err(
+            "CannotActivateCloaked",
+            format!("Cannot {action_label} while cloaked"),
+        ));
+    }
+    Ok((char_id, ship_id, sys_id, sys_handle))
+}
+
 pub async fn handle_fighters(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -615,46 +752,16 @@ async fn handle_fighters_inner(
         }
 
         ("fighterMgr", "LaunchFightersFromTubes") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
-            };
+            let (char_id, ship_id, sys_id, sys_handle, ship_ball) =
+                match resolve_in_space_fighter_ship(ctx, session, "launch fighters").await {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let entry_db_state = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .get(&char_id)
                     .map(|c| (c.station_id, c.structure_id, c.solar_system_id, c.active_ship_id))
             });
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, ship_ball)) = (match sys_handle.get_ball_snapshot(ship_id).await {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "DestinyCommandFailed".into(),
-                        message: e,
-                        client_error: None,
-                    }))
-                }
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: "Active ship is not spawned in space".into(),
-                    client_error: None,
-                }));
-            };
             if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotOpenFighterTubesWhileWarping".into(),
@@ -1108,31 +1215,14 @@ async fn handle_fighters_inner(
         }
 
         ("fighterMgr", "RecallFightersToTubes") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, _sys_id, sys_handle) =
+                match require_undocked_uncloaked_fighter_ship(ctx, session, "recall fighters").await {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let filter_ids = match parse_fighter_id_filter(args, true) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
-            };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let filter_ids: Option<Vec<i64>> = match args.first() {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if !items.is_empty() => {
-                    Some(items.iter().filter_map(|x| x.as_i64()).collect())
-                }
-                Some(PyRep::Integer(t)) => Some(vec![*t]),
-                _ => None,
             };
 
             let fighters_to_recall: Vec<crate::router::context::ActiveFighterSquadron> = ctx
@@ -1142,6 +1232,7 @@ async fn handle_fighters_inner(
                 .values()
                 .filter(|f| {
                     f.parent_ship_id == ship_id
+                        && f.owner_char_id == char_id
                         && !f.is_abandoned
                         && filter_ids
                             .as_ref()
@@ -1155,6 +1246,34 @@ async fn handle_fighters_inner(
                 })
                 .cloned()
                 .collect();
+            if fighters_to_recall.is_empty() {
+                let all_already_recalled_own = filter_ids.as_ref().is_some_and(|ids| {
+                    ctx.db.with_snapshot(|snap| {
+                        ids.iter().all(|&id| {
+                            snap.sp6_lifecycle
+                                .space_object_meta
+                                .iter()
+                                .any(|(item_id, meta)| {
+                                    meta.drone_ball_id == Some(id)
+                                        && snap.items.get(item_id).is_some_and(|it| {
+                                            it.owner_id == char_id && it.location_id == ship_id
+                                        })
+                                })
+                        })
+                    })
+                });
+                if all_already_recalled_own {
+                    return Some(Ok(PyRep::List(Vec::new())));
+                }
+                return Some(Err(fighter_rpc_err(
+                    if filter_ids.is_some() {
+                        "FighterNotFound"
+                    } else {
+                        "NoActiveFighters"
+                    },
+                    "No matching active fighter squadron found to recall",
+                )));
+            }
 
             let mut recalled = Vec::new();
             for f in fighters_to_recall {
@@ -1483,41 +1602,55 @@ async fn handle_fighters_inner(
         }
 
         ("fighterMgr", "CmdAbandonFighter") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, sys_handle) =
+                match require_undocked_uncloaked_fighter_ship(ctx, session, "abandon fighters").await {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let filter_ids = match parse_fighter_id_filter(args, false) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
-            };
-            let target_fighter_id = args.first().and_then(|a| a.as_i64());
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let mut abandoned = Vec::new();
             let mut abandoned_item_ids = Vec::new();
+            let mut foreign_active_match = false;
             {
                 let mut fighters = ctx.active_fighters.write().unwrap();
                 for f in fighters.values_mut() {
-                    if f.parent_ship_id == ship_id
-                        && target_fighter_id.map(|tid| tid == f.ball_id).unwrap_or(true)
+                    let matches_filter = filter_ids
+                        .as_ref()
+                        .map(|ids| ids.contains(&f.ball_id) || ids.contains(&f.item_id))
+                        .unwrap_or(true);
+                    if !matches_filter {
+                        continue;
+                    }
+                    if f.parent_ship_id == ship_id && f.owner_char_id == char_id && !f.is_abandoned
                     {
                         f.is_abandoned = true;
                         f.parent_ship_id = 0;
                         f.target_id = None;
                         abandoned.push(f.ball_id);
                         abandoned_item_ids.push(f.item_id);
+                    } else if filter_ids.is_some()
+                        && !f.is_abandoned
+                        && f.owner_char_id != char_id
+                    {
+                        foreign_active_match = true;
                     }
                 }
+            }
+            if abandoned.is_empty() {
+                if foreign_active_match {
+                    return Some(Ok(PyRep::List(Vec::new())));
+                }
+                return Some(Err(fighter_rpc_err(
+                    if filter_ids.is_some() {
+                        "FighterNotFound"
+                    } else {
+                        "NoActiveFighters"
+                    },
+                    "No matching active fighter squadron found to abandon",
+                )));
             }
             if !abandoned_item_ids.is_empty() {
                 ctx.db.with_mut_snapshot(|snap| {

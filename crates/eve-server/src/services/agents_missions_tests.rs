@@ -1212,3 +1212,293 @@ async fn fw_initial_offer_target_sys_courier_origin_sys_and_epic_arc_v24_briefin
         );
     });
 }
+
+#[tokio::test]
+async fn agent_warp_guards_reject_docked_cloaked_and_scrambled_without_mutating_state() {
+    const CODE_SHIP_DOCKED: &str = "ShipDocked";
+    const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
+    const CODE_CLOAKED_CANNOT_WARP: &str = "CloakedCannotWarp";
+    const CODE_WARP_SCRAMBLED: &str = "WarpScrambled";
+    const CODE_SHIP_ALREADY_IN_WARP: &str = "ShipAlreadyInWarp";
+    const LOC_BOOKMARK: &str = "bookmark";
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001i64;
+    let ship_id = 950_000_001i64;
+    let sys_id = 30_000_142u32;
+    let far_bm_id = 950_100_001i64;
+    let near_bm_id = 950_100_002i64;
+    let kw = HashMap::new();
+
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| {
+            a.solar_system_id == Some(sys_id)
+                && a.station_id
+                    .and_then(|st_id| ctx.sde.stations.get(&st_id))
+                    .is_some()
+        })
+        .expect("system must have at least one SDE station agent");
+    let st_pos = ctx
+        .sde
+        .stations
+        .get(&agent.station_id.expect("agent station verified"))
+        .expect("station present in SDE")
+        .position;
+    let ship_origin = st_pos + glam::DVec3::new(-1_000_000.0, 0.0, 0.0);
+    let far_bm_pos = ship_origin + glam::DVec3::new(1_000_000.0, 0.0, 0.0);
+    let near_bm_pos = ship_origin + glam::DVec3::new(50_000.0, 0.0, 0.0);
+    let bound = bound_agent(char_id, agent.agent_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = Some(60_003_760);
+            ch.structure_id = None;
+        }
+        snap.bookmarks.insert(
+            far_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: far_bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "FarBM".into(),
+                x: far_bm_pos.x,
+                y: far_bm_pos.y,
+                z: far_bm_pos.z,
+                item_id: None,
+                memo: "Far bookmark".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            near_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: near_bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "NearBM".into(),
+                x: near_bm_pos.x,
+                y: near_bm_pos.y,
+                z: near_bm_pos.z,
+                item_id: None,
+                memo: "On-grid bookmark".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    // 1. Station-docked, structure-docked, and DB-docked sessions reject WarpToLocation / WarpToAgentInSpace / GotoLocation
+    let mut sess = docked_session(char_id, sys_id, Some(60_003_760));
+    sess.ship_id = Some(ship_id);
+    for (method, args) in [
+        ("WarpToLocation", vec![PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)]),
+        ("WarpToAgentInSpace", vec![PyRep::Integer(agent.agent_id)]),
+        ("GotoLocation", vec![PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)]),
+    ] {
+        let err_station = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", method, &args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err_station.code, CODE_SHIP_DOCKED, "{method} must reject station-docked");
+    }
+
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_000_000_001);
+    let err_struct = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_struct.code, CODE_SHIP_DOCKED);
+    sess.structure_id = None;
+
+    // Session claims undocked, DB character still docked -> ShipDocked
+    let err_db_docked = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_db_docked.code, CODE_SHIP_DOCKED);
+    move_demo_character(&ctx, char_id, sys_id, None);
+
+    // 2. Undocked without spawned ship ball -> ShipNotInSpace
+    let err_no_ball = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_no_ball.code, CODE_SHIP_NOT_IN_SPACE);
+
+    // 3. Spawn ship ball away from far BM and agent station/anchor
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: ship_origin,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    // 4. Active non-covert cloak must reject WarpToLocation, WarpToAgentInSpace, and off-grid GotoLocation
+    //    WITHOUT sync_ship_cloak_and_mjfg_from_fitting clearing cs.is_cloaked!
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = false;
+        cs.gate_cloak_remaining_ticks = 0;
+    });
+    for (method, args) in [
+        ("WarpToLocation", vec![PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)]),
+        ("WarpToAgentInSpace", vec![PyRep::Integer(agent.agent_id)]),
+        ("GotoLocation", vec![PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)]),
+    ] {
+        let err_cloak = handle_with_bound(&ctx, &mut sess, Some(&bound), "agentMgr", method, &args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err_cloak.code, CODE_CLOAKED_CANNOT_WARP, "{method} must reject non-covert active cloak");
+    }
+    let cs_cloak = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_cloak.is_cloaked, "rejected cloaked warp must not decloak ship");
+    assert!(ctx.active_warps.lock().unwrap().is_empty());
+
+    // Combined active cloak + warp scramble also preserves cs.is_cloaked and initiates no warp
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.warp_scramble_strength = 5;
+    });
+    let err_cloak_scram = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        err_cloak_scram.code == CODE_CLOAKED_CANNOT_WARP
+            || err_cloak_scram.code == CODE_WARP_SCRAMBLED,
+        "unexpected error code: {}",
+        err_cloak_scram.code
+    );
+    assert!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+    assert!(ctx.active_warps.lock().unwrap().is_empty());
+
+    // 5. Uncloaked but scrambled -> WarpScrambled with zero ball/warp mutation
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.warp_scramble_strength = 5;
+    });
+    let err_scram = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_scram.code, CODE_WARP_SCRAMBLED);
+    assert!(ctx.active_warps.lock().unwrap().is_empty());
+
+    // 6. Subwarp GotoLocation guard when already in warp does not mutate cloak or mode
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.warp_scramble_strength = 0;
+    });
+    let _ = sys_handle.set_ball_position(ship_id, ship_origin).await;
+    let _ = sys_handle
+        .set_movement_mode(
+            ship_id,
+            eve_destiny::MovementMode::new_warp(ship_origin, far_bm_pos, 3.0),
+        )
+        .await;
+    let err_in_warp = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "GotoLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(near_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_in_warp.code, CODE_SHIP_ALREADY_IN_WARP);
+
+    // 7. Reset ball to Stop and verify valid WarpToLocation succeeds
+    let _ = sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await;
+    let warp_ok = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_BOOKMARK.into()), PyRep::Integer(far_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap();
+    assert!(warp_ok.is_ok(), "valid uncloaked unscrambled WarpToLocation must succeed: {warp_ok:?}");
+    let (_, ball_after) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(ball_after.mode, eve_destiny::MovementMode::Warp { .. }));
+}

@@ -626,3 +626,292 @@ async fn toctou_concurrent_scoop_abandoned_fighter_only_one_wins() {
     .unwrap()
     .is_err());
 }
+
+#[tokio::test]
+async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_management() {
+    const CODE_SHIP_DOCKED: &str = "ShipDocked";
+    const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
+    const CODE_CANNOT_ACTIVATE_CLOAKED: &str = "CannotActivateCloaked";
+    const CODE_FIGHTER_NOT_FOUND: &str = "FighterNotFound";
+    const CODE_NO_ACTIVE_FIGHTERS: &str = "NoActiveFighters";
+    const CODE_INVALID_ARGUMENT: &str = "InvalidArgument";
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let fid = 930_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            fid,
+            make_fighter_item(fid, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9),
+        );
+    });
+
+    // 1. Docked carrier CAN load & unload tubes, while Launch/Recall/Abandon MUST reject with ShipDocked
+    session.station_id = Some(60_003_760);
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LoadFightersToTube",
+        &[PyRep::Integer(0), PyRep::Integer(fid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("docked LoadFightersToTube allowed");
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "UnloadTubeToFighterBay",
+        &[PyRep::Integer(0)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("docked UnloadTubeToFighterBay allowed");
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LoadFightersToTube",
+        &[PyRep::Integer(0), PyRep::Integer(fid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("docked reload tube 0 allowed");
+
+    for (method, args) in [
+        ("LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])]),
+        ("RecallFightersToTubes", vec![]),
+        ("CmdAbandonFighter", vec![]),
+    ] {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, &args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_DOCKED, "{method} must reject station-docked");
+    }
+
+    session.station_id = None;
+    session.structure_id = Some(1_000_000_000_001);
+    for (method, args) in [
+        ("LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])]),
+        ("RecallFightersToTubes", vec![]),
+        ("CmdAbandonFighter", vec![]),
+    ] {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, &args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_DOCKED, "{method} must reject structure-docked");
+    }
+    session.structure_id = None;
+
+    // 2. Undocked without ship ball in space -> ShipNotInSpace
+    for method in ["RecallFightersToTubes", "CmdAbandonFighter"] {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_NOT_IN_SPACE, "{method} must reject missing ship ball");
+    }
+
+    // 3. Undock character DB record, spawn carrier ball, and launch fighter squadron into space
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 120.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 1_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    // Empty space before launch: Recall/Abandon reject with NoActiveFighters / FighterNotFound
+    assert_eq!(
+        handle_fighters(&ctx, &mut session, "fighterMgr", "RecallFightersToTubes", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        CODE_NO_ACTIVE_FIGHTERS
+    );
+    assert_eq!(
+        handle_fighters(&ctx, &mut session, "fighterMgr", "CmdAbandonFighter", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        CODE_NO_ACTIVE_FIGHTERS
+    );
+
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("launch tube 0 succeeds");
+    let fball = ctx
+        .active_fighters
+        .read()
+        .unwrap()
+        .values()
+        .find(|f| f.item_id == fid)
+        .unwrap()
+        .ball_id;
+
+    // 4. Actively cloaked (CombatState and active group-330 module) blocks Recall/Abandon with zero mutation
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 0;
+    });
+    for (method, args) in [
+        ("RecallFightersToTubes", vec![PyRep::List(vec![PyRep::Integer(fball)])]),
+        ("CmdAbandonFighter", vec![PyRep::List(vec![PyRep::Integer(fball)])]),
+    ] {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, &args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_CANNOT_ACTIVATE_CLOAKED, "{method} must reject active cloak");
+    }
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
+
+    let cloak_mod = 930_099i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod,
+            make_fighter_item(cloak_mod, 11_370, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.module_active_states.insert(cloak_mod);
+    });
+    for method in ["RecallFightersToTubes", "CmdAbandonFighter"] {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_CANNOT_ACTIVATE_CLOAKED, "{method} must reject active cloak module");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod);
+        snap.items.remove(&cloak_mod);
+    });
+
+    // 5. Invalid/non-matching fighter IDs and empty lists reject without mutating launched fighter
+    for method in ["RecallFightersToTubes", "CmdAbandonFighter"] {
+        let err_missing = handle_fighters(
+            &ctx,
+            &mut session,
+            "fighterMgr",
+            method,
+            &[PyRep::Integer(999_888_777)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_missing.code, CODE_FIGHTER_NOT_FOUND);
+
+        let err_empty = handle_fighters(
+            &ctx,
+            &mut session,
+            "fighterMgr",
+            method,
+            &[PyRep::List(vec![])],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_empty.code, CODE_INVALID_ARGUMENT);
+    }
+    assert!(!ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+
+    // Non-owner in space calling CmdAbandonFighter with another pilot's active fighter is a safe no-op returning []
+    let other_char = 930_009i64;
+    let other_ship = 930_090i64;
+    let mut other_session = session.clone();
+    other_session.character_id = Some(other_char);
+    other_session.ship_id = Some(other_ship);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: other_ship,
+                type_id: 23757,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 120.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 1_000.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    let other_ab_res = handle_fighters(
+        &ctx,
+        &mut other_session,
+        "fighterMgr",
+        "CmdAbandonFighter",
+        &[PyRep::Integer(fball)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("non-owner CmdAbandonFighter returns empty list");
+    assert_eq!(other_ab_res, PyRep::List(Vec::new()));
+    assert!(!ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+
+    // 6. Valid List-arg CmdAbandonFighter succeeds once, then rejects duplicate abandon as FighterNotFound
+    let ab_res = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdAbandonFighter",
+        &[PyRep::List(vec![PyRep::Integer(fball)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CmdAbandonFighter succeeds");
+    assert_eq!(ab_res, PyRep::List(vec![PyRep::Integer(fball)]));
+    assert!(ctx.active_fighters.read().unwrap()[&fball].is_abandoned);
+
+    let err_dup = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdAbandonFighter",
+        &[PyRep::Integer(fball)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_dup.code, CODE_FIGHTER_NOT_FOUND);
+}
