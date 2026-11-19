@@ -779,13 +779,8 @@ impl ServerContext {
                 (effective_service, method),
                 (
                     "machoNet",
-                    "ClientHasReleasedTheseObjects"
-                        | "GetGlobalConfig"
-                        | "GetConnectedClusterMode"
-                        | "GetConnectedClusterName"
-                        | "GetConnectionProperties"
-                ) | ("petitioner", "MayPetition")
-                    | ("pingService", "Ping")
+                    "ClientHasReleasedTheseObjects" | "GetGlobalConfig"
+                )
             )
     }
 
@@ -1077,7 +1072,10 @@ impl ServerContext {
             }
         }
 
-        if method == "ClientHasReleasedTheseObjects" {
+        if method == "ClientHasReleasedTheseObjects"
+            && bound_id.is_none()
+            && (service == "machoNet" || session.user_id.is_some())
+        {
             self.release_bound_objects_from_pyrep(session.session_id, &PyRep::List(args.to_vec()));
             return Ok(PyRep::None);
         }
@@ -1291,13 +1289,14 @@ impl ServerContext {
             if (session.role
                 & (eve_machonet::service_roles::ROLE_GMH
                     | eve_machonet::service_roles::ROLE_GML
+                    | eve_machonet::service_roles::ROLE_GMS
                     | eve_machonet::service_roles::ROLE_ADMIN))
                 == 0
             {
                 return Err(BridgeRpcError {
                     code: ERR_INSUFFICIENT_ROLE.into(),
                     message: format!(
-                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"
                     ),
                     client_error: None,
                 });

@@ -44,6 +44,7 @@ fn has_privileged_gm_role(session: &SessionState) -> bool {
     (session.role
         & (eve_machonet::service_roles::ROLE_GMH
             | eve_machonet::service_roles::ROLE_GML
+            | eve_machonet::service_roles::ROLE_GMS
             | eve_machonet::service_roles::ROLE_ADMIN))
         != 0
 }
@@ -51,7 +52,7 @@ fn has_privileged_gm_role(session: &SessionState) -> bool {
 fn insufficient_gm_role_err(rpc: &str) -> BridgeRpcError {
     err(
         "InsufficientRole",
-        format!("{rpc} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"),
+        format!("{rpc} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"),
     )
 }
 

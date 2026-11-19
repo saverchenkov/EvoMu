@@ -787,7 +787,7 @@ fn war_registry_gm_gates_and_war_stat_bind_enforced() {
     use eve_db::PersistedWarMeta;
     use eve_machonet::service_roles::{ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_PLAYER_DEFAULT, ROLE_QA};
 
-    let (ctx, mut agg_sess, _agg_char, mut def_sess, def_corp, _ally_sess, _ally_corp, agg_hq_id) =
+    let (ctx, mut agg_sess, _agg_char, mut def_sess, def_corp, _ally_sess, ally_corp, agg_hq_id) =
         setup_wars_ctx();
     let declared = handle_wars(
         &ctx,
@@ -863,26 +863,128 @@ fn war_registry_gm_gates_and_war_stat_bind_enforced() {
     }
     assert_eq!(ctx.db.snapshot_tables(), before_rejects);
 
-    for ok_role in [ROLE_GMH, ROLE_GML, ROLE_ADMIN] {
+    for ok_role in [
+        ROLE_GMH,
+        ROLE_GML,
+        eve_machonet::service_roles::ROLE_GMS,
+        ROLE_ADMIN,
+    ] {
         agg_sess.role = ok_role;
-        for method in [
-            "GMActivateDefender",
-            "GMDeactivateDefender",
-            "GMExtendAllyContract",
-            "GMJoinDefender",
-            "GMSetDeclareTime",
-            "GMSetWarFinishTime",
-        ] {
-            assert_eq!(
-                handle_wars(&ctx, &mut agg_sess, "warRegistry", method, &[], None)
-                    .unwrap()
-                    .unwrap(),
-                PyRep::Bool(true)
-            );
-        }
+        let now_u = ctx.now_unix();
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMJoinDefender",
+                &[PyRep::Integer(war_id), PyRep::Integer(ally_corp)],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMExtendAllyContract",
+                &[
+                    PyRep::Integer(war_id),
+                    PyRep::Integer(ally_corp),
+                    PyRep::Integer(86_400),
+                ],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMActivateDefender",
+                &[PyRep::Integer(war_id), PyRep::Integer(ally_corp)],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMDeactivateDefender",
+                &[PyRep::Integer(war_id), PyRep::Integer(ally_corp)],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMSetDeclareTime",
+                &[
+                    PyRep::Integer(war_id),
+                    PyRep::Integer(now_u.saturating_sub(1_000) as i64),
+                ],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        let future_finish = now_u + 14_400;
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMSetWarFinishTime",
+                &[
+                    PyRep::Integer(war_id),
+                    PyRep::Integer(future_finish as i64),
+                ],
+                None
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(true)
+        );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.wars[&war_id].started_unix, now_u.saturating_sub(1_000));
+            assert!(snap.wars[&war_id].active);
+            assert_eq!(snap.war_state.wars[&war_id].finish_at_unix, Some(future_finish));
+        });
     }
+    let before_missing_war = ctx.db.snapshot_tables();
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMActivateDefender",
+            &[PyRep::Integer(war_id + 777)],
+            None
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "WarNotFound"
+    );
+    assert_eq!(ctx.db.snapshot_tables(), before_missing_war);
 
     // warStatisticMgr.Bind rejects outsiders and non-existent wars without mutating snapshot or bound_objects
+    let before_rejects = ctx.db.snapshot_tables();
     let mut outsider_sess = agg_sess.clone();
     outsider_sess.user_id = Some(999);
     outsider_sess.character_id = Some(outsider_char);

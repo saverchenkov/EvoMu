@@ -177,6 +177,388 @@ fn handle_war_stat_set_session_check(
     Some(Ok(PyRep::None))
 }
 
+fn parse_war_unix_timestamp(rep: &PyRep) -> Option<u64> {
+    const WIN_FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
+    const WIN_TICKS_PER_SEC: i64 = 10_000_000;
+    let raw = rep.as_i64()?;
+    if raw >= WIN_FILETIME_UNIX_EPOCH {
+        u64::try_from((raw - WIN_FILETIME_UNIX_EPOCH) / WIN_TICKS_PER_SEC).ok()
+    } else if raw >= 0 {
+        u64::try_from(raw).ok()
+    } else {
+        None
+    }
+}
+
+fn resolve_gm_ally_record(
+    snap: &WorldStateSnapshot,
+    war: &WarRecord,
+    ally_id: i64,
+) -> Result<eve_db::snapshot_ext::WarAllyRecord, BridgeRpcError> {
+    if ally_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "allyID must be a positive corporation or alliance ID".into(),
+            client_error: None,
+        });
+    }
+    if ally_id == war.aggressor_corp_id
+        || ally_id == war.defender_corp_id
+        || same_alliance(snap, ally_id, war.aggressor_corp_id)
+        || same_alliance(snap, ally_id, war.defender_corp_id)
+    {
+        return Err(BridgeRpcError {
+            code: "CannotAllyOwnWar".into(),
+            message: format!("Target {ally_id} cannot ally with its own war {}", war.war_id),
+            client_error: None,
+        });
+    }
+    if snap.corporations.contains_key(&ally_id) {
+        Ok(eve_db::snapshot_ext::WarAllyRecord {
+            corporation_id: Some(ally_id),
+            alliance_id: None,
+        })
+    } else if snap
+        .corporations
+        .values()
+        .any(|c| c.alliance_id == Some(ally_id))
+    {
+        Ok(eve_db::snapshot_ext::WarAllyRecord {
+            corporation_id: None,
+            alliance_id: Some(ally_id),
+        })
+    } else {
+        Err(BridgeRpcError {
+            code: "InvalidWarTarget".into(),
+            message: format!("Unknown corporation or alliance allyID {ally_id}"),
+            client_error: None,
+        })
+    }
+}
+
+fn handle_war_registry_gm_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if (session.role
+        & (eve_machonet::service_roles::ROLE_GMH
+            | eve_machonet::service_roles::ROLE_GML
+            | eve_machonet::service_roles::ROLE_GMS
+            | eve_machonet::service_roles::ROLE_ADMIN))
+        == 0
+    {
+        return err(
+            "InsufficientRole",
+            format!("warRegistry.{method} requires ROLE_GMH, ROLE_GML, ROLE_GMS, or ROLE_ADMIN"),
+        );
+    }
+    let Some(war_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return err("InvalidArgument", format!("warRegistry.{method} requires positive warID"));
+    };
+    let now = ctx.now_unix();
+    let res = ctx.db.with_mut_snapshot(|snap| -> Result<Vec<(&'static str, PyRep, PyRep)>, BridgeRpcError> {
+        let Some(war) = snap.wars.get(&war_id).cloned() else {
+            return Err(BridgeRpcError {
+                code: "WarNotFound".into(),
+                message: format!("War {war_id} not found"),
+                client_error: None,
+            });
+        };
+        match method {
+            "GMJoinDefender" => {
+                let Some(ally_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMJoinDefender requires positive allyID".into(),
+                        client_error: None,
+                    });
+                };
+                let ally_rec = resolve_gm_ally_record(snap, &war, ally_id)?;
+                let effective = match args.get(2) {
+                    Some(rep) => parse_war_unix_timestamp(rep).ok_or_else(|| BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMJoinDefender effective time must be a valid timestamp".into(),
+                        client_error: None,
+                    })?,
+                    None => now,
+                };
+                if let Some(existing) = snap.war_state.negotiations.iter_mut().find(|n| {
+                    n.war_id == war_id
+                        && n.kind == NegKind::Ally
+                        && n.from_corp == ally_id
+                        && n.status == "Accepted"
+                }) {
+                    existing.effective_unix = Some(effective);
+                } else {
+                    snap.war_state.next_negotiation_id += 1;
+                    let neg_id = snap.war_state.next_negotiation_id;
+                    snap.war_state.negotiations.push(Negotiation {
+                        id: neg_id,
+                        war_id,
+                        kind: NegKind::Ally,
+                        from_corp: ally_id,
+                        isk: IskCents::ZERO,
+                        message: "GMJoinDefender".into(),
+                        status: "Accepted".into(),
+                        effective_unix: Some(effective),
+                    });
+                }
+                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
+                if !lm.allies.iter().any(|a| a == &ally_rec) {
+                    lm.allies.push(ally_rec);
+                }
+                lm.open_for_allies = Some(true);
+                let prev_open = snap.war_state.wars.entry(war_id).or_default().open_for_allies;
+                snap.war_state.wars.entry(war_id).or_default().open_for_allies = true;
+                Ok(vec![
+                    ("allyID", PyRep::None, PyRep::Integer(ally_id)),
+                    ("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(true)),
+                ])
+            }
+            "GMActivateDefender" => {
+                let ally_target = match args.get(1) {
+                    Some(PyRep::None) | None => None,
+                    Some(rep) => {
+                        let aid = rep.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "GMActivateDefender allyID must be a positive integer".into(),
+                            client_error: None,
+                        })?;
+                        Some((aid, resolve_gm_ally_record(snap, &war, aid)?))
+                    }
+                };
+                if let Some((aid, ally_rec)) = ally_target {
+                    if let Some(existing) = snap.war_state.negotiations.iter_mut().find(|n| {
+                        n.war_id == war_id
+                            && n.kind == NegKind::Ally
+                            && n.from_corp == aid
+                            && matches!(n.status.as_str(), "Accepted" | "Offered")
+                    }) {
+                        existing.status = "Accepted".into();
+                        existing.effective_unix = Some(now);
+                    } else {
+                        snap.war_state.next_negotiation_id += 1;
+                        let neg_id = snap.war_state.next_negotiation_id;
+                        snap.war_state.negotiations.push(Negotiation {
+                            id: neg_id,
+                            war_id,
+                            kind: NegKind::Ally,
+                            from_corp: aid,
+                            isk: IskCents::ZERO,
+                            message: "GMActivateDefender".into(),
+                            status: "Accepted".into(),
+                            effective_unix: Some(now),
+                        });
+                    }
+                    let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
+                    if !lm.allies.iter().any(|a| a == &ally_rec) {
+                        lm.allies.push(ally_rec);
+                    }
+                } else {
+                    for neg in &mut snap.war_state.negotiations {
+                        if neg.war_id == war_id
+                            && neg.kind == NegKind::Ally
+                            && neg.status == "Accepted"
+                            && neg.effective_unix.is_none_or(|e| e > now)
+                        {
+                            neg.effective_unix = Some(now);
+                        }
+                    }
+                }
+                let prev_active = war.active;
+                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
+                    w_mut.active = true;
+                }
+                let meta = snap.war_state.wars.entry(war_id).or_default();
+                let prev_open = meta.open_for_allies;
+                meta.open_for_allies = true;
+                let clear_expired = meta.finish_at_unix.is_some_and(|f| f <= now);
+                if clear_expired {
+                    meta.finish_at_unix = None;
+                }
+                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
+                lm.open_for_allies = Some(true);
+                if clear_expired {
+                    lm.finished_unix = None;
+                }
+                Ok(vec![
+                    ("active", PyRep::Bool(prev_active), PyRep::Bool(true)),
+                    ("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(true)),
+                ])
+            }
+            "GMDeactivateDefender" => {
+                let ally_id = match args.get(1) {
+                    Some(PyRep::None) | None => None,
+                    Some(rep) => Some(rep.as_i64().filter(|&id| id > 0).ok_or_else(|| BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMDeactivateDefender allyID must be a positive integer".into(),
+                        client_error: None,
+                    })?),
+                };
+                if let Some(aid) = ally_id {
+                    let has_neg = snap.war_state.negotiations.iter().any(|n| {
+                        n.war_id == war_id
+                            && n.kind == NegKind::Ally
+                            && n.from_corp == aid
+                            && matches!(n.status.as_str(), "Accepted" | "Offered")
+                    });
+                    let has_lm = snap.war_lifecycle_meta.get(&war_id).is_some_and(|lm| {
+                        lm.allies
+                            .iter()
+                            .any(|a| a.corporation_id == Some(aid) || a.alliance_id == Some(aid))
+                    });
+                    if !has_neg && !has_lm {
+                        return Err(BridgeRpcError {
+                            code: "AllyNotFound".into(),
+                            message: format!("Defender ally {aid} is not active in war {war_id}"),
+                            client_error: None,
+                        });
+                    }
+                    for neg in &mut snap.war_state.negotiations {
+                        if neg.war_id == war_id
+                            && neg.kind == NegKind::Ally
+                            && neg.from_corp == aid
+                            && matches!(neg.status.as_str(), "Accepted" | "Offered")
+                        {
+                            neg.status = "GMDeactivated".into();
+                        }
+                    }
+                    if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
+                        lm.allies.retain(|a| a.corporation_id != Some(aid) && a.alliance_id != Some(aid));
+                    }
+                    Ok(vec![("allyID", PyRep::Integer(aid), PyRep::None)])
+                } else {
+                    for neg in &mut snap.war_state.negotiations {
+                        if neg.war_id == war_id
+                            && neg.kind == NegKind::Ally
+                            && matches!(neg.status.as_str(), "Accepted" | "Offered")
+                        {
+                            neg.status = "GMDeactivated".into();
+                        }
+                    }
+                    if let Some(lm) = snap.war_lifecycle_meta.get_mut(&war_id) {
+                        lm.allies.clear();
+                        lm.open_for_allies = Some(false);
+                    } else {
+                        snap.war_lifecycle_meta.entry(war_id).or_default().open_for_allies = Some(false);
+                    }
+                    let meta = snap.war_state.wars.entry(war_id).or_default();
+                    let prev_open = meta.open_for_allies;
+                    meta.open_for_allies = false;
+                    Ok(vec![("openForAllies", PyRep::Bool(prev_open), PyRep::Bool(false))])
+                }
+            }
+            "GMExtendAllyContract" => {
+                let Some(ally_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMExtendAllyContract requires positive allyID".into(),
+                        client_error: None,
+                    });
+                };
+                let Some(ts_or_delta) = args.get(2).and_then(parse_war_unix_timestamp) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMExtendAllyContract requires valid extension duration or timestamp".into(),
+                        client_error: None,
+                    });
+                };
+                let Some(neg) = snap.war_state.negotiations.iter_mut().find(|n| {
+                    n.war_id == war_id
+                        && n.kind == NegKind::Ally
+                        && n.from_corp == ally_id
+                        && n.status == "Accepted"
+                }) else {
+                    return Err(BridgeRpcError {
+                        code: "AllyNotFound".into(),
+                        message: format!("Accepted ally {ally_id} not found in war {war_id}"),
+                        client_error: None,
+                    });
+                };
+                const MAX_EXTEND_SECS: u64 = 365 * 86_400;
+                let updated = if ts_or_delta > 0 && ts_or_delta <= MAX_EXTEND_SECS {
+                    neg.effective_unix.unwrap_or(now).max(now) + ts_or_delta
+                } else {
+                    ts_or_delta
+                };
+                neg.effective_unix = Some(updated);
+                Ok(vec![("allyID", PyRep::Integer(ally_id), PyRep::Integer(ally_id))])
+            }
+            "GMSetDeclareTime" => {
+                let Some(declared_unix) = args.get(1).and_then(parse_war_unix_timestamp) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMSetDeclareTime requires a valid timestamp".into(),
+                        client_error: None,
+                    });
+                };
+                let prev_declared = war.started_unix;
+                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
+                    w_mut.started_unix = declared_unix;
+                }
+                let lm = snap.war_lifecycle_meta.entry(war_id).or_default();
+                lm.declared_unix = Some(declared_unix);
+                lm.started_unix = Some(declared_unix + WAR_TIMER_SECS);
+                Ok(vec![
+                    (
+                        "timeDeclared",
+                        PyRep::Integer(prev_declared as i64),
+                        PyRep::Integer(declared_unix as i64),
+                    ),
+                    (
+                        "timeStarted",
+                        PyRep::Integer((prev_declared + WAR_TIMER_SECS) as i64),
+                        PyRep::Integer((declared_unix + WAR_TIMER_SECS) as i64),
+                    ),
+                ])
+            }
+            "GMSetWarFinishTime" => {
+                let new_finish = match args.get(1) {
+                    Some(PyRep::None) => None,
+                    Some(rep) => Some(parse_war_unix_timestamp(rep).ok_or_else(|| BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "GMSetWarFinishTime requires a valid timestamp or None".into(),
+                        client_error: None,
+                    })?),
+                    None => {
+                        return Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "GMSetWarFinishTime requires timeFinished or None".into(),
+                            client_error: None,
+                        });
+                    }
+                };
+                let prev_finish = snap
+                    .war_state
+                    .wars
+                    .get(&war_id)
+                    .and_then(|m| m.finish_at_unix)
+                    .map(|f| PyRep::Integer(f as i64))
+                    .unwrap_or(PyRep::None);
+                snap.war_state.wars.entry(war_id).or_default().finish_at_unix = new_finish;
+                snap.war_lifecycle_meta.entry(war_id).or_default().finished_unix = new_finish;
+                if let Some(w_mut) = snap.wars.get_mut(&war_id) {
+                    w_mut.active = new_finish.is_none_or(|f| f > now);
+                }
+                let new_rep = new_finish
+                    .map(|f| PyRep::Integer(f as i64))
+                    .unwrap_or(PyRep::None);
+                Ok(vec![("timeFinished", prev_finish, new_rep)])
+            }
+            _ => unreachable!(),
+        }
+    });
+    match res {
+        Ok(changes) => {
+            emit_war_changed(ctx, war_id, changes);
+            Some(Ok(PyRep::Bool(true)))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}
+
 pub(super) fn handle_wars(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -212,18 +594,7 @@ pub(super) fn handle_wars(
             | "GMSetDeclareTime"
             | "GMSetWarFinishTime",
         ) => {
-            if (session.role
-                & (eve_machonet::service_roles::ROLE_GMH
-                    | eve_machonet::service_roles::ROLE_GML
-                    | eve_machonet::service_roles::ROLE_ADMIN))
-                == 0
-            {
-                return err(
-                    "InsufficientRole",
-                    format!("warRegistry.{method} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"),
-                );
-            }
-            return Some(Ok(PyRep::Bool(true)));
+            return handle_war_registry_gm_rpc(ctx, session, method, args);
         }
         ("warStatisticMgr", "Bind") => {
             let object_id = arg_i64(0).unwrap_or(0);

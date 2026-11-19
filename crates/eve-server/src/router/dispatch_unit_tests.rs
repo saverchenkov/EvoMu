@@ -1607,6 +1607,12 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
         ("invbroker", "MachoResolveObject", vec![]),
         ("keeper", "MachoBindObject", vec![PyRep::Integer(30_000_142), PyRep::None]),
         ("warRegistry", "GetWars", vec![]),
+        ("machoNet", "GetConnectedClusterMode", vec![]),
+        ("machoNet", "GetConnectedClusterName", vec![]),
+        ("machoNet", "GetConnectionProperties", vec![]),
+        ("petitioner", "MayPetition", vec![]),
+        ("pingService", "Ping", vec![]),
+        ("ship", "ClientHasReleasedTheseObjects", vec![]),
     ] {
         let err = ctx
             .dispatch_rpc(&mut unauth_sess, svc, None, method, &args, &kw, None)
@@ -1623,13 +1629,8 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
         ("machoNet", "GetServiceInfo", vec![]),
         ("machoNet", "NoBlock", vec![]),
         ("machoNet", "GetGlobalConfig", vec![]),
-        ("machoNet", "GetConnectedClusterMode", vec![]),
-        ("machoNet", "GetConnectedClusterName", vec![]),
-        ("machoNet", "GetConnectionProperties", vec![]),
         ("machoNet", "ClientHasReleasedTheseObjects", vec![]),
         ("cache", "GetServerVersionAndBuild", vec![]),
-        ("petitioner", "MayPetition", vec![]),
-        ("pingService", "Ping", vec![]),
     ] {
         let res = ctx
             .dispatch_rpc(&mut unauth_sess, svc, None, method, &args, &kw, None)
@@ -1673,22 +1674,69 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
     }
     assert_eq!(ctx.db.snapshot_tables(), before_gm);
 
+    let gm_war_id = 700_910_099_i64;
+    let gm_ally_corp = 98_999_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            gm_ally_corp,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = gm_ally_corp;
+                c.name = "GM Test Ally".into();
+                c.ticker = "GMA".into();
+                c.ceo_id = 90_999_001;
+                c
+            },
+        );
+        snap.wars.insert(
+            gm_war_id,
+            WarRecord {
+                war_id: gm_war_id,
+                aggressor_corp_id: 98_000_001,
+                defender_corp_id: 98_000_002,
+                mutual: false,
+                started_unix: 100,
+                active: true,
+            },
+        );
+    });
     for ok_role in [
         service_roles::ROLE_GMH,
         service_roles::ROLE_GML,
+        service_roles::ROLE_GMS,
         service_roles::ROLE_ADMIN,
     ] {
         sess.role = ok_role;
-        for method in [
-            "GMActivateDefender",
-            "GMDeactivateDefender",
-            "GMExtendAllyContract",
-            "GMJoinDefender",
-            "GMSetDeclareTime",
-            "GMSetWarFinishTime",
+        let now_u = ctx.now_unix();
+        for (method, gm_args) in [
+            ("GMJoinDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            (
+                "GMExtendAllyContract",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer(gm_ally_corp),
+                    PyRep::Integer(86_400),
+                ],
+            ),
+            ("GMActivateDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            ("GMDeactivateDefender", vec![PyRep::Integer(gm_war_id), PyRep::Integer(gm_ally_corp)]),
+            (
+                "GMSetDeclareTime",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer(now_u.saturating_sub(1_000) as i64),
+                ],
+            ),
+            (
+                "GMSetWarFinishTime",
+                vec![
+                    PyRep::Integer(gm_war_id),
+                    PyRep::Integer((now_u + 14_400) as i64),
+                ],
+            ),
         ] {
             assert_eq!(
-                ctx.dispatch_rpc(&mut sess, "warRegistry", None, method, &[], &kw, None)
+                ctx.dispatch_rpc(&mut sess, "warRegistry", None, method, &gm_args, &kw, None)
                     .await
                     .expect("GM warRegistry call"),
                 PyRep::Bool(true)
@@ -1947,7 +1995,7 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
         ("agentMgr", 999_999_999),
         ("tourneyMgr", tourney_match_id), // rank_char_id is not participant
         ("warStatisticMgr", war_foreign_id),
-        ("officeManager", 98_000_001), // rank_char_id lacks corp office/hangar role
+        ("officeManager", 98_888_111), // cross-corp officeManager bind denied
     ];
     for (svc, oid) in denied_binds {
         assert_eq!(
@@ -2015,10 +2063,46 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
             "officeManager",
             None,
             "MachoBindObject",
+            &[PyRep::Integer(98_000_001), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .is_ok());
+    assert!(ctx
+        .dispatch_rpc(
+            &mut rank_sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
             &[PyRep::Integer(60_003_760), PyRep::None],
             &kw,
             None
         )
         .await
         .is_ok());
+    let mut undocked_rank_sess = rank_sess.clone();
+    undocked_rank_sess.station_id = None;
+    undocked_rank_sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&rank_char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut undocked_rank_sess,
+            "officeManager",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(98_000_001), PyRep::None],
+            &kw,
+            None
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
 }

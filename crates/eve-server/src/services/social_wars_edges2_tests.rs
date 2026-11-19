@@ -111,7 +111,7 @@ fn setup_wars_edge_ctx() -> (
 
 #[tokio::test]
 async fn social_wars_dispatch_unauth_unbind_timestamps_gm_and_get_top50_edges() {
-    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, _, _, agg_hq_id, _) =
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, _, ally_corp, agg_hq_id, _) =
         setup_wars_edge_ctx();
 
     // 1. Non-war RPC returns None from handle_wars.
@@ -241,9 +241,9 @@ async fn social_wars_dispatch_unauth_unbind_timestamps_gm_and_get_top50_edges() 
         .await
         .is_err());
 
-    // 7. GM warRegistry commands deny non-GM roles and return Bool(true) for ROLE_GMH.
+    // 7. GM warRegistry commands deny non-GM roles and perform real war mutations for ROLE_GMH/ROLE_GMS.
     assert_eq!(
-        call_wars(&ctx, &mut agg_sess, "warRegistry", "GMActivateDefender", &[], None)
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "GMActivateDefender", &[PyRep::Integer(war_id)], None)
             .await
             .unwrap_err()
             .code,
@@ -251,21 +251,39 @@ async fn social_wars_dispatch_unauth_unbind_timestamps_gm_and_get_top50_edges() 
     );
     let prev_agg_role = agg_sess.role;
     agg_sess.role = eve_machonet::service_roles::ROLE_GMH;
-    for gm in [
-        "GMActivateDefender",
-        "GMDeactivateDefender",
-        "GMExtendAllyContract",
-        "GMJoinDefender",
-        "GMSetDeclareTime",
-        "GMSetWarFinishTime",
+    let now_u = ctx.now_unix();
+    let new_declared = now_u - 5_000;
+    let new_finish = now_u + 10_000;
+    for (gm, gm_args) in [
+        ("GMJoinDefender", vec![PyRep::Integer(war_id), PyRep::Integer(ally_corp)]),
+        (
+            "GMExtendAllyContract",
+            vec![
+                PyRep::Integer(war_id),
+                PyRep::Integer(ally_corp),
+                PyRep::Integer(172_800),
+            ],
+        ),
+        ("GMActivateDefender", vec![PyRep::Integer(war_id), PyRep::Integer(ally_corp)]),
+        ("GMDeactivateDefender", vec![PyRep::Integer(war_id), PyRep::Integer(ally_corp)]),
+        ("GMSetDeclareTime", vec![PyRep::Integer(war_id), PyRep::Integer(new_declared as i64)]),
+        ("GMSetWarFinishTime", vec![PyRep::Integer(war_id), PyRep::Integer(new_finish as i64)]),
     ] {
         assert_eq!(
-            call_wars(&ctx, &mut agg_sess, "warRegistry", gm, &[], None)
+            call_wars(&ctx, &mut agg_sess, "warRegistry", gm, &gm_args, None)
                 .await
                 .unwrap(),
-            PyRep::Bool(true)
+            PyRep::Bool(true),
+            "{gm}"
         );
     }
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.wars[&war_id].started_unix, new_declared);
+        assert_eq!(s.war_state.wars[&war_id].finish_at_unix, Some(new_finish));
+        assert!(s.war_state.negotiations.iter().any(|n| {
+            n.war_id == war_id && n.from_corp == ally_corp && n.status == "GMDeactivated"
+        }));
+    });
     agg_sess.role = prev_agg_role;
 
     // 8. GetPublicWarInfo / GetBaseInfo / GetKills / GetKillsByGroup with unknown war_id -> WarNotFound.

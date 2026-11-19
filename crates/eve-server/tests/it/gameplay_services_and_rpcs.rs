@@ -4662,9 +4662,12 @@ async fn test_batch4_store_manager_rpcs() {
     let ctx = crate::crimewatch_timers_and_drones::crimewatch_drones_lifecycle::fast_raw_ctx();
 
     let mut unauth = SessionState::new(94_020);
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[]).await.is_ok());
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_products", &[]).await.is_ok());
-    assert!(rpc(&ctx, &mut unauth, "storeManager", "get_offers", &[]).await.is_ok());
+    for method in ["get_categories", "get_products", "get_offers"] {
+        let err = rpc(&ctx, &mut unauth, "storeManager", method, &[])
+            .await
+            .expect_err(&format!("unauthenticated storeManager.{method} must fail"));
+        assert_eq!(err.code, "Unauthorized", "storeManager.{method}");
+    }
     assert!(
         rpc(&ctx, &mut unauth, "storeManager", "can_purchase_offer", &[PyRep::Integer(1002)])
             .await

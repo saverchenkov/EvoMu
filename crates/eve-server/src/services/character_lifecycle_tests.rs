@@ -795,7 +795,9 @@ fn char_mgr_combat_log_resolves_war_id_and_isk_values() {
 
 #[test]
 fn char_unbound_mgr_gm_gates_deny_player_and_qa_without_mutation() {
-    use eve_machonet::service_roles::{ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_PLAYER_DEFAULT, ROLE_QA};
+    use eve_machonet::service_roles::{
+        ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_GMS, ROLE_PLAYER_DEFAULT, ROLE_QA,
+    };
 
     let ctx = test_ctx();
     let mut sess = auth_session(88, 90_000_001, 98_000_001, 30_000_142);
@@ -818,7 +820,7 @@ fn char_unbound_mgr_gm_gates_deny_player_and_qa_without_mutation() {
         .with_snapshot(|s| load_store(s).validation_toggled_by_user.get(&88).copied());
     assert_eq!(stored_before, None);
 
-    for ok_role in [ROLE_GMH, ROLE_GML, ROLE_ADMIN] {
+    for ok_role in [ROLE_GMH, ROLE_GML, ROLE_GMS, ROLE_ADMIN] {
         sess.role = ok_role;
         let systems = handle(&ctx, &mut sess, "charUnboundMgr", "GetQAStarterSystemIDs", &[], &kw)
             .unwrap()
