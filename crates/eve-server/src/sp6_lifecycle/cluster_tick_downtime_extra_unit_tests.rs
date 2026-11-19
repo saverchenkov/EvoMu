@@ -432,9 +432,11 @@ fn safe_logoff_transitions_live_closer_to_charsel_preserving_closer_and_clearing
     crate::sp6_lifecycle::cluster_tick_downtime::disconnect_safe_logoff_sessions(&ctx, char_id);
 
     // Live TCP session keeps its online lock (with character_id cleared), computer_hash,
-    // and closer channel so it transitions cleanly to character selection (#1360).
-    let (code, reason) = close_rx.try_recv().expect("live closer receives SafeLogoff");
-    assert_eq!(code, "SafeLogoff");
+    // and closer channel so it transitions cleanly to character selection (#1360, #1386).
+    let (code, reason) = close_rx
+        .try_recv()
+        .expect("live closer receives SafeLogoffCharsel");
+    assert_eq!(code, "SafeLogoffCharsel");
     assert_eq!(reason, char_id.to_string());
     assert!(
         ctx.session_closers.read().unwrap().contains_key(&888),
@@ -463,4 +465,269 @@ fn safe_logoff_transitions_live_closer_to_charsel_preserving_closer_and_clearing
     let (stale_code, _) = stale_rx.try_recv().expect("stale session disconnected");
     assert_eq!(stale_code, "SafeLogoff");
     assert!(!ctx.session_closers.read().unwrap().contains_key(&889));
+}
+
+#[test]
+fn safe_logoff_clears_online_lock_and_runs_logoff_hooks_before_hook_callback() {
+    let ctx = test_ctx();
+    let now_unix = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let watcher_id = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).unwrap().user_id);
+    let sid = 910_u64;
+
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(sid, close_tx);
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            user_id,
+            sid,
+            Some(char_id),
+            Some("hash-1386-hook".to_string()),
+            true,
+            now_unix,
+        )
+        .unwrap();
+
+    let watcher_uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&watcher_id).unwrap().user_id);
+    ctx.db
+        .acquire_online_lock(watcher_uid, 912, Some(watcher_id), true, now_unix)
+        .unwrap();
+
+    ctx.esi_state.char_contacts.write().unwrap().insert(
+        watcher_id,
+        vec![crate::esi::runtime_state::EsiContactEntry {
+            contact_id: char_id,
+            contact_type: "character".to_string(),
+            standing: 0.0,
+            is_watched: true,
+            is_blocked: false,
+            label_ids: vec![],
+        }],
+    );
+    let token = crate::services::fleet_social::ensure_xmpp_auth_token(&ctx, char_id);
+    assert!(!token.is_empty());
+    ctx.systems
+        .cluster_nodes
+        .write()
+        .unwrap()
+        .char_rebased_system_gen
+        .insert(char_id, (sys_id, 42));
+
+    let mut hook_ran = false;
+    crate::sp6_lifecycle::cluster_tick_downtime::finalize_safe_logoff_sessions_with_hook(
+        &ctx,
+        char_id,
+        |emit_activation| {
+            hook_ran = true;
+            assert!(emit_activation);
+            let online = ctx
+                .db
+                .get_online_session(user_id)
+                .expect("online lock must stay reserved for charsel before pre-signal hook");
+            assert_eq!(online.session_id, sid);
+            assert!(
+                online.character_id.is_none(),
+                "online_lock.character_id must be cleared BEFORE ball removal / OnSafeLogoffActivated"
+            );
+            assert!(
+                !ctx.systems
+                    .cluster_nodes
+                    .read()
+                    .unwrap()
+                    .char_rebased_system_gen
+                    .contains_key(&char_id),
+                "char_rebased_system_gen must be cleared before pre-signal hook"
+            );
+            ctx.db.with_snapshot(|snap| {
+                assert!(snap
+                    .kv(eve_db::Ns::XmppAuthToken)
+                    .get::<String>(char_id, "")
+                    .is_none());
+                assert!(!snap
+                    .service_state_blobs
+                    .contains_key(&format!("xmpp:token:{char_id}")));
+            });
+            let watcher_notifs = ctx.drain_notifications_for_char(watcher_id);
+            assert!(
+                watcher_notifs.iter().any(|n| {
+                    n.event == "OnContactLoggedOff"
+                        && n.args == vec![eve_proto::PyRep::Integer(char_id)]
+                }),
+                "watcher must receive OnContactLoggedOff on safe logoff: {watcher_notifs:?}"
+            );
+            assert!(
+                watcher_notifs.iter().any(|n| {
+                    n.event == "OnClientContactChange"
+                        && n.args
+                            == vec![
+                                eve_proto::PyRep::Integer(char_id),
+                                eve_proto::PyRep::Bool(false),
+                            ]
+                }),
+                "watcher must receive OnClientContactChange(false) on safe logoff: {watcher_notifs:?}"
+            );
+            assert!(
+                close_rx.try_recv().is_err(),
+                "SafeLogoffCharsel must be sent only after before_charsel_signal finishes"
+            );
+        },
+    );
+    assert!(hook_ran);
+
+    let (code, reason) = close_rx
+        .try_recv()
+        .expect("live closer receives SafeLogoffCharsel after hook");
+    assert_eq!(code, "SafeLogoffCharsel");
+    assert_eq!(reason, char_id.to_string());
+}
+
+#[tokio::test]
+async fn safe_logoff_advance_secs_removes_ball_and_clears_lock_watchlist_xmpp_and_rebased_gen() {
+    let ctx = Arc::new(test_ctx());
+    let now_unix = ctx.now_unix();
+    let char_id = 90_000_001_i64;
+    let watcher_id = 90_000_002_i64;
+    let ship_id = 100_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).unwrap().user_id);
+    let sid = 911_u64;
+
+    let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(sid, close_tx);
+    ctx.db
+        .acquire_online_lock_with_computer_hash(
+            user_id,
+            sid,
+            Some(char_id),
+            Some("hash-1386-adv".to_string()),
+            true,
+            now_unix,
+        )
+        .unwrap();
+
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    jita.spawn_ball(Ball {
+        id: ship_id,
+        type_id: 587,
+        position: DVec3::new(10_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    })
+    .await
+    .unwrap();
+    assert!(jita.get_ball_snapshot(ship_id).await.unwrap().is_some());
+
+    let watcher_uid = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&watcher_id).unwrap().user_id);
+    ctx.db
+        .acquire_online_lock(watcher_uid, 913, Some(watcher_id), true, now_unix)
+        .unwrap();
+
+    ctx.esi_state.char_contacts.write().unwrap().insert(
+        watcher_id,
+        vec![crate::esi::runtime_state::EsiContactEntry {
+            contact_id: char_id,
+            contact_type: "character".to_string(),
+            standing: 0.0,
+            is_watched: true,
+            is_blocked: false,
+            label_ids: vec![],
+        }],
+    );
+    let _ = crate::services::fleet_social::ensure_xmpp_auth_token(&ctx, char_id);
+    ctx.systems
+        .cluster_nodes
+        .write()
+        .unwrap()
+        .char_rebased_system_gen
+        .insert(char_id, (sys_id, 7));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.sp6_lifecycle.as_inner_mut().safe_logoffs.insert(
+            char_id,
+            crate::sp6_lifecycle::SafeLogoffEntry {
+                char_id,
+                ship_id,
+                solar_system_id: sys_id,
+                started_unix: now_unix,
+                complete_at_unix: now_unix + 10,
+                completed: false,
+            },
+        );
+    });
+
+    ctx.advance_secs(30);
+
+    assert!(
+        jita.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "safe logoff expiry must remove the ship ball"
+    );
+    let online = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock stays reserved at charsel");
+    assert_eq!(online.session_id, sid);
+    assert!(online.character_id.is_none());
+
+    let (code, reason) = close_rx
+        .try_recv()
+        .expect("live closer receives SafeLogoffCharsel");
+    assert_eq!(code, "SafeLogoffCharsel");
+    assert_eq!(reason, char_id.to_string());
+
+    let char_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        char_notifs
+            .iter()
+            .any(|n| n.event == "OnSafeLogoffActivated"),
+        "OnSafeLogoffActivated must be emitted: {char_notifs:?}"
+    );
+    let watcher_notifs = ctx.drain_notifications_for_char(watcher_id);
+    assert!(watcher_notifs
+        .iter()
+        .any(|n| n.event == "OnContactLoggedOff"));
+    assert!(watcher_notifs
+        .iter()
+        .any(|n| n.event == "OnClientContactChange"
+            && n.args
+                == vec![
+                    eve_proto::PyRep::Integer(char_id),
+                    eve_proto::PyRep::Bool(false),
+                ]));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .kv(eve_db::Ns::XmppAuthToken)
+            .get::<String>(char_id, "")
+            .is_none());
+        assert!(!snap
+            .service_state_blobs
+            .contains_key(&format!("xmpp:token:{char_id}")));
+    });
+    assert!(!ctx
+        .systems
+        .cluster_nodes
+        .read()
+        .unwrap()
+        .char_rebased_system_gen
+        .contains_key(&char_id));
 }

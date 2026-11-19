@@ -97,9 +97,18 @@ async fn r7_tb_01_safe_logoff_disconnects_session_and_clears_immunity_for_future
     ctx.advance_secs(30);
     crate::sp6_lifecycle::on_advance_secs(&ctx, now_unix, 30);
 
-    // 1. Safe logoff completion actively disconnects the client session
-    let closed = close_rx.try_recv().expect("safe logoff must disconnect session");
-    assert_eq!(closed.0, "SafeLogoff");
+    // 1. Safe logoff completion signals the live session closer to transition to character selection
+    let closed = close_rx
+        .try_recv()
+        .expect("safe logoff must signal live closer to character selection");
+    assert_eq!(closed.0, "SafeLogoffCharsel");
+    assert_eq!(closed.1, char_id.to_string());
+    let online = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock must stay reserved at character selection");
+    assert_eq!(online.session_id, sess.session_id);
+    assert!(online.character_id.is_none());
 
     // 2. First immediate disconnect consumes completed entry once and removes ship cleanly
     let first_disc = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id).await;

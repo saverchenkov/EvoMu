@@ -1290,12 +1290,22 @@ pub fn on_advance_secs_internal(
             entry.char_id,
             entry.ship_id,
         );
-        handle.try_remove_ball(entry.ship_id);
-        ctx.emit_typed(
-            NotificationTarget::Character(entry.char_id),
-            crate::router::notify_registry::OnSafeLogoffActivated,
+        super::cluster_tick_downtime::finalize_safe_logoff_sessions_with_hook(
+            ctx,
+            entry.char_id,
+            |emit_activation| {
+                handle.try_remove_ball(entry.ship_id);
+                if emit_activation {
+                    crate::router::notify_registry::emit_typed_char_with_db(
+                        &ctx.db,
+                        Some(&*ctx.pending_notifications),
+                        Some(&ctx.notify_tx),
+                        entry.char_id,
+                        crate::router::notify_registry::OnSafeLogoffActivated,
+                    );
+                }
+            },
         );
-        super::disconnect_safe_logoff_sessions(ctx, entry.char_id);
     }
 
     // 4. Finalize expired ungraceful logoff / disconnect ship removal timers (`plan:SP-6`)

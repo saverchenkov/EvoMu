@@ -557,19 +557,46 @@ pub fn clear_safe_logoff(db: &std::sync::Arc<eve_db::WorldRepository>, char_id: 
 /// Transitions live client sessions to character selection (or disconnects headless/stale
 /// sessions) and releases character bindings/locks for `char_id` after safe logoff (#1360).
 pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_id: i64) {
+    finalize_safe_logoff_sessions_inner(ctx, char_id, |_| {});
+}
+
+/// Clears `online_lock.character_id` and executes character-logoff side effects BEFORE
+/// running `before_charsel_signal(had_online_char)` (removing the ship ball and emitting
+/// `OnSafeLogoffActivated`), then delivers `"SafeLogoffCharsel"` on the live closer channel.
+pub(super) fn finalize_safe_logoff_sessions_with_hook<F>(
+    ctx: &crate::router::ServerContext,
+    char_id: i64,
+    before_charsel_signal: F,
+) where
+    F: FnOnce(bool),
+{
+    finalize_safe_logoff_sessions_inner(ctx, char_id, before_charsel_signal);
+}
+
+fn finalize_safe_logoff_sessions_inner<F>(
+    ctx: &crate::router::ServerContext,
+    char_id: i64,
+    before_charsel_signal: F,
+) where
+    F: FnOnce(bool),
+{
     crate::services::campaigns_and_milestones::playtime::pause_milestone_playtime(
         &ctx.db,
         char_id,
         ctx.now_unix(),
     );
     let mut session_ids = std::collections::BTreeSet::new();
-    let user_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id));
     let mut online_sid_for_char = None;
+    let mut had_online_char = false;
     if let Some(uid) = user_id {
         if let Some(rec) = ctx.db.get_online_session(uid) {
             if rec.character_id.is_none_or(|cid| cid == char_id) {
                 session_ids.insert(rec.session_id);
                 online_sid_for_char = Some((uid, rec.session_id));
+                had_online_char = rec.character_id == Some(char_id);
             }
         }
     }
@@ -580,7 +607,11 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
             }
         }
     }
-    let mut live_charsel_sid = None;
+    let mut live_charsel: Option<(
+        u64,
+        u64,
+        tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    )> = None;
     if let Some((uid, rec_sid)) = online_sid_for_char {
         let live_tx = ctx
             .session_closers
@@ -589,27 +620,24 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
             .get(&rec_sid)
             .filter(|tx| !tx.is_closed())
             .cloned();
-        let transitioned = if let Some(tx) = live_tx {
-            // Clear character_id while preserving session_id, computer_hash, and peer IP
-            // BEFORE notifying the listener so notify_rx / sys_rx / frame_rx observe charsel state.
-            let lock_reset = ctx
+        // Clear character_id while preserving session_id, computer_hash, and peer IP
+        // BEFORE removing the ship ball or notifying the listener so notify_rx / sys_rx /
+        // frame_rx deterministically observe charsel state.
+        let lock_reset = live_tx.is_some()
+            && ctx
                 .db
                 .acquire_online_lock(uid, rec_sid, None, false, ctx.now_unix())
                 .is_ok();
-            lock_reset
-                && tx
-                    .send(("SafeLogoff".to_string(), char_id.to_string()))
-                    .is_ok()
-        } else {
-            false
-        };
-        if transitioned {
-            live_charsel_sid = Some(rec_sid);
-            ctx.release_session_bindings(rec_sid);
+        if lock_reset {
+            if let Some(tx) = live_tx {
+                live_charsel = Some((uid, rec_sid, tx));
+                ctx.release_session_bindings(rec_sid);
+            }
         } else {
             ctx.db.release_online_lock(uid, rec_sid);
         }
     }
+    let live_charsel_sid = live_charsel.as_ref().map(|&(_, sid, _)| sid);
     for sid in session_ids {
         if Some(sid) == live_charsel_sid {
             continue;
@@ -617,8 +645,25 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
         ctx.disconnect_session(sid, "SafeLogoff", "Safe logoff completed");
         ctx.release_session_bindings(sid);
     }
+    crate::services::character_skills::notify_watchlist_presence(ctx, char_id, false);
     crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, char_id);
     crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, char_id);
+    crate::services::fleet_social::revoke_xmpp_auth_token(ctx, char_id);
+    if let Ok(mut cn) = ctx.systems.cluster_nodes.write() {
+        cn.char_rebased_system_gen.remove(&char_id);
+    }
+
+    before_charsel_signal(had_online_char);
+
+    if let Some((uid, rec_sid, tx)) = live_charsel {
+        if tx
+            .send(("SafeLogoffCharsel".to_string(), char_id.to_string()))
+            .is_err()
+        {
+            ctx.db.release_online_lock(uid, rec_sid);
+            ctx.disconnect_session(rec_sid, "SafeLogoff", "Safe logoff completed");
+        }
+    }
 }
 
 #[cfg(test)]

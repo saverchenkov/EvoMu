@@ -1575,3 +1575,654 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
     assert_eq!(session.character_id, Some(active_char_id));
     assert_eq!(subscribed_sys_id, Some(30_000_142));
 }
+
+fn test_1386_packet_contains_ascii(rep: &PyRep, needle: &str) -> bool {
+    match rep {
+        PyRep::String(st) => st.contains(needle),
+        PyRep::Bytes(b) => {
+            std::str::from_utf8(b).is_ok_and(|st| st.contains(needle))
+                || b.windows(needle.len()).any(|w| w == needle.as_bytes())
+        }
+        PyRep::Tuple(items) | PyRep::List(items) => items
+            .iter()
+            .any(|i| test_1386_packet_contains_ascii(i, needle)),
+        PyRep::Dict(entries) => entries.iter().any(|(k, v)| {
+            test_1386_packet_contains_ascii(k, needle) || test_1386_packet_contains_ascii(v, needle)
+        }),
+        PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+            test_1386_packet_contains_ascii(inner, needle)
+        }
+        PyRep::Object { type_name, args } => {
+            type_name.contains(needle) || test_1386_packet_contains_ascii(args, needle)
+        }
+        PyRep::ObjectEx {
+            header, list, dict, ..
+        } => {
+            test_1386_packet_contains_ascii(header, needle)
+                || list.iter().any(|i| test_1386_packet_contains_ascii(i, needle))
+                || dict.iter().any(|(k, v)| {
+                    test_1386_packet_contains_ascii(k, needle)
+                        || test_1386_packet_contains_ascii(v, needle)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn test_1386_make_ping(client_id: u64, user_id: u64, call_id: u64) -> MachoPacket {
+    MachoPacket {
+        packet_type: MachoPacketType::PingReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: None,
+            call_id: 0,
+        },
+        user_id: Some(user_id),
+        payload: PyRep::Tuple(vec![PyRep::List(Vec::new())]),
+        named_payload: HashMap::new(),
+    }
+}
+
+async fn test_1386_call_rpc(
+    stream: &mut TcpStream,
+    client_id: u64,
+    user_id: u64,
+    call_id: u64,
+    service: &str,
+    method: &str,
+    args: Vec<PyRep>,
+) -> (MachoPacket, Vec<MachoPacket>) {
+    let req = make_call_req(client_id, user_id, call_id, service, None, method, args);
+    write_framed_pyrep(stream, &req.to_pyrep()).await.unwrap();
+    let mut notifs = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(stream))
+            .await
+            .expect("timed out waiting for CallRsp")
+            .expect("read error")
+            .expect("unexpected EOF waiting for CallRsp");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "unexpected GPSTransportClosed during {service}.{method}: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode MachoPacket");
+        if matches!(
+            pkt.packet_type,
+            MachoPacketType::CallRsp | MachoPacketType::ErrorResponse
+        ) {
+            assert_eq!(
+                pkt.packet_type,
+                MachoPacketType::CallRsp,
+                "unexpected ErrorResponse for {service}.{method}: {pkt:?}"
+            );
+            return (pkt, notifs);
+        }
+        notifs.push(pkt);
+    }
+}
+
+#[tokio::test]
+async fn test_1386_stale_and_fallback_safe_logoff_emits_transport_closed_without_stealing_notifications(
+) {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let char_id = 90_000_001_i64;
+
+    // 1. Fallback safe-logoff disconnect (`"SafeLogoff"`) emits GPSTransportClosed and closes socket.
+    let (mut s_fb, fb_client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let _ = test_1386_call_rpc(
+        &mut s_fb,
+        fb_client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let sid_fb = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("fallback online lock present")
+        .session_id;
+    // Flush any post-SelectCharacterID async notifications before disconnecting the fallback socket.
+    write_framed_pyrep(
+        &mut s_fb,
+        &test_1386_make_ping(fb_client_id, user_id, 2).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    loop {
+        let rep = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s_fb),
+        )
+        .await
+        .expect("timed out waiting for fallback pre-disconnect PingRsp")
+        .expect("read error waiting for fallback pre-disconnect PingRsp")
+        .expect("fallback socket closed prematurely");
+        if MachoPacket::from_pyrep(&rep)
+            .is_some_and(|p| p.packet_type == MachoPacketType::PingRsp)
+        {
+            break;
+        }
+    }
+    ctx.db.release_online_lock(user_id, sid_fb);
+    ctx.disconnect_session(sid_fb, "SafeLogoff", "Safe logoff completed");
+
+    let closed = loop {
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s_fb),
+        )
+        .await
+        .expect("timed out waiting for fallback GPSTransportClosed")
+        .expect("read error waiting for fallback GPSTransportClosed")
+        .expect("fallback socket closed without GPSTransportClosed");
+        if let Some(c) = GPSTransportClosed::from_pyrep(&frame) {
+            break c;
+        }
+        let pkt = MachoPacket::from_pyrep(&frame).expect("decode pre-close packet");
+        assert_eq!(
+            pkt.packet_type,
+            MachoPacketType::Notification,
+            "unexpected non-notification frame before GPSTransportClosed: {pkt:?}"
+        );
+    };
+    assert_eq!(closed.reason_code.as_deref(), Some("SafeLogoff"));
+    assert_eq!(closed.reason, "Safe logoff completed");
+    let eof = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        read_framed_pyrep(&mut s_fb),
+    )
+    .await
+    .expect("timed out waiting for fallback EOF")
+    .expect("read error waiting for fallback EOF");
+    assert!(eof.is_none(), "fallback socket must terminate after GPSTransportClosed");
+    for _ in 0..200 {
+        if !ctx.session_closers.read().unwrap().contains_key(&sid_fb) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&sid_fb));
+
+    // 2. Stale bound-only socket closed via `"SafeLogoff"` terminates with GPSTransportClosed
+    //    and neither steals nor wipes a live owning session's queued character notifications.
+    let (mut s_stale, stale_client_id, _) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let _ = test_1386_call_rpc(
+        &mut s_stale,
+        stale_client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s_stale,
+        stale_client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s_stale,
+        stale_client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(30_000_142), PyRep::None],
+    )
+    .await;
+    let sid_stale = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("stale online lock present")
+        .session_id;
+    ctx.db.release_online_lock(user_id, sid_stale);
+
+    let (mut s_live, live_client_id, _) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let _ = test_1386_call_rpc(
+        &mut s_live,
+        live_client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let sid_live = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("live online lock present")
+        .session_id;
+    assert_ne!(sid_live, sid_stale);
+
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Integer(4242),
+        ],
+    );
+    ctx.disconnect_session(sid_stale, "SafeLogoff", "Safe logoff completed");
+
+    let stale_closed = loop {
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s_stale),
+        )
+        .await
+        .expect("timed out waiting for stale GPSTransportClosed")
+        .expect("read error waiting for stale GPSTransportClosed")
+        .expect("stale socket closed without GPSTransportClosed");
+        if let Some(c) = GPSTransportClosed::from_pyrep(&frame) {
+            break c;
+        }
+        let pkt = MachoPacket::from_pyrep(&frame).expect("decode pre-close packet on stale socket");
+        assert_eq!(
+            pkt.packet_type,
+            MachoPacketType::Notification,
+            "unexpected non-notification frame before stale GPSTransportClosed: {pkt:?}"
+        );
+    };
+    assert_eq!(stale_closed.reason_code.as_deref(), Some("SafeLogoff"));
+    assert_eq!(stale_closed.reason, "Safe logoff completed");
+    let stale_eof = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        read_framed_pyrep(&mut s_stale),
+    )
+    .await
+    .expect("timed out waiting for stale EOF")
+    .expect("read error waiting for stale EOF");
+    assert!(stale_eof.is_none(), "stale socket must close after GPSTransportClosed");
+    for _ in 0..200 {
+        if !ctx.session_closers.read().unwrap().contains_key(&sid_stale) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&sid_stale));
+
+    // Confirm the active session receives OnAccountChange and stays healthy on PingRsp.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s_live))
+            .await
+            .expect("timed out waiting for OnAccountChange on live session")
+            .expect("read error on live session")
+            .expect("live session unexpectedly closed");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "live session must not receive GPSTransportClosed: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnAccountChange" {
+                    break;
+                }
+            }
+        }
+    }
+
+    write_framed_pyrep(
+        &mut s_live,
+        &test_1386_make_ping(live_client_id, user_id, 2).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let ping_rsp = loop {
+        let rep = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s_live),
+        )
+        .await
+        .expect("timed out waiting for live PingRsp")
+        .expect("read error waiting for live PingRsp")
+        .expect("live session closed before PingRsp");
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        if pkt.packet_type == MachoPacketType::PingRsp {
+            break pkt;
+        }
+    };
+    assert_eq!(ping_rsp.packet_type, MachoPacketType::PingRsp);
+}
+
+#[tokio::test]
+async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifications() {
+    let ctx = ServerContext::new();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let char_id = 90_000_001_i64;
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).unwrap().user_id);
+    let stale_sid = 77_201_u64;
+    let live_sid = 77_202_u64;
+
+    ctx.db
+        .acquire_online_lock(user_id, stale_sid, Some(char_id), true, now_unix)
+        .unwrap();
+    let displaced = ctx
+        .db
+        .acquire_online_lock(user_id, live_sid, Some(char_id), true, now_unix + 1)
+        .unwrap()
+        .expect("live_sid must displace stale_sid");
+    ctx.disconnect_displaced_session(live_sid, &displaced);
+
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        crate::router::notify_registry::OnSafeLogoffActivated,
+    );
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::ascii_bytes("cash"),
+            PyRep::Integer(1000),
+            PyRep::Integer(555),
+        ],
+    );
+
+    let mut stale_session = SessionState::new(stale_sid);
+    stale_session.user_id = Some(user_id);
+    stale_session.character_id = Some(char_id);
+    stale_session.solar_system_id = Some(30_000_142);
+
+    let (_sys_tx, mut sys_rx) = tokio::sync::broadcast::channel(4);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let mut subscribed_sys_id = Some(30_000_142);
+    let mut wire_state = crate::outbound_sequencer::SessionWireState::new(stale_sid, 1_000_000_000_001);
+    let mut deferred_ship_id = None;
+    let mut pending_dock = None;
+    let (mut client_rd, mut server_wr) = tokio::io::duplex(4096);
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_charsel(
+        ctx: &ServerContext,
+        char_id: i64,
+        session: &mut SessionState,
+        sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+        notify_rx: &mut tokio::sync::broadcast::Receiver<(
+            i64,
+            crate::router::PendingMachoNotification,
+        )>,
+        subscribed_sys_id: &mut Option<u32>,
+        wire_state: &mut crate::outbound_sequencer::SessionWireState,
+        deferred_ship_id: &mut Option<PendingDeferredShipId>,
+        pending_dock: &mut Option<PendingDockCall>,
+        server_wr: &mut tokio::io::DuplexStream,
+    ) -> bool {
+        let mut wire = SafeLogoffWireContext {
+            client_id: 1_000_000_000_001,
+            sys_rx,
+            notify_rx,
+            subscribed_sys_id,
+            wire_state,
+            deferred_ship_id,
+            pending_dock,
+        };
+        handle_session_closer_event(
+            ctx,
+            session,
+            &mut wire,
+            server_wr,
+            "SafeLogoffCharsel".to_string(),
+            char_id.to_string(),
+        )
+        .await
+        .unwrap()
+    }
+
+    // 1. Live session owns online lock with character_id = Some(char_id).
+    assert!(
+        call_charsel(
+            &ctx,
+            char_id,
+            &mut stale_session,
+            &mut sys_rx,
+            &mut notify_rx,
+            &mut subscribed_sys_id,
+            &mut wire_state,
+            &mut deferred_ship_id,
+            &mut pending_dock,
+            &mut server_wr,
+        )
+        .await
+    );
+    // 2. Live session owns online lock at charsel (character_id = None).
+    ctx.db
+        .acquire_online_lock(user_id, live_sid, None, false, now_unix + 2)
+        .unwrap();
+    {
+        let mut wire = SafeLogoffWireContext {
+            client_id: 1_000_000_000_001,
+            sys_rx: &mut sys_rx,
+            notify_rx: &mut notify_rx,
+            subscribed_sys_id: &mut subscribed_sys_id,
+            wire_state: &mut wire_state,
+            deferred_ship_id: &mut deferred_ship_id,
+            pending_dock: &mut pending_dock,
+        };
+        handle_safe_logoff_to_charsel(
+            &ctx,
+            &mut stale_session,
+            &mut wire,
+            &mut server_wr,
+            &char_id.to_string(),
+        )
+        .await
+        .unwrap();
+    }
+    // 3. Even if live_sid releases its lock, revoked stale_sid must still not steal/clear notifs.
+    ctx.db.release_online_lock(user_id, live_sid);
+    assert!(
+        call_charsel(
+            &ctx,
+            char_id,
+            &mut stale_session,
+            &mut sys_rx,
+            &mut notify_rx,
+            &mut subscribed_sys_id,
+            &mut wire_state,
+            &mut deferred_ship_id,
+            &mut pending_dock,
+            &mut server_wr,
+        )
+        .await
+    );
+
+    assert_eq!(stale_session.character_id, Some(char_id));
+    assert_eq!(subscribed_sys_id, Some(30_000_142));
+    drop(server_wr);
+    assert!(
+        read_framed_pyrep(&mut client_rd).await.unwrap().is_none(),
+        "displaced/stale SafeLogoffCharsel must write zero frames"
+    );
+
+    let surviving = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        surviving.iter().any(|n| n.event == "OnSafeLogoffActivated"),
+        "OnSafeLogoffActivated must remain queued for live session: {surviving:?}"
+    );
+    assert!(
+        surviving.iter().any(|n| n.event == "OnAccountChange"),
+        "OnAccountChange must remain queued for live session: {surviving:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_1386_safe_logoff_pre_notification_online_lock_prevents_remove_ball() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(&mut s, client_id, user_id, 2, "stationSvc", "Undock", Vec::new()).await;
+
+    let (_bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(sys_id as i64), PyRep::None],
+    )
+    .await;
+    assert!(
+        bind_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "MachoBindObject must initialize live DoDestinyUpdate stream"
+    );
+
+    let jita = ctx.systems.get_or_spawn(sys_id);
+    let active_ship_id = ctx.db.get_character(char_id).unwrap().active_ship_id;
+    assert!(jita.get_ball_snapshot(active_ship_id).await.unwrap().is_some());
+
+    let _ = test_1386_call_rpc(&mut s, client_id, user_id, 4, "ship", "SafeLogoff", Vec::new()).await;
+
+    // Flush SafeLogoff's pre-timer Stop / SetSpeedFraction(0.0) tick before timer completion.
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &test_1386_make_ping(client_id, user_id, 5).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    loop {
+        let rep = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        .expect("timed out waiting for pre-completion PingRsp")
+        .expect("read error waiting for pre-completion PingRsp")
+        .expect("socket closed before pre-completion PingRsp");
+        if MachoPacket::from_pyrep(&rep)
+            .is_some_and(|p| p.packet_type == MachoPacketType::PingRsp)
+        {
+            break;
+        }
+    }
+
+    // Complete SafeLogoff timer and immediately step the system BEFORE reading frames so
+    // the RemoveBall TickBroadcast competes with OnSafeLogoffActivated / SafeLogoffCharsel.
+    ctx.advance_secs(30);
+    let online = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock must remain reserved at character selection");
+    assert!(
+        online.character_id.is_none(),
+        "online_lock.character_id must already be None before RemoveBall / OnSafeLogoffActivated"
+    );
+    assert!(
+        jita.get_ball_snapshot(active_ship_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "ship ball must be removed on safe logoff"
+    );
+    let _ = jita.step_manual(1.0).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for OnSafeLogoffActivated")
+            .expect("read error waiting for OnSafeLogoffActivated")
+            .expect("TCP closed instead of clean SafeLogoff");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "SafeLogoff must not send GPSTransportClosed: {rep:?}"
+        );
+        assert!(
+            !test_1386_packet_contains_ascii(&rep, "DoDestinyUpdate")
+                && !test_1386_packet_contains_ascii(&rep, "RemoveBall"),
+            "RemoveBall / DoDestinyUpdate must NOT be emitted after safe logoff: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        assert_ne!(
+            pkt.packet_type,
+            MachoPacketType::SessionChangeNotification,
+            "SafeLogoff must not emit SessionChangeNotification"
+        );
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnSafeLogoffActivated" {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Subsequent system step + PingReq confirms sys_rx stays silenced and socket stays open at charsel.
+    let _ = jita.step_manual(1.0).await.unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &test_1386_make_ping(client_id, user_id, 6).to_pyrep(),
+    )
+    .await
+    .unwrap();
+    loop {
+        let rep = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        .expect("timed out waiting for PingRsp")
+        .expect("read error waiting for PingRsp")
+        .expect("socket closed before PingRsp");
+        assert!(GPSTransportClosed::from_pyrep(&rep).is_none());
+        assert!(
+            !test_1386_packet_contains_ascii(&rep, "DoDestinyUpdate")
+                && !test_1386_packet_contains_ascii(&rep, "RemoveBall"),
+            "RemoveBall / DoDestinyUpdate must NOT leak after safe logoff: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        assert_ne!(pkt.packet_type, MachoPacketType::SessionChangeNotification);
+        if pkt.packet_type == MachoPacketType::PingRsp {
+            break;
+        }
+    }
+}
