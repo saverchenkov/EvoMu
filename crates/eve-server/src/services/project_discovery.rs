@@ -179,6 +179,7 @@ pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank:
 
 pub use eve_db::PlayerProjectState;
 
+#[cfg(test)]
 fn has_valid_classification_payload(rep: &PyRep) -> bool {
     ops::has_valid_classification_polygons(rep)
 }
@@ -598,9 +599,10 @@ pub fn handle_project_discovery(
             let task_arg = &args[0];
             let classification_arg = &args[1];
 
-            if !has_valid_classification_payload(classification_arg) {
+            let Some(parsed_polys) = ops::extract_submission_polygons(classification_arg) else {
                 return Some(Err(invalid_classification_error()));
-            }
+            };
+            let normalized_classification = ops::polygons_to_pyrep(&parsed_polys);
 
             let task_index = match task_arg {
                 PyRep::Integer(i) => Some(*i),
@@ -627,7 +629,7 @@ pub fn handle_project_discovery(
                     st,
                     char_id,
                     req_task_index,
-                    classification_arg,
+                    &normalized_classification,
                     now_unix,
                 )
             });

@@ -310,6 +310,59 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             grade_and_record_classification(snap, &mut store, 110, 10, &double_wound_rep);
         assert!(!dw_ok && dw_acc < CONTROL_IOU_ACCURACY_THRESHOLD, "got ({dw_acc}, {dw_ok})");
 
+        // R2 F-01 counterexamples: near-boundary crossing (v5.x = 0.612 - 4e-11) and 2e-6 x 2e-6 X-crossing
+        // previously slipped through segments_intersect's dead zone; both must fail ear-clipping & IoU < 0.35.
+        let r2_c1 = vec![
+            [0.61, 0.45],
+            [0.78, 0.45],
+            [0.612, 0.62],
+            [0.612, 0.452],
+            [0.775, 0.452],
+            [0.61199999996, 0.615],
+        ];
+        let r2_c2 = vec![
+            [0.61, 0.45],
+            [0.78, 0.45],
+            [0.61, 0.62],
+            [0.610999, 0.53],
+            [0.611001, 0.53],
+            [0.612, 0.452],
+            [0.775, 0.452],
+            [0.612, 0.615],
+            [0.611, 0.530001],
+            [0.611, 0.529999],
+        ];
+        for (uid, pts) in [(110_001_i64, r2_c1), (110_002_i64, r2_c2)] {
+            assert!(polygon_has_self_intersection(&pts));
+            assert!(ear_clip_triangulate(&pts).is_none());
+            let iou = compute_polygons_iou(std::slice::from_ref(&pts), &[ctrl_poly.clone()]);
+            assert!(iou < CONTROL_IOU_ACCURACY_THRESHOLD, "got {iou} for uid {uid}");
+            let rep = polygons_to_pyrep(std::slice::from_ref(&pts));
+            let (acc, ok) = grade_and_record_classification(snap, &mut store, uid, 10, &rep);
+            assert!(!ok && acc < CONTROL_IOU_ACCURACY_THRESHOLD, "got ({acc}, {ok})");
+        }
+
+        // Collinear overlapping non-adjacent edge & adjacent 180-degree hairpin overlap both detected
+        let collinear_overlap = vec![
+            [0.61, 0.45],
+            [0.78, 0.45],
+            [0.78, 0.55],
+            [0.70, 0.45],
+            [0.64, 0.45],
+            [0.61, 0.55],
+        ];
+        assert!(polygon_has_self_intersection(&collinear_overlap));
+        assert!(ear_clip_triangulate(&collinear_overlap).is_none());
+        let hairpin_overlap = vec![
+            [0.61, 0.45],
+            [0.75, 0.45],
+            [0.65, 0.45],
+            [0.65, 0.58],
+            [0.61, 0.58],
+        ];
+        assert!(polygon_has_self_intersection(&hairpin_overlap));
+        assert!(ear_clip_triangulate(&hairpin_overlap).is_none());
+
         // Symmetric zero-area bowtie is rejected as degenerate
         let zero_bowtie = PyRep::List(vec![PyRep::List(vec![
             PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.2)]),
@@ -318,6 +371,38 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.4)]),
         ])]);
         assert!(extract_submission_polygons(&zero_bowtie).is_none());
+
+        // R2 P2 #1: asymmetric self-intersecting bowtie cannot extrapolate centroid outside its bbox
+        // onto sample_target_center_norm(3) = [0.60, 0.68] to pass is_plausible_first_responder
+        let asym_bowtie = vec![
+            [0.01, 0.01],
+            [0.15, 0.01],
+            [0.01, 0.148],
+            [0.1499, 0.148],
+        ];
+        assert!(extract_submission_polygons(&polygons_to_pyrep(std::slice::from_ref(&asym_bowtie))).is_some());
+        let asym_centroid = polygons_centroid(std::slice::from_ref(&asym_bowtie));
+        assert!(
+            (0.01..=0.15).contains(&asym_centroid[0]) && (0.01..=0.15).contains(&asym_centroid[1]),
+            "bowtie centroid escaped bbox: {asym_centroid:?}"
+        );
+        assert!(!is_plausible_first_responder(&[asym_bowtie], 3));
+
+        // R2 P2 #2: total vertex count across multi-polygon submission is bounded at <= MAX_TOTAL_VERTICES_PER_SUBMISSION
+        let mk_200gon = |cx: f64, cy: f64| -> Vec<[f64; 2]> {
+            (0..200)
+                .map(|k| {
+                    let a = (k as f64 / 200.0) * std::f64::consts::TAU;
+                    [cx + 0.02 * a.cos(), cy + 0.02 * a.sin()]
+                })
+                .collect()
+        };
+        let too_many_verts = polygons_to_pyrep(&[
+            mk_200gon(0.2, 0.2),
+            mk_200gon(0.5, 0.5),
+            mk_200gon(0.8, 0.8),
+        ]);
+        assert!(extract_submission_polygons(&too_many_verts).is_none());
 
         // P2 #1: direct Rust CW 3-vertex triangle matches CCW twin with IoU == 1.0
         let cw_tri = vec![[ox, oy], [ox, oy + 0.24], [ox + 0.24, oy]];

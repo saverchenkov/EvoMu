@@ -152,9 +152,11 @@ const MIN_POLYGON_AREA_NORM: f64 = 1e-7;
 const MAX_SUBMITTED_COORD_ABS: f64 = 1e6;
 const MAX_POLYGONS_PER_SUBMISSION: usize = 32;
 const MAX_VERTICES_PER_POLYGON: usize = 256;
+const MAX_TOTAL_VERTICES_PER_SUBMISSION: usize = 512;
 const MAX_JSON_CLASSIFICATION_BYTES: usize = 65_536;
 const MAX_PAYLOAD_DEPTH: usize = 8;
 pub(crate) const MAX_CACHED_TASKS: usize = 64;
+const CENTROID_GRID_SAMPLES: usize = 64;
 const FIRST_RESPONDER_MIN_AREA_NORM: f64 = 5e-4;
 const FIRST_RESPONDER_MAX_AREA_NORM: f64 = 0.50;
 const FIRST_RESPONDER_MAX_CENTER_DIST: f64 = 0.65;
@@ -361,8 +363,14 @@ fn parse_raw_polygons_from_pyrep(rep: &PyRep, depth: usize) -> Option<Vec<Vec<[f
                 return None;
             }
             let mut polys = Vec::with_capacity(items.len());
+            let mut total_verts = 0usize;
             for item in items {
-                polys.push(parse_single_polygon_item(item, depth + 1)?);
+                let poly = parse_single_polygon_item(item, depth + 1)?;
+                total_verts += poly.len();
+                if total_verts > MAX_TOTAL_VERTICES_PER_SUBMISSION {
+                    return None;
+                }
+                polys.push(poly);
             }
             Some(polys)
         }
@@ -452,8 +460,24 @@ pub(crate) fn extract_submission_polygons(rep: &PyRep) -> Option<Vec<Vec<[f64; 2
 }
 
 /// Returns `true` iff `rep` carries at least one valid, non-degenerate `>= 3`-vertex 2D gate polygon.
+#[cfg(test)]
 pub(crate) fn has_valid_classification_polygons(rep: &PyRep) -> bool {
     extract_submission_polygons(rep).is_some()
+}
+
+pub(crate) fn polygons_to_pyrep(polys: &[Vec<[f64; 2]>]) -> PyRep {
+    PyRep::List(
+        polys
+            .iter()
+            .map(|poly| {
+                PyRep::List(
+                    poly.iter()
+                        .map(|&[x, y]| PyRep::Tuple(vec![PyRep::Real(x), PyRep::Real(y)]))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn point_in_or_on_ccw_triangle(p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
@@ -486,25 +510,44 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
     let o2 = cross_2d(a, b, d);
     let o3 = cross_2d(c, d, a);
     let o4 = cross_2d(c, d, b);
-    let tol_ab = eps * dist_sq(a, b).sqrt().max(1.0);
-    let tol_cd = eps * dist_sq(c, d).sqrt().max(1.0);
 
-    let ab_straddles = (o1 > tol_ab && o2 < -tol_ab) || (o1 < -tol_ab && o2 > tol_ab);
-    let cd_straddles = (o3 > tol_cd && o4 < -tol_cd) || (o3 < -tol_cd && o4 > tol_cd);
+    // Exact sign checks prevent edge-length tolerance floors from masking real transverse crossings.
+    let ab_straddles = (o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0);
+    let cd_straddles = (o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0);
     if ab_straddles && cd_straddles {
         return true;
     }
+
+    let tol_ab = eps * dist_sq(a, b).sqrt();
+    let tol_cd = eps * dist_sq(c, d).sqrt();
     (o1.abs() <= tol_ab && point_on_segment(c, a, b, eps))
         || (o2.abs() <= tol_ab && point_on_segment(d, a, b, eps))
         || (o3.abs() <= tol_cd && point_on_segment(a, c, d, eps))
         || (o4.abs() <= tol_cd && point_on_segment(b, c, d, eps))
 }
 
+fn adjacent_edges_overlap(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let bc = [c[0] - b[0], c[1] - b[1]];
+    let len_ab = (ab[0] * ab[0] + ab[1] * ab[1]).sqrt();
+    let len_bc = (bc[0] * bc[0] + bc[1] * bc[1]).sqrt();
+    if len_ab == 0.0 || len_bc == 0.0 {
+        return true;
+    }
+    let cross = ab[0] * bc[1] - ab[1] * bc[0];
+    let dot = ab[0] * bc[0] + ab[1] * bc[1];
+    cross.abs() <= 1e-11 * len_ab * len_bc && dot < 0.0
+}
+
 fn polygon_has_self_intersection(poly: &[[f64; 2]]) -> bool {
     let n = poly.len();
     for i in 0..n {
+        let prev = poly[(i + n - 1) % n];
         let a = poly[i];
         let b = poly[(i + 1) % n];
+        if adjacent_edges_overlap(prev, a, b) {
+            return true;
+        }
         for j in (i + 2)..n {
             if i == 0 && j == n - 1 {
                 continue;
@@ -570,7 +613,13 @@ fn ear_clip_triangulate(poly: &[[f64; 2]]) -> Option<Vec<[[f64; 2]; 3]>> {
             return None;
         }
     }
-    tris.push([poly_ccw[rem[0]], poly_ccw[rem[1]], poly_ccw[rem[2]]]);
+    let a = poly_ccw[rem[0]];
+    let b = poly_ccw[rem[1]];
+    let c = poly_ccw[rem[2]];
+    if cross_2d(a, b, c) <= 1e-12 {
+        return None;
+    }
+    tris.push([a, b, c]);
     let tri_sum: f64 = tris.iter().map(|&t| triangle_area(t)).sum();
     if (tri_sum - poly_area).abs() > 1e-5 * poly_area.max(1e-6) {
         return None;
@@ -791,7 +840,7 @@ pub fn compute_polygons_iou(sub_polys: &[Vec<[f64; 2]>], ref_polys: &[Vec<[f64; 
 }
 
 fn single_polygon_area_centroid(poly: &[[f64; 2]]) -> Option<(f64, [f64; 2])> {
-    if poly.len() < 3 {
+    if poly.len() < 3 || polygon_has_self_intersection(poly) {
         return None;
     }
     let mut twice_area = 0.0;
@@ -809,25 +858,67 @@ fn single_polygon_area_centroid(poly: &[[f64; 2]]) -> Option<(f64, [f64; 2])> {
         return None;
     }
     let centroid = [cx_sum / (3.0 * twice_area), cy_sum / (3.0 * twice_area)];
-    if !centroid[0].is_finite() || !centroid[1].is_finite() {
+    let [min_x, min_y, max_x, max_y] = bbox_of_points(poly);
+    if !centroid[0].is_finite()
+        || !centroid[1].is_finite()
+        || centroid[0] < min_x - 1e-6
+        || centroid[0] > max_x + 1e-6
+        || centroid[1] < min_y - 1e-6
+        || centroid[1] > max_y + 1e-6
+    {
         return None;
     }
     Some((0.5 * twice_area.abs(), centroid))
 }
 
-fn polygons_centroid(polys: &[Vec<[f64; 2]>]) -> [f64; 2] {
-    let mut weight_sum = 0.0;
-    let mut wx = 0.0;
-    let mut wy = 0.0;
-    for poly in polys {
-        if let Some((area, [cx, cy])) = single_polygon_area_centroid(poly) {
-            weight_sum += area;
-            wx += area * cx;
-            wy += area * cy;
+fn grid_even_odd_centroid(polys: &[Vec<[f64; 2]>]) -> Option<[f64; 2]> {
+    let [min_x, min_y, max_x, max_y] = polygons_bbox(polys)?;
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    if !width.is_finite() || !height.is_finite() || width <= 1e-12 || height <= 1e-12 {
+        return None;
+    }
+    let dx = width / (CENTROID_GRID_SAMPLES as f64);
+    let dy = height / (CENTROID_GRID_SAMPLES as f64);
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut hits = 0usize;
+    for iy in 0..CENTROID_GRID_SAMPLES {
+        let y = min_y + ((iy as f64) + 0.5) * dy;
+        for ix in 0..CENTROID_GRID_SAMPLES {
+            let x = min_x + ((ix as f64) + 0.5) * dx;
+            if polys.iter().any(|poly| point_in_polygon_even_odd([x, y], poly)) {
+                sum_x += x;
+                sum_y += y;
+                hits += 1;
+            }
         }
     }
-    if weight_sum > 1e-12 {
-        return [wx / weight_sum, wy / weight_sum];
+    if hits > 0 {
+        Some([sum_x / (hits as f64), sum_y / (hits as f64)])
+    } else {
+        None
+    }
+}
+
+fn polygons_centroid(polys: &[Vec<[f64; 2]>]) -> [f64; 2] {
+    if !polys.iter().any(|poly| polygon_has_self_intersection(poly)) {
+        let mut weight_sum = 0.0;
+        let mut wx = 0.0;
+        let mut wy = 0.0;
+        for poly in polys {
+            if let Some((area, [cx, cy])) = single_polygon_area_centroid(poly) {
+                weight_sum += area;
+                wx += area * cx;
+                wy += area * cy;
+            }
+        }
+        if weight_sum > 1e-12 {
+            return [wx / weight_sum, wy / weight_sum];
+        }
+    }
+    if let Some(centroid) = grid_even_odd_centroid(polys) {
+        return centroid;
     }
     let mut sum_x = 0.0;
     let mut sum_y = 0.0;
@@ -862,6 +953,9 @@ fn is_plausible_first_responder(polys: &[Vec<[f64; 2]>], task_idx: i64) -> bool 
             && (CANVAS_BOUNDS_MIN..=CANVAS_BOUNDS_MAX).contains(&y)
     });
     if !all_in_canvas {
+        return false;
+    }
+    if polys.iter().any(|poly| polygon_has_self_intersection(poly)) {
         return false;
     }
     let area = total_submission_area(polys);
