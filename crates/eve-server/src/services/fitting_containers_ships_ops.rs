@@ -595,77 +595,11 @@ pub(crate) async fn handle_ext_tail(
             Some(Ok(DBRowDescriptor::inv_item_header().build_crowset(rows)))
         }
 
-        ("invbroker", "ListStations") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let blueprint_only = args
-                .first()
-                .and_then(|a| a.as_bool().or_else(|| a.as_i64().map(|v| v != 0)))
-                .unwrap_or(false);
-            let is_corp = args
-                .get(1)
-                .and_then(|a| a.as_bool().or_else(|| a.as_i64().map(|v| v != 0)))
-                .unwrap_or(false);
-            let target_owner_id = if is_corp {
-                session.corporation_id.filter(|&cid| cid > 0).unwrap_or(char_id)
-            } else {
-                char_id
-            };
-            let rows = ctx.db.with_snapshot(|snap| {
-                let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
-                    std::collections::BTreeMap::new();
-                for item in snap.items.values() {
-                    if item.owner_id != target_owner_id {
-                        continue;
-                    }
-                    if blueprint_only
-                        && !ctx
-                            .sde
-                            .types
-                            .get(&item.type_id)
-                            .is_some_and(|t| t.category_id == 9)
-                    {
-                        continue;
-                    }
-                    let loc_id = item.location_id;
-                    let st_info = if (60_000_000..=69_999_999).contains(&loc_id) {
-                        ctx.sde
-                            .stations
-                            .get(&loc_id)
-                            .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
-                    } else if loc_id >= 1_000_000_000_000 {
-                        snap.structures
-                            .get(&loc_id)
-                            .map(|st| (i64::from(st.solar_system_id), i64::from(st.type_id)))
-                    } else {
-                        None
-                    };
-                    if let Some((sys_id, st_type_id)) = st_info {
-                        let entry = counts_by_station
-                            .entry(loc_id)
-                            .or_insert((sys_id, 0, st_type_id));
-                        entry.1 += 1;
-                    }
-                }
-                counts_by_station
-                    .into_iter()
-                    .map(|(station_id, (solar_system_id, item_count, st_type_id))| {
-                        vec![
-                            PyRep::Integer(station_id),
-                            PyRep::Integer(solar_system_id),
-                            PyRep::Integer(item_count),
-                            PyRep::Integer(st_type_id),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["stationID", "solarSystemID", "itemCount", "typeID"],
-                rows,
-            )))
-        }
+        ("invbroker", "ListStations") => Some(
+            crate::services::character_skills::character_clones_implants::handle_list_stations(
+                ctx, session, args, kwargs,
+            ),
+        ),
 
         ("invbroker", "Reprocess") => {
             let (_, _) = match ServerContext::require_character(session) {
