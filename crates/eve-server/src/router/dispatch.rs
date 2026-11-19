@@ -1122,10 +1122,6 @@ impl ServerContext {
             .map(|b| b.service.as_str())
             .unwrap_or(service);
 
-        if session.user_id.is_none() && !Self::is_genuine_preauth_rpc(effective_service, method) {
-            let _ = Self::require_auth(session)?;
-        }
-
         let (enable_living_world, enable_quasar_gateway) = {
             let flags = self.feature_flags.read().unwrap_or_else(|e| e.into_inner());
             (flags.enable_living_world, flags.enable_quasar_gateway)
@@ -1147,6 +1143,22 @@ impl ServerContext {
                 message: "Quasar publicGatewaySvc is disabled in evomu.toml feature_flags".into(),
                 client_error: None,
             });
+        }
+
+        // Framed Quasar gateway requests carry wire-encoded protobuf envelopes that return
+        // structured EvePublicResponse STATUS_UNAUTHORIZED (401) rather than MachoNet exceptions;
+        // empty/non-framed calls and notice/event RPCs remain hard-gated by require_auth.
+        let is_framed_quasar_request = effective_service == "publicGatewaySvc"
+            && matches!(method, "SendRequest" | "CallQuasar" | "Send") // rpc-lint: allow verified publicGatewaySvc request methods
+            && matches!(
+                args.iter().next().or_else(|| kwargs.get("request")),
+                Some(PyRep::Bytes(_) | PyRep::Buffer(_))
+            );
+        if session.user_id.is_none()
+            && !Self::is_genuine_preauth_rpc(effective_service, method)
+            && !is_framed_quasar_request
+        {
+            let _ = Self::require_auth(session)?;
         }
 
         if effective_service == "wormholeMgr" && method == "GetWormholePolarization" {

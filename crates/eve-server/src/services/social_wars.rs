@@ -309,7 +309,7 @@ fn handle_war_registry_gm_rpc(
     };
     let war_id = call.war_id;
     let now = ctx.now_unix();
-    let res = ctx.db.with_mut_snapshot(|snap| -> Result<Vec<(&'static str, PyRep, PyRep)>, BridgeRpcError> {
+    let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<(&'static str, PyRep, PyRep)>, BridgeRpcError> {
         let Some(war) = snap.wars.get(&war_id).cloned() else {
             return Err(WarGmError::WarNotFound.with_message(format!("War {war_id} not found")));
         };

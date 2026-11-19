@@ -636,6 +636,7 @@ seed_demo = false
 
     // 2. Assert GetLocalOccupationState returns valid warzone state on SQLite store
     let mut sess = SessionState::new(99_001);
+    sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
     sess.solar_system_id = Some(30002055); // Amo
     let kw = HashMap::new();

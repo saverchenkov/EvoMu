@@ -228,14 +228,16 @@ async fn test_store_manager_categories_and_products_live() {
     assert_eq!(
         rpc(&ctx, &mut unauth, "storeManager", "get_categories", &[])
             .await
-            .expect("empty get_categories before seeding"),
-        PyRep::List(Vec::new())
+            .unwrap_err()
+            .code,
+        "Unauthorized"
     );
     assert_eq!(
         rpc(&ctx, &mut unauth, "storeManager", "get_products", &[])
             .await
-            .expect("empty get_products before seeding"),
-        PyRep::List(Vec::new())
+            .unwrap_err()
+            .code,
+        "Unauthorized"
     );
     assert_eq!(
         rpc(&ctx, &mut unauth, "storeManager", "buy_offer", &[PyRep::Integer(1)])
@@ -256,6 +258,18 @@ async fn test_store_manager_categories_and_products_live() {
     )
     .await
     .expect("SelectCharacterID");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "storeManager", "get_categories", &[])
+            .await
+            .expect("empty get_categories before seeding"),
+        PyRep::List(Vec::new())
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "storeManager", "get_products", &[])
+            .await
+            .expect("empty get_products before seeding"),
+        PyRep::List(Vec::new())
+    );
 
     let cat_id = create_store_category(&ctx, &mut sess, "Ship SKINs").await;
     assert!(cat_id > 0);

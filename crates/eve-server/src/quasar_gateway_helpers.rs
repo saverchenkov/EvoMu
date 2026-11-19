@@ -259,6 +259,9 @@ impl PublicGatewayRouter {
                 ])))
             }
             "PollNotices" => {
+                if let Err(err) = crate::router::ServerContext::require_auth(session) {
+                    return Some(Err(err));
+                }
                 let notices = self.poll_notices(session.session_id);
                 Some(Ok(PyRep::List(notices.iter().map(notice_to_pyrep).collect())))
             }

@@ -604,11 +604,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
     let wal_ctx = ServerContext::with_sde_and_repository(Arc::clone(&ctx.sde), Arc::new(wal_repo));
     let mut wal_ch = ctx.db.get_character(90_000_001).unwrap();
     let wal_uid = wal_ch.user_id;
-    let wal_corp_id = if wal_ch.corporation_id > 0 {
-        wal_ch.corporation_id
-    } else {
-        98_000_001
-    };
+    let wal_corp_id = 98_000_001_i64;
     wal_ch.corporation_id = wal_corp_id;
     let mut wal_corp = ctx
         .db
@@ -621,6 +617,7 @@ async fn dispatch_rpc_bind_edges_wal_rollback_and_sov_respawn_triggered() {
             c
         });
     wal_corp.ceo_id = 90_000_001;
+    wal_corp.members.insert(90_000_001);
     let wal_acct = ctx.db.with_snapshot(|snap| {
         snap.accounts
             .iter()
@@ -2105,4 +2102,145 @@ async fn dispatch_rpc_p0_1350_preauth_gm_role_and_moniker_gates() {
         .code,
         "BindAuthorizationDenied"
     );
+}
+
+#[tokio::test]
+async fn dispatch_rpc_p0_1393_preauth_quasar_framed_and_feature_flags_gates() {
+    use crate::quasar_gateway::STATUS_UNAUTHORIZED;
+    use eve_proto::quasar::{
+        EvePublicRequest, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage,
+        TYPE_GOOGLEAPIS_PREFIX,
+    };
+
+    let ctx = ServerContext::with_repository(Arc::new(eve_db::WorldRepository::with_demo_seed()));
+    let mut unauth_sess = SessionState::new(94_991);
+    let kw = HashMap::new();
+
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: ctx.now_unix() as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: vec![0x42; 16],
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}google.protobuf.Empty"),
+            value: GoogleEmpty.encode_proto(),
+        }),
+        external_origin: "client".into(),
+        ..Default::default()
+    };
+    let req_bytes = req.encode_proto();
+
+    // 1. Feature flags must gate before require_auth even for unauthenticated sessions and framed Quasar payloads
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = false;
+        flags.enable_quasar_gateway = false;
+    }
+    let tale_err = ctx
+        .dispatch_rpc(
+            &mut unauth_sess,
+            "taleMgr",
+            None,
+            "GetGlobalWorldEventTales", // rpc-lint: allow verified taleMgr method
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(tale_err.code, "FeatureDisabled"); // rpc-lint: allow error code assertion
+
+    for args in [Vec::new(), vec![PyRep::Bytes(req_bytes.clone())]] {
+        let q_err = ctx
+            .dispatch_rpc(
+                &mut unauth_sess,
+                "publicGatewaySvc",
+                None,
+                "SendRequest", // rpc-lint: allow verified publicGatewaySvc method
+                &args,
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(q_err.code, "FeatureDisabled"); // rpc-lint: allow error code assertion
+    }
+
+    {
+        let mut flags = ctx.feature_flags.write().unwrap();
+        flags.enable_living_world = true;
+        flags.enable_quasar_gateway = true;
+    }
+
+    // 2. Framed publicGatewaySvc request payloads bypass MachoNet require_auth and return
+    //    structured STATUS_UNAUTHORIZED (401) without mutating DB or bound-object state
+    let before_chars = ctx.db.with_snapshot(|s| s.characters.len());
+    let mut kw_req = HashMap::new();
+    kw_req.insert("request".into(), PyRep::Bytes(req_bytes.clone()));
+    for (method, args, call_kw) in [
+        ("SendRequest", vec![PyRep::Bytes(req_bytes.clone())], &kw),
+        ("CallQuasar", vec![PyRep::Buffer(req_bytes.clone())], &kw),
+        ("Send", Vec::new(), &kw_req),
+    ] {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut unauth_sess,
+                "publicGatewaySvc",
+                None,
+                method,
+                &args,
+                call_kw,
+                None,
+            )
+            .await
+            .expect("framed unauth Quasar call returns KeyVal response");
+        assert_eq!(
+            rep.dict_get("status_code"),
+            Some(&PyRep::Integer(i64::from(STATUS_UNAUTHORIZED))),
+            "framed unauth {method} must return STATUS_UNAUTHORIZED"
+        );
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.len()), before_chars);
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+
+    // 3. Unframed publicGatewaySvc calls and all notice/event RPCs stay hard-gated by Unauthorized
+    for (method, args) in [
+        ("SendRequest", Vec::new()),
+        ("SendRequest", vec![PyRep::Integer(90_000_001)]),
+        ("CallQuasar", Vec::new()),
+        ("Send", Vec::new()),
+        ("PollNotices", Vec::new()),
+        ("Subscribe", Vec::new()),
+        ("SubscribeToNotice", Vec::new()),
+        ("ConsumeNotices", Vec::new()),
+        ("PublishEvent", Vec::new()),
+        ("PublishEventPayload", Vec::new()),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut unauth_sess,
+                "publicGatewaySvc",
+                None,
+                method,
+                &args,
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            "Unauthorized", // rpc-lint: allow error code assertion
+            "unframed/notice unauth {method} must return Unauthorized"
+        );
+    }
+
+    // 4. Direct helper defense-in-depth: PollNotices must reject unauthenticated sessions directly
+    let helper_err = ctx
+        .quasar_gateway
+        .dispatch_public_gateway_rpc(&unauth_sess, "PollNotices", &[], &kw, ctx.now_unix())
+        .expect("PollNotices returns Some")
+        .unwrap_err();
+    assert_eq!(helper_err.code, "Unauthorized"); // rpc-lint: allow error code assertion
 }

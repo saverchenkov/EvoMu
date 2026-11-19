@@ -1351,12 +1351,26 @@ async fn handle_bridge_client_collapses_forged_bound_id_and_kicked_session_probe
         &mut cli_unauth,
         next_req_id,
         "machoNet",
-        Some(existing_bid),
+        None,
         "ClientHasReleasedTheseObjects",
         vec![],
     )
     .await?
     .is_ok());
+    next_req_id += 1;
+    expected_collapsed += 1;
+
+    let forged_release_err = call_bridge_rpc(
+        &mut cli_unauth,
+        next_req_id,
+        "machoNet",
+        Some(existing_bid),
+        "ClientHasReleasedTheseObjects",
+        vec![],
+    )
+    .await?
+    .unwrap_err();
+    assert_eq!(forged_release_err.code, "BoundObjectOwnershipViolation"); // rpc-lint: allow error code assertion
     next_req_id += 1;
     expected_collapsed += 1;
 
