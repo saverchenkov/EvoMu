@@ -429,8 +429,7 @@ pub(crate) fn deposit_loot_into_ship_or_container_in_snapshot(
     let (target_loc_id, spawned_container_id) = if ship_can_hold {
         (ship_id, None)
     } else {
-        snap.next_entity_id += 1;
-        let cid = snap.next_entity_id;
+        let cid = snap.alloc_entity_id();
         snap.items.insert(
             cid,
             InventoryItemRecord {
@@ -449,10 +448,15 @@ pub(crate) fn deposit_loot_into_ship_or_container_in_snapshot(
     };
 
     for &(iid, tid, qty) in items_to_award {
+        let item_id = if iid > 0 && !snap.items.contains_key(&iid) {
+            iid
+        } else {
+            snap.alloc_entity_id()
+        };
         snap.items.insert(
-            iid,
+            item_id,
             InventoryItemRecord {
-                item_id: iid,
+                item_id,
                 type_id: tid,
                 owner_id: char_id,
                 location_id: target_loc_id,

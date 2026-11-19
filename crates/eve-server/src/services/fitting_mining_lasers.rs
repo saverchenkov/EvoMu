@@ -476,6 +476,15 @@ pub(crate) async fn handle_mining_and_deactivate(
                     client_error: None,
                 }));
             };
+            if method == "OverloadRack"
+                && (session.station_id.is_some() || session.structure_id.is_some())
+            {
+                return Some(Err(
+                    crate::services::inventory_fitting::fitting_module_cycles::ship_docked_rpc_error(
+                        "Cannot overload modules while docked",
+                    ),
+                ));
+            }
             let arg_val = match crate::router::RpcArgs::positional(args).req_non_negative_i64(0, "rackOrModuleID") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

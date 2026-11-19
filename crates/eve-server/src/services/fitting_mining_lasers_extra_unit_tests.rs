@@ -461,6 +461,19 @@ async fn overload_rack_nanite_repair_guards_ehe_burnout_and_mining_scan_branches
         ..Default::default()
     };
 
+    sess.station_id = Some(60_003_760);
+    let e_rack_station = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(e_rack_station.code, "ShipDocked");
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_000_000_001);
+    let e_rack_struct = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(e_rack_struct.code, "ShipDocked");
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&repairable_mod].state,
+        ModuleState::Online
+    );
+    sess.structure_id = None;
+
     let _ = ctx.drain_notifications_for_char(char_id);
     let r0 = call_dogma(&ctx, &mut sess, "OverloadRack", &[PyRep::Integer(0)]).await.unwrap();
     assert_eq!(r0, PyRep::List(vec![PyRep::Integer(hi_mod)]));

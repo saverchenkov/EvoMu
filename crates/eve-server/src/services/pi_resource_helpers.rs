@@ -317,6 +317,33 @@ pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now
     }
 }
 
+fn seed_legacy_colony_pressure(
+    snap: &WorldStateSnapshot,
+    planet_id: i64,
+    now_unix: u64,
+    depl_state: &mut PlanetResourceDepletionState,
+) {
+    if depl_state.colony_pressure_last_unix > 0 || !depl_state.colony_extraction_pressure.is_empty()
+    {
+        return;
+    }
+    for col in snap.planetary_colonies.values() {
+        if col.planet_id != planet_id {
+            continue;
+        }
+        let factor = depletion_recovery_factor(col.last_extracted_unix, now_unix);
+        for (&tid, &qty) in &col.extracted_commodities {
+            let eff = (qty as f64) * factor;
+            if eff >= 1.0 {
+                *depl_state.colony_extraction_pressure.entry(tid).or_insert(0.0) += eff;
+            }
+        }
+    }
+    if !depl_state.colony_extraction_pressure.is_empty() && now_unix > 0 {
+        depl_state.colony_pressure_last_unix = now_unix;
+    }
+}
+
 /// Records newly extracted commodity quantities into planetary depletion pressure without mutating pin inventory.
 pub fn record_planet_colony_extraction(
     snap: &mut WorldStateSnapshot,
@@ -328,6 +355,7 @@ pub fn record_planet_colony_extraction(
         return;
     }
     let mut depl_state = load_planet_depletion(snap, planet_id);
+    seed_legacy_colony_pressure(snap, planet_id, now_unix, &mut depl_state);
     if depl_state.colony_pressure_last_unix == 0 && now_unix > 0 {
         depl_state.colony_pressure_last_unix = now_unix;
     }
@@ -352,6 +380,7 @@ pub fn regenerate_idle_planet_depletion(
     always_persist: bool,
 ) {
     let mut depl_state = load_planet_depletion(snap, planet_id);
+    seed_legacy_colony_pressure(snap, planet_id, now_unix, &mut depl_state);
     let has_existing_state = !depl_state.resource_depletion.is_empty()
         || !depl_state.local_depletion.is_empty()
         || depl_state.gm_depletion_rate > 0.0
@@ -368,7 +397,8 @@ pub fn regenerate_idle_planet_depletion(
     save_planet_depletion(snap, &depl_state);
 }
 
-/// Decays colony cumulative extraction pressure over idle `elapsed_secs` when extractors stop.
+/// Legacy helper decaying `col.extracted_commodities` over idle `elapsed_secs` (kept for backward compatibility;
+/// live pin inventory and planetary extraction depletion pressure are decoupled via `colony_extraction_pressure`).
 pub fn decay_colony_extracted_commodities(
     col: &mut eve_db::PlanetaryColonyRecord,
     elapsed_secs: u64,

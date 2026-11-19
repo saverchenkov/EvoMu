@@ -657,14 +657,10 @@ pub async fn on_special_site_npc_destroyed_core(
                 }
             }
         }
-        found.map(|(did, iid, dname, isk, pts, ltid)| {
-            reg.next_seq += 1;
-            let loot_item_id = 1_895_800_000 + reg.next_seq;
-            (did, iid, dname, isk, pts, ltid, loot_item_id)
-        })
+        found
     });
 
-    if let Some((did, iid, dname, reward_isk, reward_points, loot_tid, loot_item_id)) = seasonal_res {
+    if let Some((did, iid, dname, reward_isk, reward_points, loot_tid)) = seasonal_res {
         let mut relay_bid_to_remove: Option<i64> = None;
         let mut exp_site_to_clear: Option<String> = None;
         let mut pool_loot: Vec<(u32, i64)> = Vec::new();
@@ -734,21 +730,19 @@ pub async fn on_special_site_npc_destroyed_core(
                 crate::services::season_manager::save_season_state_to_blobs(snap, cid, &st);
                 let mut loot_specs = Vec::new();
                 if loot_tid != 0 && _sde.types.contains_key(&loot_tid) {
-                    loot_specs.push((loot_item_id, loot_tid, 1));
+                    loot_specs.push((snap.alloc_entity_id(), loot_tid, 1));
                 }
-                let mut seq = 1_i64;
                 if relay_hacked {
                     for (ptid, pqty) in pool_loot {
                         if ptid != loot_tid && pqty > 0 && _sde.types.contains_key(&ptid) {
                             let qty = pqty.clamp(1, i64::from(i32::MAX)) as i32;
-                            loot_specs.push((loot_item_id + seq, ptid, qty));
-                            seq += 1;
+                            loot_specs.push((snap.alloc_entity_id(), ptid, qty));
                         }
                     }
                 }
                 let booster_tid = if _sde.types.contains_key(&9950) { 9950 } else { 15457 };
                 if booster_tid != loot_tid && _sde.types.contains_key(&booster_tid) {
-                    loot_specs.push((loot_item_id + seq, booster_tid, 1));
+                    loot_specs.push((snap.alloc_entity_id(), booster_tid, 1));
                 }
                 deposit_loot_into_ship_or_container_in_snapshot(
                     snap,
@@ -856,6 +850,7 @@ pub async fn ensure_seasonal_event_sites_for_system(
         }
     });
     let in_window = active_season.is_some();
+    let active_season_id = active_season.as_ref().map(|a| a.season_id);
 
     let (expired_ids, expired_balls, expired_anom_ids, mut active_sites) =
         with_pve_special_reg(ctx, |reg| {
@@ -866,6 +861,7 @@ pub async fn ensure_seasonal_event_sites_for_system(
                 list.retain(|s| {
                     let valid = in_window
                         && !s.completed
+                        && active_season_id.is_some_and(|sid| s.season_id == sid)
                         && now_ft >= s.window_start_ft
                         && now_ft <= s.window_end_ft;
                     if !valid {

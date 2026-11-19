@@ -54,7 +54,7 @@ pub fn handle_pi_colonies(
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let baseline = if col.last_extracted_unix > 0 { col.last_extracted_unix } else { net.last_simulated_unix };
+                let baseline = crate::services::industry_pi::pi_helpers::colony_sim_baseline(&col, &net);
                 let elapsed = if baseline > 0 && now_unix > baseline {
                     now_unix.saturating_sub(baseline)
                 } else {

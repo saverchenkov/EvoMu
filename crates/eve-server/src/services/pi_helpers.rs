@@ -935,10 +935,19 @@ pub(crate) fn advance_colony_simulation_detailed(
     }
 
     net.last_simulated_unix = now_unix;
-    if extracted_total > 0 {
-        col.last_extracted_unix = now_unix;
-    }
+    col.last_extracted_unix = now_unix;
     (extracted_total, processed_total, extracted_by_type)
+}
+
+pub(crate) fn colony_sim_baseline(
+    col: &PlanetaryColonyRecord,
+    net: &PiColonyNetworkState,
+) -> u64 {
+    if col.last_extracted_unix > 0 {
+        col.last_extracted_unix
+    } else {
+        net.last_simulated_unix
+    }
 }
 
 pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
@@ -955,11 +964,7 @@ pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
                 continue;
             };
             let mut net = load_pi_network(snap, cid, pid, col.command_center_level);
-            let baseline = if col.last_extracted_unix > 0 {
-                col.last_extracted_unix
-            } else {
-                net.last_simulated_unix
-            };
+            let baseline = colony_sim_baseline(&col, &net);
             if baseline > 0 && now_unix > baseline {
                 let elapsed = now_unix.saturating_sub(baseline);
                 let (ext, proc_qty) = advance_colony_and_update_depletion(
@@ -988,10 +993,9 @@ pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
 /// 1,800s / 3,600s schematics complete accurately instead of truncating `1 / 1800 == 0`.
 pub fn tick_all_colonies_background(ctx: &ServerContext, now_unix: u64) {
     let colony_baseline = |col: &PlanetaryColonyRecord, net: &PiColonyNetworkState| -> u64 {
-        if col.last_extracted_unix > 0 {
-            col.last_extracted_unix
-        } else if net.last_simulated_unix > 0 {
-            net.last_simulated_unix
+        let base = colony_sim_baseline(col, net);
+        if base > 0 {
+            base
         } else {
             net.pins
                 .iter()
@@ -1002,9 +1006,6 @@ pub fn tick_all_colonies_background(ctx: &ServerContext, now_unix: u64) {
     };
     let has_due = ctx.db.with_snapshot(|snap| {
         snap.planetary_colonies.iter().any(|(&(cid, pid), c)| {
-            if c.last_extracted_unix > 0 && now_unix > c.last_extracted_unix {
-                return true;
-            }
             let net = load_pi_network(snap, cid, pid, c.command_center_level);
             let b = colony_baseline(c, &net);
             b > 0 && now_unix > b

@@ -64,7 +64,7 @@ pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeR
 }
 
 /// Builds a `ShipDocked` error for space-only module/overload calls made while docked.
-fn ship_docked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
+pub(crate) fn ship_docked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: "ShipDocked".into(),
         message: message.into(),

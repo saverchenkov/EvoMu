@@ -748,7 +748,7 @@ async fn test_pi_idle_colony_depletion_recovers_across_get_colony_without_corrup
     };
     assert_eq!(stored3, stored1);
 
-    let (density_t2, pressure_t2, col_ts_t2, snap_stored) = ctx.db.with_snapshot(|snap| {
+    let (density_t2, pressure_t2, pressure_ts_t2, col_ts_t2, snap_stored) = ctx.db.with_snapshot(|snap| {
         let dens = eve_server::services::industry_pi::compute_planet_resource_density(
             &ctx,
             snap,
@@ -765,12 +765,10 @@ async fn test_pi_idle_colony_depletion_recovers_across_get_colony_without_corrup
             .unwrap_or(0.0);
         let col = snap.planetary_colonies.get(&(char_id, JITA_PLANET_ID)).unwrap();
         let ss = col.extracted_commodities.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied().unwrap_or(0);
-        (dens, pressure, col.last_extracted_unix, ss)
+        (dens, pressure, depl.colony_pressure_last_unix, col.last_extracted_unix, ss)
     });
-    assert_eq!(
-        col_ts_t2, t1,
-        "Idle GetColony must not advance col.last_extracted_unix when e == 0"
-    );
+    assert!(col_ts_t2 > t1, "Idle GetColony advances simulation timestamp");
+    assert_eq!(col_ts_t2, pressure_ts_t2);
     assert_eq!(snap_stored as i64, stored1);
     assert!(
         pressure_t2 < pressure_t1 * 0.55,
@@ -779,6 +777,202 @@ async fn test_pi_idle_colony_depletion_recovers_across_get_colony_without_corrup
     assert!(
         density_t2 > density_t1,
         "Planetary resource density must recover across idle GetColony without simulate_planet_depletion: t1={density_t1}, t2={density_t2}"
+    );
+}
+
+#[tokio::test]
+async fn test_pi_full_storage_elapsed_cycles_not_retroactively_minted_after_emptying() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 7029, char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship ID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(500_000_000);
+            ch.station_id = None;
+        }
+        grant_skills(snap, char_id, &[
+            (COMMAND_CENTER_UPGRADES_SKILL, 5),
+            (INTERPLANETARY_CONSOLIDATION_SKILL, 4),
+            (REMOTE_SENSING_SKILL, 5),
+            (PLANETOLOGY_SKILL, 5),
+            (ADV_PLANETOLOGY_SKILL, 5),
+        ]);
+        seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE, char_id, ship_id, 1);
+    });
+
+    let col_res = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, 0.35, -1.10),
+            cmd_up_cc_tup(0, 1, 4),
+        ]),
+    ]).await.expect("Deploy CC");
+    let PyRep::List(cc_pins) = col_res.dict_get("pins").cloned().expect("pins") else { panic!("pins"); };
+    let cc_pin_id = cc_pins[0].dict_get("pinID").and_then(|v| v.as_i64()).expect("cc_pin_id");
+
+    let net_res = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_pin_tup(1, 2, EXTRACTOR_CONTROL_UNIT_TYPE, 0.36, -1.09),
+            cmd_pin_tup(1, 3, STORAGE_FACILITY_TYPE, 0.37, -1.08),
+            cmd_link(cc_pin_id, 2),
+            cmd_link(2, 3),
+        ]),
+    ]).await.expect("Place ECU + storage");
+    let PyRep::List(net_pins) = net_res.dict_get("pins").cloned().expect("pins") else { panic!("pins"); };
+    let ecu_pin_id = net_pins.iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(EXTRACTOR_CONTROL_UNIT_TYPE as i64))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("ecu_pin_id");
+    let storage_pin_id = net_pins.iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(STORAGE_FACILITY_TYPE as i64))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("storage_pin_id");
+
+    // Install 12h ECU program (cycle 900s) routed to storage
+    rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_route(801, ecu_pin_id, storage_pin_id, AQUEOUS_LIQUIDS_P0_TYPE, 5_000),
+            PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_pin_id),
+                PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64),
+                PyRep::Integer(900),
+                PyRep::Integer(4),
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![PyRep::Real(0.36), PyRep::Real(-1.09)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.38), PyRep::Real(-1.09)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.36), PyRep::Real(-1.07)]),
+                    PyRep::Tuple(vec![PyRep::Real(0.38), PyRep::Real(-1.07)]),
+                ]),
+                PyRep::Integer(43_200),
+            ]),
+        ]),
+    ]).await.expect("Install 12h ECU program");
+
+    // 1. Run 1 active cycle so col.last_extracted_unix and net.last_simulated_unix are established
+    ctx.advance_secs(900);
+    let t_extracted = ctx.now_unix();
+    let get1 = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("Initial GetColony");
+    let stored1 = match get1.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert!(stored1 > 0);
+
+    // 2. Completely fill Storage pin to exact m3 capacity so all subsequent cycles overflow (actual_deposit == 0)
+    let storage_cap = eve_server::services::industry_pi::pi_helpers::pin_storage_capacity_m3(
+        &ctx.sde,
+        STORAGE_FACILITY_TYPE,
+    );
+    let unit_vol = ctx
+        .sde
+        .types
+        .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+        .map(|t| t.volume.max(0.01))
+        .unwrap_or(0.01);
+    let max_units = (storage_cap / unit_vol).floor() as u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap, char_id, JITA_PLANET_ID, 4,
+        );
+        let st_pin = net.pins.iter_mut().find(|p| p.pin_id == storage_pin_id).unwrap();
+        st_pin.contents.insert(AQUEOUS_LIQUIDS_P0_TYPE, max_units);
+        eve_server::services::industry_pi::pi_helpers::save_pi_network(
+            snap, char_id, JITA_PLANET_ID, &net,
+        );
+    });
+
+    // 3. Advance 5 hours (20 active cycles) while storage is full; GetColony + background tick advance net.last_simulated_unix
+    ctx.advance_secs(18_000);
+    let t_full_end = ctx.now_unix();
+    let get_full = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony while storage full");
+    assert_eq!(get_full.dict_get("simulatedExtractedQuantity").and_then(|v| v.as_i64()), Some(0));
+
+    let (sim_unix_full, last_ext_full) = ctx.db.with_snapshot(|snap| {
+        let col = snap.planetary_colonies.get(&(char_id, JITA_PLANET_ID)).unwrap();
+        let net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap, char_id, JITA_PLANET_ID, col.command_center_level,
+        );
+        (net.last_simulated_unix, col.last_extracted_unix)
+    });
+    assert_eq!(sim_unix_full, t_full_end);
+    assert!(last_ext_full > t_extracted);
+    assert_eq!(
+        last_ext_full, t_full_end,
+        "col.last_extracted_unix advances alongside net.last_simulated_unix so full-storage cycles are not retroactively minted and idle ticks do not spin"
+    );
+
+    // Repeating background tick at t_full_end must not churn or re-simulate an already simulated colony
+    eve_server::services::industry_pi::pi_helpers::tick_all_colonies_background(&ctx, t_full_end);
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap, char_id, JITA_PLANET_ID, 4,
+        );
+        assert_eq!(net.pending_login_extracted, 0);
+        assert_eq!(net.last_simulated_unix, t_full_end);
+    });
+
+    // 4. Empty storage pin, advance only 10s (< 1 cycle), and verify 20 full-storage cycles are NOT retroactively minted
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::pi_helpers::load_pi_network(
+            snap, char_id, JITA_PLANET_ID, 4,
+        );
+        net.pins.iter_mut().find(|p| p.pin_id == storage_pin_id).unwrap().contents.clear();
+        eve_server::services::industry_pi::pi_helpers::save_pi_network(
+            snap, char_id, JITA_PLANET_ID, &net,
+        );
+    });
+    ctx.advance_secs(10);
+    let get_after_empty = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony right after emptying storage");
+    let stored_after_empty = match get_after_empty.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert_eq!(
+        stored_after_empty, 0,
+        "Cycles elapsed while storage was full must NOT be retroactively minted after emptying"
+    );
+    assert_eq!(
+        get_after_empty.dict_get("simulatedExtractedQuantity").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+
+    // 5. Advancing 1 real cycle after emptying extracts only ~1 cycle (not 21 retroactive cycles)
+    ctx.advance_secs(900);
+    let get_one_cycle = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony 1 cycle after emptying");
+    let stored_one_cycle = match get_one_cycle.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert!(
+        stored_one_cycle > 0 && stored_one_cycle <= stored1 * 2,
+        "Expected only ~1 cycle extracted after emptying (stored1={stored1}, got={stored_one_cycle})"
     );
 }
 
