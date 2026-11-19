@@ -264,11 +264,11 @@ async fn test_live_esi_fw_and_incursions_lifecycle() {
     assert_eq!(c1_rolled["kills"]["last_week"], 1);
     assert_eq!(c1_rolled["kills"]["total"], 1);
 
-    // 5. Live Incursions: empty initially, spawned via `incursionSvc.GetIncursionData`, influence decays on live site completion.
+    // 5. Live Incursions: empty initially, spawned via `map.GetIncursionGlobalReport`, influence decays on live site completion.
     let empty_inc = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
     assert_eq!(empty_inc.as_array().unwrap().len(), 0);
 
-    rpc(&ctx, &mut s1, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[]).await.expect("GetHomefrontSiteInstances");
+    rpc(&ctx, &mut s1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
     let active_inc = call_esi(&router, EsiHttpRequest::new("GET", "/v1/incursions/"), 200);
     let first_inc = &active_inc.as_array().unwrap()[0];
     let cid = first_inc["constellation_id"].as_u64().unwrap() as u32;
