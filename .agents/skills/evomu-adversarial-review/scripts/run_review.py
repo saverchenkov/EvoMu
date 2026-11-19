@@ -579,12 +579,31 @@ def _enclosing_fns_at_ref(root, ref, rel_path, line_nums):
     return out
 
 
+def _is_central_router_auth_file(rel):
+    """Return True for central production router/auth files whose blast radius covers
+    bound-object auth, bridge dispatch, Quasar gateway pre-auth, and property routing (#1393)."""
+    rel_u = rel.replace("\\", "/")
+    parts = rel_u.split("/")
+    if len(parts) != 5 or parts[:4] != ["crates", "eve-server", "src", "router"]:
+        return False
+    fname = parts[4]
+    if not fname.endswith(".rs"):
+        return False
+    if fname == "tests.rs" or fname.endswith(("_unit_tests.rs", "_tests.rs", "_test.rs")):
+        return False
+    if fname in ("dispatch.rs", "context.rs", "mod.rs"):
+        return True
+    return fname == "binding.rs" or fname.startswith("binding_")
+
+
 def derive_affected_test_commands(root, base, cargo, head="HEAD"):
     """Derive targeted `cargo test -j 4` commands covering:
     1. Always-on fast wire/bootstrap sentinel (`rpc_client_contracts`, `login_space_bootstrap_sequence`,
        `client_harness`, and `--lib macho_listener`) whenever any `.rs`/`.json`/`.txt` under `crates/` changes.
     2. Reverse-import / RPC-service / `On*`-notification / symbol affected `tests/it/*.rs` (bounded to
-       <= 12 integration test filters + sentinel set) and `--lib` modules (including `crates/eve-quasar/`)."""
+       <= 12 integration test filters + sentinel set) and `--lib` modules (including `crates/eve-quasar/`).
+    3. Fast router/auth blast-radius tests (`router::binding`, `main_unit_tests`, `quasar_gateway`, and
+       `property_coverage_suite` dispatch/quasar routing) whenever central production `router/` files change."""
     diff_base = base
     if head == "HEAD":
         for trunk_ref in ("main", "origin/main"):
@@ -605,12 +624,17 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         f.startswith(("client-bridge/", "tools/client-harness/", "crates/eve-server/src/bin/"))
         for f in changed_all
     )
+    router_auth_touched = any(_is_central_router_auth_file(f) for f in changed_crates)
     include_sentinel = any(f.endswith((".rs", ".json", ".txt")) for f in changed_crates) or harness_or_journeys_touched
 
     lib_filters_by_crate = {}
     whole_lib_crates = set()
     non_server_integ = []
-    direct_server_it = ["rpc_dispatch_and_client_harness_e2e"] if harness_or_journeys_touched else []
+    direct_server_it = []
+    if harness_or_journeys_touched:
+        direct_server_it.append("rpc_dispatch_and_client_harness_e2e")
+    if router_auth_touched and "quasar_gateway" not in direct_server_it:
+        direct_server_it.append("quasar_gateway")
     changed_server_stems = set()
     quasar_crate_touched = False
 
@@ -833,14 +857,27 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         else:
             selected_server_it = list(direct_server_it[:MAX_AFFECTED_IT_FILTERS])
 
+    if router_auth_touched and "eve-server" in lib_filters_by_crate:
+        # Avoid running `router::binding` twice when `router/binding.rs` also triggers the blast-radius rule below.
+        lib_filters_by_crate["eve-server"].discard("binding")
+
     cmds = []
+    seen_cmds = set()
+
+    def _add_cmd(raw_cmd):
+        c = _ensure_cargo_j4(raw_cmd)
+        k = tuple(c)
+        if k not in seen_cmds:
+            seen_cmds.add(k)
+            cmds.append(c)
+
     if include_sentinel:
         for sflt in SENTINEL_IT_FILTERS:
-            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--test", "it", sflt]))
-        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--lib", SENTINEL_LIB_FILTER]))
+            _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", sflt])
+        _add_cmd([cargo, "test", "-p", "eve-server", "--lib", SENTINEL_LIB_FILTER])
 
     for crate in sorted(whole_lib_crates):
-        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--lib"]))
+        _add_cmd([cargo, "test", "-p", crate, "--lib"])
     for crate, filters in sorted(lib_filters_by_crate.items()):
         if crate in whole_lib_crates or not filters:
             continue
@@ -849,10 +886,10 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
             cleaned = ["notify_registry"] + [f for f in cleaned if f != "notify_registry"]
         cap = MAX_AFFECTED_LIB_FILTERS if crate == "eve-server" else 4
         for flt in cleaned[:cap]:
-            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--lib", flt]))
+            _add_cmd([cargo, "test", "-p", crate, "--lib", flt])
 
     for submod in selected_server_it[:MAX_AFFECTED_IT_FILTERS]:
-        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--test", "it", submod]))
+        _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", submod])
 
     non_root_integ = {(c, b) for c, b, s in non_server_integ if s and s not in ("main", "mod")}
     seen_integ = set()
@@ -870,12 +907,21 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
         seen_integ.add(key)
         integ_per_bin[(crate, bin_name)] = integ_per_bin.get((crate, bin_name), 0) + 1
         if submod and submod not in ("main", "mod"):
-            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--test", bin_name, submod]))
+            _add_cmd([cargo, "test", "-p", crate, "--test", bin_name, submod])
         else:
-            cmds.append(_ensure_cargo_j4([cargo, "test", "-p", crate, "--test", bin_name, "smoke"]))
+            _add_cmd([cargo, "test", "-p", crate, "--test", bin_name, "smoke"])
+
+    if router_auth_touched:
+        _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "router::binding"])
+        _add_cmd([cargo, "test", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"])
+        _add_cmd([cargo, "test", "-p", "eve-server", "--test", "it", "quasar_gateway"])
+        _add_cmd([
+            cargo, "test", "-p", "eve-testkit", "--test", "property_coverage_suite",
+            "test_t5_server_dispatch_and_quasar_gateway_routing",
+        ])
 
     if not cmds:
-        cmds.append(_ensure_cargo_j4([cargo, "test", "-p", "eve-server", "--lib", "config::tests"]))
+        _add_cmd([cargo, "test", "-p", "eve-server", "--lib", "config::tests"])
     return cmds
 
 

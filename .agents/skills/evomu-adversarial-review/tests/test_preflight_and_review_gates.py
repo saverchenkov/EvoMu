@@ -398,6 +398,80 @@ fn t() {
             "Expected quasar affected tests in %s" % (q_cmds,),
         )
 
+    def test_run_review_router_auth_blast_radius_selector(self):
+        expected_blast = [
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "router::binding"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "quasar_gateway"],
+            [
+                "cargo",
+                "test",
+                "-j",
+                "4",
+                "-p",
+                "eve-testkit",
+                "--test",
+                "property_coverage_suite",
+                "test_t5_server_dispatch_and_quasar_gateway_routing",
+            ],
+        ]
+
+        def run_for_files(paths):
+            def fake_diff(cmd, cwd, env=None, timeout=None):
+                if cmd[:3] == ["git", "diff", "--name-only"]:
+                    return 0, "\n".join(paths) + "\n"
+                if cmd[:3] == ["git", "diff", "-U0"]:
+                    return 0, ""
+                return 0, ""
+
+            with mock.patch.object(run_review, "sh", side_effect=fake_diff):
+                return run_review.derive_affected_test_commands(REPO_ROOT, "origin/main", "cargo", head="FAKE_SHA")
+
+        # Production central router/auth files must emit all 4 targets with zero duplicates
+        for prod_path in (
+            "crates/eve-server/src/router/dispatch.rs",
+            "crates/eve-server/src/router/binding_auth.rs",
+            "crates/eve-server/src/router/binding.rs",
+            "crates/eve-server/src/router/context.rs",
+            "crates/eve-server/src/router/mod.rs",
+        ):
+            cmds = run_for_files([prod_path])
+            tuples = [tuple(c) for c in cmds]
+            self.assertEqual(len(tuples), len(set(tuples)), "Duplicate commands for %s: %s" % (prod_path, cmds))
+            for req in expected_blast:
+                self.assertIn(req, cmds, "%s missing blast-radius target %s in %s" % (prod_path, req, cmds))
+            self.assertNotIn(
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "binding"],
+                cmds,
+                "Redundant bare `--lib binding` alongside `--lib router::binding` for %s" % prod_path,
+            )
+
+        # Combined diff including quasar_gateway IT and multiple router files must remain deduplicated
+        combo_cmds = run_for_files([
+            "crates/eve-server/src/router/dispatch.rs",
+            "crates/eve-server/src/router/binding.rs",
+            "crates/eve-server/tests/it/quasar_gateway.rs",
+        ])
+        combo_tuples = [tuple(c) for c in combo_cmds]
+        self.assertEqual(len(combo_tuples), len(set(combo_tuples)), "Duplicate commands in combo diff: %s" % (combo_cmds,))
+        for req in expected_blast:
+            self.assertIn(req, combo_cmds)
+
+        # Test-only router files must NOT trigger the extra blast-radius fanout
+        for test_path in (
+            "crates/eve-server/src/router/dispatch_unit_tests.rs",
+            "crates/eve-server/src/router/binding_auth_unit_tests.rs",
+            "crates/eve-server/src/router/binding_unit_tests.rs",
+            "crates/eve-server/src/router/context_tests.rs",
+        ):
+            cmds = run_for_files([test_path])
+            for req in expected_blast:
+                self.assertNotIn(
+                    req,
+                    cmds,
+                    "Test-only file %s unexpectedly triggered blast-radius target %s in %s" % (test_path, req, cmds),
+                )
+
     def test_ten_of_ten_historical_p0_regressions_caught_by_gates(self):
         """Replay all 10 historical `[P0][Hourly CI]` regressions (#1125..#1162) and verify 10/10
         are caught by `ratchet_checks` + `derive_affected_test_commands` within <= 12 `it` filters."""
