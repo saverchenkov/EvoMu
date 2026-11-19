@@ -259,7 +259,7 @@ async fn handle_module_cycles_inner(
                 .get(&module_id)
                 .cloned()
                 .or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id));
-            let Some(m) = m_opt else {
+            let Some(mut m) = m_opt else {
                 let has_online_weapon = fit.modules.values().any(|wm| {
                     (27..=34).contains(&wm.flag_id)
                         && wm.state != eve_dogma::ModuleState::Offline
@@ -295,6 +295,35 @@ async fn handle_module_cycles_inner(
             let Some(mod_type) = ctx.sde.types.get(&m.type_id) else {
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module type {} not found in SDE", m.type_id), client_error: None }));
             };
+            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
+            if method == "Overload" && matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
+                return Some(Err(
+                    crate::services::structure_weapons_ops::cannot_overload_structure_module_error(),
+                ));
+            }
+            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
+                &sys, ship_id, module_id, method, m.state,
+            ) {
+                return Some(Err(e));
+            }
+            if method == "Overload" && target_id_opt.is_none() {
+                return Some(
+                    crate::router::box_fut(|| {
+                        crate::services::fitting_cycles_overheat::handle_early_targetless_overload(
+                            ctx,
+                            &sys,
+                            char_id,
+                            ship_id,
+                            module_id,
+                            mod_type,
+                            is_weapon,
+                            &mut m,
+                            fit,
+                        )
+                    })
+                    .await,
+                );
+            }
             if effect_name != "online" && session.station_id.is_none() && session.structure_id.is_none() {
                 if let Err(e) = enforce_space_module_cloak_and_warp_guard(
                     ctx, &sys, char_id, ship_id, mod_type,
@@ -304,7 +333,6 @@ async fn handle_module_cycles_inner(
                     return Some(Err(e));
                 }
             }
-            let is_weapon = matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807);
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
@@ -382,11 +410,6 @@ async fn handle_module_cycles_inner(
                 if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
                     return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                 }
-            }
-            if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
-                &sys, ship_id, module_id, method, m.state,
-            ) {
-                return Some(Err(e));
             }
             if method == "Overload" {
                 if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(
@@ -862,48 +885,44 @@ async fn handle_module_cycles_inner(
                     .reconcile_module_cycle_before_activate(ship_id, module_id, ctx.now_unix_secs())
                     .await;
                 let in_actor_cycle = actor_cycle_state.is_some();
-                let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
-                if cleaned_stale || (is_weapon && !in_delay && !in_actor_cycle) {
-                    ctx.db.with_mut_snapshot(|s| {
-                        s.module_active_states.remove(&module_id);
-                    });
-                }
-                let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
-                let mut m_effective_state = m.state;
-                // Why: Only clear stale Active state; pre-overloaded idle modules must keep Overloaded across failed activations.
-                if !in_db_active
-                    && !in_actor_cycle
-                    && m_effective_state == eve_dogma::ModuleState::Active
-                {
-                    m_effective_state = eve_dogma::ModuleState::Online;
-                    if let Some(fm) = fit.modules.get_mut(&module_id) {
-                        fm.state = eve_dogma::ModuleState::Online;
-                    }
-                    fit.recalculate_stats(&ctx.sde);
-                    ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
-                    ctx.invalidate_and_push_fit(ship_id);
-                }
-                let already_active = m_effective_state == eve_dogma::ModuleState::Active
-                    || in_db_active
-                    || in_actor_cycle
-                    || in_delay;
                 let is_entropic = mod_type.group_id == 1986;
-                if method == "Overload" && (in_delay || already_active) && (!in_actor_cycle || is_entropic) {
-                    return Some(Err(module_already_active_rpc_error(
+                let (in_delay, already_active) = if method == "Overload" {
+                    match crate::services::fitting_cycles_overheat::check_overload_cycle_or_delay(
                         ctx,
-                        Some(m.type_id),
-                        format!("Module {module_id} cannot overload while active or in reactivation delay"),
-                    )));
-                }
-                if method == "Overload" && (already_active || target_id_opt.is_none()) {
-                    let rep = crate::router::box_fut(|| {
-                        crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                            ctx, &sys, char_id, ship_id, module_id, fit, already_active,
-                        )
-                    })
-                    .await;
-                    return Some(Ok(rep));
-                }
+                        char_id,
+                        ship_id,
+                        module_id,
+                        in_actor_cycle,
+                        cleaned_stale,
+                        is_weapon,
+                        is_entropic,
+                        &mut m,
+                        &mut fit,
+                    ) {
+                        Ok(true) => {
+                            let rep = crate::router::box_fut(|| {
+                                crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                                    ctx, &sys, char_id, ship_id, module_id, fit, true,
+                                )
+                            })
+                            .await;
+                            return Some(Ok(rep));
+                        }
+                        Ok(false) => (false, false),
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else {
+                    crate::services::fitting_cycles_overheat::reconcile_module_active_state(
+                        ctx,
+                        ship_id,
+                        module_id,
+                        in_actor_cycle,
+                        cleaned_stale,
+                        is_weapon,
+                        &mut m,
+                        &mut fit,
+                    )
+                };
                 if in_delay {
                     if matches!(mod_type.group_id, 53 | 55 | 74 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807) {
                         return Some(Err(module_already_active_rpc_error(

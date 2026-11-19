@@ -242,6 +242,34 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
         info_rep.dict_get("hasColony").unwrap().as_bool(),
         Some(false)
     );
+    let expected_cel = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.celestial_id == planet_id && c.group_id == 7)
+        .expect("planet celestial in SDE");
+    assert_eq!(
+        info_rep.dict_get("celestialIndex").and_then(|v| v.as_i64()),
+        Some(i64::from(expected_cel.celestial_index.unwrap_or(1)))
+    );
+    if expected_cel.radius > 0.0 {
+        assert_eq!(
+            info_rep.dict_get("radius").and_then(|v| v.as_f64()),
+            Some(expected_cel.radius)
+        );
+    }
+    let Some(PyRep::List(info_resources)) = info_rep.dict_get("resources") else {
+        panic!("GetPlanetInfo must include resources list");
+    };
+    assert!(!info_resources.is_empty());
+    for entry in info_resources {
+        let tid = entry.dict_get("resourceTypeID").unwrap().as_i64().unwrap() as TypeId;
+        let q = entry.dict_get("quality").unwrap().as_f64().unwrap();
+        let expected_q = ctx
+            .db
+            .with_snapshot(|snap| compute_planet_resource_quality(&ctx, snap, planet_id, tid));
+        assert!((q - expected_q).abs() < 1e-12);
+    }
 
     let res_info = handle(
         &ctx,
@@ -328,7 +356,7 @@ fn planet_mgr_resource_rpcs_and_p0_extraction_resolve_correctly() {
     .unwrap()
     .unwrap();
     assert_eq!(res_data.dict_get("numBands").unwrap().as_i64(), Some(6));
-    assert_eq!(res_data.dict_get("proximity").unwrap().as_i64(), Some(3));
+    assert_eq!(res_data.dict_get("proximity").unwrap().as_i64(), Some(4));
     let Some(PyRep::Bytes(sh_bytes)) = res_data.dict_get("data") else {
         panic!("GetResourceData must include binary SH float buffer");
     };

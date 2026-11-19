@@ -371,30 +371,30 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
     let data_tuple = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(valid_p0_tid)])
         .await
         .expect("GetResourceData tuple");
-    assert_eq!(get_i64(&data_tuple, "numBands"), Some(9));
+    assert_eq!(get_i64(&data_tuple, "numBands"), Some(17));
     assert_eq!(data_tuple.dict_get("proximity"), Some(&PyRep::Integer(3)));
     assert!(data_tuple.dict_get("inRange").is_none(), "inRange is computed client-side, not sent");
     let PyRep::Bytes(sh_bytes) = data_tuple.dict_get("data").expect("spherical harmonics data") else { panic!("expected bytes"); };
-    assert_eq!(sh_bytes.len(), 324); // 9 * 9 * 4
+    assert_eq!(sh_bytes.len(), 17 * 17 * 4);
     let sh_coeffs: Vec<f32> = sh_bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    assert_eq!(sh_coeffs.len(), 81);
+    assert_eq!(sh_coeffs.len(), 17 * 17);
     assert!(sh_coeffs.iter().all(|v| v.is_finite()));
     assert!(sh_coeffs[0] > 0.0, "SH l=0 monopole must be positive");
     assert!(sh_coeffs[1..9].iter().any(|c| c.abs() > 1e-5), "SH l=1..2 harmonics must be non-degenerate");
 
     let kv_arg = PyRep::keyval([("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(valid_p0_tid))]);
     let data_kv = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[kv_arg]).await.expect("GetResourceData KeyVal");
-    assert_eq!(get_i64(&data_kv, "numBands"), Some(9));
+    assert_eq!(get_i64(&data_kv, "numBands"), Some(17));
 
     let dict_arg = PyRep::Dict(vec![
         (PyRep::String("planetID".into()), PyRep::Integer(JITA_PLANET_ID)),
         (PyRep::String("resourceTypeID".into()), PyRep::Integer(valid_p0_tid)),
     ]);
     let data_dict = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[dict_arg]).await.expect("GetResourceData Dict");
-    assert_eq!(get_i64(&data_dict, "numBands"), Some(9));
+    assert_eq!(get_i64(&data_dict, "numBands"), Some(17));
 
     let invalid_res = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(99999)])
         .await

@@ -122,6 +122,32 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     assert_eq!(pkv.get("hasColony"), Some(&PyRep::Bool(false)));
     assert!(pkv.get("planetTypeID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
     assert!(pkv.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.0) > 1_000_000.0);
+    let jita_cel = ctx
+        .sde
+        .celestials_in_system(JITA_SOLAR_SYSTEM_ID)
+        .into_iter()
+        .find(|c| c.celestial_id == JITA_PLANET_ID && c.group_id == 7)
+        .expect("Jita IV celestial in SDE");
+    assert_eq!(
+        pkv.get("celestialIndex").and_then(|v| v.as_i64()),
+        Some(i64::from(jita_cel.celestial_index.expect("Jita IV celestial_index"))),
+    );
+    assert_eq!(
+        pkv.get("radius").and_then(|v| v.as_f64()),
+        Some(jita_cel.radius),
+    );
+    let Some(PyRep::List(info_res_list)) = pkv.get("resources") else {
+        panic!("Expected resources list in GetPlanetInfo");
+    };
+    assert!(!info_res_list.is_empty());
+    for entry in info_res_list {
+        let tid = entry.dict_get("resourceTypeID").unwrap().as_i64().unwrap() as TypeId;
+        let q = entry.dict_get("quality").unwrap().as_f64().unwrap();
+        let expected_q = ctx.db.with_snapshot(|snap| {
+            eve_server::services::industry_pi::compute_planet_resource_quality(&ctx, snap, JITA_PLANET_ID, tid)
+        });
+        assert!((q - expected_q).abs() < 1e-12, "GetPlanetInfo resource quality must match compute_planet_resource_quality");
+    }
 
     let res_info = rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("GetPlanetResourceInfo");
     let PyRep::Dict(res_entries) = res_info else { panic!("Expected Dict"); };
@@ -139,7 +165,16 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
     let s_err = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(first_p0_tid))])]).await.unwrap_err();
     assert_eq!(s_err.code, "PISkillRequiredToSurveyPlanetResources");
 
-    // Survey succeeds with Remote Sensing
+    // In-system proximity=3 minBand floor (Remote Sensing=1, Planetology=0, Adv=0 -> min_b=10)
+    ctx.db.with_mut_snapshot(|snap| grant_skills(snap, char_id, &[(REMOTE_SENSING_SKILL, 1)]));
+    let min_band_res = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
+        ("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(first_p0_tid)),
+        ("newBand", PyRep::Integer(25)),
+    ])]).await.expect("GetResourceData with Remote Sensing=1");
+    assert_eq!(min_band_res.dict_get("proximity"), Some(&PyRep::Integer(3)));
+    assert_eq!(min_band_res.dict_get("numBands"), Some(&PyRep::Integer(10)));
+
+    // Survey succeeds with Remote Sensing=4, Planetology=3, AdvPlanetology=2 -> (10 + 3 + 2*2).min(20) = 17
     ctx.db.with_mut_snapshot(|snap| grant_skills(snap, char_id, &[(REMOTE_SENSING_SKILL, 4), (PLANETOLOGY_SKILL, 3), (ADV_PLANETOLOGY_SKILL, 2)]));
     let res_data = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
         ("planetID", PyRep::Integer(JITA_PLANET_ID)), ("resourceTypeID", PyRep::Integer(first_p0_tid)),
@@ -147,9 +182,9 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
         ("remoteSensing", PyRep::Integer(4)), ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(25)),
     ])]).await.expect("GetResourceData with Remote Sensing");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
-    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(9)));
+    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(17)));
     let Some(PyRep::Bytes(sh_b)) = rd_kv.get("data") else { panic!("Expected Bytes SH buffer"); };
-    assert_eq!(sh_b.len(), 9 * 9 * 4);
+    assert_eq!(sh_b.len(), 17 * 17 * 4);
     let sh_vals: Vec<f32> = sh_b
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -187,8 +222,14 @@ async fn test_pi_planet_info_command_center_and_colony_limit() {
             ("planetID", PyRep::Integer(amarr_planet_id)), ("resourceTypeID", PyRep::Integer(i64::from(amarr_p0_tid))),
             ("newBand", PyRep::Integer(12)),
         ])]).await.expect("Colony bypasses scan range cap");
-        assert_eq!(distant_res.dict_get("proximity"), Some(&PyRep::Integer(0)));
-        assert_eq!(distant_res.dict_get("numBands"), Some(&PyRep::Integer(6)), "Distant proximity caps newBand to PLANET_RESOURCE_PROXIMITY_LIMITS[0].1 = 6");
+        assert_eq!(distant_res.dict_get("proximity"), Some(&PyRep::Integer(4)));
+        assert_eq!(distant_res.dict_get("numBands"), Some(&PyRep::Integer(12)), "Colonized planet resolves proximity=4 (Planet, max=30) so newBand=12 is unclipped");
+        let colony_max_res = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::keyval([
+            ("planetID", PyRep::Integer(amarr_planet_id)), ("resourceTypeID", PyRep::Integer(i64::from(amarr_p0_tid))),
+            ("newBand", PyRep::Integer(35)),
+        ])]).await.expect("Colonized planet caps at proximity=4 maxBand=30");
+        assert_eq!(colony_max_res.dict_get("proximity"), Some(&PyRep::Integer(4)));
+        assert_eq!(colony_max_res.dict_get("numBands"), Some(&PyRep::Integer(30)));
         ctx.db.with_mut_snapshot(|snap| { snap.planetary_colonies.remove(&(char_id, amarr_planet_id)); });
     }
 

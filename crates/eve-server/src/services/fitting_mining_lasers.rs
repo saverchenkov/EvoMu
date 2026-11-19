@@ -422,9 +422,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             if !fit.modules.contains_key(&module_id) {
-                let mut err = BridgeRpcError::user_error("ModuleNotFound");
-                err.message = format!("Module {module_id} is not fitted to active ship {ship_id}");
-                return Some(Err(err));
+                let msg = format!("Module {module_id} is not fitted to active ship {ship_id}");
+                return Some(Err(BridgeRpcError::with_client_error(
+                    "ModuleNotFound",
+                    msg.clone(),
+                    eve_proto::ClientError::CustomInfo(msg),
+                )));
             }
             let was_cycling = if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);

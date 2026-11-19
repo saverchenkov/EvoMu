@@ -4211,6 +4211,215 @@ async fn test_mid_cycle_overload_and_burnout_ship_fitting_sync() {
 }
 
 #[tokio::test]
+async fn test_dogma_im_overload_bypasses_warp_cloak_tether_and_activation_paths() {
+    let ctx = Arc::new(build_ctx());
+    let char_id: i64 = 95_099;
+    let ship_id: i64 = 96_099;
+    let structure_id: i64 = 1_000_000_098_099;
+    let bystander_char: i64 = 95_098;
+    let bystander_ship: i64 = 96_098;
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 24_698, JITA_SYS, false); // Drake
+    let _sess_bystander = seed_pilot(&ctx, bystander_char, bystander_ship, 587, JITA_SYS, false);
+    let sys = ctx.systems.get_or_spawn(JITA_SYS);
+
+    let ab_id: i64 = 97_001; // 1MN Afterburner I (439)
+    let scram_id: i64 = 97_002; // Warp Scrambler I (447)
+    let smartbomb_id: i64 = 97_003; // Small Proton Smartbomb I (1547, group 72)
+    let analyzer_id: i64 = 97_004; // Data Analyzer I (22175, group 538)
+    let salvager_id: i64 = 97_005; // Salvager I (25861, group 1122)
+    let burst_id: i64 = 97_006; // Armor Command Burst I (42526, group 1770)
+    let strip_id: i64 = 97_007; // Strip Miner I (17482, group 464)
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = make_structure(structure_id, 35_832, 98_000_001, JITA_SYS, "Jita Astrahus");
+        st.position = [100_000.0, 0.0, 0.0];
+        snap.structures.insert(structure_id, st);
+        for (iid, tid, flag) in [
+            (ab_id, 439_u32, InventoryFlag::MedSlot0),
+            (scram_id, 447, InventoryFlag::MedSlot1),
+            (smartbomb_id, 1547, InventoryFlag::HiSlot0),
+            (analyzer_id, 22_175, InventoryFlag::MedSlot2),
+            (salvager_id, 25_861, InventoryFlag::HiSlot1),
+            (burst_id, 42_526, InventoryFlag::HiSlot2),
+            (strip_id, 17_482, InventoryFlag::HiSlot3),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // Spawn neutral bystander in smartbomb range (1 km away)
+    let mut b_cs = ctx.build_ship_combat_state(bystander_char, bystander_ship, 587);
+    b_cs.shield_hp = 5_000.0;
+    b_cs.max_shield_hp = 5_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: bystander_ship,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        b_cs,
+        ctx.build_ship_slim_meta(bystander_char, 587),
+    )
+    .await
+    .unwrap();
+
+    let spawn_ship = |mode: MovementMode, cloaked: bool, gate_ticks: u32, tethered: bool| {
+        let ctx = &ctx;
+        let sys = &sys;
+        async move {
+            let _ = sys.remove_ball(ship_id).await;
+            let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 24_698);
+            cs.capacitor = 10_000.0;
+            cs.max_capacitor = 10_000.0;
+            cs.is_cloaked = cloaked;
+            cs.gate_cloak_remaining_ticks = gate_ticks;
+            cs.is_tethered = tethered;
+            sys.spawn_ball_with_meta(
+                Ball {
+                    id: ship_id,
+                    type_id: 24_698,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 10_000_000.0,
+                    radius: 150.0,
+                    speed_fraction: 0.0,
+                    mode,
+                },
+                cs,
+                ctx.build_ship_slim_meta(char_id, 24_698),
+            )
+            .await
+            .unwrap();
+        }
+    };
+
+    // 1. Pre-overload succeeds while warping
+    spawn_ship(
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(1_000_000_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 1_000_000_000.0,
+            elapsed_warp_time: 1.0,
+            phase: eve_destiny::WarpPhase::Cruising,
+        },
+        false,
+        0,
+        false,
+    )
+    .await;
+    let warp_ov = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
+        .await
+        .expect("Overload AB while warping must succeed");
+    assert_eq!(warp_ov.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&ab_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+    rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(ab_id)])
+        .await
+        .unwrap();
+
+    // 2. Pre-overload succeeds under post-jump gate cloak without breaking cloak
+    spawn_ship(MovementMode::Stop, true, 30, false).await;
+    let gate_cloak_ov = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
+        .await
+        .expect("Overload while gate-cloaked must succeed");
+    assert_eq!(gate_cloak_ov.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    let cs_post_gate = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_post_gate.is_cloaked && cs_post_gate.gate_cloak_remaining_ticks == 30, "Pre-overload must not break post-jump gate cloak");
+    rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(ab_id)])
+        .await
+        .unwrap();
+
+    // 3. Pre-overload succeeds while module-cloaked (no CannotActivateCloaked)
+    spawn_ship(MovementMode::Stop, true, 0, false).await;
+    let mod_cloak_ov = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(scram_id)])
+        .await
+        .expect("Overload while module-cloaked must succeed");
+    assert_eq!(mod_cloak_ov.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(scram_id)])
+        .await
+        .unwrap();
+
+    // 4. Pre-overload succeeds on offensive module while tethered (no CantActivateWhileTethered)
+    spawn_ship(MovementMode::Stop, false, 0, true).await;
+    let tether_ov = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(scram_id)])
+        .await
+        .expect("Overload offensive module while tethered must succeed");
+    assert_eq!(tether_ov.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(scram_id)])
+        .await
+        .unwrap();
+
+    // 5. Idle Smartbomb (group 72) with an Upwell structure in high-sec + Green safety pre-overloads cleanly without detonating or failing safety checks
+    spawn_ship(MovementMode::Stop, false, 0, false).await;
+    rpc(&ctx, &mut sess, "crimewatch", "SetSafetyLevel", vec![PyRep::Integer(2)])
+        .await
+        .expect("SetSafetyLevel Green");
+    let sb_ov = rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Overload",
+        vec![PyRep::Integer(smartbomb_id), PyRep::Integer(38)],
+    )
+    .await
+    .expect("Overload idle Smartbomb with Upwell in system & Green safety must pre-overload");
+    assert_eq!(sb_ov.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert!(!sys.has_module_cycle(ship_id, smartbomb_id).await);
+    assert!(
+        (sys.get_combat_state(bystander_ship).await.unwrap().unwrap().shield_hp - 5_000.0).abs() < 1e-6,
+        "Pre-overloading idle Smartbomb must not detonate"
+    );
+    assert!(
+        (sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 10_000.0).abs() < 1e-6,
+        "Pre-overloading idle Smartbomb must not consume capacitor"
+    );
+    assert_eq!(
+        ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&smartbomb_id].state,
+        eve_dogma::ModuleState::Overloaded
+    );
+
+    // 6. Data Analyzer, Salvager, Command Burst, and Strip Miner reject Overload with CannotOverloadModule (never TargetRequired/TargetNotLocked/activation)
+    for (label, mod_id) in [
+        ("Data Analyzer", analyzer_id),
+        ("Salvager", salvager_id),
+        ("Command Burst", burst_id),
+        ("Strip Miner", strip_id),
+    ] {
+        let err = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mod_id)])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "CannotOverloadModule", "{label} must return CannotOverloadModule");
+        assert!(!sys.has_module_cycle(ship_id, mod_id).await, "{label} must not start cycle on Overload");
+    }
+}
+
+#[tokio::test]
 async fn test_warp_to_within_min_range_sub_150km_rejected() {
     let ctx = Arc::new(build_ctx());
     let jita_sys: u32 = 30_004_759;

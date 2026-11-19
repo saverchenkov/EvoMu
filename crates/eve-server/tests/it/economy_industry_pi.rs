@@ -919,10 +919,10 @@ async fn test_pi_colony_command_center_pins_and_links() {
     .await
     .expect("GetResourceData");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
-    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(10)));
+    assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(18)));
     assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(3))), "server computes proximity=3 (System) and clamps newBand");
     let Some(PyRep::Bytes(sh_b)) = rd_kv.get("data") else { panic!("Expected SH bytes"); };
-    assert_eq!(sh_b.len(), 10 * 10 * 4);
+    assert_eq!(sh_b.len(), 18 * 18 * 4);
     let sh_vals: Vec<f32> = sh_b
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))

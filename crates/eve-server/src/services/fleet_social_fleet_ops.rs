@@ -1395,7 +1395,11 @@ pub(crate) async fn handle_fleet_warp(
         }));
     }
     if warped_members.is_empty() && deadspace_blocked {
-        return Some(Err(BridgeRpcError::user_error("NaturalPhenomenaDisruptingWarp")));
+        return Some(Err(BridgeRpcError::with_client_error(
+            "NaturalPhenomenaDisruptingWarp",
+            "Natural phenomena are disrupting warp",
+            eve_proto::ClientError::CustomInfo("Natural phenomena are disrupting warp".into()),
+        )));
     }
 
     for &opt_out_cid in &skipped_opt_out_members {

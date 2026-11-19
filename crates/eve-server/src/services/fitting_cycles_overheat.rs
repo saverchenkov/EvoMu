@@ -425,6 +425,125 @@ pub async fn handle_active_overload_toggle(
         ("effectiveMaxVelocity", PyRep::Real(max_vel)),
     ])
 }
+
+/// Reconciles active and reactivation-delay state for `(ship_id, module_id)` before activation
+/// or overload, clearing any stale `Active` state while preserving `Overloaded`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_module_active_state(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+    in_actor_cycle: bool,
+    cleaned_stale: bool,
+    clear_non_actor_db_active: bool,
+    m: &mut eve_dogma::FittedModule,
+    fit: &mut ShipFittingEngine,
+) -> (bool, bool) {
+    let in_delay = ctx.is_module_in_reactivation_delay(ship_id, module_id);
+    if cleaned_stale || (clear_non_actor_db_active && !in_delay && !in_actor_cycle) {
+        ctx.db.with_mut_snapshot(|s| {
+            s.module_active_states.remove(&module_id);
+        });
+    }
+    let in_db_active = ctx
+        .db
+        .with_snapshot(|s| s.module_active_states.contains(&module_id));
+    // Why: Only clear stale Active state; pre-overloaded idle modules must retain Overloaded across failed activations.
+    if !in_db_active && !in_actor_cycle && m.state == eve_dogma::ModuleState::Active {
+        m.state = eve_dogma::ModuleState::Online;
+        if let Some(fm) = fit.modules.get_mut(&module_id) {
+            fm.state = eve_dogma::ModuleState::Online;
+        }
+        fit.recalculate_stats(&ctx.sde);
+        ctx.persist_fit_inputs(ship_id, &fit.persisted_inputs());
+        ctx.invalidate_and_push_fit(ship_id);
+    }
+    let already_active = m.state == eve_dogma::ModuleState::Active
+        || in_db_active
+        || in_actor_cycle
+        || in_delay;
+    (in_delay, already_active)
+}
+
+/// Validates module overload eligibility (`attr 1211` + Thermodynamics >= required level) and
+/// checks cycle/delay state: returns `Ok(true)` for mid-cycle overload toggle, `Ok(false)` for
+/// idle pre-overload, or `Err(ModuleAlreadyActive)` during reactivation delay / entropic spool.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_overload_cycle_or_delay(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    in_actor_cycle: bool,
+    cleaned_stale: bool,
+    clear_non_actor_db_active: bool,
+    is_entropic: bool,
+    m: &mut eve_dogma::FittedModule,
+    fit: &mut ShipFittingEngine,
+) -> Result<bool, eve_proto::BridgeRpcError> {
+    check_can_overload_module(ctx, char_id, m.type_id)?;
+    let (in_delay, already_active) = reconcile_module_active_state(
+        ctx,
+        ship_id,
+        module_id,
+        in_actor_cycle,
+        cleaned_stale,
+        clear_non_actor_db_active,
+        m,
+        fit,
+    );
+    if !is_entropic && in_actor_cycle {
+        return Ok(true);
+    }
+    if in_delay || already_active {
+        return Err(
+            crate::services::inventory_fitting::fitting_module_cycles::module_already_active_rpc_error(
+                ctx,
+                Some(m.type_id),
+                format!("Module {module_id} cannot overload while active or in reactivation delay"),
+            ),
+        );
+    }
+    Ok(false)
+}
+
+/// Handles targetless `dogmaIM.Overload(itemID[, effectID|effectName])` early before activation
+/// guards (warp/cloak/tether/safety) and per-group activation paths.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_early_targetless_overload(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &InvType,
+    clear_non_actor_db_active: bool,
+    m: &mut eve_dogma::FittedModule,
+    mut fit: ShipFittingEngine,
+) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    if matches!(mod_type.group_id, 1327 | 1328 | 1330 | 1331 | 1333 | 1562) {
+        return Err(crate::services::structure_weapons_ops::cannot_overload_structure_module_error());
+    }
+    let (actor_cycle_state, cleaned_stale) = sys
+        .reconcile_module_cycle_before_activate(ship_id, module_id, ctx.now_unix_secs())
+        .await;
+    let active_toggle = check_overload_cycle_or_delay(
+        ctx,
+        char_id,
+        ship_id,
+        module_id,
+        actor_cycle_state.is_some(),
+        cleaned_stale,
+        clear_non_actor_db_active,
+        mod_type.group_id == 1986,
+        m,
+        &mut fit,
+    )?;
+    Ok(crate::router::box_fut(|| {
+        handle_active_overload_toggle(ctx, sys, char_id, ship_id, module_id, fit, active_toggle)
+    })
+    .await)
+}
 /// Enforces CCP in-space Nanite Repair Paste lockouts (`feat:modules.nanite-repair-paste-in-space`):
 /// a module currently being repaired cannot be activated, and no module on the ship may be overloaded
 /// while any module on the ship is undergoing active Nanite Repair Paste repair.
