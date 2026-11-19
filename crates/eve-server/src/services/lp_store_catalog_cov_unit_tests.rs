@@ -323,7 +323,10 @@ fn esi_sde_filtering_paragon_catalog_legacy_fallback_and_pyrep_serialization() {
         min_standing: None,
     };
     let rep = offer_to_pyrep(&offer_no_st);
+    assert_eq!(rep.dict_get("qty").and_then(|v| v.as_i64()), Some(2));
+    assert!(rep.dict_get("quantity").is_none());
     assert_eq!(rep.dict_get("akCost").and_then(|v| v.as_i64()), Some(0));
+    assert!(rep.dict_get("requiredStandings").is_none());
     assert!(rep.dict_get("minStanding").is_none());
     let req_list = rep.dict_get("reqItems").and_then(|v| v.as_list()).unwrap();
     assert_eq!(req_list.len(), 1);
@@ -505,18 +508,23 @@ fn lp_store_offers_roundtrip_pyrep_and_role_bitmask_kill_mutants() {
     assert_eq!(loaded[1].offer_id, 902);
     assert_eq!(get_corp_lp_offers(&snap, CONCORD_CORP_ID).len(), 1);
 
-    // Exact offer_to_pyrep field verification including minStanding
+    // Exact offer_to_pyrep field verification including requiredStandings
     let rep = offer_to_pyrep(&offer_with_standing);
     assert_eq!(rep.dict_get("offerID").and_then(|v| v.as_i64()), Some(901));
     assert_eq!(rep.dict_get("corpID").and_then(|v| v.as_i64()), Some(CONCORD_CORP_ID));
     assert_eq!(rep.dict_get("typeID").and_then(|v| v.as_i64()), Some(34));
-    assert_eq!(rep.dict_get("quantity").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(rep.dict_get("qty").and_then(|v| v.as_i64()), Some(25));
+    assert!(rep.dict_get("quantity").is_none());
     assert_eq!(rep.dict_get("lpCost").and_then(|v| v.as_i64()), Some(5_000));
     assert_eq!(rep.dict_get("iskCost").and_then(|v| v.as_f64()), Some(1_250.5));
     assert_eq!(rep.dict_get("akCost").and_then(|v| v.as_i64()), Some(42));
-    assert_eq!(rep.dict_get("minStanding").and_then(|v| v.as_f64()), Some(2.75));
+    let req_st = rep.dict_get("requiredStandings").expect("requiredStandings KeyVal");
+    assert_eq!(req_st.dict_get("value").and_then(|v| v.as_f64()), Some(2.75));
+    assert_eq!(req_st.dict_get("ownerID").and_then(|v| v.as_i64()), Some(CONCORD_CORP_ID));
+    assert!(rep.dict_get("minStanding").is_none());
     let rep_no_st = offer_to_pyrep(&offer_no_standing);
     assert_eq!(rep_no_st.dict_get("akCost").and_then(|v| v.as_i64()), Some(0));
+    assert!(rep_no_st.dict_get("requiredStandings").is_none());
     assert!(rep_no_st.dict_get("minStanding").is_none());
 
     // Role checks with multi-bit masks to kill `== -> !=`, `& -> |`, `& -> ^`, and return tuple mutants

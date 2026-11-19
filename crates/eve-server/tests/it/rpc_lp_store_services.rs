@@ -806,7 +806,8 @@ async fn test_lp_store_mgr_gameplay() {
         assert_eq!(k_i64(o, "corpID"), Some(1_000_035));
         assert!(k_i64(o, "offerID").unwrap_or(0) > 0);
         assert!(k_i64(o, "typeID").unwrap_or(0) > 0);
-        assert!(k_i64(o, "quantity").unwrap_or(0) > 0);
+        assert!(k_i64(o, "qty").unwrap_or(0) > 0);
+        assert_eq!(k_i64(o, "quantity"), None);
         assert!(k_i64(o, "lpCost").unwrap_or(0) >= 0);
         assert!(
             o.dict_get("iskCost")
@@ -1547,7 +1548,8 @@ async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
         caldari_offer.dict_get("typeID").and_then(|v| v.as_i64()),
         Some(CALDARI_TRADEIN_REWARD_TYPE_ID as i64)
     );
-    assert_eq!(caldari_offer.dict_get("quantity").and_then(|v| v.as_i64()), Some(5_000));
+    assert_eq!(caldari_offer.dict_get("qty").and_then(|v| v.as_i64()), Some(5_000));
+    assert!(caldari_offer.dict_get("quantity").is_none());
     assert_eq!(caldari_offer.dict_get("lpCost").and_then(|v| v.as_i64()), Some(2_400));
     let isk_cost = caldari_offer.dict_get("iskCost").and_then(|v| v.as_f64()).expect("iskCost");
     assert!((isk_cost - 2_400_000.0).abs() < 0.01);

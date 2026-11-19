@@ -344,18 +344,23 @@ pub(crate) fn offer_to_pyrep(o: &LPOffer) -> PyRep {
         .iter()
         .map(|&(tid, qty)| PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Integer(qty as i64)]))
         .collect();
+    // V24.02 `lpOffers/data.py::_get_offer` uses `qty` (read directly by `lpStoreSvc._GetConfirmMessage`)
+    // and `requiredStandings` KeyVal (`value`, `ownerID`), not `quantity` or `minStanding`.
     let mut fields = vec![
         ("offerID", PyRep::Integer(o.offer_id)),
         ("corpID", PyRep::Integer(o.corp_id)),
         ("typeID", PyRep::Integer(o.type_id as i64)),
-        ("quantity", PyRep::Integer(o.quantity as i64)),
+        ("qty", PyRep::Integer(o.quantity as i64)),
         ("lpCost", PyRep::Integer(o.lp_cost)),
         ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
         ("akCost", PyRep::Integer(o.ak_cost.max(0))),
         ("reqItems", PyRep::List(req_items_rep)),
     ];
     if let Some(min_st) = o.min_standing {
-        fields.push(("minStanding", PyRep::Real(min_st)));
+        fields.push((
+            "requiredStandings",
+            PyRep::keyval(vec![("value", PyRep::Real(min_st)), ("ownerID", PyRep::Integer(o.corp_id))]),
+        ));
     }
     PyRep::keyval(fields)
 }

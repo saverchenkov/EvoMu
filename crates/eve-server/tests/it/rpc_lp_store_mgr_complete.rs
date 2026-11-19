@@ -147,7 +147,8 @@ async fn test_lp_store_mgr_get_available_offers() {
         .expect("Offer 3414");
     assert_eq!(k_i64(o3414, "corpID"), Some(CALDARI_NAVY_CORP));
     assert_eq!(k_i64(o3414, "typeID"), Some(REWARD_3414_TYPE_ID as i64));
-    assert_eq!(k_i64(o3414, "quantity"), Some(1));
+    assert_eq!(k_i64(o3414, "qty"), Some(1));
+    assert_eq!(k_i64(o3414, "quantity"), None);
     assert_eq!(k_i64(o3414, "lpCost"), Some(5_250));
     let isk_cost = o3414.dict_get("iskCost").and_then(|v| v.as_f64()).expect("iskCost");
     assert!((isk_cost - 5_250_000.0).abs() < 0.01);
@@ -199,7 +200,8 @@ async fn test_lp_store_mgr_get_available_offers() {
             assert_eq!(k_i64(o, "corpID"), Some(corp));
             assert!(k_i64(o, "offerID").unwrap() > 0);
             assert!(k_i64(o, "typeID").unwrap() > 0);
-            assert!(k_i64(o, "quantity").unwrap() > 0);
+            assert!(k_i64(o, "qty").unwrap() > 0);
+            assert_eq!(k_i64(o, "quantity"), None);
             assert!(k_i64(o, "lpCost").unwrap() >= 0);
         }
     }
