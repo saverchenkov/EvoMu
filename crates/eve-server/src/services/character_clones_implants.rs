@@ -1586,7 +1586,7 @@ fn parse_py_bool_flag(rep: &PyRep) -> Option<bool> {
     rep.as_bool().or_else(|| rep.as_i64().map(|v| v != 0))
 }
 
-/// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr`.
+/// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr` (#1369).
 ///
 /// Matches V24 `assetsWindow.py:1131-1135` and `invbroker.ListStations` by returning
 /// `["stationID", "solarSystemID", "itemCount", "typeID"]` for both NPC stations and Upwell
