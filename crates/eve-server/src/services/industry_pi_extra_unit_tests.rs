@@ -580,6 +580,7 @@ fn industry_manager_corp_rbac_db_first_and_cross_owner_isolation() {
     let char_ex_installer = 91_100_008_i64;
     let char_npc = 91_100_009_i64;
     let char_uninserted = 91_100_010_i64;
+    let char_omitted_roles = 91_100_011_i64;
 
     let facility_id = 1_000_000_199_001_i64;
     let personal_job_id = 900_101_i64;
@@ -627,6 +628,7 @@ fn industry_manager_corp_rbac_db_first_and_cross_owner_isolation() {
             char_regular,
             char_station_mgr,
             char_role_dropped,
+            char_omitted_roles,
         ]);
         corp_a_rec.member_roles = HashMap::from([
             (char_factory_mgr, eve_db::corp_roles::ROLE_FACTORY_MANAGER),
@@ -657,6 +659,7 @@ fn industry_manager_corp_rbac_db_first_and_cross_owner_isolation() {
             (char_station_mgr, corp_a, "StationMgr"),
             (char_non_member, corp_a, "NonMember"),
             (char_role_dropped, corp_a, "RoleDropped"),
+            (char_omitted_roles, corp_a, "OmittedRoles"),
             (char_ex_installer, corp_b, "ExInstaller"),
             (char_npc, npc_corp, "NpcPilot"),
             (char_uninserted, uninserted_corp, "UninsertedPilot"),
@@ -944,6 +947,30 @@ fn industry_manager_corp_rbac_db_first_and_cross_owner_isolation() {
         call_job_err(&ctx, &mut s_dropped, "industryManager", "GetJobsByOwner", &[PyRep::Integer(corp_a)]).code,
         "OwnerAccessDenied"
     );
+
+    // Same-corp member omitted from BOTH corp.member_roles and corp_role_assignments
+    // with stale session.corp_role = ROLE_DIRECTOR | ROLE_FACTORY_MANAGER is denied
+    // (DB-authoritative 0 passed to effective_corp_roles_at) with zero DB mutation.
+    let snap_before_omitted = ctx.db.with_snapshot(|snap| {
+        let corp = snap.corporations.get(&corp_a).expect("corp_a exists");
+        assert!(corp.members.contains(&char_omitted_roles));
+        assert!(!corp.member_roles.contains_key(&char_omitted_roles));
+        assert!(!snap.corp_role_assignments.contains_key(&(corp_a, char_omitted_roles)));
+        snap.clone()
+    });
+    let mut s_omitted = char_session(char_omitted_roles, corp_a);
+    s_omitted.corp_role =
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER;
+    assert_eq!(
+        call_job_err(&ctx, &mut s_omitted, "industryManager", "GetJob", &[PyRep::Integer(corp_job_id)]).code,
+        "JobOwnershipViolation"
+    );
+    assert_eq!(
+        call_job_err(&ctx, &mut s_omitted, "industryManager", "GetJobsByOwner", &[PyRep::Integer(corp_a)]).code,
+        "OwnerAccessDenied"
+    );
+    let snap_after_omitted = ctx.db.with_snapshot(|snap| snap.clone());
+    assert_eq!(snap_before_omitted, snap_after_omitted);
 
     // NPC corporation and uninserted player corporation are denied cleanly.
     let mut s_npc = char_session(char_npc, npc_corp);
