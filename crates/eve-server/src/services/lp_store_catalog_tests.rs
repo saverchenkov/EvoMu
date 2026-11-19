@@ -57,8 +57,13 @@ fn test_lp_store_catalog_helpers_and_persistence() {
     // offer_to_pyrep
     let rep = offer_to_pyrep(&custom);
     assert_eq!(rep.dict_get("offerID").and_then(|v| v.as_i64()), Some(888_111));
+    assert_eq!(rep.dict_get("qty").and_then(|v| v.as_i64()), Some(10));
+    assert!(rep.dict_get("quantity").is_none());
     assert_eq!(rep.dict_get("akCost").and_then(|v| v.as_i64()), Some(5));
-    assert_eq!(rep.dict_get("minStanding").and_then(|v| v.as_f64()), Some(2.5));
+    let req_st = rep.dict_get("requiredStandings").expect("requiredStandings KeyVal");
+    assert_eq!(req_st.dict_get("value").and_then(|v| v.as_f64()), Some(2.5));
+    assert_eq!(req_st.dict_get("ownerID").and_then(|v| v.as_i64()), Some(custom.corp_id));
+    assert!(rep.dict_get("minStanding").is_none());
     let Some(PyRep::List(req_items)) = rep.dict_get("reqItems") else {
         panic!("expected reqItems list");
     };
