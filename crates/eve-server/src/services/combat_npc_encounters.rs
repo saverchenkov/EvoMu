@@ -685,6 +685,116 @@ pub fn resolve_officer_or_commander_sde_drop(ctx: &ServerContext, npc_type_id: u
     None
 }
 
+fn resolve_npc_faction_id_for_loot(
+    ctx: &ServerContext,
+    npc_type_id: u32,
+    npc_faction_id: Option<u32>,
+    spawn_faction_id: Option<u32>,
+) -> u32 {
+    if let Some(fid) = ctx
+        .sde
+        .types
+        .get(&npc_type_id)
+        .and_then(|t| t.faction_id)
+        .filter(|&f| f > 0)
+    {
+        return fid;
+    }
+    let group_name = ctx
+        .sde
+        .types
+        .get(&npc_type_id)
+        .and_then(|t| ctx.sde.groups.get(&t.group_id))
+        .map(|g| g.name.as_str())
+        .unwrap_or("");
+    let type_name = ctx
+        .sde
+        .types
+        .get(&npc_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("");
+    let wreck_name = ctx
+        .sde
+        .resolve_wreck_type_id(npc_type_id, None)
+        .and_then(|wid| ctx.sde.types.get(&wid))
+        .map(|w| w.name.as_str())
+        .unwrap_or("");
+
+    let keyword_table: &[(&[&str], u32)] = &[
+        (&["Guristas", "Pithi", "Pithum", "Pith"], 500_010),
+        (&["Angel", "Gist", "Domination"], 500_011),
+        (&["Blood", "Corpus", "Corpior", "Corpatis"], 500_012),
+        (&["Sansha", "Centii", "Centum", "Centus"], 500_019),
+        (&["Serpentis", "Coreli", "Corelum", "Corelior", "Corelatis"], 500_020),
+        (&["Caldari"], 500_001),
+        (&["Minmatar"], 500_002),
+        (&["Amarr"], 500_003),
+        (&["Gallente"], 500_004),
+    ];
+    for text in [group_name, type_name, wreck_name] {
+        for &(tokens, fid) in keyword_table {
+            if tokens.iter().any(|tok| text.contains(tok)) {
+                return fid;
+            }
+        }
+    }
+    npc_faction_id
+        .filter(|&f| f > 0)
+        .or_else(|| spawn_faction_id.filter(|&f| f > 0))
+        .or_else(|| {
+            ctx.sde
+                .types
+                .get(&npc_type_id)
+                .and_then(|t| t.race_id)
+                .and_then(|rid| match rid {
+                    1 => Some(500_001),
+                    2 => Some(500_002),
+                    4 => Some(500_003),
+                    8 => Some(500_004),
+                    _ => None,
+                })
+        })
+        .unwrap_or(0)
+}
+
+fn append_default_npc_wreck_loot(
+    ctx: &ServerContext,
+    npc_type_id: u32,
+    faction_id: u32,
+    loot_to_insert: &mut Vec<(u32, i32, bool)>,
+) {
+    if let Some(mats) = ctx.sde.type_materials.get(&npc_type_id) {
+        for m in mats {
+            let qty = m.quantity.clamp(1, 50) as i32;
+            if qty > 0 && !loot_to_insert.iter().any(|&(tid, _, _)| tid == m.material_type_id) {
+                loot_to_insert.push((m.material_type_id, qty, false));
+            }
+        }
+    }
+    let scrap_tid = if ctx.sde.types.contains_key(&15_331) {
+        15_331
+    } else {
+        34
+    };
+    if ctx.sde.types.contains_key(&scrap_tid)
+        && !loot_to_insert.iter().any(|&(tid, _, _)| tid == scrap_tid)
+    {
+        loot_to_insert.push((scrap_tid, 10, false));
+    }
+    let ammo_type_id = match faction_id {
+        500_010 | 500_001 => 204,
+        500_012 | 500_019 | 500_003 => 178,
+        500_020 | 500_004 => 230,
+        500_011 | 500_002 => 213,
+        _ => 212,
+    };
+    if ctx.sde.types.contains_key(&ammo_type_id)
+        && !loot_to_insert.iter().any(|&(tid, _, _)| tid == ammo_type_id)
+    {
+        loot_to_insert.push((ammo_type_id, 100, false));
+    }
+}
+
 /// Populates specialized NPC loot, convoy cargo, cooldowns, and wave hooks when an NPC is killed via turret/spool damage (`combat_weapons_spool.rs`).
 pub async fn populate_npc_wreck_on_turret_kill(
     ctx: &ServerContext,
@@ -702,9 +812,13 @@ pub async fn populate_npc_wreck_on_turret_kill(
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
     });
     let respawn_at = ctx.now_unix().saturating_add(1_200);
+    let mut spawn_faction_id = None;
     if let Ok(mut spawns) = ctx.npc_spawns.write() {
         if let Some(mgr) = spawns.get_mut(&solar_system_id) {
             if let Some(removed) = mgr.entities.remove(&npc_ball_id) {
+                if removed.faction_id > 0 {
+                    spawn_faction_id = Some(removed.faction_id);
+                }
                 let group_empty = !mgr
                     .entities
                     .values()
@@ -776,6 +890,16 @@ pub async fn populate_npc_wreck_on_turret_kill(
         }
     } else if archetype == "Triglavian" {
         loot_to_insert.push((48121, 1, false));
+    }
+
+    if wreck_id > 0 && loot_to_insert.is_empty() {
+        let effective_faction_id = resolve_npc_faction_id_for_loot(
+            ctx,
+            npc_type_id,
+            npc_opt.as_ref().map(|n| n.faction_id),
+            spawn_faction_id,
+        );
+        append_default_npc_wreck_loot(ctx, npc_type_id, effective_faction_id, &mut loot_to_insert);
     }
 
     if wreck_id > 0 && !loot_to_insert.is_empty() {

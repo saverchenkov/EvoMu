@@ -555,3 +555,229 @@ async fn tractor_beam_drone_bandwidth_and_drone_controller_exact_checks() {
     assert_eq!(recalled_other, vec![valid_drone_2]);
     assert!(ctrl.active_drones.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks() {
+    let mut ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_330_001_i64;
+    let mod_id = 100_330_002_i64;
+    let wreck_empty = 100_330_010_i64;
+    let wreck_with_loot = 100_330_011_i64;
+    let wreck_fail = 100_330_012_i64;
+    let loot_child = 100_330_020_i64;
+    let mod_tid = 999_861_u32;
+
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut salv_mod = sde.types[&25_861].clone();
+        salv_mod.type_id = mod_tid;
+        salv_mod.default_attributes.insert(902, 200.0);
+        sde.types.insert(mod_tid, salv_mod);
+    }
+
+    spawn_ship_ball(&ctx, sys_id, ship_id, char_id, 587, DVec3::ZERO, 40.0);
+    spawn_wreck_ball(
+        &ctx,
+        sys_id,
+        wreck_empty,
+        26_573,
+        char_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        30.0,
+    );
+    spawn_wreck_ball(
+        &ctx,
+        sys_id,
+        wreck_with_loot,
+        26_573,
+        char_id,
+        DVec3::new(1_200.0, 0.0, 0.0),
+        30.0,
+    );
+    spawn_wreck_ball(
+        &ctx,
+        sys_id,
+        wreck_fail,
+        26_573,
+        char_id,
+        DVec3::new(1_400.0, 0.0, 0.0),
+        30.0,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, mod_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            loot_child,
+            make_item(loot_child, 15_331, char_id, wreck_with_loot, InventoryFlag::Cargo, 5),
+        );
+    });
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .expect("demo character must exist for salvage notification delivery");
+    ctx.db
+        .acquire_online_lock(user_id, 9_729, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Prime observer queue so `ship_id` has no pending SetState blocking `FlushPeerObserverUpdates`.
+    let _ = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    let mut sys_rx = sys_handle.subscribe();
+
+    // Negative case: failed roll leaves wreck intact and emits zero RemoveBall / OnItemChange / OnTarget.
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap();
+        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+            target_id: wreck_fail,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        });
+    }
+    let fail_out = attempt_salvage_wreck(&ctx, sys_id, char_id, ship_id, wreck_fail, 0.0, 0.99)
+        .await
+        .unwrap();
+    assert!(matches!(fail_out, SalvageOutcome::Failed { .. }));
+    assert!(sys_rx.try_recv().is_err(), "failed salvage must not emit RemoveBall");
+    assert!(
+        ctx.drain_notifications_for_char(char_id).is_empty(),
+        "failed salvage must not emit OnItemChange or OnTarget lost"
+    );
+    assert!(sys_handle.ballpark.read().unwrap().balls.contains_key(&wreck_fail));
+
+    // Positive case A: `execute_wreck_salvage_cycle` with active target lock + Guristas Small Wreck (26573).
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap();
+        bp.target_locks.entry(ship_id).or_default().push(eve_destiny::TargetLock {
+            target_id: wreck_empty,
+            lock_time_ms: 1_000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        });
+    }
+    let cycle_rep = execute_wreck_salvage_cycle(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_empty,
+        Some(mod_tid),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cycle_rep.dict_get("salvaged").and_then(|v| v.as_bool()), Some(true));
+
+    let bcast_a = sys_rx
+        .try_recv()
+        .expect("execute_wreck_salvage_cycle must flush RemoveBall immediately before OnRemoveFX");
+    assert!(
+        bcast_a
+            .observer_events
+            .get(&ship_id)
+            .is_some_and(|evs| evs.iter().any(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_empty
+            ))),
+        "flushed broadcast must include RemoveBall({wreck_empty}): {:?}",
+        bcast_a.observer_events
+    );
+    assert!(
+        !sys_handle.ballpark.read().unwrap().balls.contains_key(&wreck_empty),
+        "wreck ball must be removed from ballpark"
+    );
+    assert!(
+        !sys_handle
+            .ballpark
+            .read()
+            .unwrap()
+            .target_locks
+            .get(&ship_id)
+            .is_some_and(|ls| ls.iter().any(|l| l.target_id == wreck_empty)),
+        "target lock on salvaged wreck must be cleared"
+    );
+
+    let notifs_a = ctx.drain_notifications_for_char(char_id);
+    let cargo_inserts: Vec<_> = notifs_a
+        .iter()
+        .filter(|n| {
+            n.event == "OnItemChange"
+                && matches!(
+                    n.args.get(1),
+                    Some(eve_proto::PyRep::Dict(entries))
+                        if entries.iter().any(|(k, v)| {
+                            k == &eve_proto::PyRep::Integer(3) && v == &eve_proto::PyRep::Integer(0)
+                        })
+                )
+        })
+        .collect();
+    assert!(
+        !cargo_inserts.is_empty(),
+        "salvage cycle must emit OnItemChange insert (ixLocationID=0) for yielded cargo items: {notifs_a:?}"
+    );
+    assert!(
+        notifs_a.iter().any(|n| {
+            n.event == "OnTarget"
+                && n.args.first() == Some(&eve_proto::PyRep::Integer(wreck_empty))
+                && n.args.get(1) == Some(&eve_proto::PyRep::String("lost".into()))
+        }),
+        "locked target wreck removal must emit OnTarget lost: {notifs_a:?}"
+    );
+    let cargo_salvage_count = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+            .count()
+    });
+    assert!(cargo_salvage_count > 0);
+    assert_eq!(cargo_inserts.len(), cargo_salvage_count);
+
+    // Positive case B: `attempt_salvage_wreck` on wreck with child loot spawns jetcan + emits moved loot OnItemChange + RemoveBall.
+    let ok_loot = attempt_salvage_wreck(&ctx, sys_id, char_id, ship_id, wreck_with_loot, 1.0, 0.0)
+        .await
+        .unwrap();
+    assert!(matches!(ok_loot, SalvageOutcome::Success { .. }));
+    let can_id = ctx.db.with_snapshot(|snap| snap.items[&loot_child].location_id);
+    assert_ne!(can_id, wreck_with_loot);
+
+    let bcast_b = sys_rx
+        .try_recv()
+        .expect("salvage with loot must flush jetcan AddBalls2 + wreck RemoveBall immediately");
+    let obs_evs_b = bcast_b.observer_events.get(&ship_id).expect("ship observer events");
+    assert!(
+        obs_evs_b.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::AddBalls2 { balls } if balls.iter().any(|b| b.id == can_id)
+        )),
+        "flushed broadcast must include AddBalls2 for spawned jetcan {can_id}: {obs_evs_b:?}"
+    );
+    assert!(
+        obs_evs_b.iter().any(|ev| matches!(
+            ev,
+            eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_with_loot
+        )),
+        "flushed broadcast must include RemoveBall({wreck_with_loot}): {obs_evs_b:?}"
+    );
+
+    let notifs_b = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs_b.iter().any(|n| {
+            n.event == "OnItemChange"
+                && matches!(
+                    n.args.get(1),
+                    Some(eve_proto::PyRep::Dict(entries))
+                        if entries.iter().any(|(k, v)| {
+                            k == &eve_proto::PyRep::Integer(3)
+                                && v == &eve_proto::PyRep::Integer(wreck_with_loot)
+                        })
+                )
+        }),
+        "loot moved from salvaged wreck into jetcan must emit OnItemChange from old wreck location: {notifs_b:?}"
+    );
+}

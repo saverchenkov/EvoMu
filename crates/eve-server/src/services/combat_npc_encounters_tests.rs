@@ -195,3 +195,89 @@ async fn officer_commander_mordu_sde_drops_and_finalize_cycle_destroyed_npcs() {
 
     record_npc_kill_progression(&ctx, char_id, Some(930_001));
 }
+
+#[tokio::test]
+async fn populate_npc_wreck_on_turret_kill_handles_pithi_invader_and_faction_loot() {
+    let (ctx, _session, char_id, _ship_id, sys_id) = make_fighter_ctx_and_session();
+
+    // Verify Pithi Invader (16997) in live SDE has faction_id == None and Guristas Small Wreck (26573).
+    let pithi = ctx.sde.types.get(&16_997).expect("Pithi Invader 16997 in SDE");
+    assert_eq!(pithi.faction_id, None);
+    assert_eq!(ctx.sde.resolve_wreck_type_id(16_997, None), Some(26_573));
+
+    // Negative case: wreck_id == 0 skips loot insertion even for 16997.
+    let mut dropped_none = Vec::new();
+    let arch_no_wreck = populate_npc_wreck_on_turret_kill(
+        &ctx,
+        sys_id,
+        960_100,
+        16_997,
+        DVec3::ZERO,
+        0,
+        char_id,
+        &mut dropped_none,
+    )
+    .await;
+    assert_eq!(arch_no_wreck, "Pirate");
+    assert!(dropped_none.is_empty());
+
+    // Positive case: spawning/killing Pithi Invader (16997) with turret populates Guristas wreck loot
+    // even if a regional npc_spawns fallback had a different faction_id (e.g. non-Caldari system).
+    let wreck_id = 960_200_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            wreck_id,
+            make_fighter_item(wreck_id, 26_573, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ent = crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+            960_101,
+            16_997,
+            sys_id,
+            "Pirate",
+        );
+        ent.faction_id = 500_012; // Wrong regional fallback must yield to Guristas group/type/wreck derivation.
+        rt.npc_entities.insert(960_101, ent);
+    });
+    let mut dropped = Vec::new();
+    let arch = populate_npc_wreck_on_turret_kill(
+        &ctx,
+        sys_id,
+        960_101,
+        16_997,
+        DVec3::ZERO,
+        wreck_id,
+        char_id,
+        &mut dropped,
+    )
+    .await;
+    assert_eq!(arch, "Pirate");
+    assert!(
+        dropped.iter().any(|d| d.type_id == 15_331 && d.qty_dropped == 10),
+        "Pithi Invader wreck must drop Metal Scraps (15331): {dropped:?}"
+    );
+    assert!(
+        dropped.iter().any(|d| d.type_id == 204 && d.qty_dropped == 100),
+        "Pithi Invader wreck must resolve Guristas faction ammo (204): {dropped:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let wreck_items: Vec<_> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == wreck_id)
+            .collect();
+        assert_eq!(wreck_items.len(), dropped.len());
+        assert!(wreck_items.iter().all(|i| i.flag == InventoryFlag::Cargo && i.owner_id == char_id));
+    });
+
+    // Other pirate faction names resolve cleanly when SDE type has no explicit faction_id.
+    assert_eq!(
+        resolve_npc_faction_id_for_loot(&ctx, 16_997, Some(500_012), None),
+        500_010
+    );
+    assert_eq!(
+        resolve_npc_faction_id_for_loot(&ctx, 999_999_888, Some(500_011), None),
+        500_011
+    );
+}
