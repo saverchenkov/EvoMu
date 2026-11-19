@@ -542,11 +542,28 @@ async fn clear_incursion_site(
 // parity: feat:pve.incursion-payout
 // parity: notify:OnInfluenceUpdate
 // parity: notify:OnTaleRemove
-#[tokio::test]
-async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
+#[test]
+fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
+    let handle = std::thread::Builder::new()
+        .name("incursion_fleet_payout".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner());
+        })
+        .expect("spawn test thread");
+    if let Err(e) = handle.join() {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e_inner() {
     let ctx = fresh_player_ctx();
     let ((mut sess1, cid1, ship1, guns1, bast1), (mut sess2, cid2, ship2, guns2, cyno_mod), (mut titan_sess, titan_cid, titan_id, titan_guns, dd_mod), (d1, d2, d3)) = tokio::join!(
-        async {
+        Box::pin(async {
             let (mut s, cid, _) = create_player_pilot(&ctx, 52_101, "inc_pilot_u1", "Incursion Runner", JITA_SYS).await;
             fund_pilot_isk(&ctx, &mut s, 20).await;
             let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;
@@ -554,8 +571,8 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
             let bast = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 33_400, 1).await;
             rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(bast), PyRep::Integer(ship), PyRep::Integer(31)]).await;
             (s, cid, ship, guns, bast)
-        },
-        async {
+        }),
+        Box::pin(async {
             let (mut s, cid, _) = create_player_pilot(&ctx, 52_102, "inc_pilot_u2", "Incursion Wing", JITA_SYS).await;
             fund_pilot_isk(&ctx, &mut s, 20).await;
             ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[22_428, 21_096]).await;
@@ -565,8 +582,8 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
             let ozone = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 16_273, 1_500).await;
             rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(ozone), PyRep::Integer(ship), PyRep::Integer(5)]).await;
             (s, cid, ship, guns, cyno_mod)
-        },
-        async {
+        }),
+        Box::pin(async {
             let (mut s, cid, _) = create_player_pilot(&ctx, 52_103, "inc_titan_u3", "Incursion Avatar", JITA_SYS).await;
             fund_pilot_isk(&ctx, &mut s, 120).await;
             ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[11_567, 40_631]).await;
@@ -578,11 +595,11 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
             let iso_cargo = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 16_274, 1_500).await;
             rpc_ok(&ctx, &mut s, "invbroker", "Add", &[PyRep::Integer(iso_cargo), PyRep::Integer(titan_id), PyRep::Integer(5)]).await;
             (s, cid, titan_id, titan_guns, dd_mod)
-        },
-        async {
+        }),
+        Box::pin(async {
             let setup_dread = |uid: u64, uname: &'static str, cname: &'static str| {
                 let ctx_ref = &ctx;
-                async move {
+                Box::pin(async move {
                     let (mut ds, dcid, _) = create_player_pilot(ctx_ref, uid, uname, cname, JITA_SYS).await;
                     fund_pilot_isk(ctx_ref, &mut ds, 20).await;
                     let (did, dguns) = buy_fit_combat_ship_with_ammo(ctx_ref, &mut ds, dcid, JITA_STATION, 19_720, 37_298, 17_686, 3, 100).await;
@@ -596,14 +613,14 @@ async fn test_incursion_fleet_payout_and_influence_tale_notifications_e2e() {
                     let sm = buy_item_at_station(ctx_ref, &mut ds, dcid, JITA_STATION, 20_280, 1).await;
                     rpc_ok(ctx_ref, &mut ds, "invbroker", "Add", &[PyRep::Integer(sm), PyRep::Integer(did), PyRep::Integer(30)]).await;
                     (ds, dcid, did, dguns, sm)
-                }
+                })
             };
             tokio::join!(
                 setup_dread(52_104, "inc_dr1", "Incursion Dread 1"),
                 setup_dread(52_105, "inc_dr2", "Incursion Dread 2"),
                 setup_dread(52_106, "inc_dr3", "Incursion Dread 3"),
             )
-        },
+        }),
     );
     let mut d_pilots = vec![d1, d2, d3];
 

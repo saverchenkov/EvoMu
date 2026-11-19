@@ -572,22 +572,20 @@ pub(crate) async fn handle_multi_add(
         }
         fitting_containers_ships::record_container_add_log(ctx, char_id, fin_id, it_tid, it_qty, new_loc);
         if pre_item.location_id != new_loc {
-            crate::services::pve_homefront_sites::on_homefront_inventory_event(
+            crate::services::pve_homefront_sites::on_homefront_inventory_event_sync(
                 ctx,
                 char_id,
                 session.solar_system_id,
                 pre_item.location_id,
                 it_tid,
-            )
-            .await;
-            crate::services::pve_homefront_sites::on_homefront_item_moved(
+            );
+            crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
                 ctx,
                 char_id,
                 new_loc,
                 it_tid,
                 u64::try_from(it_qty).unwrap_or(0),
-            )
-            .await;
+            );
         }
         if let Some(fin) = fin_opt {
             if fin.item_id != pre_item.item_id {
@@ -1145,14 +1143,13 @@ async fn handle_multi_add_auto_fit(
             )
             .await;
             if old_loc != ship_id {
-                crate::services::pve_homefront_sites::on_homefront_item_moved(
+                crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
                     ctx,
                     char_id,
                     ship_id,
                     updated.type_id,
                     u64::try_from(updated.quantity).unwrap_or(0),
-                )
-                .await;
+                );
             }
             despawn_set.insert(old_loc);
         }

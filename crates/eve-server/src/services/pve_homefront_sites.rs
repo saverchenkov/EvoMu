@@ -4861,8 +4861,8 @@ pub async fn on_homefront_cargo_scanned(
     });
 }
 
-/// Live item move hook called when cargo items are transferred into a Raid delivery depot.
-pub async fn on_homefront_item_moved(
+/// Synchronous live item move hook called when cargo items are transferred into a Raid delivery depot.
+pub fn on_homefront_item_moved_sync(
     ctx: &ServerContext,
     char_id: i64,
     dest_id: i64,
@@ -4919,9 +4919,19 @@ pub async fn on_homefront_item_moved(
     }
 }
 
-/// Live inventory-movement hook invoked via `pve_dungeon_runtime::on_dungeon_item_looted` whenever a pilot
-/// transfers an item between space containers / ship cargo (verifies depot deliveries in `snap.items`).
-pub async fn on_homefront_inventory_event(
+/// Async wrapper around [`on_homefront_item_moved_sync`].
+pub async fn on_homefront_item_moved(
+    ctx: &ServerContext,
+    char_id: i64,
+    dest_id: i64,
+    item_type_id: TypeId,
+    quantity: u64,
+) {
+    on_homefront_item_moved_sync(ctx, char_id, dest_id, item_type_id, quantity);
+}
+
+/// Synchronous live inventory-movement hook verifying depot deliveries in `snap.items`.
+pub fn on_homefront_inventory_event_sync(
     ctx: &ServerContext,
     char_id: i64,
     sys_id_opt: Option<SolarSystemId>,
@@ -5003,6 +5013,18 @@ pub async fn on_homefront_inventory_event(
     for inst_id in complete_insts {
         try_settle_completed_homefront_live(ctx, inst_id);
     }
+}
+
+/// Live inventory-movement hook invoked via `pve_dungeon_runtime::on_dungeon_item_looted` whenever a pilot
+/// transfers an item between space containers / ship cargo (verifies depot deliveries in `snap.items`).
+pub async fn on_homefront_inventory_event(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id_opt: Option<SolarSystemId>,
+    source_or_dest_id: i64,
+    item_type_id: TypeId,
+) {
+    on_homefront_inventory_event_sync(ctx, char_id, sys_id_opt, source_or_dest_id, item_type_id);
 }
 
 /// Synchronous capacitor transfer / energy neutralizer hook (DreadAssault & StabilizeRift).
