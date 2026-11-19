@@ -7,6 +7,15 @@ matches NPCs, structures, containers, asteroids, mission items, and dungeons aga
 local SDE SQLite database + sde_agent_mission_ext.json, classifies triggers and EWAR,
 and writes gitignored data/wiki_pve_content.json and data/wiki_pve_report.json.
 
+Verification (--verify) enforces two distinct thresholds without conflating buckets:
+- --min-resolved-percent (default 85.0): gates strictly concrete SDE type_ids only
+  (resolved_exact + validated resolved_structure_faction). On the ~/ai/eve-wiki corpus,
+  strict sde_types.name matching has an empirical ceiling ~87.1% due to blank wiki
+  cells (293), bare family prefixes / '?' placeholders (201), and CCP custom dungeon
+  display names absent from sde_types (994 mapped to faction/class candidates).
+- --min-candidate-mapped-percent (default 90.0): gates concrete + non-empty
+  candidate_type_ids across all candidate-mapped rows.
+
 IMPORTANT: Generated output contains CC BY-SA wiki-derived data and must never be committed.
 """
 
@@ -30,7 +39,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-ALLOWED_SDE_CATEGORIES = (2, 3, 6, 11, 18, 22, 23, 25, 40, 46, 65, 87)
+# Combat NPC rows resolve strictly against Category 11 (Entity); celestial/structure/asteroid rows
+# also allow their dedicated non-ship categories in strict Entity-first priority order.
+# Player Ship (6), Player Drone (18), and Player Fighter (87) categories are intentionally excluded.
+ALLOWED_SDE_CATEGORIES = (2, 3, 11, 22, 23, 25, 40, 46, 65)
+COMBAT_ENTITY_CATEGORIES = (11,)
+GATE_ENTITY_CATEGORIES = (2, 11)
+ASTEROID_ENTITY_CATEGORIES = (25, 11)
+STRUCTURE_ENTITY_CATEGORIES = (11, 2, 22, 23, 3, 40, 46, 65)
 
 PVE_CATEGORIES = {
     "Security missions",
@@ -174,17 +190,45 @@ SPELLING_PAIRS: list[tuple[str, str]] = [
     ("cruiser missile battery", "cruise missile battery"),
     ("cruise missile launcher", "cruise missile battery"),
     ("pithii", "pithi"),
+    ("pithium ", "pithum "),
     ("centi ", "centii "),
     ("gisti ", "gistii "),
+    ("gistastis ", "gistatis "),
+    ("gistatsis ", "gistatis "),
+    ("gistatus ", "gistatis "),
+    ("gistor ", "gistior "),
+    ("gistium ", "gistum "),
+    ("corelli ", "coreli "),
+    ("colerior ", "corelior "),
+    ("corelium ", "corelum "),
+    ("corpier ", "corpior "),
+    ("coprii ", "corpii "),
+    ("martriarch", "matriarch"),
+    ("matriarc", "matriarch"),
+    ("ammater ", "ammatar "),
     ("war lord", "warlord"),
     ("sentinal", "sentinel"),
     ("infilitrator", "infiltrator"),
     ("mahariel", "machariel"),
     ("watchmen", "watchman"),
     ("archangels ", "arch angel "),
+    ("archangels ", "angel "),
     ("archangel ", "arch angel "),
     ("archangel", "arch angel"),
+    ("blood raiders ", "blood "),
+    ("blood raider ", "blood "),
     ("blood raider ", "bloodraider "),
+    ("tribinus", "tribunus"),
+    ("guerilla", "guerrilla"),
+    ("mercanary", "mercenary"),
+    ("maraudar", "marauder"),
+    ("violater", "violator"),
+    ("silferfish", "silverfish"),
+    ("baracuda", "barracuda"),
+    ("terroris", "terrorist"),
+    ("gallent ", "gallente "),
+    ("shatterer ", "shatter "),
+    ("infestor ", "infester "),
     ("amarr navy ", "imperial navy "),
     ("gallente navy ", "federation navy "),
     ("minmatar navy ", "republic fleet "),
@@ -220,42 +264,93 @@ SPELLING_PAIRS: list[tuple[str, str]] = [
     ("stasis tower", "stasis webifier tower"),
 ]
 
-FAMILY_RANK_SIBLINGS: dict[str, list[str]] = {
-    "corpii": ["corpii", "corpior", "corpum", "corpatis", "corpus", "dark corpii", "dark corpior", "dark corpum", "dark corpatis", "dark corpus", "elder corpii", "elder corpum"],
-    "corpior": ["corpii", "corpior", "corpum", "corpatis", "corpus", "dark corpior", "dark corpatis", "dark corpus"],
-    "corpum": ["corpii", "corpior", "corpum", "corpatis", "corpus", "dark corpum"],
-    "corpatis": ["corpii", "corpior", "corpum", "corpatis", "corpus", "dark corpatis"],
-    "corpus": ["corpii", "corpior", "corpum", "corpatis", "corpus", "dark corpus"],
-    "gistii": ["gistii", "gistior", "gistum", "gistatis", "gist", "arch gistii"],
-    "gistior": ["gistii", "gistior", "gistum", "gistatis", "gist"],
-    "gistum": ["gistii", "gistior", "gistum", "gistatis", "gist", "arch gistum"],
-    "gistatis": ["gistii", "gistior", "gistum", "gistatis", "gist"],
-    "gist": ["gistii", "gistior", "gistum", "gistatis", "gist"],
-    "coreli": ["coreli", "corelior", "corelum", "corelatis", "core", "shadow coreli", "shadow corelior", "shadow corelum"],
-    "corelior": ["coreli", "corelior", "corelum", "corelatis", "core"],
-    "corelum": ["coreli", "corelior", "corelum", "corelatis", "core", "shadow corelum"],
-    "corelatis": ["coreli", "corelior", "corelum", "corelatis", "core"],
-    "core": ["coreli", "corelior", "corelum", "corelatis", "core"],
-    "centii": ["centii", "centior", "centum", "centatis", "centus", "true centii", "true centum", "true centus"],
-    "centior": ["centii", "centior", "centum", "centatis", "centus"],
-    "centum": ["centii", "centior", "centum", "centatis", "centus"],
-    "centatis": ["centii", "centior", "centum", "centatis", "centus"],
-    "centus": ["centii", "centior", "centum", "centatis", "centus"],
-    "pithi": ["pithi", "pithior", "pithum", "pithatis", "pith", "dire pithi", "dread pithi"],
-    "pithior": ["pithi", "pithior", "pithum", "pithatis", "pith"],
-    "pithum": ["pithi", "pithior", "pithum", "pithatis", "pith"],
-    "pithatis": ["pithi", "pithior", "pithum", "pithatis", "pith"],
-    "pith": ["pithi", "pithior", "pithum", "pithatis", "pith"],
-    "imperial": ["imperial", "imperial templar", "divine imperial", "imperial navy", "amarr navy"],
-    "divine": ["divine imperial", "imperial"],
-    "blood": ["blood", "dark blood", "elder blood", "corpii", "corpior", "corpum", "corpatis", "corpus"],
-    "strain": ["strain"],
-    "rogue": ["rogue", "rogue pirate", "rogue drone"],
-    "angel": ["angel", "arch angel", "domination", "gistii", "gistior", "gistum", "gistatis", "gist"],
-    "serpentis": ["serpentis", "shadow serpentis", "coreli", "corelior", "corelum", "corelatis", "core"],
-    "guristas": ["guristas", "dread guristas", "pithi", "pithior", "pithum", "pithatis", "pith"],
-    "sansha": ["sansha", "sansha's", "true sansha", "centii", "centior", "centum", "centatis", "centus"],
+# Pirate/empire rank metadata constrained by (faction_family, ship_class) so siblings never swap across hull sizes.
+RANK_PREFIX_META: dict[str, tuple[str, str]] = {
+    # Blood Raiders
+    "corpii": ("blood", "frigate"),
+    "dark corpii": ("blood", "frigate"),
+    "elder corpii": ("blood", "frigate"),
+    "corpior": ("blood", "destroyer"),
+    "dark corpior": ("blood", "destroyer"),
+    "corpum": ("blood", "cruiser"),
+    "dark corpum": ("blood", "cruiser"),
+    "elder corpum": ("blood", "cruiser"),
+    "corpatis": ("blood", "battlecruiser"),
+    "dark corpatis": ("blood", "battlecruiser"),
+    "corpus": ("blood", "battleship"),
+    "dark corpus": ("blood", "battleship"),
+    "blood": ("blood", "any"),
+    "dark blood": ("blood", "any"),
+    "elder blood": ("blood", "any"),
+    # Angel Cartel
+    "gistii": ("angel", "frigate"),
+    "arch gistii": ("angel", "frigate"),
+    "gistior": ("angel", "destroyer"),
+    "gistum": ("angel", "cruiser"),
+    "arch gistum": ("angel", "cruiser"),
+    "gistatis": ("angel", "battlecruiser"),
+    "gist": ("angel", "battleship"),
+    "angel": ("angel", "any"),
+    "arch angel": ("angel", "any"),
+    "domination": ("angel", "any"),
+    # Serpentis
+    "coreli": ("serpentis", "frigate"),
+    "shadow coreli": ("serpentis", "frigate"),
+    "corelior": ("serpentis", "destroyer"),
+    "shadow corelior": ("serpentis", "destroyer"),
+    "corelum": ("serpentis", "cruiser"),
+    "shadow corelum": ("serpentis", "cruiser"),
+    "corelatis": ("serpentis", "battlecruiser"),
+    "shadow corelatis": ("serpentis", "battlecruiser"),
+    "core": ("serpentis", "battleship"),
+    "serpentis": ("serpentis", "any"),
+    "shadow serpentis": ("serpentis", "any"),
+    # Sansha's Nation
+    "centii": ("sansha", "frigate"),
+    "true centii": ("sansha", "frigate"),
+    "centior": ("sansha", "destroyer"),
+    "centum": ("sansha", "cruiser"),
+    "true centum": ("sansha", "cruiser"),
+    "centatis": ("sansha", "battlecruiser"),
+    "centus": ("sansha", "battleship"),
+    "true centus": ("sansha", "battleship"),
+    "sansha": ("sansha", "any"),
+    "sansha's": ("sansha", "any"),
+    "true sansha": ("sansha", "any"),
+    # Guristas Pirates
+    "pithi": ("guristas", "frigate"),
+    "dire pithi": ("guristas", "frigate"),
+    "dread pithi": ("guristas", "frigate"),
+    "pithior": ("guristas", "destroyer"),
+    "pithum": ("guristas", "cruiser"),
+    "dire pithum": ("guristas", "cruiser"),
+    "pithatis": ("guristas", "battlecruiser"),
+    "pith": ("guristas", "battleship"),
+    "guristas": ("guristas", "any"),
+    "dread guristas": ("guristas", "any"),
+    # Amarr Empire NPC entities
+    "imperial": ("amarr", "any"),
+    "imperial templar": ("amarr", "any"),
+    "divine": ("amarr", "any"),
+    "divine imperial": ("amarr", "any"),
+    "amarr navy": ("amarr", "any"),
+    # Rogue Drones
+    "strain": ("rogue_drone", "any"),
+    "rogue": ("rogue_drone", "any"),
 }
+
+FAMILY_CLASS_PREFIXES: dict[tuple[str, str], list[str]] = {}
+for _rp, (_fam, _cls) in RANK_PREFIX_META.items():
+    FAMILY_CLASS_PREFIXES.setdefault((_fam, _cls), []).append(_rp)
+
+ROGUE_DRONE_SUFFIXES_BY_CLASS: dict[str, tuple[str, ...]] = {
+    "frigate": ("alvi",),
+    "destroyer": ("alvior",),
+    "cruiser": ("alvum", "alvu"),
+    "battlecruiser": ("alvatis",),
+    "battleship": ("alvus",),
+}
+ALL_ROGUE_DRONE_SUFFIXES: tuple[str, ...] = ("alvi", "alvior", "alvum", "alvu", "alvatis", "alvus")
 
 STRUCTURE_ALIASES: dict[str, list[str]] = {
     "stasis tower": ["{fac} Stasis Tower", "Stasis Webification Battery", "Pirate Stasis Tower"],
@@ -293,7 +388,20 @@ STRUCTURE_ALIASES: dict[str, list[str]] = {
     "casino": ["{fac} Casino", "Habitation Module - Casino"],
     "smuggler stargate": ["Smuggler Stargate", "Pirate Gate"],
     "repair station": ["{fac} Repair Station", "Repair Station"],
+    "repair outpost": ["{fac} Deadspace Repair Outpost", "{fac} Repair Outpost", "Repair Outpost"],
     "power generator": ["{fac} Power Generator", "Power Generator"],
+    "shield generator": ["Starbase Shield Generator", "Fortified Starbase Shield Generator"],
+    "reactor array": ["Starbase Reactor Array", "Complex Reactor Array", "Simple Reactor Array"],
+    "drone sentry": ["Inactive Drone Sentry", "Rogue Drone Sentry"],
+    "major assembly array": ["Starbase Major Assembly Array"],
+    "low-tech energy harvester": ["Low-Tech Deadspace Energy Harvester"],
+    "raider outpost": ["Blood Raider Logistics Outpost", "Blood Raider Military Outpost"],
+    "gate sentry": ["{fac} Sentry Gun", "Tower Sentry {fac} I", "Tower Sentry {fac} II", "Tower Sentry {fac} III"],
+    "station sentry": ["{fac} Sentry Gun", "Tower Sentry {fac} I", "Tower Sentry {fac} II", "Tower Sentry {fac} III"],
+    "lookout tower": ["{fac} Lookout Tower", "Lookout Tower", "Observation Post"],
+    "mind control tower": ["{fac} Starbase Control Tower", "{fac} Control Tower"],
+    "recreational supplies": ["Exploration Supplies", "Expedition Secure Supplies"],
+    "abandoned ship yard": ["{fac} Component Deposit Yard", "Shipyard", "Dirty Shipyard"],
     "hackable container": ["Cargo Container"],
     "structure container": ["Cargo Container"],
     "floating container": ["Cargo Container"],
@@ -331,8 +439,22 @@ TRAILING_PARENS_RE = re.compile(r"\s*\(([^()]*)\)\s*$")
 HEADING_RE = re.compile(r"^(={2,6})\s*(.*?)\s*\1\s*$", re.M)
 
 ROOM_HEADING_RE = re.compile(
-    r"\b(?:pocket|room|stage|chamber|hall|part\s*\d+|area|zone)\b|"
+    r"\b(?:pocket|room|stage|chamber|hall|part\s*\d+|area|zone|warp-?in)\b|"
     r"\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|initial|final|last|gated)\s+(?:pocket|room|area|part|stage)\b",
+    re.I,
+)
+
+VARIANT_HEADING_RE = re.compile(
+    r"\b(?:variant|variation(?:\s+\d+)?|type\s*\d+)\b|"
+    r"\blayout\b|"
+    r"\bwalkthrough\s*\([^)]+\)|"
+    r"\b(?:ring|station|pirate\s+gate|chem(?:ical)?\s+factory|asteroid(?:\s+port)?|mining\s+port|rock(?:\s+haven)?|gas(?:\s+haven)?)\s+spawn\b|"
+    r"^(?:location\s+(?:\d+|one|two|three|four)|(?:first|second|third|fourth)\s+location)\b",
+    re.I,
+)
+
+NON_VARIANT_SECTION_RE = re.compile(
+    r"\b(?:escalation|rewards?|loot|bounty|see\s+also|external\s+links?|notes?|tips?|references?|mining|salvage|trigger)\b",
     re.I,
 )
 
@@ -615,7 +737,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     is_escalation = bool(re.search(r"\bescall?ation\b|\bexpedition\b", low))
 
     m_sec = re.search(r"\b(\d+)\s*(?:s|sec|seconds?)\b", low)
-    m_min = re.search(r"\b(\d+)\s*(?:m|min|mins|minutes?)\b", low)
+    m_min = re.search(r"\b(\d+)\s*(?:min|mins|minutes?)\b", low)
     m_hr = re.search(r"\b(\d+)\s*(?:h|hr|hrs|hours?)\b", low)
     time_seconds: int | None = None
     if m_sec:
@@ -624,6 +746,29 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         time_seconds = int(m_min.group(1)) * 60
     elif m_hr:
         time_seconds = int(m_hr.group(1)) * 3600
+
+    generic_last = {
+        "one", "ship", "ships", "npc", "npcs", "enemy", "enemies", "hostile", "hostiles",
+        "target", "targets", "unit", "units", "group", "wave", "spawn", "fleet", "wing", "pack",
+        "pocket", "room", "remaining", "surviving", "alive", "left", "standing",
+        "in", "of", "the", "a", "an", "this", "that", "to", "be",
+        "triggers", "trigger", "spawns", "spawn", "killed", "destroyed", "dead",
+    }
+
+    def _matches_named_last_target() -> bool:
+        for pat in (
+            r"\b(?:destruction|killing|death)\s+of\s+(?:the\s+)?last\s+([a-z0-9' \-]+?)(?:\s+(?:is\s+)?(?:triggers?|spawns?|will|causes?|in\b|to\b)|$|[.,;])",
+            r"\blast\s+([a-z0-9' \-]+?)\s+(?:is\s+)?(?:destroyed|killed|dead|triggers?|spawns?|to\s+(?:die|spawn|be\s+(?:killed|destroyed)))",
+            r"^last\s+([a-z0-9' \-]+)$",
+        ):
+            for m in re.finditer(pat, low):
+                phrase = m.group(1).strip()
+                if re.search(r"\b(?:in|of)\s+(?:the\s+)?(?:group|wave|spawn|fleet|wing|pack)\b", phrase):
+                    continue
+                toks = [t for t in phrase.split() if t not in {"the", "a", "an", "remaining", "surviving"}]
+                if toks and not all(t in generic_last for t in toks):
+                    return True
+        return False
 
     # Priority order from most specific to most general, ending at group_destroyed fallback
     if (
@@ -635,6 +780,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
         or re.search(r"\blast\s+(?:of|kill\s+of|ship\s+(?:killed\s+)?of)\s+(?:this|the|that)?\s*class\b", low)
         or re.search(r"\bdestroying\s+all\s+(?:the\s+)?(?:frigates|destroyers|cruisers|battlecruisers|battleships)\b", low)
         or re.search(r"\blast\s+lord\s+admiral\b", low)
+        or _matches_named_last_target()
     ):
         kind = "last_of_class_destroyed"
     elif (
@@ -648,7 +794,7 @@ def classify_trigger(text: str) -> dict[str, Any] | None:
     ):
         kind = "last_in_group_destroyed"
     elif re.search(
-        r"\b(?:approach|approaching|within\s+\d+\s*km|proximity|warping\s+in|on\s+warp|range|distance|too\s+close|orbit|get\s+within|enter(?:s|ing)?)\b",
+        r"\b(?:approach|approaching|within\s+\d+\s*(?:k?m)|proximity|warping\s+in|on\s+warp|range|distance|too\s+close|orbit|get\s+within|enter(?:s|ing)?)\b",
         low,
     ):
         kind = "ship_approached"
@@ -940,7 +1086,7 @@ def split_template(body: str) -> tuple[str, list[str], dict[str, str]]:
 
 def _norm_class_bucket(npc_class: str) -> str | None:
     low = npc_class.lower()
-    if "battlecruiser" in low:
+    if "battlecruiser" in low or "battle cruiser" in low:
         return "battlecruiser"
     if "battleship" in low:
         return "battleship"
@@ -951,6 +1097,66 @@ def _norm_class_bucket(npc_class: str) -> str | None:
     if "frigate" in low:
         return "frigate"
     return None
+
+
+STRUCTURE_CLASSES = {
+    "structure",
+    "sentry",
+    "tower",
+    "battery",
+    "container",
+    "hackable",
+    "destructible object",
+    "large collidable object",
+    "hangar array",
+    "beacon",
+    "station",
+    "deployable",
+    "wreck",
+    "object",
+    "stargate",
+    "turret",
+    "refinery",
+    "array",
+    "warehouse",
+    "depot",
+    "outpost",
+    "bunker",
+    "silo",
+}
+
+
+def _is_structure_row(npc_class: str, raw_name: str = "") -> bool:
+    cls_low = npc_class.strip().lower()
+    if cls_low in STRUCTURE_CLASSES or cls_low in ("acceleration gate", "accl gate", "accel gate"):
+        return True
+    if not cls_low and raw_name:
+        return bool(
+            re.search(
+                r"\b(?:tower|sentry|battery|bunker|gate|container|silo|refinery|shipyard|"
+                r"outpost|station|depot|beacon|array|lab|habitat|habitation|monument|wreck|debris|cache|casket|strongbox)\b",
+                raw_name,
+                re.I,
+            )
+        )
+    return False
+
+
+def _allowed_cats_for_row(npc_class: str, raw_name: str = "") -> tuple[int, ...]:
+    cls_low = npc_class.strip().lower()
+    if cls_low in ("asteroid", "astroids", "ore", "ice"):
+        return (25, 11, 2)
+    if cls_low in ("gas cloud", "cloud", "agent", "celestial"):
+        return (2, 11, 25)
+    if cls_low in ("acceleration gate", "accl gate", "accel gate"):
+        return GATE_ENTITY_CATEGORIES
+    if _is_structure_row(npc_class, raw_name):
+        return STRUCTURE_ENTITY_CATEGORIES
+    return COMBAT_ENTITY_CATEGORIES
+
+
+def _sde_ref_class_bucket(ref: "SdeTypeRef") -> str | None:
+    return _norm_class_bucket(ref.group_name)
 
 
 @dataclass
@@ -977,43 +1183,47 @@ class SdeIndex:
             for r in conn.execute("SELECT group_id, name FROM sde_groups")
         }
 
-        self.npc_by_name: dict[str, list[SdeTypeRef]] = defaultdict(list)
-        self.npc_by_nospace: dict[str, list[SdeTypeRef]] = defaultdict(list)
-        self.npc_by_first_word_len: dict[tuple[str, int], list[str]] = defaultdict(list)
-        self.ship_hulls: dict[str, list[SdeTypeRef]] = defaultdict(list)
+        self.npc_by_cat_name: dict[int, dict[str, list[SdeTypeRef]]] = defaultdict(lambda: defaultdict(list))
+        self.npc_by_cat_nospace: dict[int, dict[str, list[SdeTypeRef]]] = defaultdict(lambda: defaultdict(list))
+        self.npc_by_cat_first_word_len: dict[int, dict[tuple[str, int], list[str]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self.diamond_by_hull: dict[str, list[SdeTypeRef]] = defaultdict(list)
         self.item_by_name: dict[str, list[int]] = defaultdict(list)
         self.faction_class_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
 
-        cat_list = ",".join(str(c) for c in ALLOWED_SDE_CATEGORIES)
-        seen_first_words: set[tuple[str, int, str]] = set()
+        seen_first_words: dict[int, set[tuple[str, int, str]]] = defaultdict(set)
         for row in conn.execute(
-            f"SELECT type_id, group_id, category_id, name, faction_id, volume "
-            f"FROM sde_types WHERE name IS NOT NULL ORDER BY type_id"
+            "SELECT type_id, group_id, category_id, name, faction_id, volume "
+            "FROM sde_types WHERE name IS NOT NULL ORDER BY type_id"
         ):
             nl = row["name"].lower()
             self.item_by_name[nl].append(int(row["type_id"]))
-            if row["category_id"] not in ALLOWED_SDE_CATEGORIES:
+            cat_id = int(row["category_id"]) if row["category_id"] is not None else -1
+            if cat_id not in ALLOWED_SDE_CATEGORIES:
                 continue
             gname = groups.get(row["group_id"], "")
             ref = SdeTypeRef(
                 type_id=int(row["type_id"]),
                 name=row["name"],
                 group_id=int(row["group_id"]),
-                category_id=int(row["category_id"]),
+                category_id=cat_id,
                 faction_id=int(row["faction_id"]) if row["faction_id"] is not None else None,
                 group_name=gname,
             )
-            self.npc_by_name[nl].append(ref)
-            self.npc_by_nospace[nl.replace(" ", "").replace("'", "")].append(ref)
+            self.npc_by_cat_name[cat_id][nl].append(ref)
+            self.npc_by_cat_nospace[cat_id][nl.replace(" ", "").replace("'", "")].append(ref)
+            if cat_id == 11 and nl.startswith("♦ "):
+                dhull = nl[2:].strip()
+                if dhull:
+                    self.diamond_by_hull[dhull].append(ref)
             toks = nl.split()
             if toks:
                 key = (toks[0], len(toks), nl)
-                if key not in seen_first_words:
-                    seen_first_words.add(key)
-                    self.npc_by_first_word_len[(toks[0], len(toks))].append(nl)
-            if ref.category_id == 6:
-                self.ship_hulls[nl].append(ref)
-            if ref.category_id == 11 and (
+                if key not in seen_first_words[cat_id]:
+                    seen_first_words[cat_id].add(key)
+                    self.npc_by_cat_first_word_len[cat_id][(toks[0], len(toks))].append(nl)
+            if cat_id == 11 and (
                 gname.startswith("Mission ")
                 or gname.startswith("Deadspace ")
                 or gname.startswith("Asteroid ")
@@ -1027,8 +1237,9 @@ class SdeIndex:
 
         for k in self.faction_class_groups:
             self.faction_class_groups[k] = sorted(set(self.faction_class_groups[k]))[:20]
-        for k in self.npc_by_first_word_len:
-            self.npc_by_first_word_len[k].sort()
+        for cat_map in self.npc_by_cat_first_word_len.values():
+            for k in cat_map:
+                cat_map[k].sort()
 
         self.dungeons_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in conn.execute(
@@ -1062,22 +1273,39 @@ class SdeIndex:
             return []
         clean = item_name.strip().lower()
         cands = [clean]
-        if clean.endswith("s") and len(clean) > 3:
+        if clean.endswith("ies") and len(clean) > 4:
+            cands.append(clean[:-3] + "y")
+        elif clean.endswith("s") and len(clean) > 3:
             cands.append(clean[:-1])
         else:
             cands.append(clean + "s")
-        for prefix in ("crates of ", "crate of ", "large crate of ", "small crate of ", "group of ", "units of "):
+        for prefix in (
+            "large crates of ",
+            "large crate of ",
+            "small crates of ",
+            "small crate of ",
+            "crates of ",
+            "crate of ",
+            "groups of ",
+            "group of ",
+            "units of ",
+        ):
             if clean.startswith(prefix):
                 sub = clean[len(prefix) :].strip()
                 cands.append(sub)
+                if sub.endswith("ies") and len(sub) > 4:
+                    cands.append(sub[:-3] + "y")
                 cands.append(f"crate of {sub}")
+                cands.append(f"crates of {sub}")
+                cands.append(f"large crate of {sub}")
+                cands.append(f"large crates of {sub}")
         for c in cands:
             if c in self.item_by_name:
                 return sorted(set(self.item_by_name[c]))
         return []
 
     @staticmethod
-    def normalize_variants(name: str) -> list[str]:
+    def normalize_variants(name: str, is_structure: bool = False) -> list[str]:
         cands = [name]
         low = name.lower()
         for a, b in SPELLING_PAIRS:
@@ -1088,13 +1316,29 @@ class SdeIndex:
         for a, b in (
             ("defence", "defense"),
             ("batery", "battery"),
+            ("batteries", "battery"),
             ("neutalizer", "neutralizer"),
             ("pithii", "pithi"),
+            ("pithium ", "pithum "),
             ("centi ", "centii "),
+            ("gistastis ", "gistatis "),
+            ("gistatsis ", "gistatis "),
+            ("gistatus ", "gistatis "),
+            ("gistor ", "gistior "),
+            ("gistium ", "gistum "),
+            ("corelli ", "coreli "),
+            ("colerior ", "corelior "),
+            ("corelium ", "corelum "),
+            ("corpier ", "corpior "),
+            ("coprii ", "corpii "),
+            ("martriarch", "matriarch"),
+            ("matriarc", "matriarch"),
+            ("ammater ", "ammatar "),
             ("war lord", "warlord"),
             ("sentinal", "sentinel"),
             ("blood raider", "bloodraider"),
             ("watchmen", "watchman"),
+            ("gallent ", "gallente "),
             ("amarr navy ", "imperial navy "),
         ):
             compound = re.sub(re.escape(a), b, compound, flags=re.I)
@@ -1118,8 +1362,19 @@ class SdeIndex:
         cands.extend(extra)
 
         stripped = name.strip(" .:*?!")
+        while stripped.startswith("(") and stripped.count("(") > stripped.count(")"):
+            stripped = stripped[1:].strip()
+        while stripped.startswith("[") and stripped.count("[") > stripped.count("]"):
+            stripped = stripped[1:].strip()
+        while stripped.endswith(")") and stripped.count(")") > stripped.count("("):
+            stripped = stripped[:-1].strip()
+        while stripped.endswith("]") and stripped.count("]") > stripped.count("["):
+            stripped = stripped[:-1].strip()
         if stripped != name:
             cands.append(stripped)
+        unwrapped_prefix = re.sub(r"^\(([A-Za-z0-9' -]+)\)\s+", r"\1 ", stripped).strip()
+        if unwrapped_prefix and unwrapped_prefix != stripped:
+            cands.append(unwrapped_prefix)
         if stripped.lower().startswith("the "):
             cands.append(stripped[4:])
         else:
@@ -1148,7 +1403,9 @@ class SdeIndex:
             "CHAIN ",
         ):
             if stripped.lower().startswith(pf.lower()):
-                cands.append(stripped[len(pf) :].strip())
+                rest = stripped[len(pf) :].strip()
+                if rest:
+                    cands.append(rest)
 
         if low.startswith("corpum dark ") or low.startswith("corpum shadow "):
             cands.append("Dark " + stripped)
@@ -1158,19 +1415,19 @@ class SdeIndex:
             cands.append(name.replace("-", " "))
             cands.append(name.replace(" - ", "-"))
 
-        cands.append(stripped + " Ship")
-        cands.append(stripped + " Gun")
-        cands.append(stripped + " Battery")
-        cands.append("Deadspace " + stripped)
-
-        m_rn = re.match(r"^(.+?)\s+(I|II|III|IV|V)$", stripped)
-        if m_rn:
-            cands.append(f"{m_rn.group(1)} Sentry {m_rn.group(2)}")
-            m_tw = re.match(r"^(\S+)\s+Tower\s+(I|II|III)$", stripped, re.I)
-            if m_tw:
-                cands.append(f"Tower Sentry {m_tw.group(1)} {m_tw.group(2)}")
-        else:
-            cands.append(f"{stripped} I")
+        if is_structure:
+            cands.append(stripped + " Ship")
+            cands.append(stripped + " Gun")
+            cands.append(stripped + " Battery")
+            cands.append("Deadspace " + stripped)
+            m_rn = re.match(r"^(.+?)\s+(I|II|III|IV|V)$", stripped)
+            if m_rn:
+                cands.append(f"{m_rn.group(1)} Sentry {m_rn.group(2)}")
+                m_tw = re.match(r"^(\S+)\s+Tower\s+(I|II|III)$", stripped, re.I)
+                if m_tw:
+                    cands.append(f"Tower Sentry {m_tw.group(1)} {m_tw.group(2)}")
+            elif re.search(r"\b(?:tower|sentry|battery)\b", stripped, re.I):
+                cands.append(f"{stripped} I")
 
         out: list[str] = []
         seen: set[str] = set()
@@ -1181,108 +1438,255 @@ class SdeIndex:
                 out.append(c.strip())
         return out
 
-    def direct_hits(self, name: str, allow_fuzzy: bool = True) -> list[SdeTypeRef]:
-        for v in self.normalize_variants(name):
-            vl = v.lower()
-            if vl in self.npc_by_name:
-                return self.npc_by_name[vl]
-            ns = vl.replace(" ", "").replace("'", "")
-            if ns in self.npc_by_nospace:
-                return self.npc_by_nospace[ns]
+    @staticmethod
+    def _filter_by_expected_class(
+        refs: list[SdeTypeRef],
+        expected_class: str | None,
+    ) -> list[SdeTypeRef]:
+        if not expected_class:
+            return refs
+        out: list[SdeTypeRef] = []
+        for r in refs:
+            rc = _sde_ref_class_bucket(r)
+            if rc is None or rc == expected_class:
+                out.append(r)
+        return out
+
+    def direct_hits(
+        self,
+        name: str,
+        allow_fuzzy: bool = True,
+        allowed_cats: tuple[int, ...] = COMBAT_ENTITY_CATEGORIES,
+        expected_class: str | None = None,
+        is_structure: bool = False,
+    ) -> list[SdeTypeRef]:
+        variants = self.normalize_variants(name, is_structure=is_structure)
+        for cat in allowed_cats:
+            by_name = self.npc_by_cat_name.get(cat, {})
+            by_nospace = self.npc_by_cat_nospace.get(cat, {})
+            for v in variants:
+                vl = v.lower()
+                if vl in by_name:
+                    return by_name[vl]
+                ns = vl.replace(" ", "").replace("'", "")
+                if ns in by_nospace:
+                    return by_nospace[ns]
+
+        # Verified Category 11 ♦ Diamond NPC entities (explicit NPC corp prefixes or exact "Orca")
+        if 11 in allowed_cats and self.diamond_by_hull:
+            nl_d = name.strip().lower()
+            if nl_d == "orca" and "orca" in self.diamond_by_hull:
+                return self.diamond_by_hull["orca"]
+            for corp_pf in (
+                "imperial war reserves ",
+                "state military stockpile ",
+                "federal strategic materiel ",
+                "republic fleet ordnance ",
+                "blood raiders ",
+                "serpentis corporation ",
+                "archangels ",
+                "true power ",
+            ):
+                if nl_d.startswith(corp_pf):
+                    dhull = nl_d[len(corp_pf) :].strip()
+                    if dhull in self.diamond_by_hull:
+                        filtered = self._filter_by_expected_class(self.diamond_by_hull[dhull], expected_class)
+                        if filtered:
+                            return filtered
 
         if not allow_fuzzy:
             return []
 
         nl = name.strip().lower()
+        while nl.startswith("(") and nl.count("(") > nl.count(")"):
+            nl = nl[1:].strip()
+        while nl.endswith(")") and nl.count(")") > nl.count("("):
+            nl = nl[:-1].strip()
         toks = nl.split()
-        # Unambiguous trailing token abbreviation (e.g. "Corelum Guardian Chief Infa/Saf/Sen/Def/Prot")
-        if len(toks) >= 2 and len(toks[-1]) >= 3:
-            lead = " ".join(toks[:-1]) + " "
-            last_t = toks[-1]
-            abbr = [
-                v
-                for k, v in self.npc_by_name.items()
-                if k.startswith(lead) and k[len(lead) :].startswith(last_t)
-            ]
-            if abbr:
-                flat = [x for m in abbr for x in m]
-                if len({x.name for x in flat}) <= 3:
-                    return flat
 
-        # Sibling rank substitution in the same pirate/empire/drone family
-        if toks and toks[0] in FAMILY_RANK_SIBLINGS and len(toks) >= 2:
-            rest = " ".join(toks[1:])
-            for alt in FAMILY_RANK_SIBLINGS[toks[0]]:
-                cand = f"{alt} {rest}"
-                if cand in self.npc_by_name:
-                    return self.npc_by_name[cand]
-            if toks[-1] in ("alvi", "alvu", "alvatis", "alvior", "alvus"):
+        for cat in allowed_cats:
+            by_name = self.npc_by_cat_name.get(cat, {})
+            by_fw = self.npc_by_cat_first_word_len.get(cat, {})
+
+            # Deadspace cruiser missing fixed sub-tier token ("Corpum Engraver" -> "Corpum Arch Engraver", "Corelum Scout" -> "Corelum Chief Scout")
+            if cat == 11 and len(toks) >= 2 and expected_class in (None, "cruiser"):
+                for pfx, tier_w in (("corpum", "arch"), ("corelum", "chief")):
+                    if toks[0] == pfx and toks[1] != tier_w:
+                        cand_t = f"{pfx} {tier_w} " + " ".join(toks[1:])
+                        if cand_t in by_name:
+                            filtered = self._filter_by_expected_class(by_name[cand_t], expected_class)
+                            if filtered:
+                                return filtered
+
+            # Unambiguous trailing token abbreviation (e.g. "Corelum Guardian Chief Infa/Saf/Sen/Def/Prot")
+            if len(toks) >= 2 and len(toks[-1]) >= 3:
+                lead = " ".join(toks[:-1]) + " "
+                last_t = toks[-1]
+                abbr = [
+                    v
+                    for k, v in by_name.items()
+                    if k.startswith(lead) and k[len(lead) :].startswith(last_t)
+                ]
+                if abbr:
+                    flat = self._filter_by_expected_class([x for m in abbr for x in m], expected_class)
+                    if flat and len({x.name for x in flat}) <= 3:
+                        return flat
+
+            # Sibling rank substitution constrained strictly to the same (faction_family, ship_class)
+            for prefix_len in (2, 1):
+                if len(toks) > prefix_len:
+                    pref_key = " ".join(toks[:prefix_len])
+                    meta = RANK_PREFIX_META.get(pref_key)
+                    if meta:
+                        fam, src_cls = meta
+                        target_cls = expected_class or (None if src_cls == "any" else src_cls)
+                        rest = " ".join(toks[prefix_len:])
+                        cand_prefixes: list[str] = []
+                        if target_cls:
+                            cand_prefixes.extend(FAMILY_CLASS_PREFIXES.get((fam, target_cls), []))
+                            if src_cls == "any":
+                                cand_prefixes.extend(FAMILY_CLASS_PREFIXES.get((fam, "any"), []))
+                        else:
+                            cand_prefixes.extend(FAMILY_CLASS_PREFIXES.get((fam, "any"), []))
+                        for alt in cand_prefixes:
+                            if alt == pref_key:
+                                continue
+                            cand = f"{alt} {rest}"
+                            if cand in by_name:
+                                filtered = self._filter_by_expected_class(by_name[cand], expected_class)
+                                if filtered:
+                                    return filtered
+                        break
+
+            # Rogue Drone suffix substitution (independent of FAMILY_RANK_SIBLINGS) constrained by ship_class
+            if len(toks) >= 2 and toks[-1] in ALL_ROGUE_DRONE_SUFFIXES:
                 body_p = " ".join(toks[:-1])
-                for suf in ("alvi", "alvior", "alvu", "alvus", "alvatis"):
-                    cand = f"{body_p} {suf}"
-                    if cand in self.npc_by_name:
-                        return self.npc_by_name[cand]
+                suf_pool = (
+                    ROGUE_DRONE_SUFFIXES_BY_CLASS.get(expected_class, ALL_ROGUE_DRONE_SUFFIXES)
+                    if expected_class
+                    else ALL_ROGUE_DRONE_SUFFIXES
+                )
+                for suf in suf_pool:
+                    for cand in (f"{body_p} {suf}", f"strain {body_p} {suf}"):
+                        if cand in by_name:
+                            filtered = self._filter_by_expected_class(by_name[cand], expected_class)
+                            if filtered:
+                                return filtered
 
-        # Guarded 1-typo difflib match sharing exact first token & token length
-        if len(toks) >= 2:
-            for base in (
-                nl,
-                re.sub(r"amarr navy ", "imperial navy ", re.sub(r"pithii", "pithi", nl)),
-            ):
-                btoks = base.split()
-                pool = self.npc_by_first_word_len.get((btoks[0], len(btoks)), [])
-                if pool:
-                    matches = difflib.get_close_matches(base, pool, n=1, cutoff=0.85)
-                    if matches:
-                        return self.npc_by_name[matches[0]]
+            # Guarded 1-typo difflib match sharing exact first token & token length
+            if len(toks) >= 2:
+                for base in (
+                    nl,
+                    re.sub(
+                        r"\bmartriarch\b",
+                        "matriarch",
+                        re.sub(
+                            r"\bgist(?:astis|atsis|atus)\b",
+                            "gistatis",
+                            re.sub(r"amarr navy ", "imperial navy ", re.sub(r"pithii", "pithi", nl)),
+                        ),
+                    ),
+                ):
+                    btoks = base.split()
+                    pool = by_fw.get((btoks[0], len(btoks)), [])
+                    if pool:
+                        matches = difflib.get_close_matches(base, pool, n=1, cutoff=0.85)
+                        if matches:
+                            filtered = self._filter_by_expected_class(by_name[matches[0]], expected_class)
+                            if filtered:
+                                return filtered
         return []
 
-    def expand_short_names(self, raw_name: str) -> tuple[list[str], bool]:
+    def expand_short_names(
+        self,
+        raw_name: str,
+        allowed_cats: tuple[int, ...] = COMBAT_ENTITY_CATEGORIES,
+        expected_class: str | None = None,
+        is_structure: bool = False,
+    ) -> tuple[list[str], bool]:
         """Expand short-form EVE NPC names (slashes, shared prefix/suffix/circumfix, ranges, ellipses)."""
         s = clean_wiki_inline(raw_name)
         if not s or set(s) <= set("?-.* "):
             return [], False
         had_ellipsis = "..." in s
 
+        def strip_unbalanced(tok: str) -> str:
+            t = tok.strip()
+            while t.startswith("(") and t.count("(") > t.count(")"):
+                t = t[1:].strip()
+            while t.startswith("[") and t.count("[") > t.count("]"):
+                t = t[1:].strip()
+            while t.endswith(")") and t.count(")") > t.count("("):
+                t = t[:-1].strip()
+            while t.endswith("]") and t.count("]") > t.count("["):
+                t = t[:-1].strip()
+            return t
+
+        def has_rank_or_faction_prefix(tok: str) -> bool:
+            tl = tok.lower()
+            return any(tl.startswith(rp + " ") for rp in RANK_PREFIX_META) or any(
+                tl.startswith(npf + " ") for npf in NAME_TO_CANON_FACTION
+            )
+
+        def has_hit(cand: str, allow_fuzzy: bool = False) -> bool:
+            return bool(
+                self.direct_hits(
+                    cand,
+                    allow_fuzzy=allow_fuzzy,
+                    allowed_cats=allowed_cats,
+                    expected_class=expected_class,
+                    is_structure=is_structure,
+                )
+            )
+
         # Numeric range brackets e.g. "AEGIS No. [1-4] Capital Construction Forge"
         m_rng = re.match(r"^(.*?)\[(\d+)\s*-\s*(\d+)\](.*)$", s)
-        if m_rng and not self.direct_hits(s, allow_fuzzy=False):
+        if m_rng and not has_hit(s, allow_fuzzy=False):
             a, b = int(m_rng.group(2)), int(m_rng.group(3))
             if 0 < b - a <= 12:
                 expanded = [
                     re.sub(r"\s+", " ", f"{m_rng.group(1)}{k}{m_rng.group(4)}").strip()
                     for k in range(a, b + 1)
                 ]
-                if any(self.direct_hits(x) for x in expanded):
+                if any(has_hit(x, allow_fuzzy=True) for x in expanded):
                     return expanded, had_ellipsis
 
         # Embedded bracket/paren override e.g. "Seven Recruit [Coreli Watchman/Patroller]" or "Chemical Factory (Fortified Angel Bunker)"
         m_emb = re.match(r"^[^\[\(]+([\[\(])([^\]\)]+)([\]\)])\s*$", s)
-        if m_emb and not self.direct_hits(s, allow_fuzzy=False):
+        if m_emb and not has_hit(s, allow_fuzzy=False):
             inner = m_emb.group(2).strip()
             if not re.search(
                 r"\b(?:warning|km|units|m3|triggers|wave|boss|commander|spawn|note|optional|rare|maybe)\b",
                 inner,
                 re.I,
             ):
-                exp_inner, _ = self.expand_short_names(inner)
-                if exp_inner and any(self.direct_hits(x) for x in exp_inner):
+                exp_inner, _ = self.expand_short_names(
+                    inner,
+                    allowed_cats=allowed_cats,
+                    expected_class=expected_class,
+                    is_structure=is_structure,
+                )
+                if exp_inner and any(has_hit(x, allow_fuzzy=True) for x in exp_inner):
                     return exp_inner, had_ellipsis
 
         def expand_piece(piece: str) -> list[str]:
-            piece = piece.strip()
+            piece = strip_unbalanced(piece)
             if not piece:
                 return []
             m_cnt = re.match(r"^(?:\d+x\s+|\d+\s*-\s*\d+\s*x?\s+)(.+)$", piece, re.I)
-            if m_cnt and not self.direct_hits(piece, allow_fuzzy=False):
+            if m_cnt and not has_hit(piece, allow_fuzzy=False):
                 piece = m_cnt.group(1).strip()
-            if self.direct_hits(piece, allow_fuzzy=False):
+            if "/" not in piece and has_hit(piece, allow_fuzzy=False):
+                return [piece]
+            if "/" in piece and any(piece.lower() in self.npc_by_cat_name.get(cat, {}) for cat in allowed_cats):
                 return [piece]
 
-            # Parenthetical alternation: "Pithatis (Enforcer/Executor)"
+            # Parenthetical alternation: "Pithatis (Enforcer/Executor)" or "(Dire Pithi Infiltrator/Invader)"
             m = re.match(r"^(.*?)\(([^()]*?/[^()]*?)\)(.*)$", piece)
             if m:
                 pre, inside, post = m.group(1), m.group(2), m.group(3)
+                if not pre.strip() and not post.strip():
+                    return expand_piece(inside)
                 out: list[str] = []
                 for opt in inside.split("/"):
                     opt = opt.strip()
@@ -1291,7 +1695,7 @@ class SdeIndex:
                 return out
 
             if "/" in piece:
-                parts = [p.strip() for p in piece.split("/") if p.strip()]
+                parts = [strip_unbalanced(p) for p in piece.split("/") if strip_unbalanced(p)]
                 # Hyphenated prefix e.g. "Type-A/B/C/D Anomalous Alvi"
                 m_hyp = re.match(r"^([A-Za-z0-9]+-)([A-Za-z0-9]+)$", parts[0])
                 if m_hyp and len(parts) >= 2:
@@ -1302,7 +1706,7 @@ class SdeIndex:
                     for idx, p in enumerate(parts[1:], 1):
                         tok = p.split()[0] if idx == len(parts) - 1 and suffix else p
                         hyp_cands.append(f"{hyp_pref}{tok}{suffix}")
-                    if sum(1 for c in hyp_cands if self.direct_hits(c, allow_fuzzy=False)) >= 2:
+                    if sum(1 for c in hyp_cands if has_hit(c, allow_fuzzy=False)) >= 2:
                         return hyp_cands
 
                 # Ellipsis trailing suffix hint e.g. "Silverfish/... Alvi"
@@ -1319,93 +1723,141 @@ class SdeIndex:
                             )
                     return expanded
 
-                parts = [re.sub(r"^\.\.\.\s*|\s*\.\.\.$", "", p).strip() for p in parts]
+                parts = [strip_unbalanced(re.sub(r"^\.\.\.\s*|\s*\.\.\.$", "", p)) for p in parts]
                 parts = [p for p in parts if p]
                 if not parts:
                     return []
                 if len(parts) == 1:
                     return [parts[0]]
-                if all(self.direct_hits(p) for p in parts):
-                    return parts
 
                 p0_w = parts[0].split()
                 pl_w = parts[-1].split()
 
-                # Circumfix: shared leading prefix AND shared trailing suffix ("Corelatis Squad/Wing Leader")
-                if len(p0_w) >= 2 and len(pl_w) >= 2:
-                    best: list[str] | None = None
-                    best_hits = 0
-                    for kp in range(1, len(p0_w)):
+                # Run strict-first then fuzzy across circumfix, shared prefix, rolling prefix, and shared suffix
+                # BEFORE accepting independent unprefixed parts (preventing "EoM Hydra/Ogre" -> unprefixed hits).
+                for fuzzy_pass in (False, True):
+                    # Circumfix: shared leading prefix AND shared trailing suffix ("Corelatis Squad/Wing Leader")
+                    if len(p0_w) >= 2 and len(pl_w) >= 2:
+                        best: list[str] | None = None
+                        best_hits = 0
+                        for kp in range(1, len(p0_w)):
+                            prefix = " ".join(p0_w[:kp])
+                            for ks in range(1, len(pl_w)):
+                                suffix = " ".join(pl_w[-ks:])
+                                cands = []
+                                for idx, p in enumerate(parts):
+                                    cand = p
+                                    if (
+                                        idx > 0
+                                        and not cand.lower().startswith(prefix.lower())
+                                        and not has_rank_or_faction_prefix(cand)
+                                        and not cand.lower().startswith(suffix.lower())
+                                    ):
+                                        cand = f"{prefix} {cand}"
+                                    if (
+                                        idx < len(parts) - 1
+                                        and not cand.lower().endswith(suffix.lower())
+                                        and not cand.lower().startswith(suffix.lower() + " ")
+                                    ):
+                                        cand = f"{cand} {suffix}"
+                                    cands.append(cand)
+                                hits = sum(1 for c in cands if has_hit(c, allow_fuzzy=fuzzy_pass))
+                                if hits > best_hits:
+                                    best_hits = hits
+                                    best = cands
+                        if best and best_hits == len(best):
+                            return best
+
+                    # Rolling prefix ("Gistii Ambusher/Arch Gistii Outlaw/Thug") & Shared prefix ("EoM Hydra/Ogre")
+                    best_pref: list[str] | None = None
+                    best_pref_hits = 0
+                    for kp in range(len(p0_w) - 1, 0, -1):
                         prefix = " ".join(p0_w[:kp])
-                        for ks in range(1, len(pl_w)):
-                            suffix = " ".join(pl_w[-ks:])
-                            cands = []
-                            for idx, p in enumerate(parts):
-                                cand = p
-                                if idx > 0 and not cand.lower().startswith(prefix.lower()):
-                                    cand = f"{prefix} {cand}"
-                                if idx < len(parts) - 1 and not cand.lower().endswith(suffix.lower()):
-                                    cand = f"{cand} {suffix}"
-                                cands.append(cand)
-                            hits = sum(1 for c in cands if self.direct_hits(c))
-                            if hits > best_hits:
-                                best_hits = hits
-                                best = cands
-                    if best and best_hits == len(best):
-                        return best
+                        cands = [parts[0]]
+                        cur_prefix = prefix
+                        for p in parts[1:]:
+                            pl_tok = p.lower()
+                            if pl_tok.startswith(cur_prefix.lower() + " ") or pl_tok.startswith(prefix.lower() + " "):
+                                cands.append(p)
+                                pw = p.split()
+                                if len(pw) >= 2:
+                                    cur_prefix = " ".join(pw[:-1])
+                            elif has_rank_or_faction_prefix(p):
+                                cands.append(p)
+                                pw = p.split()
+                                if len(pw) >= 2:
+                                    cur_prefix = " ".join(pw[:-1])
+                            else:
+                                cands.append(f"{cur_prefix} {p}")
+                        hits = sum(1 for c in cands if has_hit(c, allow_fuzzy=fuzzy_pass))
+                        if hits > best_pref_hits:
+                            best_pref_hits = hits
+                            best_pref = cands
+                    if best_pref and best_pref_hits == len(best_pref):
+                        return best_pref
 
-                # Shared prefix ("Pithatis Enforcer/Executor", "Centus Tyrant/Dread Lord")
-                best_pref: list[str] | None = None
-                best_pref_hits = 0
-                for kp in range(len(p0_w) - 1, 0, -1):
-                    prefix = " ".join(p0_w[:kp])
-                    cands = [parts[0]]
+                    # Shared suffix ("Heavy/Light Missile Battery", "Render/Decimator Alvi", "Predator Alvior/ Marauder")
+                    best_suf: list[str] | None = None
+                    best_suf_hits = 0
+                    suf_candidates: list[str] = [" ".join(pl_w[-ks:]) for ks in range(len(pl_w) - 1, 0, -1)]
+                    if len(pl_w) == 1 and len(p0_w) >= 2:
+                        suf_candidates.extend(" ".join(p0_w[-ks:]) for ks in range(len(p0_w) - 1, 0, -1))
+                    for suffix in suf_candidates:
+                        cands = []
+                        suf_low = suffix.lower()
+                        for p in parts:
+                            pl_tok = p.lower()
+                            if pl_tok.endswith(suf_low) or pl_tok.startswith(suf_low + " "):
+                                cands.append(p)
+                            else:
+                                cands.append(f"{p} {suffix}")
+                        hits = sum(1 for c in cands if has_hit(c, allow_fuzzy=fuzzy_pass))
+                        if hits > best_suf_hits:
+                            best_suf_hits = hits
+                            best_suf = cands
+                    if best_suf and best_suf_hits == len(best_suf):
+                        return best_suf
+
+                # Mixed prefix/suffix flip e.g. "Alvus Controller / Spearhead/Swarm Preserver Alvus"
+                if len(parts) >= 2 and p0_w[0].lower() in ("alvus", "strain") and pl_w[-1].lower() in ALL_ROGUE_DRONE_SUFFIXES:
+                    suf_word = pl_w[-1]
+                    mixed_cands = [parts[0]]
                     for p in parts[1:]:
-                        if p.lower().startswith(prefix.lower()) or self.direct_hits(p, allow_fuzzy=False):
-                            cands.append(p)
+                        if p.lower().startswith(suf_word.lower() + " ") or p.lower().endswith(" " + suf_word.lower()):
+                            mixed_cands.append(p)
                         else:
-                            cands.append(f"{prefix} {p}")
-                    hits = sum(1 for c in cands if self.direct_hits(c))
-                    if hits > best_pref_hits:
-                        best_pref_hits = hits
-                        best_pref = cands
-                if best_pref and best_pref_hits == len(best_pref):
-                    return best_pref
+                            mixed_cands.append(f"{p} {suf_word}")
+                    if sum(1 for c in mixed_cands if has_hit(c, allow_fuzzy=True)) >= 2:
+                        return mixed_cands
 
-                # Shared suffix ("Heavy/Light Missile Battery", "Render/Decimator Alvi")
-                best_suf: list[str] | None = None
-                best_suf_hits = 0
-                for ks in range(len(pl_w) - 1, 0, -1):
-                    suffix = " ".join(pl_w[-ks:])
-                    cands = []
-                    for p in parts[:-1]:
-                        if p.lower().endswith(suffix.lower()) or self.direct_hits(p, allow_fuzzy=False):
-                            cands.append(p)
-                        else:
-                            cands.append(f"{p} {suffix}")
-                    cands.append(parts[-1])
-                    hits = sum(1 for c in cands if self.direct_hits(c))
-                    if hits > best_suf_hits:
-                        best_suf_hits = hits
-                        best_suf = cands
+                # Independent full names separated by "/" (only if no shared affix resolved all parts)
+                if all(has_hit(p, allow_fuzzy=True) for p in parts):
+                    return parts
+
                 if best_suf and best_suf_hits > best_pref_hits:
                     return best_suf
-                if best_pref:
+                if best_pref and best_pref_hits >= 2:
+                    return best_pref
+                if best_pref and best_pref_hits == 1 and not has_hit(parts[-1], allow_fuzzy=True):
                     return best_pref
                 return parts
 
             return [piece]
 
-        if "," in s and not self.direct_hits(s, allow_fuzzy=False):
+        if "," in s and not has_hit(s, allow_fuzzy=False):
             comma_parts = [x.strip() for x in s.split(",") if x.strip()]
             cand_list: list[str] = []
             for cp in comma_parts:
                 cand_list.extend(expand_piece(cp))
-            if len(cand_list) > 1 and any(self.direct_hits(x) for x in cand_list):
+            if len(cand_list) > 1 and any(has_hit(x, allow_fuzzy=True) for x in cand_list):
                 return cand_list, had_ellipsis
         return expand_piece(s), had_ellipsis
 
-    def find_family_candidates(self, name: str) -> list[SdeTypeRef]:
+    def find_family_candidates(
+        self,
+        name: str,
+        allowed_cats: tuple[int, ...] = COMBAT_ENTITY_CATEGORIES,
+    ) -> list[SdeTypeRef]:
         low = clean_wiki_inline(name).strip(" .?*!").lower()
         low = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", low).strip()
         if low.endswith("pithii"):
@@ -1419,22 +1871,13 @@ class SdeIndex:
         ):
             pref = "federation praktor " if low == "federation prak" else low + " "
             hits: list[SdeTypeRef] = []
-            for k in sorted(self.npc_by_name):
-                if k.startswith(pref):
-                    hits.extend(self.npc_by_name[k])
-            if hits:
-                return hits[:20]
-        toks = low.split()
-        if len(toks) >= 2 and toks[-1] in self.ship_hulls:
-            return self.ship_hulls[toks[-1]]
-        if len(toks) == 1 and len(low) >= 4:
-            poss_prefix = low + "'s "
-            hits = []
-            for k in sorted(self.npc_by_name):
-                if k.startswith(poss_prefix):
-                    hits.extend(self.npc_by_name[k])
-            if hits:
-                return hits[:20]
+            for cat in allowed_cats:
+                by_name = self.npc_by_cat_name.get(cat, {})
+                for k in sorted(by_name):
+                    if k.startswith(pref):
+                        hits.extend(by_name[k])
+                if hits:
+                    return hits[:20]
         return []
 
     def resolve_npc_row(
@@ -1446,7 +1889,32 @@ class SdeIndex:
         is_event: bool = False,
     ) -> dict[str, Any]:
         raw_clean = clean_wiki_inline(raw_name)
-        cls_low = npc_class.lower()
+        cls_low = npc_class.strip().lower()
+        allowed_cats = _allowed_cats_for_row(npc_class, raw_clean)
+        is_struct = _is_structure_row(npc_class, raw_clean)
+        cb = _norm_class_bucket(npc_class)
+
+        # Acceleration Gate rows (even when the wiki name cell is blank)
+        if cls_low in ("acceleration gate", "accl gate", "accel gate") or (
+            raw_clean and re.match(r"^(?:acceleration )?gate\b", raw_clean.lower())
+        ):
+            hits = self.direct_hits(
+                "Acceleration Gate",
+                allow_fuzzy=False,
+                allowed_cats=GATE_ENTITY_CATEGORIES,
+                is_structure=True,
+            )
+            if hits:
+                return {
+                    "status": "resolved_exact",
+                    "method": "acceleration_gate",
+                    "expanded_names": [raw_clean or "Acceleration Gate"],
+                    "type_ids": sorted({h.type_id for h in hits}),
+                    "candidate_type_ids": sorted({h.type_id for h in hits}),
+                    "matched_names": sorted({h.name for h in hits}),
+                    "unresolved_parts": [],
+                    "reason": None,
+                }
 
         if not raw_clean:
             return {
@@ -1471,40 +1939,34 @@ class SdeIndex:
                 "reason": "placeholder_question_mark",
             }
 
-        # Acceleration Gate rows
-        if cls_low in ("acceleration gate", "accl gate", "accel gate") or re.match(
-            r"^(?:acceleration )?gate\b", raw_clean.lower()
-        ):
-            hits = self.direct_hits("Acceleration Gate", allow_fuzzy=False)
-            if hits:
-                return {
-                    "status": "resolved_exact",
-                    "method": "acceleration_gate",
-                    "expanded_names": [raw_clean],
-                    "type_ids": sorted({h.type_id for h in hits}),
-                    "candidate_type_ids": sorted({h.type_id for h in hits}),
-                    "matched_names": sorted({h.name for h in hits}),
-                    "unresolved_parts": [],
-                    "reason": None,
-                }
-
         # Asteroid / ore rows
         if cls_low == "asteroid":
             m_ast = ORE_STRIP_RE.match(raw_clean)
-            if m_ast and m_ast.group(1).lower() in self.npc_by_name:
-                hits = self.npc_by_name[m_ast.group(1).lower()]
-                return {
-                    "status": "resolved_structure_faction",
-                    "method": "asteroid_ore_name",
-                    "expanded_names": [m_ast.group(1)],
-                    "type_ids": sorted({h.type_id for h in hits}),
-                    "candidate_type_ids": sorted({h.type_id for h in hits}),
-                    "matched_names": sorted({h.name for h in hits}),
-                    "unresolved_parts": [],
-                    "reason": None,
-                }
+            if m_ast:
+                hits = self.direct_hits(
+                    m_ast.group(1),
+                    allow_fuzzy=False,
+                    allowed_cats=ASTEROID_ENTITY_CATEGORIES,
+                    is_structure=False,
+                )
+                if hits:
+                    return {
+                        "status": "resolved_structure_faction",
+                        "method": "asteroid_ore_name",
+                        "expanded_names": [m_ast.group(1)],
+                        "type_ids": sorted({h.type_id for h in hits}),
+                        "candidate_type_ids": sorted({h.type_id for h in hits}),
+                        "matched_names": sorted({h.name for h in hits}),
+                        "unresolved_parts": [],
+                        "reason": None,
+                    }
 
-        names, had_ellipsis = self.expand_short_names(raw_name)
+        names, had_ellipsis = self.expand_short_names(
+            raw_name,
+            allowed_cats=allowed_cats,
+            expected_class=cb,
+            is_structure=is_struct,
+        )
         if not names:
             return {
                 "status": "unresolved",
@@ -1523,94 +1985,159 @@ class SdeIndex:
         unresolved_parts: list[str] = []
 
         for nm in names:
-            hits = self.direct_hits(nm, allow_fuzzy=True)
+            nm_cats = _allowed_cats_for_row(npc_class, nm)
+            nm_struct = is_struct or _is_structure_row(npc_class, nm)
+            hits = self.direct_hits(
+                nm,
+                allow_fuzzy=True,
+                allowed_cats=nm_cats,
+                expected_class=cb,
+                is_structure=nm_struct,
+            )
             if hits:
                 exact_hits.extend(hits)
                 continue
 
             if note:
+                note_matched = False
                 m_ren = re.search(
-                    r"(?:renamed(?:\s+to|\s+from)?|formerly|previously|now)\s+['\"]?([A-Za-z0-9' \-]+)",
+                    r"(?:renamed(?:\s+to|\s+from)?|formerly|previously|now|ship\s+type:?)\s*['\"]?([A-Za-z0-9' /\-]+)",
                     note,
                     re.I,
                 )
+                note_cands: list[str] = []
                 if m_ren:
-                    hits = self.direct_hits(m_ren.group(1).strip(), allow_fuzzy=True)
-                    if hits:
-                        exact_hits.extend(hits)
-                        continue
+                    note_cands.append(m_ren.group(1).strip())
+                elif "/" in note or len(note.split()) <= 4:
+                    note_cands.append(note.strip())
+                for nc in note_cands:
+                    exp_nc, _ = self.expand_short_names(
+                        nc,
+                        allowed_cats=nm_cats,
+                        expected_class=cb,
+                        is_structure=nm_struct,
+                    )
+                    nc_hits: list[SdeTypeRef] = []
+                    for enc in exp_nc:
+                        h = self.direct_hits(
+                            enc,
+                            allow_fuzzy=bool(m_ren),
+                            allowed_cats=nm_cats,
+                            expected_class=cb,
+                            is_structure=nm_struct,
+                        )
+                        if not h:
+                            nc_hits = []
+                            break
+                        nc_hits.extend(h)
+                    if nc_hits:
+                        exact_hits.extend(nc_hits)
+                        note_matched = True
+                        break
+                if note_matched:
+                    continue
 
             nlow = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", nm).strip(" .?*!").lower()
-            nlow_nopf = re.sub(r"^(?:starbase|pirate|enemy|hostile)\s+", "", nlow)
+            nlow_nopf = re.sub(
+                r"^(?:starbase|pirate|enemy|hostile|conquered|gistum|gistior|gistii|gist|"
+                r"pithum|pithior|pithi|pith|corelum|corelior|coreli|core|centus|centum|centior|centii|"
+                r"corpus|corpum|corpior|corpii|serpentis|guristas|angel|sansha|blood raiders?|guardian angel)\s+",
+                "",
+                nlow,
+            )
             cand_patterns: list[str] = []
             for key in (nlow, nlow_nopf):
                 if key in STRUCTURE_ALIASES:
                     cand_patterns.extend(STRUCTURE_ALIASES[key])
-            if cls_low in (
-                "structure",
-                "sentry",
-                "tower",
-                "container",
-                "hackable",
-                "destructible object",
-                "large collidable object",
-                "battery",
-                "drone",
-                "frigate",
-                "cruiser",
-                "battleship",
-                "battlecruiser",
-                "destroyer",
-                "industrial",
-                "hangar array",
-                "beacon",
-            ):
+            if nlow_nopf != nlow and nm_struct:
+                cand_patterns.append("{fac} " + nlow_nopf)
+                cand_patterns.append(nlow_nopf)
+            m_ft = re.match(r"^(.+?)\s+(?:tower\s+sentry|sentry\s+tower)(?:\s+(i|ii|iii))?$", nlow, re.I)
+            if m_ft:
+                tier = m_ft.group(2).upper() if m_ft.group(2) else None
+                tiers = [tier] if tier else ["I", "II", "III"]
+                fac_word = m_ft.group(1).strip().title()
+                for t_rn in tiers:
+                    cand_patterns.append(f"Tower Sentry {fac_word} {t_rn}")
+                cand_patterns.append(f"{fac_word} Sentry Gun")
+                cand_patterns.extend(f"Tower Sentry {{fac}} {t_rn}" for t_rn in tiers)
+            m_tws = re.match(r"^tower\s+sentry\s+([a-z]+)$", nlow, re.I)
+            if m_tws:
+                fw = m_tws.group(1).rstrip("s").title()
+                for t_rn in ("I", "II", "III"):
+                    cand_patterns.append(f"Tower Sentry {fw} {t_rn}")
+                    cand_patterns.append(f"Tower Sentry {{fac}} {t_rn}")
+            m_en = re.match(r"^(.+?)\s+energy neutralizer tower$", nlow, re.I)
+            if m_en:
+                fw = m_en.group(1).strip().title()
+                cand_patterns.extend([f"{fw} Energy Neutralizer Sentry I", f"{fw} Energy Neutralizer Sentry II", "{fac} Energy Neutralizer Sentry I"])
+            if nm_struct or cls_low in ("drone", "frigate", "cruiser", "battleship", "battlecruiser", "destroyer", "industrial"):
                 cand_patterns.append("{fac} " + nm)
 
+            inferred_nm_fac = infer_faction_from_text(nm)
+            fac_pool: list[str] = []
+            if inferred_nm_fac:
+                fac_pool.append(inferred_nm_fac)
+            for pf_fac in page_factions:
+                if pf_fac not in fac_pool:
+                    fac_pool.append(pf_fac)
+
             struct_matched: list[SdeTypeRef] = []
-            fac_pool = page_factions or [
-                "Angel Cartel",
-                "Guristas Pirates",
-                "Blood Raider Covenant",
-                "Sansha's Nation",
-                "Serpentis",
-                "Rogue Drones",
-            ]
-            for fac in fac_pool:
-                prefixes = FACTION_PREFIXES.get(fac, [fac])
-                for pat in cand_patterns:
-                    if "{fac}" in pat:
+            # Un-templated structure aliases apply even when page_factions is empty;
+            # never synthesize a default faction (like Angel Cartel) when fac_pool is empty.
+            for pat in cand_patterns:
+                if "{fac}" in pat:
+                    continue
+                h = self.direct_hits(
+                    pat,
+                    allow_fuzzy=False,
+                    allowed_cats=nm_cats,
+                    expected_class=cb,
+                    is_structure=nm_struct,
+                )
+                if h:
+                    struct_matched.extend(h)
+                    break
+
+            if not struct_matched and fac_pool:
+                for fac in fac_pool:
+                    prefixes = FACTION_PREFIXES.get(fac, [fac])
+                    for pat in cand_patterns:
+                        if "{fac}" not in pat:
+                            continue
                         for pf in prefixes:
-                            h = self.direct_hits(pat.format(fac=pf), allow_fuzzy=False)
+                            h = self.direct_hits(
+                                pat.format(fac=pf),
+                                allow_fuzzy=False,
+                                allowed_cats=nm_cats,
+                                expected_class=cb,
+                                is_structure=nm_struct,
+                            )
                             if h:
                                 struct_matched.extend(h)
-                    else:
-                        h = self.direct_hits(pat, allow_fuzzy=False)
-                        if h:
-                            struct_matched.extend(h)
+                        if struct_matched:
+                            break
                     if struct_matched:
                         break
-                if struct_matched:
-                    break
+
             if struct_matched:
                 struct_hits.extend(struct_matched)
                 continue
 
-            fh = self.find_family_candidates(nm)
+            fh = self.find_family_candidates(nm, allowed_cats=nm_cats)
             if fh:
                 fam_hits.extend(fh)
             else:
                 unresolved_parts.append(nm)
 
-        all_refs = exact_hits + struct_hits + fam_hits
+        concrete_refs = exact_hits + struct_hits
+        concrete_tids = sorted({h.type_id for h in concrete_refs})
+        all_refs = concrete_refs + fam_hits
         all_tids = sorted({h.type_id for h in all_refs})
-        matched_names = sorted({h.name for h in all_refs})
+        matched_names = sorted({h.name for h in concrete_refs})
 
-        if not unresolved_parts:
-            if fam_hits:
-                status = "resolved_family_candidates"
-                method = "ellipsis_or_family_prefix" if had_ellipsis else "family_or_hull_candidate"
-            elif struct_hits:
+        if not unresolved_parts and concrete_tids and not fam_hits:
+            if struct_hits:
                 status = "resolved_structure_faction"
                 method = "faction_qualified_structure"
             else:
@@ -1620,28 +2147,39 @@ class SdeIndex:
                 "status": status,
                 "method": method,
                 "expanded_names": names,
-                "type_ids": sorted({h.type_id for h in exact_hits + struct_hits}),
-                "candidate_type_ids": all_tids,
+                "type_ids": concrete_tids,
+                "candidate_type_ids": concrete_tids,
                 "matched_names": matched_names,
                 "unresolved_parts": [],
                 "reason": None,
             }
 
-        if all_refs:
+        if not unresolved_parts and fam_hits:
+            return {
+                "status": "resolved_family_candidates",
+                "method": "ellipsis_or_family_prefix" if had_ellipsis else "family_prefix_candidate",
+                "expanded_names": names,
+                "type_ids": [],
+                "candidate_type_ids": all_tids,
+                "matched_names": [],
+                "unresolved_parts": list(names),
+                "reason": "bare_family_prefix_only",
+            }
+
+        if concrete_tids or fam_hits:
             return {
                 "status": "partly_resolved",
                 "method": "partial_multi_name",
                 "expanded_names": names,
-                "type_ids": sorted({h.type_id for h in exact_hits + struct_hits}),
+                "type_ids": concrete_tids,
                 "candidate_type_ids": all_tids,
                 "matched_names": matched_names,
                 "unresolved_parts": unresolved_parts,
                 "reason": f"unresolved_part:{';'.join(unresolved_parts)}",
             }
 
-        # Fallback to faction + ship_class mission/site SDE entity group candidates ONLY when
-        # the custom spawn name indicates a faction or EVE combat role/class
-        cb = _norm_class_bucket(npc_class)
+        # Faction + ship_class entity group hints are preserved as candidate_type_ids on unresolved rows
+        # (never counted toward concrete resolved_total / resolved_percent).
         inferred_name_fac = infer_faction_from_text(raw_clean)
         nf = inferred_name_fac or (page_factions[0] if page_factions else None)
         has_role_or_fac_hint = bool(inferred_name_fac or NPC_ROLE_HINT_RE.search(raw_clean))
@@ -1737,9 +2275,6 @@ def parse_wiki_page(
         )
         for e in events
     )
-    has_pve_cat = bool(set(categories) & PVE_CATEGORIES)
-    if not has_pve_template and not (has_pve_cat and "NPCTableRow" in wikitext):
-        return None
     if not has_pve_template:
         return None
 
@@ -1747,14 +2282,29 @@ def parse_wiki_page(
     is_event = "Game events" in categories
     is_past = "Past content" in categories
 
-    # Build raw units grouped around Missiondetails / CMBSite* headers (skipping Escalation teaser links)
+    # Build raw units grouped around Missiondetails / CMBSite* headers (splitting mutually exclusive site variants)
     units_raw: list[dict[str, Any]] = []
     cur_heading_stack: list[tuple[int, str]] = []
     cur_unit: dict[str, Any] | None = None
     preamble_events: list[dict[str, Any]] = []
+    variant_heading_level: int | None = None
 
     def current_heading_text() -> str:
         return " > ".join(h for _, h in cur_heading_stack)
+
+    def unit_has_npc_rows(u: dict[str, Any]) -> bool:
+        return any(
+            e["kind"] == "template" and e["name"] in ("npctablerow", "npctr")
+            for e in u["events"]
+        )
+
+    def lookahead_has_npcs(start_idx: int, stop_level: int) -> bool:
+        for nxt in events[start_idx + 1 :]:
+            if nxt["kind"] == "heading" and nxt["level"] <= stop_level:
+                break
+            if nxt["kind"] == "template" and nxt["name"] in ("npctablerow", "npctr"):
+                return True
+        return False
 
     for idx, ev in enumerate(events):
         if ev["kind"] == "heading":
@@ -1762,6 +2312,53 @@ def parse_wiki_page(
             txt = ev["text"]
             cur_heading_stack = [(l, h) for l, h in cur_heading_stack if l < lvl]
             cur_heading_stack.append((lvl, txt))
+
+            if cur_unit is not None and cur_unit["unit_kind"] == "combat_site":
+                in_non_variant_sec = any(NON_VARIANT_SECTION_RE.search(h) for _, h in cur_heading_stack)
+                if in_non_variant_sec:
+                    if variant_heading_level is not None and lvl <= variant_heading_level:
+                        variant_heading_level = None
+                    cur_unit["events"].append(ev)
+                    continue
+                is_room_h = bool(ROOM_HEADING_RE.search(txt))
+                is_explicit_variant = (not is_room_h) and bool(VARIANT_HEADING_RE.search(txt))
+                is_sibling_variant = (
+                    (not is_room_h)
+                    and variant_heading_level is not None
+                    and lvl == variant_heading_level
+                )
+                has_future_variant_sibling = (
+                    (not is_room_h)
+                    and not is_explicit_variant
+                    and any(
+                        nxt["kind"] == "heading"
+                        and nxt["level"] == lvl
+                        and VARIANT_HEADING_RE.search(nxt["text"])
+                        for nxt in events[idx + 1 :]
+                    )
+                )
+                if (is_explicit_variant or is_sibling_variant or has_future_variant_sibling) and lookahead_has_npcs(idx, lvl):
+                    if not unit_has_npc_rows(cur_unit):
+                        cur_unit["variant_name"] = txt
+                        cur_unit["events"] = [
+                            e for e in cur_unit["events"] if e["kind"] != "heading" or e["level"] < lvl
+                        ]
+                        variant_heading_level = lvl
+                    else:
+                        variant_heading_level = lvl
+                        cur_unit = {
+                            "unit_kind": "combat_site",
+                            "header": cur_unit["header"],
+                            "section_heading": cur_unit["section_heading"],
+                            "variant_name": txt,
+                            "events": [],
+                            "escalation_links": cur_unit["escalation_links"],
+                        }
+                        units_raw.append(cur_unit)
+                    continue
+                if variant_heading_level is not None and lvl <= variant_heading_level:
+                    variant_heading_level = None
+
             if cur_unit is not None:
                 cur_unit["events"].append(ev)
             else:
@@ -1770,10 +2367,12 @@ def parse_wiki_page(
 
         tname = ev["name"]
         if tname == "missiondetails":
+            variant_heading_level = None
             cur_unit = {
                 "unit_kind": "mission",
                 "header": ev,
                 "section_heading": current_heading_text(),
+                "variant_name": None,
                 "events": list(preamble_events) if not units_raw and preamble_events else [],
                 "escalation_links": [],
             }
@@ -1796,10 +2395,12 @@ def parse_wiki_page(
                     if link_nm:
                         units_raw[-1]["escalation_links"].append(clean_wiki_inline(link_nm))
                     continue
+            variant_heading_level = None
             cur_unit = {
                 "unit_kind": "combat_site",
                 "header": ev,
                 "section_heading": current_heading_text(),
+                "variant_name": None,
                 "events": list(preamble_events) if not units_raw and preamble_events else [],
                 "escalation_links": [],
             }
@@ -1831,10 +2432,22 @@ def parse_wiki_page(
                 "unit_kind": unit_kind,
                 "header": None,
                 "section_heading": "",
+                "variant_name": None,
                 "events": preamble_events,
                 "escalation_links": [],
             }
         )
+
+    # Count sibling variants sharing the same header
+    variant_groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for uraw in units_raw:
+        if uraw.get("variant_name"):
+            variant_groups[id(uraw["header"])].append(uraw)
+    for group_list in variant_groups.values():
+        if len(group_list) > 1:
+            for v_idx, uraw in enumerate(group_list, start=1):
+                uraw["variant_index"] = v_idx
+                uraw["variant_count"] = len(group_list)
 
     parsed_units: list[dict[str, Any]] = []
     for u_idx, uraw in enumerate(units_raw, start=1):
@@ -1935,6 +2548,8 @@ def _finalize_unit(
     cur_room: dict[str, Any] | None = None
     cur_wave: dict[str, Any] | None = None
     pending_room_name: str | None = None
+    cur_head_label: str = ""
+    cur_head_is_initial: bool = False
 
     def ensure_room(name: str | None = None) -> dict[str, Any]:
         nonlocal cur_room, cur_wave, pending_room_name
@@ -1952,7 +2567,9 @@ def _finalize_unit(
         return cur_room
 
     def start_room(name: str) -> None:
-        nonlocal cur_room, cur_wave, pending_room_name
+        nonlocal cur_room, cur_wave, pending_room_name, cur_head_label, cur_head_is_initial
+        cur_head_label = ""
+        cur_head_is_initial = False
         if cur_room is not None and not cur_room["waves"]:
             cur_room["room_name"] = name
             return
@@ -1966,16 +2583,44 @@ def _finalize_unit(
         cur_wave = None
         pending_room_name = None
 
-    def start_wave(wname: str) -> None:
+    def _classify_wave_timing(wname: str, is_separator: bool) -> str:
+        low = wname.lower()
+        if re.search(r"\b(?:possible|rare|optional|escalat|chance|random)\b", low):
+            return "optional_spawn"
+        if re.search(r"\b(?:structures?|gates?|bunkers?|towers?|sentries)\b", low) and "wave" not in low:
+            return "static_structures"
+        if is_separator and cur_head_is_initial and not re.search(r"\b(?:wave|reinforce|trigger|second|third|fourth|next)\b", low):
+            return "simultaneous_initial_group"
+        if not is_separator and re.search(r"\b(?:initial|warp-?in|first\s+spawn|starting|defenders)\b", low):
+            return "initial_spawn"
+        return "sequential_wave"
+
+    def start_wave(
+        wname: str,
+        is_separator: bool = False,
+        parent_phase: str | None = None,
+        group_name: str | None = None,
+    ) -> None:
         nonlocal cur_wave
         room = ensure_room()
-        wtrig = classify_wave_header_trigger(wname)
-        cur_wave = {
+        # Prune any immediately preceding empty wave (e.g. NPCTableHead|Initial Hostiles followed by NPCTableSeparator|Group 1)
+        if room["waves"] and not room["waves"][-1]["spawns"]:
+            room["waves"].pop()
+        label = wname or f"Wave {len(room['waves']) + 1}"
+        wtrig = classify_wave_header_trigger(label)
+        timing = _classify_wave_timing(group_name or label, is_separator=is_separator)
+        wave_obj: dict[str, Any] = {
             "wave_index": len(room["waves"]) + 1,
-            "wave_name": wname or f"Wave {len(room['waves']) + 1}",
+            "wave_name": label,
+            "timing": timing,
             "wave_trigger": wtrig,
             "spawns": [],
         }
+        if parent_phase:
+            wave_obj["parent_phase"] = parent_phase
+        if group_name:
+            wave_obj["group_name"] = group_name
+        cur_wave = wave_obj
         room["waves"].append(cur_wave)
 
     for ev in uraw["events"]:
@@ -1998,13 +2643,28 @@ def _finalize_unit(
             # Also detect if NPCTableHead itself names a pocket/room when heading didn't
             if wname and re.match(r"^(?:pocket|room)\s+\d+\b", wname, re.I) and cur_room is not None and cur_room["waves"]:
                 start_room(wname)
-            start_wave(wname)
+            cur_head_label = wname
+            cur_head_is_initial = bool(
+                re.search(r"\b(?:initial|warp-?in|first\s+spawn|starting)\b", wname, re.I)
+            )
+            start_wave(wname, is_separator=False)
         elif tname in ("npctableseparator", "npcts"):
             sep_label = clean_wiki_inline(epos[0] if epos else "")
             if sep_label and re.match(r"^(?:pocket|room)\s+\d+\b", sep_label, re.I):
                 start_room(sep_label)
             else:
-                start_wave(sep_label or "Group")
+                grp = sep_label or "Group"
+                full_label = (
+                    f"{cur_head_label} - {grp}"
+                    if cur_head_label and grp.lower() != cur_head_label.lower()
+                    else grp
+                )
+                start_wave(
+                    full_label,
+                    is_separator=True,
+                    parent_phase=cur_head_label or None,
+                    group_name=grp,
+                )
         elif tname in ("npctablerow", "npctr"):
             if cur_wave is None:
                 start_wave("Initial")
@@ -2063,8 +2723,12 @@ def _finalize_unit(
 
             cur_wave["spawns"].append(spawn_entry)
 
-    # Drop completely empty rooms if a room heading had no spawns at all
-    rooms = [r for r in rooms if any(w["spawns"] for w in r["waves"])]
+    # Drop empty ghost waves inside each room and empty rooms with no spawns
+    for r in rooms:
+        r["waves"] = [w for w in r["waves"] if w["spawns"]]
+        for w_idx, w in enumerate(r["waves"], start=1):
+            w["wave_index"] = w_idx
+    rooms = [r for r in rooms if r["waves"]]
     for idx, r in enumerate(rooms, start=1):
         r["room_index"] = idx
 
@@ -2114,13 +2778,14 @@ def _finalize_unit(
         }
 
     entry_id = f"{page_title}#{unit_index}"
-    return {
+    unit_out: dict[str, Any] = {
         "entry_id": entry_id,
         "page_title": page_title,
         "base_title": tinfo["base_title"],
         "unit_index": unit_index,
         "unit_kind": uraw["unit_kind"],
         "section_heading": uraw["section_heading"],
+        "variant_name": uraw.get("variant_name"),
         "title_qualifiers": tinfo["qualifiers"],
         "part_info": tinfo["part_info"],
         "categories": sorted(categories),
@@ -2138,6 +2803,10 @@ def _finalize_unit(
         },
         "rooms": rooms,
     }
+    if "variant_index" in uraw:
+        unit_out["variant_index"] = uraw["variant_index"]
+        unit_out["variant_count"] = uraw["variant_count"]
+    return unit_out
 
 
 def _collect_wiki_articles(wiki_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2211,6 +2880,7 @@ def run_import(
     mining_count = 0
     matched_mission_units = 0
     matched_dungeon_units = 0
+    npc_candidate_mapped_total = 0
 
     for art in articles:
         text = art["path"].read_text(encoding="utf-8", errors="replace")
@@ -2273,7 +2943,9 @@ def run_import(
                         res = sp["resolution"]
                         st = res["status"]
                         status_counts[st] += 1
-                        if st.startswith("resolved_"):
+                        if res.get("type_ids") or res.get("candidate_type_ids"):
+                            npc_candidate_mapped_total += 1
+                        if st in ("resolved_exact", "resolved_structure_faction") and res.get("type_ids"):
                             p_rows_resolved += 1
                         elif st == "partly_resolved":
                             p_rows_partial += 1
@@ -2293,18 +2965,20 @@ def run_import(
                             )
                         else:
                             p_rows_unresolved += 1
-                            unresolved_rows.append(
-                                {
-                                    "page": art["title"],
-                                    "entry_id": eid,
-                                    "room": room["room_name"],
-                                    "wave": wave["wave_name"],
-                                    "raw_class": sp["raw_class"],
-                                    "raw_name": sp["raw_name"],
-                                    "factions": unit["factions"],
-                                    "reason": res["reason"],
-                                }
-                            )
+                            unres_entry: dict[str, Any] = {
+                                "page": art["title"],
+                                "entry_id": eid,
+                                "room": room["room_name"],
+                                "wave": wave["wave_name"],
+                                "raw_class": sp["raw_class"],
+                                "raw_name": sp["raw_name"],
+                                "factions": unit["factions"],
+                                "status": st,
+                                "reason": res["reason"] or f"unresolved_status:{st}",
+                            }
+                            if res.get("candidate_type_ids"):
+                                unres_entry["candidate_type_ids"] = res["candidate_type_ids"]
+                            unresolved_rows.append(unres_entry)
 
                         tr = sp.get("trigger")
                         if tr:
@@ -2337,14 +3011,10 @@ def run_import(
         )
 
     npc_total = sum(status_counts.values())
-    npc_resolved_total = sum(v for k, v in status_counts.items() if k.startswith("resolved_"))
-    npc_strict_resolved = (
-        status_counts.get("resolved_exact", 0)
-        + status_counts.get("resolved_structure_faction", 0)
-        + status_counts.get("resolved_family_candidates", 0)
-    )
+    npc_resolved_total = status_counts.get("resolved_exact", 0) + status_counts.get("resolved_structure_faction", 0)
+    npc_unresolved_total = len(unresolved_rows)
     resolved_pct = round(100.0 * npc_resolved_total / npc_total, 2) if npc_total else 0.0
-    strict_pct = round(100.0 * npc_strict_resolved / npc_total, 2) if npc_total else 0.0
+    candidate_mapped_pct = round(100.0 * npc_candidate_mapped_total / npc_total, 2) if npc_total else 0.0
 
     header = {
         "schema_version": 1,
@@ -2376,10 +3046,10 @@ def run_import(
             "npc_rows_total": npc_total,
             "npc_rows_resolved_total": npc_resolved_total,
             "npc_rows_resolved_percent": resolved_pct,
-            "npc_rows_strict_resolved_total": npc_strict_resolved,
-            "npc_rows_strict_resolved_percent": strict_pct,
+            "npc_rows_candidate_mapped_total": npc_candidate_mapped_total,
+            "npc_rows_candidate_mapped_percent": candidate_mapped_pct,
             "npc_rows_partly_resolved": status_counts.get("partly_resolved", 0),
-            "npc_rows_unresolved": status_counts.get("unresolved", 0),
+            "npc_rows_unresolved": npc_unresolved_total,
             "npc_resolution_breakdown": {k: status_counts[k] for k in sorted(status_counts)},
             "trigger_total": sum(trigger_counts.values()),
             "trigger_classification_counts": {k: trigger_counts[k] for k in sorted(trigger_counts)},
@@ -2446,12 +3116,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min-resolved-percent",
         type=float,
+        default=85.0,
+        help=(
+            "Minimum strictly-concrete NPC row resolved percentage enforced by --verify "
+            "(default: 85.0; empirical ~/ai/eve-wiki sde_types concrete ceiling ~87.1%% "
+            "due to 293 blank cells + 201 bare prefix/? + 994 CCP custom dungeon names)"
+        ),
+    )
+    parser.add_argument(
+        "--min-candidate-mapped-percent",
+        type=float,
         default=90.0,
-        help="Minimum NPC row resolved percentage enforced by --verify (default: 90.0)",
+        help=(
+            "Minimum NPC row percentage with concrete type_ids or non-empty candidate_type_ids "
+            "enforced by --verify (default: 90.0)"
+        ),
     )
     args = parser.parse_args(argv)
 
-    _, report = run_import(
+    content_doc, report = run_import(
         wiki_dir=args.wiki_dir,
         sde_db_path=args.sde_db,
         mission_ext_path=args.mission_ext,
@@ -2463,8 +3146,10 @@ def main(argv: list[str] | None = None) -> int:
         f"Imported {totals['content_units']} PvE units across {totals['pve_pages_extracted']} pages "
         f"(missions_matched={totals['units_matched_to_sde_mission']}, "
         f"dungeons_matched={totals['units_matched_to_sde_dungeon']}); "
-        f"NPC rows resolved: {totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
+        f"NPC rows resolved (concrete type_ids): {totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
         f"({totals['npc_rows_resolved_percent']}%); "
+        f"candidate_mapped: {totals['npc_rows_candidate_mapped_total']}/{totals['npc_rows_total']} "
+        f"({totals['npc_rows_candidate_mapped_percent']}%); "
         f"partial={totals['npc_rows_partly_resolved']}, unresolved={totals['npc_rows_unresolved']}; "
         f"trigger_fallbacks={totals['trigger_fallback_count']}"
     )
@@ -2497,21 +3182,51 @@ def main(argv: list[str] | None = None) -> int:
             errors.append("no NPC rows extracted")
         if totals["npc_rows_resolved_percent"] < args.min_resolved_percent:
             errors.append(
-                f"NPC resolved percent {totals['npc_rows_resolved_percent']}% < {args.min_resolved_percent}%"
+                f"NPC concrete resolved percent {totals['npc_rows_resolved_percent']}% < {args.min_resolved_percent}%"
             )
+        if totals["npc_rows_candidate_mapped_percent"] < args.min_candidate_mapped_percent:
+            errors.append(
+                f"NPC candidate-mapped percent {totals['npc_rows_candidate_mapped_percent']}% < {args.min_candidate_mapped_percent}%"
+            )
+        if totals["npc_rows_resolved_total"] + totals["npc_rows_partly_resolved"] + totals["npc_rows_unresolved"] != totals["npc_rows_total"]:
+            errors.append("npc row totals accounting mismatch")
         if totals["npc_rows_partly_resolved"] != len(report["partly_resolved_rows"]):
             errors.append("partly_resolved_rows accounting mismatch")
         if totals["npc_rows_unresolved"] != len(report["unresolved_rows"]):
             errors.append("unresolved_rows accounting mismatch")
         if totals["trigger_fallback_count"] != len(report["trigger_fallbacks"]):
             errors.append("trigger_fallbacks accounting mismatch")
+        verified_concrete = 0
+        verified_candidate_mapped = 0
+        for u in content_doc["entries"]:
+            for r in u["rooms"]:
+                for w in r["waves"]:
+                    if not w["spawns"]:
+                        errors.append(f"empty ghost wave in {u['entry_id']} / {r['room_name']} / {w['wave_name']}")
+                        break
+                    for sp in w["spawns"]:
+                        sres = sp["resolution"]
+                        if sres["status"] in ("resolved_exact", "resolved_structure_faction"):
+                            if not sres.get("type_ids"):
+                                errors.append(f"resolved status without concrete type_ids in {u['entry_id']}: {sp['raw_name']}")
+                                break
+                            verified_concrete += 1
+                        if sres.get("type_ids") or sres.get("candidate_type_ids"):
+                            verified_candidate_mapped += 1
+        if verified_concrete != totals["npc_rows_resolved_total"]:
+            errors.append("concrete resolved count accounting mismatch")
+        if verified_candidate_mapped != totals["npc_rows_candidate_mapped_total"]:
+            errors.append("candidate-mapped count accounting mismatch")
         if errors:
             for err in errors:
                 print(f"VERIFY FAIL: {err}", file=sys.stderr)
             return 1
         print(
-            f"VERIFY PASS: content_sha256={sha_c1} report_sha256={sha_r1} "
-            f"resolved={totals['npc_rows_resolved_percent']}% (>= {args.min_resolved_percent}%)"
+            f"VERIFY PASS: concrete_resolved={totals['npc_rows_resolved_total']}/{totals['npc_rows_total']} "
+            f"({totals['npc_rows_resolved_percent']}% >= {args.min_resolved_percent}%) "
+            f"candidate_mapped={totals['npc_rows_candidate_mapped_total']}/{totals['npc_rows_total']} "
+            f"({totals['npc_rows_candidate_mapped_percent']}% >= {args.min_candidate_mapped_percent}%) "
+            f"content_sha256={sha_c1} report_sha256={sha_r1}"
         )
     return 0
 

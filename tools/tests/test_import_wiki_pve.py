@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -56,10 +57,15 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
     groups = [
         (550, 11, "Asteroid Angel Cartel Frigate"),
         (600, 11, "Deadspace Guristas Battlecruiser"),
+        (601, 11, "Deadspace Angel Cartel Frigate"),
+        (602, 11, "Deadspace Angel Cartel Cruiser"),
+        (603, 11, "Deadspace Serpentis Battleship"),
         (630, 11, "Deadspace Serpentis Battlecruiser"),
         (319, 11, "Large Collidable Structure"),
         (366, 2, "Acceleration Gate"),
         (25, 6, "Frigate"),
+        (100, 18, "Combat Drone"),
+        (101, 87, "Light Fighter"),
         (459, 25, "Harvestable Ore"),
         (314, 17, "Commodities"),
         (671, 11, "Mission Caldari State Frigate"),
@@ -67,7 +73,12 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
     conn.executemany("INSERT INTO sde_groups VALUES (?, ?, ?)", groups)
 
     types = [
-        # Ships / NPCs
+        # Category 6/18/87 player entities (must NEVER be matched for NPCs)
+        (6001, 25, 6, "SynthAlpha", None, 100.0),
+        (6002, 25, 6, "SynthBeta", None, 100.0),
+        (6003, 100, 18, "SynthBeta I", None, 5.0),
+        (6004, 101, 87, "SynthGamma", None, 10.0),
+        # Ships / NPCs (Category 11 Entity)
         (10001, 600, 11, "Synth Pithatis Enforcer", None, 100.0),
         (10002, 600, 11, "Synth Pithatis Executor", None, 100.0),
         (10003, 630, 11, "Synth Corelatis Squad Leader", None, 100.0),
@@ -78,6 +89,14 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
         (10008, 550, 11, "Unit-2 Swarm", None, 100.0),
         (10009, 550, 11, "Synth Renamed Interceptor", None, 100.0),
         (10010, 671, 11, "Caldari Navy Frigate", 500001, 100.0),
+        (10011, 550, 11, "SynthOrder SynthAlpha", None, 100.0),
+        (10012, 550, 11, "SynthOrder SynthBeta", None, 100.0),
+        (10013, 550, 11, "Render Alvi", None, 50.0),
+        (10014, 601, 11, "Gistii Nomad", None, 50.0),
+        (10015, 602, 11, "Gistum Nomad", None, 100.0),
+        (10016, 603, 11, "Core High Admiral", None, 1000.0),
+        (10017, 603, 11, "Core Lord Admiral", None, 1000.0),
+        (10018, 603, 11, "Core Admiral", None, 1000.0),
         # Structures & Gates
         (17831, 366, 2, "Acceleration Gate", None, 1000.0),
         (16757, 319, 11, "Angel Bunker", None, 1000.0),
@@ -496,6 +515,255 @@ class TestWikiPveImporter(unittest.TestCase):
             )
         self.assertEqual(rc_fail, 1)
         self.assertIn("VERIFY FAIL:", err_buf_fail.getvalue())
+
+    def test_category_exclusion_and_shared_prefix_priority(self) -> None:
+        # Shared prefix must beat Cat 6/18/87 player hulls/drones/fighters
+        res = self.sde.resolve_npc_row(
+            npc_class="Frigate",
+            raw_name="SynthOrder SynthAlpha/SynthBeta",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res["status"], "resolved_exact")
+        self.assertEqual(res["expanded_names"], ["SynthOrder SynthAlpha", "SynthOrder SynthBeta"])
+        self.assertEqual(res["type_ids"], [10011, 10012])
+
+        # Standalone Cat 6/18/87 names must never leak into NPC resolution
+        for hull in ("SynthAlpha", "SynthBeta", "SynthGamma"):
+            leak = self.sde.resolve_npc_row(
+                npc_class="Frigate",
+                raw_name=hull,
+                note="",
+                page_factions=["Angel Cartel"],
+            )
+            self.assertEqual(leak["type_ids"], [])
+            self.assertNotEqual(leak["status"], "resolved_exact")
+
+        # Parenthesized outer/inner alternation must expand cleanly without premature stripping
+        res_outer = self.sde.resolve_npc_row(
+            npc_class="Battlecruiser",
+            raw_name="(Synth Pithatis Enforcer/Executor)",
+            note="",
+            page_factions=["Guristas Pirates"],
+        )
+        self.assertEqual(res_outer["expanded_names"], ["Synth Pithatis Enforcer", "Synth Pithatis Executor"])
+        self.assertEqual(res_outer["type_ids"], [10001, 10002])
+
+        res_inner = self.sde.resolve_npc_row(
+            npc_class="Battleship",
+            raw_name="Core (High/Lord) Admiral",
+            note="",
+            page_factions=["Serpentis"],
+        )
+        self.assertEqual(res_inner["expanded_names"], ["Core High Admiral", "Core Lord Admiral"])
+        self.assertEqual(res_inner["type_ids"], [10016, 10017])
+
+    def test_rank_class_constraint_rogue_drones_and_no_default_angel(self) -> None:
+        # Gistum (Cruiser) must NOT cross-substitute into Gistii (Frigate) when class is Frigate
+        res_mismatch = self.sde.resolve_npc_row(
+            npc_class="Frigate",
+            raw_name="Gistum Nonexistent",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_mismatch["type_ids"], [])
+
+        # Standard Rogue Drone suffix swap works independently of pirate rank prefixes
+        res_drone = self.sde.resolve_npc_row(
+            npc_class="Frigate",
+            raw_name="Render Alvatis",
+            note="",
+            page_factions=["Rogue Drones"],
+        )
+        self.assertEqual(res_drone["status"], "resolved_exact")
+        self.assertEqual(res_drone["type_ids"], [10013])
+
+        # Empty page_factions must NEVER synthesize an Angel Cartel fallback
+        res_nofac = self.sde.resolve_npc_row(
+            npc_class="Structure",
+            raw_name="Bunker",
+            note="",
+            page_factions=[],
+        )
+        self.assertEqual(res_nofac["status"], "unresolved")
+        self.assertEqual(res_nofac["type_ids"], [])
+
+    def test_candidate_buckets_not_counted_by_verify_gate(self) -> None:
+        wiki_dir = self.root / "wiki_cand"
+        wt_dir = wiki_dir / "wikitext"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / "Cand_Site.wiki").write_text(
+            (
+                "{{CMBSiteInfo|name=Synthetic Raid|faction=Angel Cartel|rating=3}}\n"
+                "{{NPCTableHead|Initial}}\n"
+                "{{NPCTableRow|Frigate|2|Angel Security Guard}}\n"
+                "{{NPCTableRow|Cruiser|1|Gistum}}\n"
+            ),
+            encoding="utf-8",
+        )
+        (wiki_dir / "catalog.json").write_text(
+            json.dumps(
+                {
+                    "summary": {"article_count": 1},
+                    "articles": {
+                        "Cand_Site": {
+                            "title": "Synthetic Raid",
+                            "wikitext_path": "wikitext/Cand_Site.wiki",
+                            "categories": ["Combat Anomalies"],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out_c = self.root / "cand_content.json"
+        out_r = self.root / "cand_report.json"
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            rc = imp.main(
+                [
+                    "--wiki-dir",
+                    str(wiki_dir),
+                    "--sde-db",
+                    str(self.sde_db),
+                    "--mission-ext",
+                    str(self.mission_ext),
+                    "--out-content",
+                    str(out_c),
+                    "--out-report",
+                    str(out_r),
+                    "--verify",
+                ]
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("VERIFY FAIL:", err_buf.getvalue())
+        self.assertIn("< 85.0%", err_buf.getvalue())
+        rep = json.loads(out_r.read_text(encoding="utf-8"))
+        self.assertEqual(rep["totals"]["npc_rows_resolved_total"], 0)
+        self.assertEqual(rep["totals"]["npc_rows_resolved_percent"], 0.0)
+        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_total"], 2)
+        self.assertEqual(rep["totals"]["npc_rows_candidate_mapped_percent"], 100.0)
+        self.assertEqual(len(rep["unresolved_rows"]), 2)
+        reasons = {r["raw_name"]: r["reason"] for r in rep["unresolved_rows"]}
+        self.assertEqual(reasons["Angel Security Guard"], "custom_spawn_name_mapped_via_faction_class")
+        self.assertEqual(reasons["Gistum"], "bare_family_prefix_only")
+
+    def test_variant_splitting_ghost_wave_pruning_triggers_and_crates(self) -> None:
+        wiki_text = (
+            "{{CMBSiteInfo|name=Synthetic Raid|faction=Serpentis|rating=3}}\n"
+            "== Type 1 - Alpha Variant ==\n"
+            "{{NPCTableHead|Initial Hostiles}}\n"
+            "{{NPCTableSeparator|Group 1 (15km)}}\n"
+            "{{NPCTableRow|Battleship|1|Core High Admiral|trigger=Destruction of the last Core Admiral triggers the next wave}}\n"
+            "{{NPCTableSeparator|Group 2 (30km)}}\n"
+            "{{NPCTableRow|Frigate|2|Synth Gistii Ambusher|trigger=Approach within 500m}}\n"
+            "{{NPCTableHead|Wave 1}}\n"
+            "{{NPCTableRow|Battleship|1|Core Lord Admiral|trigger=Last Synth Conquistador triggers next wave}}\n"
+            "== Type 2 - Beta Variant ==\n"
+            "{{NPCTableHead|Initial Defenders}}\n"
+            "{{NPCTableRow|Frigate|3|Synth Gistii Raider}}\n"
+        )
+        parsed = imp.parse_wiki_page(
+            title="Synthetic Haven",
+            categories=["Combat Anomalies"],
+            wikitext=wiki_text,
+            sde=self.sde,
+        )
+        assert parsed is not None
+        self.assertEqual(len(parsed["units"]), 2)
+        u1, u2 = parsed["units"]
+        self.assertEqual(u1["variant_name"], "Type 1 - Alpha Variant")
+        self.assertEqual(u2["variant_name"], "Type 2 - Beta Variant")
+        self.assertEqual(u1["variant_index"], 1)
+        self.assertEqual(u1["variant_count"], 2)
+
+        waves1 = u1["rooms"][0]["waves"]
+        # Empty ghost wave from Initial Hostiles before Group 1 must be pruned!
+        self.assertTrue(all(len(w["spawns"]) > 0 for w in waves1))
+        self.assertEqual(len(waves1), 3)
+        self.assertEqual(waves1[0]["timing"], "simultaneous_initial_group")
+        self.assertEqual(waves1[1]["timing"], "simultaneous_initial_group")
+        self.assertEqual(waves1[2]["timing"], "sequential_wave")
+
+        self.assertEqual(waves1[0]["spawns"][0]["trigger"]["kind"], "last_of_class_destroyed")
+        self.assertEqual(waves1[1]["spawns"][0]["trigger"]["kind"], "ship_approached")
+        self.assertEqual(waves1[2]["spawns"][0]["trigger"]["kind"], "last_of_class_destroyed")
+        self.assertEqual(imp.classify_trigger("Approach within 500m")["kind"], "ship_approached")
+        self.assertEqual(imp.classify_trigger("Arrives after 5m")["kind"], "group_destroyed")
+
+        # Plural "large crates of " lookup
+        self.assertEqual(self.sde.lookup_item_type_ids("Large Crates of Synth Supplies"), [29570])
+
+    def test_dual_verify_thresholds_enforced(self) -> None:
+        wiki_dir = self.root / "wiki_dual_gate"
+        wt_dir = wiki_dir / "wikitext"
+        wt_dir.mkdir(parents=True)
+        (wiki_dir / "catalog.json").write_text(
+            json.dumps(
+                {
+                    "summary": {"article_count": 1},
+                    "articles": {
+                        "Dual_Site": {
+                            "title": "Synthetic Raid",
+                            "wikitext_path": "wikitext/Dual_Site.wiki",
+                            "categories": ["Combat Anomalies"],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        out_c = self.root / "dual_content.json"
+        out_r = self.root / "dual_report.json"
+
+        def run_case(rows: list[str]) -> tuple[int, str, str]:
+            body = "{{CMBSiteInfo|name=Synthetic Raid|faction=Angel Cartel|rating=3}}\n{{NPCTableHead|Initial}}\n"
+            body += "".join(f"{{{{NPCTableRow|Frigate|1|{name}}}}}\n" for name in rows)
+            (wt_dir / "Dual_Site.wiki").write_text(body, encoding="utf-8")
+            out_buf = io.StringIO()
+            err_buf = io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                rc = imp.main(
+                    [
+                        "--wiki-dir",
+                        str(wiki_dir),
+                        "--sde-db",
+                        str(self.sde_db),
+                        "--mission-ext",
+                        str(self.mission_ext),
+                        "--out-content",
+                        str(out_c),
+                        "--out-report",
+                        str(out_r),
+                        "--verify",
+                    ]
+                )
+            return rc, out_buf.getvalue(), err_buf.getvalue()
+
+        # 9 concrete + 1 candidate-only = 90.0% concrete (>= 85.0%), 100.0% candidate_mapped (>= 90.0%) -> PASS
+        rc_pass, out_pass, err_pass = run_case(["SynthOrder SynthAlpha"] * 9 + ["Angel Security Guard"])
+        self.assertEqual(rc_pass, 0)
+        self.assertEqual(err_pass, "")
+        self.assertIn("concrete_resolved=9/10 (90.0% >= 85.0%)", out_pass)
+        self.assertIn("candidate_mapped=10/10 (100.0% >= 90.0%)", out_pass)
+        self.assertRegex(out_pass, r"content_sha256=[0-9a-f]{64} report_sha256=[0-9a-f]{64}")
+
+        # 8 concrete + 1 candidate-only + 1 unmatched = 80.0% concrete (< 85.0%), 90.0% candidate_mapped -> FAIL concrete
+        rc_fail_conc, _, err_fail_conc = run_case(
+            ["SynthOrder SynthAlpha"] * 8 + ["Angel Security Guard", "Totally Missing Name"]
+        )
+        self.assertEqual(rc_fail_conc, 1)
+        self.assertIn("VERIFY FAIL: NPC concrete resolved percent 80.0% < 85.0%", err_fail_conc)
+        self.assertNotIn("candidate-mapped percent", err_fail_conc)
+
+        # 17 concrete + 3 unmatched = 85.0% concrete (>= 85.0%), 85.0% candidate_mapped (< 90.0%) -> FAIL candidate
+        rc_fail_cand, _, err_fail_cand = run_case(
+            ["SynthOrder SynthAlpha"] * 17 + ["Totally Missing Name"] * 3
+        )
+        self.assertEqual(rc_fail_cand, 1)
+        self.assertIn("VERIFY FAIL: NPC candidate-mapped percent 85.0% < 90.0%", err_fail_cand)
+        self.assertNotIn("concrete resolved percent", err_fail_cand)
 
 
 if __name__ == "__main__":
