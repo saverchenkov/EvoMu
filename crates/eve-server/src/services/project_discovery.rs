@@ -179,11 +179,6 @@ pub fn rank_for_xp(store: &ProjectDiscoveryStore, experience: f64, current_rank:
 
 pub use eve_db::PlayerProjectState;
 
-#[cfg(test)]
-fn has_valid_classification_payload(rep: &PyRep) -> bool {
-    ops::has_valid_classification_polygons(rep)
-}
-
 fn invalid_classification_error() -> BridgeRpcError {
     BridgeRpcError::with_client_error(
         "InvalidClassification",

@@ -8,6 +8,10 @@ use super::*;
 use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
 use std::collections::HashMap;
 
+fn has_valid_classification_payload(rep: &PyRep) -> bool {
+    ops::extract_submission_polygons(rep).is_some()
+}
+
 #[test]
 fn project_discovery_payload_validation_bounded_tasks_and_config_edges() {
     // 1. has_valid_classification_payload across all PyRep variants requires >= 3 finite polygon vertices

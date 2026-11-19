@@ -459,12 +459,6 @@ pub(crate) fn extract_submission_polygons(rep: &PyRep) -> Option<Vec<Vec<[f64; 2
     Some(out)
 }
 
-/// Returns `true` iff `rep` carries at least one valid, non-degenerate `>= 3`-vertex 2D gate polygon.
-#[cfg(test)]
-pub(crate) fn has_valid_classification_polygons(rep: &PyRep) -> bool {
-    extract_submission_polygons(rep).is_some()
-}
-
 pub(crate) fn polygons_to_pyrep(polys: &[Vec<[f64; 2]>]) -> PyRep {
     PyRep::List(
         polys
