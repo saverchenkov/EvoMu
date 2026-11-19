@@ -4,16 +4,16 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6271 / 6320 ledger rows closed (99.22%)**, 2377 NA, 1743 tagged tests, 7578 passing tests. Flagged fake by the gap auditor: 43.
+**Parity: 6272 / 6334 ledger rows closed (99.02%)**, 2377 NA, 1752 tagged tests, 7838 passing tests. Flagged fake by the gap auditor: 44.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1604 | 1499 | 94 | 11 |
-| notify | 1311 | 495 | 813 | 3 |
-| plan | 114 | 109 | 0 | 5 |
+| feat | 1612 | 1498 | 94 | 20 |
+| notify | 1311 | 497 | 813 | 1 |
+| plan | 120 | 109 | 0 | 11 |
 | quasar | 1455 | 119 | 1328 | 8 |
 | rpc | 1373 | 1260 | 91 | 22 |
 | sde | 213 | 171 | 42 | 0 |
@@ -28,30 +28,32 @@ Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows who
 |---|---|---|---|---|
 | Flying and navigation | 121 | 122 | 99% | 0 |
 | Ships, fitting and modules | 266 | 266 | 100% | 0 |
-| Combat | 120 | 120 | 100% | 0 |
-| Accounts, characters and skills | 103 | 104 | 99% | 0 |
+| Combat | 120 | 122 | 98% | 0 |
+| Accounts, characters and skills | 102 | 105 | 97% | 0 |
 | Inventory, markets and contracts | 84 | 85 | 99% | 0 |
 | Industry and resources | 127 | 129 | 98% | 0 |
-| PvE | 116 | 121 | 96% | 0 |
+| PvE | 116 | 126 | 92% | 0 |
 | Corporations, alliances and fleets | 124 | 124 | 100% | 0 |
 | Structures and territory | 132 | 133 | 99% | 0 |
 | ESI web API | 138 | 138 | 100% | 0 |
 | Quasar gateway services | 32 | 32 | 100% | 94 |
 | Game-master mode and commands | 22 | 22 | 100% | 0 |
 | Sessions and server operations | 114 | 114 | 100% | 0 |
-| **All areas** | **1499** | **1510** | **99%** | 94 |
+| **All areas** | **1498** | **1518** | **99%** | 94 |
 
 Features not yet done, by area:
 
 - **Flying and navigation:** `feat:navigation.gravity-hazard-safe-zones (FLAGGED_FAKE)`
 
-- **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`
+- **Combat:** `feat:npc.static-weapon-hit-formulas (MISSING)`, `feat:npc.static-wreck-loot-and-abilities (MISSING)`
+
+- **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`, `feat:standings.npc-kill-standing-loss (MISSING)`, `feat:standings.standing-loss (FLAGGED_FAKE)`
 
 - **Inventory, markets and contracts:** `feat:wallet.nes-store (FLAGGED_FAKE)`
 
 - **Industry and resources:** `feat:mining.belt-ore-distribution (FLAGGED_FAKE)`, `feat:mining.belts-as-balls (FLAGGED_FAKE)`
 
-- **PvE:** `feat:pve.dungeon-system (FLAGGED_FAKE)`, `feat:pve.events-sites (FLAGGED_FAKE)`, `feat:pve.homefront-ops (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`
+- **PvE:** `feat:pve.combat-site-content-records (MISSING)`, `feat:pve.cosmos-epic-wh-incursion-content (MISSING)`, `feat:pve.dungeon-system (FLAGGED_FAKE)`, `feat:pve.events-sites (FLAGGED_FAKE)`, `feat:pve.homefront-ops (FLAGGED_FAKE)`, `feat:pve.mission-complete (FLAGGED_FAKE)`, `feat:pve.mission-lp-isk-reward-formula (FLAGGED_FAKE)`, `feat:pve.noncombat-mission-content-records (MISSING)`, `feat:pve.security-storyline-mission-content (MISSING)`, `feat:pve.wiki-content-importer (MISSING)`
 
 - **Structures and territory:** `feat:sovereignty.skyhook-reagent-maturity (FLAGGED_FAKE)`
 
@@ -190,7 +192,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-2 | Order lifecycle | DONE | 23/23 | test_e2_market_order_matching_queries_and_cancellation, test_e2_structure_market_service_and_order_expiry | DONE | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested. | 9275b57f4 2026-11-11 |
 | E-3 | Contracts | DONE | 15/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction, test_e3_corp_contract_wallet_roles_and_issuer_departure | DONE | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested. | 02ea9ce13 2026-10-21 |
 | E-4 | Industry | DONE | 33/33 | test_e4_capital_shipyard_restrictions_and_exponential_research, test_e4_industry_jobs_lifecycle_manufacturing_research_a | DONE | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested. | 958987363 2026-11-06 |
-| E-5 | Agents and missions | FLAGGED_FAKE | 25/26 | agent_mission_completion_isk_lp_standing_and_reload, test_agent_missions_complete_reward_formula_and_storyline_e2e | PARTIAL | Agent finder, conversation, mission offer/accept/decline/quit/complete state machine, dungeon NPC spawns, bonus timer, skill-scaled ISK/LP rewards, standing propagation, and cooldowns verified. | e1cbba77e 2026-11-04 |
+| E-5 | Agents and missions | FLAGGED_FAKE | 24/26 | agent_mission_completion_isk_lp_standing_and_reload, test_agent_missions_complete_reward_formula_and_storyline_e2e, test | PARTIAL | Agent finder, conversation, mission offer/accept/decline/quit/complete state machine, dungeon NPC spawns, bonus timer, skill-scaled ISK/LP rewards, standing propagation, and cooldowns verified. | 32d5f080d 2026-11-18 |
 | E-6 | PI basics | DONE | 23/23 | test_e6_pi_extractor_expiry_and_launch_canister | DONE | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested. | 252371f52 2026-10-27 |
 | E-7 | AIR NPE server-side node-graph runner & tutorial pocket orchestrator (user-added… | DONE | 3/3 | air_npe_server_nodegraph_runner_full_tutorial_to_completion | DONE | — | ac4908537 2026-11-02 |
 
@@ -215,7 +217,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Identity, Account, FastCheckout, Token Purchase, Subscriptions, and Monetization gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | PARTIAL | Quasar Daily Goals, AIR Career Goals, Achievements, Skill Plans, Tracks, and Goal/Tale notices wired with V24 client static/localization tables imported into evomu_sde.sqlite (`sde_achievements` 68 /  | ddbd4d872 2026-11-16 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | DONE | 0/0 | entitlements_serverops_and_sqlite_restart_persistence, test_plan_q5_social_and_organization_quasar_packages, test_quasar | DONE | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented and verified. | 958987363 2026-11-06 |
-| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | DONE | 0/0 | quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan_q6_economy_and_industry_quasar_packages, test_quasar_a | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | f50483bc6 2026-11-17 |
+| Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | DONE | 0/0 | quasar_economy_industry_h2c_and_persistence_end_to_end, test_plan_q6_economy_and_industry_quasar_packages, test_quasar_a | PARTIAL | Quasar Market, Contract, Industry, Blueprint, Asset, AssetHolding, Inventory, Container, Accounting, LoyaltyPoints, Planet, PI, Ore, Moon, and AsteroidBelt handlers and h2c persistence verified. | c685b23df 2026-11-18 |
 | Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Space, Celestials, Navigation, Bubble Presence, Dynamic Bounty System, and Pirate Insurgency gateway handlers implemented and verified. | 911eb8b47 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | DONE | 0/0 | test_canonical_plan_q3_q4_q7_q8_quasar_packages_dispatch | DONE | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers and notices implemented and verified. | 6eb5708a0 2026-11-06 |
 | Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | BLOCKED_BY_FEATURES | 0/0 | test_plan_q9_cosmetics_and_app_infrastructure | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Component/SKIN Market Listings, Achievements, Career Goals, Daily Goals (with V24 `evomu_sde.sqlite` catalog/localization tables, explicit `DERIVED` server-aut | bb5c2427e 2026-11-09 |
@@ -231,6 +233,17 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | ESI-5 | Corporation, Alliance. | DONE | 0/0 | test_esi_corp_blueprints_projects_and_structure_markets_live, test_plan_esi5_corp_structures_timers_and_starbase_detail, | DONE | Alliance and Corporation ESI routes and governance features implemented and verified. | 3ed24678b 2026-11-03 |
 | ESI-6 | Market, Contracts, Industry, Planetary Interaction. | DONE | 0/0 | test_esi_planetary_interaction_planets_and_customs_offices, test_esi_planetary_interaction_schematics_and_colonies | DONE | Market, Contracts, Industry, and Planetary Interaction ESI routes implemented and verified. | 958987363 2026-11-06 |
 | ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | DONE | 0/0 | test_plan_esi7_fleets_and_ui_navigation | DONE | All 24 Fleets and User Interface ESI routes implemented and verified end-to-end. | bb5c2427e 2026-11-09 |
+
+## Phase PVE: PvE Content & NPC Combat (ACTIVE — `#1395`–`#1400`)
+
+| Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
+|---|---|---|---|---|---|---|---|
+| PVE-1 | Wiki PvE content importer (#1395, 1 track, tools only, no deps). Deterministic t… | MISSING | 0/1 | — | NOT STARTED | Active (#1395, 1 track): deterministic wiki NPC/mission table importer under tools/ writing only gitignored data/ output and resolution report (>=90% resolved); hand-written test fixtures only. | 2550c2e53 2026-10-21 |
+| PVE-2 | Ordinary NPC weapons, hit rules, wreck & loot (#1396, 2 tracks, no deps; land be… | MISSING | 0/2 | — | NOT STARTED | Active (#1396, 2 tracks, closes #1391): ordinary NPCs use static SDE weapon stats, turret/missile hit formulas, weapon FX, wreck_type_id, size-scaled loot, and zero invented EWAR abilities. | — |
+| PVE-3 | Faction NPC kill standing loss (#1397, 1 small track, no deps). Destroying an NP… | MISSING | 0/1 | — | NOT STARTED | Active (#1397, 1 small track): destroying standing-bearing faction NPCs applies standing loss and derived ally/enemy shifts via apply_faction_standing_with_derived once per system per 10 minutes. | — |
+| PVE-4 | Combat anomalies, complexes, expeditions & chemical labs content (#1398, 2 track… | MISSING | 0/1 | — | NOT STARTED | Active (#1398, 2 tracks, needs #1395, after #1396): startup wiki-content loader for combat anomalies, rated/unrated complexes, expeditions, and chemical labs with hand-written test fixtures. | 2550c2e53 2026-10-21 |
+| PVE-5 | Security, storyline, courier, trade & mining mission content (#1399, 2–3 tracks;… | MISSING | 0/2 | — | NOT STARTED | Active (#1399, 2-3 tracks, needs #1395+#1398, after #1396): content-driven security/storyline waves and objectives plus record-driven courier, trade, and mining mission cargo/goods/ore. | — |
+| PVE-6 | COSMOS, epic arcs, wormhole sites, incursion layouts & small site families (#140… | MISSING | 0/1 | — | NOT STARTED | Active (#1400, 2-3 tracks, needs #1395+#1398, lowest priority): content-driven COSMOS chains/sites, epic arcs, Sleeper wormhole waves, incursion constellation layouts, and small site families. | — |
 
 ## Phase Z: Ledger closure and final acceptance
 
@@ -249,11 +262,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| LW-1 | Actors, doctrines & config. NPC corps as CorporationRecords + wallets; mutable f… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): NPC CorporationRecords and wallets, mutable faction relations, Doctrine Library and DoctrineStats cache, layered config soak gate, and livingworld GM. | 7d976fca5 2026-11-16 |
+| LW-1 | Actors, doctrines & config. NPC corps as CorporationRecords + wallets; mutable f… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): NPC CorporationRecords and wallets, mutable faction relations, Doctrine Library and DoctrineStats cache, layered config soak gate, and livingworld GM. | c685b23df 2026-11-18 |
 | LW-2 | Job Engine & attention. Timer-wheel jobs, locations, travel/jump/dock events, re… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): discrete-event timer-wheel Job Engine, travel/jump/dock events, star-map jump recording, attention hydration/dehydration, and tick governor. | — |
 | LW-3 | Economy. Station stock/recipes; place_order_in_snap; traders/haulers/mining/ice/… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): station stock and recipes, market orders, trader/hauler/mining/ice/PI jobs, ammo resupply manifests, and IndustryJobRecord hull replacement. | — |
 | LW-4 | Off-grid conflict & piracy. Encounter model, statistical resolver from DoctrineS… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): off-grid encounter model, DoctrineStats statistical resolver, real killmails/wrecks/loot/BRM, piracy pressure, and navy response. | — |
 | LW-5 | On-grid parity & FX. FittedNpcRuntime from DoctrineStats, NPC-vs-NPC Dogma, ammo… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): on-grid FittedNpcRuntime from DoctrineStats, NPC-vs-NPC Dogma, ammo/heat/cap/drone rules, SlimItemMeta, OnSpecialFX moduleTypeID, and formations. | — |
 | LW-6 | Conflict engine & structures. Tension/war chest/ladders; FW plexing, sov flips, … | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): conflict engine tension/war chest/ladders, FW/sov/insurgency rungs, NPC POS/Citadel seeding, and lethal structure sieges. | — |
 | LW-7 | Non-market factions & capitals. Drifter wormhole ingress at Jove Observatories, … | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): non-market Drifter wormhole ingress, Rogue Drone infestation, Triglavian stellar targeting, Sansha targeting, and capital staging/doomsday rules. | — |
-| LW-8 | Player hooks. Dynamic agent offers, NPC contracts, Fleet Finder wings, allied ho… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): dynamic agent offers, NPC contracts, Fleet Finder wings, allied cyno hot-drops, NPC mail digests, vendetta wars, and ransom. | 7d976fca5 2026-11-16 |
+| LW-8 | Player hooks. Dynamic agent offers, NPC contracts, Fleet Finder wings, allied ho… | PARKED | 0/0 | — | PARKED | Parked post-Phase-Z (Living Universe v3): dynamic agent offers, NPC contracts, Fleet Finder wings, allied cyno hot-drops, NPC mail digests, vendetta wars, and ransom. | c685b23df 2026-11-18 |

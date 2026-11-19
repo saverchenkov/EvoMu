@@ -287,6 +287,30 @@
     "assessment": "DONE",
     "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
   },
+  "PVE-1": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1395, 1 track): deterministic wiki NPC/mission table importer under tools/ writing only gitignored data/ output and resolution report (>=90% resolved); hand-written test fixtures only."
+  },
+  "PVE-2": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1396, 2 tracks, closes #1391): ordinary NPCs use static SDE weapon stats, turret/missile hit formulas, weapon FX, wreck_type_id, size-scaled loot, and zero invented EWAR abilities."
+  },
+  "PVE-3": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1397, 1 small track): destroying standing-bearing faction NPCs applies standing loss and derived ally/enemy shifts via apply_faction_standing_with_derived once per system per 10 minutes."
+  },
+  "PVE-4": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1398, 2 tracks, needs #1395, after #1396): startup wiki-content loader for combat anomalies, rated/unrated complexes, expeditions, and chemical labs with hand-written test fixtures."
+  },
+  "PVE-5": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1399, 2-3 tracks, needs #1395+#1398, after #1396): content-driven security/storyline waves and objectives plus record-driven courier, trade, and mining mission cargo/goods/ore."
+  },
+  "PVE-6": {
+    "assessment": "NOT STARTED",
+    "note": "Active (#1400, 2-3 tracks, needs #1395+#1398, lowest priority): content-driven COSMOS chains/sites, epic arcs, Sleeper wormhole waves, incursion constellation layouts, and small site families."
+  },
   "Q-1": {
     "assessment": "DONE",
     "note": "All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest."

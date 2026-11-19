@@ -51,6 +51,11 @@
       "id": "feat:sovereignty.skyhook-reagent-maturity"
     },
     {
+      "evidence": "Wiki gap pass (2026-11-19, #1397 / PVE-3): acceptance requires killing faction NPCs to lower faction standing with derived ally/enemy propagation, but sole tagged test test_standings_formulas_derived_effective_corp_standing_data_and_transactions (crates/eve-server/tests/it/agents_missions_complete.rs:1185-1187) covers only the mission half. No NPC death path (combat/npc_ai.rs, services/combat_npc_encounters.rs, combat/death_pipeline.rs) calls apply_faction_standing_with_derived (services/agents_standings_arcs.rs:1333). Reopened until #1397 lands.",
+      "flagged_by_audit": "20261119-wiki-gap-pass",
+      "id": "feat:standings.standing-loss"
+    },
+    {
       "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
       "flagged_by_audit": "20261025-200428",
       "id": "feat:wallet.nes-store"

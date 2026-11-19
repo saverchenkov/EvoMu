@@ -466,6 +466,47 @@ class TestFinalGateAndParityJourneys(unittest.TestCase):
             for i in range(1, 9):
                 self.assertRegex(st_txt, r"\|\s*`?LW-%d`?\s*\|[^|]+\|\s*PARKED\s*\|" % i)
 
+    def test_active_phase_pve_rows_and_reopened_standing_loss(self):
+        # Phase PVE (PVE-1..PVE-6 for #1395-#1400) is ACTIVE (never parked) and blocks completeness until closed.
+        for i in range(1, 7):
+            self.assertNotIn("plan:PVE-%d" % i, parity_status.PARKED_PLAN)
+
+        ledger = _read_json(os.path.join(SKILL_DIR, "references", "parity", "ledger.json"))
+        by_id = {r["id"]: r for r in ledger["rows"]}
+        for i in range(1, 7):
+            self.assertIn("plan:PVE-%d" % i, by_id)
+
+        pve_feats = [r["id"] for r in ledger["rows"] if r.get("category") == "feat" and str(r.get("plan_task", "")).startswith("PVE-")]
+        self.assertGreaterEqual(len(pve_feats), 8)
+        for fid in (
+            "feat:pve.wiki-content-importer",
+            "feat:npc.static-weapon-hit-formulas",
+            "feat:npc.static-wreck-loot-and-abilities",
+            "feat:standings.npc-kill-standing-loss",
+            "feat:pve.combat-site-content-records",
+            "feat:pve.security-storyline-mission-content",
+            "feat:pve.noncombat-mission-content-records",
+            "feat:pve.cosmos-epic-wh-incursion-content",
+        ):
+            self.assertIn(fid, by_id)
+
+        # feat:standings.standing-loss is reopened via fake_done until #1397 lands.
+        aud = _read_json(os.path.join(SKILL_DIR, "references", "parity", "auditor_rows.json"))
+        fake_ids = {f["id"] for f in aud.get("fake_done", [])}
+        self.assertIn("feat:standings.standing-loss", fake_ids)
+
+        # Verify action_plan.md documents Phase PVE execution order and CC BY-SA / MIT licence boundary.
+        with open(os.path.join(SKILL_DIR, "references", "action_plan.md"), encoding="utf-8") as fh:
+            plan_txt = fh.read()
+        self.assertIn("## Phase PVE: PvE Content & NPC Combat (ACTIVE", plan_txt)
+        self.assertIn("CC BY-SA", plan_txt)
+        self.assertIn("gitignored", plan_txt)
+
+        # Verify status_table.py parses and renders Phase PVE (PVE-1..PVE-6).
+        phases, _titles = status_table.plan_structure()
+        pve_phase = [ids for name, ids in phases if name.startswith("Phase PVE:")]
+        self.assertEqual(pve_phase, [["PVE-1", "PVE-2", "PVE-3", "PVE-4", "PVE-5", "PVE-6"]])
+
 
 if __name__ == "__main__":
     unittest.main()

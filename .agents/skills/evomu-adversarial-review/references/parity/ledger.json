@@ -1,6 +1,6 @@
 {
  "version": 1,
- "row_count": 5756,
+ "row_count": 5770,
  "rows": [
   {
    "id": "rpc:FastCheckoutService.BuyOffer",
@@ -61314,12 +61314,14 @@
    "id": "feat:npc.npc-ai-targeting",
    "category": "feat",
    "title": "NPC AI targeting",
-   "acceptance": "NPCs target, orbit, apply weapons and EWAR, switch targets per V24 rules.",
+   "acceptance": "NPCs target, orbit at static-data orbit distance and cruise speed, route turret and missile attacks through standard turret/missile hit formulas (tracking/falloff/signature/angular speed and explosion radius/velocity), switch targets per V24 rules, and use only EWAR/neut/remote-repair abilities present in their static SDE attributes (never inventing abilities; #1396, #1391).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "npc",
    "sources": [
-    "wiki:NPC_damage_types"
+    "wiki:NPC_damage_types",
+    "issue:#1396",
+    "issue:#1391"
    ],
    "plan_task": "C-4"
   },
@@ -61327,12 +61329,13 @@
    "id": "feat:npc.npc-damage-types",
    "category": "feat",
    "title": "NPC damage types",
-   "acceptance": "Pirate factions deal/resist designated damage types.",
+   "acceptance": "Each NPC reads weapon damage by type, damage multiplier, rate of fire, range, falloff, tracking, and missile explosion radius/velocity from its own static data (sde_types.attributes_json) rather than bounty-derived or faction-fixed splits, and emits weapon-matched visual FX (#1396).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "npc",
    "sources": [
-    "wiki:NPC_damage_types"
+    "wiki:NPC_damage_types",
+    "issue:#1396"
    ],
    "plan_task": "C-4"
   },
@@ -61340,12 +61343,13 @@
    "id": "feat:npc.npc-loot",
    "category": "feat",
    "title": "NPC loot tables",
-   "acceptance": "NPC wrecks contain loot table drops and salvage.",
+   "acceptance": "Destroyed NPCs spawn their static-data wreck_type_id (size-class fallback only when absent), scale server-derived loot by NPC size class using the ammo fired by the NPC's own weapons (preserving commander/officer/clone-soldier/Sleeper special drops), and support salvage (#1396).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "npc",
    "sources": [
-    "wiki:Ratting"
+    "wiki:Ratting",
+    "issue:#1396"
    ],
    "plan_task": "C-4"
   },
@@ -61496,13 +61500,16 @@
    "id": "feat:npc.npc-spawn-encounter",
    "category": "feat",
    "title": "Encounter spawning",
-   "acceptance": "encounterSpawnServer spawns waves with triggers.",
+   "acceptance": "encounterSpawnServer and site wave spawners spawn the groups, ship classes, rolled counts, and triggers (on ship kill, group clear, class clear, approach, timed, objective) defined by the site or mission content record when present (#1395, #1398, #1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "npc",
    "sources": [
     "wiki:Ratting",
-    "crucible:src/eve-server/npc"
+    "crucible:src/eve-server/npc",
+    "issue:#1395",
+    "issue:#1398",
+    "issue:#1399"
    ],
    "plan_task": "C-4"
   },
@@ -61656,12 +61663,14 @@
    "id": "feat:pve.mission-security",
    "category": "feat",
    "title": "Security (combat) missions",
-   "acceptance": "Kill objective missions spawn dungeons with NPC waves and triggers.",
+   "acceptance": "Security missions with a content record (matched by mission, agent level, and enemy faction) spawn the rooms, groups, counts, and triggers of that record through the shared dungeon loader, display matching journal objective text, and complete when the stated objective (clear all, destroy named ship/structure, or retrieve item) is met (#1395, #1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Security_missions"
+    "wiki:Security_missions",
+    "issue:#1395",
+    "issue:#1399"
    ],
    "plan_task": "E-5"
   },
@@ -61669,12 +61678,13 @@
    "id": "feat:pve.mission-courier",
    "category": "feat",
    "title": "Distribution missions",
-   "acceptance": "Distribution missions place cargo in the hangar; completion only when the cargo is in the destination hangar/ship; failure on expiry.",
+   "acceptance": "Distribution/courier missions with a content record issue the cargo item type, quantity, and volume stated in that record rather than guessing from mission title words, place cargo in the hangar, complete only when delivered to the destination hangar/ship, and fail on expiry (#1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Distribution_missions"
+    "wiki:Distribution_missions",
+    "issue:#1399"
    ],
    "plan_task": "E-5"
   },
@@ -61682,12 +61692,13 @@
    "id": "feat:pve.mission-mining",
    "category": "feat",
    "title": "Mining missions",
-   "acceptance": "Mining missions spawn a private pocket with mission asteroids; completion requires the mined ore quantity delivered to the agent.",
+   "acceptance": "Mining missions with a content record spawn a private asteroid pocket containing the ore type and amount stated in that record rather than guessing from mission title words; completion requires delivering the mined ore quantity to the agent (#1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Mining_missions"
+    "wiki:Mining_missions",
+    "issue:#1399"
    ],
    "plan_task": "MN-18"
   },
@@ -61695,12 +61706,13 @@
    "id": "feat:pve.mission-trade",
    "category": "feat",
    "title": "Trade missions",
-   "acceptance": "Trade missions require the requested item quantity in the agent station hangar; items consumed on completion.",
+   "acceptance": "Trade missions with a content record request the item type and quantity stated in that record rather than guessing from mission title words, verify them in the agent station hangar, and consume them on completion (#1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Missions"
+    "wiki:Missions",
+    "issue:#1399"
    ],
    "plan_task": "E-5"
   },
@@ -61708,12 +61720,14 @@
    "id": "feat:pve.mission-storyline",
    "category": "feat",
    "title": "Storyline missions",
-   "acceptance": "Every 16 missions of a level grants storyline mission offer from nearby agent.",
+   "acceptance": "Every 16 missions of a level grants a storyline mission offer from a nearby agent; storyline missions with a content record spawn its rooms, groups, counts, triggers, and objectives via the shared loader rather than a generic single-wave placeholder (#1395, #1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Missions"
+    "wiki:Missions",
+    "issue:#1395",
+    "issue:#1399"
    ],
    "plan_task": "E-5"
   },
@@ -61800,13 +61814,15 @@
    "id": "feat:pve.epic-arcs",
    "category": "feat",
    "title": "Epic arcs",
-   "acceptance": "Multi-mission arc state (epicArcStatus, GetMyEpicArcStatus) with branching and 90-day cooldown.",
+   "acceptance": "Multi-mission epic arc state (epicArcStatus, GetMyEpicArcStatus) enforces mission ordering, branching choices, per-mission encounters from loaded content records where the client omits them, and the 90-day cooldown (#1395, #1400).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
     "wiki:Epic_arcs",
-    "client:eve/client/script/ui/shared/dockedUI/agents.pyj"
+    "client:eve/client/script/ui/shared/dockedUI/agents.pyj",
+    "issue:#1395",
+    "issue:#1400"
    ],
    "plan_task": "E-5"
   },
@@ -61814,12 +61830,14 @@
    "id": "feat:pve.cosmos",
    "category": "feat",
    "title": "COSMOS agents/missions",
-   "acceptance": "COSMOS constellations with storyline agents and unique sites.",
+   "acceptance": "COSMOS constellations provide storyline agents, one-time chains, and unique sites driven by loaded content records through the shared mission/site loader when present (#1395, #1400).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:COSMOS"
+    "wiki:COSMOS",
+    "issue:#1395",
+    "issue:#1400"
    ],
    "plan_task": "E-5"
   },
@@ -61840,12 +61858,14 @@
    "id": "feat:pve.combat-anomalies",
    "category": "feat",
    "title": "Combat anomalies",
-   "acceptance": "Belts/hideaways/havens/sanctums spawn per true-sec with waves.",
+   "acceptance": "Combat anomalies (hideaways/havens/sanctums/etc.) spawn per true-sec and, whenever a content record is loaded, execute the exact rooms, groups, ship classes, rolled counts, triggers, and completion condition of that record instead of a single repeated NPC type (#1395, #1398).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Combat_site"
+    "wiki:Combat_site",
+    "issue:#1395",
+    "issue:#1398"
    ],
    "plan_task": "SO-5"
   },
@@ -61866,12 +61886,14 @@
    "id": "feat:pve.ded-complexes",
    "category": "feat",
    "title": "DED complexes",
-   "acceptance": "Rated complexes 1/10-10/10 with ship size gate restrictions and overseer loot.",
+   "acceptance": "Rated (1/10-10/10) and unrated complexes enforce ship-size gate restrictions and overseer loot and, whenever a content record is loaded, spawn its exact rooms, groups, counts, triggers, gate unlocks, and completion objective (#1395, #1398).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Deadspace"
+    "wiki:Deadspace",
+    "issue:#1395",
+    "issue:#1398"
    ],
    "plan_task": "SO-5"
   },
@@ -61879,12 +61901,14 @@
    "id": "feat:pve.escalations",
    "category": "feat",
    "title": "Escalations",
-   "acceptance": "Completing sites can escalate (dungeonExplorationMgr.GetMyEscalatingPathDetails).",
+   "acceptance": "Completing eligible sites can escalate (dungeonExplorationMgr.GetMyEscalatingPathDetails) along the multi-step expedition chain and per-step site content defined in the loaded content record when present (#1395, #1398).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "client:eve/client/script/ui/shared/neocom/journal.pyj"
+    "client:eve/client/script/ui/shared/neocom/journal.pyj",
+    "issue:#1395",
+    "issue:#1398"
    ],
    "plan_task": "SO-5"
   },
@@ -61892,12 +61916,14 @@
    "id": "feat:pve.expeditions",
    "category": "feat",
    "title": "Expeditions",
-   "acceptance": "Completing certain sites may grant an expedition (escalation) with a destination site and expiry delivered by notification/journal.",
+   "acceptance": "Completing certain sites grants an expedition (escalation) with destination steps, rooms, groups, counts, triggers, and expiry driven by the loaded content record when present and delivered by notification/journal (#1395, #1398).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Deadspace"
+    "wiki:Deadspace",
+    "issue:#1395",
+    "issue:#1398"
    ],
    "plan_task": "SO-5"
   },
@@ -61984,12 +62010,14 @@
    "id": "feat:pve.wormhole-sites",
    "category": "feat",
    "title": "Wormhole sites",
-   "acceptance": "Sleeper combat anomalies/sites spawn per wormhole class with wave triggers and blue loot.",
+   "acceptance": "Sleeper wormhole anomalies and sites spawn per-site wave, trigger, and ship-class content records when loaded (with blue loot), falling back to class-band tables only when no site record exists (#1395, #1400).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
-    "wiki:Wormhole_space"
+    "wiki:Wormhole_space",
+    "issue:#1395",
+    "issue:#1400"
    ],
    "plan_task": "SO-5"
   },
@@ -61997,13 +62025,14 @@
    "id": "feat:pve.incursion-system",
    "category": "feat",
    "title": "Incursions",
-   "acceptance": "incursion constellations, influence, staging/vanguard/assault/HQ sites, payouts.",
+   "acceptance": "Incursion constellations track influence, payouts, and staging/vanguard/assault/HQ system roles loaded from per-constellation content records where available (gate-map fallback otherwise; #1400).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
     "wiki:Incursions",
-    "wiki:Anatomy_of_Incursions"
+    "wiki:Anatomy_of_Incursions",
+    "issue:#1400"
    ],
    "plan_task": null
   },
@@ -62338,13 +62367,17 @@
    "id": "feat:pve.dungeon-system",
    "category": "feat",
    "title": "Dungeon instance system",
-   "acceptance": "Dungeons spawn rooms with objects, NPC groups, triggers (on kill/approach/loot) and despawn when complete.",
+   "acceptance": "Dungeons and sites with a loaded content record spawn the exact rooms, objects, NPC groups, ship classes, rolled counts, triggers (on kill/approach/timed/objective), gate unlocks, and completion objectives of that record (falling back cleanly with startup counts logged when unrecorded) and despawn when complete (#1395, #1398, #1399, #1400).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "pve",
    "sources": [
     "client:eve/client/script/ui/inflight/dungeoneditor.pyj",
-    "quasar:dungeon"
+    "quasar:dungeon",
+    "issue:#1395",
+    "issue:#1398",
+    "issue:#1399",
+    "issue:#1400"
    ],
    "plan_task": "SO-5"
   },
@@ -62992,12 +63025,13 @@
    "id": "feat:mining.mining-missions",
    "category": "feat",
    "title": "Mining missions",
-   "acceptance": "Mining missions spawn mission asteroids; ore delivered to the agent completes the mission.",
+   "acceptance": "Mining missions with a content record spawn mission asteroids of the recorded ore type and quantity (rather than guessing from mission title words); delivering the mined ore to the agent completes the mission (#1399).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "mining",
    "sources": [
-    "wiki:Mining_missions"
+    "wiki:Mining_missions",
+    "issue:#1399"
    ],
    "plan_task": "MN-18"
   },
@@ -66170,12 +66204,13 @@
    "id": "feat:standings.standing-loss",
    "category": "feat",
    "title": "Standing loss",
-   "acceptance": "Declining/failing missions and killing faction NPCs lower standings; derived losses applied to allied factions.",
+   "acceptance": "Declining/failing missions and destroying standing-bearing faction NPC ships/structures lower standings via apply_faction_standing_with_derived (derived shifts applied to allied/enemy factions, rate-limited to one tick per character, faction, and solar system per 10 minutes) and emit normal standing-change notifications (#1397).",
    "na_allowed": false,
    "attest_ok": false,
    "domain": "standings",
    "sources": [
-    "wiki:NPC_standings"
+    "wiki:NPC_standings",
+    "issue:#1397"
    ],
    "plan_task": "E-5"
   },
@@ -72046,6 +72081,127 @@
    "plan_task": "CH-4"
   },
   {
+   "id": "feat:pve.wiki-content-importer",
+   "category": "feat",
+   "title": "PvE wiki content importer and resolution report",
+   "acceptance": "Deterministic tool under tools/ parses local EVE University wiki mission/site NPC tables (NPCTableHead/NPCTableRow/Missiondetails/CMBSiteInfo) against local SDE (sde_types, sde_dungeons, sde_missions, sde_agent_mission_ext.json) into one gitignored content file under data/ (CC BY-SA boundary: never committed) and a resolution report; >= 90% NPC rows resolve, shorthand names/count ranges/trigger kinds parse cleanly, and unit tests use short hand-written snippets only (#1395).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "issue:#1395",
+    "wiki:Missions",
+    "wiki:Combat_sites"
+   ],
+   "plan_task": "PVE-1"
+  },
+  {
+   "id": "feat:npc.static-weapon-hit-formulas",
+   "category": "feat",
+   "title": "Ordinary NPC static weapon stats, turret/missile hit formulas, and movement",
+   "acceptance": "Every NPC (including belt rats and group spawns) reads weapon damage by type, damage multiplier, rate of fire, range, falloff, tracking, missile type/explosion radius/velocity, orbit distance, and cruise speed from its own static data (sde_types.attributes_json), routes attacks through standard turret or missile hit formulas with weapon-matched visual FX, logs missing-attribute fallbacks once per type, and matches static DPS within 1% against a large stationary target (#1396).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "npc",
+   "sources": [
+    "issue:#1396",
+    "wiki:Turret_mechanics",
+    "wiki:Missile_mechanics"
+   ],
+   "plan_task": "PVE-2"
+  },
+  {
+   "id": "feat:npc.static-wreck-loot-and-abilities",
+   "category": "feat",
+   "title": "NPC static wreck_type_id, size-scaled loot, and no invented EWAR/abilities",
+   "acceptance": "Destroyed NPCs spawn their static wreck_type_id (size-class fallback only when absent); server-derived loot scales by NPC size class using the ammo fired by the NPC's own weapons while preserving commander/officer/clone-soldier/Sleeper special drops; NPCs without SDE attributes for neutralizers, webs, scrams, ECM, or remote repair have no invented abilities (#1396, #1391).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "npc",
+   "sources": [
+    "issue:#1396",
+    "issue:#1391",
+    "wiki:NPC_damage_types"
+   ],
+   "plan_task": "PVE-2"
+  },
+  {
+   "id": "feat:standings.npc-kill-standing-loss",
+   "category": "feat",
+   "title": "Faction NPC kill standing loss and 10-minute per-system tick",
+   "acceptance": "Destroying an NPC ship or structure belonging to a standing-bearing faction lowers faction standing and propagates derived ally/enemy shifts via apply_faction_standing_with_derived, capped at one tick per character, faction, and solar system per 10 minutes, pushes normal standing-change notifications to the client socket, and preserves sec-status, mission, and FW standing rules (#1397).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "standings",
+   "sources": [
+    "issue:#1397",
+    "wiki:NPC_standings",
+    "wiki:Faction_warfare_standings"
+   ],
+   "plan_task": "PVE-3"
+  },
+  {
+   "id": "feat:pve.combat-site-content-records",
+   "category": "feat",
+   "title": "Content-driven combat anomalies, complexes, expeditions, and chemical labs",
+   "acceptance": "Server loads the gitignored #1395 content file at startup (labelled wiki-sourced in code/logs); combat anomalies, rated/unrated complexes, expeditions/escalations, and chemical labs with a content record spawn its exact rooms, groups, ship classes, rolled counts, triggers, gate unlocks, completion objective, and expedition step chains; unrecorded sites keep fallback with startup counts logged, and tests use hand-written fixtures (#1398).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "issue:#1398",
+    "wiki:Combat_sites",
+    "wiki:Expeditions"
+   ],
+   "plan_task": "PVE-4"
+  },
+  {
+   "id": "feat:pve.security-storyline-mission-content",
+   "category": "feat",
+   "title": "Content-driven security and storyline mission rooms, waves, triggers, and objectives",
+   "acceptance": "Security and storyline missions with a content record (matched by mission, agent level, and enemy faction) spawn the recorded rooms, groups, counts, and triggers via the shared dungeon loader, display matching journal objective text, and become completable when the stated objective (clear all, destroy named ship/structure, or retrieve item) is met rather than only after clearing every ship; unrecorded missions keep fallback with startup counts logged, and tests use hand-written fixtures (#1399).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "issue:#1399",
+    "wiki:Missions"
+   ],
+   "plan_task": "PVE-5"
+  },
+  {
+   "id": "feat:pve.noncombat-mission-content-records",
+   "category": "feat",
+   "title": "Content-driven courier, trade, and mining mission cargo, goods, and ore",
+   "acceptance": "Courier/distribution, trade, and mining missions with a content record use the cargo item type, quantity, volume, or mission asteroid field ore type and amount defined in that record rather than guessing from mission title words, with matching journal objective text, startup fallback counts logged for unrecorded missions, and hand-written test fixtures (#1399).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "issue:#1399",
+    "wiki:Distribution_missions",
+    "wiki:Mining_missions"
+   ],
+   "plan_task": "PVE-5"
+  },
+  {
+   "id": "feat:pve.cosmos-epic-wh-incursion-content",
+   "category": "feat",
+   "title": "Content-driven COSMOS, epic arcs, wormhole sites, incursion layouts, and small site families",
+   "acceptance": "COSMOS agent chains/sites, epic-arc mission order/branches/encounters, per-site wormhole Sleeper waves (via extended #1395 importer), per-constellation incursion staging/vanguard/assault/HQ layouts (gate-map fallback), and small site families (low-sec combat beacons, AEGIS data sites, Besieged Covert Research Facility, circle agent missions) load from the content file when present with per-family startup counts logged and hand-written test fixtures (#1400).",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "issue:#1400",
+    "wiki:COSMOS",
+    "wiki:Epic_arcs",
+    "wiki:Wormhole_sites",
+    "wiki:Incursions"
+   ],
+   "plan_task": "PVE-6"
+  },
+  {
    "id": "plan:C-1",
    "category": "plan",
    "title": "C-1",
@@ -72618,6 +72774,54 @@
    "category": "plan",
    "title": "P-7",
    "acceptance": "Canonical task P-7 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-1",
+   "category": "plan",
+   "title": "PVE-1",
+   "acceptance": "Canonical task PVE-1 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-2",
+   "category": "plan",
+   "title": "PVE-2",
+   "acceptance": "Canonical task PVE-2 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-3",
+   "category": "plan",
+   "title": "PVE-3",
+   "acceptance": "Canonical task PVE-3 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-4",
+   "category": "plan",
+   "title": "PVE-4",
+   "acceptance": "Canonical task PVE-4 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-5",
+   "category": "plan",
+   "title": "PVE-5",
+   "acceptance": "Canonical task PVE-5 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:PVE-6",
+   "category": "plan",
+   "title": "PVE-6",
+   "acceptance": "Canonical task PVE-6 meets every 'Done when' criterion in action_plan.md.",
    "na_allowed": false,
    "attest_ok": false
   },
