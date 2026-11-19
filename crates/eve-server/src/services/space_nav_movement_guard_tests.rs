@@ -2385,6 +2385,42 @@ async fn active_cloak_rejects_jump_filament_and_gate_intents_while_gate_cloak_al
             "CannotJumpWhileCloaked",
         ),
         (
+            "CynoBridge(unbubbled)",
+            MovementIntent::CynoBridge {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: false,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "CynoBridge(allow_bubbled)",
+            MovementIntent::CynoBridge {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: true,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "ConduitJump(unbubbled)",
+            MovementIntent::ConduitJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: false,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "ConduitJump(allow_bubbled)",
+            MovementIntent::ConduitJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: true,
+            },
+            "ShipCloaked",
+        ),
+        (
             "ShipcasterJump",
             MovementIntent::ShipcasterJump {
                 from_sys: high_sys,
@@ -2758,5 +2794,574 @@ async fn ess_acceleration_gate_exempts_cloak_for_range_then_decloak_while_other_
         .unwrap_err()
         .code,
         "WarpScrambled"
+    );
+}
+
+#[tokio::test]
+async fn active_cloak_rejects_conduit_jump_and_cyno_bridge_while_gate_cloak_allows_gh_1406() {
+    let ctx = test_ctx();
+    let from_sys = 30_000_142u32;
+    let to_sys = find_system_by_pred(&ctx.sde, |s| {
+        s.security_status < 0.45
+            && s.region_id != 10_000_070
+            && !(31_000_000..=32_999_999).contains(&s.solar_system_id)
+    });
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let ship_id = 10_014_061i64;
+    let cloak_mod_id = 10_014_062i64;
+    let origin = DVec3::new(45_000.0, 0.0, 0.0);
+
+    let is_covert_type = |effect_ids: &[u16]| {
+        effect_ids.iter().any(|&eid| {
+            ctx.sde
+                .effects
+                .get(&eid)
+                .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+        })
+    };
+    let non_covert_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| t.group_id == 330 && !is_covert_type(&t.effect_ids))
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .expect("non-covert cloak type in SDE");
+    let covert_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| t.group_id == 330 && is_covert_type(&t.effect_ids))
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .expect("covert cloak type in SDE");
+
+    spawn_test_ship(
+        &ctx,
+        from_sys,
+        char_id,
+        ship_id,
+        587,
+        origin,
+        1_000_000.0,
+        CombatState::default(),
+    )
+    .await;
+    let sys_h = ctx.systems.get_or_spawn(from_sys);
+
+    let intents = [
+        (
+            "ConduitJump(unbubbled)",
+            MovementIntent::ConduitJump {
+                from_sys,
+                to_sys,
+                allow_bubbled: false,
+            },
+        ),
+        (
+            "ConduitJump(allow_bubbled)",
+            MovementIntent::ConduitJump {
+                from_sys,
+                to_sys,
+                allow_bubbled: true,
+            },
+        ),
+        (
+            "CynoBridge(unbubbled)",
+            MovementIntent::CynoBridge {
+                from_sys,
+                to_sys,
+                allow_bubbled: false,
+            },
+        ),
+        (
+            "CynoBridge(allow_bubbled)",
+            MovementIntent::CynoBridge {
+                from_sys,
+                to_sys,
+                allow_bubbled: true,
+            },
+        ),
+    ];
+    let expected_ship_cloaked_ce =
+        eve_proto::BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ShipCloaked)
+            .client_error;
+
+    // 1. Baseline uncloaked ship passes ConduitJump and CynoBridge.
+    for (label, intent) in &intents {
+        assert!(
+            ctx.validate_ship_movement(char_id, ship_id, intent.clone())
+                .await
+                .is_ok(),
+            "{label} must pass when uncloaked"
+        );
+    }
+
+    // 2. Active non-gate cloak in actor CombatState (both standard and covert) rejects with ShipCloaked
+    //    and performs zero DB or actor state mutation.
+    for is_covert_cloak in [false, true] {
+        sys_h
+            .set_combat_state(
+                ship_id,
+                CombatState {
+                    is_cloaked: true,
+                    gate_cloak_remaining_ticks: 0,
+                    is_covert_cloak,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let epoch_before = ctx.db.state_epoch();
+        let tx_before = ctx.db.tx_commit_count();
+        for (label, intent) in &intents {
+            let err = ctx
+                .validate_ship_movement(char_id, ship_id, intent.clone())
+                .await
+                .expect_err(&format!(
+                    "{label} must reject active actor cloak (is_covert_cloak={is_covert_cloak})"
+                ));
+            assert_eq!(err.code, "ShipCloaked", "{label} error code mismatch");
+            assert_eq!(
+                err.client_error, expected_ship_cloaked_ce,
+                "{label} must attach canonical UserErrorKey::ShipCloaked"
+            );
+        }
+        assert_eq!(ctx.db.state_epoch(), epoch_before);
+        assert_eq!(ctx.db.tx_commit_count(), tx_before);
+        let cs_after = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs_after.is_cloaked);
+        assert_eq!(cs_after.gate_cloak_remaining_ticks, 0);
+        assert_eq!(cs_after.is_covert_cloak, is_covert_cloak);
+    }
+
+    // 3. Gate cloak (`gate_cloak_remaining_ticks > 0`, no active DB cloak module) remains permitted
+    //    with zero DB or actor state mutation.
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 15,
+                is_covert_cloak: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let gate_epoch = ctx.db.state_epoch();
+    let gate_tx = ctx.db.tx_commit_count();
+    for (label, intent) in &intents {
+        assert!(
+            ctx.validate_ship_movement(char_id, ship_id, intent.clone())
+                .await
+                .is_ok(),
+            "{label} must remain permitted under gate cloak"
+        );
+    }
+    assert_eq!(ctx.db.state_epoch(), gate_epoch);
+    assert_eq!(ctx.db.tx_commit_count(), gate_tx);
+    let gate_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(gate_cs.is_cloaked);
+    assert_eq!(gate_cs.gate_cloak_remaining_ticks, 15);
+
+    // 4. Unsynced active DB fitted cloak module (`snap.module_active_states` active while
+    //    `cs.is_cloaked == false`, AND even when stale `gate_cloak_remaining_ticks > 0`) rejects
+    //    ConduitJump and CynoBridge with ShipCloaked, preserves covert-cloak Warp rules, and
+    //    performs zero DB or actor mutation.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: non_covert_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(cloak_mod_id, true);
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+
+    for (cloak_label, cloak_tid, expect_warp_ok) in [
+        ("non-covert", non_covert_tid, false),
+        ("covert", covert_tid, true),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&cloak_mod_id).unwrap().type_id = cloak_tid;
+        });
+        for (cs_label, cs_seed) in [
+            ("unsynced-clear-cs", CombatState::default()),
+            (
+                "stale-gate-ticks-cs",
+                CombatState {
+                    is_cloaked: true,
+                    gate_cloak_remaining_ticks: 10,
+                    is_covert_cloak: false,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            sys_h.set_combat_state(ship_id, cs_seed.clone()).await.unwrap();
+            let epoch_before = ctx.db.state_epoch();
+            let tx_before = ctx.db.tx_commit_count();
+            for (label, intent) in &intents {
+                let err = ctx
+                    .validate_ship_movement(char_id, ship_id, intent.clone())
+                    .await
+                    .expect_err(&format!(
+                        "{label} must reject unsynced DB {cloak_label} cloak ({cs_label})"
+                    ));
+                assert_eq!(err.code, "ShipCloaked");
+                assert_eq!(err.client_error, expected_ship_cloaked_ce);
+            }
+            // Covert-cloak Warp must remain allowed while non-covert Warp stays rejected.
+            let warp_res = ctx
+                .validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id: from_sys })
+                .await;
+            if expect_warp_ok {
+                assert!(
+                    warp_res.expect("covert cloak warp must stay allowed").is_covert_cloaked
+                );
+            } else {
+                assert_eq!(warp_res.unwrap_err().code, "CloakedCannotWarp");
+            }
+            // Zero DB or actor state mutation.
+            assert_eq!(ctx.db.state_epoch(), epoch_before);
+            assert_eq!(ctx.db.tx_commit_count(), tx_before);
+            assert!(ctx
+                .db
+                .with_snapshot(|snap| snap.module_active_states.contains(&cloak_mod_id)));
+            let cs_after = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+            assert_eq!(cs_after.is_cloaked, cs_seed.is_cloaked);
+            assert_eq!(
+                cs_after.gate_cloak_remaining_ticks,
+                cs_seed.gate_cloak_remaining_ticks
+            );
+            assert_eq!(cs_after.is_covert_cloak, cs_seed.is_covert_cloak);
+        }
+    }
+}
+
+#[tokio::test]
+async fn conduit_jump_excludes_active_cloaked_fleetmates_but_permits_gate_cloaked_and_uncloaked_gh_1406() {
+    let ctx = test_ctx();
+    let origin_sys = 30_004_759u32;
+    let dest_sys = 30_004_760u32;
+    let kw = std::collections::HashMap::new();
+
+    let all_skills_l5: std::collections::HashMap<u32, eve_db::TrainedSkillRecord> = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| t.category_id == 16)
+        .map(|t| {
+            (
+                t.type_id,
+                eve_db::TrainedSkillRecord {
+                    type_id: t.type_id,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            )
+        })
+        .collect();
+
+    let seed_char = |cid: i64, sid: i64, sys: u32| {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = snap.characters.values().next().unwrap().clone();
+            ch.character_id = cid;
+            ch.clone_grade = 2;
+            ch.name = format!("Pilot-{cid}");
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
+            snap.characters.insert(cid, ch);
+            snap.skills.insert(cid, all_skills_l5.clone());
+        });
+    };
+
+    let cyno_char = 91_406_101i64;
+    let cyno_ship = 92_406_101i64;
+    let blops_char = 91_406_102i64;
+    let blops_ship = 92_406_102i64;
+    let p_uncloaked = 91_406_103i64;
+    let p_uncloaked_ship = 92_406_103i64;
+    let p_actor_cloaked = 91_406_104i64;
+    let p_actor_cloaked_ship = 92_406_104i64;
+    let p_db_cloaked = 91_406_105i64;
+    let p_db_cloaked_ship = 92_406_105i64;
+    let p_gate_cloaked = 91_406_106i64;
+    let p_gate_cloaked_ship = 92_406_106i64;
+
+    seed_char(cyno_char, cyno_ship, dest_sys);
+    spawn_test_ship(
+        &ctx,
+        dest_sys,
+        cyno_char,
+        cyno_ship,
+        11_957, // Falcon
+        DVec3::new(10_000.0, 0.0, 0.0),
+        12_000_000.0,
+        CombatState {
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    seed_char(blops_char, blops_ship, origin_sys);
+    spawn_test_ship(
+        &ctx,
+        origin_sys,
+        blops_char,
+        blops_ship,
+        22_428, // Redeemer (Black Ops)
+        DVec3::ZERO,
+        100_000_000.0,
+        CombatState {
+            capacitor: 10_000.0,
+            max_capacitor: 10_000.0,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    for (cid, sid, cs) in [
+        (p_uncloaked, p_uncloaked_ship, CombatState::default()),
+        (
+            p_actor_cloaked,
+            p_actor_cloaked_ship,
+            CombatState {
+                is_cloaked: true,
+                is_covert_cloak: true,
+                gate_cloak_remaining_ticks: 0,
+                ..Default::default()
+            },
+        ),
+        (p_db_cloaked, p_db_cloaked_ship, CombatState::default()),
+        (
+            p_gate_cloaked,
+            p_gate_cloaked_ship,
+            CombatState {
+                is_cloaked: true,
+                is_covert_cloak: false,
+                gate_cloak_remaining_ticks: 10,
+                ..Default::default()
+            },
+        ),
+    ] {
+        seed_char(cid, sid, origin_sys);
+        spawn_test_ship(
+            &ctx,
+            origin_sys,
+            cid,
+            sid,
+            11_957, // Falcon (covert ops eligible)
+            DVec3::new(2_000.0, 0.0, 0.0),
+            12_000_000.0,
+            cs,
+        )
+        .await;
+    }
+
+    let db_cloak_mod_id = 93_406_105i64;
+    let cyno_mod_id = 93_406_101i64;
+    let cyno_ozone_id = 93_406_102i64;
+    let blops_fuel_id = 93_406_103i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // Cyno generator + Liquid Ozone on cyno Falcon
+        snap.items.insert(
+            cyno_mod_id,
+            InventoryItemRecord {
+                item_id: cyno_mod_id,
+                type_id: 21_096, // Cynosural Field Generator I
+                owner_id: cyno_char,
+                location_id: cyno_ship,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cyno_ozone_id,
+            InventoryItemRecord {
+                item_id: cyno_ozone_id,
+                type_id: 16_273, // Liquid Ozone
+                owner_id: cyno_char,
+                location_id: cyno_ship,
+                flag: InventoryFlag::Cargo,
+                quantity: 2_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Fuel bay isotopes on Redeemer
+        snap.items.insert(
+            blops_fuel_id,
+            InventoryItemRecord {
+                item_id: blops_fuel_id,
+                type_id: 16_274, // Helium Isotopes
+                owner_id: blops_char,
+                location_id: blops_ship,
+                flag: InventoryFlag::SpecializedFuelBay,
+                quantity: 50_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        // Unsynced active Covert Ops cloak on p_db_cloaked_ship (`cs.is_cloaked == false`)
+        snap.items.insert(
+            db_cloak_mod_id,
+            InventoryItemRecord {
+                item_id: db_cloak_mod_id,
+                type_id: 11_578, // Covert Ops Cloaking Device II
+                owner_id: p_db_cloaked,
+                location_id: p_db_cloaked_ship,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(db_cloak_mod_id, true);
+        snap.module_active_states.insert(db_cloak_mod_id);
+
+        // Put all pilots in the same fleet accepting conduit jumps.
+        let members = [
+            cyno_char,
+            blops_char,
+            p_uncloaked,
+            p_actor_cloaked,
+            p_db_cloaked,
+            p_gate_cloaked,
+        ];
+        let mut details = std::collections::HashMap::new();
+        for cid in members {
+            details.insert(
+                cid,
+                eve_db::FleetMemberRecord {
+                    character_id: cid,
+                    wing_id: None,
+                    squad_id: None,
+                    role: if cid == blops_char {
+                        eve_db::FleetRole::FleetCommander
+                    } else {
+                        eve_db::FleetRole::SquadMember
+                    },
+                    role_name: "Member".into(),
+                    takes_fleet_warp: true,
+                    accepts_regroup: true,
+                    accepts_conduit_jumps: true,
+                    job: if cid == blops_char { 2 } else { 0 },
+                    join_time_unix: 1,
+                },
+            );
+        }
+        snap.fleets.insert(
+            94_406_001,
+            eve_db::FleetRecord {
+                fleet_id: 94_406_001,
+                boss_id: blops_char,
+                motd: String::new(),
+                free_move: true,
+                is_registered: false,
+                members: members.to_vec(),
+                member_details: details,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut cyno_sess = eve_machonet::SessionState::new(101);
+    cyno_sess.user_id = Some(101);
+    cyno_sess.character_id = Some(cyno_char);
+    cyno_sess.solar_system_id = Some(dest_sys);
+    cyno_sess.ship_id = Some(cyno_ship);
+    let beacon_id = ctx
+        .dispatch_rpc(
+            &mut cyno_sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[
+                eve_proto::PyRep::Integer(cyno_mod_id),
+                eve_proto::PyRep::String("cynosuralGeneration".into()),
+                eve_proto::PyRep::Integer(0),
+                eve_proto::PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("light cyno beacon")
+        .dict_get("beaconID")
+        .and_then(|v| v.as_i64())
+        .expect("beaconID");
+
+    let mut blops_sess = eve_machonet::SessionState::new(102);
+    blops_sess.user_id = Some(102);
+    blops_sess.character_id = Some(blops_char);
+    blops_sess.solar_system_id = Some(origin_sys);
+    blops_sess.ship_id = Some(blops_ship);
+    ctx.dispatch_rpc(
+        &mut blops_sess,
+        "beyonce",
+        None,
+        "CmdGroupJumpToFleetModuleBeacon",
+        &[
+            eve_proto::PyRep::Integer(cyno_char),
+            eve_proto::PyRep::Integer(dest_sys as i64),
+            eve_proto::PyRep::Integer(beacon_id),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("conduit jump succeeds for anchor");
+
+    // Uncloaked and gate-cloaked passengers jump; active actor-cloaked and unsynced DB-cloaked passengers remain in origin_sys.
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&blops_char].solar_system_id, dest_sys);
+        assert_eq!(snap.characters[&p_uncloaked].solar_system_id, dest_sys);
+        assert_eq!(snap.characters[&p_gate_cloaked].solar_system_id, dest_sys);
+        assert_eq!(
+            snap.characters[&p_actor_cloaked].solar_system_id, origin_sys,
+            "active actor-cloaked fleetmate must be excluded from conduit jump"
+        );
+        assert_eq!(
+            snap.characters[&p_db_cloaked].solar_system_id, origin_sys,
+            "unsynced active DB-cloaked fleetmate must be excluded from conduit jump"
+        );
+        assert!(
+            snap.module_active_states.contains(&db_cloak_mod_id),
+            "rejected DB-cloaked fleetmate must keep cloak module state unmutated"
+        );
+    });
+    let origin_h = ctx.systems.get_or_spawn(origin_sys);
+    assert!(
+        origin_h
+            .get_combat_state(p_actor_cloaked_ship)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_cloaked,
+        "rejected actor-cloaked fleetmate must keep CombatState cloak intact"
     );
 }
