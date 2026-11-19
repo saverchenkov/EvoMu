@@ -472,6 +472,139 @@ fn t() {
                     "Test-only file %s unexpectedly triggered blast-radius target %s in %s" % (test_path, req, cmds),
                 )
 
+    def test_coalesce_cargo_test_commands(self):
+        # 1. Coalesces multiple --test it and --lib filters into one command per target,
+        #    deduplicates filters in order, and keeps check / --bin / other crates separate.
+        raw = [
+            ["cargo", "check", "-j", "4", "--workspace", "--bins"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "rpc_client_contracts"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "login_space_bootstrap_sequence"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "macho_listener"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "dispatch"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "macho_listener"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "quasar_gateway"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--test", "it", "rpc_client_contracts"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"],
+            [
+                "cargo",
+                "test",
+                "-j",
+                "4",
+                "-p",
+                "eve-testkit",
+                "--test",
+                "property_coverage_suite",
+                "test_t5_server_dispatch_and_quasar_gateway_routing",
+            ],
+        ]
+        self.assertEqual(
+            run_review._coalesce_cargo_test_commands(raw),
+            [
+                ["cargo", "check", "-j", "4", "--workspace", "--bins"],
+                [
+                    "cargo",
+                    "test",
+                    "-j",
+                    "4",
+                    "-p",
+                    "eve-server",
+                    "--test",
+                    "it",
+                    "--",
+                    "rpc_client_contracts",
+                    "login_space_bootstrap_sequence",
+                    "quasar_gateway",
+                ],
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--", "macho_listener", "dispatch"],
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"],
+                [
+                    "cargo",
+                    "test",
+                    "-j",
+                    "4",
+                    "-p",
+                    "eve-testkit",
+                    "--test",
+                    "property_coverage_suite",
+                    "test_t5_server_dispatch_and_quasar_gateway_routing",
+                ],
+            ],
+        )
+
+        # 2. Duplicate single filter collapses cleanly to one command without duplicating filter
+        dup_single = [
+            ["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "lock_rank"],
+            ["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "lock_rank"],
+        ]
+        self.assertEqual(
+            run_review._coalesce_cargo_test_commands(dup_single),
+            [["cargo", "test", "-j", "4", "-p", "eve-db", "--lib", "lock_rank"]],
+        )
+
+        # 3. Unfiltered command for a target subsumes filtered commands for the same target (either order)
+        subsumed = [
+            ["cargo", "test", "-j", "4", "-p", "eve-proto", "--lib", "pb"],
+            ["cargo", "test", "-j", "4", "-p", "eve-proto", "--lib"],
+            ["cargo", "test", "-j", "4", "-p", "eve-proto", "--lib", "marshal"],
+            ["cargo", "test", "-j", "4", "-p", "eve-quasar", "--lib"],
+            ["cargo", "test", "-j", "4", "-p", "eve-quasar", "--lib", "framing"],
+        ]
+        self.assertEqual(
+            run_review._coalesce_cargo_test_commands(subsumed),
+            [
+                ["cargo", "test", "-j", "4", "-p", "eve-proto", "--lib"],
+                ["cargo", "test", "-j", "4", "-p", "eve-quasar", "--lib"],
+            ],
+        )
+
+        # 4. Commands with extra flags (-- --exact, --ignored, --workspace, --no-fail-fast) stay unmerged
+        specials = [
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "foo"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--", "--exact", "exact_fn"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--ignored"],
+            ["cargo", "test", "-j", "4", "--workspace", "--no-fail-fast"],
+            ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "bar"],
+        ]
+        self.assertEqual(
+            run_review._coalesce_cargo_test_commands(specials),
+            [
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--", "foo", "bar"],
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--", "--exact", "exact_fn"],
+                ["cargo", "test", "-j", "4", "-p", "eve-server", "--lib", "--ignored"],
+                ["cargo", "test", "-j", "4", "--workspace", "--no-fail-fast"],
+            ],
+        )
+
+        # 5. End-to-end check inside `run_tests`: multiple affected commands coalesce into one per target
+        seen_cmds = []
+
+        def fake_sh(cmd, cwd, env=None, timeout=None):
+            seen_cmds.append(list(cmd))
+            return 0, "test demo ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n"
+
+        multi_derived = [
+            ["cargo", "test", "-p", "eve-server", "--test", "it", "rpc_client_contracts"],
+            ["cargo", "test", "-p", "eve-server", "--test", "it", "client_harness"],
+            ["cargo", "test", "-p", "eve-server", "--lib", "macho_listener"],
+            ["cargo", "test", "-p", "eve-server", "--lib", "router::binding"],
+            ["cargo", "test", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(run_review, "sh", side_effect=fake_sh), mock.patch.object(
+                run_review, "_acquire_cargo_test_slot", return_value=None
+            ), mock.patch.object(run_review, "derive_affected_test_commands", return_value=multi_derived):
+                _, meta = run_review.run_tests(REPO_ROOT, tmp, timeout=30, base="HEAD")
+        self.assertEqual(meta["exit"], 0)
+        self.assertEqual(
+            [c[1:] for c in seen_cmds],
+            [
+                ["check", "-j", "4", "--workspace", "--bins"],
+                ["test", "-j", "4", "-p", "eve-server", "--test", "it", "--", "rpc_client_contracts", "client_harness"],
+                ["test", "-j", "4", "-p", "eve-server", "--lib", "--", "macho_listener", "router::binding"],
+                ["test", "-j", "4", "-p", "eve-server", "--bin", "eve-server", "main_unit_tests"],
+            ],
+        )
+
     def test_ten_of_ten_historical_p0_regressions_caught_by_gates(self):
         """Replay all 10 historical `[P0][Hourly CI]` regressions (#1125..#1162) and verify 10/10
         are caught by `ratchet_checks` + `derive_affected_test_commands` within <= 12 `it` filters."""

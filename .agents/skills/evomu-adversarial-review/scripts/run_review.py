@@ -925,6 +925,88 @@ def derive_affected_test_commands(root, base, cargo, head="HEAD"):
     return cmds
 
 
+def _parse_coalesceable_cargo_test(cmd):
+    """Parse simple single-filter or unfiltered `cargo test [-j N] -p <pkg> (--lib | --bin <name> | --test <name>) [filter]`.
+
+    Returns `(key_tuple, filter_or_None)` when safe to coalesce, or `None` for any other command
+    (e.g. `cargo check`, `--workspace`, `--ignored`, `--no-fail-fast`, `-- --exact`, extra flags)."""
+    if not cmd or len(cmd) < 5 or cmd[1] != "test" or "--" in cmd:
+        return None
+    i = 2
+    prefix = [cmd[0], "test"]
+    while i < len(cmd):
+        tok = cmd[i]
+        if tok in ("-j", "--jobs"):
+            if i + 1 >= len(cmd) or cmd[i + 1].startswith("-"):
+                return None
+            prefix.extend((tok, cmd[i + 1]))
+            i += 2
+        elif tok.startswith("-j") or tok.startswith("--jobs="):
+            prefix.append(tok)
+            i += 1
+        else:
+            break
+    if i + 2 >= len(cmd) or cmd[i] != "-p" or cmd[i + 1].startswith("-"):
+        return None
+    prefix.extend(("-p", cmd[i + 1]))
+    i += 2
+    target_flag = cmd[i]
+    if target_flag == "--lib":
+        prefix.append("--lib")
+        i += 1
+    elif target_flag in ("--bin", "--test"):
+        if i + 1 >= len(cmd) or cmd[i + 1].startswith("-"):
+            return None
+        prefix.extend((target_flag, cmd[i + 1]))
+        i += 2
+    else:
+        return None
+    rest = cmd[i:]
+    if not rest:
+        return tuple(prefix), None
+    if len(rest) == 1 and not rest[0].startswith("-"):
+        return tuple(prefix), rest[0]
+    return None
+
+
+def _coalesce_cargo_test_commands(cmds):
+    """Coalesce simple `cargo test` commands targeting the same crate/target into one process so
+    `OnceLock` SDE loading happens once per target instead of once per filter.
+
+    Preserves first-appearance ordering of each group and leaves non-matching commands untouched."""
+    order = []
+    groups = {}
+    for cmd in cmds:
+        parsed = _parse_coalesceable_cargo_test(cmd)
+        if parsed is None:
+            order.append(("raw", list(cmd)))
+            continue
+        key, flt = parsed
+        grp = groups.get(key)
+        if grp is None:
+            grp = {"unfiltered": False, "filters": []}
+            groups[key] = grp
+            order.append(("group", key))
+        if flt is None:
+            grp["unfiltered"] = True
+        elif not grp["unfiltered"] and flt not in grp["filters"]:
+            grp["filters"].append(flt)
+
+    out = []
+    for kind, item in order:
+        if kind == "raw":
+            out.append(item)
+            continue
+        grp = groups[item]
+        if grp["unfiltered"]:
+            out.append(list(item))
+        elif len(grp["filters"]) == 1:
+            out.append(list(item) + [grp["filters"][0]])
+        else:
+            out.append(list(item) + ["--"] + grp["filters"])
+    return out
+
+
 def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=False):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
     # Isolated from agent artifacts. Disable incremental cache (~7.5 GiB/slot) so 5 concurrent review slots stay lean.
@@ -947,6 +1029,7 @@ def run_tests(root, sdir, timeout, attest_dir=None, base="main", full_workspace=
     cmds = [_ensure_cargo_j4(c) for c in raw_cmds]
     if not use_full and any(c and c[-1] in SENTINEL_IT_FILTERS for c in cmds):
         cmds.insert(0, [cargo, "check", "-j", "4", "--workspace", "--bins"])
+    cmds = _coalesce_cargo_test_commands(cmds)
     slot_fh = _acquire_cargo_test_slot(root)
     outs = []
     rc = 0
