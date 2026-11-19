@@ -1389,6 +1389,331 @@ fn list_stations_corp_governance_office_and_role_matrix() {
     assert_eq!(call_corp(deliveries_id), expected_all);
 }
 
+#[test]
+fn list_stations_blocks_docked_scoped_escalation_and_covers_titles_pending_deliveries_and_bays() {
+    let ctx = test_ctx();
+    let mut st_iter = ctx.sde.stations.values();
+    let st_hq = st_iter.next().expect("HQ SDE station").clone();
+    let st_base = st_iter
+        .find(|s| s.station_id != st_hq.station_id)
+        .expect("base SDE station")
+        .clone();
+    let st_other = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.station_id != st_hq.station_id && s.station_id != st_base.station_id)
+        .expect("other SDE station")
+        .clone();
+
+    let corp_id = 98_000_399_i64;
+    let ceo_id = 90_002_000_i64;
+    let global_dir_id = 90_002_001_i64;
+    let docked_hq_dir_id = 90_002_002_i64;
+    let docked_base_trader_id = 90_002_003_i64;
+    let title_member_id = 90_002_004_i64;
+    let title_mask_only_id = 90_002_005_i64;
+    let unmatured_title_only_id = 90_002_006_i64;
+    let pend_scoped_id = 90_002_007_i64;
+    let deliv_only_id = 90_002_008_i64;
+    let personal_id = 90_002_009_i64;
+
+    let struct_hq = 1_048_000_000_399_i64;
+    let struct_other = 1_048_000_000_400_i64;
+    let now_unix = ctx.now_unix();
+    let empty_kw = HashMap::new();
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("demo char");
+        let uid = base_ch.user_id;
+        for (cid, dock_st) in [
+            (ceo_id, None),
+            (global_dir_id, None),
+            (docked_hq_dir_id, Some(st_hq.station_id)),
+            (docked_base_trader_id, Some(st_base.station_id)),
+            (title_member_id, Some(st_hq.station_id)),
+            (title_mask_only_id, None),
+            (unmatured_title_only_id, Some(st_hq.station_id)),
+            (pend_scoped_id, Some(st_hq.station_id)),
+            (deliv_only_id, None),
+            (personal_id, None),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            ch.station_id = dock_st;
+            snap.characters.insert(cid, ch);
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "ScopedListCorp", "SLC", ceo_id);
+        corp.hq_station_id = Some(st_hq.station_id);
+        corp.members = HashSet::from([
+            ceo_id,
+            global_dir_id,
+            docked_hq_dir_id,
+            docked_base_trader_id,
+            title_member_id,
+            title_mask_only_id,
+            unmatured_title_only_id,
+            pend_scoped_id,
+            deliv_only_id,
+        ]);
+        corp.member_roles
+            .insert(global_dir_id, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(deliv_only_id, corp_roles::ROLE_DELIVERIES_HANGAR_QUERY);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.corp_role_assignments.insert(
+            (corp_id, docked_hq_dir_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: docked_hq_dir_id,
+                roles_at_hq: corp_roles::ROLE_DIRECTOR,
+                ..Default::default()
+            },
+        );
+        snap.corp_role_assignments.insert(
+            (corp_id, docked_base_trader_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: docked_base_trader_id,
+                roles_at_base: corp_roles::ROLE_TRADER,
+                ..Default::default()
+            },
+        );
+
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.member_bases
+            .insert(docked_base_trader_id, st_base.station_id);
+        gov.member_bases.insert(title_member_id, st_base.station_id);
+        gov.pending_title_role_grants.insert(
+            title_member_id,
+            (corp_roles::ROLE_HANGAR_CAN_QUERY[1], now_unix + 3_600),
+        );
+        gov.pending_title_role_grants.insert(
+            unmatured_title_only_id,
+            (corp_roles::ROLE_HANGAR_CAN_QUERY[1], now_unix + 3_600),
+        );
+        gov.pending_scoped_role_grants.insert(
+            pend_scoped_id,
+            (corp_roles::ROLE_HANGAR_CAN_QUERY[0], 0, 0, now_unix + 86_400),
+        );
+        gov.member_titles.insert(title_mask_only_id, 1u64 << 1);
+
+        snap.corp_member_titles
+            .insert((corp_id, title_member_id), vec![1]);
+        snap.corp_member_titles
+            .insert((corp_id, unmatured_title_only_id), vec![4]);
+        snap.corp_titles.insert(
+            corp_id,
+            vec![
+                eve_db::snapshot_ext::CorpTitleEntry {
+                    title_id: 1,
+                    name: "ScopedMulti".into(),
+                    roles_at_hq: vec!["Hangar Can Query 2".into()],
+                    roles_at_base: vec!["Deliveries Hangar Query".into()],
+                    roles_at_other: vec!["Hangar Can Query 3".into()],
+                    ..Default::default()
+                },
+                eve_db::snapshot_ext::CorpTitleEntry {
+                    title_id: 2,
+                    name: "OtherSag3".into(),
+                    roles_at_other: vec!["Hangar Can Query 3".into()],
+                    ..Default::default()
+                },
+                eve_db::snapshot_ext::CorpTitleEntry {
+                    title_id: 4,
+                    name: "HqSag2Only".into(),
+                    roles_at_hq: vec!["Hangar Can Query 2".into()],
+                    ..Default::default()
+                },
+            ],
+        );
+
+        snap.structures.insert(
+            struct_hq,
+            UpwellStructureRecord {
+                structure_id: struct_hq,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                state: "ShieldVulnerable".into(),
+                name: "BayOnly Astrahus".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_other,
+            UpwellStructureRecord {
+                structure_id: struct_other,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_144,
+                state: "ShieldVulnerable".into(),
+                name: "Mixed Raitaru".into(),
+                ..Default::default()
+            },
+        );
+
+        // HQ: SAG1 + SAG2
+        put_item(snap, 34, corp_id, st_hq.station_id, InventoryFlag::CorpSAG1, 10, false);
+        put_item(snap, 34, corp_id, st_hq.station_id, InventoryFlag::CorpSAG2, 10, false);
+        // Base: CorpDeliveries (62) + CapsuleerDeliveries (187)
+        put_item(snap, 34, corp_id, st_base.station_id, InventoryFlag::CorpDeliveries, 4, false);
+        put_item(snap, 34, corp_id, st_base.station_id, InventoryFlag::CapsuleerDeliveries, 6, false);
+        // Other station: SAG3 + SAG1 + Deliveries (173)
+        put_item(snap, 34, corp_id, st_other.station_id, InventoryFlag::CorpSAG3, 3, false);
+        put_item(snap, 34, corp_id, st_other.station_id, InventoryFlag::CorpSAG1, 3, false);
+        put_item(snap, 34, corp_id, st_other.station_id, InventoryFlag::Deliveries, 3, false);
+
+        // struct_hq: ONLY structure fuel/fighter bays (must NEVER appear in corp ListStations)
+        put_item(snap, 4051, corp_id, struct_hq, InventoryFlag::SpecializedFuelBay, 50, false);
+        put_item(snap, 4051, corp_id, struct_hq, InventoryFlag::StructureFuel, 50, false);
+        put_item(snap, 23_057, corp_id, struct_hq, InventoryFlag::FighterBay, 5, false);
+
+        // struct_other: 1 CorpSAG1 item + fuel/fighter/ammo/core/service/hangar items (count must be 1)
+        put_item(snap, 34, corp_id, struct_other, InventoryFlag::CorpSAG1, 7, false);
+        put_item(snap, 4051, corp_id, struct_other, InventoryFlag::SpecializedFuelBay, 50, false);
+        put_item(snap, 4051, corp_id, struct_other, InventoryFlag::StructureFuel, 50, false);
+        put_item(snap, 23_057, corp_id, struct_other, InventoryFlag::FighterBay, 5, false);
+        put_item(snap, 37_847, corp_id, struct_other, InventoryFlag::SpecializedAmmoHold, 10, false);
+        put_item(snap, 56_201, corp_id, struct_other, InventoryFlag::StructureDeedBay, 1, true);
+        put_item(snap, 35_894, corp_id, struct_other, InventoryFlag::ServiceSlot0, 1, true);
+        put_item(snap, 34, corp_id, struct_other, InventoryFlag::Hangar, 9, false);
+
+        // Personal assets at struct_hq: docked ship (Hangar) with nested fighters (FighterBay)
+        // plus direct structure bay items that must be excluded.
+        let ship_id = put_item(snap, 587, personal_id, struct_hq, InventoryFlag::Hangar, 1, true);
+        put_item(snap, 23_057, personal_id, ship_id, InventoryFlag::FighterBay, 5, false);
+        put_item(snap, 4051, personal_id, struct_hq, InventoryFlag::SpecializedFuelBay, 100, false);
+        put_item(snap, 4051, personal_id, struct_hq, InventoryFlag::StructureFuel, 100, false);
+        put_item(snap, 23_057, personal_id, struct_hq, InventoryFlag::FighterBay, 5, false);
+        uid
+    });
+
+    let call_ls = |cid: i64, dock_st: Option<i64>, is_corp: bool| -> Result<Vec<Vec<i64>>, BridgeRpcError> {
+        let mut s = make_session(uid, cid, corp_id, dock_st, None);
+        let rep = handle_clones_and_sheet(
+            &ctx,
+            &mut s,
+            "charMgr",
+            "ListStations",
+            &[PyRep::Bool(false), PyRep::Bool(is_corp)],
+            &empty_kw,
+        )
+        .expect("handled")?;
+        let PyRep::Rowset { columns, rows } = rep else {
+            panic!("expected Rowset, got {rep:?}");
+        };
+        assert_eq!(
+            columns,
+            vec!["stationID", "solarSystemID", "itemCount", "typeID"]
+        );
+        Ok(rows
+            .into_iter()
+            .map(|r| r.into_iter().map(|c| c.as_i64().expect("int")).collect())
+            .collect())
+    };
+    let row_for = |st: &eve_sde::StationInfo, count: i64| -> Vec<i64> {
+        vec![
+            st.station_id,
+            i64::from(st.solar_system_id),
+            count,
+            i64::from(st.station_type_id),
+        ]
+    };
+
+    // 1. Docked HQ Director and Base Trader must NOT escalate globally via ch.station_id.
+    assert_eq!(
+        call_ls(docked_hq_dir_id, Some(st_hq.station_id), true).unwrap(),
+        vec![row_for(&st_hq, 2)]
+    );
+    assert_eq!(
+        call_ls(docked_base_trader_id, Some(st_base.station_id), true).unwrap(),
+        vec![row_for(&st_base, 2)]
+    );
+
+    // 2. Deliveries role sees CorpDeliveries (62), CapsuleerDeliveries (187), and Deliveries (173).
+    let mut expected_deliv = vec![row_for(&st_base, 2), row_for(&st_other, 1)];
+    expected_deliv.sort_by_key(|r| r[0]);
+    assert_eq!(call_ls(deliv_only_id, None, true).unwrap(), expected_deliv);
+
+    // 3. Title-granted scoped roles: unmatured HQ title role suppressed while matured base/other work;
+    //    unmatured-only title member fails closed with CorpRoleDenied until maturation.
+    let mut expected_title_pre = vec![row_for(&st_base, 2), row_for(&st_other, 1)];
+    expected_title_pre.sort_by_key(|r| r[0]);
+    assert_eq!(
+        call_ls(title_member_id, Some(st_hq.station_id), true).unwrap(),
+        expected_title_pre
+    );
+    assert_eq!(
+        call_ls(title_mask_only_id, None, true).unwrap(),
+        vec![row_for(&st_other, 1)]
+    );
+    assert_eq!(
+        call_ls(unmatured_title_only_id, Some(st_hq.station_id), true)
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_ls(pend_scoped_id, Some(st_hq.station_id), true)
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Advance 3600s: pending_title_role_grants matures; pending_scoped_role_grants still unmatured.
+    ctx.advance_secs(3_600);
+    let mut expected_title_post = vec![
+        row_for(&st_hq, 1),
+        row_for(&st_base, 2),
+        row_for(&st_other, 1),
+    ];
+    expected_title_post.sort_by_key(|r| r[0]);
+    assert_eq!(
+        call_ls(title_member_id, Some(st_hq.station_id), true).unwrap(),
+        expected_title_post
+    );
+    assert_eq!(
+        call_ls(unmatured_title_only_id, Some(st_hq.station_id), true).unwrap(),
+        vec![row_for(&st_hq, 1)]
+    );
+    assert_eq!(
+        call_ls(pend_scoped_id, Some(st_hq.station_id), true)
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Advance remaining 82800s (total 86400s): matured pending_scoped_role_grants unlocks HQ SAG1.
+    ctx.advance_secs(82_800);
+    assert_eq!(
+        call_ls(pend_scoped_id, Some(st_hq.station_id), true).unwrap(),
+        vec![row_for(&st_hq, 1)]
+    );
+
+    // 4. CEO and global Director only see asset-visible corp flags (fuel/fighter/slot/hangar excluded).
+    let mut expected_full_corp = vec![
+        row_for(&st_hq, 2),
+        row_for(&st_base, 2),
+        row_for(&st_other, 3),
+        vec![struct_other, 30_000_144, 1, 35_835],
+    ];
+    expected_full_corp.sort_by_key(|r| r[0]);
+    assert_eq!(call_ls(ceo_id, None, true).unwrap(), expected_full_corp);
+    assert_eq!(
+        call_ls(global_dir_id, None, true).unwrap(),
+        expected_full_corp
+    );
+
+    // 5. Personal ListStations excludes structure SpecializedFuelBay/StructureFuel/FighterBay
+    //    while still counting the docked ship carrying fighters in its own FighterBay.
+    assert_eq!(
+        call_ls(personal_id, None, false).unwrap(),
+        vec![vec![struct_hq, 30_000_142, 1, 35_832]]
+    );
+}
+
 #[cfg(test)]
 #[path = "character_clones_implants_extra_unit_tests.rs"]
 mod character_clones_implants_extra_unit_tests;

@@ -1618,6 +1618,24 @@ fn resolve_list_stations_location(
     raw_loc
 }
 
+fn corp_asset_required_role(flag: InventoryFlag) -> Option<u64> {
+    match flag {
+        InventoryFlag::CorpSAG1 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0]),
+        InventoryFlag::CorpSAG2 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]),
+        InventoryFlag::CorpSAG3 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[2]),
+        InventoryFlag::CorpSAG4 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[3]),
+        InventoryFlag::CorpSAG5 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[4]),
+        InventoryFlag::CorpSAG6 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[5]),
+        InventoryFlag::CorpSAG7 => Some(eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[6]),
+        InventoryFlag::Deliveries
+        | InventoryFlag::CorpDeliveries
+        | InventoryFlag::CapsuleerDeliveries => {
+            Some(eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY)
+        }
+        _ => None,
+    }
+}
+
 fn corp_item_visible_to_role(
     snap: &eve_db::WorldStateSnapshot,
     corp_id: i64,
@@ -1625,25 +1643,94 @@ fn corp_item_visible_to_role(
     loc_id: i64,
     flag: InventoryFlag,
     full_corp_roles: u64,
+    has_full_global_corp_access: bool,
     now_unix: u64,
 ) -> bool {
+    let Some(div_role) = corp_asset_required_role(flag) else {
+        return false;
+    };
+    if has_full_global_corp_access {
+        return true;
+    }
     let (is_ceo_loc, loc_role) =
         snap.effective_corp_roles_at(corp_id, char_id, Some(loc_id), 0, now_unix);
     if is_ceo_loc || loc_role == u64::MAX || (loc_role & full_corp_roles) != 0 {
         return true;
     }
-    let div_role = match flag {
-        InventoryFlag::CorpSAG1 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0],
-        InventoryFlag::CorpSAG2 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1],
-        InventoryFlag::CorpSAG3 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[2],
-        InventoryFlag::CorpSAG4 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[3],
-        InventoryFlag::CorpSAG5 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[4],
-        InventoryFlag::CorpSAG6 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[5],
-        InventoryFlag::CorpSAG7 => eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[6],
-        InventoryFlag::Deliveries => eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY,
-        _ => return false,
-    };
     eve_db::corp_roles::has_role(loc_role, div_role)
+}
+
+fn has_scoped_corp_query_role(
+    snap: &eve_db::WorldStateSnapshot,
+    corp_id: i64,
+    char_id: i64,
+    any_asset_query_roles: u64,
+    now_unix: u64,
+) -> bool {
+    let mut hq_roles = 0u64;
+    let mut base_roles = 0u64;
+    let mut other_roles = 0u64;
+
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        hq_roles |= ra.roles_at_hq;
+        base_roles |= ra.roles_at_base;
+        other_roles |= ra.roles_at_other;
+    }
+
+    let gov_opt = snap.corp_governance.get(&corp_id);
+    let mut unmatured_role_bits = 0u64;
+    let mut unmatured_title_bits = 0u64;
+    if let Some(gov) = gov_opt {
+        if let Some(&(p_mask, matured_at)) = gov.pending_role_grants.get(&char_id) {
+            if now_unix < matured_at {
+                const DELAYED_STASIS_MASK: u64 =
+                    eve_db::corp_roles::CORP_DELAYED_DIVISION_ROLE_MASK
+                        | eve_db::corp_roles::ROLE_DIRECTOR
+                        | (0x7Fu64 << 42);
+                unmatured_role_bits |= p_mask & DELAYED_STASIS_MASK;
+            }
+        }
+        if let Some(&(hq_p, base_p, other_p, matured_at)) =
+            gov.pending_scoped_role_grants.get(&char_id)
+        {
+            if now_unix >= matured_at {
+                hq_roles |= hq_p;
+                base_roles |= base_p;
+                other_roles |= other_p;
+            } else {
+                hq_roles &= !hq_p;
+                base_roles &= !base_p;
+                other_roles &= !other_p;
+            }
+        }
+        if let Some(&(t_mask, matured_at)) = gov.pending_title_role_grants.get(&char_id) {
+            if now_unix < matured_at {
+                unmatured_title_bits |= t_mask;
+            }
+        }
+    }
+
+    let member_tmask = gov_opt
+        .and_then(|g| g.member_titles.get(&char_id).copied())
+        .unwrap_or(0);
+    let tids_opt = snap.corp_member_titles.get(&(corp_id, char_id));
+    if let Some(titles) = snap.corp_titles.get(&corp_id) {
+        for t in titles.iter().filter(|t| {
+            tids_opt.is_some_and(|tids| tids.contains(&t.title_id))
+                || (member_tmask & eve_db::snapshot_ext::title_id_to_bit(t.title_id)) != 0
+        }) {
+            hq_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_hq)
+                & !unmatured_title_bits;
+            base_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_base)
+                & !unmatured_title_bits;
+            other_roles |= eve_db::corp_roles::encode_corp_role_names(&t.roles_at_other)
+                & !unmatured_title_bits;
+        }
+    }
+
+    let scoped_roles =
+        (hq_roles | base_roles | other_roles) & !(unmatured_role_bits | unmatured_title_bits);
+    (scoped_roles & any_asset_query_roles) != 0
 }
 
 #[derive(Clone, Copy)]
@@ -1672,7 +1759,7 @@ fn list_stations_rpc_error(
     }
 }
 
-/// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr` (#1369).
+/// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr` / `invbroker` (#1369, #1380).
 ///
 /// Matches V24 `assetsWindow.py:1131-1135` and `invbroker.ListStations` by returning
 /// `["stationID", "solarSystemID", "itemCount", "typeID"]` for both NPC stations and in-space
@@ -1728,16 +1815,16 @@ pub(crate) fn handle_list_stations(
                     format!("Corporation {owner_id} not found"),
                 ));
             }
+            // Pass `Some(0)` so strictly global evaluation never inherits docked station-scoped roles.
             let (is_ceo, global_role) =
-                snap.effective_corp_roles_at(owner_id, char_id, None, 0, now_unix);
-            let has_scoped_query_role = snap
-                .corp_role_assignments
-                .get(&(owner_id, char_id))
-                .is_some_and(|ra| {
-                    ((ra.roles | ra.roles_at_hq | ra.roles_at_base | ra.roles_at_other)
-                        & any_asset_query_roles)
-                        != 0
-                });
+                snap.effective_corp_roles_at(owner_id, char_id, Some(0), 0, now_unix);
+            let has_scoped_query_role = has_scoped_corp_query_role(
+                snap,
+                owner_id,
+                char_id,
+                any_asset_query_roles,
+                now_unix,
+            );
             if !is_ceo
                 && global_role != u64::MAX
                 && (global_role & any_asset_query_roles) == 0
@@ -1760,7 +1847,7 @@ pub(crate) fn handle_list_stations(
                 continue;
             }
             if eve_db::WorldStateSnapshot::is_fitted_slot_flag(item.flag)
-                || item.flag == InventoryFlag::StructureFuel
+                || crate::services::structure_acl_defense_rules::is_structure_fuel_flag(item.flag)
             {
                 continue;
             }
@@ -1780,6 +1867,9 @@ pub(crate) fn handle_list_stations(
                     .get(&loc_id)
                     .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
             } else {
+                if item.flag == InventoryFlag::FighterBay {
+                    continue;
+                }
                 snap.structures
                     .get(&loc_id)
                     .filter(|st| {
@@ -1791,7 +1881,6 @@ pub(crate) fn handle_list_stations(
             };
             if let Some((sys_id, st_type_id)) = st_info {
                 if is_corp
-                    && !has_full_global_corp_access
                     && !corp_item_visible_to_role(
                         snap,
                         owner_id,
@@ -1799,6 +1888,7 @@ pub(crate) fn handle_list_stations(
                         loc_id,
                         item.flag,
                         full_corp_roles,
+                        has_full_global_corp_access,
                         now_unix,
                     )
                 {
