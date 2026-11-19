@@ -2148,7 +2148,7 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
         sys_h.set_combat_state(ship_a, CombatState {
             warp_core_strength: wcs,
             warp_scramble_strength: scram,
-            is_cloaked: true,
+            is_cloaked: false,
             is_tethered: true,
             ..Default::default()
         }).await.unwrap();
@@ -2160,6 +2160,12 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
         assert_eq!(res.is_ok(), exp_ok, "wcs={wcs} scram={scram}");
     }
     // AbyssalOrVoidFilament selective cloak/tether flags
+    sys_h.set_combat_state(ship_a, CombatState {
+        warp_core_strength: 1,
+        is_cloaked: true,
+        is_tethered: true,
+        ..Default::default()
+    }).await.unwrap();
     assert!(ctx.validate_ship_movement(
         char_a,
         ship_a,
@@ -2307,4 +2313,290 @@ async fn w4_mutant_killers_boundaries_structure_piloting_ranks_mass_and_tackle()
         ctx.validate_ship_movement(char_a, ship_a, MovementIntent::WormholeJump { from_sys: sys_ls_edge, max_jump_mass: None }).await.unwrap_err().code,
         "ShipRestrictedFromWormhole"
     );
+}
+
+#[tokio::test]
+async fn active_cloak_rejects_jump_filament_and_gate_intents_while_gate_cloak_allows_and_stays_read_pure() {
+    let ctx = test_ctx();
+    let high_sys = 30_000_142u32;
+    let low_sys = find_system_by_pred(&ctx.sde, |s| {
+        s.security_status < 0.45
+            && s.region_id != 10_000_070
+            && !(31_000_000..=32_999_999).contains(&s.solar_system_id)
+    });
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let ship_id = 10_009_501i64;
+    let origin = DVec3::new(30_000.0, 0.0, 0.0);
+    spawn_test_ship(
+        &ctx,
+        high_sys,
+        char_id,
+        ship_id,
+        587,
+        origin,
+        1_000_000.0,
+        CombatState::default(),
+    )
+    .await;
+    let sys_h = ctx.systems.get_or_spawn(high_sys);
+
+    let intents = [
+        (
+            "StargateJump",
+            MovementIntent::StargateJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                gate_id: 1,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "AnsiblexJump",
+            MovementIntent::AnsiblexJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "WormholeJump",
+            MovementIntent::WormholeJump {
+                from_sys: high_sys,
+                max_jump_mass: None,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "CynoJump(unbubbled)",
+            MovementIntent::CynoJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: false,
+            },
+            "CannotJumpWhileCloaked",
+        ),
+        (
+            "CynoJump(allow_bubbled)",
+            MovementIntent::CynoJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                allow_bubbled: true,
+            },
+            "CannotJumpWhileCloaked",
+        ),
+        (
+            "ShipcasterJump",
+            MovementIntent::ShipcasterJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+            },
+            "ShipCloaked",
+        ),
+        (
+            "RandomFilament",
+            MovementIntent::RandomFilament { from_sys: high_sys },
+            "CannotActivateFilamentWhileCloaked",
+        ),
+        (
+            "AccelerationGate",
+            MovementIntent::AccelerationGate {
+                sys_id: high_sys,
+                kind: AccelerationGateKind::Generic,
+            },
+            "ShipCloaked",
+        ),
+    ];
+
+    let expected_ship_cloaked_ce =
+        eve_proto::BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ShipCloaked)
+            .client_error;
+
+    for is_covert_cloak in [false, true] {
+        sys_h
+            .set_combat_state(
+                ship_id,
+                CombatState {
+                    is_cloaked: true,
+                    gate_cloak_remaining_ticks: 0,
+                    is_covert_cloak,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let epoch_before = ctx.db.state_epoch();
+        let tx_before = ctx.db.tx_commit_count();
+        for (label, intent, expected_code) in &intents {
+            let err = ctx
+                .validate_ship_movement(char_id, ship_id, intent.clone())
+                .await
+                .expect_err(&format!(
+                    "{label} must reject active module cloak (is_covert_cloak={is_covert_cloak})"
+                ));
+            assert_eq!(err.code, *expected_code, "{label} error code mismatch");
+            if *expected_code == "ShipCloaked" {
+                assert_eq!(
+                    err.client_error, expected_ship_cloaked_ce,
+                    "{label} must attach canonical UserErrorKey::ShipCloaked"
+                );
+            }
+        }
+        assert_eq!(ctx.db.state_epoch(), epoch_before);
+        assert_eq!(ctx.db.tx_commit_count(), tx_before);
+        let cs_after = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs_after.is_cloaked);
+        assert_eq!(cs_after.gate_cloak_remaining_ticks, 0);
+        assert_eq!(cs_after.is_covert_cloak, is_covert_cloak);
+    }
+
+    // Gate cloak (`gate_cloak_remaining_ticks > 0`) must remain permitted across all variants.
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 1,
+                is_covert_cloak: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for (label, intent, _) in &intents {
+        let ok = ctx
+            .validate_ship_movement(char_id, ship_id, intent.clone())
+            .await;
+        assert!(
+            ok.is_ok(),
+            "{label} must remain allowed under gate cloak: {ok:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsynced_active_fitting_cloak_blocks_intents_and_preserves_covert_warp_read_pure() {
+    let ctx = test_ctx();
+    let high_sys = 30_000_142u32;
+    let low_sys = find_system_by_pred(&ctx.sde, |s| {
+        s.security_status < 0.45
+            && s.region_id != 10_000_070
+            && !(31_000_000..=32_999_999).contains(&s.solar_system_id)
+    });
+    let char_id = ctx.db.with_snapshot(|snap| *snap.characters.keys().next().unwrap());
+    let ship_id = 10_009_601i64;
+    let mod_id = 10_009_602i64;
+    let origin = DVec3::new(40_000.0, 0.0, 0.0);
+
+    let is_covert_type = |effect_ids: &[u16]| {
+        effect_ids.iter().any(|&eid| {
+            ctx.sde
+                .effects
+                .get(&eid)
+                .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+        })
+    };
+    let non_covert_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| t.group_id == 330 && !is_covert_type(&t.effect_ids))
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_577);
+    let covert_tid = ctx
+        .sde
+        .types
+        .iter()
+        .filter(|(_, t)| t.group_id == 330 && is_covert_type(&t.effect_ids))
+        .min_by_key(|(&tid, _)| tid)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_578);
+
+    spawn_test_ship(
+        &ctx,
+        high_sys,
+        char_id,
+        ship_id,
+        587,
+        origin,
+        1_000_000.0,
+        CombatState::default(),
+    )
+    .await;
+    let sys_h = ctx.systems.get_or_spawn(high_sys);
+
+    // Unsynced active non-covert cloak in `module_active_states` (`cs.is_cloaked == false`) must still reject cleanly.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            InventoryItemRecord {
+                item_id: mod_id,
+                type_id: non_covert_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(mod_id);
+    });
+    let epoch_before = ctx.db.state_epoch();
+    let tx_before = ctx.db.tx_commit_count();
+    assert_eq!(
+        ctx.validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id: high_sys })
+            .await
+            .unwrap_err()
+            .code,
+        "CloakedCannotWarp"
+    );
+    assert_eq!(
+        ctx.validate_ship_movement(
+            char_id,
+            ship_id,
+            MovementIntent::StargateJump {
+                from_sys: high_sys,
+                to_sys: low_sys,
+                gate_id: 1,
+            },
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipCloaked"
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), tx_before);
+    assert!(!sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    // Unsynced active Covert Ops cloak (`cs.is_cloaked == false` OR stale `is_covert_cloak == false`)
+    // must permit warp and surface `is_covert_cloaked == true`.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = covert_tid;
+    });
+    let ok = ctx
+        .validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id: high_sys })
+        .await
+        .expect("unsynced Covert Ops cloak must allow warp");
+    assert!(ok.is_covert_cloaked);
+
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                is_covert_cloak: false,
+                gate_cloak_remaining_ticks: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ok_stale_flag = ctx
+        .validate_ship_movement(char_id, ship_id, MovementIntent::Warp { sys_id: high_sys })
+        .await
+        .expect("active Covert Ops fitting module must override stale is_covert_cloak=false");
+    assert!(ok_stale_flag.is_covert_cloaked);
 }

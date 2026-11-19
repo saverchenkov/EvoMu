@@ -340,6 +340,8 @@ async fn handle_cmd_warp_to_stuff(
             client_error: None,
         });
     };
+    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
+    crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, char_id)?;
     let is_fleet_warp_kw = kwargs
         .get("fleet")
         .is_some_and(|v| matches!(v, PyRep::Bool(true)) || v.as_i64().is_some_and(|i| i != 0) || v.as_str().is_some())
@@ -359,6 +361,25 @@ async fn handle_cmd_warp_to_stuff(
         if let Some(res) =
             crate::services::fleet_social::fleet_social_fleet_ops::handle_fleet_warp(ctx, session, &wf_args, kwargs).await
         {
+            if let Ok(ref rep) = res {
+                let caller_warped = rep
+                    .dict_get("warpedMemberIDs")
+                    .and_then(|v| match v {
+                        PyRep::List(items) | PyRep::Tuple(items) => {
+                            Some(items.iter().any(|item| item.as_i64() == Some(char_id)))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                if caller_warped {
+                    break_location_change_invulnerability(ctx, char_id);
+                    let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+                        ctx,
+                        char_id,
+                        "SAFE_LOGOFF_ABORT_MOVING",
+                    );
+                }
+            }
             return res;
         }
     }
@@ -449,7 +470,6 @@ async fn handle_cmd_warp_to_stuff(
         "CmdWarpToStuff request"
     );
     let handle = ctx.systems.get_or_spawn(sys_id);
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -466,6 +486,15 @@ async fn handle_cmd_warp_to_stuff(
             client_error: None,
         });
     };
+
+    let validated = ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
+        )
+        .await?;
+    let is_covert_cloaked = validated.is_covert_cloaked;
 
     let needs_pve_seed = matches!(
         stuff_type,
@@ -759,15 +788,6 @@ async fn handle_cmd_warp_to_stuff(
     );
     let landing_dist = current_ball.position.distance(landing_pos);
 
-    let validated = ctx
-        .validate_ship_movement(
-            char_id,
-            ship_id,
-            crate::services::space_nav_movement_guard::MovementIntent::Warp { sys_id },
-        )
-        .await?;
-    let is_covert_cloaked = validated.is_covert_cloaked;
-
     let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
     let mut dest_pos = landing_pos - warp_dir * min_range;
     let requested_dist_m = current_ball.position.distance(dest_pos);
@@ -809,6 +829,7 @@ async fn handle_cmd_warp_to_stuff(
     let cap_per_m = cap_per_au / AU_IN_METERS;
     let req_cap = cap_per_m * requested_dist_m;
 
+    let mut cap_debit_update: Option<(f64, f64, f64, f64)> = None;
     if let Ok(Some(mut cs)) = handle.get_combat_state(ship_id).await {
         let mut repaired_max_cap = false;
         if (cs.max_capacitor - 250.0).abs() < 1e-6
@@ -820,6 +841,7 @@ async fn handle_cmd_warp_to_stuff(
             repaired_max_cap = true;
         }
         let old_cap = cs.capacitor;
+        let pre_debit_cap = cs.capacitor;
         if cs.capacitor < req_cap {
             let affordable_dist_m = if cap_per_m > 0.0 {
                 cs.capacitor / cap_per_m
@@ -853,19 +875,21 @@ async fn handle_cmd_warp_to_stuff(
         } else {
             let _ = handle.set_capacitor(ship_id, cs.capacitor).await;
         }
-        let _ = ctx.notify_ship_capacitor_change(
-            char_id,
-            ship_id,
-            cs.capacitor,
-            cs.max_capacitor,
-            Some(old_cap),
-        );
+        cap_debit_update = Some((cs.capacitor, cs.max_capacitor, old_cap, pre_debit_cap));
     }
 
     let warp_speed = compute_pilot_warp_speed_au_s(ctx, char_id, sys_id, current_ball.type_id);
     let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
-    if !is_covert_cloaked {
-        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    if is_covert_cloaked {
+        // Ensure a stale `is_covert_cloak = false` flag on `CombatState` does not cause
+        // `ballpark.set_movement_mode` to reject a verified active Covert Ops cloak module.
+        let _ = handle
+            .modify_combat_state(ship_id, |live_cs| {
+                if live_cs.is_cloaked && !live_cs.is_covert_cloak {
+                    live_cs.is_covert_cloak = true;
+                }
+            })
+            .await;
     }
     let target_belt_id = ctx
         .sde
@@ -876,6 +900,18 @@ async fn handle_cmd_warp_to_stuff(
     if target_belt_id.is_some() {
         let _ = handle.populate_asteroid_belt_entities().await;
     }
+    // Snapshot active gate cloak and undock invulnerability read-only immediately before
+    // `set_warp_movement_mode`, which clears them inside `Ballpark::set_mode` so `Ok(tick)`
+    // can emit `OnJumpCloakCancelled` / `OnInvulnCancelled` without dropping them.
+    let (had_gate_cloak, had_undock_invuln) = match handle.get_combat_state(ship_id).await {
+        Ok(Some(live_cs)) => (
+            !is_covert_cloaked
+                && (live_cs.gate_cloak_remaining_ticks > 0
+                    || (live_cs.is_cloaked && !live_cs.is_covert_cloak)),
+            live_cs.undock_invulnerable_remaining_ticks > 0,
+        ),
+        _ => (false, false),
+    };
     match handle
         .set_warp_movement_mode(
             ship_id,
@@ -885,6 +921,27 @@ async fn handle_cmd_warp_to_stuff(
         .await
     {
         Ok(tick) => {
+            if let Some((new_cap, max_cap, old_cap, _)) = cap_debit_update {
+                let _ = ctx.notify_ship_capacitor_change(
+                    char_id,
+                    ship_id,
+                    new_cap,
+                    max_cap,
+                    Some(old_cap),
+                );
+            }
+            if had_gate_cloak || had_undock_invuln {
+                crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    had_gate_cloak,
+                    had_undock_invuln,
+                );
+            }
+            // Run tether & fitting cloak reconciliation only after `ball.mode` is `MovementMode::Warp`
+            // so `sync_tether` breaks tether cleanly without granting a +25% capacitor repair.
+            sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             if stuff_type == "item" && target_id > 0 {
                 let _ = ctx.systems.ensure_stargate_destination_loaded_for_intent(
                     sys_id,
@@ -908,6 +965,13 @@ async fn handle_cmd_warp_to_stuff(
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {
+            if let Some((_, _, _, pre_debit_cap)) = cap_debit_update {
+                let _ = handle
+                    .modify_combat_state(ship_id, move |live_cs| {
+                        live_cs.capacitor = pre_debit_cap;
+                    })
+                    .await;
+            }
             let code = if e.contains("WarpScrambled") {
                 "WarpScrambled"
             } else if e.contains("CloakedCannotWarp") {

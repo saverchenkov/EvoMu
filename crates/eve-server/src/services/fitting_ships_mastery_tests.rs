@@ -1062,3 +1062,252 @@ async fn eject_in_space_missing_hull_ball_rejects_without_mutating_db_or_spawnin
         "no capsule ball may be spawned near star origin (150, 0, 0)"
     );
 }
+
+#[tokio::test]
+async fn active_cloak_and_invalid_args_reject_eject_cleanly_while_gate_cloak_allows() {
+    use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
+        clone_char_with, test_ctx_with_clock,
+    };
+
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let sys_id = 30_000_142_u32;
+    let char_id = 9_860_001_i64;
+    let corp_id = 98_600_860_i64;
+    let ship_id = 9_860_002_i64;
+    let ship_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 6 && t.group_id == 25)
+        .or_else(|| ctx.sde.types.values().find(|t| t.category_id == 6 && t.type_id != 670))
+        .map(|t| t.type_id)
+        .unwrap_or(587);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "Cloak Eject", corp_id, sys_id, ship_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_combat(
+        eve_destiny::Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: glam::DVec3::new(15_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 320.0,
+            inertia: 2.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+    )
+    .await
+    .expect("spawn test hull");
+
+    let mut sess = SessionState::new(9_860);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+    let expected_ship_cloaked_ce =
+        BridgeRpcError::from_user_key(eve_proto::UserErrorKey::ShipCloaked).client_error;
+
+    // 1. Active module cloak (non-covert and covert) must reject ship.Eject cleanly without mutating DB or ballpark.
+    for is_covert_cloak in [false, true] {
+        sys.set_combat_state(
+            ship_id,
+            eve_destiny::CombatState {
+                is_cloaked: true,
+                gate_cloak_remaining_ticks: 0,
+                is_covert_cloak,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let epoch_0 = ctx.db.state_epoch();
+        let tx_0 = ctx.db.tx_commit_count();
+        let err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+            .await
+            .expect("handled")
+            .expect_err("cloaked ship.Eject must fail");
+        assert_eq!(err.code, "ShipCloaked");
+        assert_eq!(err.client_error, expected_ship_cloaked_ce);
+        assert_eq!(sess.ship_id, Some(ship_id));
+        assert_eq!(ctx.db.state_epoch(), epoch_0);
+        assert_eq!(ctx.db.tx_commit_count(), tx_0);
+        let cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked);
+        assert_eq!(cs.gate_cloak_remaining_ticks, 0);
+    }
+
+    // 1b. Unsynced active cloak module in `snap.module_active_states` (`cs.is_cloaked == false`)
+    //     must ALSO reject ship.Eject cleanly with UserErrorKey::ShipCloaked and zero mutations.
+    sys.set_combat_state(ship_id, eve_destiny::CombatState::default())
+        .await
+        .unwrap();
+    let cloak_mod_id = 9_860_003_i64;
+    let cloak_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 330)
+        .map(|(&tid, _)| tid)
+        .unwrap_or(11_577);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: cloak_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    let epoch_unsynced = ctx.db.state_epoch();
+    let tx_unsynced = ctx.db.tx_commit_count();
+    let unsynced_err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("unsynced active cloak module must reject ship.Eject");
+    assert_eq!(unsynced_err.code, "ShipCloaked");
+    assert_eq!(unsynced_err.client_error, expected_ship_cloaked_ce);
+    assert_eq!(sess.ship_id, Some(ship_id));
+    assert_eq!(ctx.db.state_epoch(), epoch_unsynced);
+    assert_eq!(ctx.db.tx_commit_count(), tx_unsynced);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+        snap.items.remove(&cloak_mod_id);
+    });
+
+    // 2. Invalid / mismatched optional pickid (and [PyRep::None] + kwargs["shipID"]) must reject before any mutation.
+    sys.set_combat_state(ship_id, eve_destiny::CombatState::default())
+        .await
+        .unwrap();
+    let epoch_0 = ctx.db.state_epoch();
+    let tx_0 = ctx.db.tx_commit_count();
+    let bad_pick = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Eject",
+        &[PyRep::Integer(ship_id + 1)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("mismatched Eject pickid must reject");
+    assert_eq!(bad_pick.code, "InvalidShip");
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    let mut kw_ship = HashMap::new();
+    kw_ship.insert("shipID".to_string(), PyRep::Integer(ship_id + 2));
+    let bad_none_ship = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Eject",
+        &[PyRep::None],
+        &kw_ship,
+    )
+    .await
+    .expect("handled")
+    .expect_err("[None] + mismatched kwargs[shipID] must reject");
+    assert_eq!(bad_none_ship.code, "InvalidShip");
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+
+    // 3. DB-docked character (even if session.station_id was stale None) must reject CannotEjectWhileDocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760);
+    });
+    let epoch_docked = ctx.db.state_epoch();
+    let tx_docked = ctx.db.tx_commit_count();
+    let dock_err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("DB-docked Eject must fail");
+    assert_eq!(dock_err.code, "CannotEjectWhileDocked");
+    assert_eq!(ctx.db.state_epoch(), epoch_docked);
+    assert_eq!(ctx.db.tx_commit_count(), tx_docked);
+
+    // 3b. DB-resolved solar system security check: criminal in highsec rejects even if session.solar_system_id is None.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(char_id).criminal_flag_until_unix = ctx.now_unix_secs() + 60;
+    }
+    sess.solar_system_id = None;
+    let crim_err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("highsec criminal must fail via DB-resolved sys_id");
+    assert_eq!(crim_err.code, "CannotEjectInvolvedInCrime");
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(char_id).criminal_flag_until_unix = 0;
+    }
+    sess.solar_system_id = Some(sys_id);
+
+    // 4. Undock in DB, set gate cloak (`gate_cloak_remaining_ticks > 0`), pass matching shipID arg -> Eject succeeds.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
+    sys.set_combat_state(
+        ship_id,
+        eve_destiny::CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 10,
+            is_covert_cloak: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let ok = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "ship",
+        "Eject",
+        &[PyRep::Integer(ship_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("gate-cloaked Eject with matching shipID must succeed");
+    assert_eq!(ok.dict_get("abandonedShipID").and_then(PyRep::as_i64), Some(ship_id));
+    assert_ne!(sess.ship_id, Some(ship_id));
+}

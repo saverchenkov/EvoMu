@@ -368,6 +368,82 @@ pub(crate) fn can_warp_in_ballpark(bp: &eve_destiny::Ballpark, ship_id: i64) -> 
     true
 }
 
+#[derive(Clone, Copy)]
+enum MovementCloakErrorCode {
+    CannotJumpWhileCloaked,
+    CannotActivateFilamentWhileCloaked,
+}
+
+impl MovementCloakErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CannotJumpWhileCloaked => "CannotJumpWhileCloaked",
+            Self::CannotActivateFilamentWhileCloaked => "CannotActivateFilamentWhileCloaked",
+        }
+    }
+}
+
+fn movement_cloak_rpc_error(code: MovementCloakErrorCode, message: &'static str) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().to_string(),
+        message: message.to_string(),
+        client_error: None,
+    }
+}
+
+/// Read-only inspection of `snap.module_active_states` for an active fitted cloak module on
+/// `ship_id` outside Abyssal Deadspace, returning `Some(is_covert)` without mutating DB or actor.
+pub(crate) fn resolve_active_fitting_cloak_read_only(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    ship_id: i64,
+) -> Option<bool> {
+    if (32_000_000..=32_999_999).contains(&sys_id) {
+        return None;
+    }
+    ctx.db.with_snapshot(|snap| {
+        for item in snap.items.values() {
+            if (char_id <= 0 || item.owner_id == char_id)
+                && item.location_id == ship_id
+                && matches!(item.flag as u16, 11..=34 | 125..=132)
+                && snap.module_active_states.contains(&item.item_id)
+            {
+                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
+                    if ty.group_id == 330 {
+                        let is_covert = ty.effect_ids.iter().any(|&eid| {
+                            ctx.sde
+                                .effects
+                                .get(&eid)
+                                .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                        });
+                        return Some(is_covert);
+                    }
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Checks fail-closed whether `ship_id` has an active non-gate cloak in Ballpark `CombatState`
+/// or an unsynced active fitted cloak module in `snap.module_active_states` outside Abyssal space.
+pub(crate) async fn is_ship_module_cloaked_fail_closed(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    sys_id: u32,
+    ship_id: i64,
+) -> Result<bool, String> {
+    let cs_opt = sys_handle.get_combat_state(ship_id).await?;
+    let actor_cloaked = cs_opt
+        .as_ref()
+        .is_some_and(|cs| cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0);
+    let fitting_cloaked =
+        resolve_active_fitting_cloak_read_only(ctx, char_id, sys_id, ship_id).is_some();
+    Ok(actor_cloaked || fitting_cloaked)
+}
+
 impl ServerContext {
     /// Unified pre-movement validator covering tackle/bubbles, immobilizing modules,
     /// cloak rules, hull/mass limits, and system/location locks (`#591`).
@@ -386,7 +462,7 @@ impl ServerContext {
     /// explicitly clears the active warp check, while still enforcing all other locks/tackle.
     pub(crate) async fn validate_ship_movement_with_warp_arrival(
         &self,
-        _char_id: i64,
+        char_id: i64,
         ship_id: i64,
         intent: MovementIntent,
         allow_arriving_warp: bool,
@@ -503,43 +579,84 @@ impl ServerContext {
         // Category 2: Navigation locks (Cyno, Doomsday/Lance, Entosis, Skyhook, CRAB) and immobilizing modules.
         validate_navigation_and_immobilizing_locks(self, ship_id, &intent)?;
 
-        // Category 3: Cloak & tether rules.
+        // Category 3: Cloak & tether rules (read-only across `CombatState` and `snap.module_active_states`
+        // so unsynced module cloaks cannot bypass validation or lose covert-cloak status).
+        let fitting_cloak_opt =
+            resolve_active_fitting_cloak_read_only(self, char_id, sys_id, ship_id);
+        let (eff_cloaked, eff_covert_cloak, eff_gate_cloak_ticks) = match fitting_cloak_opt {
+            Some(mod_is_covert) => (true, mod_is_covert, 0),
+            None => match cs_opt.as_ref() {
+                Some(cs) => (
+                    cs.is_cloaked,
+                    cs.is_covert_cloak,
+                    cs.gate_cloak_remaining_ticks,
+                ),
+                None => (false, false, 0),
+            },
+        };
+        let eff_tethered = cs_opt.as_ref().is_some_and(|cs| cs.is_tethered);
         let mut is_covert_cloaked = false;
-        if let Some(ref cs) = cs_opt {
-            if intent.is_warp_intent() {
-                if cs.is_cloaked
-                    && cs.gate_cloak_remaining_ticks == 0
-                    && !cs.is_covert_cloak
-                {
-                    return Err(BridgeRpcError {
-                        code: "CloakedCannotWarp".into(),
-                        message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device".into(),
-                        client_error: None,
-                    });
+        if intent.is_warp_intent() {
+            if eff_cloaked && eff_gate_cloak_ticks == 0 && !eff_covert_cloak {
+                return Err(BridgeRpcError {
+                    code: "CloakedCannotWarp".into(),
+                    message: "Cannot initiate warp while cloaked without a Covert Ops Cloaking Device".into(),
+                    client_error: None,
+                });
+            }
+            is_covert_cloaked = eff_cloaked && eff_covert_cloak && eff_gate_cloak_ticks == 0;
+        } else if let MovementIntent::AbyssalOrVoidFilament {
+            reject_when_cloaked,
+            reject_when_tethered,
+            ..
+        } = intent
+        {
+            if reject_when_cloaked && eff_cloaked {
+                return Err(BridgeRpcError {
+                    code: "ShipIsCloaked".into(),
+                    message: "Cannot activate filament while cloaked".into(),
+                    client_error: None,
+                });
+            }
+            if reject_when_tethered && eff_tethered {
+                return Err(BridgeRpcError {
+                    code: "ShipIsTethered".into(),
+                    message: "Cannot activate filament while tethered".into(),
+                    client_error: None,
+                });
+            }
+        } else if eff_cloaked && eff_gate_cloak_ticks == 0 {
+            match intent {
+                MovementIntent::CynoJump { .. } => {
+                    return Err(movement_cloak_rpc_error(
+                        MovementCloakErrorCode::CannotJumpWhileCloaked,
+                        "Cannot jump while cloaked",
+                    ));
                 }
-                is_covert_cloaked = cs.is_cloaked
-                    && cs.is_covert_cloak
-                    && cs.gate_cloak_remaining_ticks == 0;
-            } else if let MovementIntent::AbyssalOrVoidFilament {
-                reject_when_cloaked,
-                reject_when_tethered,
-                ..
-            } = intent
-            {
-                if reject_when_cloaked && cs.is_cloaked {
-                    return Err(BridgeRpcError {
-                        code: "ShipIsCloaked".into(),
-                        message: "Cannot activate filament while cloaked".into(),
-                        client_error: None,
-                    });
+                MovementIntent::RandomFilament { .. } => {
+                    return Err(movement_cloak_rpc_error(
+                        MovementCloakErrorCode::CannotActivateFilamentWhileCloaked,
+                        "Cannot activate filament while cloaked",
+                    ));
                 }
-                if reject_when_tethered && cs.is_tethered {
-                    return Err(BridgeRpcError {
-                        code: "ShipIsTethered".into(),
-                        message: "Cannot activate filament while tethered".into(),
-                        client_error: None,
-                    });
+                MovementIntent::StargateJump { .. }
+                | MovementIntent::AnsiblexJump { .. }
+                | MovementIntent::WormholeJump { .. }
+                | MovementIntent::ShipcasterJump { .. }
+                | MovementIntent::AccelerationGate { .. } => {
+                    return Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::ShipCloaked,
+                    ));
                 }
+                MovementIntent::CynoBridge { .. }
+                | MovementIntent::ConduitJump { .. } => {}
+                MovementIntent::Warp { .. }
+                | MovementIntent::BookmarkWarp { .. }
+                | MovementIntent::AgencyWarp { .. }
+                | MovementIntent::VectorWarp { .. }
+                | MovementIntent::AbyssalOrVoidFilament { .. } => unreachable!(
+                    "warp and abyssal/void filament intents are handled above"
+                ),
             }
         }
 

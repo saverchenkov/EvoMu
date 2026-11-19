@@ -853,6 +853,73 @@ fn validate_optional_self_destruct_pickid(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum SelfDestructErrorCode {
+    CannotSelfDestructWhileDocked,
+    NoActiveShip,
+    DestinyQueryFailed,
+}
+
+impl SelfDestructErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CannotSelfDestructWhileDocked => "CannotSelfDestructWhileDocked",
+            Self::NoActiveShip => "NoActiveShip",
+            Self::DestinyQueryFailed => "DestinyQueryFailed",
+        }
+    }
+}
+
+fn self_destruct_rpc_error(
+    code: SelfDestructErrorCode,
+    message: impl Into<String>,
+) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().to_string(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn cannot_self_destruct_docked_err() -> BridgeRpcError {
+    self_destruct_rpc_error(
+        SelfDestructErrorCode::CannotSelfDestructWhileDocked,
+        "Cannot self-destruct a ship while docked in a station or structure",
+    )
+}
+
+fn no_active_ship_err(message: &str) -> BridgeRpcError {
+    self_destruct_rpc_error(SelfDestructErrorCode::NoActiveShip, message)
+}
+
+fn validate_self_destruct_snap_preconditions(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    sys_id: u32,
+    ship_id: i64,
+) -> Result<u32, BridgeRpcError> {
+    let Some(ch) = snap.characters.get(&char_id) else {
+        return Err(no_active_ship_err("Character not found"));
+    };
+    if ch.station_id.is_some() || ch.structure_id.is_some() {
+        return Err(cannot_self_destruct_docked_err());
+    }
+    if ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
+        return Err(no_active_ship_err(
+            "Session ship is no longer active in this solar system",
+        ));
+    }
+    let Some(ship_item) = snap.items.get(&ship_id) else {
+        return Err(no_active_ship_err("Active ship item not found"));
+    };
+    if ship_item.owner_id != char_id || ship_item.location_id != i64::from(sys_id) {
+        return Err(no_active_ship_err(
+            "Ship is not owned by pilot in this solar system",
+        ));
+    }
+    Ok(ship_item.type_id)
+}
+
 /// Advances in-flight missiles and active Breacher Pod DoTs in `solar_system_id` by `dt` seconds
 
 
@@ -872,18 +939,10 @@ pub async fn handle_wrecks_killmails(
                 Err(e) => return Some(Err(e)),
             };
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotSelfDestructWhileDocked".into(),
-                    message: "Cannot self-destruct a ship while docked in a station or structure".into(),
-                    client_error: None,
-                }));
+                return Some(Err(cannot_self_destruct_docked_err()));
             }
             let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
+                return Some(Err(no_active_ship_err("Session has no active ship")));
             };
             if let Err(e) = validate_optional_self_destruct_pickid(args, kwargs, ship_id) {
                 return Some(Err(e));
@@ -895,6 +954,34 @@ pub async fn handle_wrecks_killmails(
                     client_error: None,
                 }));
             };
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                validate_self_destruct_snap_preconditions(snap, char_id, sys_id, ship_id)
+            }) {
+                return Some(Err(e));
+            }
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            match crate::services::space_nav_movement_guard::is_ship_module_cloaked_fail_closed(
+                ctx,
+                &sys_handle,
+                char_id,
+                sys_id,
+                ship_id,
+            )
+            .await
+            {
+                Ok(true) => {
+                    return Some(Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::ShipCloaked,
+                    )));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    return Some(Err(self_destruct_rpc_error(
+                        SelfDestructErrorCode::DestinyQueryFailed,
+                        e,
+                    )));
+                }
+            }
             let now_unix = ctx.now_unix();
             let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id)
                 .clamp(0.10, 1.0);
@@ -914,44 +1001,9 @@ pub async fn handle_wrecks_killmails(
                     &ctx.db,
                     &*ctx.combat_ephemeral,
                     |snap, rt| {
-                        let Some(ch) = snap.characters.get(&char_id) else {
-                            return Err(BridgeRpcError {
-                                code: "NoActiveShip".into(),
-                                message: "Character not found".into(),
-                                client_error: None,
-                            });
-                        };
-                        if ch.station_id.is_some() || ch.structure_id.is_some() {
-                            return Err(BridgeRpcError {
-                                code: "CannotSelfDestructWhileDocked".into(),
-                                message: "Cannot self-destruct a ship while docked in a station or structure".into(),
-                                client_error: None,
-                            });
-                        }
-                        if ch.solar_system_id != sys_id || ch.active_ship_id != ship_id {
-                            return Err(BridgeRpcError {
-                                code: "NoActiveShip".into(),
-                                message: "Session ship is no longer active in this solar system".into(),
-                                client_error: None,
-                            });
-                        }
-                        let Some(ship_item) = snap.items.get(&ship_id) else {
-                            return Err(BridgeRpcError {
-                                code: "NoActiveShip".into(),
-                                message: "Active ship item not found".into(),
-                                client_error: None,
-                            });
-                        };
-                        if ship_item.owner_id != char_id
-                            || ship_item.location_id != i64::from(sys_id)
-                        {
-                            return Err(BridgeRpcError {
-                                code: "NoActiveShip".into(),
-                                message: "Ship is not owned by pilot in this solar system".into(),
-                                client_error: None,
-                            });
-                        }
-                        let ship_type_id = ship_item.type_id;
+                        let ship_type_id = validate_self_destruct_snap_preconditions(
+                            snap, char_id, sys_id, ship_id,
+                        )?;
 
                         let rt_existing = rt.self_destruct_countdowns.get(&ship_id).cloned();
                         let sp6_existing = snap.sp6_lifecycle.self_destructs.get(&ship_id).cloned();
@@ -1228,12 +1280,40 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(cannot_self_destruct_docked_err()));
+            }
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                if snap
+                    .characters
+                    .get(&char_id)
+                    .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+                {
+                    return Err(cannot_self_destruct_docked_err());
+                }
+                let sid = session.ship_id.unwrap_or_else(|| {
+                    snap.characters
+                        .get(&char_id)
+                        .map(|c| c.active_ship_id)
+                        .unwrap_or(0)
+                });
+                validate_optional_self_destruct_pickid(args, kwargs, sid)
+            }) {
+                return Some(Err(e));
+            }
             let now_unix = ctx.now_unix();
             let (ship_id, aborted, remaining_secs) =
                 match crate::services::combat_crimewatch::with_mut_combat_runtime_tx_locks(
                     &ctx.db,
                     &*ctx.combat_ephemeral,
                     |snap, rt| {
+                        if snap
+                            .characters
+                            .get(&char_id)
+                            .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+                        {
+                            return Err(cannot_self_destruct_docked_err());
+                        }
                         let sid = session.ship_id.unwrap_or_else(|| {
                             snap.characters
                                 .get(&char_id)

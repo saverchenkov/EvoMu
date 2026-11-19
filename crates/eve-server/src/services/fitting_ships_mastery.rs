@@ -52,6 +52,35 @@ fn ship_not_in_space_err(message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EjectErrorCode {
+    DestinyQueryFailed,
+}
+
+impl EjectErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DestinyQueryFailed => "DestinyQueryFailed",
+        }
+    }
+}
+
+fn eject_rpc_error(code: EjectErrorCode, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().to_string(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn active_ship_not_found_err(ship_id: i64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "ShipNotFound".into(),
+        message: format!("Active ship {ship_id} not found"),
+        client_error: None,
+    }
+}
+
 pub(crate) async fn handle_ships_mastery_and_fitting_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -81,17 +110,29 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     client_error: None,
                 }));
             }
-            if method == "Eject" && (session.station_id.is_some() || session.structure_id.is_some()) {
+            let (old_ship_type_id, char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
+                let ch = snap.characters.get(&char_id);
+                (
+                    snap.items.get(&old_ship_id).map(|it| it.type_id),
+                    ch.and_then(|c| c.station_id.or(c.structure_id)),
+                    ch.map(|c| c.solar_system_id).filter(|&s| s > 0),
+                    ch.map(|c| c.home_station_id).unwrap_or(0),
+                )
+            });
+            let dock_opt = session.station_id.or(session.structure_id).or(char_dock);
+            let sys_opt = session.solar_system_id.or(char_sys);
+            let loc_id = dock_opt
+                .or_else(|| sys_opt.map(|s| s as i64))
+                .or(if char_home > 0 { Some(char_home) } else { None })
+                .unwrap_or(0);
+            if method == "Eject" && dock_opt.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "CannotEjectWhileDocked".into(),
                     message: "Eject is only possible in space; use LeaveShip while docked".into(),
                     client_error: None,
                 }));
             }
-            let is_capsule = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&old_ship_id).is_some_and(|it| it.type_id == 670)
-            });
-            if is_capsule {
+            if old_ship_type_id == Some(670) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotEjectFromCapsule".into(),
                     message: "Cannot eject from a Capsule".into(),
@@ -99,7 +140,34 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             }
             let now_unix = ctx.now_unix_secs();
+            let mut live_eject_pos: Option<DVec3> = None;
             if method == "Eject" {
+                let has_explicit_pickid =
+                    kwargs.get("pickid").is_some_and(|v| !matches!(v, PyRep::None));
+                let has_explicit_ship_id =
+                    kwargs.get("shipID").is_some_and(|v| !matches!(v, PyRep::None));
+                let explicit_ship_id = if args.first().is_none_or(|a| matches!(a, PyRep::None))
+                    && !has_explicit_pickid
+                    && has_explicit_ship_id
+                {
+                    crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "shipID")
+                } else {
+                    crate::router::RpcArgs::new(args, kwargs).opt_positive_i64(0, "pickid")
+                };
+                match explicit_ship_id {
+                    Ok(Some(target_ship_id)) if target_ship_id != old_ship_id => {
+                        let message = format!(
+                            "Eject target ship {target_ship_id} does not match active ship {old_ship_id}"
+                        );
+                        return Some(Err(BridgeRpcError::with_client_error(
+                            "InvalidShip",
+                            message.clone(),
+                            eve_proto::ClientError::CustomInfo(format!("InvalidShip: {message}")),
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Some(Err(e)),
+                }
                 if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(
                     ctx,
                     old_ship_id,
@@ -107,20 +175,51 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 ) {
                     return Some(Err(e));
                 }
-                if let Some(sys_id) = session.solar_system_id {
-                    let sys_h = ctx.systems.get_or_spawn(sys_id);
-                    if let Ok(Some((_, cur_b))) = sys_h.get_ball_snapshot(old_ship_id).await {
-                        if matches!(
-                            cur_b.mode,
-                            eve_destiny::MovementMode::Warp { phase, .. }
-                                if phase != eve_destiny::WarpPhase::Aligning
-                        ) {
-                            return Some(Err(BridgeRpcError {
-                                code: "ShipInWarp".into(),
-                                message: "Cannot eject from ship while in active warp".into(),
-                                client_error: None,
-                            }));
-                        }
+                if old_ship_type_id.is_none() {
+                    return Some(Err(active_ship_not_found_err(old_ship_id)));
+                }
+                let Some(sys_id) = sys_opt else {
+                    return Some(Err(ship_not_in_space_err(format!(
+                        "Cannot eject from ship {old_ship_id}: no active solar system"
+                    ))));
+                };
+                let sys_h = ctx.systems.get_or_spawn(sys_id);
+                let Ok(Some((_, cur_b))) = sys_h.get_ball_snapshot(old_ship_id).await else {
+                    return Some(Err(ship_not_in_space_err(format!(
+                        "Active ship {old_ship_id} has no live ballpark entity in solar system {sys_id}"
+                    ))));
+                };
+                if matches!(
+                    cur_b.mode,
+                    eve_destiny::MovementMode::Warp { phase, .. }
+                        if phase != eve_destiny::WarpPhase::Aligning
+                ) {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipInWarp".into(),
+                        message: "Cannot eject from ship while in active warp".into(),
+                        client_error: None,
+                    }));
+                }
+                match crate::services::space_nav_movement_guard::is_ship_module_cloaked_fail_closed(
+                    ctx,
+                    &sys_h,
+                    char_id,
+                    sys_id,
+                    old_ship_id,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        return Some(Err(BridgeRpcError::from_user_key(
+                            eve_proto::UserErrorKey::ShipCloaked,
+                        )));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        return Some(Err(eject_rpc_error(
+                            EjectErrorCode::DestinyQueryFailed,
+                            e,
+                        )));
                     }
                 }
                 if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, old_ship_id) {
@@ -145,9 +244,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         client_error: None,
                     }));
                 }
-                let sys_sec = session
-                    .solar_system_id
-                    .and_then(|sid| ctx.sde.solar_systems.get(&sid))
+                let sys_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
                     .map(|s| s.security_status)
                     .unwrap_or(0.0);
                 if has_criminal_timer && sys_sec >= 0.45 {
@@ -157,6 +257,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         client_error: None,
                     }));
                 }
+                live_eject_pos = Some(cur_b.position);
             }
             if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
                 return Some(Err(BridgeRpcError {
@@ -165,67 +266,10 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     client_error: None,
                 }));
             }
-            let (char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|ch| (ch.station_id.or(ch.structure_id), ch.solar_system_id, ch.home_station_id))
-                    .unwrap_or((None, 0, 0))
-            });
-            let dock_opt = session.station_id.or(session.structure_id).or(char_dock);
-            let sys_opt = session.solar_system_id.or(if char_sys > 0 { Some(char_sys) } else { None });
-            let loc_id = dock_opt
-                .or_else(|| sys_opt.map(|s| s as i64))
-                .or(if char_home > 0 { Some(char_home) } else { None })
-                .unwrap_or(0);
-
-            let old_ship_precheck = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&old_ship_id).map(|item| item.type_id)
-            });
-            let live_eject_pos = if dock_opt.is_none() {
-                if let Some(old_type_id) = old_ship_precheck {
-                    if method == "Eject" && old_type_id != 670 {
-                        let Some(sys_id) = sys_opt else {
-                            return Some(Err(ship_not_in_space_err(format!(
-                                "Cannot eject from ship {old_ship_id}: no active solar system"
-                            ))));
-                        };
-                        let sys = ctx.systems.get_or_spawn(sys_id);
-                        let ball_pos = sys
-                            .get_ball_snapshot(old_ship_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|(_, b)| b.position);
-                        let Some(pos) = ball_pos else {
-                            return Some(Err(ship_not_in_space_err(format!(
-                                "Active ship {old_ship_id} has no live ballpark entity in solar system {sys_id}"
-                            ))));
-                        };
-                        Some(pos)
-                    } else if let Some(sys_id) = sys_opt {
-                        let sys = ctx.systems.get_or_spawn(sys_id);
-                        sys.get_ball_snapshot(old_ship_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|(_, b)| b.position)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(old_ship) = snap.items.get(&old_ship_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Active ship {old_ship_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(active_ship_not_found_err(old_ship_id));
                 };
                 if old_ship.type_id == 670 {
                     return Err(BridgeRpcError {
