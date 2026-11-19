@@ -937,3 +937,547 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
         assert_eq!(sentry_err.code, alsc_denied, "{method} must reject group 449 sentry");
     }
 }
+
+fn extract_bound_id_from_rep(rep: &PyRep) -> u64 {
+    let target = match rep {
+        PyRep::Tuple(items) if !items.is_empty() => &items[0],
+        other => other,
+    };
+    if let Some(id) = target.as_i64().and_then(|v| u64::try_from(v).ok()) {
+        return id;
+    }
+    let PyRep::SubStruct(sub) = target else {
+        panic!("expected SubStruct or integer bound id, got {rep:?}");
+    };
+    let PyRep::SubStream(inner) = sub.as_ref() else {
+        panic!("expected SubStream inside SubStruct, got {sub:?}");
+    };
+    let PyRep::Tuple(parts) = inner.as_ref() else {
+        panic!("expected Tuple inside SubStream, got {inner:?}");
+    };
+    let oid = match parts.first() {
+        Some(PyRep::Bytes(bytes)) => std::str::from_utf8(bytes).expect("utf-8 oid"),
+        Some(PyRep::String(s)) => s.as_str(),
+        other => panic!("expected oid Bytes/String in bound SubStream, got {other:?}"),
+    };
+    oid.rsplit(':')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("invalid oid string {oid:?}"))
+}
+
+#[tokio::test]
+async fn has_existing_password_set_bound_moniker_and_slot_validation() {
+    let (ctx, mut owner_sess) = make_ctx_and_session();
+    let owner_id = owner_sess.character_id.unwrap();
+    let station_id = owner_sess.station_id.unwrap();
+    let alsc_id = 880_210_i64;
+    let outsider_id = 90_000_211_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            alsc_id,
+            InventoryItemRecord {
+                item_id: alsc_id,
+                type_id: 17366,
+                owner_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let mut outsider = snap.characters[&owner_id].clone();
+        outsider.character_id = outsider_id;
+        outsider.user_id = outsider_id as u64;
+        outsider.corporation_id = 98_000_211;
+        outsider.name = "Outsider Pilot".into();
+        snap.characters.insert(outsider_id, outsider);
+    });
+
+    let kw = std::collections::HashMap::new();
+    let trace = Some("machoNet:26000");
+
+    // V24 client flow: MachoBindObject(station_id) -> GetInventoryFromId(alsc_id, 0) -> HasExistingPasswordSet(which)
+    let station_bind_rep = ctx
+        .dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(station_id), PyRep::None],
+            &kw,
+            trace,
+        )
+        .await
+        .expect("MachoBindObject(station_id) must succeed");
+    let station_bid = extract_bound_id_from_rep(&station_bind_rep);
+
+    let cont_bind_rep = ctx
+        .dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(station_bid),
+            "GetInventoryFromId",
+            &[PyRep::Integer(alsc_id), PyRep::Integer(0)],
+            &kw,
+            trace,
+        )
+        .await
+        .expect("GetInventoryFromId(alsc_id, 0) must succeed");
+    let cont_bid = extract_bound_id_from_rep(&cont_bind_rep);
+
+    // 1. Neither password slot set -> both 1 (General) and 2 (Config) return false.
+    for slot in [1_i64, 2_i64] {
+        let rep = ctx
+            .dispatch_rpc(
+                &mut owner_sess,
+                "invbroker",
+                Some(cont_bid),
+                "HasExistingPasswordSet",
+                &[PyRep::Integer(slot)],
+                &kw,
+                trace,
+            )
+            .await
+            .expect("bound HasExistingPasswordSet must succeed");
+        assert_eq!(rep, PyRep::Bool(false), "slot {slot} must be false before SetPassword");
+    }
+
+    // 2. Only config password (which=2) set: slot 1 stays false, slot 2 returns true across bound/unbound/kwargs.
+    write_container_ship_state(&ctx, |st| {
+        st.set_container_password(alsc_id, 2, "cfg-secret".into());
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(cont_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(1)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(cont_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(2)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            None,
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(alsc_id), PyRep::Integer(2)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let mut kw_id = std::collections::HashMap::new();
+    kw_id.insert("containerID".to_string(), PyRep::Integer(alsc_id));
+    kw_id.insert("which".to_string(), PyRep::Integer(2));
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            None,
+            "HasExistingPasswordSet",
+            &[],
+            &kw_id,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 3. Both slots set then slot 1 cleared: slot 1 returns false again while slot 2 remains true.
+    write_container_ship_state(&ctx, |st| {
+        st.set_container_password(alsc_id, 1, "gen-secret".into());
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(cont_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(1)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    write_container_ship_state(&ctx, |st| {
+        st.set_container_password(alsc_id, 1, String::new());
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(cont_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(1)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(cont_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(2)],
+            &kw,
+            trace,
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // 4. Invalid `which` values (including small integers 3/99 and strings) must fail with InvalidPasswordType.
+    for bad_which in [
+        PyRep::Integer(0),
+        PyRep::Integer(3),
+        PyRep::Integer(99),
+        PyRep::Integer(-1),
+        PyRep::String("general".into()),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut owner_sess,
+                "invbroker",
+                Some(cont_bid),
+                "HasExistingPasswordSet",
+                &[bad_which.clone()],
+                &kw,
+                trace,
+            )
+            .await
+            .expect_err("invalid which must be rejected");
+        assert_eq!(err.code, "InvalidPasswordType", "bad which {bad_which:?}");
+    }
+
+    // 5. Station-bound HasExistingPasswordSet(1) resolves container_id=station_id and fails ContainerNotFound.
+    let station_err = ctx
+        .dispatch_rpc(
+            &mut owner_sess,
+            "invbroker",
+            Some(station_bid),
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(1)],
+            &kw,
+            trace,
+        )
+        .await
+        .expect_err("station-bound HasExistingPasswordSet(1) must reject");
+    assert_eq!(station_err.code, "ContainerNotFound");
+
+    // 6. Outsider cannot probe HasExistingPasswordSet on another pilot's container.
+    let mut outsider_sess = SessionState {
+        session_id: 211,
+        user_id: Some(outsider_id as u64),
+        character_id: Some(outsider_id),
+        corporation_id: Some(98_000_211),
+        station_id: Some(station_id),
+        ..owner_sess.clone()
+    };
+    let denied = ctx
+        .dispatch_rpc(
+            &mut outsider_sess,
+            "invbroker",
+            None,
+            "HasExistingPasswordSet",
+            &[PyRep::Integer(alsc_id), PyRep::Integer(2)],
+            &kw,
+            trace,
+        )
+        .await
+        .expect_err("outsider HasExistingPasswordSet must be denied");
+    assert_eq!(denied.code, "ALSCAccessDenied");
+}
+
+#[tokio::test]
+async fn alsc_log_get_rejects_same_corp_and_npc_corp_non_owner_without_mutating_logs() {
+    let (ctx, mut owner_sess) = make_ctx_and_session();
+    let owner_id = owner_sess.character_id.unwrap();
+    let player_corp = owner_sess.corporation_id.unwrap();
+    let station_id = owner_sess.station_id.unwrap();
+    let npc_corp = 1_000_009_i64;
+
+    let personal_alsc = 880_220_i64;
+    let corp_alsc = 880_221_i64;
+    let npc_owner_id = 90_000_222_i64;
+    let npc_peer_id = 90_000_223_i64;
+    let npc_personal_alsc = 880_224_i64;
+    let mate_dir_id = 90_000_225_i64;
+    let mate_plain_id = 90_000_226_i64;
+    let gm_id = 90_000_227_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, item_owner) in [
+            (personal_alsc, owner_id),
+            (corp_alsc, player_corp),
+            (npc_personal_alsc, npc_owner_id),
+        ] {
+            snap.items.insert(
+                cid,
+                InventoryItemRecord {
+                    item_id: cid,
+                    type_id: 17366,
+                    owner_id: item_owner,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        let template = snap.characters[&owner_id].clone();
+        for (cid, corp) in [
+            (npc_owner_id, npc_corp),
+            (npc_peer_id, npc_corp),
+            (mate_dir_id, player_corp),
+            (mate_plain_id, player_corp),
+            (gm_id, 98_000_299),
+        ] {
+            let mut rec = template.clone();
+            rec.character_id = cid;
+            rec.user_id = cid as u64;
+            rec.corporation_id = corp;
+            rec.name = format!("Pilot {cid}");
+            snap.characters.insert(cid, rec);
+        }
+        if let Some(corp) = snap.corporations.get_mut(&player_corp) {
+            corp.members.insert(mate_dir_id);
+            corp.members.insert(mate_plain_id);
+            corp.member_roles.insert(
+                mate_dir_id,
+                eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+            );
+        }
+    });
+
+    write_container_ship_state(&ctx, |st| {
+        st.set_container_password(personal_alsc, 1, "p-pw".into());
+        st.set_container_password(npc_personal_alsc, 1, "npc-pw".into());
+        st.set_container_password(corp_alsc, 1, "c-pw".into());
+    });
+
+    let kw = std::collections::HashMap::new();
+    let mut mate_dir_sess = SessionState {
+        session_id: 225,
+        user_id: Some(mate_dir_id as u64),
+        character_id: Some(mate_dir_id),
+        corporation_id: Some(player_corp),
+        corp_role: eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG,
+        ..owner_sess.clone()
+    };
+    let mut mate_plain_sess = SessionState {
+        session_id: 226,
+        user_id: Some(mate_plain_id as u64),
+        character_id: Some(mate_plain_id),
+        corporation_id: Some(player_corp),
+        corp_role: 0,
+        ..owner_sess.clone()
+    };
+    let mut npc_peer_sess = SessionState {
+        session_id: 223,
+        user_id: Some(npc_peer_id as u64),
+        character_id: Some(npc_peer_id),
+        corporation_id: Some(npc_corp),
+        corp_role: 0,
+        ..owner_sess.clone()
+    };
+    let mut gm_sess = SessionState {
+        session_id: 227,
+        user_id: Some(gm_id as u64),
+        character_id: Some(gm_id),
+        corporation_id: Some(98_000_299),
+        corp_role: 0,
+        role: eve_machonet::service_roles::ROLE_GM_DEFAULT,
+        ..owner_sess.clone()
+    };
+
+    // 1. Same-player-corp colleague (even Director + EquipmentConfig) CANNOT read personal ALSC audit logs
+    //    and CANNOT inject ALSCActionPasswordFailure entries.
+    for args in [
+        vec![PyRep::Integer(personal_alsc)],
+        vec![PyRep::Integer(personal_alsc), PyRep::String("wrong".into())],
+        vec![PyRep::Integer(personal_alsc), PyRep::String("p-pw".into())],
+    ] {
+        let err = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut mate_dir_sess,
+            None,
+            "invbroker",
+            "ALSCLogGet",
+            &args,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "ALSCAccessDenied");
+    }
+
+    // 2. Same-NPC-corp non-owner CANNOT read or pollute another pilot's personal ALSC audit logs.
+    let npc_unbound_err = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut npc_peer_sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(npc_personal_alsc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(npc_unbound_err.code, "ALSCAccessDenied");
+
+    let npc_bound_id = ctx
+        .bind_verified_sub_object(&npc_peer_sess, "invbroker", npc_personal_alsc)
+        .expect("bind verified sub object");
+    let npc_bound_entry = ctx.verify_bound_object(&npc_peer_sess, npc_bound_id).unwrap();
+    let npc_bound_err = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut npc_peer_sess,
+        Some(&npc_bound_entry),
+        "invbroker",
+        "ALSCLogGet",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(npc_bound_err.code, "ALSCAccessDenied");
+
+    // Verify neither personal ALSC accumulated any ALSCActionPasswordFailure entry.
+    let state_after_denied = read_container_ship_state(&ctx);
+    assert!(
+        state_after_denied.alsc_logs.get(&personal_alsc).is_none_or(Vec::is_empty),
+        "denied same-corp ALSCLogGet must not mutate personal ALSC audit log"
+    );
+    assert!(
+        state_after_denied.alsc_logs.get(&npc_personal_alsc).is_none_or(Vec::is_empty),
+        "denied NPC-corp ALSCLogGet must not mutate personal ALSC audit log"
+    );
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!container_has_active_audit_log_snap(snap, personal_alsc, now));
+        assert!(!container_has_active_audit_log_snap(snap, npc_personal_alsc, now));
+    });
+
+    // 3. Personal owner and GM succeed via atomic write_container_ship_state (recording failure then success).
+    let wrong_pw_err = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut owner_sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(personal_alsc), PyRep::String("wrong".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(wrong_pw_err.code, "ALSCPasswordNeededToViewAuditLog");
+    let logs_after_owner_fail = read_container_ship_state(&ctx);
+    let p_logs = logs_after_owner_fail.alsc_logs.get(&personal_alsc).expect("owner failure logged");
+    assert_eq!(p_logs.len(), 1);
+    assert_eq!(p_logs[0].action, "ALSCActionPasswordFailure");
+    assert_eq!(p_logs[0].actor_id, owner_id);
+
+    assert!(
+        handle_containers_ships_and_fitting(
+            &ctx,
+            &mut gm_sess,
+            None,
+            "invbroker",
+            "ALSCLogGet",
+            &[PyRep::Integer(personal_alsc), PyRep::String("p-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "GM with valid config password must be able to read personal ALSC log"
+    );
+
+    // 4. Corp-owned ALSC still rejects unprivileged corp mate without log mutation and allows Director+Config.
+    let corp_plain_err = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut mate_plain_sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(corp_alsc)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(corp_plain_err.code, "ALSCAccessDenied");
+    assert!(read_container_ship_state(&ctx).alsc_logs.get(&corp_alsc).is_none_or(Vec::is_empty));
+
+    let corp_dir_wrong = handle_containers_ships_and_fitting(
+        &ctx,
+        &mut mate_dir_sess,
+        None,
+        "invbroker",
+        "ALSCLogGet",
+        &[PyRep::Integer(corp_alsc), PyRep::String("bad".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(corp_dir_wrong.code, "ALSCPasswordNeededToViewAuditLog");
+    assert_eq!(
+        read_container_ship_state(&ctx).alsc_logs[&corp_alsc][0].action,
+        "ALSCActionPasswordFailure"
+    );
+
+    assert!(
+        handle_containers_ships_and_fitting(
+            &ctx,
+            &mut mate_dir_sess,
+            None,
+            "invbroker",
+            "ALSCLogGet",
+            &[PyRep::Integer(corp_alsc), PyRep::String("c-pw".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "corp Director + EquipmentConfig with valid config password must read corp ALSC log"
+    );
+}

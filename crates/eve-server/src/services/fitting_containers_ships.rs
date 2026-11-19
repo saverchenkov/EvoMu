@@ -1523,7 +1523,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 Ok(v) => v.or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0),
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false, false) {
+            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false) {
                 return Some(Err(e));
             }
             let st = read_container_ship_state(ctx);
@@ -1596,75 +1596,104 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 PyRep::Integer(n) => Some(*n != 0),
                 _ => None,
             });
-            if let Err(e) =
-                authorize_container_inspect(ctx, session, char_id, container_id, false, true)
-            {
+            if let Err(e) = authorize_container_inspect(ctx, session, char_id, container_id, false) {
                 return Some(Err(e));
             }
-            let (flag_id, location_id, container_owner_id) = ctx.db.with_snapshot(|snap| {
-                let cont = snap.items.get(&container_id);
-                let flag_id = cont.map(|c| c.flag as i64).unwrap_or(4);
-                let container_owner_id = cont
-                    .map(|c| c.owner_id)
-                    .filter(|&o| o > 0)
-                    .unwrap_or(char_id);
-                let mut loc = cont.map(|c| c.location_id).unwrap_or(0);
-                for _ in 0..16 {
+            let (flag_id, location_id, container_owner_id, container_type_id) =
+                ctx.db.with_snapshot(|snap| {
+                    let cont = snap.items.get(&container_id);
+                    let flag_id = cont.map(|c| c.flag as i64).unwrap_or(4);
+                    let container_owner_id = cont
+                        .map(|c| c.owner_id)
+                        .filter(|&o| o > 0)
+                        .unwrap_or(char_id);
+                    let container_type_id = cont.map(|c| c.type_id).unwrap_or(0);
+                    let mut loc = cont.map(|c| c.location_id).unwrap_or(0);
+                    for _ in 0..16 {
+                        if loc <= 0 {
+                            break;
+                        }
+                        if ctx.sde.stations.contains_key(&loc)
+                            || snap.structures.contains_key(&loc)
+                            || u32::try_from(loc).is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id))
+                        {
+                            break;
+                        }
+                        let Some(parent) = snap.items.get(&loc) else {
+                            break;
+                        };
+                        if parent.location_id <= 0 || parent.location_id == loc {
+                            break;
+                        }
+                        loc = parent.location_id;
+                    }
                     if loc <= 0 {
-                        break;
+                        loc = snap
+                            .characters
+                            .get(&char_id)
+                            .and_then(|c| c.station_id.or(Some(i64::from(c.solar_system_id))))
+                            .filter(|&v| v > 0)
+                            .unwrap_or_else(|| container_id.max(1));
                     }
-                    if ctx.sde.stations.contains_key(&loc)
-                        || snap.structures.contains_key(&loc)
-                        || u32::try_from(loc).is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id))
-                    {
-                        break;
-                    }
-                    let Some(parent) = snap.items.get(&loc) else {
-                        break;
-                    };
-                    if parent.location_id <= 0 || parent.location_id == loc {
-                        break;
-                    }
-                    loc = parent.location_id;
-                }
-                if loc <= 0 {
-                    loc = snap
-                        .characters
-                        .get(&char_id)
-                        .and_then(|c| c.station_id.or(Some(i64::from(c.solar_system_id))))
-                        .filter(|&v| v > 0)
-                        .unwrap_or_else(|| container_id.max(1));
-                }
-                (flag_id, loc, container_owner_id)
-            });
-            let mut st = read_container_ship_state(ctx);
-            let cfg = st.container_configs.get(&container_id).cloned().unwrap_or_default();
-            let need_check = cfg.password_per_action || !st.unlocked_containers.contains(&(container_id, char_id));
-            if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
-                if !req_pw.is_empty() && need_check {
-                    let provided = kwargs
-                        .get("password")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            (!is_bound_client_call)
-                                .then(|| args.get(1).and_then(|a| a.as_str()))
-                                .flatten()
-                        })
-                        .unwrap_or("");
-                    let now_unix = ctx.now_unix_secs();
-                    let tid = ctx.db.with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id)).unwrap_or(0);
-                    if provided != req_pw {
-                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordFailure".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                        save_container_ship_state(ctx, &st);
-                        return Some(Err(BridgeRpcError { code: "ALSCPasswordNeededToViewAuditLog".into(), message: "Container password required to view audit log".into(), client_error: None }));
-                    }
-                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionPasswordSuccess".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                    st.unlocked_containers.insert((container_id, char_id));
-                    save_container_ship_state(ctx, &st);
-                }
-            }
+                    (flag_id, loc, container_owner_id, container_type_id)
+                });
+            let provided = kwargs
+                .get("password")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    (!is_bound_client_call)
+                        .then(|| args.get(1).and_then(|a| a.as_str()))
+                        .flatten()
+                })
+                .unwrap_or("");
+            let now_unix = ctx.now_unix_secs();
             const ALSC_PAGE_LIMIT: usize = 50;
-            let raw_logs = st.alsc_logs.get(&container_id).cloned().unwrap_or_default();
+            let raw_logs = match write_container_ship_state(ctx, |st| {
+                let cfg = st
+                    .container_configs
+                    .get(&container_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let need_check = cfg.password_per_action
+                    || !st.unlocked_containers.contains(&(container_id, char_id));
+                if let Some(req_pw) = st
+                    .container_passwords
+                    .get(&container_id)
+                    .filter(|p| !p.is_empty())
+                    .cloned()
+                {
+                    if need_check {
+                        if provided != req_pw {
+                            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+                                timestamp_unix: now_unix,
+                                actor_id: char_id,
+                                action: "ALSCActionPasswordFailure".into(),
+                                item_id: container_id,
+                                item_type_id: container_type_id,
+                                quantity: 1,
+                            });
+                            return Err(BridgeRpcError {
+                                code: "ALSCPasswordNeededToViewAuditLog".into(),
+                                message: "Container password required to view audit log".into(),
+                                client_error: None,
+                            });
+                        }
+                        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+                            timestamp_unix: now_unix,
+                            actor_id: char_id,
+                            action: "ALSCActionPasswordSuccess".into(),
+                            item_id: container_id,
+                            item_type_id: container_type_id,
+                            quantity: 1,
+                        });
+                        st.unlocked_containers.insert((container_id, char_id));
+                    }
+                }
+                Ok(st.alsc_logs.get(&container_id).cloned().unwrap_or_default())
+            }) {
+                Ok(logs) => logs,
+                Err(e) => return Some(Err(e)),
+            };
             let mut filtered: Vec<(i64, i64, AlscLogEntry)> = raw_logs
                 .into_iter()
                 .enumerate()
@@ -2066,7 +2095,6 @@ pub(super) fn authorize_container_inspect(
     char_id: i64,
     container_id: i64,
     allow_ship: bool,
-    allow_corp_mate_personal: bool,
 ) -> Result<(), BridgeRpcError> {
     if container_id <= 0 {
         return Err(rpc_err(
@@ -2120,16 +2148,6 @@ pub(super) fn authorize_container_inspect(
                 "ALSCAccessDenied",
                 format!("Not authorized to access corporate container {container_id}"),
             ));
-        }
-        if allow_corp_mate_personal && caller_corp > 0 {
-            let owner_corp = snap
-                .characters
-                .get(&cont.owner_id)
-                .map(|c| c.corporation_id)
-                .unwrap_or(0);
-            if owner_corp == caller_corp {
-                return Ok(());
-            }
         }
         Err(BridgeRpcError {
             code: "ALSCAccessDenied".into(),
