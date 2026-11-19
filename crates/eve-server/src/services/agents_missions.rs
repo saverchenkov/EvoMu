@@ -110,6 +110,50 @@ fn epic_arc_required_missions(ctx: &ServerContext, fac_id: i64) -> usize {
         .max(2)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MissionArchetype {
+    is_data_center: bool,
+    is_heraldry: bool,
+    is_trade: bool,
+    is_courier: bool,
+    is_kill: bool,
+}
+
+/// Classifies an agent mission into server gameplay archetypes from its SDE template, optional
+/// offer/delivery metadata, and optional agent record.
+///
+/// Several non-courier SDE templates (`*TradeMission` variants and Paragon `HeraldryMission`
+/// templates) carry `is_courier = 1` in static SDE data, while Data Center (`agent_type_id == 5`)
+/// and non-delivery R&D turn-ins (`agent_type_id == 4` with no `destination_station_id`) deliver
+/// directly to the agent's station rather than using courier cargo grant or destination hand-in.
+fn classify_mission_archetype(
+    tmpl: Option<&eve_sde::MissionTemplate>,
+    meta: Option<&MissionTimingAndCargoMeta>,
+    agent: Option<&eve_sde::AgentInfo>,
+) -> MissionArchetype {
+    let ct = tmpl
+        .and_then(|t| t.content_template.as_deref())
+        .unwrap_or_default();
+    let is_data_center = agent.is_some_and(|a| a.agent_type_id == 5);
+    let is_rnd_turnin = agent.is_some_and(is_rnd_agent)
+        && meta.is_some_and(|mt| mt.destination_station_id.is_none());
+    let is_heraldry = ct.contains("Heraldry");
+    let is_trade = !is_data_center && ct.contains("Trade");
+    let has_courier_signal = tmpl.is_some_and(|t| t.is_courier)
+        || ct.contains("Courier")
+        || meta.is_some_and(|mt| mt.destination_station_id.is_some());
+    let is_courier =
+        !is_trade && !is_heraldry && !is_data_center && !is_rnd_turnin && has_courier_signal;
+    let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+    MissionArchetype {
+        is_data_center,
+        is_heraldry,
+        is_trade,
+        is_courier,
+        is_kill,
+    }
+}
+
 /// Resolves mission-specific briefing text from SDE templates, agent/corp/system/station
 /// records, dungeon encounters, and active mission delivery metadata (never falling back to
 /// the legacy generic `"Execute objectives in system"` sentence). Must remain DB-lock-free
@@ -581,15 +625,14 @@ pub async fn handle_with_bound(
                                 if m.state == "Accepted" { mt.accept_expiry_unix } else { Some(mt.offer_expiry_unix) }
                             }).unwrap_or(now + 86_400);
                         let ct = tmpl.and_then(|t| t.content_template.as_deref()).unwrap_or_default();
-                        let bm_hint = if ct.contains("Trade") {
+                        let arch = classify_mission_archetype(tmpl, meta.as_ref(), None);
+                        let bm_hint = if arch.is_trade {
                             "UI/Agents/MissionTypes/Trade"
-                        } else if tmpl.is_some_and(|t| t.is_courier)
-                            || ct.contains("Courier")
-                            || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some()
-                        {
+                        } else if arch.is_courier {
                             "UI/Agents/MissionTypes/Courier"
-                        } else if tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining"))
-                            || ct.contains("Mining")
+                        } else if !arch.is_heraldry
+                            && (tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining"))
+                                || ct.contains("Mining"))
                         {
                             "UI/Agents/MissionTypes/Mining"
                         } else {
@@ -766,14 +809,11 @@ pub async fn handle_with_bound(
                 .as_ref().and_then(|mt| mt.required_delivery_type_id).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None);
             let req_qty = meta.as_ref().map_or(0_i64, |mt| mt.required_delivery_qty as i64);
             let ct = tmpl.and_then(|t| t.content_template.as_deref()).unwrap_or_default();
-            let is_heraldry = ct.contains("Heraldry");
-            let is_trade = ct.contains("Trade");
-            let is_courier = !is_trade
-                && !is_heraldry
-                && (tmpl.is_some_and(|t| t.is_courier)
-                    || ct.contains("Courier")
-                    || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some());
-            let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+            let arch = classify_mission_archetype(tmpl, meta.as_ref(), None);
+            let is_heraldry = arch.is_heraldry;
+            let is_trade = arch.is_trade;
+            let is_courier = arch.is_courier;
+            let is_kill = arch.is_kill;
             let is_mining = !is_kill
                 && !is_courier
                 && !is_trade
@@ -1402,11 +1442,12 @@ pub async fn handle_with_bound(
                         let mission_id = tmpl.mission_id;
                         let title = tmpl.title.clone();
                         let ct = tmpl.content_template.as_deref().unwrap_or_default();
-                        let is_heraldry = ct.contains("Heraldry");
-                        let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
-                        let is_courier = !is_trade && !is_heraldry && (tmpl.is_courier || ct.contains("BasicCourier"));
-                        let is_data_center = agent_info.agent_type_id == 5;
-                        let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+                        let arch = classify_mission_archetype(Some(tmpl), None, Some(agent_info));
+                        let is_heraldry = arch.is_heraldry;
+                        let is_trade = arch.is_trade;
+                        let is_courier = arch.is_courier;
+                        let is_data_center = arch.is_data_center;
+                        let is_kill = arch.is_kill;
                         let is_mining = !is_kill && !is_trade && !is_courier && !is_heraldry && (ct.contains("BasicMining")
                             || tmpl.title.to_lowercase().contains("mining")
                             || agent_info.division_id == 23);
@@ -1688,8 +1729,13 @@ pub async fn handle_with_bound(
                             meta.accepted_at_unix.get_or_insert(now);
                             final_accept_expiry = *meta.accept_expiry_unix.get_or_insert(now + accept_dur);
                             final_bonus_expiry = *meta.bonus_expiry_unix.get_or_insert(now + bonus_dur);
-                            let is_trade = tmpl_opt.as_ref().is_some_and(|t| t.content_template.as_deref().unwrap_or_default().contains("Trade"));
-                            let is_courier = !is_trade && tmpl_opt.as_ref().is_some_and(|t| t.is_courier || t.content_template.as_deref().unwrap_or_default().contains("BasicCourier"));
+                            let agent_opt = ctx.sde.agents.get(&meta.agent_id);
+                            let is_courier = classify_mission_archetype(
+                                tmpl_opt.as_ref(),
+                                Some(&meta),
+                                agent_opt,
+                            )
+                            .is_courier;
                             if is_courier && meta.granted_courier_item_id.is_none() {
                                 let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError { code: "InvalidMissionLocation".into(), message: format!("Courier mission {mission_id} has no delivery item type specified"), client_error: None })?;
                                 let cargo_qty = meta.required_delivery_qty.max(1);
@@ -1730,16 +1776,20 @@ pub async fn handle_with_bound(
                         }
                     }
 
-                    let is_rnd = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|m| ctx.sde.agents.get(&m.agent_id)).is_some_and(is_rnd_agent));
-                    let is_mining_mission = !is_rnd && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
-                        let c = m.content_template.as_deref().unwrap_or_default();
-                        if c.contains("Kill") || c.contains("Encounter") || c.contains("Trade") || m.is_courier || c.contains("Courier") {
-                            return false;
-                        }
-                        let agent_div = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|meta| ctx.sde.agents.get(&meta.agent_id)).map(|a| a.division_id)).unwrap_or(0);
-                        let t = m.title.to_lowercase();
-                        let c_lower = c.to_lowercase();
-                        agent_div == 23 || c_lower.contains("mining") || t.contains("mining") || t.contains("mineral") || t.contains("ore")
+                    let is_mining_mission = ctx.db.with_snapshot(|snap| {
+                        let meta_opt = load_mission_meta(snap, char_id, mission_id);
+                        let agent_opt = meta_opt.as_ref().and_then(|m| ctx.sde.agents.get(&m.agent_id));
+                        !agent_opt.is_some_and(is_rnd_agent)
+                            && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                                let arch = classify_mission_archetype(Some(m), meta_opt.as_ref(), agent_opt);
+                                if arch.is_kill || arch.is_trade || arch.is_courier || arch.is_heraldry || arch.is_data_center {
+                                    return false;
+                                }
+                                let agent_div = agent_opt.map(|a| a.division_id).unwrap_or(0);
+                                let t = m.title.to_lowercase();
+                                let c_lower = m.content_template.as_deref().unwrap_or_default().to_lowercase();
+                                agent_div == 23 || c_lower.contains("mining") || t.contains("mining") || t.contains("mineral") || t.contains("ore")
+                            })
                     });
                     if is_mining_mission {
                         let ore_tid = ctx.db.with_snapshot(|snap| load_mission_meta(snap, char_id, mission_id).and_then(|m| m.required_delivery_type_id).unwrap_or(1230));
@@ -1816,11 +1866,13 @@ pub async fn handle_with_bound(
                     let (active_agent_id, pre_dest_station, pre_is_dc, pre_is_trade, pre_is_courier) = ctx.db.with_snapshot(|snap| {
                         let m_agent = snap.active_missions.get(&(char_id, mission_id)).map_or(agent_id, |m| m.agent_id);
                         let meta_opt = load_mission_meta(snap, char_id, mission_id);
-                        let is_dc = ctx.sde.agents.get(&m_agent).is_some_and(|a| a.agent_type_id == 5);
-                        let is_trade = !is_dc && tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
+                        let arch = classify_mission_archetype(
+                            Some(&tmpl),
+                            meta_opt.as_ref(),
+                            ctx.sde.agents.get(&m_agent),
+                        );
                         let dest_st = meta_opt.as_ref().and_then(|mt| mt.destination_station_id);
-                        let is_courier = !is_trade && !is_dc && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || dest_st.is_some());
-                        (m_agent, dest_st, is_dc, is_trade, is_courier)
+                        (m_agent, dest_st, arch.is_data_center, arch.is_trade, arch.is_courier)
                     });
                     if action_id == 6 {
                         if let Some(ref agent_info) = ctx.sde.agents.get(&active_agent_id).cloned() {
@@ -1920,16 +1972,18 @@ pub async fn handle_with_bound(
                         let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
                             return Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None });
                         };
+                        let agent_opt = ctx.sde.agents.get(&m.agent_id);
                         let is_rnd = meta_opt
                             .as_ref()
-                            .and_then(|m| ctx.sde.agents.get(&m.agent_id))
+                            .and_then(|mt| ctx.sde.agents.get(&mt.agent_id))
                             .is_some_and(is_rnd_agent);
-                        let is_dc = ctx.sde.agents.get(&m.agent_id).is_some_and(|a| a.agent_type_id == 5);
-                        let is_heraldry = tmpl.content_template.as_deref().unwrap_or_default().contains("Heraldry");
-                        let is_trade = !is_dc && tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
-                        let is_courier = !is_trade && !is_dc && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
-                        let is_kill = !is_dc && (tmpl.content_template.as_deref().unwrap_or_default().contains("Kill") || tmpl.content_template.as_deref().unwrap_or_default().contains("Encounter"));
-                        let is_mining_mission = !is_rnd && !is_kill && !is_trade && !is_courier && {
+                        let arch = classify_mission_archetype(Some(&tmpl), meta_opt.as_ref(), agent_opt);
+                        let is_dc = arch.is_data_center;
+                        let is_heraldry = arch.is_heraldry;
+                        let is_trade = arch.is_trade;
+                        let is_courier = !is_rnd && arch.is_courier;
+                        let is_kill = !is_dc && arch.is_kill;
+                        let is_mining_mission = !is_rnd && !is_kill && !is_trade && !is_courier && !is_heraldry && {
                             let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
                             agent_div == 23 || {
                                 let t = tmpl.title.to_lowercase();
@@ -2160,10 +2214,11 @@ pub async fn handle_with_bound(
                                 let sl_agent = ctx.sde.agents.get(&storyline_agent_id);
                                 let sl_sys_id = sl_agent.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
                                 let ct = storyline_tmpl.content_template.as_deref().unwrap_or_default();
-                                let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
-                                let is_courier = !is_trade && (storyline_tmpl.is_courier || ct.contains("BasicCourier"));
-                                let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
-                                let is_mining = !is_kill && !is_trade && !is_courier && (ct.contains("BasicMining")
+                                let arch = classify_mission_archetype(Some(storyline_tmpl), None, sl_agent);
+                                let is_trade = arch.is_trade;
+                                let is_courier = arch.is_courier;
+                                let is_kill = arch.is_kill;
+                                let is_mining = !is_kill && !is_trade && !is_courier && !arch.is_heraldry && (ct.contains("BasicMining")
                                     || storyline_tmpl.title.to_lowercase().contains("mining")
                                     || sl_agent.is_some_and(|a| a.division_id == 23));
                                 let (req_tid, req_qty, origin_sid, dest_sid, sl_npcs) = if is_courier {
@@ -2387,4 +2442,5 @@ pub async fn handle_with_bound(
 
 #[cfg(test)] #[path = "agents_missions_unit_tests.rs"] mod agents_missions_unit_tests;
 #[cfg(test)] #[path = "agents_missions_edges2_tests.rs"] mod agents_missions_edges2_tests;
+#[cfg(test)] #[path = "agents_missions_tests.rs"] mod agents_missions_tests;
 
