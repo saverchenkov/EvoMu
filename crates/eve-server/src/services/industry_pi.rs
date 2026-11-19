@@ -189,7 +189,7 @@ fn verify_corp_industry_job_read_access(
         return Err(crate::services::account_services::err(err_code, deny_message()));
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(target_corp_id, char_id, None, session.corp_role, now_unix);
+        snap.effective_corp_roles_at(target_corp_id, char_id, None, 0, now_unix);
     let has_factory_access = is_ceo
         || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
     if !has_factory_access {
