@@ -605,6 +605,62 @@ fn t() {
             ],
         )
 
+    def test_acquire_cargo_test_slot_respects_global_active_cargo_cap(self):
+        # Verify `_count_active_cargo_processes` parsing and fail-open behavior
+        with mock.patch.object(
+            run_review.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(["pgrep", "-x", "cargo"], 0, "101\n202\n303\n", ""),
+        ):
+            self.assertEqual(run_review._count_active_cargo_processes(), 3)
+        with mock.patch.object(
+            run_review.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(["pgrep", "-x", "cargo"], 1, "", ""),
+        ):
+            self.assertEqual(run_review._count_active_cargo_processes(), 0)
+        with mock.patch.object(run_review.subprocess, "run", side_effect=FileNotFoundError("no pgrep")):
+            self.assertEqual(run_review._count_active_cargo_processes(), 0)
+
+        # Verify `_acquire_cargo_test_slot` waits when host `cargo` >= max_slots (both pre-check and
+        # post-flock recheck), releases any acquired flock on recheck failure, and acquires cleanly once < max_slots.
+        sleeps = []
+        counts = iter([3, 4, 2, 3, 2, 2])
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"EVOMU_MAX_CARGO_TEST_SLOTS": "3"}), mock.patch.object(
+                run_review.rl, "main_state_dir", return_value=tmp
+            ), mock.patch.object(
+                run_review, "_count_active_cargo_processes", side_effect=lambda: next(counts)
+            ), mock.patch.object(
+                run_review.time, "sleep", side_effect=lambda s: sleeps.append(s)
+            ):
+                fh = run_review._acquire_cargo_test_slot(REPO_ROOT)
+                try:
+                    self.assertIsNotNone(fh)
+                    self.assertEqual(sleeps, [5.0, 5.0, 5.0])
+                    slot0 = os.path.join(tmp, "cargo_test_slot_0.lock")
+                    self.assertTrue(os.path.isfile(slot0))
+                    with open(slot0, encoding="utf-8") as sfh:
+                        meta = json.loads(sfh.read())
+                    self.assertEqual(meta["slot"], 0)
+                    self.assertEqual(meta["pid"], os.getpid())
+                finally:
+                    run_review._release_cargo_test_slot(fh)
+
+                # After release, slot 0 is immediately acquirable again when active cargo < max_slots.
+                counts_after = iter([1, 1])
+                with mock.patch.object(
+                    run_review, "_count_active_cargo_processes", side_effect=lambda: next(counts_after)
+                ):
+                    fh2 = run_review._acquire_cargo_test_slot(REPO_ROOT)
+                    try:
+                        self.assertIsNotNone(fh2)
+                        with open(os.path.join(tmp, "cargo_test_slot_0.lock"), encoding="utf-8") as sfh2:
+                            meta2 = json.loads(sfh2.read())
+                        self.assertEqual(meta2["slot"], 0)
+                    finally:
+                        run_review._release_cargo_test_slot(fh2)
+
     def test_ten_of_ten_historical_p0_regressions_caught_by_gates(self):
         """Replay all 10 historical `[P0][Hourly CI]` regressions (#1125..#1162) and verify 10/10
         are caught by `ratchet_checks` + `derive_affected_test_commands` within <= 12 `it` filters."""

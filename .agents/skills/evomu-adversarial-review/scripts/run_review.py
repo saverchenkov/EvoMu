@@ -244,35 +244,79 @@ def env_audit(root):
     return "\n\n".join(lines) or "(no wrappers found)"
 
 
+def _count_active_cargo_processes():
+    """Return the count of live host `cargo` processes (`pgrep -x cargo`), or 0 if unavailable."""
+    try:
+        proc = subprocess.run(["pgrep", "-x", "cargo"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    return sum(1 for ln in proc.stdout.splitlines() if ln.strip())
+
+
 def _acquire_cargo_test_slot(root):
-    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 3) kernel flock slots so up to 3 concurrent cargo test
-    runs execute simultaneously without exhausting host memory while LLM reviews proceed in parallel."""
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 3) kernel flock slots AND verify total live
+    host `cargo` processes (`pgrep -x cargo`) stay below `max_slots` across reviews + coder subagents."""
     try:
         import fcntl
     except ImportError:
         return None
     max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "3")))
     mdir = rl.main_state_dir(root)
-    waited = False
+    waited_slot = False
+    waited_cargo = False
     while True:
+        active = _count_active_cargo_processes()
+        if active >= max_slots:
+            if not waited_cargo:
+                print(
+                    "[review] waiting for active host cargo processes to drop below %d (currently %d)..."
+                    % (max_slots, active),
+                    flush=True,
+                )
+                waited_cargo = True
+            time.sleep(5.0)
+            continue
+        recheck_exceeded = False
         for slot in range(max_slots):
             lpath = os.path.join(mdir, "cargo_test_slot_%d.lock" % slot)
             fh = open(lpath, "a+", encoding="utf-8")
             try:
                 os.set_inheritable(fh.fileno(), False)
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fh.seek(0)
-                fh.truncate()
-                fh.write(json.dumps({"pid": os.getpid(), "root": root, "slot": slot, "ts": time.time()}) + "\n")
-                fh.flush()
-                print("[review] acquired cargo test slot %d/%d" % (slot + 1, max_slots), flush=True)
-                return fh
             except (BlockingIOError, OSError):
                 fh.close()
-        if not waited:
+                continue
+            active_now = _count_active_cargo_processes()
+            if active_now >= max_slots:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                fh.close()
+                if not waited_cargo:
+                    print(
+                        "[review] waiting for active host cargo processes to drop below %d (currently %d)..."
+                        % (max_slots, active_now),
+                        flush=True,
+                    )
+                    waited_cargo = True
+                recheck_exceeded = True
+                break
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps({"pid": os.getpid(), "root": root, "slot": slot, "ts": time.time()}) + "\n")
+            fh.flush()
+            print("[review] acquired cargo test slot %d/%d (host cargo: %d/%d)" % (slot + 1, max_slots, active_now, max_slots), flush=True)
+            return fh
+        if recheck_exceeded:
+            time.sleep(5.0)
+            continue
+        if not waited_slot:
             print("[review] waiting for a free cargo test slot (max %d concurrent workspace test runs)..." % max_slots,
                   flush=True)
-            waited = True
+            waited_slot = True
         time.sleep(2.0)
 
 
