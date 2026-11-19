@@ -307,6 +307,48 @@ fn record_warp_progression(ctx: &ServerContext, char_id: i64) {
     );
 }
 
+fn resolve_bookmark_warp_pos(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    sys_id: u32,
+    target_id: i64,
+) -> Result<DVec3, BridgeRpcError> {
+    if sys_id == SOLAR_SYSTEM_ZARZAKH {
+        return Err(BridgeRpcError::from_user_key(
+            eve_proto::UserErrorKey::DunBlacklistCannotWarp,
+        ));
+    }
+    let now_unix = ctx.now_unix();
+    if crate::services::fleet_social::is_bookmark_expired(ctx, target_id, now_unix) {
+        return Err(bookmark_expired_err(target_id));
+    }
+    let bm_opt = ctx.db.with_snapshot(|snap| {
+        let b = snap.bookmarks.get(&target_id)?;
+        if b.solar_system_id != sys_id {
+            return None;
+        }
+        let can_use = b.owner_id == char_id
+            || b.folder_id.is_some_and(|fid| {
+                snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                    crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                        snap, session, char_id, f,
+                    ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                })
+            });
+        if can_use {
+            Some(DVec3::new(b.x, b.y, b.z))
+        } else {
+            None
+        }
+    });
+    bm_opt.ok_or_else(|| BridgeRpcError {
+        code: "BookmarkNotFound".into(),
+        message: format!("Bookmark {target_id} not found"),
+        client_error: None,
+    })
+}
+
 async fn handle_cmd_warp_to_stuff(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -487,6 +529,16 @@ async fn handle_cmd_warp_to_stuff(
         });
     };
 
+    // Resolve read-only bookmark targets (Zarzakh ban, expiry, ACL lookup) before ship movement
+    // validation so missing/unauthorized bookmarks report BookmarkNotFound instead of WarpScrambled.
+    let pre_resolved_bookmark_pos = if stuff_type == "bookmark" {
+        Some(resolve_bookmark_warp_pos(
+            ctx, session, char_id, sys_id, target_id,
+        )?)
+    } else {
+        None
+    };
+
     let validated = ctx
         .validate_ship_movement(
             char_id,
@@ -517,40 +569,7 @@ async fn handle_cmd_warp_to_stuff(
     let mut fleet_ship_ball_id: Option<i64> = None;
     match stuff_type {
         "bookmark" => {
-            if sys_id == SOLAR_SYSTEM_ZARZAKH {
-                return Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::DunBlacklistCannotWarp));
-            }
-            let now_unix = ctx.now_unix();
-            if crate::services::fleet_social::is_bookmark_expired(ctx, target_id, now_unix) {
-                return Err(bookmark_expired_err(target_id));
-            }
-            let bm_opt = ctx.db.with_snapshot(|snap| {
-                let b = snap.bookmarks.get(&target_id)?;
-                if b.solar_system_id != sys_id {
-                    return None;
-                }
-                let can_use = b.owner_id == char_id
-                    || b.folder_id.is_some_and(|fid| {
-                        snap.bookmark_folders.get(&fid).is_some_and(|f| {
-                            crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
-                                snap, session, char_id, f,
-                            ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
-                        })
-                    });
-                if can_use {
-                    Some(DVec3::new(b.x, b.y, b.z))
-                } else {
-                    None
-                }
-            });
-            let Some(pos) = bm_opt else {
-                return Err(BridgeRpcError {
-                    code: "BookmarkNotFound".into(),
-                    message: format!("Bookmark {target_id} not found"),
-                    client_error: None,
-                });
-            };
-            resolved_pos = Some(pos);
+            resolved_pos = pre_resolved_bookmark_pos;
         }
         "mission" | "dungeon" | "location" | "epinstance" | "ep_instance" | "site" | "anomaly" => {
             let deadspace_type = if stuff_type == "ep_instance" {

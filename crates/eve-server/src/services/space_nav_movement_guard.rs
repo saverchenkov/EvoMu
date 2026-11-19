@@ -391,6 +391,44 @@ fn movement_cloak_rpc_error(code: MovementCloakErrorCode, message: &'static str)
     }
 }
 
+/// Read-only inspection returning `(item_id, type_id, is_covert, is_active_in_db)` for all
+/// fitted group-330 cloak modules on `ship_id` owned by `char_id` (or any owner when `char_id <= 0`),
+/// sorted deterministically by `item_id`.
+pub(crate) fn fitted_cloak_modules_read_only(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Vec<(i64, u32, bool, bool)> {
+    ctx.db.with_snapshot(|snap| {
+        let mut modules: Vec<(i64, u32, bool, bool)> = snap
+            .items
+            .values()
+            .filter_map(|item| {
+                if !((char_id <= 0 || item.owner_id == char_id)
+                    && item.location_id == ship_id
+                    && matches!(item.flag as u16, 11..=34 | 125..=132))
+                {
+                    return None;
+                }
+                let ty = ctx.sde.types.get(&item.type_id)?;
+                if ty.group_id != 330 {
+                    return None;
+                }
+                let is_covert = ty.effect_ids.iter().any(|&eid| {
+                    ctx.sde
+                        .effects
+                        .get(&eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                });
+                let is_active = snap.module_active_states.contains(&item.item_id);
+                Some((item.item_id, item.type_id, is_covert, is_active))
+            })
+            .collect();
+        modules.sort_unstable_by_key(|&(item_id, _, _, _)| item_id);
+        modules
+    })
+}
+
 /// Read-only inspection of `snap.module_active_states` for an active fitted cloak module on
 /// `ship_id` outside Abyssal Deadspace, returning `Some(is_covert)` without mutating DB or actor.
 pub(crate) fn resolve_active_fitting_cloak_read_only(
@@ -402,28 +440,10 @@ pub(crate) fn resolve_active_fitting_cloak_read_only(
     if (32_000_000..=32_999_999).contains(&sys_id) {
         return None;
     }
-    ctx.db.with_snapshot(|snap| {
-        for item in snap.items.values() {
-            if (char_id <= 0 || item.owner_id == char_id)
-                && item.location_id == ship_id
-                && matches!(item.flag as u16, 11..=34 | 125..=132)
-                && snap.module_active_states.contains(&item.item_id)
-            {
-                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if ty.group_id == 330 {
-                        let is_covert = ty.effect_ids.iter().any(|&eid| {
-                            ctx.sde
-                                .effects
-                                .get(&eid)
-                                .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
-                        });
-                        return Some(is_covert);
-                    }
-                }
-            }
-        }
-        None
-    })
+    fitted_cloak_modules_read_only(ctx, char_id, ship_id)
+        .into_iter()
+        .find(|&(_, _, _, is_active)| is_active)
+        .map(|(_, _, is_covert, _)| is_covert)
 }
 
 /// Checks fail-closed whether `ship_id` has an active non-gate cloak in Ballpark `CombatState`
@@ -639,6 +659,12 @@ impl ServerContext {
                         "Cannot activate filament while cloaked",
                     ));
                 }
+                MovementIntent::CynoBridge { .. }
+                | MovementIntent::ConduitJump { .. }
+                | MovementIntent::AccelerationGate {
+                    kind: AccelerationGateKind::EssBank,
+                    ..
+                } => {}
                 MovementIntent::StargateJump { .. }
                 | MovementIntent::AnsiblexJump { .. }
                 | MovementIntent::WormholeJump { .. }
@@ -648,8 +674,6 @@ impl ServerContext {
                         eve_proto::UserErrorKey::ShipCloaked,
                     ));
                 }
-                MovementIntent::CynoBridge { .. }
-                | MovementIntent::ConduitJump { .. } => {}
                 MovementIntent::Warp { .. }
                 | MovementIntent::BookmarkWarp { .. }
                 | MovementIntent::AgencyWarp { .. }
