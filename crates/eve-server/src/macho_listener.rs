@@ -1921,6 +1921,154 @@ pub async fn read_framed_pyrep<R: AsyncReadExt + Unpin>(stream: &mut R) -> Resul
     Ok(Some(rep))
 }
 
+struct SafeLogoffWireContext<'a> {
+    client_id: u64,
+    sys_rx: &'a mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+    notify_rx: &'a mut tokio::sync::broadcast::Receiver<(
+        i64,
+        crate::router::PendingMachoNotification,
+    )>,
+    subscribed_sys_id: &'a mut Option<u32>,
+    wire_state: &'a mut crate::outbound_sequencer::SessionWireState,
+    deferred_ship_id: &'a mut Option<PendingDeferredShipId>,
+    pending_dock: &'a mut Option<PendingDockCall>,
+}
+
+async fn emit_typed_notifications<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    wire_state: &mut crate::outbound_sequencer::SessionWireState,
+    writer: &mut W,
+    client_id: u64,
+    session: &SessionState,
+    pending_notifs: Vec<crate::outbound_sequencer::TypedNotification>,
+) -> Result<()> {
+    for typed_notif in pending_notifs {
+        if !session_owns_char_notifications(ctx, session) {
+            break;
+        }
+        if let Some(drop_ev) = wire_state.gate_notification(&typed_notif.event, &typed_notif.args)
+        {
+            record_sequencer_events(ctx, session.session_id, &[drop_ev], None, false);
+            continue;
+        }
+        let frame = if let Some(service) = typed_notif.service {
+            crate::outbound_sequencer::OutFrame::ServiceCall {
+                service,
+                method: typed_notif.event,
+                args: typed_notif.args,
+            }
+        } else {
+            crate::outbound_sequencer::OutFrame::Notification {
+                event: typed_notif.event,
+                args: typed_notif.args,
+            }
+        };
+        let wire_pyrep =
+            out_frame_to_wire_pyrep(MACHO_PROXY_NODE_ID, client_id, session.user_id, &frame);
+        write_framed_pyrep(writer, &wire_pyrep).await?;
+    }
+    Ok(())
+}
+
+/// Flushes pending safe-logoff notifications (including `OnSafeLogoffActivated` while the
+/// client still has `session.charid` non-None, matching V24 `GameUI.OnSafeLogoffActivated`)
+/// and transitions the connection cleanly back to character selection without `GPSTransportClosed` (#1360).
+async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    wire: &mut SafeLogoffWireContext<'_>,
+    writer: &mut W,
+    reason: &str,
+) -> Result<()> {
+    let Some(cid) = session.character_id else {
+        return Ok(());
+    };
+    if let Ok(target_cid) = reason.trim().parse::<i64>() {
+        if target_cid != cid {
+            return Ok(());
+        }
+    }
+    // Guard against a late/stale SafeLogoff signal firing after a new character was already selected.
+    if let Some(uid) = session.user_id {
+        if let Some(os) = ctx.db.get_online_session(uid) {
+            if os.session_id == session.session_id && os.character_id.is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    let pending_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(cid)
+        .into_iter()
+        .filter(|notif| notif.event != "OnSessionChanged")
+        .filter_map(|notif| {
+            build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args)
+        })
+        .collect();
+    if !pending_notifs.is_empty() {
+        emit_typed_notifications(
+            ctx,
+            wire.wire_state,
+            writer,
+            wire.client_id,
+            session,
+            pending_notifs,
+        )
+        .await?;
+    }
+    ctx.clear_notifications_for_char(cid);
+    let _ = session.drain_notifications();
+
+    wire.wire_state.leave_space();
+    ctx.systems
+        .clear_explicit_update_state_guards_for_session(session.session_id);
+    let _ = drain_sys_rx_discarding_lag(wire.sys_rx);
+    while !matches!(
+        wire.notify_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty
+            | tokio::sync::broadcast::error::TryRecvError::Closed)
+    ) {}
+    *wire.subscribed_sys_id = None;
+    *wire.deferred_ship_id = None;
+    *wire.pending_dock = None;
+
+    session.character_id = None;
+    session.corporation_id = None;
+    session.alliance_id = None;
+    session.war_faction_id = None;
+    session.corp_role = 0;
+    session.corp_account_key = 1000;
+    session.fleet_id = None;
+    crate::router::clear_session_character_state(session);
+
+    ctx.release_session_bindings(session.session_id);
+    ctx.quasar_gateway
+        .on_session_changed(session, ctx.now_unix());
+    ctx.flight_recorder.record_wire_state(wire.wire_state);
+    Ok(())
+}
+
+/// Processes a single control signal received on `close_rx`.
+/// Returns `Ok(true)` if the connection stays open at character selection, or `Ok(false)`
+/// if `GPSTransportClosed` was sent and the connection loop should exit.
+async fn handle_session_closer_event<W: AsyncWriteExt + Unpin>(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    wire: &mut SafeLogoffWireContext<'_>,
+    writer: &mut W,
+    reason_code: String,
+    reason: String,
+) -> Result<bool> {
+    if reason_code == "SafeLogoff" {
+        handle_safe_logoff_to_charsel(ctx, session, wire, writer, &reason).await?;
+        Ok(true)
+    } else {
+        let closed = GPSTransportClosed::new(reason, reason_code);
+        let _ = write_framed_pyrep(writer, &closed.to_pyrep()).await;
+        Ok(false)
+    }
+}
+
 /// Handles a single native `machoNet` TCP connection through the 4-step V24.01 `GPSTransport`
 /// handshake state machine and subsequent authenticated `MachoPacket` RPC dispatch (`P-6`).
 pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>) -> Result<()> {
@@ -2149,19 +2297,50 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 }
             }
             Some((reason_code, reason)) = close_rx.recv() => {
-                let closed = GPSTransportClosed::new(reason, reason_code);
-                let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
-                break;
+                let mut safe_wire = SafeLogoffWireContext {
+                    client_id,
+                    sys_rx: &mut sys_rx,
+                    notify_rx: &mut notify_rx,
+                    subscribed_sys_id: &mut subscribed_sys_id,
+                    wire_state: &mut wire_state,
+                    deferred_ship_id: &mut deferred_ship_id,
+                    pending_dock: &mut pending_dock,
+                };
+                if !matches!(
+                    handle_session_closer_event(
+                        &ctx,
+                        &mut session,
+                        &mut safe_wire,
+                        &mut writer,
+                        reason_code,
+                        reason,
+                    )
+                    .await,
+                    Ok(true)
+                ) {
+                    break;
+                }
             }
             tick_res = sys_rx.recv(), if !matches!(wire_state.destiny, crate::outbound_sequencer::DestinyStream::Detached) => {
                 // Guard against emitting stale space ticks (or pod TerminalExplosion/RemoveBall)
                 // after an out-of-band DeathRespawn has already transitioned the session in DB
-                // (#1010), before `notify_rx` wakes up to emit `SessionChangeNotification`.
+                // (#1010) or after SafeLogoff cleared online_lock.character_id (#1360), before
+                // `notify_rx` / `close_rx` completes local session teardown.
                 let mut db_probe = session.clone();
                 if session.character_id.is_some() {
                     ctx.sync_session(&mut db_probe);
                 }
-                let still_in_same_live_space = db_probe.character_id.is_some()
+                let online_char_matches = session.user_id.is_none_or(|uid| {
+                    match ctx.db.get_online_session(uid) {
+                        Some(os) => {
+                            os.session_id == session_id
+                                && os.character_id == session.character_id
+                        }
+                        None => true,
+                    }
+                });
+                let still_in_same_live_space = online_char_matches
+                    && db_probe.character_id.is_some()
                     && db_probe.station_id.is_none()
                     && db_probe.structure_id.is_none()
                     && db_probe.solar_system_id == session.solar_system_id
@@ -2458,48 +2637,53 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 break;
                             }
                         }
-                        let mut write_failed = false;
-                        for typed_notif in pending_notifs {
-                            if !session_owns_char_notifications(&ctx, &session) {
-                                break;
-                            }
-                            if let Some(drop_ev) =
-                                wire_state.gate_notification(&typed_notif.event, &typed_notif.args)
-                            {
-                                record_sequencer_events(
-                                    &ctx,
-                                    session.session_id,
-                                    &[drop_ev],
-                                    None,
-                                    false,
-                                );
-                                continue;
-                            }
-                            let notif_pkt = if let Some(ref service) = typed_notif.service {
-                                crate::router::ServerContext::build_macho_service_call_packet(
-                                    MACHO_PROXY_NODE_ID,
-                                    client_id,
-                                    session.user_id,
-                                    service,
-                                    &typed_notif.event,
-                                    typed_notif.args,
-                                )
-                            } else {
-                                MachoPacket::new_broadcast_notification(
-                                    MACHO_PROXY_NODE_ID,
-                                    client_id,
-                                    session.user_id,
-                                    &typed_notif.event,
-                                    typed_notif.args,
-                                )
-                            };
-                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
-                                write_failed = true;
-                                break;
-                            }
-                        }
-                        if write_failed {
+                        let sent_safe_logoff = pending_notifs
+                            .iter()
+                            .any(|n| n.event == "OnSafeLogoffActivated");
+                        if emit_typed_notifications(
+                            &ctx,
+                            &mut wire_state,
+                            &mut writer,
+                            client_id,
+                            &session,
+                            pending_notifs,
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
+                        }
+                        let safe_logoff_charsel_pending = sent_safe_logoff
+                            && session.user_id.is_some_and(|uid| {
+                                matches!(
+                                    ctx.db.get_online_session(uid),
+                                    Some(os)
+                                        if os.session_id == session_id
+                                            && os.character_id.is_none()
+                                )
+                            });
+                        if safe_logoff_charsel_pending {
+                            let mut safe_wire = SafeLogoffWireContext {
+                                client_id,
+                                sys_rx: &mut sys_rx,
+                                notify_rx: &mut notify_rx,
+                                subscribed_sys_id: &mut subscribed_sys_id,
+                                wire_state: &mut wire_state,
+                                deferred_ship_id: &mut deferred_ship_id,
+                                pending_dock: &mut pending_dock,
+                            };
+                            if handle_safe_logoff_to_charsel(
+                                &ctx,
+                                &mut session,
+                                &mut safe_wire,
+                                &mut writer,
+                                &cid.to_string(),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                 }
@@ -2777,6 +2961,39 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                     }
                     continue;
+                }
+
+                // Drain any pending session-closer signal before handling the next authenticated
+                // client frame so a concurrent SafeLogoff or displacement cannot race SelectCharacterID.
+                let mut close_connection = false;
+                while let Ok((reason_code, reason)) = close_rx.try_recv() {
+                    let mut safe_wire = SafeLogoffWireContext {
+                        client_id,
+                        sys_rx: &mut sys_rx,
+                        notify_rx: &mut notify_rx,
+                        subscribed_sys_id: &mut subscribed_sys_id,
+                        wire_state: &mut wire_state,
+                        deferred_ship_id: &mut deferred_ship_id,
+                        pending_dock: &mut pending_dock,
+                    };
+                    if !matches!(
+                        handle_session_closer_event(
+                            &ctx,
+                            &mut session,
+                            &mut safe_wire,
+                            &mut writer,
+                            reason_code,
+                            reason,
+                        )
+                        .await,
+                        Ok(true)
+                    ) {
+                        close_connection = true;
+                        break;
+                    }
+                }
+                if close_connection {
+                    break;
                 }
 
                 // Handshake is complete (`Authenticated`): only valid `MachoPacket`s are processed now.
