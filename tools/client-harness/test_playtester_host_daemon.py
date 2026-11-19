@@ -4391,6 +4391,47 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
             self.assertEqual(snap["server_request_count"], 3)
             self.assertEqual(snap["gateway_request_count"], 1)
 
+    def test_gh1358_r3_01_refresh_oracle_handshake_builds_clientless_staged_app(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            machonet_src = root / "crates" / "eve-machonet" / "src"
+            machonet_src.mkdir(parents=True)
+            (machonet_src / "lib.rs").write_text(
+                "pub const V24_BOOT_BUILD: u32 = 3_698_585;\n",
+                encoding="utf-8",
+            )
+            empty_staged_app = root / "staged_eve_app"
+            empty_staged_app.mkdir(parents=True)
+
+            # Full PlaytesterRunner construction on a clientless host (no start.ini, no client_build_<digits>)
+            # must not raise TypeError during _refresh_oracle_handshake_builds().
+            args = playtester.parse_args(["--no-github-sync"])
+            args.worktree = str(root)
+            args.runtime_dir = str(root / "runtime")
+            args.staged_app = str(empty_staged_app)
+            runner = playtester.PlaytesterRunner(args)
+            try:
+                snap = runner.oracle._session_telemetry_payload()
+                self.assertEqual(snap["handshake"]["server_boot_build"], 3698585)
+                self.assertNotIn("client_boot_build", snap["handshake"])
+                self.assertNotIn("build_mismatch", snap["handshake"])
+
+                # Direct call with None / 0 / non-positive start.ini also guards cleanly without TypeError.
+                (empty_staged_app / "start.ini").write_text("build = 0\n", encoding="utf-8")
+                runner._refresh_oracle_handshake_builds(None)
+                runner._refresh_oracle_handshake_builds(0)
+                snap_zero = runner.oracle._session_telemetry_payload()
+                self.assertNotIn("client_boot_build", snap_zero["handshake"])
+                self.assertNotIn("build_mismatch", snap_zero["handshake"])
+
+                # Explicit positive client_build still populates handshake metadata.
+                runner._refresh_oracle_handshake_builds(3698585)
+                snap_ok = runner.oracle._session_telemetry_payload()
+                self.assertEqual(snap_ok["handshake"]["client_boot_build"], 3698585)
+                self.assertEqual(snap_ok["handshake"]["build_mismatch"], False)
+            finally:
+                runner.oracle.flush()
+
 
 if __name__ == "__main__":
     unittest.main()

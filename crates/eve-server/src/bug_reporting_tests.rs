@@ -665,34 +665,68 @@ async fn test_bundle_telemetry_defaults_and_user_fallback() {
     assert_eq!(char_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
     assert_eq!(char_hs.build_mismatch, Some(false));
 
-    // HTTP `/bugs/api/issue` with `"Build": 0` treats client_build == 0 as unknown (not stale mismatch).
+    // HTTP `/bugs/api/issue` with `"Build": 0` or negative build treats client_build as None (unknown, not mismatch).
     let dir = make_temp_queue_dir("bug_build_zero");
     let issue_ctx = ServerContext::new();
     issue_ctx.bug_reporting.set_queue_dir_override(Some(dir.clone()));
-    let zero_build_payload = serde_json::to_vec(&json!({
-        "categoryID": "UI",
-        "summary": "Build zero sentinel test",
-        "description": "No character session attached",
-        "reproductionSteps": "N/A",
-        "computerInfo": "macOS",
-        "Build": 0
-    }))
-    .unwrap();
-    let zero_resp = handle_bugs_http_request(
-        &issue_ctx,
-        "POST",
-        "/bugs/api/issue",
-        &HashMap::new(),
-        &zero_build_payload,
+    for bad_build in [json!(0), json!(-1), json!("0"), json!("-42")] {
+        let zero_build_payload = serde_json::to_vec(&json!({
+            "categoryID": "UI",
+            "summary": "Build zero sentinel test",
+            "description": "No character session attached",
+            "reproductionSteps": "N/A",
+            "computerInfo": "macOS",
+            "Build": bad_build
+        }))
+        .unwrap();
+        let zero_resp = handle_bugs_http_request(
+            &issue_ctx,
+            "POST",
+            "/bugs/api/issue",
+            &HashMap::new(),
+            &zero_build_payload,
+        );
+        assert_eq!(zero_resp.status_code, 201);
+        let zero_json: serde_json::Value = serde_json::from_slice(&zero_resp.body).unwrap();
+        let zero_key = zero_json["key"].as_str().unwrap();
+        let zero_path = issue_ctx.bug_reporting.lookup_report_path(zero_key).unwrap();
+        let zero_bundle: BugIncidentBundle =
+            serde_json::from_slice(&std::fs::read(&zero_path).unwrap()).unwrap();
+        let zero_manual = zero_bundle
+            .manual_report
+            .as_ref()
+            .expect("manual report details present");
+        assert_eq!(zero_manual.client_build, None);
+        let zero_hs = zero_bundle.handshake.as_ref().expect("server build present");
+        assert_eq!(zero_hs.client_boot_build, None);
+        assert_eq!(zero_hs.build_mismatch, None);
+    }
+
+    // `get_session_telemetry` guards `session_request_counts` behind `session_id > 0`.
+    let empty_kwargs = HashMap::new();
+    issue_ctx.flight_recorder.record(
+        0,
+        "machoNet",
+        None,
+        "GetTime",
+        &[],
+        &empty_kwargs,
+        Duration::from_millis(1),
+        "OK",
     );
-    assert_eq!(zero_resp.status_code, 201);
-    let zero_json: serde_json::Value = serde_json::from_slice(&zero_resp.body).unwrap();
-    let zero_key = zero_json["key"].as_str().unwrap();
-    let zero_path = issue_ctx.bug_reporting.lookup_report_path(zero_key).unwrap();
-    let zero_bundle: BugIncidentBundle =
-        serde_json::from_slice(&std::fs::read(&zero_path).unwrap()).unwrap();
-    let zero_hs = zero_bundle.handshake.as_ref().expect("server build present");
-    assert_eq!(zero_hs.client_boot_build, None);
-    assert_eq!(zero_hs.build_mismatch, None);
+    issue_ctx.flight_recorder.record(
+        101,
+        "machoNet",
+        None,
+        "GetTime",
+        &[],
+        &empty_kwargs,
+        Duration::from_millis(1),
+        "OK",
+    );
+    let zero_sess_tel = issue_ctx.flight_recorder.get_session_telemetry(0, None);
+    assert_eq!(zero_sess_tel.server_request_count, 0);
+    let pos_sess_tel = issue_ctx.flight_recorder.get_session_telemetry(101, None);
+    assert_eq!(pos_sess_tel.server_request_count, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

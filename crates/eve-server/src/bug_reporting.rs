@@ -921,10 +921,13 @@ fn handle_post_bug_issue(
         .and_then(|v| v.as_str())
         .unwrap_or("EvoMu")
         .to_string();
-    let client_build = payload.get("Build").and_then(|v| {
-        v.as_i64()
-            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
-    });
+    let client_build = payload
+        .get("Build")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        })
+        .filter(|&b| b > 0);
     let labels: Vec<String> = payload
         .get("labels")
         .and_then(|v| v.as_array())
