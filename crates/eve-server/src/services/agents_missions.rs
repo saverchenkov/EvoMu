@@ -112,6 +112,8 @@ const ERR_NO_SOLAR_SYSTEM: &str = "NoSolarSystem";
 const ERR_DESTINY_QUERY_FAILED: &str = "DestinyQueryFailed";
 const ERR_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
 const ERR_CROSS_SYSTEM_WARP: &str = "CrossSystemWarp";
+const ERR_BOOKMARK_EXPIRED: &str = "BookmarkExpired";
+const ERR_BOOKMARK_NOT_FOUND: &str = "BookmarkNotFound";
 
 fn agent_warp_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -119,6 +121,22 @@ fn agent_warp_err(code: &'static str, message: impl Into<String>) -> BridgeRpcEr
         message: message.into(),
         client_error: None,
     }
+}
+
+fn can_use_bookmark_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    bm: &eve_db::BookmarkRecord,
+) -> bool {
+    bm.owner_id == char_id
+        || bm.folder_id.is_some_and(|fid| {
+            snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                    snap, session, char_id, f,
+                ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+            })
+        })
 }
 
 enum AgentWarpTarget {
@@ -152,10 +170,13 @@ struct ParsedAgentWarpArgs<'a> {
     loc_type: Option<&'a str>,
     first_id: Option<i64>,
     loc_num: Option<i64>,
+    referring_agent_id: Option<i64>,
     warp_range: f64,
+    is_goto: bool,
 }
 
 fn parse_agent_warp_args<'a>(
+    method: &str,
     args: &'a [PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<ParsedAgentWarpArgs<'a>, BridgeRpcError> {
@@ -165,22 +186,41 @@ fn parse_agent_warp_args<'a>(
         [a0] => (Some(a0), None, None),
         [] => (None, None, None),
     };
-    let raw_range = arg2
-        .and_then(|v| v.as_f64())
-        .or_else(|| kwargs.get("warpRange").and_then(|v| v.as_f64()))
-        .or_else(|| kwargs.get("minRange").and_then(|v| v.as_f64()))
-        .unwrap_or(0.0);
-    if !raw_range.is_finite() {
-        return Err(agent_warp_err(
-            ERR_INVALID_ARGUMENT,
-            "warpRange must be a finite number",
-        ));
-    }
+    let is_goto = method == "GotoLocation";
+    // V24 `ApproachLocation` sends `agentMgr.GotoLocation(locType, locNumber, referringAgentID)`:
+    // `args[2]` is an integer agent ID, never a warp standoff range.
+    let (referring_agent_id, warp_range) = if is_goto {
+        let ref_agent = arg2
+            .and_then(|v| v.as_i64())
+            .filter(|&id| id > 0)
+            .or_else(|| {
+                kwargs
+                    .get("referringAgentID")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&id| id > 0)
+            });
+        (ref_agent, 0.0)
+    } else {
+        let raw_range = arg2
+            .and_then(|v| v.as_f64())
+            .or_else(|| kwargs.get("warpRange").and_then(|v| v.as_f64()))
+            .or_else(|| kwargs.get("minRange").and_then(|v| v.as_f64()))
+            .unwrap_or(0.0);
+        if !raw_range.is_finite() {
+            return Err(agent_warp_err(
+                ERR_INVALID_ARGUMENT,
+                "warpRange must be a finite number",
+            ));
+        }
+        (None, raw_range.clamp(0.0, MAX_AGENT_WARP_RANGE_M))
+    };
     Ok(ParsedAgentWarpArgs {
         loc_type: arg0.and_then(|v| v.as_str()),
         first_id: arg0.and_then(|v| v.as_i64()).filter(|&id| id > 0),
         loc_num: arg1.and_then(|v| v.as_i64()).filter(|&n| n > 0),
-        warp_range: raw_range.clamp(0.0, MAX_AGENT_WARP_RANGE_M),
+        referring_agent_id,
+        warp_range,
+        is_goto,
     })
 }
 
@@ -189,6 +229,7 @@ fn find_accepted_mission_for_warp(
     char_id: i64,
     bound_agent_id: Option<i64>,
     location_number: Option<i64>,
+    referring_agent_id: Option<i64>,
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<eve_db::ActiveMissionRecord> {
     let kw_mission_id = kwargs
@@ -212,23 +253,20 @@ fn find_accepted_mission_for_warp(
             return None;
         }
         if let Some(mid) = kw_mission_id {
-            if let Some(m) = missions.iter().find(|m| m.mission_id == mid) {
-                return Some((*m).clone());
-            }
+            return missions.iter().find(|m| m.mission_id == mid).map(|m| (*m).clone());
         }
         if let Some(loc) = location_number {
-            if let Some(m) = missions.iter().find(|m| {
-                i64::from(m.mission_id) == loc
-                    || m.agent_id == loc
-                    || m.bookmark_id == Some(loc)
-            }) {
-                return Some((*m).clone());
-            }
+            return missions
+                .iter()
+                .find(|m| {
+                    i64::from(m.mission_id) == loc
+                        || m.agent_id == loc
+                        || m.bookmark_id == Some(loc)
+                })
+                .map(|m| (*m).clone());
         }
-        if let Some(ag_id) = bound_agent_id.or(kw_agent_id) {
-            if let Some(m) = missions.iter().find(|m| m.agent_id == ag_id) {
-                return Some((*m).clone());
-            }
+        if let Some(ag_id) = bound_agent_id.or(kw_agent_id).or(referring_agent_id) {
+            return missions.iter().find(|m| m.agent_id == ag_id).map(|m| (*m).clone());
         }
         missions.first().map(|m| (*m).clone())
     })
@@ -297,6 +335,7 @@ async fn agent_homebase_or_space_target(
 
 fn mission_dungeon_warp_target(
     ctx: &ServerContext,
+    session: &SessionState,
     char_id: i64,
     fallback_sys_id: u32,
     mission: &eve_db::ActiveMissionRecord,
@@ -316,10 +355,14 @@ fn mission_dungeon_warp_target(
             format!("Mission {} has no solar system", mission.mission_id),
         ));
     }
+    let now_unix = ctx.now_unix();
     let bm_pos = ctx.db.with_snapshot(|snap| {
         mission.bookmark_id.and_then(|bmid| {
+            if crate::services::fleet_social::is_bookmark_expired_in_snap(snap, bmid, now_unix) {
+                return None;
+            }
             snap.bookmarks.get(&bmid).and_then(|bm| {
-                ((bm.owner_id == char_id || bm.is_shared)
+                (can_use_bookmark_in_snap(snap, session, char_id, bm)
                     && bm.solar_system_id == mission_sys_id
                     && bm.item_id.is_none()
                     && bm.x.is_finite()
@@ -341,6 +384,7 @@ fn mission_dungeon_warp_target(
 
 async fn resolve_agent_warp_target(
     ctx: &ServerContext,
+    session: &SessionState,
     sys_handle: &crate::system_actor::SystemHandle,
     char_id: i64,
     sys_id: u32,
@@ -355,15 +399,24 @@ async fn resolve_agent_warp_target(
         .and_then(|v| v.as_i64())
         .filter(|&id| id > 0);
     let loc_num = parsed.loc_num;
+    let ref_agent_id = parsed.referring_agent_id;
 
     if method == "WarpToAgentInSpace" {
         let target_agent_id = parsed
             .first_id
             .or(kw_agent_id)
             .or(bound_agent_id)
+            .or(ref_agent_id)
             .or_else(|| {
-                find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, loc_num, kwargs)
-                    .map(|m| m.agent_id)
+                find_accepted_mission_for_warp(
+                    ctx,
+                    char_id,
+                    bound_agent_id,
+                    loc_num,
+                    ref_agent_id,
+                    kwargs,
+                )
+                .map(|m| m.agent_id)
             })
             .ok_or_else(|| {
                 agent_warp_err(
@@ -378,10 +431,15 @@ async fn resolve_agent_warp_target(
         let loc_type = raw_type.trim().to_ascii_lowercase();
         match loc_type.as_str() {
             "dungeon" | "mission" | "site" | "pocket" | "encounter" => {
-                if let Some(m) =
-                    find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, loc_num, kwargs)
-                {
-                    return mission_dungeon_warp_target(ctx, char_id, sys_id, &m);
+                if let Some(m) = find_accepted_mission_for_warp(
+                    ctx,
+                    char_id,
+                    bound_agent_id,
+                    loc_num,
+                    ref_agent_id,
+                    kwargs,
+                ) {
+                    return mission_dungeon_warp_target(ctx, session, char_id, sys_id, &m);
                 }
                 if let Some(pos) =
                     crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
@@ -404,9 +462,14 @@ async fn resolve_agent_warp_target(
                 ));
             }
             "objective.destination" | "destination" | "courier" | "dropoff" => {
-                if let Some(m) =
-                    find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, loc_num, kwargs)
-                {
+                if let Some(m) = find_accepted_mission_for_warp(
+                    ctx,
+                    char_id,
+                    bound_agent_id,
+                    loc_num,
+                    ref_agent_id,
+                    kwargs,
+                ) {
                     let dest_sid = ctx.db.with_snapshot(|snap| {
                         load_mission_meta(snap, char_id, m.mission_id)
                             .and_then(|mt| mt.destination_station_id.or(mt.origin_station_id))
@@ -415,7 +478,7 @@ async fn resolve_agent_warp_target(
                         return station_warp_target(ctx, st_id);
                     }
                     if m.bookmark_id.is_some() || m.npcs_remaining > 0 {
-                        return mission_dungeon_warp_target(ctx, char_id, sys_id, &m);
+                        return mission_dungeon_warp_target(ctx, session, char_id, sys_id, &m);
                     }
                     return agent_homebase_or_space_target(ctx, sys_handle, sys_id, m.agent_id)
                         .await;
@@ -426,8 +489,14 @@ async fn resolve_agent_warp_target(
                 ));
             }
             "agenthomebase" | "station" | "agent" => {
-                let mission_opt =
-                    find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, loc_num, kwargs);
+                let mission_opt = find_accepted_mission_for_warp(
+                    ctx,
+                    char_id,
+                    bound_agent_id,
+                    loc_num,
+                    ref_agent_id,
+                    kwargs,
+                );
                 if let Some(ref m) = mission_opt {
                     if bound_agent_id.is_none() || bound_agent_id == Some(m.agent_id) {
                         let origin_sid = ctx.db.with_snapshot(|snap| {
@@ -443,6 +512,7 @@ async fn resolve_agent_warp_target(
                 let target_agent_id = bound_agent_id
                     .or_else(|| loc_num.filter(|id| ctx.sde.agents.contains_key(id)))
                     .or(kw_agent_id)
+                    .or(ref_agent_id)
                     .or_else(|| mission_opt.map(|m| m.agent_id))
                     .ok_or_else(|| {
                         agent_warp_err(
@@ -455,6 +525,7 @@ async fn resolve_agent_warp_target(
             }
             "bookmark" => {
                 let bmid = loc_num
+                    .or(parsed.first_id)
                     .or_else(|| kwargs.get("bookmarkID").and_then(|v| v.as_i64()))
                     .ok_or_else(|| {
                         agent_warp_err(
@@ -462,20 +533,54 @@ async fn resolve_agent_warp_target(
                             "Bookmark warp requires bookmarkID",
                         )
                     })?;
-                let bm = ctx
-                    .db
-                    .with_snapshot(|snap| {
-                        snap.bookmarks
-                            .get(&bmid)
-                            .filter(|b| b.owner_id == char_id || b.is_shared)
-                            .cloned()
-                    })
-                    .ok_or_else(|| {
-                        agent_warp_err(
-                            ERR_INVALID_MISSION_LOCATION,
+                if sys_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
+                    return Err(BridgeRpcError::from_user_key(
+                        eve_proto::UserErrorKey::DunBlacklistCannotWarp,
+                    ));
+                }
+                let now_unix = ctx.now_unix();
+                let bm = ctx.db.with_snapshot(|snap| {
+                    let expired = crate::services::fleet_social::is_bookmark_expired_in_snap(
+                        snap, bmid, now_unix,
+                    );
+                    let Some(b) = snap.bookmarks.get(&bmid) else {
+                        return Err(if expired {
+                            agent_warp_err(
+                                ERR_BOOKMARK_EXPIRED,
+                                format!("Bookmark {bmid} has expired"),
+                            )
+                        } else {
+                            agent_warp_err(
+                                ERR_BOOKMARK_NOT_FOUND,
+                                format!("Bookmark {bmid} not found"),
+                            )
+                        });
+                    };
+                    if !can_use_bookmark_in_snap(snap, session, char_id, b) {
+                        return Err(agent_warp_err(
+                            ERR_BOOKMARK_NOT_FOUND,
                             format!("Bookmark {bmid} not found"),
-                        )
-                    })?;
+                        ));
+                    }
+                    if expired {
+                        return Err(agent_warp_err(
+                            ERR_BOOKMARK_EXPIRED,
+                            format!("Bookmark {bmid} has expired"),
+                        ));
+                    }
+                    if b.solar_system_id == crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH {
+                        return Err(BridgeRpcError::from_user_key(
+                            eve_proto::UserErrorKey::DunBlacklistCannotWarp,
+                        ));
+                    }
+                    if !b.x.is_finite() || !b.y.is_finite() || !b.z.is_finite() {
+                        return Err(agent_warp_err(
+                            ERR_BOOKMARK_NOT_FOUND,
+                            format!("Bookmark {bmid} has invalid coordinates"),
+                        ));
+                    }
+                    Ok(b.clone())
+                })?;
                 let anchor_pos = DVec3::new(bm.x, bm.y, bm.z);
                 if let Some(st_id) = bm.item_id.filter(|id| ctx.sde.stations.contains_key(id)) {
                     return Ok(AgentWarpTarget::StationOrCelestial {
@@ -502,11 +607,16 @@ async fn resolve_agent_warp_target(
         if ctx.sde.agents.contains_key(&id) {
             return agent_homebase_or_space_target(ctx, sys_handle, sys_id, id).await;
         }
-        if let Some(m) =
-            find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, Some(id), kwargs)
-        {
+        if let Some(m) = find_accepted_mission_for_warp(
+            ctx,
+            char_id,
+            bound_agent_id,
+            Some(id),
+            ref_agent_id,
+            kwargs,
+        ) {
             if i64::from(m.mission_id) == id || m.bookmark_id == Some(id) {
-                return mission_dungeon_warp_target(ctx, char_id, sys_id, &m);
+                return mission_dungeon_warp_target(ctx, session, char_id, sys_id, &m);
             }
         }
         if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(id).await {
@@ -523,10 +633,17 @@ async fn resolve_agent_warp_target(
         ));
     }
 
-    if let Some(m) = find_accepted_mission_for_warp(ctx, char_id, bound_agent_id, None, kwargs) {
-        return mission_dungeon_warp_target(ctx, char_id, sys_id, &m);
+    if let Some(m) = find_accepted_mission_for_warp(
+        ctx,
+        char_id,
+        bound_agent_id,
+        None,
+        ref_agent_id,
+        kwargs,
+    ) {
+        return mission_dungeon_warp_target(ctx, session, char_id, sys_id, &m);
     }
-    if let Some(ag_id) = bound_agent_id.or(kw_agent_id) {
+    if let Some(ag_id) = bound_agent_id.or(kw_agent_id).or(ref_agent_id) {
         return agent_homebase_or_space_target(ctx, sys_handle, sys_id, ag_id).await;
     }
     Err(agent_warp_err(
@@ -562,7 +679,7 @@ async fn handle_agent_warp_to_location(
         .ok_or_else(|| {
             agent_warp_err(ERR_NO_SOLAR_SYSTEM, "Session has no active solar system")
         })?;
-    let parsed = parse_agent_warp_args(args, kwargs)?;
+    let parsed = parse_agent_warp_args(method, args, kwargs)?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (_, current_ball) = sys_handle
@@ -583,6 +700,7 @@ async fn handle_agent_warp_to_location(
 
     let target = resolve_agent_warp_target(
         ctx,
+        session,
         &sys_handle,
         char_id,
         sys_id,
@@ -624,22 +742,42 @@ async fn handle_agent_warp_to_location(
     };
 
     let warp_dist_m = current_ball.position.distance(raw_dest_pos);
-    if !warp_dist_m.is_finite() || warp_dist_m < MIN_AGENT_WARP_DISTANCE_M {
-        return Err(BridgeRpcError::warp_distance_too_short(format!(
-            "Warp vector distance {warp_dist_m:.1} m is below minimum {MIN_AGENT_WARP_DISTANCE_M:.0} m"
-        )));
+    if !warp_dist_m.is_finite() {
+        return Err(agent_warp_err(
+            ERR_INVALID_ARGUMENT,
+            "Destination distance must be finite",
+        ));
     }
+    let is_subwarp_goto = parsed.is_goto && warp_dist_m < MIN_AGENT_WARP_DISTANCE_M;
+    if is_subwarp_goto {
+        crate::services::nav_warp_interdiction::execute_subwarp_goto_point(
+            ctx,
+            &sys_handle,
+            char_id,
+            ship_id,
+            sys_id,
+            &current_ball,
+            raw_dest_pos,
+        )
+        .await?;
+    } else {
+        if warp_dist_m < MIN_AGENT_WARP_DISTANCE_M {
+            return Err(BridgeRpcError::warp_distance_too_short(format!(
+                "Warp vector distance {warp_dist_m:.1} m is below minimum {MIN_AGENT_WARP_DISTANCE_M:.0} m"
+            )));
+        }
 
-    crate::services::nav_warp_interdiction::execute_agency_content_warp(
-        ctx,
-        &sys_handle,
-        char_id,
-        ship_id,
-        sys_id,
-        &current_ball,
-        raw_dest_pos,
-    )
-    .await?;
+        crate::services::nav_warp_interdiction::execute_agency_content_warp(
+            ctx,
+            &sys_handle,
+            char_id,
+            ship_id,
+            sys_id,
+            &current_ball,
+            raw_dest_pos,
+        )
+        .await?;
+    }
 
     if let AgentWarpTarget::Dungeon {
         mission_id,
@@ -659,12 +797,11 @@ async fn handle_agent_warp_to_location(
                 .iter()
                 .any(|&npc_id| sys_handle.get_ball_position_sync(npc_id).is_some());
             if !any_alive {
-                ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                ctx.db.with_mut_snapshot(|snap| {
                     if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                         m.spawned_npc_ball_ids.clear();
                     }
-                    Ok(())
-                })?;
+                });
             }
         }
         let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
@@ -675,13 +812,15 @@ async fn handle_agent_warp_to_location(
         );
     }
 
-    crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
-        ctx,
-        char_id,
-        sys_id,
-        current_ball.position.to_array(),
-        raw_dest_pos.to_array(),
-    );
+    if !is_subwarp_goto {
+        crate::services::pve_dungeon_runtime::on_warp_start_leave_dungeon_if_needed(
+            ctx,
+            char_id,
+            sys_id,
+            current_ball.position.to_array(),
+            raw_dest_pos.to_array(),
+        );
+    }
 
     Ok(PyRep::Bool(true))
 }
