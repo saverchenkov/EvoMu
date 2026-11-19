@@ -585,9 +585,9 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
     let mut keys: Vec<&str> = kv.keys().map(|k| k.as_str()).collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["data", "numBands", "proximity"]);
-    assert_eq!(kv.get("numBands").and_then(|v| v.as_i64()), Some(9), "skill cap 2 + 3 + 2*2");
-    assert!(matches!(kv.get("data"), Some(PyRep::Bytes(b)) if b.len() == 9 * 9 * 4));
-    assert_eq!(kv.get("proximity"), Some(&PyRep::None));
+    assert_eq!(kv.get("numBands").and_then(|v| v.as_i64()), Some(22), "V24 Planet proximity=4 cap (15 + 3 + 2*2).min(30)");
+    assert!(matches!(kv.get("data"), Some(PyRep::Bytes(b)) if b.len() == 22 * 22 * 4));
+    assert_eq!(kv.get("proximity"), Some(&PyRep::Integer(4)));
 
     // Bound moniker call: GetResourceData(resourceTypeID)
     let res_bound = rpc_bound(
@@ -1393,10 +1393,10 @@ async fn test_pi_multi_colony_bound_moniker_isolation() {
     )
     .await
     .expect("GetResourceData on bound Planet B moniker");
-    // newBand 15 exceeds the pilot's skill cap (2 + 3 + 2*2 = 9) and is clamped server-side
-    assert_eq!(res_data.dict_get("numBands").and_then(|v| v.as_i64()), Some(9));
-    assert_eq!(res_data.dict_get("proximity").and_then(|v| v.as_i64()), Some(0));
-    assert!(matches!(res_data.dict_get("data"), Some(PyRep::Bytes(b)) if b.len() == 9 * 9 * 4));
+    // Client passed bogus proximity=0; server resolves Planet (4) from colony (max 15 + 3 + 2*2 = 22), honouring newBand=15
+    assert_eq!(res_data.dict_get("numBands").and_then(|v| v.as_i64()), Some(15));
+    assert_eq!(res_data.dict_get("proximity").and_then(|v| v.as_i64()), Some(4));
+    assert!(matches!(res_data.dict_get("data"), Some(PyRep::Bytes(b)) if b.len() == 15 * 15 * 4));
 
     // 7. UserAbandonPlanet on Planet B moniker with 0 arguments:
     // Deletes Planet B colony, but leaves Planet A colony completely intact!
