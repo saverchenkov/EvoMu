@@ -49,30 +49,6 @@ GATE_ENTITY_CATEGORIES = (2, 11)
 ASTEROID_ENTITY_CATEGORIES = (25, 11)
 STRUCTURE_ENTITY_CATEGORIES = (11, 2, 22, 23, 3, 40, 46, 65)
 
-PVE_CATEGORIES = {
-    "Security missions",
-    "Distribution Missions",
-    "Mining Missions",
-    "COSMOS missions",
-    "COSMOS sites",
-    "Epic arc missions",
-    "Storyline missions",
-    "Combat Anomalies",
-    "DED Complexes",
-    "Unrated Complexes",
-    "Expeditions",
-    "Chemical Labs",
-    "Relic sites",
-    "Data sites",
-    "Gas sites",
-    "Ore sites",
-    "Wormhole sites",
-    "Anomic missions",
-    "Career Agents",
-    "Mercenary Tactical Operations",
-    "Data center missions",
-}
-
 SKIP_TEMPLATE_TITLES_PREFIX = (
     "Template:",
     "Module:",
@@ -106,56 +82,51 @@ FACTION_PREFIXES: dict[str, list[str]] = {
     "Equilibrium of Mankind": ["EoM"],
 }
 
-NAME_TO_CANON_FACTION: dict[str, str] = {
-    "guristas": "Guristas Pirates",
-    "pith": "Guristas Pirates",
-    "angel": "Angel Cartel",
-    "arch angel": "Angel Cartel",
-    "domination": "Angel Cartel",
-    "gist": "Angel Cartel",
-    "blood": "Blood Raider Covenant",
-    "corpus": "Blood Raider Covenant",
-    "corpior": "Blood Raider Covenant",
-    "corpatis": "Blood Raider Covenant",
-    "corpum": "Blood Raider Covenant",
-    "corpii": "Blood Raider Covenant",
-    "sansha": "Sansha's Nation",
-    "centi": "Sansha's Nation",
-    "centus": "Sansha's Nation",
-    "centum": "Sansha's Nation",
-    "centior": "Sansha's Nation",
-    "centatis": "Sansha's Nation",
-    "serpentis": "Serpentis",
-    "core": "Serpentis",
-    "corelum": "Serpentis",
-    "corelior": "Serpentis",
-    "coreli": "Serpentis",
-    "corelatis": "Serpentis",
-    "rogue drone": "Rogue Drones",
-    "alvi": "Rogue Drones",
-    "alvu": "Rogue Drones",
-    "alvatis": "Rogue Drones",
-    "amarr": "Amarr Empire",
-    "imperial": "Amarr Empire",
-    "caldari": "Caldari State",
-    "state ": "Caldari State",
-    "gallente": "Gallente Federation",
-    "federation": "Gallente Federation",
-    "minmatar": "Minmatar Republic",
-    "republic": "Minmatar Republic",
-    "mordu": "Mordu's Legion Command",
-    "mercenar": "Mercenaries",
-    "khanid": "Khanid Kingdom",
-    "ammatar": "Ammatar Mandate",
-    "thukker": "Thukker Tribe",
-    "syndicate": "The Syndicate",
-    "concord": "CONCORD Assembly",
-    "triglavian": "Triglavian Collective",
-    "edencom": "EDENCOM",
-    "drifter": "Drifters",
-    "eom": "Equilibrium of Mankind",
-    "equilibrium of mankind": "Equilibrium of Mankind",
-}
+_FACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pat, re.I), canon)
+    for pat, canon in (
+        # Multi-word & unambiguous faction/rank stems first so short tokens never hijack them
+        (r"\b(?:equilibrium\s+of\s+mankind|eom)\b", "Equilibrium of Mankind"),
+        (r"\brogue\s+drones?\b", "Rogue Drones"),
+        (r"\b(?:blood\s+raiders?|bloodraiders?|dark\s+blood|corpii|corpior|corpum|corpatis|corpus)\b", "Blood Raider Covenant"),
+        (r"\b(?:angel\s+cartel|arch\s+angel|guardian\s+angels?|domination|gistii|gistior|gistum|gistatis|gist)\b", "Angel Cartel"),
+        (r"\b(?:dread\s+guristas|guristas|pithii?|pithior|pithum|pithatis|pith)\b", "Guristas Pirates"),
+        (r"\b(?:true\s+sansha|sansha(?:'s)?|centii|centior|centum|centatis|centus|centi)\b", "Sansha's Nation"),
+        (
+            r"\b(?:shadow\s+serpentis|serpentis|coreli|corelior|corelum|corelatis)\b"
+            r"|\bcore\s+(?:admiral|baron|commodore|fleet|flotilla|grand|high|lord|port|rear|vice|serpentis|runner)\b",
+            "Serpentis",
+        ),
+        (r"\bmordu(?:'s)?\b", "Mordu's Legion Command"),
+        (r"\b(?:amarr(?:\s+empire|\s+navy)?|imperial(?:\s+navy|\s+templar|\s+war)?)\b", "Amarr Empire"),
+        (r"\bcaldari(?:\s+state|\s+navy)?\b|\bstate\s+(?:military|navy|soldier|shukuro|protector|executor|war|sentry|bunker)\b|^state$", "Caldari State"),
+        (r"\bgallente(?:\s+federation|\s+navy)?\b|\bfederation\b", "Gallente Federation"),
+        (r"\bminmatar(?:\s+republic|\s+fleet)?\b|\brepublic\b", "Minmatar Republic"),
+        (r"\bkhanid\b", "Khanid Kingdom"),
+        (r"\bammatar\b", "Ammatar Mandate"),
+        (r"\bthukker\b", "Thukker Tribe"),
+        (r"\bsyndicate\b", "The Syndicate"),
+        (r"\bconcord\b", "CONCORD Assembly"),
+        (r"\btriglavian\b", "Triglavian Collective"),
+        (r"\bedencom\b", "EDENCOM"),
+        (r"\bdrifters?\b", "Drifters"),
+        (r"\bmercenar(?:y|ies)\b", "Mercenaries"),
+        # Ambiguous single-word tokens last, with strict word boundaries & negative guards
+        (r"\b(?:alvi|alvior|alvum|alvu|alvatis|alvus)\b", "Rogue Drones"),
+        (r"\bangel\b", "Angel Cartel"),
+        (r"\bblood\b(?!\s*-|\s*(?:stained|line|bath|hound|money)\b)", "Blood Raider Covenant"),
+    )
+)
+
+FACTION_WORD_PREFIXES: tuple[str, ...] = (
+    "guristas", "dread guristas", "pith", "angel", "arch angel", "domination", "gist",
+    "blood", "blood raider", "dark blood", "corpus", "corpior", "corpatis", "corpum", "corpii",
+    "sansha", "true sansha", "centus", "centum", "centior", "centii", "centatis", "centi",
+    "serpentis", "shadow serpentis", "core", "corelum", "corelior", "coreli", "corelatis",
+    "rogue drone", "amarr", "imperial", "caldari", "state", "gallente", "federation",
+    "minmatar", "republic", "mordu", "khanid", "ammatar", "thukker", "syndicate",
+    "concord", "triglavian", "edencom", "drifter", "eom", "equilibrium of mankind",
+)
 
 CANON_FACTION_NAME_TO_ID: dict[str, int] = {
     "Caldari State": 500001,
@@ -352,11 +323,14 @@ ROGUE_DRONE_SUFFIXES_BY_CLASS: dict[str, tuple[str, ...]] = {
     "battleship": ("alvus",),
 }
 ALL_ROGUE_DRONE_SUFFIXES: tuple[str, ...] = ("alvi", "alvior", "alvum", "alvu", "alvatis", "alvus")
+ROGUE_DRONE_SUFFIX_TO_CLASS: dict[str, str] = {
+    suf: cls for cls, sufs in ROGUE_DRONE_SUFFIXES_BY_CLASS.items() for suf in sufs
+}
 
-STRUCTURE_ALIASES: dict[str, list[str]] = {
+STRUCTURE_ALIASES: dict[str, list[str | tuple[str, ...]]] = {
     "stasis tower": ["{fac} Stasis Tower", "Stasis Webification Battery", "Pirate Stasis Tower"],
     "starbase stasis tower": ["{fac} Stasis Tower", "Stasis Webification Battery"],
-    "bunker": ["{fac} Bunker", "Occupied {fac} Bunker", "Drone Bunker"],
+    "bunker": ["{fac} Bunker", "Occupied {fac} Bunker"],
     "aux power array": ["Starbase Auxiliary Power Array", "Small Auxiliary Power Array", "Medium Auxiliary Power Array", "Large Auxiliary Power Array"],
     "auxiliary power array": ["Starbase Auxiliary Power Array", "Small Auxiliary Power Array", "Medium Auxiliary Power Array", "Large Auxiliary Power Array"],
     "habitat": ["Habitation Module"],
@@ -370,8 +344,14 @@ STRUCTURE_ALIASES: dict[str, list[str]] = {
     "heavy missile battery": ["{fac} Heavy Missile Battery", "Heavy Missile Battery"],
     "light missile battery": ["{fac} Light Missile Battery", "Light Missile Battery"],
     "torpedo battery": ["{fac} Torpedo Battery", "Torpedo Battery"],
-    "energy neutralizer sentry": ["{fac} Energy Neutralizer Sentry I", "{fac} Energy Neutralizer Sentry II", "{fac} Energy Neutralizer Sentry"],
-    "tower sentry": ["Tower Sentry {fac} I", "Tower Sentry {fac} II", "Tower Sentry {fac} III", "{fac} Sentry Gun"],
+    "energy neutralizer sentry": [
+        ("{fac} Energy Neutralizer Sentry I", "{fac} Energy Neutralizer Sentry II", "{fac} Energy Neutralizer Sentry III"),
+        "{fac} Energy Neutralizer Sentry",
+    ],
+    "tower sentry": [
+        ("Tower Sentry {fac} I", "Tower Sentry {fac} II", "Tower Sentry {fac} III"),
+        "{fac} Sentry Gun",
+    ],
     "tower sentry i": ["Tower Sentry {fac} I"],
     "tower sentry ii": ["Tower Sentry {fac} II"],
     "tower sentry iii": ["Tower Sentry {fac} III"],
@@ -539,9 +519,11 @@ def clean_wiki_inline(text: str) -> str:
 
 
 def infer_faction_from_text(text: str) -> str | None:
-    low = text.lower()
-    for key, canon in NAME_TO_CANON_FACTION.items():
-        if key in low:
+    low = text.strip()
+    if not low:
+        return None
+    for pat, canon in _FACTION_PATTERNS:
+        if pat.search(low):
             return canon
     return None
 
@@ -888,7 +870,7 @@ def extract_courier_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, An
     item: str | None = None
     m_q = re.search(
         r"(?:deliver|transport|haul|move|pick\s*up(?:\s+and\s+deliver)?|bring(?:\s+back)?|fetch|carry|ac?quire(?:\s+these\s+goods)?)\s*:?\s*"
-        r"([\d,]+)\s*(?:x\s+)?(.+?)(?:\s+to\s+.+|\s+from\s+.+|$|[.;])",
+        r"(\d[\d,]*)\s*(?:x\s+)?(.+?)(?:\s+to\s+.+|\s+from\s+.+|$|[.;])",
         s_no_vol,
         re.I,
     )
@@ -896,7 +878,7 @@ def extract_courier_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, An
         qty = int(m_q.group(1).replace(",", ""))
         item = m_q.group(2).strip(" .,:;\"'")
     else:
-        m_q2 = re.search(r"\b([\d,]+)\s*x\s+([A-Za-z][^.;()]+)", s_no_vol, re.I)
+        m_q2 = re.search(r"\b(\d[\d,]*)\s*x\s+([A-Za-z][^.;()]+)", s_no_vol, re.I)
         if m_q2:
             qty = int(m_q2.group(1).replace(",", ""))
             item = m_q2.group(2).strip(" .,:;\"'")
@@ -940,7 +922,7 @@ def extract_mining_payload(objective_raw: str, sde: "SdeIndex") -> dict[str, Any
     ore: str | None = None
     patterns = (
         r"(?:mine|harvest|ac?quire(?:\s+these\s+goods)?|reprocess(?:\s+it)?\s+(?:to|into)|bring\s+back)\s*:?\s*"
-        r"([\d,]+)\s*(?:x\s+)?(?:units\s+)?(?:of\s+)?([A-Za-z][A-Za-z0-9' \-]+?)"
+        r"(\d[\d,]*)\s*(?:x\s+)?(?:units\s+)?(?:of\s+)?([A-Za-z][A-Za-z0-9' \-]+?)"
         r"(?:\s+to\s+your\s+agent|\s+in\s+the|\s+and\s+|[.;()]|$)",
         r"(?:mine|harvest)\s+(?:all\s+the\s+|some\s+|enough\s+|out\s+all\s+the\s+|of\s+)?"
         r"([A-Za-z][A-Za-z0-9' \-]+?)(?:\s+ore)?(?:\s+in\s+the|\s+to\s+|\s+and\s+|[.;()]|$)",
@@ -1033,7 +1015,8 @@ def iter_templates_and_headings(text: str) -> list[dict[str, Any]]:
                 else:
                     j += 1
             else:
-                break
+                # Unclosed "{{" must not discard remaining balanced templates later in the article.
+                i = idx + 2
 
     scan_templates(text, 0)
     events.sort(key=lambda e: (e["pos"], 0 if e["kind"] == "heading" else 1))
@@ -1174,9 +1157,9 @@ class SdeIndex:
     """In-memory lookup index built from local evomu_sde.sqlite and mission_ext."""
 
     def __init__(self, sde_db_path: Path, mission_ext_path: Path) -> None:
-        if not sde_db_path.exists():
-            raise FileNotFoundError(f"SDE SQLite database not found: {sde_db_path}")
-        conn = sqlite3.connect(str(sde_db_path))
+        if not sde_db_path.is_file() or sde_db_path.stat().st_size == 0:
+            raise FileNotFoundError(f"SDE SQLite database missing or empty: {sde_db_path}")
+        conn = sqlite3.connect(sde_db_path.resolve().as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
 
         groups = {
@@ -1231,10 +1214,9 @@ class SdeIndex:
             ):
                 fac = infer_faction_from_text(gname)
                 if fac:
-                    gn_norm = gname.lower().replace("battle cruisers", "battlecruiser")
-                    for cls in ("frigate", "destroyer", "cruiser", "battlecruiser", "battleship"):
-                        if cls in gn_norm:
-                            self.faction_class_groups[(fac, cls)].append(ref.type_id)
+                    cls = _norm_class_bucket(gname)
+                    if cls in ("frigate", "destroyer", "cruiser", "battlecruiser", "battleship"):
+                        self.faction_class_groups[(fac, cls)].append(ref.type_id)
 
         for k in self.faction_class_groups:
             self.faction_class_groups[k] = sorted(set(self.faction_class_groups[k]))[:20]
@@ -1242,11 +1224,13 @@ class SdeIndex:
             for k in cat_map:
                 cat_map[k].sort()
 
+        self.dungeons_by_id: dict[int, dict[str, Any]] = {}
         self.dungeons_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in conn.execute(
             "SELECT dungeon_id, name, archetype_id, faction_id, difficulty FROM sde_dungeons ORDER BY dungeon_id"
         ):
             d = dict(row)
+            self.dungeons_by_id[int(d["dungeon_id"])] = d
             if d["name"]:
                 for k in make_title_lookup_keys(d["name"]):
                     self.dungeons_by_key[k].append(d)
@@ -1280,26 +1264,48 @@ class SdeIndex:
             cands.append(clean[:-1])
         else:
             cands.append(clean + "s")
-        for prefix in (
-            "large crates of ",
-            "large crate of ",
-            "small crates of ",
-            "small crate of ",
-            "crates of ",
-            "crate of ",
-            "groups of ",
-            "group of ",
-            "units of ",
-        ):
+
+        crate_prefixes = (
+            ("large crates of ", ("large crate of ", "large crates of ", "crate of ", "crates of ")),
+            ("large crate of ", ("large crate of ", "large crates of ", "crate of ", "crates of ")),
+            ("small crates of ", ("small crate of ", "small crates of ", "crate of ", "crates of ")),
+            ("small crate of ", ("small crate of ", "small crates of ", "crate of ", "crates of ")),
+            ("crates of ", ("crate of ", "crates of ", "large crate of ", "large crates of ")),
+            ("crate of ", ("crate of ", "crates of ", "large crate of ", "large crates of ")),
+        )
+        qty_prefixes = ("groups of ", "group of ", "units of ")
+
+        fallback_bare: list[str] = []
+        matched_crate = False
+        for prefix, out_prefixes in crate_prefixes:
             if clean.startswith(prefix):
+                matched_crate = True
                 sub = clean[len(prefix) :].strip()
-                cands.append(sub)
+                sub_forms = [sub]
                 if sub.endswith("ies") and len(sub) > 4:
-                    cands.append(sub[:-3] + "y")
-                cands.append(f"crate of {sub}")
-                cands.append(f"crates of {sub}")
-                cands.append(f"large crate of {sub}")
-                cands.append(f"large crates of {sub}")
+                    sub_forms.append(sub[:-3] + "y")
+                elif sub.endswith("s") and len(sub) > 3:
+                    sub_forms.append(sub[:-1])
+                else:
+                    sub_forms.append(sub + "s")
+                for opf in out_prefixes:
+                    for sf in sub_forms:
+                        cands.append(f"{opf}{sf}")
+                fallback_bare.extend(sub_forms)
+                break
+
+        if not matched_crate:
+            for prefix in qty_prefixes:
+                if clean.startswith(prefix):
+                    sub = clean[len(prefix) :].strip()
+                    cands.append(sub)
+                    if sub.endswith("ies") and len(sub) > 4:
+                        cands.append(sub[:-3] + "y")
+                    elif sub.endswith("s") and len(sub) > 3:
+                        cands.append(sub[:-1])
+                    break
+
+        cands.extend(fallback_bare)
         for c in cands:
             if c in self.item_by_name:
                 return sorted(set(self.item_by_name[c]))
@@ -1427,8 +1433,6 @@ class SdeIndex:
                 m_tw = re.match(r"^(\S+)\s+Tower\s+(I|II|III)$", stripped, re.I)
                 if m_tw:
                     cands.append(f"Tower Sentry {m_tw.group(1)} {m_tw.group(2)}")
-            elif re.search(r"\b(?:tower|sentry|battery)\b", stripped, re.I):
-                cands.append(f"{stripped} I")
 
         out: list[str] = []
         seen: set[str] = set()
@@ -1449,8 +1453,16 @@ class SdeIndex:
         out: list[SdeTypeRef] = []
         for r in refs:
             rc = _sde_ref_class_bucket(r)
-            if rc is None or rc == expected_class:
-                out.append(r)
+            if rc is not None:
+                if rc == expected_class:
+                    out.append(r)
+                continue
+            g_low = r.group_name.lower()
+            if expected_class in ("frigate", "destroyer", "cruiser", "battlecruiser", "battleship") and any(
+                tok in g_low for tok in ("structure", "sentry", "beacon", "object", "container", "wreck")
+            ):
+                continue
+            out.append(r)
         return out
 
     def direct_hits(
@@ -1540,6 +1552,8 @@ class SdeIndex:
                     meta = RANK_PREFIX_META.get(pref_key)
                     if meta:
                         fam, src_cls = meta
+                        if src_cls != "any" and expected_class and src_cls != expected_class:
+                            break
                         target_cls = expected_class or (None if src_cls == "any" else src_cls)
                         rest = " ".join(toks[prefix_len:])
                         cand_prefixes: list[str] = []
@@ -1559,14 +1573,12 @@ class SdeIndex:
                                     return filtered
                         break
 
-            # Rogue Drone suffix substitution (independent of FAMILY_RANK_SIBLINGS) constrained by ship_class
+            # Rogue Drone suffix substitution constrained by ship_class (and hull class of suffix when expected_class is None)
             if len(toks) >= 2 and toks[-1] in ALL_ROGUE_DRONE_SUFFIXES:
                 body_p = " ".join(toks[:-1])
-                suf_pool = (
-                    ROGUE_DRONE_SUFFIXES_BY_CLASS.get(expected_class, ALL_ROGUE_DRONE_SUFFIXES)
-                    if expected_class
-                    else ALL_ROGUE_DRONE_SUFFIXES
-                )
+                src_drone_cls = ROGUE_DRONE_SUFFIX_TO_CLASS.get(toks[-1])
+                eff_cls = expected_class or src_drone_cls
+                suf_pool = ROGUE_DRONE_SUFFIXES_BY_CLASS.get(eff_cls, (toks[-1],)) if eff_cls else (toks[-1],)
                 for suf in suf_pool:
                     for cand in (f"{body_p} {suf}", f"strain {body_p} {suf}"):
                         if cand in by_name:
@@ -1574,7 +1586,9 @@ class SdeIndex:
                             if filtered:
                                 return filtered
 
-            # Guarded 1-typo difflib match sharing exact first token & token length
+            # Guarded 1-typo difflib match: exact first word, same token count, single differing
+            # non-Roman/non-digit token >= 4 chars with tight per-token similarity (>= 0.78)
+            roman_or_num = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
             if len(toks) >= 2:
                 for base in (
                     nl,
@@ -1591,9 +1605,21 @@ class SdeIndex:
                     btoks = base.split()
                     pool = by_fw.get((btoks[0], len(btoks)), [])
                     if pool:
-                        matches = difflib.get_close_matches(base, pool, n=1, cutoff=0.85)
-                        if matches:
-                            filtered = self._filter_by_expected_class(by_name[matches[0]], expected_class)
+                        matches = difflib.get_close_matches(base, pool, n=5, cutoff=0.85)
+                        for m_cand in matches:
+                            ctoks = m_cand.split()
+                            diffs = [(a, b) for a, b in zip(btoks, ctoks) if a != b]
+                            if len(diffs) == 1:
+                                ta, tb = diffs[0]
+                                if ta in roman_or_num or tb in roman_or_num or ta.isdigit() or tb.isdigit():
+                                    continue
+                                if min(len(ta), len(tb)) < 4:
+                                    continue
+                                if difflib.SequenceMatcher(None, ta, tb).ratio() < 0.78:
+                                    continue
+                            elif len(diffs) > 1:
+                                continue
+                            filtered = self._filter_by_expected_class(by_name[m_cand], expected_class)
                             if filtered:
                                 return filtered
         return []
@@ -1626,7 +1652,7 @@ class SdeIndex:
         def has_rank_or_faction_prefix(tok: str) -> bool:
             tl = tok.lower()
             return any(tl.startswith(rp + " ") for rp in RANK_PREFIX_META) or any(
-                tl.startswith(npf + " ") for npf in NAME_TO_CANON_FACTION
+                tl.startswith(npf + " ") for npf in FACTION_WORD_PREFIXES
             )
 
         def has_hit(cand: str, allow_fuzzy: bool = False) -> bool:
@@ -2046,7 +2072,7 @@ class SdeIndex:
                 "",
                 nlow,
             )
-            cand_patterns: list[str] = []
+            cand_patterns: list[str | tuple[str, ...]] = []
             for key in (nlow, nlow_nopf):
                 if key in STRUCTURE_ALIASES:
                     cand_patterns.extend(STRUCTURE_ALIASES[key])
@@ -2058,20 +2084,28 @@ class SdeIndex:
                 tier = m_ft.group(2).upper() if m_ft.group(2) else None
                 tiers = [tier] if tier else ["I", "II", "III"]
                 fac_word = m_ft.group(1).strip().title()
-                for t_rn in tiers:
-                    cand_patterns.append(f"Tower Sentry {fac_word} {t_rn}")
+                if tier:
+                    cand_patterns.append(f"Tower Sentry {fac_word} {tier}")
+                else:
+                    cand_patterns.append(tuple(f"Tower Sentry {fac_word} {t_rn}" for t_rn in tiers))
                 cand_patterns.append(f"{fac_word} Sentry Gun")
-                cand_patterns.extend(f"Tower Sentry {{fac}} {t_rn}" for t_rn in tiers)
+                if tier:
+                    cand_patterns.append(f"Tower Sentry {{fac}} {tier}")
+                else:
+                    cand_patterns.append(tuple(f"Tower Sentry {{fac}} {t_rn}" for t_rn in tiers))
             m_tws = re.match(r"^tower\s+sentry\s+([a-z]+)$", nlow, re.I)
             if m_tws:
-                fw = m_tws.group(1).rstrip("s").title()
-                for t_rn in ("I", "II", "III"):
-                    cand_patterns.append(f"Tower Sentry {fw} {t_rn}")
-                    cand_patterns.append(f"Tower Sentry {{fac}} {t_rn}")
-            m_en = re.match(r"^(.+?)\s+energy neutralizer tower$", nlow, re.I)
+                raw_fw = m_tws.group(1)
+                fw_variants = list(dict.fromkeys([raw_fw.title(), raw_fw.rstrip("s").title()]))
+                cand_patterns.append(
+                    tuple(f"Tower Sentry {fw} {t_rn}" for fw in fw_variants for t_rn in ("I", "II", "III"))
+                )
+                cand_patterns.append(tuple(f"Tower Sentry {{fac}} {t_rn}" for t_rn in ("I", "II", "III")))
+            m_en = re.match(r"^(.+?)\s+energy neutralizer (?:tower|sentry)$", nlow, re.I)
             if m_en:
                 fw = m_en.group(1).strip().title()
-                cand_patterns.extend([f"{fw} Energy Neutralizer Sentry I", f"{fw} Energy Neutralizer Sentry II", "{fac} Energy Neutralizer Sentry I"])
+                cand_patterns.append(tuple(f"{fw} Energy Neutralizer Sentry {t_rn}" for t_rn in ("I", "II", "III")))
+                cand_patterns.append(tuple(f"{{fac}} Energy Neutralizer Sentry {t_rn}" for t_rn in ("I", "II", "III")))
             if nm_struct or cls_low in ("drone", "frigate", "cruiser", "battleship", "battlecruiser", "destroyer", "industrial"):
                 cand_patterns.append("{fac} " + nm)
 
@@ -2084,40 +2118,42 @@ class SdeIndex:
                     fac_pool.append(pf_fac)
 
             struct_matched: list[SdeTypeRef] = []
-            # Un-templated structure aliases apply even when page_factions is empty;
-            # never synthesize a default faction (like Angel Cartel) when fac_pool is empty.
-            for pat in cand_patterns:
-                if "{fac}" in pat:
-                    continue
-                h = self.direct_hits(
-                    pat,
-                    allow_fuzzy=False,
-                    allowed_cats=nm_cats,
-                    expected_class=cb,
-                    is_structure=nm_struct,
-                )
-                if h:
-                    struct_matched.extend(h)
-                    break
-
-            if not struct_matched and fac_pool:
-                for fac in fac_pool:
-                    prefixes = FACTION_PREFIXES.get(fac, [fac])
-                    for pat in cand_patterns:
-                        if "{fac}" not in pat:
-                            continue
-                        for pf in prefixes:
-                            h = self.direct_hits(
-                                pat.format(fac=pf),
-                                allow_fuzzy=False,
-                                allowed_cats=nm_cats,
-                                expected_class=cb,
-                                is_structure=nm_struct,
-                            )
-                            if h:
-                                struct_matched.extend(h)
+            # Evaluate patterns in declared priority order so {fac}-qualified faction patterns
+            # run before untemplated fallbacks (never synthesizing a default faction when fac_pool is empty).
+            for pat_entry in cand_patterns:
+                pats = pat_entry if isinstance(pat_entry, tuple) else (pat_entry,)
+                if any("{fac}" in p for p in pats):
+                    if not fac_pool:
+                        continue
+                    for fac in fac_pool:
+                        prefixes = FACTION_PREFIXES.get(fac, [fac])
+                        for p in pats:
+                            for pf in prefixes:
+                                cand_str = p.format(fac=pf) if "{fac}" in p else p
+                                h = self.direct_hits(
+                                    cand_str,
+                                    allow_fuzzy=False,
+                                    allowed_cats=nm_cats,
+                                    expected_class=cb,
+                                    is_structure=nm_struct,
+                                )
+                                if h:
+                                    struct_matched.extend(h)
                         if struct_matched:
                             break
+                    if struct_matched:
+                        break
+                else:
+                    for p in pats:
+                        h = self.direct_hits(
+                            p,
+                            allow_fuzzy=False,
+                            allowed_cats=nm_cats,
+                            expected_class=cb,
+                            is_structure=nm_struct,
+                        )
+                        if h:
+                            struct_matched.extend(h)
                     if struct_matched:
                         break
 
@@ -2137,6 +2173,30 @@ class SdeIndex:
         all_tids = sorted({h.type_id for h in all_refs})
         matched_names = sorted({h.name for h in concrete_refs})
 
+        def _make_res(
+            status: str,
+            method: str,
+            *,
+            type_ids: list[int] | None = None,
+            candidate_type_ids: list[int] | None = None,
+            matched_list: list[str] | None = None,
+            unresolved_list: list[str] | None = None,
+            reason: str | None = None,
+        ) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "status": status,
+                "method": method,
+                "expanded_names": names,
+                "type_ids": type_ids or [],
+                "candidate_type_ids": candidate_type_ids or [],
+                "matched_names": matched_list or [],
+                "unresolved_parts": unresolved_list or [],
+                "reason": reason,
+            }
+            if had_ellipsis:
+                out["had_ellipsis"] = True
+            return out
+
         if not unresolved_parts and concrete_tids and not fam_hits:
             if struct_hits:
                 status = "resolved_structure_faction"
@@ -2144,40 +2204,33 @@ class SdeIndex:
             else:
                 status = "resolved_exact"
                 method = "short_form_expansion" if len(names) > 1 else "exact_or_normalized"
-            return {
-                "status": status,
-                "method": method,
-                "expanded_names": names,
-                "type_ids": concrete_tids,
-                "candidate_type_ids": concrete_tids,
-                "matched_names": matched_names,
-                "unresolved_parts": [],
-                "reason": None,
-            }
+            return _make_res(
+                status,
+                method,
+                type_ids=concrete_tids,
+                candidate_type_ids=concrete_tids,
+                matched_list=matched_names,
+            )
 
         if not unresolved_parts and fam_hits:
-            return {
-                "status": "resolved_family_candidates",
-                "method": "ellipsis_or_family_prefix" if had_ellipsis else "family_prefix_candidate",
-                "expanded_names": names,
-                "type_ids": [],
-                "candidate_type_ids": all_tids,
-                "matched_names": [],
-                "unresolved_parts": list(names),
-                "reason": "bare_family_prefix_only",
-            }
+            return _make_res(
+                "resolved_family_candidates",
+                "ellipsis_or_family_prefix" if had_ellipsis else "family_prefix_candidate",
+                candidate_type_ids=all_tids,
+                unresolved_list=list(names),
+                reason="bare_family_prefix_only",
+            )
 
         if concrete_tids or fam_hits:
-            return {
-                "status": "partly_resolved",
-                "method": "partial_multi_name",
-                "expanded_names": names,
-                "type_ids": concrete_tids,
-                "candidate_type_ids": all_tids,
-                "matched_names": matched_names,
-                "unresolved_parts": unresolved_parts,
-                "reason": f"unresolved_part:{';'.join(unresolved_parts)}",
-            }
+            return _make_res(
+                "partly_resolved",
+                "partial_multi_name",
+                type_ids=concrete_tids,
+                candidate_type_ids=all_tids,
+                matched_list=matched_names,
+                unresolved_list=unresolved_parts,
+                reason=f"unresolved_part:{';'.join(unresolved_parts)}",
+            )
 
         # Faction + ship_class entity group hints are preserved as candidate_type_ids on unresolved rows
         # (never counted toward concrete resolved_total / resolved_percent).
@@ -2186,27 +2239,20 @@ class SdeIndex:
         has_role_or_fac_hint = bool(inferred_name_fac or NPC_ROLE_HINT_RE.search(raw_clean))
         if has_role_or_fac_hint and cb and nf and self.faction_class_groups.get((nf, cb)):
             cands = self.faction_class_groups[(nf, cb)]
-            return {
-                "status": "resolved_class_candidates",
-                "method": f"faction_class_group:{nf}:{cb}",
-                "expanded_names": names,
-                "type_ids": [],
-                "candidate_type_ids": cands,
-                "matched_names": [],
-                "unresolved_parts": unresolved_parts,
-                "reason": "custom_spawn_name_mapped_via_faction_class",
-            }
+            return _make_res(
+                "resolved_class_candidates",
+                f"faction_class_group:{nf}:{cb}",
+                candidate_type_ids=cands,
+                unresolved_list=unresolved_parts,
+                reason="custom_spawn_name_mapped_via_faction_class",
+            )
 
-        return {
-            "status": "unresolved",
-            "method": "none",
-            "expanded_names": names,
-            "type_ids": [],
-            "candidate_type_ids": [],
-            "matched_names": [],
-            "unresolved_parts": unresolved_parts,
-            "reason": "event_npc_not_in_sde" if is_event else "unmatched_name_in_sde",
-        }
+        return _make_res(
+            "unresolved",
+            "none",
+            unresolved_list=unresolved_parts,
+            reason="event_npc_not_in_sde" if is_event else "unmatched_name_in_sde",
+        )
 
     def match_sde_page(
         self,
@@ -2225,11 +2271,19 @@ class SdeIndex:
                     matched_missions[m["mission_id"]] = m
                     if m["mission_id"] in self.mission_dungeons:
                         did = self.mission_dungeons[m["mission_id"]]
-                        # Ensure linked dungeon ID is recorded even if dungeon name differed
-                        matched_dungeons.setdefault(
-                            did,
-                            {"dungeon_id": did, "name": m["name"], "faction_id": None, "difficulty": None, "linked_via_mission_ext": True},
-                        )
+                        # Populate real sde_dungeons metadata (faction_id, difficulty, archetype_id) when available
+                        if did not in matched_dungeons:
+                            real_d = self.dungeons_by_id.get(did)
+                            if real_d is not None:
+                                matched_dungeons[did] = {**real_d, "linked_via_mission_ext": True}
+                            else:
+                                matched_dungeons[did] = {
+                                    "dungeon_id": did,
+                                    "name": m["name"],
+                                    "faction_id": None,
+                                    "difficulty": None,
+                                    "linked_via_mission_ext": True,
+                                }
                 for d in self.dungeons_by_key.get(key, []):
                     matched_dungeons[d["dungeon_id"]] = d
 
@@ -2328,16 +2382,26 @@ def parse_wiki_page(
                     and variant_heading_level is not None
                     and lvl == variant_heading_level
                 )
-                has_future_variant_sibling = (
-                    (not is_room_h)
-                    and not is_explicit_variant
-                    and any(
-                        nxt["kind"] == "heading"
-                        and nxt["level"] == lvl
-                        and VARIANT_HEADING_RE.search(nxt["text"])
-                        for nxt in events[idx + 1 :]
-                    )
-                )
+                has_future_variant_sibling = False
+                if (not is_room_h) and not is_explicit_variant:
+                    for nxt in events[idx + 1 :]:
+                        if nxt["kind"] == "template" and nxt["name"] in (
+                            "missiondetails",
+                            "cmbsiteinfo",
+                            "cmbsite",
+                            "cmbsitebox",
+                        ):
+                            break
+                        if nxt["kind"] == "heading":
+                            if nxt["level"] < lvl:
+                                break
+                            if (
+                                nxt["level"] == lvl
+                                and not NON_VARIANT_SECTION_RE.search(nxt["text"])
+                                and VARIANT_HEADING_RE.search(nxt["text"])
+                            ):
+                                has_future_variant_sibling = True
+                                break
                 if (is_explicit_variant or is_sibling_variant or has_future_variant_sibling) and lookahead_has_npcs(idx, lvl):
                     if not unit_has_npc_rows(cur_unit):
                         cur_unit["variant_name"] = txt

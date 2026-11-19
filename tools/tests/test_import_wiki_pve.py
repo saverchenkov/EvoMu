@@ -69,6 +69,10 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
         (459, 25, "Harvestable Ore"),
         (314, 17, "Commodities"),
         (671, 11, "Mission Caldari State Frigate"),
+        (20001, 11, "Destructible Sentry Gun"),
+        (20002, 23, "Stasis Webification Battery"),
+        (20003, 11, "Deadspace Angel Cartel Battlecruiser"),
+        (20004, 11, "Deadspace Angel Cartel Battleship"),
     ]
     conn.executemany("INSERT INTO sde_groups VALUES (?, ?, ?)", groups)
 
@@ -97,15 +101,28 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
         (10016, 603, 11, "Core High Admiral", None, 1000.0),
         (10017, 603, 11, "Core Lord Admiral", None, 1000.0),
         (10018, 603, 11, "Core Admiral", None, 1000.0),
-        # Structures & Gates
+        (10019, 601, 11, "Gistii OnlyFrig", None, 50.0),
+        (10020, 20003, 11, "Gistatis OnlyBC", None, 100.0),
+        (10021, 602, 11, "Gistum OnlyCruiser", None, 100.0),
+        (10022, 319, 11, "Blood Raider Bunker", None, 1000.0),
+        # Structures & Gates (including Drone Bunker & Cat 23 Stasis Webification Battery + multi-tier sentries)
         (17831, 366, 2, "Acceleration Gate", None, 1000.0),
         (16757, 319, 11, "Angel Bunker", None, 1000.0),
         (16796, 319, 11, "Guristas Bunker", None, 1000.0),
-        (17605, 319, 11, "Angel Stasis Tower", None, 1000.0),
-        (17607, 319, 11, "Guristas Stasis Tower", None, 1000.0),
-        # Ore & Courier Commodity
+        (18012, 319, 11, "Drone Bunker", None, 1000.0),
+        (17605, 20001, 11, "Angel Stasis Tower", None, 1000.0),
+        (17607, 20001, 11, "Guristas Stasis Tower", None, 1000.0),
+        (17178, 20002, 23, "Stasis Webification Battery", None, 1000.0),
+        (17147, 20001, 11, "Tower Sentry Angel I", None, 1000.0),
+        (17146, 20001, 11, "Tower Sentry Angel II", None, 1000.0),
+        (16740, 20001, 11, "Tower Sentry Angel III", None, 1000.0),
+        (28139, 20001, 11, "Angel Energy Neutralizer Sentry I", None, 1000.0),
+        (28144, 20001, 11, "Angel Energy Neutralizer Sentry II", None, 1000.0),
+        (28150, 20001, 11, "Angel Energy Neutralizer Sentry III", None, 1000.0),
+        # Ore & Courier Commodity (both bare item and crate item)
         (28618, 459, 25, "Synthium Ore", None, 0.3),
         (29570, 314, 17, "Crate of Synth Supplies", None, 20.0),
+        (29571, 314, 17, "Synth Supplies", None, 5.0),
     ]
     conn.executemany("INSERT INTO sde_types VALUES (?, ?, ?, ?, ?, ?)", types)
 
@@ -113,6 +130,7 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
         (4001, "Synthetic Raid", 4, 500010, 3),
         (4002, "Synthetic Raid", 4, 500011, 4),
         (4003, "Synthetic Multi-Part (1 of 3)", 1, 500011, 2),
+        (4004, "Different Dungeon Name", 2, 500010, 3),
     ]
     conn.executemany("INSERT INTO sde_dungeons VALUES (?, ?, ?, ?, ?)", dungeons)
 
@@ -120,6 +138,7 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
         (9001, "Synthetic Multi-Part (1 of 3)", 0, 100, 150, 1),
         (9002, "Synthetic Supply Run", 1, 50, 75, 1),
         (9003, "Synthetic Ore Extraction", 0, 80, 120, 1),
+        (9004, "Synthetic Linked Mission", 0, 120, 180, 1),
     ]
     conn.executemany("INSERT INTO sde_missions VALUES (?, ?, ?, ?, ?, ?)", missions)
 
@@ -127,7 +146,7 @@ def _build_synthetic_sde(db_path: Path, mission_ext_path: Path) -> None:
     conn.close()
 
     mission_ext_path.write_text(
-        json.dumps({"mission_dungeons": {"9001": 4003}, "rnd_agent_skills": {}}),
+        json.dumps({"mission_dungeons": {"9001": 4003, "9004": 4004}, "rnd_agent_skills": {}}),
         encoding="utf-8",
     )
 
@@ -214,6 +233,7 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(res["type_ids"], [10009])
 
     def test_generic_structure_resolved_within_page_faction(self) -> None:
+        # Faction-qualified "{fac} Bunker" must beat "Drone Bunker" on non-Drone pages
         res_angel = self.sde.resolve_npc_row(
             npc_class="Structure",
             raw_name="Bunker",
@@ -223,6 +243,15 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(res_angel["status"], "resolved_structure_faction")
         self.assertEqual(res_angel["type_ids"], [16757])
 
+        res_drone_bunker = self.sde.resolve_npc_row(
+            npc_class="Structure",
+            raw_name="Bunker",
+            note="",
+            page_factions=["Rogue Drones"],
+        )
+        self.assertEqual(res_drone_bunker["status"], "resolved_structure_faction")
+        self.assertEqual(res_drone_bunker["type_ids"], [18012])
+
         res_guristas = self.sde.resolve_npc_row(
             npc_class="Sentry",
             raw_name="Stasis Tower",
@@ -231,6 +260,26 @@ class TestWikiPveImporter(unittest.TestCase):
         )
         self.assertEqual(res_guristas["status"], "resolved_structure_faction")
         self.assertEqual(res_guristas["type_ids"], [17607])
+
+        # Starbase Stasis Tower on Angel page must resolve to Cat 11 Angel Stasis Tower,
+        # NOT Cat 23 POS Stasis Webification Battery (while falling back when no faction tower exists)
+        res_starbase = self.sde.resolve_npc_row(
+            npc_class="Sentry",
+            raw_name="Starbase Stasis Tower",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_starbase["status"], "resolved_structure_faction")
+        self.assertEqual(res_starbase["type_ids"], [17605])
+
+        res_fallback_pos = self.sde.resolve_npc_row(
+            npc_class="Sentry",
+            raw_name="Starbase Stasis Tower",
+            note="",
+            page_factions=["Mordu's Legion Command"],
+        )
+        self.assertEqual(res_fallback_pos["status"], "resolved_structure_faction")
+        self.assertEqual(res_fallback_pos["type_ids"], [17178])
 
     def test_multi_room_bracketed_title_and_sde_matching(self) -> None:
         wiki_text = (
@@ -559,16 +608,33 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(res_inner["type_ids"], [10016, 10017])
 
     def test_rank_class_constraint_rogue_drones_and_no_default_angel(self) -> None:
-        # Gistum (Cruiser) must NOT cross-substitute into Gistii (Frigate) when class is Frigate
+        # Gistum (Cruiser) must NOT cross-substitute into Gistii (Frigate) even when Gistii OnlyFrig exists
         res_mismatch = self.sde.resolve_npc_row(
             npc_class="Frigate",
-            raw_name="Gistum Nonexistent",
+            raw_name="Gistum OnlyFrig",
             note="",
             page_factions=["Angel Cartel"],
         )
         self.assertEqual(res_mismatch["type_ids"], [])
 
-        # Standard Rogue Drone suffix swap works independently of pirate rank prefixes
+        # Gistii Nomad (Frigate) and Gistum Nomad (Cruiser) resolve strictly within their classes
+        res_nomad_frig = self.sde.resolve_npc_row(
+            npc_class="Frigate",
+            raw_name="Gistii Nomad",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_nomad_frig["type_ids"], [10014])
+        res_nomad_cru = self.sde.resolve_npc_row(
+            npc_class="Cruiser",
+            raw_name="Gistum Nomad",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_nomad_cru["type_ids"], [10015])
+
+        # Rogue Drone suffix typo swap works when ship_class="Frigate" explicitly constrains hull class,
+        # but unknown-class ("Drone") must NOT cross hull classes from Alvatis (BC) to Alvi (Frigate)
         res_drone = self.sde.resolve_npc_row(
             npc_class="Frigate",
             raw_name="Render Alvatis",
@@ -578,7 +644,15 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(res_drone["status"], "resolved_exact")
         self.assertEqual(res_drone["type_ids"], [10013])
 
-        # Empty page_factions must NEVER synthesize an Angel Cartel fallback
+        res_drone_unknown_cls = self.sde.resolve_npc_row(
+            npc_class="Drone",
+            raw_name="Render Alvatis",
+            note="",
+            page_factions=["Rogue Drones"],
+        )
+        self.assertEqual(res_drone_unknown_cls["type_ids"], [])
+
+        # Empty page_factions must NEVER synthesize Drone Bunker or Angel Cartel fallback
         res_nofac = self.sde.resolve_npc_row(
             npc_class="Structure",
             raw_name="Bunker",
@@ -765,6 +839,134 @@ class TestWikiPveImporter(unittest.TestCase):
         self.assertEqual(rc_fail_cand, 1)
         self.assertIn("VERIFY FAIL: NPC candidate-mapped percent 85.0% < 90.0%", err_fail_cand)
         self.assertNotIn("concrete resolved percent", err_fail_cand)
+
+    def test_r2_p1_fixes_substring_sentries_crates_and_sqlite_ro(self) -> None:
+        # 1. Battlecruisers must NEVER pollute Cruiser candidate pools
+        cru_pool = self.sde.faction_class_groups.get(("Angel Cartel", "cruiser"), [])
+        bc_pool = self.sde.faction_class_groups.get(("Angel Cartel", "battlecruiser"), [])
+        self.assertIn(10015, cru_pool)
+        self.assertIn(10021, cru_pool)
+        self.assertNotIn(10020, cru_pool)
+        self.assertIn(10020, bc_pool)
+
+        # 2. Word-boundary & strict faction inference avoids core/blood false positives
+        for neutral_text in (
+            "Datacore",
+            "Power Core",
+            "Core Complexion",
+            "Core Garrison",
+            "The Score",
+            "Minecore Facilities",
+            "The Blood-Stained Stars",
+            "Bloodline",
+        ):
+            self.assertIsNone(imp.infer_faction_from_text(neutral_text), neutral_text)
+        self.assertEqual(imp.infer_faction_from_text("Rogue Drone Core"), "Rogue Drones")
+        self.assertEqual(imp.infer_faction_from_text("Contested Amarr Bastion of Blood"), "Amarr Empire")
+        self.assertEqual(imp.infer_faction_from_text("Core High Admiral"), "Serpentis")
+        self.assertEqual(imp.infer_faction_from_text("Blood Disciple"), "Blood Raider Covenant")
+
+        # 3. Trailing " I" removal lets untiered sentries return all matching tiers (I/II/III)
+        res_neut = self.sde.resolve_npc_row(
+            npc_class="Sentry",
+            raw_name="Angel Energy Neutralizer Sentry",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_neut["type_ids"], [28139, 28144, 28150])
+
+        res_tws = self.sde.resolve_npc_row(
+            npc_class="Sentry",
+            raw_name="Tower Sentry Angel",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_tws["type_ids"], [16740, 17146, 17147])
+
+        # 4. Crate lookup prefers crate-qualified item over bare commodity when both exist
+        self.assertEqual(self.sde.lookup_item_type_ids("Large Crates of Synth Supplies"), [29570])
+
+        # 5. Missing or 0-byte SQLite DB raises FileNotFoundError and NEVER creates a 0-byte stub
+        missing_db = self.root / "never_created.sqlite"
+        with self.assertRaises(FileNotFoundError):
+            imp.SdeIndex(missing_db, self.mission_ext)
+        self.assertFalse(missing_db.exists())
+
+        empty_db = self.root / "zero_byte.sqlite"
+        empty_db.write_bytes(b"")
+        with self.assertRaises(FileNotFoundError):
+            imp.SdeIndex(empty_db, self.mission_ext)
+
+    def test_r2_p2_fixes_difflib_comma_ellipsis_unclosed_and_linked_dungeon(self) -> None:
+        # 1. Difflib typo guard rejects distinct semantic words like Hunter vs Bunker
+        res_hunter = self.sde.resolve_npc_row(
+            npc_class="Battlecruiser",
+            raw_name="Blood Raider Hunter",
+            note="",
+            page_factions=["Blood Raider Covenant"],
+        )
+        self.assertNotIn(10022, res_hunter["type_ids"])
+
+        # 2. Stray comma in courier/mining objective never triggers int(",") ValueError
+        comma_courier = imp.extract_courier_payload("Deliver , to station", self.sde)
+        self.assertTrue(comma_courier is None or comma_courier["quantity"] is None)
+
+        # 3. Ellipsis truncation indicator preserved on concrete exact matches
+        res_ell = self.sde.resolve_npc_row(
+            npc_class="Frigate",
+            raw_name="Synth Gistii Ambusher/...",
+            note="",
+            page_factions=["Angel Cartel"],
+        )
+        self.assertEqual(res_ell["status"], "resolved_exact")
+        self.assertEqual(res_ell["type_ids"], [10005])
+        self.assertTrue(res_ell.get("had_ellipsis"))
+
+        # 4. Unclosed "{{" does not discard subsequent balanced templates
+        wiki_unclosed = (
+            "{{UnclosedTemplate|broken=1\n"
+            "{{CMBSiteInfo|name=Synthetic Raid|faction=Angel Cartel|rating=3}}\n"
+            "{{NPCTableHead|Initial}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+        )
+        parsed_unclosed = imp.parse_wiki_page(
+            title="Synthetic Raid",
+            categories=["Combat Anomalies"],
+            wikitext=wiki_unclosed,
+            sde=self.sde,
+        )
+        assert parsed_unclosed is not None
+        self.assertEqual(len(parsed_unclosed["units"]), 1)
+        self.assertEqual(parsed_unclosed["units"][0]["rooms"][0]["waves"][0]["spawns"][0]["resolution"]["type_ids"], [10005])
+
+        # 5. Bounded variant lookahead stops at next unit header
+        wiki_two_units = (
+            "{{CMBSiteInfo|name=Synthetic Raid|faction=Angel Cartel|rating=3}}\n"
+            "== Main Section ==\n"
+            "{{NPCTableHead|Initial}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Ambusher}}\n"
+            "{{CMBSiteInfo|name=Synthetic Second|faction=Angel Cartel|rating=3}}\n"
+            "== Type 1 - Sub Variant ==\n"
+            "{{NPCTableHead|Initial}}\n"
+            "{{NPCTableRow|Frigate|1|Synth Gistii Raider}}\n"
+        )
+        parsed_two = imp.parse_wiki_page(
+            title="Synthetic Page",
+            categories=["Combat Anomalies"],
+            wikitext=wiki_two_units,
+            sde=self.sde,
+        )
+        assert parsed_two is not None
+        self.assertEqual(len(parsed_two["units"]), 2)
+        self.assertIsNone(parsed_two["units"][0]["variant_name"])
+        self.assertEqual(parsed_two["units"][1]["variant_name"], "Type 1 - Sub Variant")
+
+        # 6. Linked mission_ext dungeon populates real sde_dungeons faction_id/difficulty
+        m_res = self.sde.match_sde_page(["Synthetic Linked Mission"], ["Angel Cartel"], [3])
+        self.assertEqual(m_res["mission_ids"], [9004])
+        self.assertEqual(m_res["dungeon_ids"], [4004])
+        self.assertEqual(m_res["dungeons"][0]["faction_id"], 500010)
+        self.assertEqual(m_res["dungeons"][0]["difficulty"], 3)
 
 
 if __name__ == "__main__":
