@@ -4008,5 +4008,158 @@ class TestGmBridgeScatterCapture1268(unittest.TestCase):
             self.assertEqual(res_fail["flight_recorder"]["scatters_observed"], [])
 
 
+class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
+    def test_cumulative_session_telemetry_transport_errors_and_handshake_builds(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            machonet_src = root / "crates" / "eve-machonet" / "src"
+            machonet_src.mkdir(parents=True)
+            (machonet_src / "lib.rs").write_text(
+                "pub const V24_BOOT_BUILD: u32 = 3_698_585;\n",
+                encoding="utf-8",
+            )
+            staged_app = root / "EVE.app"
+            staged_app.mkdir(parents=True)
+            (staged_app / "start.ini").write_text("build = 3600000\n", encoding="utf-8")
+
+            self.assertEqual(playtester._read_server_boot_build(root), 3698585)
+            self.assertEqual(playtester._read_client_boot_build(staged_app), 3600000)
+
+            qdir = root / "queue"
+            sdir = root / "step_1"
+            qdir.mkdir()
+            sdir.mkdir()
+            shot = root / "shot.png"
+            shot.write_bytes(b"png")
+            tb = root / "tb.log"
+            tb.write_text("", encoding="utf-8")
+            srv = root / "srv.log"
+            srv.write_text(
+                "2026-11-19T12:00:00Z INFO eve_server::quasar_grpc: listening on 127.0.0.1:50051\n",
+                encoding="utf-8",
+            )
+
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            oracle.reset_log_offsets(tb, srv)
+            oracle.set_handshake_builds(
+                client_boot_build=playtester._read_client_boot_build(staged_app),
+                server_boot_build=playtester._read_server_boot_build(root),
+            )
+
+            unseq_gateway_err = {
+                "kind": "quasar",
+                "service": "publicGateway",
+                "method": "Send",
+                "error": "Connection refused",
+            }
+            calls_step1 = [
+                {"seq": 1, "service": "account", "method": "GetEntry", "status": "OK"},
+                {"seq": 2, "service": "character", "method": "GetCharacterToSelect", "status": "OK"},
+                unseq_gateway_err,
+            ]
+
+            runner = playtester.PlaytesterRunner.__new__(playtester.PlaytesterRunner)
+            runner.worktree_dir = root
+            runner.staged_app = staged_app
+            runner.oracle = oracle
+            runner.client_proc = None
+            runner._session_flight_calls = []
+            runner._session_flight_seqs = set()
+
+            runner._record_session_flight_calls(calls_step1)
+            # Duplicate seq / same unseq dict must not double-count.
+            runner._record_session_flight_calls(calls_step1)
+
+            queued1 = oracle.evaluate_step(
+                step_num=1,
+                git_head="deadbeef",
+                decision={"action": {"type": "wait"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {
+                        "macho_calls": calls_step1,
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                },
+                ui_snapshot={"session": {"charid": 2100000001}},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(queued1, [])
+            snap1 = oracle._session_telemetry_payload()
+            self.assertEqual(snap1["server_request_count"], 2)
+            self.assertEqual(snap1["gateway_request_count"], 0)
+            self.assertEqual(snap1["telemetry"]["gateway_transport_error_count"], 1)
+            self.assertEqual(
+                snap1["handshake"],
+                {
+                    "client_boot_build": 3600000,
+                    "server_boot_build": 3698585,
+                    "build_mismatch": True,
+                },
+            )
+
+            # Startup Quasar log does not increment gateway count; non-startup warn or OK publicGatewaySvc does.
+            with srv.open("a", encoding="utf-8") as fh:
+                fh.write("2026-11-19T12:00:05Z WARN eve_server::quasar_grpc: UNAUTHENTICATED user=0\n")
+            with tb.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    'Traceback (most recent call last):\n  File "eve/client/ui/foo.py", line 10, in Bar\nRuntimeError: boom\n'
+                )
+
+            calls_step2 = [
+                {"seq": 3, "service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"},
+            ]
+            runner._record_session_flight_calls(calls_step2)
+            queued2 = oracle.evaluate_step(
+                step_num=2,
+                git_head="deadbeef",
+                decision={"action": {"type": "click"}, "bug_report": {"should_file": False}},
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {
+                        "macho_calls": calls_step2,
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                },
+                ui_snapshot={"session": {"charid": 2100000001}},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(len(queued2), 1)
+            bundle = json.loads(queued2[0].read_text(encoding="utf-8"))
+            self.assertEqual(bundle["server_request_count"], 3)
+            self.assertEqual(bundle["gateway_request_count"], 1)
+            self.assertTrue(bundle["handshake"]["build_mismatch"])
+            self.assertEqual(bundle["manual_report"]["client_build"], 3600000)
+            self.assertEqual(bundle["telemetry"]["gateway_transport_error_count"], 1)
+
+            runner.stop_client()
+            snap_after_stop = oracle._session_telemetry_payload()
+            self.assertEqual(snap_after_stop["server_request_count"], 0)
+            self.assertEqual(snap_after_stop["gateway_request_count"], 0)
+            self.assertEqual(snap_after_stop["handshake"]["client_boot_build"], 3600000)
+
+    def test_playtester_parse_args_backwards_compatible(self):
+        args = playtester.parse_args(["--scenario", "scenarios/warp.json", "--no-github-sync"])
+        self.assertEqual(args.scenarios, ["scenarios/warp.json"])
+        self.assertTrue(args.no_github_sync)
+
+        default_args = playtester.parse_args([])
+        self.assertEqual(default_args.scenarios, [])
+        self.assertFalse(default_args.no_github_sync)
+
+
 if __name__ == "__main__":
     unittest.main()

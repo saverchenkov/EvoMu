@@ -4628,6 +4628,120 @@ def _evaluate_step_assertions(
 # Zero-Tolerance Bug Oracle & Incident Bundle Emitter
 # ---------------------------------------------------------------------------
 
+_GATEWAY_SERVER_STATUS_RE = re.compile(
+    r"\bstatus\s*=\s*(?:2\d\d|400|401|403|404|409|422)\b", re.IGNORECASE
+)
+_CLIENT_TRANSPORT_FAILURE_RE = re.compile(
+    r"transport|connection|refused|timed?\s*out|deadline|unavailable|channel|"
+    r"socket|broken pipe|reset by peer|unreachable|\beof\b|\bdns\b|502\b|503\b|504\b",
+    re.IGNORECASE,
+)
+_QUASAR_LOG_STARTUP_RE = re.compile(
+    r"descriptor manifest|listening on|starting quasar|loaded quasar|descriptors loaded",
+    re.IGNORECASE,
+)
+
+
+def _read_server_boot_build(worktree_dir: Path) -> Optional[int]:
+    """Read `pub const V24_BOOT_BUILD: u32 = ...` from `eve-machonet/src/lib.rs`."""
+    candidates = [
+        worktree_dir / "crates" / "eve-machonet" / "src" / "lib.rs",
+        REPO_ROOT / "crates" / "eve-machonet" / "src" / "lib.rs",
+    ]
+    for path in candidates:
+        try:
+            if path.exists():
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                m = re.search(r"pub\s+const\s+V24_BOOT_BUILD\s*:\s*u32\s*=\s*([0-9_]+)\s*;", text)
+                if m:
+                    val = int(m.group(1).replace("_", ""))
+                    if val > 0:
+                        return val
+        except Exception:
+            pass
+    return None
+
+
+def _read_client_boot_build(staged_app: Optional[Path] = None) -> Optional[int]:
+    """Read `build = <id>` from staged client `start.ini` or cache directory name."""
+    candidates: List[Path] = []
+    if staged_app is not None:
+        candidates.extend(
+            [
+                staged_app / "start.ini",
+                staged_app / "Contents" / "Resources" / "start.ini",
+            ]
+        )
+    for ini_path in candidates:
+        try:
+            if ini_path.exists():
+                for line in ini_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    m = re.match(r"^\s*build\s*=\s*(\d+)\s*$", line)
+                    if m:
+                        return int(m.group(1))
+        except Exception:
+            pass
+    if staged_app is not None:
+        m_dir = re.search(r"client_build_(\d+)", staged_app.name)
+        if m_dir:
+            return int(m_dir.group(1))
+    return None
+
+
+def _classify_flight_entry_reach(mc: Dict[str, Any]) -> Tuple[bool, bool, bool]:
+    """
+    Classify a playtester flight-recorder entry as:
+      `(counts_server_request, counts_gateway_request, is_gateway_transport_error)`.
+    Distinguishes client-side failed `publicGateway` transport calls from server-reached RPCs.
+    """
+    kind = str(mc.get("kind") or "").lower()
+    svc = str(mc.get("service") or "").lower()
+    method = str(mc.get("method") or "").lower()
+    explicit_err = str(mc.get("error") or "").strip()
+    raw_status = mc.get("status")
+    if raw_status is None or not str(raw_status).strip():
+        status_str = f"ERR({explicit_err})" if explicit_err else "OK"
+    else:
+        status_str = str(raw_status).strip()
+    err_str = explicit_err or str(mc.get("result") or "").strip()
+    combined = f"{status_str} {err_str}".strip()
+
+    is_gateway = (
+        kind == "quasar" or "quasar" in svc or "gateway" in svc or "quasar" in method
+    )
+
+    if mc.get("transport_error") is True or mc.get("client_transport_failure") is True:
+        return (False, False, is_gateway)
+
+    if (status_str.upper().startswith("OK") and not explicit_err) or mc.get("reached_server") is True:
+        if svc == "publicgatewaysvc":
+            return (True, True, False)
+        return (not is_gateway, is_gateway, False)
+
+    if svc in ("quasar_grpc", "publicgatewaysvc") and _CLIENT_TRANSPORT_FAILURE_RE.search(combined):
+        return (False, False, True)
+    if svc == "quasar_grpc":
+        return (False, True, False)
+    if svc == "publicgatewaysvc":
+        return (True, True, False)
+
+    if is_gateway:
+        if _CLIENT_TRANSPORT_FAILURE_RE.search(combined) or not _GATEWAY_SERVER_STATUS_RE.search(
+            combined
+        ):
+            return (False, False, True)
+        return (False, True, False)
+
+    if status_str.upper().startswith(("ERR", "FAIL", "TIMEOUT")) and re.search(
+        r"connection\s*refused|connection\s*reset|socket\s*error|connect\s*timeout|transport\s*closed",
+        combined,
+        re.IGNORECASE,
+    ):
+        return (False, False, False)
+
+    return (True, False, False)
+
+
 class PlaytesterBugOracle:
     def __init__(
         self,
@@ -4649,12 +4763,131 @@ class PlaytesterBugOracle:
         self._prev_step_dropped_all_log_excs: bool = False
         self.last_unseen_tracebacks: List[Dict[str, str]] = []
         self.last_suppressed_tracebacks: List[Dict[str, str]] = []
+        self._session_server_request_count: int = 0
+        self._session_gateway_request_count: int = 0
+        self._session_gateway_transport_error_count: int = 0
+        self._session_flight_seqs_seen: set = set()
+        self._session_unseq_entry_ids: set[int] = set()
+        self._session_unseq_entry_refs: List[Dict[str, Any]] = []
+        self._session_client_boot_build: Optional[int] = None
+        self._session_server_boot_build: Optional[int] = _read_server_boot_build(self.worktree_dir)
         self._write_queue: Optional["queue.Queue[Optional[Tuple[Path, Dict[str, Any], bool]]]"] = None
         self._writer_thread: Optional[threading.Thread] = None
         if self.async_write:
             self._write_queue = queue.Queue()
             self._writer_thread = threading.Thread(target=self._async_writer_loop, daemon=True)
             self._writer_thread.start()
+
+    def reset_session_telemetry(
+        self,
+        *,
+        client_boot_build: Optional[int] = None,
+        server_boot_build: Optional[int] = None,
+    ) -> None:
+        self._session_server_request_count = 0
+        self._session_gateway_request_count = 0
+        self._session_gateway_transport_error_count = 0
+        self._session_flight_seqs_seen.clear()
+        self._session_unseq_entry_ids.clear()
+        self._session_unseq_entry_refs.clear()
+        if client_boot_build is not None and client_boot_build > 0:
+            self._session_client_boot_build = int(client_boot_build)
+        else:
+            self._session_client_boot_build = None
+        if server_boot_build is not None and server_boot_build > 0:
+            self._session_server_boot_build = int(server_boot_build)
+        else:
+            self._session_server_boot_build = _read_server_boot_build(self.worktree_dir)
+
+    def set_handshake_builds(
+        self,
+        *,
+        client_boot_build: Optional[int] = None,
+        server_boot_build: Optional[int] = None,
+    ) -> None:
+        if client_boot_build is not None and client_boot_build > 0:
+            self._session_client_boot_build = int(client_boot_build)
+        if server_boot_build is not None and server_boot_build > 0:
+            self._session_server_boot_build = int(server_boot_build)
+
+    def record_session_flight_calls(self, calls: Any, *, server_log_chunk: str = "") -> None:
+        """Accumulate cumulative session server/gateway RPC counts across steps."""
+        step_gateway_reached = 0
+        any_gateway_in_batch = False
+        if isinstance(calls, list):
+            for entry in calls:
+                if not isinstance(entry, dict):
+                    continue
+                _, gw_candidate, _ = _classify_flight_entry_reach(entry)
+                if gw_candidate:
+                    any_gateway_in_batch = True
+                seq_val = entry.get("seq")
+                if seq_val is not None:
+                    if seq_val in self._session_flight_seqs_seen:
+                        continue
+                    self._session_flight_seqs_seen.add(seq_val)
+                else:
+                    eid = id(entry)
+                    if eid in self._session_unseq_entry_ids:
+                        continue
+                    self._session_unseq_entry_ids.add(eid)
+                    self._session_unseq_entry_refs.append(entry)
+                srv_hit, gw_hit, gw_transport_err = _classify_flight_entry_reach(entry)
+                if srv_hit:
+                    self._session_server_request_count += 1
+                if gw_hit:
+                    self._session_gateway_request_count += 1
+                    step_gateway_reached += 1
+                if gw_transport_err:
+                    self._session_gateway_transport_error_count += 1
+
+        if server_log_chunk and step_gateway_reached == 0 and not any_gateway_in_batch:
+            srv_quasar_hits = sum(
+                1
+                for ln in server_log_chunk.splitlines()
+                if re.search(
+                    r"eve_server::quasar_grpc|quasar_grpc::|/eve_public\.|gateway\.Requests|gateway\.Events|publicGatewaySvc",
+                    ln,
+                )
+                and not _QUASAR_LOG_STARTUP_RE.search(ln)
+            )
+            if srv_quasar_hits > 0:
+                self._session_gateway_request_count += srv_quasar_hits
+
+    def _session_telemetry_payload(
+        self, ui_snapshot: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if isinstance(ui_snapshot, dict):
+            snap_build = _coerce_int_client_build(ui_snapshot.get("client_build"))
+            if snap_build > 0:
+                self._session_client_boot_build = snap_build
+        if self._session_server_boot_build is None:
+            self._session_server_boot_build = _read_server_boot_build(self.worktree_dir)
+
+        payload: Dict[str, Any] = {
+            "server_request_count": self._session_server_request_count,
+            "gateway_request_count": self._session_gateway_request_count,
+        }
+        hs: Dict[str, Any] = {}
+        if self._session_client_boot_build:
+            hs["client_boot_build"] = self._session_client_boot_build
+        if self._session_server_boot_build:
+            hs["server_boot_build"] = self._session_server_boot_build
+        if hs:
+            if self._session_client_boot_build and self._session_server_boot_build:
+                hs["build_mismatch"] = (
+                    self._session_client_boot_build < self._session_server_boot_build
+                )
+            else:
+                hs["build_mismatch"] = False
+            payload["handshake"] = hs
+        if self._session_gateway_transport_error_count > 0:
+            payload["telemetry"] = {
+                "server_request_count": self._session_server_request_count,
+                "gateway_request_count": self._session_gateway_request_count,
+                "gateway_transport_error_count": self._session_gateway_transport_error_count,
+            }
+        return payload
 
     def _check_destiny_client_logs(self, run_dir: Path) -> Optional[Dict[str, Any]]:
         """Run tools/classify_client_log.py (--expect parity) on run client logs when present."""
@@ -5271,6 +5504,7 @@ class PlaytesterBugOracle:
         fr_log_excs = fr.get("log_exceptions") or []
         fr_quasar_errs = fr.get("quasar_errors") or []
         fr_macho_excs = fr.get("macho_exceptions") or []
+        self.record_session_flight_calls(fr.get("macho_calls") or [], server_log_chunk=new_srv)
         expected_text = str((decision.get("action") or {}).get("expected_ui_and_state_change") or "")
         fr_fallback_trace = new_tb if len(fr_log_excs) == 1 else ""
         fr_non_benign_log_excs, fr_ignorable_log_excs = self.partition_log_exceptions(
@@ -5720,25 +5954,31 @@ class PlaytesterBugOracle:
                             "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
                         }
                     )
+            telemetry_payload = self._session_telemetry_payload(ui_snapshot=ui_snapshot)
+            manual_report: Dict[str, Any] = {
+                "report_key": f"playtester_step{step_num:04d}_{fingerprint}",
+                "category_id": inc["subsystem"],
+                "category_name": inc["kind"],
+                "title": clean_title,
+                "description": inc["summary"],
+                "reproduction_steps": (
+                    f"1. Step {step_num} action: `{json.dumps(decision.get('action'))}`\n"
+                    f"2. Observation: {decision.get('observation')}\n"
+                    f"3. State diff: `{json.dumps(exec_res.get('state_diff') if isinstance(exec_res, dict) else None)}`"
+                ),
+            }
+            hs_build = (telemetry_payload.get("handshake") or {}).get("client_boot_build")
+            if hs_build:
+                manual_report["client_build"] = hs_build
             bundle = {
                 "fingerprint": fingerprint,
                 "stack_hash": fp_i64,
                 "stack_key": f"playtester:{inc['subsystem']}:{inc['kind']}",
                 "trace": inc["traceback"] or "",
                 "report_source": "f12_manual",
-                "manual_report": {
-                    "report_key": f"playtester_step{step_num:04d}_{fingerprint}",
-                    "category_id": inc["subsystem"],
-                    "category_name": inc["kind"],
-                    "title": clean_title,
-                    "description": inc["summary"],
-                    "reproduction_steps": (
-                        f"1. Step {step_num} action: `{json.dumps(decision.get('action'))}`\n"
-                        f"2. Observation: {decision.get('observation')}\n"
-                        f"3. State diff: `{json.dumps(exec_res.get('state_diff') if isinstance(exec_res, dict) else None)}`"
-                    ),
-                },
+                "manual_report": manual_report,
                 "flight_recorder": fr_calls,
+                **telemetry_payload,
                 "timestamp": utc_now_iso(),
                 "git_head": git_head,
                 "step": step_num,
@@ -5952,6 +6192,7 @@ class PlaytesterBugOracle:
         polling_storm_per_min: float = 200.0,
     ) -> List[Path]:
         """Harvest flight-recorder anomalies at session end and write deduplicated bug bundles."""
+        self.record_session_flight_calls(calls)
         anomalies = self.analyze_flight_recorder_anomalies(
             calls,
             min_calls=min_calls,
@@ -5964,6 +6205,7 @@ class PlaytesterBugOracle:
         created_files: List[Path] = []
         known = self.memory.data.setdefault("filed_incident_fingerprints", [])
         sess_raw = dict(session or {})
+        telemetry_payload = self._session_telemetry_payload()
         for anom in anomalies:
             fp_src = f"flight_recorder:{anom['kind']}:{anom['service']}.{anom['method']}"
             fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()[:16]
@@ -6012,6 +6254,7 @@ class PlaytesterBugOracle:
                     if k != "sample_calls"
                 },
                 "flight_recorder": fr_calls,
+                **telemetry_payload,
                 "timestamp": utc_now_iso(),
                 "git_head": git_head,
                 "step": step_num,
@@ -6226,6 +6469,7 @@ class PlaytesterRunner:
             sync_github=not args.no_github_sync,
             async_write=True,
         )
+        self._refresh_oracle_handshake_builds()
 
     def _server_bin_mtime(self) -> Optional[float]:
         for rel in ("target/debug/eve-server", "target/release/eve-server"):
@@ -6352,9 +6596,49 @@ class PlaytesterRunner:
     def _active_persona_id(self) -> str:
         return str((self.memory.data.get("active_persona") or {}).get("id") or "")
 
+    def _refresh_oracle_handshake_builds(self, client_build: Any = None) -> None:
+        oracle = getattr(self, "oracle", None)
+        if oracle is None:
+            return
+        resolved_client = _coerce_int_client_build(client_build)
+        if resolved_client <= 0:
+            resolved_client = _read_client_boot_build(getattr(self, "staged_app", None))
+        oracle.set_handshake_builds(
+            client_boot_build=resolved_client if resolved_client > 0 else None,
+            server_boot_build=_read_server_boot_build(getattr(self, "worktree_dir", REPO_ROOT)),
+        )
+
+    def _sync_initial_session_flight_calls(self, boot_payload: Any = None) -> None:
+        boot_state = _unwrap_state_payload(boot_payload) if isinstance(boot_payload, dict) else {}
+        client_build = (
+            boot_state.get("client_build")
+            or (boot_payload.get("client_build") if isinstance(boot_payload, dict) else None)
+        )
+        self._refresh_oracle_handshake_builds(client_build)
+        if isinstance(boot_payload, dict):
+            boot_fr = boot_payload.get("flight_recorder")
+            if isinstance(boot_fr, dict) and boot_fr.get("macho_calls"):
+                self._record_session_flight_calls(boot_fr.get("macho_calls"))
+                return
+        if (
+            getattr(self, "rpc", None) is not None
+            and getattr(self, "client_proc", None) is not None
+            and self.client_proc.poll() is None
+        ):
+            try:
+                fr_resp = self.rpc.call("get_flight_recorder", {"since_seq": 0}, timeout=5.0) or {}
+                if isinstance(fr_resp.get("result"), dict):
+                    fr_resp = fr_resp["result"]
+                self._record_session_flight_calls(fr_resp.get("macho_calls") or [])
+            except Exception:
+                pass
+
     def _record_session_flight_calls(self, calls: Any) -> None:
         if not isinstance(calls, list):
             return
+        oracle = getattr(self, "oracle", None)
+        if oracle is not None:
+            oracle.record_session_flight_calls(calls)
         for entry in calls:
             if not isinstance(entry, dict):
                 continue
@@ -7163,6 +7447,7 @@ class PlaytesterRunner:
                 {"timeout_ms": 90000, "select_Wait_ms": 90000},
                 timeout=110.0,
             )
+            self._sync_initial_session_flight_calls(boot)
             log_info(
                 f"Session ready: charid={boot.get('session', {}).get('charid')} "
                 f"view={boot.get('active_view')} stationid={boot.get('session', {}).get('stationid')} "
@@ -7198,6 +7483,16 @@ class PlaytesterRunner:
                 pass
         self.client_proc = None
         self.corrupted_viewstate_streak = 0
+        if hasattr(self, "_session_flight_calls"):
+            self._session_flight_calls.clear()
+        if hasattr(self, "_session_flight_seqs"):
+            self._session_flight_seqs.clear()
+        oracle = getattr(self, "oracle", None)
+        if oracle is not None:
+            oracle.reset_session_telemetry(
+                client_boot_build=_read_client_boot_build(getattr(self, "staged_app", None)),
+                server_boot_build=_read_server_boot_build(getattr(self, "worktree_dir", REPO_ROOT)),
+            )
 
     def hot_reload_server_boundary(self) -> bool:
         """
@@ -10028,6 +10323,7 @@ class ScenarioRunner(PlaytesterRunner):
                 {"timeout_ms": 90000, "select_Wait_ms": 90000, "defer_char_select": defer_cs},
                 timeout=110.0,
             ) or {}
+            self._sync_initial_session_flight_calls(self._last_boot_result)
             return True
         except Exception as exc:
             log_err(f"Scenario bootstrap_session failed: {exc}")

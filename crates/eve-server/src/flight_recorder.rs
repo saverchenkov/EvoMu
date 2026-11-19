@@ -358,6 +358,28 @@ fn percentile_sorted(sorted: &[u64], pct_num: usize, pct_den: usize) -> u64 {
     sorted[idx]
 }
 
+/// Client/server MachoNet handshake boot-build metadata captured for incident triage (`BF-1344-03`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HandshakeBuildMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_boot_build: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_boot_build: Option<u32>,
+    #[serde(default)]
+    pub build_mismatch: bool,
+}
+
+/// Cumulative per-session RPC and handshake telemetry queried by bug-reporting bundles.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionRpcTelemetry {
+    #[serde(default)]
+    pub server_request_count: u64,
+    #[serde(default)]
+    pub gateway_request_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake: Option<HandshakeBuildMetadata>,
+}
+
 pub struct FlightRecorder {
     sessions: RwLock<HashMap<u64, VecDeque<FlightRecorderEntry>>>,
     outbound_ledgers: RwLock<HashMap<u64, VecDeque<OutboundLedgerEntry>>>,
@@ -368,6 +390,11 @@ pub struct FlightRecorder {
     sequencer_counters: RwLock<HashMap<u64, SessionSequencerCounters>>,
     invariant_violations: RwLock<HashMap<u64, VecDeque<SequencerInvariantViolationRecord>>>,
     prevented_jolts: RwLock<HashMap<u64, VecDeque<PreventedJoltRecord>>>,
+    session_request_counts: RwLock<HashMap<u64, u64>>,
+    session_gateway_counts: RwLock<HashMap<u64, u64>>,
+    user_gateway_counts: RwLock<HashMap<u64, u64>>,
+    session_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
+    user_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
 }
 
 impl Default for FlightRecorder {
@@ -394,6 +421,11 @@ impl FlightRecorder {
             sequencer_counters: RwLock::new(HashMap::new()),
             invariant_violations: RwLock::new(HashMap::new()),
             prevented_jolts: RwLock::new(HashMap::new()),
+            session_request_counts: RwLock::new(HashMap::new()),
+            session_gateway_counts: RwLock::new(HashMap::new()),
+            user_gateway_counts: RwLock::new(HashMap::new()),
+            session_handshakes: RwLock::new(HashMap::new()),
+            user_handshakes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -436,6 +468,11 @@ impl FlightRecorder {
                 queue.pop_front();
             }
             queue.push_back(entry);
+        }
+
+        Self::increment_bounded_counter(&self.session_request_counts, session_id);
+        if service == "publicGatewaySvc" {
+            Self::increment_bounded_counter(&self.session_gateway_counts, session_id);
         }
     }
 
@@ -895,6 +932,146 @@ impl FlightRecorder {
             .read()
             .ok()
             .and_then(|lock| lock.get(&session_id).cloned())
+    }
+
+    fn increment_bounded_counter(map: &RwLock<HashMap<u64, u64>>, key: u64) {
+        if let Ok(mut lock) = map.write() {
+            if lock.len() >= MAX_TRACKED_SESSIONS && !lock.contains_key(&key) {
+                if let Some(oldest) = lock.keys().next().copied() {
+                    lock.remove(&oldest);
+                }
+            }
+            *lock.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    fn upsert_bounded_handshake(
+        map: &RwLock<HashMap<u64, HandshakeBuildMetadata>>,
+        key: u64,
+        client_boot_build: Option<u32>,
+        server_boot_build: u32,
+        build_mismatch: bool,
+    ) {
+        if let Ok(mut lock) = map.write() {
+            if lock.len() >= MAX_TRACKED_SESSIONS && !lock.contains_key(&key) {
+                if let Some(oldest) = lock.keys().next().copied() {
+                    lock.remove(&oldest);
+                }
+            }
+            let entry = lock.entry(key).or_default();
+            if let Some(cb) = client_boot_build {
+                entry.client_boot_build = Some(cb);
+            }
+            entry.server_boot_build = Some(server_boot_build);
+            let incompatible = entry
+                .client_boot_build
+                .is_some_and(|c| c < server_boot_build);
+            entry.build_mismatch = entry.build_mismatch || build_mismatch || incompatible;
+        }
+    }
+
+    /// Records a server-reached Quasar gRPC / public gateway request (`BF-1344-03`).
+    pub fn record_gateway_request(&self, online_session_id: Option<u64>, user_id: Option<u64>) {
+        if let Some(sid) = online_session_id.filter(|&id| id > 0) {
+            Self::increment_bounded_counter(&self.session_gateway_counts, sid);
+        }
+        if let Some(uid) = user_id.filter(|&id| id > 0) {
+            Self::increment_bounded_counter(&self.user_gateway_counts, uid);
+        }
+    }
+
+    /// Records client and server boot builds observed during MachoNet handshake (`BF-1344-03`).
+    pub fn record_handshake_builds(
+        &self,
+        session_id: u64,
+        user_id: Option<u64>,
+        client_boot_build: Option<u32>,
+        server_boot_build: u32,
+        build_mismatch: bool,
+    ) {
+        if session_id > 0 {
+            Self::upsert_bounded_handshake(
+                &self.session_handshakes,
+                session_id,
+                client_boot_build,
+                server_boot_build,
+                build_mismatch,
+            );
+        }
+        if let Some(uid) = user_id.filter(|&id| id > 0) {
+            let resolved_client = client_boot_build.or_else(|| {
+                if session_id > 0 {
+                    self.session_handshakes
+                        .read()
+                        .ok()
+                        .and_then(|lock| lock.get(&session_id).and_then(|h| h.client_boot_build))
+                } else {
+                    None
+                }
+            });
+            Self::upsert_bounded_handshake(
+                &self.user_handshakes,
+                uid,
+                resolved_client,
+                server_boot_build,
+                build_mismatch,
+            );
+        }
+    }
+
+    /// Returns cumulative server/gateway RPC counts and handshake builds for `(session_id, user_id)`.
+    pub fn get_session_telemetry(
+        &self,
+        session_id: u64,
+        user_id: Option<u64>,
+    ) -> SessionRpcTelemetry {
+        let server_request_count = self
+            .session_request_counts
+            .read()
+            .ok()
+            .and_then(|lock| lock.get(&session_id).copied())
+            .unwrap_or(0);
+        let sess_gw = if session_id > 0 {
+            self.session_gateway_counts
+                .read()
+                .ok()
+                .and_then(|lock| lock.get(&session_id).copied())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let user_gw = user_id
+            .filter(|&uid| uid > 0)
+            .and_then(|uid| {
+                self.user_gateway_counts
+                    .read()
+                    .ok()
+                    .and_then(|lock| lock.get(&uid).copied())
+            })
+            .unwrap_or(0);
+        let gateway_request_count = sess_gw.max(user_gw);
+        let handshake = if session_id > 0 {
+            self.session_handshakes
+                .read()
+                .ok()
+                .and_then(|lock| lock.get(&session_id).cloned())
+        } else {
+            None
+        }
+        .or_else(|| {
+            user_id.filter(|&uid| uid > 0).and_then(|uid| {
+                self.user_handshakes
+                    .read()
+                    .ok()
+                    .and_then(|lock| lock.get(&uid).cloned())
+            })
+        });
+
+        SessionRpcTelemetry {
+            server_request_count,
+            gateway_request_count,
+            handshake,
+        }
     }
 }
 

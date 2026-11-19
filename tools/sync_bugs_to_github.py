@@ -65,6 +65,14 @@ _CLIENT_FRAME_WRAPPER_FILES = _TRANSPORT_WRAPPER_FILES | {
     "bluepyimpl.py",
 }
 
+
+def _strip_py_extension(filename: str) -> str:
+    base = os.path.basename(filename.replace("\\", "/")).lower()
+    return re.sub(r"\.py[a-z0-9]*$", "", base)
+
+
+_CLIENT_FRAME_WRAPPER_STEMS = {_strip_py_extension(name) for name in _CLIENT_FRAME_WRAPPER_FILES}
+
 _SERVER_REQUEST_COUNT_KEYS = (
     "server_requests",
     "server_request_count",
@@ -114,7 +122,10 @@ _NOISE_LINE_PREFIXES = (
 )
 
 _FILE_LINE_RE = re.compile(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+([^\s)]+))?')
-_EVE_PRE_FRAME_RE = re.compile(r"^(?:<pre>)?([^\s(]+\.py[a-z]*)\((\d+)\)\s*([^\s]+)?")
+_EVE_PRE_FRAME_RE = re.compile(r"^(?:<pre>)?(.+?\.py[a-z]*)\((\d+)\)\s*([^\s]+)?")
+_LOG_TRACEBACK_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?LogTraceback\s+args=")
+_LOG_CALL_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?_?Log(?:Exception|Traceback)\s+args=")
+_CALLSTACK_SPLIT_RE = re.compile(r"(?m)^\s*CALLSTACK:\s*$")
 
 
 def _fnv1a_i64(signature: str) -> int:
@@ -132,15 +143,41 @@ def _get_bundle_trace(bundle: Dict[str, Any]) -> str:
     return str(bundle.get("trace") or bundle.get("traceback") or "")
 
 
-def _parse_logtraceback_args(line: str) -> str:
-    m = re.match(r"^log\.LogTraceback\s+args=(\(.*\))", line)
+def _extract_balanced_tuple_repr(text: str) -> str:
+    """Extracts the leading parenthesized `args=(...)` tuple before trailing `kwargs=...`."""
+    if not text.startswith("("):
+        return re.sub(r"\s+kwargs=.*$", "", text).strip()
+    depth = 0
+    quote: Optional[str] = None
+    escaped = False
+    for idx, ch in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[: idx + 1]
+    kw_idx = text.rfind("kwargs=")
+    if kw_idx != -1:
+        return text[:kw_idx].strip()
+    return text
+
+
+def _parse_logtraceback_args(line: str, *, pattern: re.Pattern[str] = _LOG_TRACEBACK_ARGS_RE) -> str:
+    m = pattern.match(line)
     if not m:
         return ""
-    raw_tuple = m.group(1)
-    # Trim trailing kwargs={} if present after closing paren.
-    kw_idx = raw_tuple.rfind("kwargs=")
-    if kw_idx != -1:
-        raw_tuple = raw_tuple[:kw_idx].strip()
+    raw_tuple = _extract_balanced_tuple_repr(line[m.end() :].strip())
     try:
         parsed = ast.literal_eval(raw_tuple)
         if isinstance(parsed, tuple):
@@ -153,22 +190,13 @@ def _parse_logtraceback_args(line: str) -> str:
 def _pick_leaf_frame(frames: List[Tuple[str, str, Optional[str]]]) -> Tuple[str, str, Optional[str]]:
     chosen = frames[-1]
     for cand in reversed(frames):
-        if cand[0].lower() not in _CLIENT_FRAME_WRAPPER_FILES:
+        if _strip_py_extension(cand[0]) not in _CLIENT_FRAME_WRAPPER_STEMS:
             chosen = cand
             break
     return chosen
 
 
-def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
-    """
-    Extracts (exception_class, error_msg, location) from a Python traceback,
-    playtester log capture (`logmodule.LogException` / `log.LogTraceback`), or EVE
-    `alert.SendClientStackTraceAlert` formatted exception block.
-    """
-    lines = [line.strip() for line in trace.strip().splitlines() if line.strip()]
-    if not lines:
-        return "UnknownException", "No traceback provided", stack_key or "unknown"
-
+def _extract_exception_from_lines(lines: List[str]) -> Tuple[str, str]:
     exc_class = ""
     msg = ""
     for idx, line in enumerate(lines):
@@ -188,21 +216,28 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
     if not exc_class:
         stacktrace_msg = ""
         logtraceback_msg = ""
+        saw_logtraceback = False
         for line in lines:
             m_st = re.match(r"^STACKTRACE\s+#\d+(?:.*?\s:\s*|[^:]*:\s*)(.+)$", line)
             if m_st and not stacktrace_msg:
                 stacktrace_msg = m_st.group(1).strip()
-            if line.startswith("log.LogTraceback args=") and not logtraceback_msg:
-                logtraceback_msg = _parse_logtraceback_args(line)
+            if _LOG_TRACEBACK_ARGS_RE.match(line):
+                saw_logtraceback = True
+                if not logtraceback_msg:
+                    logtraceback_msg = _parse_logtraceback_args(line)
 
         if logtraceback_msg:
             exc_class, msg = "LogTraceback", logtraceback_msg
         elif stacktrace_msg:
             exc_class, msg = "LogTraceback", stacktrace_msg
+        elif saw_logtraceback:
+            exc_class, msg = "LogTraceback", ""
 
     if not exc_class:
         candidate_lines: List[str] = []
         skip_next_code_line = False
+        fallback_logexc_msg = ""
+        saw_logexc_call = False
         for line in lines:
             if _FILE_LINE_RE.search(line):
                 skip_next_code_line = True
@@ -210,10 +245,23 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
             if _EVE_PRE_FRAME_RE.match(line):
                 skip_next_code_line = False
                 continue
-            if any(line.startswith(p) for p in _NOISE_LINE_PREFIXES) or line in ("None", "{", "}"):
+            if any(line.startswith(p) for p in _NOISE_LINE_PREFIXES) or line in (
+                "None",
+                "NoneType: None",
+                "{",
+                "}",
+            ):
                 skip_next_code_line = False
                 continue
-            if line.startswith("Traceback (most recent call last):") or line.startswith("logmodule.LogException Traceback"):
+            if _LOG_CALL_ARGS_RE.match(line):
+                saw_logexc_call = True
+                if not fallback_logexc_msg:
+                    fallback_logexc_msg = _parse_logtraceback_args(line, pattern=_LOG_CALL_ARGS_RE)
+                skip_next_code_line = False
+                continue
+            if line.startswith("Traceback (most recent call last):") or line.startswith(
+                "logmodule.LogException Traceback"
+            ):
                 skip_next_code_line = False
                 continue
             if line.startswith(("EXCEPTION #", "STACKTRACE #")):
@@ -227,23 +275,28 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
             skip_next_code_line = False
             candidate_lines.append(line)
 
-        last_line = candidate_lines[-1] if candidate_lines else lines[-1]
-        if ":" in last_line:
-            exc_class, msg = last_line.split(":", 1)
-            exc_class, msg = exc_class.strip(), msg.strip()
-        else:
-            exc_class = last_line.strip()
-            msg = ""
+        if candidate_lines:
+            last_line = candidate_lines[-1]
+            if ":" in last_line:
+                exc_class, msg = last_line.split(":", 1)
+                exc_class, msg = exc_class.strip(), msg.strip()
+            else:
+                exc_class = last_line.strip()
+                msg = ""
+        elif saw_logexc_call:
+            exc_class = "LogException"
+            msg = fallback_logexc_msg
 
-    clean_stack_key = stack_key.strip() if stack_key else ""
-    if clean_stack_key.startswith(("Caught at:", "Thrown at:")):
-        clean_stack_key = ""
-    location = clean_stack_key or "unknown"
+    return exc_class, msg
 
+
+def _extract_location_from_lines(lines: List[str]) -> Optional[str]:
     # Collect EVE `<pre>/path/file.py(123) fn` or `Traced at:` frames cleanly.
     thrown_idx = next((i for i, l in enumerate(lines) if l.startswith("Thrown at:")), None)
     traced_idx = next((i for i, l in enumerate(lines) if l.startswith("Traced at:")), None)
-    search_start = thrown_idx + 1 if thrown_idx is not None else (traced_idx + 1 if traced_idx is not None else 0)
+    search_start = (
+        thrown_idx + 1 if thrown_idx is not None else (traced_idx + 1 if traced_idx is not None else 0)
+    )
     search_lines = lines[search_start:]
 
     pre_frames: List[Tuple[str, str, Optional[str]]] = []
@@ -259,8 +312,7 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
 
     if pre_frames:
         filepath, lineno, fn = _pick_leaf_frame(pre_frames)
-        location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
-        return exc_class, msg, location
+        return f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
 
     py_frames: List[Tuple[str, str, Optional[str]]] = []
     for line in lines:
@@ -271,7 +323,50 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
 
     if py_frames:
         filepath, lineno, fn = _pick_leaf_frame(py_frames)
-        location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
+        return f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
+
+    return None
+
+
+def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
+    """
+    Extracts (exception_class, error_msg, location) from a Python traceback,
+    playtester log capture (`logmodule.LogException` / `log.LogTraceback`), or EVE
+    `alert.SendClientStackTraceAlert` formatted exception block.
+    """
+    raw = trace.replace("\r\n", "\n").strip()
+    if not raw:
+        return "UnknownException", "No traceback provided", stack_key or "unknown"
+
+    parts = _CALLSTACK_SPLIT_RE.split(raw, maxsplit=1)
+    primary_lines = [line.strip() for line in parts[0].splitlines() if line.strip()]
+    callstack_lines = (
+        [line.strip() for line in parts[1].splitlines() if line.strip()] if len(parts) > 1 else []
+    )
+    all_lines = primary_lines or callstack_lines
+
+    exc_class, msg = _extract_exception_from_lines(primary_lines)
+    if not exc_class and callstack_lines:
+        exc_class, msg = _extract_exception_from_lines(callstack_lines)
+    if not exc_class:
+        last_line = all_lines[-1]
+        if ":" in last_line:
+            exc_class, msg = last_line.split(":", 1)
+            exc_class, msg = exc_class.strip(), msg.strip()
+        else:
+            exc_class, msg = last_line.strip(), ""
+
+    clean_stack_key = stack_key.strip() if stack_key else ""
+    if clean_stack_key.startswith(("Caught at:", "Thrown at:")):
+        clean_stack_key = ""
+    location = clean_stack_key or "unknown"
+
+    # Prefer throw-site frames before `\nCALLSTACK:\n`, falling back to `CALLSTACK:` only when primary lacks frames.
+    parsed_loc = _extract_location_from_lines(primary_lines)
+    if parsed_loc is None and callstack_lines:
+        parsed_loc = _extract_location_from_lines(callstack_lines)
+    if parsed_loc is not None:
+        location = parsed_loc
 
     return exc_class, msg, location
 
@@ -320,6 +415,104 @@ def _first_present_scalar(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) -
     return None
 
 
+_GATEWAY_SERVER_STATUS_RE = re.compile(
+    r"\bstatus\s*=\s*(?:2\d\d|400|401|403|404|409|422)\b", re.IGNORECASE
+)
+_CLIENT_TRANSPORT_FAILURE_RE = re.compile(
+    r"transport|connection|refused|timed?\s*out|deadline|unavailable|channel|"
+    r"socket|broken pipe|reset by peer|unreachable|\beof\b|\bdns\b|502\b|503\b|504\b",
+    re.IGNORECASE,
+)
+_QUASAR_LOG_STARTUP_RE = re.compile(
+    r"descriptor manifest|listening on|starting quasar|loaded quasar|descriptors loaded",
+    re.IGNORECASE,
+)
+
+
+def _is_positive_identity(val: Any) -> bool:
+    if isinstance(val, bool) or val is None:
+        return False
+    if isinstance(val, int):
+        return val > 0
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s.lower() in ("none", "null", "0"):
+            return False
+        if s.isdigit():
+            return int(s) > 0
+        return True
+    return False
+
+
+def _has_authenticated_session_evidence(bundle: Dict[str, Any]) -> bool:
+    """Returns True when bundle session/ledger/destiny state proves the client reached eve-server."""
+    session = bundle.get("session")
+    if isinstance(session, dict):
+        for key in ("user_id", "userid", "character_id", "charid"):
+            if _is_positive_identity(session.get(key)):
+                return True
+    outbound = bundle.get("outbound_ledger")
+    if isinstance(outbound, list) and len(outbound) > 0:
+        return True
+    destiny = bundle.get("destiny_stamps")
+    if isinstance(destiny, list) and len(destiny) > 0:
+        return True
+    return False
+
+
+def _is_client_transport_failure_call(call: Any) -> bool:
+    """Detects client-side transport errors (e.g. refused/timed-out publicGateway) that never reached server."""
+    if not isinstance(call, dict):
+        return False
+    if call.get("transport_error") is True or call.get("client_transport_failure") is True:
+        return True
+    if call.get("reached_server") is True:
+        return False
+
+    svc = str(call.get("service") or "").lower()
+    method = str(call.get("method") or "").lower()
+    err_str = str(call.get("error") or "").strip()
+    raw_status = call.get("status")
+    if raw_status is None or not str(raw_status).strip():
+        status_str = f"ERR({err_str})" if err_str else ""
+    else:
+        status_str = str(raw_status).strip()
+    combined_status = f"{status_str} {err_str}".strip()
+    is_gateway = "quasar" in svc or "gateway" in svc or "quasar" in method
+
+    if status_str.upper().startswith("OK") and not err_str:
+        return False
+
+    # Server-recorded gateway services only appear in FlightRecorder after hitting eve-server.
+    if svc in ("quasar_grpc", "publicgatewaysvc") and not _CLIENT_TRANSPORT_FAILURE_RE.search(combined_status):
+        return False
+
+    if is_gateway and (status_str.upper().startswith(("ERR", "FAIL", "TIMEOUT")) or bool(err_str)):
+        if _CLIENT_TRANSPORT_FAILURE_RE.search(combined_status):
+            return True
+        if not _GATEWAY_SERVER_STATUS_RE.search(combined_status):
+            return True
+        return False
+
+    if (status_str.upper().startswith(("ERR", "FAIL", "TIMEOUT")) or bool(err_str)) and re.search(
+        r"connection\s*refused|connection\s*reset|socket\s*error|connect\s*timeout|transport\s*closed",
+        combined_status,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _is_gateway_flight_call_reached_server(call: Any) -> bool:
+    if not isinstance(call, dict):
+        return False
+    svc = str(call.get("service") or "").lower()
+    method = str(call.get("method") or "").lower()
+    if not ("quasar" in svc or "gateway" in svc or "quasar" in method):
+        return False
+    return not _is_client_transport_failure_call(call)
+
+
 def _extract_session_request_counts(bundle: Dict[str, Any]) -> Dict[str, Any]:
     """Inspects session request counts reaching the server and public gateway."""
     scopes = _iter_bundle_scopes(bundle)
@@ -331,30 +524,36 @@ def _extract_session_request_counts(bundle: Dict[str, Any]) -> Dict[str, Any]:
     logs_after = bundle.get("server_logs_after") or []
     all_logs = [str(ln) for ln in logs_before] + [str(ln) for ln in logs_after]
 
-    observed_server = len(flight_recorder) + len(all_logs)
-    observed_gateway = sum(
+    observed_server = sum(
         1
         for call in flight_recorder
-        if isinstance(call, dict)
-        and (
-            "quasar" in str(call.get("service", "")).lower()
-            or "gateway" in str(call.get("service", "")).lower()
-            or "quasar" in str(call.get("method", "")).lower()
-        )
+        if isinstance(call, dict) and not _is_client_transport_failure_call(call)
+    )
+    observed_gateway = sum(
+        1 for call in flight_recorder if _is_gateway_flight_call_reached_server(call)
     ) + sum(
         1
         for ln in all_logs
-        if re.search(r"eve_server::quasar_grpc|quasar_grpc::|/eve_public\.|gateway\.Requests", ln)
-        and "descriptor manifest" not in ln.lower()
+        if re.search(
+            r"eve_server::quasar_grpc|quasar_grpc::|/eve_public\.|gateway\.Requests|gateway\.Events|publicGatewaySvc",
+            ln,
+        )
+        and not _QUASAR_LOG_STARTUP_RE.search(ln)
     )
 
     server_requests = explicit_server if explicit_server is not None else observed_server
     gateway_requests = explicit_gateway if explicit_gateway is not None else observed_gateway
+    reached_server = (
+        server_requests > 0
+        or observed_server > 0
+        or _has_authenticated_session_evidence(bundle)
+    )
     return {
         "server_requests": server_requests,
         "gateway_requests": gateway_requests,
         "server_requests_explicit": explicit_server is not None,
         "gateway_requests_explicit": explicit_gateway is not None,
+        "reached_server": reached_server,
     }
 
 
@@ -365,6 +564,9 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
     server_build = _first_present_scalar(scopes, _SERVER_BUILD_KEYS)
 
     explicit_mismatch = any(scope.get("build_mismatch") is True for scope in scopes)
+    explicit_compatible = not explicit_mismatch and any(
+        scope.get("build_mismatch") is False for scope in scopes
+    )
 
     logs_and_trace = (
         [str(ln) for ln in (bundle.get("server_logs_before") or [])]
@@ -392,9 +594,20 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     norm_client = client_build.strip() if client_build else None
     norm_server = server_build.strip() if server_build else None
-    mismatch = explicit_mismatch or (
+    builds_differ = (
         norm_client is not None and norm_server is not None and norm_client != norm_server
     )
+    if explicit_mismatch:
+        mismatch = True
+    elif explicit_compatible:
+        mismatch = False
+    elif builds_differ:
+        if norm_client.isdigit() and norm_server.isdigit():
+            mismatch = int(norm_client) < int(norm_server)
+        else:
+            mismatch = True
+    else:
+        mismatch = False
     return {
         "client_build": norm_client,
         "server_build": norm_server,
@@ -411,21 +624,35 @@ def _is_gateway_failure_bundle(bundle: Dict[str, Any]) -> bool:
         str(manual.get(k) or "") for k in ("title", "description")
     )
     combined = "\n".join(part for part in (trace, stack_key, manual_text) if part)
-    if not combined:
-        return False
+    if combined:
+        if re.search(r"ServerException\b|GenericInternalServerError\b|CampaignRequestError\b", combined):
+            return True
+        if "Could not fetch owned ship cosmetic licenses" in combined:
+            return True
+        if "invalid character on request" in combined and ("dispatched" in combined or "quasar" in combined.lower()):
+            return True
+        if "Request timed out" in combined and re.search(
+            r"InternalServerError|request_messenger|quasar|gateway|PLEX", combined, re.IGNORECASE
+        ):
+            return True
+        if re.search(
+            r"(?:quasar|request_messenger)\.py|eve_public\.gateway|(?:quasar(?:_grpc)?|public\s*gateway)\b",
+            combined,
+            re.IGNORECASE,
+        ) and re.search(r"Error|Exception|Timeout|timed out|failed|refused|unavailable", combined, re.IGNORECASE):
+            return True
 
-    if re.search(r"ServerException\b|GenericInternalServerError\b|CampaignRequestError\b", combined):
-        return True
-    if "Could not fetch owned ship cosmetic licenses" in combined:
-        return True
-    if "invalid character on request" in combined and ("dispatched" in combined or "quasar" in combined.lower()):
-        return True
-    if "Request timed out" in combined and re.search(r"InternalServerError|request_messenger|quasar|gateway|PLEX", combined, re.IGNORECASE):
-        return True
-    if re.search(r"(?:quasar|request_messenger)\.py|eve_public\.gateway", combined, re.IGNORECASE) and re.search(
-        r"Error|Exception|Timeout", combined
-    ):
-        return True
+    for call in bundle.get("flight_recorder") or []:
+        if not isinstance(call, dict):
+            continue
+        svc = str(call.get("service") or "").lower()
+        method = str(call.get("method") or "").lower()
+        if ("quasar" in svc or "gateway" in svc or "quasar" in method) and (
+            _is_client_transport_failure_call(call)
+            or bool(call.get("error"))
+            or str(call.get("status") or "").strip().upper().startswith(("ERR", "FAIL", "TIMEOUT"))
+        ):
+            return True
     return False
 
 
@@ -477,13 +704,17 @@ def classify_environment_fault(bundle: Dict[str, Any]) -> Optional[Tuple[str, st
 
     req_counts = _extract_session_request_counts(bundle)
     trace = _get_bundle_trace(bundle).strip()
+    is_non_python_manual = is_manual_report(bundle) and not _is_client_python_manual(bundle)
     has_error_signal = (
-        req_counts["server_requests_explicit"]
-        or bool(trace)
-        or bundle.get("report_source") == "exception"
-        or _is_client_python_manual(bundle)
+        not is_non_python_manual
+        and (
+            req_counts["server_requests_explicit"]
+            or bool(trace)
+            or bundle.get("report_source") == "exception"
+            or _is_client_python_manual(bundle)
+        )
     )
-    if req_counts["server_requests"] == 0 and has_error_signal:
+    if req_counts["server_requests"] == 0 and not req_counts["reached_server"] and has_error_signal:
         return (
             "zero_server_requests",
             "env:zero_server_requests",

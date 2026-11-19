@@ -221,6 +221,11 @@ async fn handle_grpc_stream(
         }
         "/eve_public.gateway.Requests/Send" => {
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
+                tracing::warn!(
+                    peer_ip = ?peer_ip,
+                    path = "/eve_public.gateway.Requests/Send",
+                    "Quasar gRPC request returned UNAUTHENTICATED trailer"
+                );
                 return send_trailers_only(
                     &mut respond,
                     GRPC_STATUS_UNAUTHENTICATED,
@@ -235,6 +240,16 @@ async fn handle_grpc_stream(
                 let mut pub_req = match EvePublicRequest::decode_proto(&frame_bytes) {
                     Ok(r) => r,
                     Err(e) => {
+                        ctx.flight_recorder.record_gateway_request(
+                            identity.bound_online_session_id,
+                            Some(identity.user_id),
+                        );
+                        tracing::warn!(
+                            user_id = identity.user_id,
+                            online_session_id = ?identity.bound_online_session_id,
+                            error = %e,
+                            "Quasar gRPC request returned INVALID_ARGUMENT trailer"
+                        );
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_INVALID_ARGUMENT,
@@ -261,6 +276,16 @@ async fn handle_grpc_stream(
                 ) {
                     Ok(s) => s,
                     Err(reason) => {
+                        ctx.flight_recorder.record_gateway_request(
+                            identity.bound_online_session_id,
+                            Some(identity.user_id),
+                        );
+                        tracing::warn!(
+                            user_id = identity.user_id,
+                            online_session_id = ?identity.bound_online_session_id,
+                            reason = %reason,
+                            "Quasar gRPC request returned UNAUTHENTICATED trailer"
+                        );
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_UNAUTHENTICATED,
@@ -269,6 +294,10 @@ async fn handle_grpc_stream(
                         return Ok(());
                     }
                 };
+                ctx.flight_recorder.record_gateway_request(
+                    identity.bound_online_session_id,
+                    Some(identity.user_id),
+                );
                 let mut rsp = ctx.quasar_gateway.handle_public_request(
                     &session,
                     &pub_req,
@@ -433,6 +462,16 @@ async fn handle_grpc_stream(
                 let mut ev = match EvePublicEvent::decode_proto(&frame_bytes) {
                     Ok(ev) => ev,
                     Err(e) => {
+                        ctx.flight_recorder.record_gateway_request(
+                            identity.bound_online_session_id,
+                            Some(identity.user_id),
+                        );
+                        tracing::warn!(
+                            user_id = identity.user_id,
+                            online_session_id = ?identity.bound_online_session_id,
+                            error = %e,
+                            "Quasar gRPC event publish returned INVALID_ARGUMENT trailer"
+                        );
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_INVALID_ARGUMENT,
@@ -459,6 +498,16 @@ async fn handle_grpc_stream(
                 ) {
                     Ok(s) => s,
                     Err(reason) => {
+                        ctx.flight_recorder.record_gateway_request(
+                            identity.bound_online_session_id,
+                            Some(identity.user_id),
+                        );
+                        tracing::warn!(
+                            user_id = identity.user_id,
+                            online_session_id = ?identity.bound_online_session_id,
+                            reason = %reason,
+                            "Quasar gRPC event publish returned UNAUTHENTICATED trailer"
+                        );
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_UNAUTHENTICATED,
@@ -479,6 +528,15 @@ async fn handle_grpc_stream(
                             .is_some_and(|corp| session.corporation_id != Some(i64::from(corp)))
                         || (ac.service_role_mask & !session.role) != 0
                     {
+                        ctx.flight_recorder.record_gateway_request(
+                            identity.bound_online_session_id,
+                            Some(identity.user_id),
+                        );
+                        tracing::warn!(
+                            user_id = identity.user_id,
+                            online_session_id = ?identity.bound_online_session_id,
+                            "Quasar gRPC event publish returned PERMISSION_DENIED trailer"
+                        );
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_PERMISSION_DENIED,
@@ -487,6 +545,10 @@ async fn handle_grpc_stream(
                         return Ok(());
                     }
                 }
+                ctx.flight_recorder.record_gateway_request(
+                    identity.bound_online_session_id,
+                    Some(identity.user_id),
+                );
                 ctx.quasar_gateway
                     .publish_event(&session, ev, ctx.now_unix());
                 // `EventPublisher::ReadConfirm` / `ReadEmpty` expects one `google.protobuf.Empty` per Event.
