@@ -681,6 +681,10 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<SystemCommand>(1);
     drop(cmd_rx);
     let (event_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (dead_view_tx, dead_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
+    let dead_view_tx = Arc::new(dead_view_tx);
+    let dead_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
     let dead = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
@@ -691,10 +695,16 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
+        ballpark: Arc::new(super::BallparkHandle::new(
+            Ballpark::new(30_000_142),
+            Arc::clone(&dead_view_tx),
+            Arc::clone(&dead_tidi_bits),
+        )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: dead_view_tx,
+        view_rx: dead_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        tidi_factor_bits: dead_tidi_bits,
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
         last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -714,6 +724,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    dead.ballpark.attach_actor_state(&dead.actor_state);
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(dead.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -874,6 +885,10 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         }
     });
     let (drop_evt_tx, _) = tokio::sync::broadcast::channel::<TickBroadcast>(8);
+    let (drop_view_tx, drop_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
+    let drop_view_tx = Arc::new(drop_view_tx);
+    let drop_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
     let drop_h = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx: drop_tx,
@@ -884,10 +899,16 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(Ballpark::new(30_000_142))),
+        ballpark: Arc::new(super::BallparkHandle::new(
+            Ballpark::new(30_000_142),
+            Arc::clone(&drop_view_tx),
+            Arc::clone(&drop_tidi_bits),
+        )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: drop_view_tx,
+        view_rx: drop_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        tidi_factor_bits: drop_tidi_bits,
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
         last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -907,6 +928,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    drop_h.ballpark.attach_actor_state(&drop_h.actor_state);
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
     assert!(drop_h.spawn_ball_with_combat(make_ball(1, 606, DVec3::ZERO), CombatState::default()).await.is_err());
@@ -1353,6 +1375,10 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(1);
     drop(cmd_rx);
     let (event_tx, _) = tokio::sync::broadcast::channel(4);
+    let (handle_view_tx, handle_view_rx) =
+        tokio::sync::watch::channel(Arc::new(super::super::SystemView::default()));
+    let handle_view_tx = Arc::new(handle_view_tx);
+    let handle_tidi_bits = Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits()));
     let handle = SystemHandle {
         solar_system_id: 30_000_142,
         cmd_tx,
@@ -1363,10 +1389,16 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         committed_warp_balls: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         warp_stopped_at: Arc::new(eve_db::lock_rank::RankedRwLock::new(HashMap::new())),
         active_module_ships: Arc::new(eve_db::lock_rank::RankedRwLock::new(std::collections::HashSet::new())),
-        ballpark: Arc::new(eve_db::lock_rank::RankedRwLock::new(eve_destiny::Ballpark::new(30_000_142))),
+        ballpark: Arc::new(super::BallparkHandle::new(
+            eve_destiny::Ballpark::new(30_000_142),
+            Arc::clone(&handle_view_tx),
+            Arc::clone(&handle_tidi_bits),
+        )),
         actor_state: Arc::new(eve_db::lock_rank::RankedRwLock::new(super::super::SystemActorState::default())),
+        view_tx: handle_view_tx,
+        view_rx: handle_view_rx,
         last_auto_stepped_unix: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tidi_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
+        tidi_factor_bits: handle_tidi_bits,
         sim_elapsed_secs_bits: Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits())),
         last_visible_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         last_fx_stamp: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1386,6 +1418,7 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    handle.ballpark.attach_actor_state(&handle.actor_state);
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
     assert!(handle.set_ball_max_velocity(1, 100.0).await.is_err());

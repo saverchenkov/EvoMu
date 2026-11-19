@@ -95,10 +95,8 @@ fn snapshot_pre_balls(
     let Some(sys_h) = ctx.systems.get_handle(sys_id) else {
         return HashMap::new();
     };
-    let Ok(bp) = sys_h.ballpark.read() else {
-        return HashMap::new();
-    };
-    bp.balls
+    let view = sys_h.view();
+    view.balls
         .iter()
         .map(|(&id, b)| (id, (b.position, b.radius)))
         .collect()

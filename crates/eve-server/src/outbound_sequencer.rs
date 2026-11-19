@@ -142,12 +142,11 @@ impl SessionWireState {
         observer_ship_id: BallId,
     ) {
         if let Some(handle) = ctx.systems.get_handle(solar_system_id) {
-            if let Ok(bp) = handle.ballpark.read() {
-                if bp.balls.contains_key(&observer_ship_id) {
-                    for b in bp.visible_balls_for_observer(observer_ship_id) {
-                        self.materialized.insert(b.id);
-                        self.guard.seed_validator_materialized(b.id);
-                    }
+            let view = handle.view();
+            if view.balls.contains_key(&observer_ship_id) {
+                for b in view.visible_balls_for_observer(observer_ship_id) {
+                    self.materialized.insert(b.id);
+                    self.guard.seed_validator_materialized(b.id);
                 }
             }
         }

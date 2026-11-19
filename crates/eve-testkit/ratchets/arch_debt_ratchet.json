@@ -117,8 +117,8 @@
       "description": "Per-method/service grace helper functions in router/binding.rs (#1190)."
     },
     "ballpark_locks_outside_system_actor": {
-      "max_occurrences": 80,
-      "max_files": 42,
+      "max_occurrences": 61,
+      "max_files": 27,
       "exact": true,
       "owning_issue": 1342,
       "path_exclude_substring": "system_actor",

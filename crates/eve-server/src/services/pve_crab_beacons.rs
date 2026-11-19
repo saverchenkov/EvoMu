@@ -718,13 +718,13 @@ fn is_crab_linked_ship_valid(ctx: &ServerContext, rec: &CrabBeaconRecord, requir
         if docked { return false; }
     }
     let Some(sys_handle) = ctx.systems.active_system_handles().into_iter().find(|(id, _)| *id == rec.solar_system_id).map(|(_, h)| h) else { return false };
-    let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
-    let Some(sb) = bp.balls.get(&sid) else { return false };
-    if matches!(sb.mode, MovementMode::Warp { .. }) || bp.combat_states.get(&sid).is_some_and(|cs| cs.structure_hp <= 0.0) {
+    let view = sys_handle.view();
+    let Some(sb) = view.balls.get(&sid) else { return false };
+    if matches!(sb.mode, MovementMode::Warp { .. }) || view.combat_states.get(&sid).is_some_and(|cs| cs.structure_hp <= 0.0) {
         return false;
     }
     if require_range {
-        let bpos = bp.balls.get(&rec.beacon_id).map(|b| b.position).unwrap_or_else(|| DVec3::from_array(rec.position));
+        let bpos = view.balls.get(&rec.beacon_id).map(|b| b.position).unwrap_or_else(|| DVec3::from_array(rec.position));
         if (sb.position.distance(bpos) - sb.radius - 400.0).max(0.0) > CRAB_LINK_RANGE_M {
             return false;
         }

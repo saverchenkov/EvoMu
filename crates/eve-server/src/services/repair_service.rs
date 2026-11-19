@@ -15,19 +15,10 @@ use std::collections::HashMap;
 /// Returns `true` when `ship_id` has an actual ball entry in `sys_id`'s `Ballpark` without
 /// blocking on a write-locked `Ballpark` or violating lock ordering.
 fn has_ball_in_fallback_system(ctx: &ServerContext, ship_id: i64, sys_id: u32) -> bool {
-    if eve_db::lock_rank::held_lock_ranks()
-        .iter()
-        .any(|&r| r >= eve_db::lock_rank::RANK_BALLPARK)
-    {
-        return false;
-    }
     let Some(handle) = ctx.systems.get_handle(sys_id) else {
         return false;
     };
-    let Ok(bp) = handle.ballpark.try_read() else {
-        return false;
-    };
-    bp.balls.contains_key(&ship_id)
+    handle.view().contains_ball(ship_id)
 }
 
 fn sample_live_repair_ship_hp(
@@ -261,17 +252,11 @@ fn resolve_structure_repair_location(
     }
     let (sys_id, ship_id) = (session.solar_system_id?, session.ship_id?);
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let (tethered, ship_pos) = match sys.ballpark.try_read() {
-        Ok(bp) => (
-            bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_tethered),
-            bp.balls.get(&ship_id).map(|b| b.position)?,
-        ),
-        Err(std::sync::TryLockError::WouldBlock) => (
-            sys.is_ball_tethered_sync(ship_id),
-            sys.get_ball_position_sync(ship_id)?,
-        ),
-        Err(std::sync::TryLockError::Poisoned(_)) => return None,
-    };
+    let view = sys.view();
+    let (tethered, ship_pos) = (
+        view.is_ball_tethered(ship_id),
+        view.ball_position(ship_id)?,
+    );
     if !tethered {
         return None;
     }

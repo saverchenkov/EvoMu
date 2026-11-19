@@ -114,12 +114,7 @@ pub(super) async fn validate_in_space_ship_store_allowed(
             "store ship",
         )?;
 
-        let is_gate_cloaked = {
-            let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            bp.combat_states
-                .get(&sid)
-                .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0)
-        };
+        let is_gate_cloaked = sys.view().is_gate_cloaked(sid);
         if is_gate_cloaked
             || crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
                 ctx, sys, sid,
@@ -151,14 +146,7 @@ pub(super) async fn validate_in_space_ship_store_allowed(
             ));
         }
 
-        let is_targeted = {
-            let bp = sys.ballpark.read().unwrap_or_else(|e| e.into_inner());
-            bp.target_locks
-                .iter()
-                .any(|(&locker_id, locks)| {
-                    locker_id != sid && locks.iter().any(|l| l.target_id == sid)
-                })
-        };
+        let is_targeted = sys.view().is_ball_targeted(sid);
         if is_targeted {
             return Err(err(
                 "CannotStoreTargetedShip",

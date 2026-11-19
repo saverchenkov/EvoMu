@@ -2,36 +2,24 @@
 
 #![forbid(unsafe_code)]
 
-use super::SystemHandle;
-use eve_db::lock_rank::{RankedRwLock, RANK_BALLPARK, RANK_LEAF};
+use super::{BallparkHandle, SystemHandle};
+use eve_db::lock_rank::{RankedRwLock, RANK_LEAF};
 use eve_destiny::{BallId, Ballpark};
 use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[allow(clippy::type_complexity)]
-fn db_ballpark_map() -> &'static std::sync::Mutex<
-    HashMap<
-        (u64, SolarSystemId),
-        (
-            std::sync::Weak<RankedRwLock<Ballpark, RANK_BALLPARK>>,
-            std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-            std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-        ),
-    >,
-> {
+#[derive(Clone)]
+struct DbBallparkEntry {
+    ballpark: std::sync::Weak<BallparkHandle>,
+    ball_positions: std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
+    scrambled_balls: std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
+}
+
+fn db_ballpark_map() -> &'static std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>> {
     static MAP: std::sync::OnceLock<
-        std::sync::Mutex<
-            HashMap<
-                (u64, SolarSystemId),
-                (
-                    std::sync::Weak<RankedRwLock<Ballpark, RANK_BALLPARK>>,
-                    std::sync::Weak<RankedRwLock<HashMap<BallId, DVec3>, RANK_LEAF>>,
-                    std::sync::Weak<RankedRwLock<std::collections::HashSet<BallId>, RANK_LEAF>>,
-                ),
-            >,
-        >,
+        std::sync::Mutex<HashMap<(u64, SolarSystemId), DbBallparkEntry>>,
     > = std::sync::OnceLock::new();
     MAP.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -43,15 +31,15 @@ pub(crate) fn register_db_system_ballpark(
 ) {
     let mut g = db_ballpark_map().lock().unwrap_or_else(|e| e.into_inner());
     if g.len() > 256 {
-        g.retain(|_, (bp, _, _)| bp.strong_count() > 0);
+        g.retain(|_, entry| entry.ballpark.strong_count() > 0);
     }
     g.insert(
         (db.instance_id(), solar_system_id),
-        (
-            Arc::downgrade(&handle.ballpark),
-            Arc::downgrade(&handle.ball_positions),
-            Arc::downgrade(&handle.scrambled_balls),
-        ),
+        DbBallparkEntry {
+            ballpark: Arc::downgrade(&handle.ballpark),
+            ball_positions: Arc::downgrade(&handle.ball_positions),
+            scrambled_balls: Arc::downgrade(&handle.scrambled_balls),
+        },
     );
 }
 
@@ -291,20 +279,24 @@ pub fn try_remove_ball_for_db(
         .unwrap_or_else(|e| e.into_inner())
         .get(&(db.instance_id(), solar_system_id))
         .cloned();
-    if let Some((bp_w, pos_w, scram_w)) = entry {
-        if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) =
-            (bp_w.upgrade(), pos_w.upgrade(), scram_w.upgrade())
-        {
+    if let Some(entry) = entry {
+        if let (Some(bp_arc), Some(pos_arc), Some(scram_arc)) = (
+            entry.ballpark.upgrade(),
+            entry.ball_positions.upgrade(),
+            entry.scrambled_balls.upgrade(),
+        ) {
+            let apply_remove = |bp: &mut Ballpark| {
+                let _ = bp.remove_ball(ball_id);
+                sync_ball_positions(bp, &pos_arc, &scram_arc);
+            };
             if eve_db::lock_rank::held_lock_ranks().contains(&eve_db::lock_rank::RANK_BALLPARK) {
                 eve_db::lock_rank::assert_locks_below(eve_db::lock_rank::RANK_BALLPARK + 1);
                 if let Ok(mut bp) = bp_arc.try_write_unranked() {
-                    let _ = bp.remove_ball(ball_id);
-                    sync_ball_positions(&bp, &pos_arc, &scram_arc);
+                    apply_remove(&mut bp);
                 }
             } else {
                 let mut bp = bp_arc.write().unwrap_or_else(|e| e.into_inner());
-                let _ = bp.remove_ball(ball_id);
-                sync_ball_positions(&bp, &pos_arc, &scram_arc);
+                apply_remove(&mut bp);
             }
         }
     }

@@ -579,9 +579,9 @@ impl LivingWorldDirector {
         // If the miner or hauler has taken hostile fire, evade by warping toward destination station instead of snapping back.
         let miner_snap = handle.get_ball_snapshot(convoy_id).await.ok().flatten();
         let miner_under_fire = {
-            let bp = handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+            let view = handle.view();
             [convoy_id, hauler_ball_id].into_iter().any(|bid| {
-                bp.combat_states.get(&bid).is_some_and(|mc| {
+                view.combat_states.get(&bid).is_some_and(|mc| {
                     mc.shield_hp + 1.0 < mc.max_shield_hp || mc.armor_hp + 1.0 < mc.max_armor_hp
                 })
             })

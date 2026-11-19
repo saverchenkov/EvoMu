@@ -305,10 +305,10 @@ pub fn has_active_counter_insurgency_sentries(ctx: &ServerContext, sys_id: u32) 
         return false;
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+    let view = sys_handle.view();
     bids.into_iter().any(|bid| {
-        bp.balls.contains_key(&bid)
-            && bp.combat_states.get(&bid).is_none_or(|cs| cs.structure_hp > 0.0)
+        view.balls.contains_key(&bid)
+            && view.combat_states.get(&bid).is_none_or(|cs| cs.structure_hp > 0.0)
     })
 }
 
