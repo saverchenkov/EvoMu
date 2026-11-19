@@ -11,7 +11,7 @@ use crate::router::notify_registry::{
     push_typed_session_notification, OnAccountChange, OnSolarsystemInterferenceChanged,
 };
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
@@ -627,7 +627,7 @@ pub async fn complete_special_dungeon_instance(
     ctx: &ServerContext,
     session: &mut SessionState,
     instance_id: i64,
-    fleet_count: usize,
+    _fleet_count: usize,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -763,12 +763,15 @@ pub async fn complete_special_dungeon_instance(
                 );
             }
         }
+        let arch_key = get_homefront_runtime_state(ctx, instance_id)
+            .map(|s| s.blueprint.archetype.as_str())
+            .unwrap_or("Unknown");
         return Ok(PyRep::keyval([
             ("instanceID", PyRep::Integer(instance_id)),
             ("completed", PyRep::Bool(true)),
             ("rewardPaidIsk", PyRep::Integer(reward_paid)),
             ("totalFleetIsk", PyRep::Integer(summary.total_fleet_isk)),
-            ("archetype", PyRep::String(summary.archetype.key().into())),
+            ("archetype", PyRep::String(arch_key.into())),
         ]));
     }
 

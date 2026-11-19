@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::pve_special_sites::with_pve_special_reg;
 use eve_db::clock::VirtualServerClock;
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
@@ -144,6 +145,8 @@ mod multi_role_unit_tests {
             ch.user_id = user_id;
             ch.name = format!("HF Pilot {char_id}");
             ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
             ch.active_ship_id = ship_id;
             ch.balance = IskCents::from_isk(1_000_000);
             ch.standings.clear();
@@ -386,7 +389,7 @@ mod multi_role_unit_tests {
         enter_hf_gate_at_site(&ctx, &dps1, aar_state.instance_id).await.unwrap();
         let bubble_id = 1_897_800_000 + aar_state.instance_id * 100 + 9;
         for w in 1..=9_u8 {
-            let mid = abyssal_clear_wave(&ctx, &venture, aar_state.instance_id, 30, 0.0, w % 2 == 1)
+            let mid = abyssal_clear_wave(&ctx, &venture, aar_state.instance_id, 324, 0.0, w % 2 == 1)
                 .await
                 .expect("mine Mutanite to disperse warp bubble");
             assert!(matches!(

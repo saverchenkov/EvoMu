@@ -110,7 +110,7 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     };
     for idx in 1..=5i64 {
         let mut sess = eve_machonet::SessionState::new(idx as u64);
-        sess.user_id = Some(idx);
+        sess.user_id = Some(idx as u64);
         sess.character_id = Some(90_060_000 + idx);
         sess.solar_system_id = Some(sys_id);
         sess.ship_id = Some(1_060_000_000 + idx);

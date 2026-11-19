@@ -956,7 +956,9 @@ pub async fn handle_pve_hacking(
                     let mut ghost_info = None;
                     if game.status == "InProgress" {
                         let sid = game.solar_system_id;
-                        if game.site_id.starts_with("STRUCTURE_") {
+                        if game.site_id.starts_with("HOMEFRONT_") {
+                            // Homefront Suspicious Signal arrays and Salvage Research werposts remain retryable.
+                        } else if game.site_id.starts_with("STRUCTURE_") {
                             let fc = reg.structure_char_failures.entry((char_id, container_id)).or_insert(0);
                             *fc += 1;
                         } else {

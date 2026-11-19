@@ -802,7 +802,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             crate::services::pve_homefront_sites::on_homefront_cargo_scanned(
                 ctx,
                 char_id,
-                sys,
+                sys.solar_system_id,
                 target_id,
                 &cargo_list,
             )

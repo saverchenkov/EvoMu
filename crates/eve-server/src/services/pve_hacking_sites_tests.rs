@@ -546,6 +546,9 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
     // 2. Suspicious Signal: quitting twice must NOT permanently lock out array;
     //    hacking all 3 arrays clears relay is_tethered in Ballpark.
     let ss = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367).expect("spawn Suspicious Signal");
+    let _ = sys_handle
+        .set_ball_position(ship_id, ss.site_position + DVec3::new(400.0, 0.0, 0.0))
+        .await;
     activate_homefront_acceleration_gate(&ctx, &session, ss.instance_id)
         .await
         .expect("enter Suspicious Signal gate");

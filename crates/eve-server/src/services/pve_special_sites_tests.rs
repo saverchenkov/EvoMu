@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use eve_db::clock::VirtualServerClock;
-use eve_db::WorldRepository;
+use eve_db::{IskCents, WorldRepository};
 use eve_machonet::SessionState;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::HashMap;
@@ -69,6 +69,10 @@ fn make_ctx_and_pilot(sys_id: SolarSystemId, with_ship: bool) -> (ServerContext,
     db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id;
+            if with_ship {
+                ch.station_id = None;
+                ch.structure_id = None;
+            }
             ch.active_ship_id = ship_id;
             ch.balance = IskCents::from_isk(1_000_000);
         }
@@ -342,7 +346,7 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
         if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&hf.instance_id) {
             if let Some(c) = rec.contributions.get_mut(&char_id) {
                 c.damage_dealt = 2_000.0;
-                c.objective_units = 1;
+                c.objective_actions = 1;
             }
             match &mut rec.progress {
                 eve_db::service_domains::pve_sites::HomefrontProgressRecord::Raid {

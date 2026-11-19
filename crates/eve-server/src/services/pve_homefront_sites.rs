@@ -43,8 +43,8 @@ const HOMEFRONT_BEACON_TYPE_ID: TypeId = 77_149;
 const HOMEFRONT_ACCEL_GATE_TYPE_ID: TypeId = 17_831;
 const HOMEFRONT_CARGO_CONTAINER_TYPE_ID: TypeId = 23;
 const HOMEFRONT_GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
-const HOMEFRONT_POCKET_Z_OFFSET_M: f64 = 60_000.0;
-const HOMEFRONT_POCKET_LANDING_Y_M: f64 = -10_000.0;
+const HOMEFRONT_POCKET_Z_OFFSET_M: f64 = 1_000_000.0;
+const HOMEFRONT_POCKET_LANDING_Y_M: f64 = -1_500.0;
 const HOMEFRONT_WARP_ARRIVAL_RADIUS_M: f64 = 50_000.0;
 const HOMEFRONT_AAR_ROCKS_PER_WAVE: usize = 12;
 const HOMEFRONT_AAR_UNITS_PER_ROCK: u32 = 27;
@@ -345,7 +345,32 @@ fn bp_to_record(bp: &HomefrontOperationBlueprint) -> HomefrontBlueprintRecord {
         loot_commodity_type_id: bp.loot_commodity_type_id,
         escort_wave_type_ids: bp.escort_wave_type_ids.clone(),
         damage_profile: bp.damage_profile,
-        ewar_profile: bp.ewar_profile.clone(),
+        ewar_profile: bp.ewar_profile.to_string(),
+    }
+}
+
+fn static_ewar_profile(label: &str) -> &'static str {
+    match label {
+        "Energy Neutralizer / Weapon Disruption" => "Energy Neutralizer / Weapon Disruption",
+        "ECM" => "ECM",
+        "Remote Sensor Dampening" => "Remote Sensor Dampening",
+        "Target Painter / ECM" => "Target Painter / ECM",
+        "Stasis Webifier / Sensor Dampening" => "Stasis Webifier / Sensor Dampening",
+        "Stasis Webifier" => "Stasis Webifier",
+        "Target Painter" => "Target Painter",
+        "Dreadnought Energy Neutralizer / ECM / Weapon Disruption" => {
+            "Dreadnought Energy Neutralizer / ECM / Weapon Disruption"
+        }
+        "Dreadnought Energy Neutralizer / ECM" => "Dreadnought Energy Neutralizer / ECM",
+        "Dreadnought Energy Neutralizer / ECM / Target Painter" => {
+            "Dreadnought Energy Neutralizer / ECM / Target Painter"
+        }
+        "Abyssal Warp Disruption Field / Remote Armor Logistics" => {
+            "Abyssal Warp Disruption Field / Remote Armor Logistics"
+        }
+        "Energy Neutralizer / Cap Transfer" => "Energy Neutralizer / Cap Transfer",
+        "Stasis Webifier / Combat Drones" => "Stasis Webifier / Combat Drones",
+        _ => "Homefront EWAR",
     }
 }
 
@@ -374,7 +399,7 @@ fn record_to_bp(rec: &HomefrontBlueprintRecord) -> HomefrontOperationBlueprint {
         loot_commodity_type_id: rec.loot_commodity_type_id,
         escort_wave_type_ids: rec.escort_wave_type_ids.clone(),
         damage_profile: rec.damage_profile,
-        ewar_profile: rec.ewar_profile.clone(),
+        ewar_profile: static_ewar_profile(&rec.ewar_profile),
     }
 }
 
@@ -1301,7 +1326,7 @@ fn spawn_container_item_in_snap(
                 owner_id,
                 location_id: container_id,
                 flag: InventoryFlag::Cargo,
-                quantity: qty as i64,
+                quantity: i32::try_from(qty).unwrap_or(i32::MAX),
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -2100,12 +2125,7 @@ pub async fn activate_homefront_acceleration_gate(
             ));
         }
         if rec.failed {
-            return Err(hf_err(
-                "OperationFailed",
-                rec.failure_reason
-                    .clone()
-                    .unwrap_or_else(|| "Homefront operation has already failed".into()),
-            ));
+            return Err(failed_site_err(rec));
         }
         let arch = kind_to_arch(rec.blueprint.archetype);
         let elig = validate_homefront_ship_eligibility(&ctx.sde, ship_type_id, arch)?;
@@ -2209,6 +2229,24 @@ pub fn get_homefront_runtime_record(
     })
 }
 
+fn failed_site_err(rec: &HomefrontRuntimeRecord) -> BridgeRpcError {
+    let code = if rec
+        .failure_reason
+        .as_deref()
+        .is_some_and(|r| r.contains("operation timer"))
+    {
+        "OperationTimedOut"
+    } else {
+        "OperationFailed"
+    };
+    hf_err(
+        code,
+        rec.failure_reason
+            .clone()
+            .unwrap_or_else(|| "Homefront operation failed".into()),
+    )
+}
+
 fn verify_active_pilot_and_timeout_in_snap<'a>(
     snap: &'a mut WorldStateSnapshot,
     sde: &SdeRegistry,
@@ -2231,12 +2269,7 @@ fn verify_active_pilot_and_timeout_in_snap<'a>(
         )));
     }
     if rec.failed {
-        return Err(Err(hf_err(
-            "OperationFailed",
-            rec.failure_reason
-                .clone()
-                .unwrap_or_else(|| "Homefront operation failed".into()),
-        )));
+        return Err(Err(failed_site_err(rec)));
     }
     if !rec.started || !rec.entered_pilots.contains_key(&char_id) {
         return Err(Err(hf_err(
@@ -2281,22 +2314,30 @@ where
     res
 }
 
-fn ensure_contribution<'a>(
-    rec: &'a mut HomefrontRuntimeRecord,
+fn ensure_contribution_fields<'a>(
+    contributions: &'a mut BTreeMap<i64, HomefrontContributionRecord>,
+    next_entry_sequence: &mut u64,
     char_id: i64,
 ) -> &'a mut HomefrontContributionRecord {
-    if !rec.contributions.contains_key(&char_id) {
-        rec.next_entry_sequence = rec.next_entry_sequence.saturating_add(1);
-        rec.contributions.insert(
+    if !contributions.contains_key(&char_id) {
+        *next_entry_sequence = next_entry_sequence.saturating_add(1);
+        contributions.insert(
             char_id,
             HomefrontContributionRecord {
                 character_id: char_id,
-                entry_sequence: rec.next_entry_sequence,
+                entry_sequence: *next_entry_sequence,
                 ..Default::default()
             },
         );
     }
-    rec.contributions.get_mut(&char_id).expect("inserted above")
+    contributions.get_mut(&char_id).expect("inserted above")
+}
+
+fn ensure_contribution<'a>(
+    rec: &'a mut HomefrontRuntimeRecord,
+    char_id: i64,
+) -> &'a mut HomefrontContributionRecord {
+    ensure_contribution_fields(&mut rec.contributions, &mut rec.next_entry_sequence, char_id)
 }
 
 fn active_ship_id_for_pilot(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64) -> Option<i64> {
@@ -3276,7 +3317,7 @@ fn emit_payout_notifications(
         if !payout.eligible {
             continue;
         }
-        if payout.isk_cents.cents() > 0 {
+        if payout.isk_cents.raw_cents() > 0 {
             ctx.emit_typed(
                 NotificationTarget::Character(payout.character_id),
                 OnAccountChange {
@@ -3316,23 +3357,18 @@ fn credit_payouts_in_snap(
         let credit_cents = if ratio_num == ratio_den || ratio_den == 0 {
             payout.isk_cents
         } else {
-            let scaled = (payout.isk_cents.cents() as i128) * (ratio_num as i128)
+            let scaled = (payout.isk_cents.raw_cents() as i128) * (ratio_num as i128)
                 / (ratio_den as i128);
-            IskCents::from_cents(scaled as i64)
+            IskCents::from_raw_cents(scaled as i64)
         };
         let mut new_bal = IskCents::ZERO;
         let mut lp_delta = None;
+        let mut append_journal_entry = false;
         if let Some(ch) = snap.characters.get_mut(&payout.character_id) {
-            if credit_cents.cents() > 0 {
+            if credit_cents.raw_cents() > 0 {
                 ch.balance = ch.balance.checked_add(credit_cents).unwrap_or(ch.balance);
                 new_bal = ch.balance;
-                snap.append_journal(
-                    payout.character_id,
-                    "CorporateRewardPayout",
-                    credit_cents,
-                    new_bal,
-                    format!("Homefront Operation Payout ({dname})"),
-                );
+                append_journal_entry = true;
             }
             if payout.lp > 0 {
                 let before = ch.loyalty_points.get(&issuer_corp_id).copied().unwrap_or(0);
@@ -3341,9 +3377,18 @@ fn credit_payouts_in_snap(
                 lp_delta = Some((issuer_corp_id, before, after));
             }
         }
+        if append_journal_entry {
+            snap.append_journal(
+                payout.character_id,
+                "CorporateRewardPayout",
+                credit_cents,
+                new_bal,
+                format!("Homefront Operation Payout ({dname})"),
+            );
+        }
         let mut adjusted = payout.clone();
         adjusted.isk_cents = credit_cents;
-        adjusted.isk = credit_cents.to_isk_i64_floor();
+        adjusted.isk = credit_cents.raw_cents() / 100;
         emitted.push((adjusted, new_bal, lp_delta));
     }
     emitted
@@ -3367,49 +3412,54 @@ fn settle_homefront_completion_atomic_db(
             BridgeRpcError,
         > {
             let site_done = resolve_site_record_completed_in_snap(snap, instance_id);
-            let Some(rec) = resolve_runtime_record_in_snap(snap, sde, instance_id) else {
-                return Ok(Err(hf_err(
-                    "HomefrontSiteNotFound",
-                    format!("Unknown Homefront site instance {instance_id}"),
-                )));
-            };
-            if rec.completed || site_done {
-                rec.completed = true;
-                return Ok(Err(hf_err(
-                    "SiteAlreadyCompleted",
-                    format!("Homefront operation {instance_id} is already completed"),
-                )));
-            }
-            if rec.failed {
-                return Ok(Err(hf_err(
-                    "OperationFailed",
-                    rec.failure_reason
-                        .clone()
-                        .unwrap_or_else(|| "Homefront operation failed".into()),
-                )));
-            }
-            if let Some(cid) = require_pilot_entered {
-                if !rec.started || !rec.entered_pilots.contains_key(&cid) {
+            let (site_sys, base_isk, base_lp, opt_fleet, raw_contribs) = {
+                let Some(rec) = resolve_runtime_record_in_snap(snap, sde, instance_id) else {
                     return Ok(Err(hf_err(
-                        "GateNotEntered",
-                        "Pilot must pass the Homefront acceleration gate first",
+                        "HomefrontSiteNotFound",
+                        format!("Unknown Homefront site instance {instance_id}"),
+                    )));
+                };
+                if rec.completed || site_done {
+                    rec.completed = true;
+                    return Ok(Err(hf_err(
+                        "SiteAlreadyCompleted",
+                        format!("Homefront operation {instance_id} is already completed"),
                     )));
                 }
-            }
-            if !runtime_record_objective_complete(rec) {
-                return Ok(Err(hf_err(
-                    "ObjectivesIncomplete",
-                    format!(
-                        "Cannot complete Homefront {:?} ({instance_id}): role objectives not yet satisfied",
-                        rec.blueprint.archetype
-                    ),
-                )));
-            }
+                if rec.failed {
+                    return Ok(Err(failed_site_err(rec)));
+                }
+                if let Some(cid) = require_pilot_entered {
+                    if !rec.started || !rec.entered_pilots.contains_key(&cid) {
+                        return Ok(Err(hf_err(
+                            "GateNotEntered",
+                            "Pilot must pass the Homefront acceleration gate first",
+                        )));
+                    }
+                }
+                if !runtime_record_objective_complete(rec) {
+                    return Ok(Err(hf_err(
+                        "ObjectivesIncomplete",
+                        format!(
+                            "Cannot complete Homefront {:?} ({instance_id}): role objectives not yet satisfied",
+                            rec.blueprint.archetype
+                        ),
+                    )));
+                }
+                (
+                    rec.solar_system_id,
+                    rec.blueprint.base_pilot_isk,
+                    rec.blueprint.base_pilot_lp,
+                    rec.blueprint.optimal_fleet_size,
+                    rec.contributions
+                        .values()
+                        .map(contrib_to_public)
+                        .collect::<Vec<_>>(),
+                )
+            };
 
-            let site_sys = rec.solar_system_id;
-            let contributors: Vec<HomefrontParticipantContribution> = rec
-                .contributions
-                .values()
+            let contributors: Vec<HomefrontParticipantContribution> = raw_contribs
+                .into_iter()
                 .filter(|c| {
                     snap.characters.get(&c.character_id).is_none_or(|ch| {
                         ch.solar_system_id == site_sys
@@ -3417,12 +3467,11 @@ fn settle_homefront_completion_atomic_db(
                             && ch.structure_id.is_none()
                     })
                 })
-                .map(contrib_to_public)
                 .collect();
             let summary = compute_homefront_fleet_payouts(
-                rec.blueprint.base_pilot_isk,
-                rec.blueprint.base_pilot_lp,
-                rec.blueprint.optimal_fleet_size,
+                base_isk,
+                base_lp,
+                opt_fleet,
                 &contributors,
             );
             if summary.eligible_pilot_count == 0 {
@@ -3431,6 +3480,17 @@ fn settle_homefront_completion_atomic_db(
                     "No pilot met the minimum contribution threshold for Homefront payout",
                 )));
             }
+
+            let rec = snap
+                .dungeon_runtime
+                .homefront_runtimes
+                .get_mut(&instance_id)
+                .ok_or_else(|| {
+                    hf_err(
+                        "HomefrontSiteNotFound",
+                        format!("Unknown Homefront site instance {instance_id}"),
+                    )
+                })?;
 
             // Compute unpaid share delta for Abyssal Artifact Recovery waves already paid live
             let (unpaid_num, unpaid_den) = match &rec.progress {
@@ -3753,7 +3813,7 @@ pub async fn on_homefront_warp_landed(
 /// Checks if a Homefront dungeon instance is present for `pve_special_sites::complete_special_dungeon_instance`.
 pub fn is_homefront_pve_completion_target(
     ctx: &ServerContext,
-    sys_id: SolarSystemId,
+    _sys_id: SolarSystemId,
     instance_id: i64,
 ) -> bool {
     ctx.db.with_snapshot(|snap| {
@@ -3763,8 +3823,9 @@ pub fn is_homefront_pve_completion_target(
             || snap
                 .pve_special_sites
                 .homefront_sites
-                .get(&sys_id)
-                .is_some_and(|l| l.iter().any(|s| s.instance_id == instance_id))
+                .values()
+                .flatten()
+                .any(|s| s.instance_id == instance_id)
     })
 }
 
@@ -3797,7 +3858,7 @@ pub fn complete_homefront_from_special_dungeon(
     let mut payouts = Vec::new();
     ctx.db.with_snapshot(|snap| {
         for p in &summary.payouts {
-            if p.eligible && p.isk_cents.cents() > 0 {
+            if p.eligible && p.isk_cents.raw_cents() > 0 {
                 if let Some(ch) = snap.characters.get(&p.character_id) {
                     payouts.push((p.character_id, p.isk, ch.balance));
                 }
@@ -4195,7 +4256,7 @@ pub async fn on_homefront_entity_destroyed_core(
                 settle_homefront_completion_atomic_db(db, sde, systems, inst_id, None)
             {
                 for (payout, new_balance, _) in emitted {
-                    if payout.eligible && payout.isk_cents.cents() > 0 {
+                    if payout.eligible && payout.isk_cents.raw_cents() > 0 {
                         account_changes.push((payout.character_id, new_balance.to_wire_f64()));
                     }
                 }
@@ -4269,8 +4330,12 @@ pub async fn on_homefront_ore_mined(
                         ore_mined_by_fleet.saturating_add(u32::try_from(mined_units).unwrap_or(u32::MAX));
                     *total_residue_units =
                         total_residue_units.saturating_add(u32::try_from(wasted_units).unwrap_or(u32::MAX));
-                    ensure_contribution(rec, char_id).ore_mined_units +=
-                        u32::try_from(mined_units).unwrap_or(u32::MAX);
+                    ensure_contribution_fields(
+                        &mut rec.contributions,
+                        &mut rec.next_entry_sequence,
+                        char_id,
+                    )
+                    .ore_mined_units += u32::try_from(mined_units).unwrap_or(u32::MAX);
                     if *remaining_units == 0 {
                         settle_inst = Some(rec.instance_id);
                     }
@@ -4296,8 +4361,12 @@ pub async fn on_homefront_ore_mined(
                             *mutanite_units_remaining = 0;
                         }
                     }
-                    ensure_contribution(rec, char_id).ore_mined_units +=
-                        u32::try_from(mined_units).unwrap_or(u32::MAX);
+                    ensure_contribution_fields(
+                        &mut rec.contributions,
+                        &mut rec.next_entry_sequence,
+                        char_id,
+                    )
+                    .ore_mined_units += u32::try_from(mined_units).unwrap_or(u32::MAX);
                     if *mutanite_units_remaining == 0 {
                         let bubble_was = *warp_bubble_active;
                         *warp_bubble_active = false;
@@ -4491,7 +4560,12 @@ pub async fn on_homefront_wreck_salvaged(
                     if wreck_ball_ids.contains(&wreck_id) {
                         wreck_ball_ids.retain(|&id| id != wreck_id);
                         *wrecks_salvaged = wrecks_salvaged.saturating_add(1).min(*total_wrecks);
-                        ensure_contribution(rec, char_id).objective_actions += 1;
+                        ensure_contribution_fields(
+                            &mut rec.contributions,
+                            &mut rec.next_entry_sequence,
+                            char_id,
+                        )
+                        .objective_actions += 1;
                         if *wrecks_salvaged >= *total_wrecks {
                             complete_inst = Some(rec.instance_id);
                         }
@@ -4580,7 +4654,12 @@ pub async fn on_homefront_item_moved(
                 if *delivery_depot_ball_id == dest_id {
                     let add = u8::try_from(quantity).unwrap_or(u8::MAX);
                     *cargo_delivered = cargo_delivered.saturating_add(add);
-                    ensure_contribution(rec, char_id).cargo_delivered += u32::from(add);
+                    ensure_contribution_fields(
+                        &mut rec.contributions,
+                        &mut rec.next_entry_sequence,
+                        char_id,
+                    )
+                    .cargo_delivered += u32::from(add);
                     if *cargo_delivered >= *required_deliveries {
                         complete_inst = Some(rec.instance_id);
                     }
@@ -4670,7 +4749,12 @@ pub async fn on_homefront_inventory_event(
                     if delivered_in_depot > *cargo_delivered {
                         let delta = delivered_in_depot - *cargo_delivered;
                         *cargo_delivered = delivered_in_depot;
-                        ensure_contribution(rec, char_id).cargo_delivered += u32::from(delta);
+                        ensure_contribution_fields(
+                            &mut rec.contributions,
+                            &mut rec.next_entry_sequence,
+                            char_id,
+                        )
+                        .cargo_delivered += u32::from(delta);
                     }
                     if *cargo_delivered >= *required_deliveries {
                         complete_insts.push(inst_id);
@@ -5006,7 +5090,12 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                 let delta = raid_depot_count - *cargo_delivered;
                 *cargo_delivered = raid_depot_count;
                 if let Some(pid) = raid_last_pilot_opt {
-                    ensure_contribution(rec, pid).cargo_delivered += u32::from(delta);
+                    ensure_contribution_fields(
+                        &mut rec.contributions,
+                        &mut rec.next_entry_sequence,
+                        pid,
+                    )
+                    .cargo_delivered += u32::from(delta);
                 }
                 if *cargo_delivered >= *required_deliveries {
                     fx.settle_complete = true;
@@ -5487,7 +5576,6 @@ pub fn handle_get_homefront_site_instances(
         if snap.pve_special_sites.sim_clock_sec < ctx.now_unix() {
             snap.pve_special_sites.sim_clock_sec = ctx.now_unix();
         }
-        ensure_homefront_sites_for_system_locked(ctx, &mut snap.pve_special_sites, sys_id);
         let mut entries: Vec<(u32, i64)> = Vec::new();
         if let Some(list) = snap.pve_special_sites.homefront_sites.get(&sys_id) {
             for s in list {

@@ -503,7 +503,7 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
                 rec.blueprint.base_pilot_isk = 10_000_000;
                 if let Some(c) = rec.contributions.get_mut(&char_id) {
                     c.damage_dealt = 2_000.0;
-                    c.objective_units = 1;
+                    c.objective_actions = 1;
                 }
                 if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::Raid {
                     cargo_delivered,
@@ -558,7 +558,7 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
         if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&810_003) {
             if let Some(c) = rec.contributions.get_mut(&wingman_id) {
                 c.damage_dealt = 2_000.0;
-                c.objective_units = 1;
+                c.objective_actions = 1;
             }
         }
     });

@@ -192,7 +192,7 @@ async fn homefront_npc_destroyed_covers_solo_fleet_filters_and_skip_cases() {
 
     let make_sess = |cid: i64, sid: i64, s_sys: u32, st: Option<i64>, sr: Option<i64>| {
         let mut s = eve_machonet::SessionState::new(cid as u64);
-        s.user_id = Some(cid);
+        s.user_id = Some(cid as u64);
         s.character_id = Some(cid);
         s.solar_system_id = Some(s_sys);
         s.ship_id = Some(sid);

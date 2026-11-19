@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::router::ServerContext;
+use crate::services::pve_special_sites::with_pve_special_reg;
 use eve_db::clock::VirtualServerClock;
 use eve_db::WorldRepository;
 use eve_machonet::SessionState;
@@ -338,12 +339,18 @@ mod multi_role_edge_tests {
 
         // 3-pilot site rejects Coercer Navy Issue (73789) and Caracal (621)
         let sal = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, sal.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         assert_eq!(
             activate_homefront_acceleration_gate(&ctx, &sess_caracal, sal.instance_id).await.unwrap_err().code,
             "ShipRestrictedByGate"
         );
 
         // 3. Raid edge failures: untackled hauler escapes; Caracal (<3500 m3) blocked from cargo delivery; incomplete objectives blocked
+        let _ = sys_h
+            .set_ball_position(830_001, raid.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id).await.unwrap();
         let ship_post_gate = sys_h.get_ball_snapshot(830_001).await.unwrap().unwrap().1.position;
         assert!(
@@ -480,8 +487,8 @@ mod multi_role_edge_tests {
             "InvalidArgument"
         );
         // Live event handlers silently sanitize NaN/negative inputs without mutating contributions
-        on_homefront_combat_damage_event(&ctx, 930_001, jita, 999_999, f64::NAN).await;
-        on_homefront_cap_warfare_event(&ctx, 930_001, jita, 999_999, f64::INFINITY, 0.0).await;
+        on_homefront_combat_damage_event(&ctx, Some(930_001), 830_001, 999_999, f64::NAN).await;
+        on_homefront_cap_warfare_event(&ctx, 930_001, jita, 999_999, f64::INFINITY, true).await;
         on_homefront_remote_repair_event(&ctx, 930_001, jita, 999_999, f64::NEG_INFINITY).await;
 
         let timed = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).unwrap();

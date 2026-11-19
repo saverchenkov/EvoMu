@@ -787,6 +787,11 @@ mod homefront_operations_it {
             }
             sessions.push(sess);
         }
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&940_002) {
+                ch.clone_grade = 2; // Omega clone required for Salvaging V (Alpha caps at III)
+            }
+        });
         grant_skills(&ctx, 940_002, &[(25_863, 5)]); // Salvaging V (>= 20% bonus with Salvager I)
 
         // Verify GetHomefrontSiteInstances RPC exposes Jita Homefront sites with canonical payouts
@@ -941,7 +946,7 @@ mod homefront_operations_it {
         position_ship_at(&ctx, jita, 743_000_004, aar.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[3], aar.instance_id).await.unwrap();
         for _ in 1..=9 {
-            abyssal_clear_wave(&ctx, &sessions[3], aar.instance_id, 30, 1_500.0, true).await.unwrap();
+            abyssal_clear_wave(&ctx, &sessions[3], aar.instance_id, 324, 1_500.0, true).await.unwrap();
         }
         assert_eq!(
             complete_homefront_operation_and_pay(&ctx, &sessions[3], aar.instance_id)
@@ -1131,6 +1136,7 @@ mod homefront_operations_it {
             )
             .await;
         let mut salvaged_ok = false;
+        let mut last_cyc = None;
         for _ in 0..50 {
             let cyc = execute_wreck_salvage_cycle(
                 &ctx,
@@ -1146,8 +1152,12 @@ mod homefront_operations_it {
                 salvaged_ok = true;
                 break;
             }
+            last_cyc = Some(cyc);
         }
-        assert!(salvaged_ok, "Salvager I + Salvaging V must salvage Homefront wreck");
+        assert!(
+            salvaged_ok,
+            "Salvager I + Salvaging V must salvage Homefront wreck (last={last_cyc:?})"
+        );
         assert!(matches!(
             get_homefront_runtime_state(&ctx, sal_live.instance_id).unwrap().progress,
             HomefrontArchetypeProgress::SalvageResearch { wrecks_salvaged, .. } if wrecks_salvaged >= 1

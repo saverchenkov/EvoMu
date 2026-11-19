@@ -1874,6 +1874,7 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                             1.0
                         };
                         let mut rollover_cap_drained = 0.0;
+                        let mut rollover_cap_transferred = 0.0;
                         let mut rollover_shield_repaired = 0.0;
                         if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                             let mut att = 1.0;
@@ -1897,8 +1898,10 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                                     rollover_shield_repaired = (cs.shield_hp - old_shield).max(0.0);
                                 }
                                 if cycle.remote_cap_amount > 0.0 {
+                                    let old_cap = cs.capacitor;
                                     cs.capacitor = (cs.capacitor + cycle.remote_cap_amount * att)
                                         .min(cs.max_capacitor);
+                                    rollover_cap_transferred = (cs.capacitor - old_cap).max(0.0);
                                 }
                             }
                         }
@@ -1911,6 +1914,16 @@ pub(crate) fn step_cycles_and_capacitor_with_missiles_and_tidi(
                                     activity_kind: "cap_warfare",
                                     sub_kind: "neutralizer",
                                     amount: rollover_cap_drained,
+                                });
+                            }
+                            if rollover_cap_transferred > 0.0 {
+                                pending_cycle_actions.push(PendingCycleAction::CareerProgressEvent {
+                                    char_id: cid,
+                                    source_ship_id: cycle.ship_id,
+                                    target_id,
+                                    activity_kind: "cap_warfare",
+                                    sub_kind: "cap_transfer",
+                                    amount: rollover_cap_transferred,
                                 });
                             }
                             if rollover_shield_repaired > 0.0 {
@@ -3600,3 +3613,136 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
 #[cfg(test)]
 #[path = "cycles_tests.rs"]
 mod cycles_tests;
+
+#[cfg(test)]
+mod r2_cap_transfer_tests {
+    use super::*;
+    use eve_destiny::{Ball, Ballpark, CombatState, MovementMode};
+    use eve_sde::SdeRegistry;
+    use glam::DVec3;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn remote_cap_transfer_rollover_emits_career_progress_event() {
+        let mut bp = Ballpark::new(30_000_142);
+        let src_ship = 91_001_i64;
+        let tgt_dread = 91_002_i64;
+        let blocked_tgt = 91_003_i64;
+        for (id, tid, pos) in [
+            (src_ship, 587_u32, DVec3::ZERO),
+            (tgt_dread, 19_720_u32, DVec3::new(1_000.0, 0.0, 0.0)),
+            (blocked_tgt, 19_720_u32, DVec3::new(1_500.0, 0.0, 0.0)),
+        ] {
+            bp.add_ball(Ball {
+                id,
+                type_id: tid,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            });
+        }
+        bp.combat_states.insert(
+            src_ship,
+            CombatState {
+                capacitor: 5_000.0,
+                max_capacitor: 5_000.0,
+                ..CombatState::default()
+            },
+        );
+        bp.combat_states.insert(
+            tgt_dread,
+            CombatState {
+                capacitor: 0.0,
+                max_capacitor: 120_000.0,
+                ..CombatState::default()
+            },
+        );
+        bp.combat_states.insert(
+            blocked_tgt,
+            CombatState {
+                capacitor: 0.0,
+                max_capacitor: 120_000.0,
+                disallow_assistance: true,
+                ..CombatState::default()
+            },
+        );
+        let mut cycles = vec![
+            ActiveModuleCycle {
+                ship_id: src_ship,
+                owner_char_id: Some(90_000_001),
+                module_id: 92_001,
+                module_type_id: 3558,
+                target_id: Some(tgt_dread),
+                remote_cap_amount: 500.0,
+                remote_optimal: 10_000.0,
+                remote_falloff: 5_000.0,
+                duration_s: 1.0,
+                repeat: 1,
+                ..Default::default()
+            },
+            ActiveModuleCycle {
+                ship_id: src_ship,
+                owner_char_id: Some(90_000_001),
+                module_id: 92_002,
+                module_type_id: 3558,
+                target_id: Some(blocked_tgt),
+                remote_cap_amount: 500.0,
+                remote_optimal: 10_000.0,
+                remote_falloff: 5_000.0,
+                duration_s: 1.0,
+                repeat: 1,
+                ..Default::default()
+            },
+        ];
+        let mut pending_disruptors = Vec::new();
+        let mut nanite_repairs = Vec::new();
+        let mut heat = HashMap::new();
+        let mut rah_accum = HashMap::new();
+        let mut pending_actions = Vec::new();
+        let sde_opt: Option<Arc<SdeRegistry>> = None;
+        let db_opt: Option<Arc<eve_db::WorldRepository>> = None;
+        let rng_opt: Option<Arc<crate::rng::MechanicRng>> = None;
+        step_cycles_and_capacitor(
+            &mut bp,
+            &mut cycles,
+            &mut pending_disruptors,
+            &mut nanite_repairs,
+            &mut heat,
+            &mut rah_accum,
+            &HashMap::new(),
+            &HashMap::new(),
+            &sde_opt,
+            &db_opt,
+            &rng_opt,
+            &Arc::new(RwLock::new(Default::default())),
+            &mut pending_actions,
+            1.0,
+            None,
+        );
+        assert!(pending_actions.iter().any(|a| matches!(
+            a,
+            PendingCycleAction::CareerProgressEvent {
+                char_id: 90_000_001,
+                source_ship_id,
+                target_id,
+                activity_kind: "cap_warfare",
+                sub_kind: "cap_transfer",
+                amount,
+            } if *source_ship_id == src_ship && *target_id == tgt_dread && *amount > 400.0
+        )));
+        assert!(!pending_actions.iter().any(|a| matches!(
+            a,
+            PendingCycleAction::CareerProgressEvent {
+                target_id,
+                sub_kind: "cap_transfer",
+                ..
+            } if *target_id == blocked_tgt
+        )));
+    }
+}

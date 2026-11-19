@@ -60,7 +60,7 @@ fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
 #[tokio::test]
 async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
     let ctx = fresh_player_ctx();
-    let ((mut sess1, cid1, ship1, guns1, bast1), (mut sess2, cid2, ship2, guns2, bast2)) = tokio::join!(
+    let ((mut sess1, _cid1, ship1, guns1, bast1), (mut sess2, cid2, ship2, guns2, bast2)) = tokio::join!(
         async {
             let (mut s, cid, _) = create_player_pilot(&ctx, 52_001, "hf_lead_u1", "Homefront Lead", JITA_SYS).await;
             let (ship, guns) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 28_659, 3057, 262, 4, 40).await;

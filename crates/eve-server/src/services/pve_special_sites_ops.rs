@@ -27,6 +27,9 @@ fn hf_ops_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+/// Volume (m3) of the Warclone Blanks Vat Raid crate (`type_id = 77473`) in SDE.
+pub const HOMEFRONT_RAID_CARGO_VOLUME_M3: f64 = 3_500.0;
+
 /// Canonical Homefront Operation site archetypes grounded in V24 `archetype_id == 70` dungeons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HomefrontArchetype {
