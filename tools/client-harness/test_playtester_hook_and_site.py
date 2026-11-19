@@ -4392,20 +4392,35 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
 
         main_layer = Node("Layer", "l_main", 0, 0, 1280, 800)
         windows = []
+        cmd_calls = []
 
         def _make_standalone(minimized=False):
             wnd = Node("DirectionalScanner", "directionalScannerWindow", 120, 80, 420, 520, parent=main_layer)
             wnd.windowID = "directionalScannerWindow"
             wnd.caption = "Directional Scanner"
-            wnd.minimized = minimized
+
+            def _minimize():
+                wnd.minimized = True
+                wnd.state = 2  # CarbonUI uiconst.UI_HIDDEN
+
+            def _maximize():
+                wnd.minimized = False
+                wnd.state = 0  # CarbonUI uiconst.UI_NORMAL
+
+            wnd.Minimize = _minimize
+            wnd.Maximize = _maximize
             wnd.IsMinimized = lambda: bool(wnd.minimized)
-            wnd.Maximize = lambda: setattr(wnd, "minimized", False)
+            if minimized:
+                _minimize()
+            else:
+                _maximize()
             pal = Node("DirectionalScannerPalette", "DirectionalScannerPalette", 125, 110, 410, 480, parent=wnd)
             Node("ScanButton", "ScanButton", 140, 540, 90, 28, parent=pal, label="Scan", click=True)
             return wnd
 
         class FakeCmd:
             def OpenDirectionalScanner(self):
+                cmd_calls.append("OpenDirectionalScanner")
                 if not windows:
                     windows.append(_make_standalone(minimized=True))
 
@@ -4427,9 +4442,127 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
             self.assertTrue(res.get("ok"), res)
             self.assertEqual(len(windows), 1)
             self.assertFalse(windows[0].minimized)
+            self.assertEqual(windows[0].state, 0)
             ui_tree = hook._inspect_uicore_tree()
             self.assertTrue(any(w.get("window_id") == "directionalScannerWindow" for w in ui_tree["open_windows"]))
             self.assertTrue(any(w.get("cls") == "ScanButton" and w.get("label") == "Scan" for w in ui_tree["clickable_widgets"]))
+
+            # Minimize existing standalone window with CarbonUI UI_HIDDEN (state=2) and reopen without calling command
+            windows[0].Minimize()
+            self.assertEqual(windows[0].state, 2)
+            calls_before = len(cmd_calls)
+            res2 = hook._open_client_window(fake_sm, "dscan")
+            self.assertTrue(res2.get("ok"), res2)
+            self.assertFalse(windows[0].minimized)
+            self.assertEqual(windows[0].state, 0)
+            self.assertEqual(len(cmd_calls), calls_before)
+
+    def test_open_neocom_dscan_minimized_solar_system_map_restores_preserves_toggle_and_closes(self):
+        hook = _load_hook_with_py2_stubs()
+        Node = self._build_node
+
+        side_layer = Node("Layer", "l_sidePanels", 0, 0, 1280, 800)
+        ss_panel = Node("SolarSystemViewPanel", "solar_system_map_panel", 48, 0, 1232, 800, parent=side_layer)
+        ss_panel.windowID = "solar_system_map_panel"
+        ss_panel.caption = "Solar System Map"
+        ss_panel.Minimize = lambda: (setattr(ss_panel, "minimized", True), setattr(ss_panel, "state", 2))
+        ss_panel.Maximize = lambda: (setattr(ss_panel, "minimized", False), setattr(ss_panel, "state", 0))
+        ss_panel.IsMinimized = lambda: bool(getattr(ss_panel, "minimized", False))
+        ss_panel.Minimize()
+
+        mv = Node("MapViewSolarSystem", "MapViewSolarSystem", 48, 0, 1232, 800, parent=ss_panel)
+        ss_panel.mapView = mv
+        mv.directionalScannerPalette = None
+        state = {"dscan_open": False, "cmd_calls": []}
+
+        def _attach_pal():
+            if mv.directionalScannerPalette is not None and not mv.directionalScannerPalette.destroyed:
+                return
+            pal = Node("DirectionalScannerPalette", "DirectionalScannerPalette", 60, 60, 420, 620, parent=mv, click=True)
+            pal.minimized = False
+            pal.Minimize = lambda: (setattr(pal, "minimized", True), setattr(pal, "state", 2))
+            pal.Maximize = lambda: (setattr(pal, "minimized", False), setattr(pal, "state", 0))
+            pal.IsMinimized = lambda: bool(getattr(pal, "minimized", False))
+            Node("ScanButton", "ScanButton", 70, 630, 90, 28, parent=pal, label="Scan", click=True)
+            mv.directionalScannerPalette = pal
+            state["dscan_open"] = True
+
+        def _detach_pal():
+            pal = mv.directionalScannerPalette
+            if pal is not None:
+                pal.destroyed = True
+                pal.display = False
+                if pal in mv.children:
+                    mv.children.remove(pal)
+            mv.directionalScannerPalette = None
+            state["dscan_open"] = False
+
+        mv.CloseDirectionalScannerPalette = _detach_pal
+
+        class FakeCmd:
+            def OpenDirectionalScanner(self, toggle=True, *args):
+                state["cmd_calls"].append(toggle)
+                if toggle:
+                    if state["dscan_open"]:
+                        _detach_pal()
+                    else:
+                        _attach_pal()
+                else:
+                    _attach_pal()
+
+        windows = [ss_panel]
+        fake_layers = types.SimpleNamespace(sidePanels=side_layer)
+        fake_uicore = types.SimpleNamespace(
+            cmd=FakeCmd(),
+            registry=types.SimpleNamespace(GetWindows=lambda: list(windows), GetModalWindow=lambda: None),
+            layer=fake_layers,
+            desktop=types.SimpleNamespace(width=1280, height=800),
+        )
+        fake_sm = types.SimpleNamespace(services={}, GetService=lambda _n: None)
+        space_sess = types.SimpleNamespace(stationid=None, structureid=None, solarsystemid=30000144, shipid=1001)
+        empty_snap = {"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "inflight"}
+
+        with mock.patch.dict(builtins.__dict__, {"session": space_sess, "sm": fake_sm, "uicore": fake_uicore}), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_close_context_menus_if_outside"), \
+             mock.patch.object(hook, "_dismiss_pinned_tooltip_if_outside"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value=empty_snap):
+            # 1) Minimized SolarSystemViewPanel (state=2) with closed D-Scan passes toggle=False and maximizes host
+            res1 = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
+            self.assertTrue(res1.get("ok"), res1)
+            self.assertTrue(res1.get("action_ok"), res1)
+            self.assertEqual(state["cmd_calls"], [False])
+            self.assertFalse(ss_panel.minimized)
+            self.assertEqual(ss_panel.state, 0)
+            self.assertTrue(state["dscan_open"])
+
+            # 2) Minimized SolarSystemViewPanel (state=2) with open D-Scan restores host without toggling D-Scan closed
+            ss_panel.Minimize()
+            self.assertFalse(any(w.get("window_id") == "directionalScannerWindow" for w in hook._inspect_uicore_tree()["open_windows"]))
+            res2 = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
+            self.assertTrue(res2.get("ok"), res2)
+            self.assertFalse(ss_panel.minimized)
+            self.assertEqual(ss_panel.state, 0)
+            self.assertEqual(state["cmd_calls"], [False])
+            self.assertTrue(any(w.get("window_id") == "directionalScannerWindow" for w in hook._inspect_uicore_tree()["open_windows"]))
+
+            # 3) Minimized DirectionalScannerPalette inside visible SolarSystemViewPanel is hidden until maximized
+            mv.directionalScannerPalette.Minimize()
+            self.assertFalse(any(w.get("window_id") == "directionalScannerWindow" for w in hook._inspect_uicore_tree()["open_windows"]))
+            res3 = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
+            self.assertTrue(res3.get("ok"), res3)
+            self.assertFalse(mv.directionalScannerPalette.minimized)
+            self.assertEqual(mv.directionalScannerPalette.state, 0)
+
+            # 4) Closing dscan while SolarSystemViewPanel is minimized (state=2) still closes embedded D-Scan palette
+            ss_panel.Minimize()
+            res_close = hook._execute_action(fake_sm, {"type": "close_modal_or_window", "target": "dscan", "wait_ms": 0})
+            self.assertTrue(res_close.get("action_ok"), res_close)
+            self.assertFalse(state["dscan_open"])
+            self.assertIn(ss_panel, windows)
 
     def test_open_neocom_dscan_fails_closed_when_missing_hidden_minimized_or_docked(self):
         hook = _load_hook_with_py2_stubs()
@@ -4451,9 +4584,10 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
             def OpenDirectionalScanner(self, toggle=True, *args):
                 cmd_calls.append(toggle)
 
+        windows = [ss_panel]
         fake_uicore = types.SimpleNamespace(
             cmd=NoopCmd(),
-            registry=types.SimpleNamespace(GetWindows=lambda: [ss_panel], GetModalWindow=lambda: None),
+            registry=types.SimpleNamespace(GetWindows=lambda: list(windows), GetModalWindow=lambda: None),
             layer=types.SimpleNamespace(main=main_layer, sidePanels=side_layer),
             desktop=types.SimpleNamespace(width=1280, height=800),
         )
@@ -4486,13 +4620,38 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
             self.assertFalse(res_req.get("action_ok"), res_req)
             self.assertEqual(len(cmd_calls), 2)
 
+            # Un-maximizable minimized SolarSystemViewPanel (state=2) with attached embedded palette fails closed
+            ss_panel.minimized = True
+            ss_panel.state = 2
+            ss_panel.Maximize = lambda: None  # Maximize fails to restore
+            hidden_pal.display = True
+            hidden_pal.state = 0
+            tree_min = hook._inspect_uicore_tree()
+            self.assertFalse(any(w.get("window_id") == "directionalScannerWindow" for w in tree_min["open_windows"]))
+            res_unmax_emb = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
+            self.assertFalse(res_unmax_emb.get("ok"), res_unmax_emb)
+            self.assertFalse(res_unmax_emb.get("action_ok"), res_unmax_emb)
+            self.assertEqual(cmd_calls[-1], False)
+
+            # Un-maximizable minimized standalone DirectionalScanner (state=2, no working Maximize) fails closed
+            stuck_ds = Node("DirectionalScanner", "directionalScannerWindow", 100, 100, 400, 500, parent=main_layer)
+            stuck_ds.windowID = "directionalScannerWindow"
+            stuck_ds.minimized = True
+            stuck_ds.state = 2
+            stuck_ds.Maximize = lambda: None
+            windows[:] = [stuck_ds]
+            res_unmax_std = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
+            self.assertFalse(res_unmax_std.get("ok"), res_unmax_std)
+            self.assertFalse(res_unmax_std.get("action_ok"), res_unmax_std)
+
             # While docked, fails closed with space-only guard without calling cmd
+            calls_before_dock = len(cmd_calls)
             with mock.patch.dict(builtins.__dict__, {"session": docked_sess}):
                 res_docked = hook._execute_action(fake_sm, {"type": "open_neocom", "target": "dscan", "wait_ms": 0})
                 self.assertFalse(res_docked.get("ok"), res_docked)
                 self.assertFalse(res_docked.get("action_ok"), res_docked)
                 self.assertIn("in space", res_docked.get("error", ""))
-                self.assertEqual(len(cmd_calls), 2)
+                self.assertEqual(len(cmd_calls), calls_before_dock)
 
 
 if __name__ == "__main__":

@@ -1725,14 +1725,31 @@ def _is_chain_visible(node, stop_at=None, max_depth=24, allow_minimized=False):
     for _ in range(max_depth):
         if cur is None:
             break
-        if not _is_visible(cur):
-            return False
-        if not allow_minimized and cur is not stop_at and _is_window_minimized(cur):
+        cur_min = _is_window_minimized(cur)
+        if cur_min and not allow_minimized:
             return False
         if cur is stop_at:
-            return True
+            return _is_visible(cur) or (allow_minimized and cur_min)
+        if not _is_visible(cur) and not (allow_minimized and cur_min):
+            return False
         cur = getattr(cur, "parent", None)
     return True
+
+
+def _maximize_dscan_surface(ds_cont, ds_host):
+    maximized = False
+    targets = [ds_host] if (ds_cont is ds_host) else [ds_host, ds_cont]
+    for target_node in targets:
+        if target_node is None or not _is_window_minimized(target_node):
+            continue
+        if hasattr(target_node, "Maximize"):
+            try:
+                target_node.Maximize()
+                maximized = True
+            except Exception:
+                pass
+    if maximized:
+        H._sleep_ms(300)
 
 
 def _collect_dscan_candidate_roots(uicore):
@@ -1775,11 +1792,14 @@ def _collect_dscan_candidate_roots(uicore):
     return win_roots + layer_roots
 
 
-def _find_solar_system_map_panel(uicore=None):
+def _find_solar_system_map_panel(uicore=None, include_minimized=False):
     if uicore is None:
         uicore = _get_uicore()
     for w in _collect_dscan_candidate_roots(uicore):
-        if not _is_visible(w):
+        is_min = _is_window_minimized(w)
+        if is_min and not include_minimized:
+            continue
+        if not _is_visible(w) and not (is_min and include_minimized):
             continue
         wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
         cls_n = w.__class__.__name__
@@ -1814,10 +1834,10 @@ def _find_directional_scanner_surface(uicore=None, include_minimized=False):
             return ("standalone", w, w, is_min)
 
     for host in roots:
-        if not _is_visible(host):
+        is_host_min = _is_window_minimized(host)
+        if is_host_min and not include_minimized:
             continue
-        is_min = _is_window_minimized(host)
-        if is_min and not include_minimized:
+        if not _is_visible(host) and not (is_host_min and include_minimized):
             continue
         mv = getattr(host, "mapView", None)
         pal = getattr(mv, "directionalScannerPalette", None) if mv is not None else None
@@ -1832,9 +1852,10 @@ def _find_directional_scanner_surface(uicore=None, include_minimized=False):
                     continue
                 q_seen.add(id(cur))
                 if cur is not host:
-                    if not _is_visible(cur):
+                    cur_min = _is_window_minimized(cur)
+                    if cur_min and not include_minimized:
                         continue
-                    if not include_minimized and _is_window_minimized(cur):
+                    if not _is_visible(cur) and not (cur_min and include_minimized):
                         continue
                 cur_cls = cur.__class__.__name__
                 cur_name = _safe_str(getattr(cur, "name", ""), 64)
@@ -1848,10 +1869,13 @@ def _find_directional_scanner_surface(uicore=None, include_minimized=False):
         if (
             pal is not None
             and not getattr(pal, "destroyed", False)
-            and _is_visible(pal)
+            and (_is_visible(pal) or (include_minimized and _is_window_minimized(pal)))
             and _is_chain_visible(pal, host, allow_minimized=include_minimized)
         ):
-            return ("embedded", pal, host, is_min)
+            eff_min = bool(is_host_min or _is_window_minimized(pal))
+            if eff_min and not include_minimized:
+                continue
+            return ("embedded", pal, host, eff_min)
 
     return (None, None, None, False)
 
@@ -4973,12 +4997,8 @@ def _open_client_window(sm, target, require_open=False):
         if mname == "OpenDirectionalScanner":
             pre_ds_kind, pre_ds_cont, pre_ds_host, pre_ds_min = _find_directional_scanner_surface(uicore, include_minimized=True)
             if pre_ds_cont is not None:
-                if pre_ds_min and pre_ds_host is not None and hasattr(pre_ds_host, "Maximize"):
-                    try:
-                        pre_ds_host.Maximize()
-                        H._sleep_ms(300)
-                    except Exception:
-                        pass
+                if pre_ds_min:
+                    _maximize_dscan_surface(pre_ds_cont, pre_ds_host)
                 ds_kind, ds_cont, _, ds_min = _find_directional_scanner_surface(uicore, include_minimized=False)
                 if ds_cont is not None and not ds_min:
                     return {
@@ -5016,9 +5036,10 @@ def _open_client_window(sm, target, require_open=False):
             except Exception:
                 pass
             cmd_args = (cg_id,)
-        elif mname == "OpenDirectionalScanner" and _find_solar_system_map_panel(uicore) is not None:
-            # When SolarSystemViewPanel is already open, V24 OpenDirectionalScanner(toggle=True)
-            # toggles D-Scan; pass toggle=False when supported so open never acts as close.
+        elif mname == "OpenDirectionalScanner" and _find_solar_system_map_panel(uicore, include_minimized=True) is not None:
+            # When SolarSystemViewPanel is already open (visible or minimized), V24
+            # OpenDirectionalScanner(toggle=True) toggles D-Scan; pass toggle=False when
+            # supported so open never acts as close.
             try:
                 code_obj = getattr(fn, "__code__", None)
                 varnames = getattr(code_obj, "co_varnames", ()) if code_obj is not None else ()
@@ -5057,12 +5078,8 @@ def _open_client_window(sm, target, require_open=False):
 
         if mname == "OpenDirectionalScanner":
             ds_kind, ds_cont, ds_host, ds_min = _find_directional_scanner_surface(uicore, include_minimized=True)
-            if ds_cont is not None and ds_min and ds_host is not None and hasattr(ds_host, "Maximize"):
-                try:
-                    ds_host.Maximize()
-                    H._sleep_ms(300)
-                except Exception:
-                    pass
+            if ds_cont is not None and ds_min:
+                _maximize_dscan_surface(ds_cont, ds_host)
             ds_kind, ds_cont, ds_host, ds_min = _find_directional_scanner_surface(uicore, include_minimized=False)
             if ds_cont is None or ds_min:
                 return {
