@@ -646,6 +646,455 @@ async fn delete_fitting_rbac_ownership_and_malformed_list_errors() {
     );
 }
 
+#[tokio::test]
+async fn corp_and_alliance_fittings_enforce_npc_rejection_uninserted_rbac_members_and_db_first() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let fit_kv = PyRep::keyval([
+        ("name", PyRep::String("RBAC Guard Fit".into())),
+        ("shipTypeID", PyRep::Integer(587)),
+        ("description", PyRep::String("regression".into())),
+        ("fitData", PyRep::List(vec![])),
+    ]);
+
+    let npc_corp_id = 1_000_009_i64;
+    let uninserted_corp_id = 98_777_881_i64;
+    let ally_uninserted_corp_id = 98_777_882_i64;
+    let seeded_corp_id = 98_777_883_i64;
+    let stale_corp_id = 98_777_884_i64;
+    let alliance_id = 99_777_882_i64;
+    let stale_alliance_id = 99_777_884_i64;
+
+    let npc_char = 91_777_881_i64;
+    let uninserted_char = 91_777_882_i64;
+    let ally_uninserted_char = 91_777_883_i64;
+    let seeded_ceo = 91_777_884_i64;
+    let omitted_char = 91_777_885_i64;
+    let db_char = 91_777_886_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            npc_char,
+            eve_db::CharacterRecord {
+                character_id: npc_char,
+                corporation_id: npc_corp_id,
+                alliance_id: Some(alliance_id),
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            uninserted_char,
+            eve_db::CharacterRecord {
+                character_id: uninserted_char,
+                corporation_id: uninserted_corp_id,
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            ally_uninserted_char,
+            eve_db::CharacterRecord {
+                character_id: ally_uninserted_char,
+                corporation_id: ally_uninserted_corp_id,
+                alliance_id: Some(alliance_id),
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            omitted_char,
+            eve_db::CharacterRecord {
+                character_id: omitted_char,
+                corporation_id: seeded_corp_id,
+                alliance_id: Some(alliance_id),
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            db_char,
+            eve_db::CharacterRecord {
+                character_id: db_char,
+                corporation_id: seeded_corp_id,
+                alliance_id: Some(alliance_id),
+                ..Default::default()
+            },
+        );
+
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = seeded_corp_id;
+        corp.name = "Fitting Members Corp".into();
+        corp.ticker = "FMBR".into();
+        corp.ceo_id = seeded_ceo;
+        corp.alliance_id = Some(alliance_id);
+        corp.members = std::collections::HashSet::from([seeded_ceo, db_char]);
+        corp.member_roles
+            .insert(omitted_char, eve_db::corp_roles::ROLE_FITTING_MANAGER);
+        corp.member_roles
+            .insert(db_char, eve_db::corp_roles::ROLE_FITTING_MANAGER);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(seeded_corp_id, corp);
+
+        let mut stale_corp = CorporationRecord::default();
+        stale_corp.corporation_id = stale_corp_id;
+        stale_corp.name = "Stale Fitting Corp".into();
+        stale_corp.ticker = "SFIT".into();
+        stale_corp.ceo_id = db_char;
+        stale_corp.alliance_id = Some(stale_alliance_id);
+        stale_corp.members = std::collections::HashSet::from([db_char]);
+        stale_corp.ensure_wallet_divisions();
+        snap.corporations.insert(stale_corp_id, stale_corp);
+
+        snap.alliances.insert(
+            alliance_id,
+            eve_db::AllianceRecord {
+                alliance_id,
+                name: "Fitting Guard Alliance".into(),
+                short_name: "FGAL".into(),
+                executor_corp_id: seeded_corp_id,
+                member_corp_ids: std::collections::HashSet::from([
+                    seeded_corp_id,
+                    ally_uninserted_corp_id,
+                ]),
+            },
+        );
+        snap.alliances.insert(
+            stale_alliance_id,
+            eve_db::AllianceRecord {
+                alliance_id: stale_alliance_id,
+                name: "Stale Alliance".into(),
+                short_name: "STAL".into(),
+                executor_corp_id: stale_corp_id,
+                member_corp_ids: std::collections::HashSet::from([stale_corp_id]),
+            },
+        );
+    });
+
+    // 1. NPC corporations are rejected on corpFittingMgr and allianceFittingMgr even with max corp_role,
+    // while curated community fittings (1_000_282) stay gated strictly on GM/Content role.
+    let mut npc_sess = SessionState::new(91_801);
+    npc_sess.user_id = Some(1);
+    npc_sess.character_id = Some(npc_char);
+    npc_sess.corporation_id = Some(npc_corp_id);
+    npc_sess.alliance_id = Some(alliance_id);
+    npc_sess.role = eve_machonet::service_roles::ROLE_PLAYER;
+    npc_sess.corp_role = u64::MAX;
+
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(npc_corp_id), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "GetFittings",
+            &[PyRep::Integer(npc_corp_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "allianceFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(alliance_id), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(1_000_282), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AccessDenied"
+    );
+    npc_sess.role |= eve_machonet::service_roles::ROLE_CONTENT;
+    assert!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut npc_sess,
+            None,
+            "corpFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(1_000_282), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+
+    // 2. Uninserted player corp (>= 98M) and uninserted member corp inside inserted alliance fail closed
+    // even with session.corp_role = ROLE_FITTING_MANAGER; unregistered alliance also fails closed.
+    let mut uninserted_sess = SessionState::new(91_802);
+    uninserted_sess.user_id = Some(2);
+    uninserted_sess.character_id = Some(uninserted_char);
+    uninserted_sess.corporation_id = Some(uninserted_corp_id);
+    uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut uninserted_sess,
+            None,
+            "corpFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(uninserted_corp_id), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut uninserted_sess,
+            None,
+            "corpFittingMgr",
+            "GetFittings",
+            &[PyRep::Integer(uninserted_corp_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut ally_uninserted_sess = SessionState::new(91_803);
+    ally_uninserted_sess.user_id = Some(3);
+    ally_uninserted_sess.character_id = Some(ally_uninserted_char);
+    ally_uninserted_sess.corporation_id = Some(ally_uninserted_corp_id);
+    ally_uninserted_sess.alliance_id = Some(alliance_id);
+    ally_uninserted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut ally_uninserted_sess,
+            None,
+            "allianceFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(alliance_id), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut ally_uninserted_sess,
+            None,
+            "allianceFittingMgr",
+            "GetFittings",
+            &[PyRep::Integer(alliance_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Seeded player corp claiming an unregistered alliance ID rejects allianceFittingMgr with NotInAlliance.
+    let unreg_ally_id = 99_777_899_i64;
+    let unreg_ally_corp_id = 98_777_899_i64;
+    let unreg_ally_ceo = 91_777_899_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut uc = CorporationRecord::default();
+        uc.corporation_id = unreg_ally_corp_id;
+        uc.name = "Unreg Ally Corp".into();
+        uc.ticker = "UAC".into();
+        uc.ceo_id = unreg_ally_ceo;
+        uc.alliance_id = Some(unreg_ally_id);
+        uc.members.insert(unreg_ally_ceo);
+        uc.ensure_wallet_divisions();
+        snap.corporations.insert(unreg_ally_corp_id, uc);
+        snap.characters.insert(
+            unreg_ally_ceo,
+            eve_db::CharacterRecord {
+                character_id: unreg_ally_ceo,
+                corporation_id: unreg_ally_corp_id,
+                alliance_id: Some(unreg_ally_id),
+                ..Default::default()
+            },
+        );
+    });
+    let mut unreg_ally_sess = SessionState::new(91_806);
+    unreg_ally_sess.user_id = Some(6);
+    unreg_ally_sess.character_id = Some(unreg_ally_ceo);
+    unreg_ally_sess.corporation_id = Some(unreg_ally_corp_id);
+    unreg_ally_sess.alliance_id = Some(unreg_ally_id);
+    let unreg_ally_err = handle_fitting_mgr(
+        &ctx,
+        &mut unreg_ally_sess,
+        None,
+        "allianceFittingMgr",
+        "SaveFitting",
+        &[PyRep::Integer(unreg_ally_id), fit_kv.clone()],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(unreg_ally_err.code, "UserError");
+    assert_eq!(unreg_ally_err.message, "NotInAlliance");
+    let unreg_ally_get_err = handle_fitting_mgr(
+        &ctx,
+        &mut unreg_ally_sess,
+        None,
+        "allianceFittingMgr",
+        "GetFittings",
+        &[PyRep::Integer(unreg_ally_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(unreg_ally_get_err.code, "UserError");
+    assert_eq!(unreg_ally_get_err.message, "NotInAlliance");
+
+    // 3. Character omitted from non-empty corp.members is denied on corp & alliance FittingMgr even with ROLE_FITTING_MANAGER.
+    let mut omitted_sess = SessionState::new(91_804);
+    omitted_sess.user_id = Some(4);
+    omitted_sess.character_id = Some(omitted_char);
+    omitted_sess.corporation_id = Some(seeded_corp_id);
+    omitted_sess.alliance_id = Some(alliance_id);
+    omitted_sess.corp_role = eve_db::corp_roles::ROLE_FITTING_MANAGER;
+    for (svc, oid, method, args) in [
+        (
+            "corpFittingMgr",
+            seeded_corp_id,
+            "SaveFitting",
+            vec![PyRep::Integer(seeded_corp_id), fit_kv.clone()],
+        ),
+        ("corpFittingMgr", seeded_corp_id, "GetFittings", vec![PyRep::Integer(seeded_corp_id)]),
+        (
+            "allianceFittingMgr",
+            alliance_id,
+            "SaveFitting",
+            vec![PyRep::Integer(alliance_id), fit_kv.clone()],
+        ),
+        ("allianceFittingMgr", alliance_id, "GetFittings", vec![PyRep::Integer(alliance_id)]),
+    ] {
+        let _ = oid;
+        assert_eq!(
+            handle_fitting_mgr(&ctx, &mut omitted_sess, None, svc, method, &args, &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied",
+            "{svc}.{method} must deny character omitted from non-empty corp.members"
+        );
+    }
+
+    // 4. Stale session.corporation_id / session.alliance_id cannot override DB character membership.
+    let mut stale_sess = SessionState::new(91_805);
+    stale_sess.user_id = Some(5);
+    stale_sess.character_id = Some(db_char);
+    stale_sess.corporation_id = Some(stale_corp_id);
+    stale_sess.alliance_id = Some(stale_alliance_id);
+    stale_sess.corp_role = 0;
+
+    let stale_corp_err = handle_fitting_mgr(
+        &ctx,
+        &mut stale_sess,
+        None,
+        "corpFittingMgr",
+        "SaveFitting",
+        &[PyRep::Integer(stale_corp_id), fit_kv.clone()],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stale_corp_err.code, "UserError");
+    assert_eq!(stale_corp_err.message, "FittingOwnerMismatch");
+    let stale_ally_err = handle_fitting_mgr(
+        &ctx,
+        &mut stale_sess,
+        None,
+        "allianceFittingMgr",
+        "GetFittings",
+        &[PyRep::Integer(stale_alliance_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(stale_ally_err.code, "UserError");
+    assert_eq!(stale_ally_err.message, "FittingOwnerMismatch");
+    assert!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut stale_sess,
+            None,
+            "corpFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(seeded_corp_id), fit_kv.clone()],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+    assert!(
+        handle_fitting_mgr(
+            &ctx,
+            &mut stale_sess,
+            None,
+            "allianceFittingMgr",
+            "SaveFitting",
+            &[PyRep::Integer(alliance_id), fit_kv],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .is_ok()
+    );
+}
+
 #[cfg(test)]
 #[path = "fitting_mgr_service_extra_unit_tests.rs"]
 mod fitting_mgr_service_extra_unit_tests;

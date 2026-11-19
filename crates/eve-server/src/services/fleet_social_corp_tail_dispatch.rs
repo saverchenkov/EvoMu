@@ -9,6 +9,24 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use super::fleet_social_corps::promote_due_pending_corp_grants;
 
+fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
+    corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
+}
+
+fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+fn corp_tail_err(code: &'static str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.to_owned(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn handle_corp_gov_tail(
     ctx: &ServerContext,
@@ -21,11 +39,13 @@ pub fn handle_corp_gov_tail(
     now_unix: u64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (has_director, has_personnel, has_comms) = ctx.db.with_snapshot(|snap| {
-        if corp_id <= 0
-            || (1_000_000..2_000_000).contains(&corp_id)
-            || ctx.sde.npc_corporations.contains_key(&corp_id)
-            || !snap.corporations.contains_key(&corp_id)
-        {
+        if is_npc_corporation_id(ctx, corp_id) {
+            return (false, false, false);
+        }
+        let Some(corp) = snap.corporations.get(&corp_id) else {
+            return (false, false, false);
+        };
+        if is_excluded_corp_member(corp, char_id) {
             return (false, false, false);
         }
         let (is_ceo, eff_roles) =
@@ -372,19 +392,20 @@ pub fn handle_corp_gov_tail(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut skills_owner_id = char_id;
                 let (is_ceo, caller_role) =
-                    snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
+                    snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(crate::services::account_services::err(
                         "CorporationNotFound",
                         format!("Corporation {corp_id} not found"),
                     ));
                 };
-                if corp.ceo_id != 0
-                    && !is_ceo
-                    && !eve_db::corp_roles::has_role(
-                        caller_role,
-                        eve_db::corp_roles::ROLE_DIRECTOR,
-                    )
+                if is_excluded_corp_member(corp, char_id)
+                    || (corp.ceo_id != 0
+                        && !is_ceo
+                        && !eve_db::corp_roles::has_role(
+                            caller_role,
+                            eve_db::corp_roles::ROLE_DIRECTOR,
+                        ))
                 {
                     return Err(crate::services::account_services::err(
                         "CorpRoleDenied",
@@ -424,16 +445,27 @@ pub fn handle_corp_gov_tail(
                 .unwrap_or(0);
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if is_npc_corporation_id(ctx, corp_id) {
+                    return Err(corp_tail_err(
+                        "CorpRoleDenied",
+                        "NPC corporations cannot change corporation HQ",
+                    ));
+                }
                 let (is_ceo, caller_role) =
                     snap.effective_corp_roles_at(corp_id, char_id, None, 0, now_unix);
-                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                        client_error: None,
-                    });
+                let excluded_member = {
+                    let Some(corp) = snap.corporations.get(&corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorporationNotFound".into(),
+                            message: format!("Corporation {corp_id} not found"),
+                            client_error: None,
+                        });
+                    };
+                    is_excluded_corp_member(corp, char_id)
                 };
-                if !is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                if excluded_member
+                    || (!is_ceo && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR))
+                {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Moving corporation HQ requires CEO or Director role".into(),
@@ -450,6 +482,13 @@ pub fn handle_corp_gov_tail(
                         client_error: None,
                     });
                 }
+                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                    return Err(BridgeRpcError {
+                        code: "CorporationNotFound".into(),
+                        message: format!("Corporation {corp_id} not found"),
+                        client_error: None,
+                    });
+                };
                 let old_hq = corp.hq_station_id.replace(station_id);
                 Ok(old_hq)
             });
@@ -529,20 +568,29 @@ pub fn handle_corp_gov_tail(
                 .flatten();
             let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&req_corp_id) {
+                if is_npc_corporation_id(ctx, req_corp_id) {
+                    return Err(corp_tail_err(
+                        "CorpRoleDenied",
+                        "NPC corporations do not have corporate asset inventory",
+                    ));
+                }
+                let Some(corp) = snap.corporations.get(&req_corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {req_corp_id} not found"),
                         client_error: None,
                     });
-                }
+                };
+                let excluded_member = is_excluded_corp_member(corp, char_id);
                 let (is_ceo, caller_role) =
                     snap.effective_corp_roles_at(req_corp_id, char_id, None, 0, now_unix);
                 let allowed_roles = corp_roles::ROLE_DIRECTOR
                     | corp_roles::ROLE_ACCOUNTANT
                     | corp_roles::ROLE_JUNIOR_ACCOUNTANT
                     | corp_roles::ROLE_TRADER;
-                if !is_ceo && caller_role != u64::MAX && (caller_role & allowed_roles) == 0 {
+                if excluded_member
+                    || (!is_ceo && caller_role != u64::MAX && (caller_role & allowed_roles) == 0)
+                {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Viewing corporation asset inventory requires Director, Accountant, or Trader role".into(),
@@ -717,7 +765,13 @@ pub fn handle_corp_gov_tail(
 
         ("corpRegistry", "RegisterNewAggressionSettings") => {
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
-                if !snap.corporations.contains_key(&corp_id) {
+                if is_npc_corporation_id(ctx, corp_id) {
+                    return false;
+                }
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return false;
+                };
+                if is_excluded_corp_member(corp, char_id) {
                     return false;
                 }
                 let (is_ceo, roles) =
@@ -929,13 +983,27 @@ pub(crate) fn handle_get_corp_applications_rpc(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+    let corp_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id)))
+        .or(session.corporation_id)
+        .unwrap_or(0);
     super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let res = ctx.db.with_snapshot(|snap| {
+        if is_npc_corporation_id(ctx, corp_id) {
+            return Err(corp_tail_err(
+                "CorpRoleDenied",
+                "NPC corporations do not manage player corporation applications",
+            ));
+        }
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found"), client_error: None });
         };
+        if is_excluded_corp_member(corp, char_id) {
+            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into(), client_error: None });
+        }
         let (is_ceo, eff_roles) =
             crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
                 snap, corp_id, char_id, 0, now_unix,

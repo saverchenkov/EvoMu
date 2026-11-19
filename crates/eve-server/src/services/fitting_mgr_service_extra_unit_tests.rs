@@ -392,7 +392,17 @@ async fn alliance_fittings_community_content_role_update_delete_and_max_cap() {
                 __corp.corporation_id = corp_id;
                 __corp.ceo_id = cid;
                 __corp.alliance_id = Some(alliance_id);
+                __corp.members.insert(cid);
                 __corp },
+        );
+        snap.alliances.insert(
+            alliance_id,
+            eve_db::AllianceRecord {
+                alliance_id,
+                executor_corp_id: corp_id,
+                member_corp_ids: [corp_id].into_iter().collect(),
+                ..Default::default()
+            },
         );
     });
 

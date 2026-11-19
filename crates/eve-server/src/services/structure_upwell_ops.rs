@@ -468,11 +468,16 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
             if st.owner_corp_id != owner_id {
                 return Err(err("StructureOwnershipViolation", format!("Character {char_id} (corp {owner_id}) cannot move corporate assets from structure {structure_id} owned by corp {}", st.owner_corp_id)));
             }
-            let (is_ceo, roles) =
-                snap.effective_corp_roles_at(owner_id, char_id, Some(structure_id), session.corp_role, now_unix);
             let has_dir = session.has_gm_role()
-                || is_ceo
-                || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
+                || has_db_corp_asset_safety_role(
+                    ctx,
+                    snap,
+                    char_id,
+                    owner_id,
+                    Some(structure_id),
+                    eve_db::corp_roles::ROLE_DIRECTOR,
+                    now_unix,
+                );
             if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
         }
         let ext_active = load_ext_state(snap); let all_active_ships: HashSet<i64> = snap.characters.values().map(|c| c.active_ship_id).filter(|&id| id > 0).chain(session.ship_id.into_iter().filter(|&id| id > 0)).chain(ext_active.previous_ship_by_structure.iter().filter(|(sid, _)| ext_active.active_pilot_by_structure.contains_key(sid)).map(|(_, &sh)| sh).filter(|&id| id > 0)).collect();
@@ -612,6 +617,38 @@ pub fn sync_auto_delivered_asset_safety_wraps(ctx: &ServerContext) {
     });
 }
 
+/// Returns `true` when `char_id` belongs to registered player corporation `corp_id` (not excluded
+/// from `corp.members`) and holds CEO status or `required_role` strictly from DB state (`0` session fallback).
+fn has_db_corp_asset_safety_role(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    loc_id: Option<i64>,
+    required_role: u64,
+    now_unix: u64,
+) -> bool {
+    if corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+    {
+        return false;
+    }
+    let Some(corp) = snap.corporations.get(&corp_id) else {
+        return false;
+    };
+    let excluded_member =
+        corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id);
+    if excluded_member {
+        return false;
+    }
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, loc_id, 0, now_unix);
+    corp.ceo_id == char_id
+        || is_ceo
+        || eve_db::corp_roles::has_role(eff_roles, required_role)
+}
+
 fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, is_corp: bool) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
@@ -623,32 +660,24 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
                 .map(|c| c.corporation_id)
                 .or(session.corporation_id)
                 .unwrap_or(0);
-            if let Some(corp) = snap.corporations.get(&owner_id) {
-                let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                    owner_id,
-                    char_id,
-                    None,
-                    session.corp_role,
-                    now_unix,
-                );
-                if corp.ceo_id != char_id
-                    && !is_ceo
-                    && !eve_db::corp_roles::has_role(
-                        eff_roles,
-                        eve_db::corp_roles::ROLE_ACCOUNTANT,
-                    )
-                {
-                    return Err(err(
-                        "CorpRoleDenied",
-                        "Viewing corporate asset safety requires Accountant or Director role",
-                    ));
-                }
-            } else if owner_id >= 98_000_000
-                && !eve_db::corp_roles::has_role(
-                    session.corp_role,
-                    eve_db::corp_roles::ROLE_ACCOUNTANT,
-                )
+            if owner_id <= 0
+                || (1_000_000..2_000_000).contains(&owner_id)
+                || ctx.sde.npc_corporations.contains_key(&owner_id)
             {
+                return Err(err(
+                    "CorpRoleDenied",
+                    "Viewing corporate asset safety requires a player corporation",
+                ));
+            }
+            if !has_db_corp_asset_safety_role(
+                ctx,
+                snap,
+                char_id,
+                owner_id,
+                None,
+                eve_db::corp_roles::ROLE_ACCOUNTANT,
+                now_unix,
+            ) {
                 return Err(err(
                     "CorpRoleDenied",
                     "Viewing corporate asset safety requires Accountant or Director role",
@@ -694,17 +723,36 @@ fn handle_get_wrap_names(ctx: &ServerContext, session: &mut SessionState, args: 
         Some(PyRep::Integer(id)) => vec![*id],
         _ => Vec::new(),
     };
+    let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let corp_authorized = !session.has_gm_role()
+            && has_db_corp_asset_safety_role(
+                ctx,
+                snap,
+                char_id,
+                caller_corp,
+                None,
+                eve_db::corp_roles::ROLE_ACCOUNTANT,
+                now_unix,
+            );
         let ext = load_ext_state(snap);
         Ok(PyRep::Dict(
             ids.into_iter()
                 .filter_map(|wid| {
-                    ext.asset_safety_wraps.get(&wid).filter(|w| {
-                        w.owner_id == char_id
-                            || (w.is_corp && caller_corp > 0 && w.owner_id == caller_corp)
-                            || session.has_gm_role()
-                    }).map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone())))
+                    ext.asset_safety_wraps
+                        .get(&wid)
+                        .filter(|w| {
+                            session.has_gm_role()
+                                || (!w.is_corp && w.owner_id == char_id)
+                                || (w.is_corp && corp_authorized && w.owner_id == caller_corp)
+                        })
+                        .map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone())))
                 })
                 .collect(),
         ))
@@ -748,13 +796,19 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         if (wrap.is_corp && wrap.owner_id != caller_corp) || (!wrap.is_corp && wrap.owner_id != char_id) {
             return Err(err("NotAssetSafetyWrapOwner", format!("Wrap {wrap_id} is not owned by the caller")));
         }
-        if wrap.is_corp {
-            let (is_ceo, roles) =
-                snap.effective_corp_roles_at(caller_corp, char_id, Some(dest_id), session.corp_role, now_unix);
-            let has_dir = session.has_gm_role()
-                || is_ceo
-                || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
-            if !has_dir { return Err(err("InsufficientCorpRoles", "Delivering corporate asset safety wrap requires Director or CEO role")); }
+        if wrap.is_corp
+            && !session.has_gm_role()
+            && !has_db_corp_asset_safety_role(
+                ctx,
+                snap,
+                char_id,
+                caller_corp,
+                Some(dest_id),
+                eve_db::corp_roles::ROLE_DIRECTOR,
+                now_unix,
+            )
+        {
+            return Err(err("InsufficientCorpRoles", "Delivering corporate asset safety wrap requires Director or CEO role"));
         }
         if wrap.delivered_to_id.is_some() && (!wrap.auto_delivered || wrap.retrieval_fee_paid) {
             return Err(err("AssetSafetyWrapAlreadyDelivered", format!("Asset safety wrap {wrap_id} has already been delivered")));

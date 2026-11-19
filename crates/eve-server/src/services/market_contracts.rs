@@ -1802,12 +1802,27 @@ pub fn handle(
         }
         ("contractProxy", "GetNumItemsInContainers") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs")) {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|v| v.as_i64()).collect(),
-                Some(PyRep::Integer(id)) => vec![*id],
-                _ => Vec::new(),
+            let cid_arg = args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs"));
+            let cids: Vec<i64> = match cid_arg {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    let mut parsed = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item {
+                            PyRep::Integer(cid) if *cid > 0 => parsed.push(*cid),
+                            _ => {
+                                return Some(Err(rpc_err(
+                                    "InvalidContainer",
+                                    "containerID must be positive integer",
+                                )));
+                            }
+                        }
+                    }
+                    parsed
+                }
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                _ => return Some(Err(rpc_err("InvalidContainer", "containerID must be positive"))),
             };
-            if cids.is_empty() || cids.iter().any(|&cid| cid <= 0) {
+            if cids.is_empty() {
                 return Some(Err(rpc_err("InvalidContainer", "containerID must be positive")));
             }
             let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
@@ -1903,7 +1918,6 @@ fn resolve_corp_container_context(
 fn check_corp_container_query_access(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
-    session: &SessionState,
     corp_id: i64,
     char_id: i64,
     location_id: Option<i64>,
@@ -1916,12 +1930,18 @@ fn check_corp_container_query_access(
             "Cannot query corporate contract containers for an NPC corporation",
         ));
     }
-    if !snap.corporations.contains_key(&corp_id) {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
         return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
+    };
+    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return Err(rpc_err(
+            "CorpRoleDenied",
+            "Inspecting corporation containers requires membership in the corporation",
+        ));
     }
     let resolved_loc = location_id.and_then(|loc| resolve_corp_container_context(snap, loc).0.or(Some(loc)));
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, resolved_loc, session.corp_role, now_unix);
+        snap.effective_corp_roles_at(corp_id, char_id, resolved_loc, 0, now_unix);
     let allowed = if is_ceo || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR) {
         true
     } else if (116..=122).contains(&flag_num) {
@@ -1954,9 +1974,11 @@ fn inspect_contract_container_items<'a>(
     req_flag_num: Option<i64>,
     now_unix: u64,
 ) -> Result<Option<Vec<&'a InventoryItemRecord>>, BridgeRpcError> {
-    let caller_corp = session
-        .corporation_id
-        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
         .filter(|&id| id > 0);
     let div_filter = req_flag_num.filter(|&f| is_corp_division_or_deliveries_flag(f));
     if for_corp {
@@ -1976,7 +1998,6 @@ fn inspect_contract_container_items<'a>(
             check_corp_container_query_access(
                 ctx,
                 snap,
-                session,
                 corp_id,
                 char_id,
                 location_hint,
@@ -2005,7 +2026,6 @@ fn inspect_contract_container_items<'a>(
                                         && check_corp_container_query_access(
                                             ctx,
                                             snap,
-                                            session,
                                             cid,
                                             char_id,
                                             root_loc.or(Some(i.location_id)),
@@ -2028,7 +2048,6 @@ fn inspect_contract_container_items<'a>(
                 check_corp_container_query_access(
                     ctx,
                     snap,
-                    session,
                     cont.owner_id,
                     char_id,
                     root_loc,
@@ -2065,7 +2084,6 @@ fn inspect_contract_container_items<'a>(
                 match check_corp_container_query_access(
                     ctx,
                     snap,
-                    session,
                     cont.owner_id,
                     char_id,
                     root_loc,
@@ -2088,7 +2106,6 @@ fn inspect_contract_container_items<'a>(
                 check_corp_container_query_access(
                     ctx,
                     snap,
-                    session,
                     cont.owner_id,
                     char_id,
                     root_loc,
@@ -2103,7 +2120,6 @@ fn inspect_contract_container_items<'a>(
             check_corp_container_query_access(
                 ctx,
                 snap,
-                session,
                 corp_id,
                 char_id,
                 location_hint,
@@ -2158,7 +2174,6 @@ fn inspect_contract_container_items<'a>(
             check_corp_container_query_access(
                 ctx,
                 snap,
-                session,
                 corp_id,
                 char_id,
                 location_hint,
@@ -2175,7 +2190,6 @@ fn inspect_contract_container_items<'a>(
             match check_corp_container_query_access(
                 ctx,
                 snap,
-                session,
                 item.owner_id,
                 char_id,
                 root_loc,

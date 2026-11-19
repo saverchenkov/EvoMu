@@ -1605,6 +1605,23 @@ async fn test_jetcan_wreck_sma_fleet_hangar_and_asset_safety() {
     ]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
+    let char_id = 90_000_001i64;
+    let corp_id = 98_900_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Asset Safety Test Corp".into();
+        corp.ticker = "ASTC".into();
+        corp.ceo_id = char_id;
+        corp.members.insert(char_id);
+        corp.member_roles
+            .insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+    });
     let mut sess = SessionState::new(7104);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     ctx.dispatch_rpc(
@@ -1612,14 +1629,13 @@ async fn test_jetcan_wreck_sma_fleet_hangar_and_asset_safety() {
         "charUnboundMgr",
         None,
         "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
+        &[PyRep::Integer(char_id)],
         &kw,
         None,
     )
     .await
     .expect("SelectCharacterID");
 
-    let char_id = 90_000_001i64;
     let station_id = 60_003_760i64;
     let sys_id = 30_000_142u32;
 

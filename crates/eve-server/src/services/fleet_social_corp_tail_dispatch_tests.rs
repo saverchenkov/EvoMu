@@ -482,3 +482,195 @@ fn corp_gov_tail_rbac_and_npc_corp_guards() {
         assert!(!snap.corp_member_limits.contains_key(&missing_corp_id));
     });
 }
+
+#[test]
+fn corp_gov_tail_enforces_non_empty_corp_members() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_id = 98_600_701_i64;
+    let corp_no_ceo = 98_600_702_i64;
+    let ceo_id = 91_600_701_i64;
+    let member_id = 91_600_702_i64;
+    let omitted_id = 91_600_703_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "TailMemberCorp".into();
+        corp.ticker = "TMC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id]);
+        corp.member_roles.insert(omitted_id, u64::MAX);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        let mut no_ceo = CorporationRecord::default();
+        no_ceo.corporation_id = corp_no_ceo;
+        no_ceo.name = "TailNoCeoCorp".into();
+        no_ceo.ticker = "TNCC".into();
+        no_ceo.ceo_id = 0;
+        no_ceo.members = std::collections::HashSet::from([member_id]);
+        no_ceo.member_roles.insert(omitted_id, u64::MAX);
+        no_ceo.ensure_wallet_divisions();
+        snap.corporations.insert(corp_no_ceo, no_ceo);
+    });
+
+    let mut omitted_sess = make_session(omitted_id, corp_id);
+    for (svc, method, args) in [
+        ("corpRegistry", "GetPendingAutoKicks", vec![]),
+        ("corpRegistry", "UpdateAttributes", vec![]),
+        ("corpRegistry", "UpdateCorporationAbilities", vec![]),
+        ("corpStationMgr", "MoveCorpHQHere", vec![PyRep::Integer(60_003_760)]),
+        (
+            "corpmgr",
+            "GetAssetInventory",
+            vec![PyRep::Integer(corp_id), PyRep::String("offices".into())],
+        ),
+        ("corpRegistry", "RegisterNewAggressionSettings", vec![PyRep::Bool(true)]),
+    ] {
+        assert_eq!(
+            handle_corp_gov_tail(&ctx, &mut omitted_sess, svc, method, &args, corp_id, omitted_id, 1000)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied",
+            "{svc}.{method} must deny character omitted from non-empty corp.members"
+        );
+    }
+
+    // Even when ceo_id == 0, non-members omitted from non-empty corp.members are denied UpdateAttributes.
+    let mut omitted_no_ceo_sess = make_session(omitted_id, corp_no_ceo);
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut omitted_no_ceo_sess,
+            "corpRegistry",
+            "UpdateAttributes",
+            &[],
+            corp_no_ceo,
+            omitted_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // GetApplications also rejects callers omitted from non-empty corp.members.
+    assert_eq!(
+        handle_get_corp_applications_rpc(&ctx, &omitted_sess, &[PyRep::Integer(corp_id)], false)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+}
+
+#[test]
+fn corp_gov_tail_update_attributes_rejects_stale_session_corp_role() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_id = 98_600_801_i64;
+    let ceo_id = 91_600_801_i64;
+    let plain_id = 91_600_802_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "AttrRoleCorp".into();
+        corp.ticker = "ARC".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id, plain_id]);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+    });
+
+    let mut plain_sess = make_session(plain_id, corp_id);
+    plain_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut plain_sess,
+            "corpRegistry",
+            "UpdateAttributes",
+            &[],
+            corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    let mut ceo_sess = make_session(ceo_id, corp_id);
+    ceo_sess.corp_role = 0;
+    assert!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut ceo_sess,
+            "corpRegistry",
+            "UpdateAttributes",
+            &[],
+            corp_id,
+            ceo_id,
+            1000,
+        )
+        .unwrap()
+        .is_ok()
+    );
+}
+
+#[test]
+fn corp_gov_tail_rejects_npc_corp_even_if_corp_record_seeded() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let npc_corp_id = 1_000_009_i64;
+    let char_id = 91_600_901_i64;
+    let station_id = *ctx.sde.stations.keys().next().unwrap_or(&60_003_760);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut npc = CorporationRecord::default();
+        npc.corporation_id = npc_corp_id;
+        npc.name = "Seeded NPC Guard".into();
+        npc.ticker = "SNG".into();
+        npc.ceo_id = char_id;
+        npc.members.insert(char_id);
+        npc.member_roles.insert(char_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        npc.ensure_wallet_divisions();
+        snap.corporations.insert(npc_corp_id, npc);
+        if let Some(base) = snap.characters.values().next().cloned() {
+            let mut ch = base;
+            ch.character_id = char_id;
+            ch.corporation_id = npc_corp_id;
+            snap.characters.insert(char_id, ch);
+        }
+    });
+
+    let mut npc_sess = make_session(char_id, npc_corp_id);
+    for (svc, method, args) in [
+        ("corpStationMgr", "MoveCorpHQHere", vec![PyRep::Integer(station_id)]),
+        ("corpmgr", "GetAssetInventory", vec![PyRep::Integer(npc_corp_id), PyRep::String("offices".into())]),
+        (
+            "corpmgr",
+            "GetAssetInventoryForLocation",
+            vec![PyRep::Integer(npc_corp_id), PyRep::Integer(station_id), PyRep::String("offices".into())],
+        ),
+        ("corpRegistry", "RegisterNewAggressionSettings", vec![PyRep::Bool(true)]),
+    ] {
+        assert_eq!(
+            handle_corp_gov_tail(&ctx, &mut npc_sess, svc, method, &args, npc_corp_id, char_id, 1000)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied",
+            "{svc}.{method} must reject NPC corporation {npc_corp_id}"
+        );
+    }
+    assert_eq!(
+        handle_get_corp_applications_rpc(&ctx, &npc_sess, &[PyRep::Integer(npc_corp_id)], false)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+}

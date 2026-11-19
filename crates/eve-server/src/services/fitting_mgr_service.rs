@@ -33,6 +33,107 @@ fn has_corp_fitting_manager_role(is_ceo: bool, roles: u64) -> bool {
         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)
 }
 
+fn deny_corp_fitting_role(message: impl Into<String>) -> BridgeRpcError {
+    crate::services::account_services::err("CorpRoleDenied", message)
+}
+
+fn is_npc_corporation_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+fn authorize_player_corp_fitting_member(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+    action_label: &str,
+    scope_noun: &str,
+    expected_alliance_id: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    if is_npc_corporation_id(ctx, corp_id) {
+        return Err(deny_corp_fitting_role(format!(
+            "{action_label} {scope_noun} fittings is not permitted for NPC corporations"
+        )));
+    }
+    let excluded_member = ctx.db.with_snapshot(|s| -> Result<bool, BridgeRpcError> {
+        let Some(corp) = s.corporations.get(&corp_id) else {
+            return Err(deny_corp_fitting_role(format!(
+                "{action_label} {scope_noun} fittings requires a registered player corporation"
+            )));
+        };
+        if let Some(alliance_id) = expected_alliance_id {
+            let Some(alliance) = s.alliances.get(&alliance_id) else {
+                return Err(crate::services::account_services::err(
+                    "UserError",
+                    "NotInAlliance",
+                ));
+            };
+            if !alliance.member_corp_ids.contains(&corp_id) && corp.alliance_id != Some(alliance_id) {
+                return Err(crate::services::account_services::err(
+                    "UserError",
+                    "FittingOwnerMismatch",
+                ));
+            }
+        }
+        Ok(is_excluded_corp_member(corp, char_id))
+    })?;
+    if excluded_member {
+        return Err(deny_corp_fitting_role(format!(
+            "{action_label} {scope_noun} fittings requires membership in the corporation"
+        )));
+    }
+    let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+    if !has_corp_fitting_manager_role(is_ceo, roles) {
+        return Err(deny_corp_fitting_role(format!(
+            "{action_label} {scope_noun} fittings requires Fitting Manager or Director role"
+        )));
+    }
+    Ok(())
+}
+
+fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
+    corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
+}
+
+fn resolve_caller_corp_and_alliance(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+) -> (i64, i64) {
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
+        .unwrap_or(0);
+    let corp_opt = snap.corporations.get(&caller_corp);
+    let caller_alliance = corp_opt
+        .and_then(|c| c.alliance_id)
+        .or_else(|| {
+            if corp_opt.is_none() {
+                snap.characters.get(&char_id).and_then(|c| c.alliance_id)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            snap.alliances
+                .values()
+                .find(|a| a.member_corp_ids.contains(&caller_corp))
+                .map(|a| a.alliance_id)
+        })
+        .or_else(|| {
+            if corp_opt.is_none() && !snap.characters.contains_key(&char_id) {
+                session.alliance_id
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    (caller_corp, caller_alliance)
+}
+
 fn resolve_and_authorize_fitting_owner(
     ctx: &ServerContext,
     session: &SessionState,
@@ -41,10 +142,13 @@ fn resolve_and_authorize_fitting_owner(
     owner_filter: Option<i64>,
     action_label: &str,
 ) -> Result<i64, BridgeRpcError> {
+    let (caller_corp, caller_alliance) = ctx
+        .db
+        .with_snapshot(|snap| resolve_caller_corp_and_alliance(snap, session, char_id));
     let expected_owner = if service.starts_with("corp") {
-        session.corporation_id.unwrap_or(0)
+        caller_corp
     } else if service.starts_with("alliance") {
-        session.alliance_id.unwrap_or(0)
+        caller_alliance
     } else {
         char_id
     };
@@ -72,52 +176,18 @@ fn resolve_and_authorize_fitting_owner(
             client_error: None,
         });
     }
-    if service.starts_with("corp")
-        && ctx
-            .db
-            .with_snapshot(|s| s.corporations.contains_key(&target_owner))
-    {
-        let (is_ceo, roles) = get_effective_corp_roles(ctx, target_owner, char_id);
-        if !has_corp_fitting_manager_role(is_ceo, roles) {
-            return Err(BridgeRpcError {
-                code: "CorpRoleDenied".into(),
-                message: format!(
-                    "{action_label} corporation fittings requires Fitting Manager or Director role"
-                ),
-                client_error: None,
-            });
-        }
+    if service.starts_with("corp") {
+        authorize_player_corp_fitting_member(ctx, target_owner, char_id, action_label, "corporation", None)?;
     }
     if service.starts_with("alliance") {
-        let caller_corp = session.corporation_id.unwrap_or(0);
-        let (corp_exists, in_alliance) = ctx.db.with_snapshot(|s| {
-            let corp_ok = s.corporations.contains_key(&caller_corp);
-            let alliance_ok = s.alliances.get(&target_owner).map_or(true, |a| {
-                a.member_corp_ids.contains(&caller_corp)
-                    || s.corporations
-                        .get(&caller_corp)
-                        .and_then(|c| c.alliance_id)
-                        == Some(target_owner)
-            });
-            (corp_ok, alliance_ok)
-        });
-        if !in_alliance {
-            return Err(crate::services::account_services::err(
-                "UserError",
-                "FittingOwnerMismatch",
-            ));
-        }
-        if corp_exists {
-            let (is_ceo, roles) = get_effective_corp_roles(ctx, caller_corp, char_id);
-            if !has_corp_fitting_manager_role(is_ceo, roles) {
-                return Err(crate::services::account_services::err(
-                    "CorpRoleDenied",
-                    format!(
-                        "{action_label} alliance fittings requires Fitting Manager or Director role"
-                    ),
-                ));
-            }
-        }
+        authorize_player_corp_fitting_member(
+            ctx,
+            caller_corp,
+            char_id,
+            action_label,
+            "alliance",
+            Some(target_owner),
+        )?;
     }
     Ok(target_owner)
 }
@@ -191,9 +261,17 @@ fn handle_get_fittings(
     let owner_id = if is_community_query {
         COMMUNITY_FITTING_CORP_ID
     } else {
+        let (caller_corp, caller_alliance, corp_exists, alliance_exists, excluded_member) =
+            ctx.db.with_snapshot(|snap| {
+                let (corp_id, ally_id) = resolve_caller_corp_and_alliance(snap, session, char_id);
+                let corp_opt = snap.corporations.get(&corp_id);
+                let excluded = corp_opt.is_some_and(|corp| is_excluded_corp_member(corp, char_id));
+                let ally_ok = ally_id > 0 && snap.alliances.contains_key(&ally_id);
+                (corp_id, ally_id, corp_opt.is_some(), ally_ok, excluded)
+            });
         let expected_owner = match service {
-            "corpFittingMgr" => session.corporation_id.unwrap_or(0),
-            "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
+            "corpFittingMgr" => caller_corp,
+            "allianceFittingMgr" => caller_alliance,
             _ => char_id,
         };
         let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
@@ -205,6 +283,20 @@ fn handle_get_fittings(
 
         if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
             return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into(), client_error: None }));
+        }
+        let is_shared_fitting_service = matches!(service, "corpFittingMgr" | "allianceFittingMgr");
+        if is_shared_fitting_service
+            && (is_npc_corporation_id(ctx, caller_corp) || !corp_exists || excluded_member)
+        {
+            return Some(Err(deny_corp_fitting_role(
+                "Viewing corporation or alliance fittings requires player corporation membership",
+            )));
+        }
+        if service == "allianceFittingMgr" && !alliance_exists {
+            return Some(Err(crate::services::account_services::err(
+                "UserError",
+                "NotInAlliance",
+            )));
         }
         owner_id
     };
@@ -264,12 +356,18 @@ async fn handle_save_fitting(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let (caller_corp, caller_alliance) = ctx
+        .db
+        .with_snapshot(|snap| resolve_caller_corp_and_alliance(snap, session, char_id));
     let default_owner = match service {
-        "corpFittingMgr" => session.corporation_id.unwrap_or(char_id),
-        "allianceFittingMgr" => session
-            .alliance_id
-            .or(session.corporation_id)
-            .unwrap_or(char_id),
+        "corpFittingMgr" => if caller_corp > 0 { caller_corp } else { char_id },
+        "allianceFittingMgr" => if caller_alliance > 0 {
+            caller_alliance
+        } else if caller_corp > 0 {
+            caller_corp
+        } else {
+            char_id
+        },
         _ => char_id,
     };
 
