@@ -1139,3 +1139,379 @@ async fn no_solar_system_rejected_purely_across_probe_rpcs_and_multi_arg_unbound
     .await;
     assert!(res.is_none(), "unbound [Real, Real] RequestScans must fall through");
 }
+
+#[tokio::test]
+async fn docked_expired_signatures_and_pochven_and_scan_inhibitor_persist() {
+    let (ctx, mut docked) = make_scan_ctx_and_session();
+    let kw = HashMap::new();
+    let pochven_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE contains Pochven solar system");
+    assert_eq!(
+        crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, pochven_sys).0,
+        25
+    );
+
+    docked.solar_system_id = Some(pochven_sys);
+    docked.station_id = Some(60_003_760);
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.insert(
+            pochven_sys,
+            vec![
+                CosmicSignatureRecord {
+                    signature_id: "WH-EXP-1".into(),
+                    solar_system_id: pochven_sys,
+                    sig_group: "Wormhole".into(),
+                    type_name: "Unstable Wormhole (K162)".into(),
+                    position: [1_000_000.0, 2_000_000.0, 3_000_000.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: Some(26_272),
+                    destination_system_id: Some(30_000_142),
+                    created_unix: now_u.saturating_sub(90_000),
+                    lifetime_seconds: 1_000,
+                    max_mass_kg: 2_000_000_000.0,
+                    remaining_mass_kg: 2_000_000_000.0,
+                    max_jump_mass_kg: 375_000_000.0,
+                    collapsed: false,
+                },
+                CosmicSignatureRecord {
+                    signature_id: "DAT-EXP-1".into(),
+                    solar_system_id: pochven_sys,
+                    sig_group: "Data Site".into(),
+                    type_name: "Expired Test Data Site".into(),
+                    position: [4_000_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: now_u.saturating_sub(90_000),
+                    lifetime_seconds: 1_000,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+                CosmicSignatureRecord {
+                    signature_id: "DAT-LIVE-1".into(),
+                    solar_system_id: pochven_sys,
+                    sig_group: "Data Site".into(),
+                    type_name: "Live Test Data Site".into(),
+                    position: [5_000_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    created_unix: now_u,
+                    lifetime_seconds: 86_400,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    max_jump_mass_kg: 0.0,
+                    collapsed: false,
+                },
+            ],
+        );
+        snap.cosmic_anomalies.insert(
+            pochven_sys,
+            vec![
+                eve_db::types::CosmicAnomalyRecord {
+                    anomaly_id: "ANOM-EXP-1".into(),
+                    solar_system_id: pochven_sys,
+                    name: "Expired Combat Anomaly".into(),
+                    anomaly_type: "CombatAnomaly".into(),
+                    position: [6_000_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: now_u.saturating_sub(90_000),
+                    lifetime_seconds: 1_000,
+                    cleared: false,
+                },
+                eve_db::types::CosmicAnomalyRecord {
+                    anomaly_id: "ANOM-LIVE-1".into(),
+                    solar_system_id: pochven_sys,
+                    name: "Live Combat Anomaly".into(),
+                    anomaly_type: "CombatAnomaly".into(),
+                    position: [7_000_000.0, 0.0, 0.0],
+                    signal_strength: 1.0,
+                    ore_types: Vec::new(),
+                    remaining_volume: 0.0,
+                    created_unix: now_u,
+                    lifetime_seconds: 86_400,
+                    cleared: false,
+                },
+            ],
+        );
+    });
+
+    let bound = BoundObjectEntry {
+        bound_id: 21,
+        session_id: docked.session_id,
+        user_id: docked.user_id.unwrap_or(1),
+        character_id: docked.character_id.unwrap_or(90_000_001),
+        service: "scanMgr".into(),
+        object_id: pochven_sys as i64,
+        oid_str: "N=1:21".into(),
+        ref_id: 21,
+    };
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    let scan_mgr = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut docked,
+        None,
+        "scanMgr",
+        "GetSystemScanMgr",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetSystemScanMgr");
+    let Some(PyRep::List(mgr_sigs)) = scan_mgr.dict_get("signatures") else {
+        panic!("expected signatures list from GetSystemScanMgr");
+    };
+    let mgr_sig_ids: Vec<&str> = mgr_sigs
+        .iter()
+        .filter_map(|r| r.dict_get("id").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(mgr_sig_ids, vec!["DAT-LIVE-1"]);
+    let Some(PyRep::List(mgr_anoms)) = scan_mgr.dict_get("anomalies") else {
+        panic!("expected anomalies list from GetSystemScanMgr");
+    };
+    assert_eq!(mgr_anoms.len(), 1);
+    assert!(
+        !mgr_anoms.iter().any(|r| {
+            r.dict_get("dungeonName")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.contains("Dense Veldspar") || n.contains("Expired"))
+        }),
+        "Pochven scanMgr must filter expired anomalies and never synthesize Dense Veldspar"
+    );
+
+    let full = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut docked,
+        Some(&bound),
+        "scanMgr",
+        "GetFullState",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetFullState");
+    let PyRep::Tuple(parts) = full else { panic!("expected 4-tuple") };
+    let PyRep::Dict(anom_dict) = &parts[0] else { panic!("expected anom dict") };
+    let PyRep::Dict(sig_dict) = &parts[1] else { panic!("expected sig dict") };
+    let anom_keys: Vec<&str> = anom_dict.iter().filter_map(|(k, _)| k.as_str()).collect();
+    let sig_keys: Vec<&str> = sig_dict.iter().filter_map(|(k, _)| k.as_str()).collect();
+    assert_eq!(anom_keys, vec!["ANOM-LIVE-1"]);
+    assert_eq!(sig_keys, vec!["DAT-LIVE-1"]);
+
+    let anoms_rep = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut docked,
+        Some(&bound),
+        "scanMgr",
+        "GetAnomalies",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetAnomalies");
+    let PyRep::List(anoms_list) = anoms_rep else { panic!("expected anomalies list") };
+    assert_eq!(anoms_list.len(), 1);
+
+    let wh_exp_ball = crate::services::space_destiny::wormhole_item_id_for_signature(pochven_sys, "WH-EXP-1");
+    assert!(
+        ctx.systems
+            .get_or_spawn(pochven_sys)
+            .get_ball_snapshot(wh_exp_ball)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired wormhole signature must not materialize Ballpark ball"
+    );
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. P2 #2: Mobile Scan Inhibitor early return in RequestScans still persists updated probes to sp6_lifecycle.
+    let (ctx2, mut sess2) = make_scan_ctx_and_session();
+    let sys2 = 30_000_142;
+    let char2 = 90_000_001;
+    let ship2 = 100_000_001;
+    let inhib_id = 880_001;
+    let probe_id = 700_980;
+    let now2 = ctx2.now_unix();
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.insert(
+            sys2,
+            vec![CosmicSignatureRecord {
+                signature_id: "INH-101".into(),
+                solar_system_id: sys2,
+                sig_group: "Data Site".into(),
+                type_name: "Inhibited Site".into(),
+                position: [1_000_000.0, 0.0, 0.0],
+                signal_strength: 0.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now2,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            }],
+        );
+        snap.items.insert(
+            inhib_id,
+            eve_db::InventoryItemRecord {
+                item_id: inhib_id,
+                type_id: 33_589,
+                owner_id: char2,
+                location_id: sys2 as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.deployable_state.deployables.insert(
+            inhib_id,
+            eve_db::MobileDeployableRecord {
+                item_id: inhib_id,
+                type_id: 33_589,
+                group_id: crate::services::mobile_deployables_ext::GROUP_MOBILE_SCAN_INHIBITOR,
+                owner_id: char2,
+                solar_system_id: sys2,
+                anchor_start_unix: now2.saturating_sub(120),
+                anchor_duration_secs: 60,
+                anchor_completed: true,
+                is_unanchored: false,
+                expires_at_unix: now2 + 3_600,
+                last_interaction_unix: now2,
+                reinforced_until_unix: None,
+                last_ping_unix: None,
+                position: [1_000.0, 0.0, 0.0],
+                deployed_fleet_id: None,
+            },
+        );
+    });
+    let sys2_handle = ctx2.systems.get_or_spawn(sys2);
+    let _ = sys2_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship2,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx2.build_ship_combat_state(char2, ship2, 587),
+        )
+        .await;
+    let _ = sys2_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: inhib_id,
+            type_id: 33_589,
+            position: glam::DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys2_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: probe_id,
+            type_id: 30_013,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 100_000.0,
+            inertia: 0.1,
+            mass: 50.0,
+            radius: 10.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    ctx2.active_scanner_probes.write().unwrap().insert(
+        probe_id,
+        ActiveScannerProbe {
+            probe_id,
+            probe_type_id: 30_013,
+            owner_char_id: char2,
+            ship_id: ship2,
+            launcher_module_id: 0,
+            solar_system_id: sys2,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 2.0 * crate::services::space_destiny::AU_IN_METERS,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3600.0,
+            launched_at_unix: now2,
+            state: PROBE_STATE_IDLE,
+            warp_end_ft: None,
+        },
+    );
+    let bound2 = BoundObjectEntry {
+        bound_id: 22,
+        session_id: sess2.session_id,
+        user_id: sess2.user_id.unwrap_or(1),
+        character_id: char2,
+        service: "scanMgr".into(),
+        object_id: sys2 as i64,
+        oid_str: "N=1:22".into(),
+        ref_id: 22,
+    };
+    let target_dest = [1.0e10, 2.0e9, -3.0e9];
+    let probe_updates = PyRep::Dict(vec![(
+        PyRep::Integer(probe_id),
+        PyRep::keyval([
+            (
+                "destination",
+                PyRep::Tuple(target_dest.into_iter().map(PyRep::Real).collect()),
+            ),
+            ("rangeStep", PyRep::Integer(2)),
+        ]),
+    )]);
+    let inh_rep = handle_scan_and_wormhole_extras(
+        &ctx2,
+        &mut sess2,
+        Some(&bound2),
+        "scanMgr",
+        "RequestScans",
+        &[probe_updates],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("inhibited RequestScans returns empty results");
+    assert_eq!(inh_rep, PyRep::List(Vec::new()));
+    let persisted = ctx2.db.with_snapshot(|snap| {
+        snap.sp6_lifecycle
+            .active_scanner_probes
+            .get(&probe_id)
+            .map(|p| (p.destination, p.range_step))
+    });
+    assert_eq!(
+        persisted,
+        Some((target_dest, 2)),
+        "scan-inhibited RequestScans early return must still persist moved probe state"
+    );
+}

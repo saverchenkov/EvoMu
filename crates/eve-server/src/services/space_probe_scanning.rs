@@ -6,9 +6,9 @@
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::space_destiny::{
     compute_wormhole_stages_with_sde, derive_wormhole_buckets, ensure_system_signatures_and_anomalies,
-    pochven_wormhole_ball_position, system_wormhole_profile, wormhole_item_id_for_signature,
-    AU_IN_METERS,
+    pochven_wormhole_ball_position, wormhole_item_id_for_signature, AU_IN_METERS,
 };
+use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -63,6 +63,18 @@ fn require_undocked_probe_space(
     Ok((char_id, sys_id))
 }
 
+fn is_signature_active(sig: &CosmicSignatureRecord, now_unix: u64) -> bool {
+    !sig.collapsed
+        && (sig.lifetime_seconds == 0
+            || now_unix < sig.created_unix.saturating_add(sig.lifetime_seconds))
+}
+
+fn is_anomaly_active(anom: &CosmicAnomalyRecord, now_unix: u64) -> bool {
+    !anom.cleared
+        && (anom.lifetime_seconds == 0
+            || now_unix < anom.created_unix.saturating_add(anom.lifetime_seconds))
+}
+
 /// Reads cached cosmic signatures & anomalies purely from snapshot when native sites are
 /// already seeded and unexpired (`None` indicates seeding or expiry cleanup is needed).
 fn read_system_signatures_and_anomalies_ready(
@@ -109,13 +121,13 @@ async fn sync_existing_wormhole_balls(
 ) {
     let has_active_wh = sigs
         .iter()
-        .any(|s| s.sig_group == "Wormhole" && !s.collapsed);
+        .any(|s| s.sig_group == "Wormhole" && is_signature_active(s, now_unix));
     if !has_active_wh {
         return;
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for sig in sigs {
-        if sig.sig_group == "Wormhole" && !sig.collapsed {
+        if sig.sig_group == "Wormhole" && is_signature_active(sig, now_unix) {
             let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
             if sys_handle
                 .get_ball_snapshot(wh_item_id)
@@ -165,9 +177,10 @@ async fn load_system_signatures_and_anomalies(
         || session.ship_id.is_none()
     {
         let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
-            let sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
-            let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
-                let wh_class = system_wormhole_profile(sys_id).0;
+            let mut sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
+            sigs.retain(|s| is_signature_active(s, now_unix));
+            let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
+                let wh_class = system_wormhole_profile_sde(&ctx.sde, sys_id).0;
                 if wh_class == 0 {
                     vec![CosmicAnomalyRecord {
                         anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
@@ -186,6 +199,7 @@ async fn load_system_signatures_and_anomalies(
                     Vec::new()
                 }
             });
+            anoms.retain(|a| is_anomaly_active(a, now_unix));
             (sigs, anoms)
         });
         sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
@@ -701,8 +715,10 @@ async fn handle_get_full_state(
     } else {
         caller_sys
     };
-    let (sigs, anomalies) =
-        load_system_signatures_and_anomalies(ctx, session, sys_id, ctx.now_unix()).await;
+    let now_unix = ctx.now_unix();
+    let (sigs, mut anomalies) =
+        load_system_signatures_and_anomalies(ctx, session, sys_id, now_unix).await;
+    anomalies.retain(|a| is_anomaly_active(a, now_unix));
     let anom_ids: std::collections::HashSet<String> =
         anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
     let anom_id_refs: std::collections::HashSet<&str> =
@@ -717,10 +733,11 @@ async fn handle_get_full_state(
     let sig_entries: Vec<(PyRep, PyRep)> = sigs
         .into_iter()
         .filter(|s| {
-            !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
-                s,
-                &anom_id_refs,
-            )
+            is_signature_active(s, now_unix)
+                && !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                    s,
+                    &anom_id_refs,
+                )
         })
         .map(|mut s| {
             let eff_strength = if is_gm {
@@ -999,7 +1016,8 @@ async fn handle_get_system_scan_mgr(
         Ok(b) => b,
         Err(e) => return Some(Err(e)),
     };
-    let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
+    let (wh_class, is_thera, is_shattered, env_effect) =
+        system_wormhole_profile_sde(&ctx.sde, sys_id);
 
     let anom_ids: std::collections::HashSet<&str> =
         anomalies.iter().map(|a| a.anomaly_id.as_str()).collect();
@@ -1420,6 +1438,7 @@ async fn handle_request_scans(
     let caller_ship_id = session.ship_id.or_else(|| active_probes.first().map(|p| p.ship_id));
     if let Some(cb) = caller_ship_id.and_then(|csid| balls.iter().find(|b| b.id == csid)) {
         if inhibitor_positions.iter().any(|pos| cb.position.distance(*pos) <= 30_000.0) {
+            sync_scanner_probes_to_db(ctx);
             return Some(Ok(PyRep::List(Vec::new())));
         }
     }
@@ -1726,6 +1745,7 @@ async fn handle_request_scans(
         if let Some(sid) = session.ship_id {
             if let Some(cpos) = sys_handle.get_ball_position_sync(sid) {
                 if crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, cpos) {
+                    sync_scanner_probes_to_db(ctx);
                     return Some(Ok(PyRep::List(Vec::new())));
                 }
             }

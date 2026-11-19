@@ -935,7 +935,7 @@ pub async fn process_incursion_site_completion_and_payout(
     site_id: &str,
     candidate_pilots: Option<&[CharacterId]>,
 ) -> Result<IncursionCompletionResult, BridgeRpcError> {
-    let res = process_incursion_site_completion_and_payout_core(
+    let res = Box::pin(process_incursion_site_completion_and_payout_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
@@ -944,7 +944,7 @@ pub async fn process_incursion_site_completion_and_payout(
         site_sys,
         site_id,
         candidate_pilots,
-    )
+    ))
     .await;
     if let Ok(r) = &res {
         notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, site_sys, r);
@@ -964,7 +964,7 @@ pub async fn check_and_complete_incursion_wave_server_side_core(
     let killer_fleet_id = killer_char_id.and_then(|cid| {
         db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.fleet_id))
     });
-    process_incursion_site_completion_and_payout_core(
+    Box::pin(process_incursion_site_completion_and_payout_core(
         systems,
         db,
         sde,
@@ -973,7 +973,7 @@ pub async fn check_and_complete_incursion_wave_server_side_core(
         solar_system_id,
         site_id,
         None,
-    )
+    ))
     .await
 }
 

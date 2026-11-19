@@ -430,3 +430,157 @@ async fn unseeded_wh_alignment_and_signature_warp_purity() {
     assert!(read_pve_exploration_reg(&ctx, |r| r.seeded_systems.is_empty()));
     assert!(ctx.systems.get_handle(lowsec_forge_sys).is_none());
 }
+
+#[tokio::test]
+async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
+    let sde = shared_sde();
+    let kw = HashMap::new();
+    let char_id: i64 = 90_000_001;
+    let ship_id: i64 = 777_000_003;
+
+    let pochven_sys = sde
+        .solar_systems
+        .values()
+        .find(|s| s.region_id == 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE contains Pochven solar system");
+    let wh_sys = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .find(|&sid| {
+            let (c, _, shat, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, sid);
+            (1..=6).contains(&c) && !shat
+        })
+        .expect("SDE contains non-shattered C1-C6 wormhole");
+
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("dng_poch_wh", "pw", char_id, "DngPochWh");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = pochven_sys;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: pochven_sys as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(Arc::clone(&sde), db));
+    let mut sess = SessionState::new(923);
+    sess.user_id = Some(94);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+
+    let err_ship_not_in_space = "ShipNotInSpace";
+    let err_sig_not_scanned = "SignatureNotScanned";
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Unseeded Pochven ore anomalies (deterministic [primary_did, 8974]) match mining need and stop at ShipNotInSpace before seeding.
+    sess.solar_system_id = Some(pochven_sys);
+    const POCHVEN_SPECIAL_ORE_DUNGEONS: [u32; 5] = [8987, 8988, 8989, 8990, 8991];
+    let primary_poch_did =
+        POCHVEN_SPECIAL_ORE_DUNGEONS[(pochven_sys as usize) % POCHVEN_SPECIAL_ORE_DUNGEONS.len()];
+    for did in [primary_poch_did, 8974] {
+        let arg = PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(did)))]);
+        let err = handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect_err("unspawned ship must hit ShipNotInSpace rather than SiteNotFound");
+        assert_eq!(err.code, err_ship_not_in_space, "Pochven ore dungeon {did}");
+    }
+
+    // 2. Unseeded WH ore anomalies match mining need cleanly (ShipNotInSpace) without consuming RNG, and WH gas returns SignatureNotScanned read-only.
+    sess.solar_system_id = Some(wh_sys);
+    let (wh_c, _, _, _) = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&sde, wh_sys);
+    let wh_ore_did = crate::services::mining_sites::wormhole_ore_sites_for_class(wh_c)
+        .into_iter()
+        .filter_map(|d| crate::services::mining_sites::resolve_wormhole_ore_site_with_dungeon(&sde, d).ok())
+        .map(|(did, _)| did)
+        .next()
+        .expect("C1-C6 WH ore dungeon");
+    let err_wh_ore = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(wh_ore_did)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unspawned ship must hit ShipNotInSpace on WH ore dungeon");
+    assert_eq!(err_wh_ore.code, err_ship_not_in_space);
+
+    let wh_gas_did = crate::services::mining_sites::WORMHOLE_GAS_SITES
+        .first()
+        .and_then(|d| crate::services::mining_sites::resolve_wormhole_gas_site(&sde, d).ok())
+        .map(|(did, _)| did)
+        .expect("WH gas dungeon");
+    let err_wh_gas = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(wh_gas_did)))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("unscanned WH gas signature must reject with SignatureNotScanned");
+    assert_eq!(err_wh_gas.code, err_sig_not_scanned);
+
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 3. Once ship is spawned in Pochven Ballpark, warp_to_content to 8974 lazily seeds mining and warps.
+    sess.solar_system_id = Some(pochven_sys);
+    let _ = ctx
+        .systems
+        .get_or_spawn(pochven_sys)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    let warp_rep = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[PyRep::keyval([("dungeonID", PyRep::Integer(8974))])],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("Pochven mining warp_to_content must succeed");
+    assert_eq!(warp_rep, PyRep::None);
+    assert!(ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&pochven_sys)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_id.starts_with("DNG-8974-")))
+    }));
+}

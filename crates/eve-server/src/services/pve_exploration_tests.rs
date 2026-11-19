@@ -1103,3 +1103,243 @@ async fn unseeded_shattered_wh_site_activation_and_bogus_site_id_read_purity() {
                 .is_some_and(|sites| sites.iter().any(|s| s.site_id == c13_dat_id))
     }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unseeded_dungeon_restrictions_dungeon_id_gate_alias_and_ended_incursion_guards() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_050_512;
+    let ship_id: i64 = 1_050_401_512;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("exp_r5", "pw", char_id, "ExpR5");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (Frigate)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_820_000)));
+    let kw = HashMap::new();
+
+    let mut sess = SessionState::new(512);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. F-01: Unseeded keeper.GetDungeonShipRestrictions / CanEnterDungeonInCurrentShip resolve
+    //    real unseeded PvE signatures & anomalies read-only and reject missing strings with DungeonNotFound.
+    let sig_specs = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(&ctx, sys_id);
+    assert!(!sig_specs.is_empty());
+    let anom_specs = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(&ctx, sys_id);
+    assert!(!anom_specs.is_empty());
+
+    for (sig_did, sig_id) in &sig_specs {
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let rep = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(sig_id.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_or_else(|e| panic!("{meth} for {sig_id} failed: {e:?}"));
+            if !sig_id.starts_with("DED-") {
+                assert_eq!(
+                    rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
+                    Some(i64::from(*sig_did)),
+                    "{meth} must preserve unseeded signature dungeonID for {sig_id}"
+                );
+            }
+        }
+    }
+
+    let first_anom = &anom_specs[0];
+    for query in [first_anom.site_id.clone(), first_anom.dungeon_id.to_string()] {
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let rep = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(query.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .unwrap_or_else(|e| panic!("{meth} for anomaly {query} failed: {e:?}"));
+            assert_eq!(
+                rep.dict_get("dungeonID").and_then(|v| v.as_i64()),
+                Some(i64::from(first_anom.dungeon_id))
+            );
+        }
+    }
+
+    for missing in ["DED-BOGUS-5", "NO-SUCH-SITE", "99999999"] {
+        for meth in ["GetDungeonShipRestrictions", "CanEnterDungeonInCurrentShip"] {
+            let err = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                meth,
+                &[PyRep::String(missing.into())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect_err("unknown string siteID must reject with DungeonNotFound");
+            assert_eq!(err.code, "DungeonNotFound", "{meth}({missing})");
+        }
+    }
+
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.contains_key(&sys_id) && !reg.sites_by_system.contains_key(&sys_id)
+    }));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. P2 #1: is_naturally_seedable_pve_site_id and unseeded ActivateAccelerationGate accept stringified dungeon_id.
+    let (sig0_did, _) = &sig_specs[0];
+    assert!(super::is_naturally_seedable_pve_site_id(
+        &ctx,
+        sys_id,
+        &first_anom.dungeon_id.to_string(),
+    ));
+    assert!(super::is_naturally_seedable_pve_site_id(
+        &ctx,
+        sys_id,
+        &sig0_did.to_string(),
+    ));
+    assert!(!super::is_naturally_seedable_pve_site_id(&ctx, sys_id, "99999999"));
+
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    let gate_res = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::String(first_anom.dungeon_id.to_string())],
+        &kw,
+    )
+    .await
+    .expect("handled");
+    if let Err(ref e) = gate_res {
+        assert_ne!(
+            e.code, "DungeonNotFound",
+            "stringified natural dungeon_id must resolve past DungeonNotFound"
+        );
+    }
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.get(&sys_id).copied() == Some(true)
+    }));
+
+    // Once seeded, missing dungeon strings still reject with DungeonNotFound in GetDungeonShipRestrictions.
+    let seeded_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "GetDungeonShipRestrictions",
+        &[PyRep::String("DED-BOGUS-5".into())],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("missing string in seeded system must return DungeonNotFound");
+    assert_eq!(seeded_err.code, "DungeonNotFound");
+
+    // 3. P2 #3: Ended / Withdrawing incursion tales must not satisfy INC-* ActivateAccelerationGate probes.
+    let (const_id, _) = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(&ctx)
+        .into_iter()
+        .next()
+        .expect("eligible incursion constellation");
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.initialized = true;
+        crate::services::pve_incursion_sites::seed_incursion_for_constellation(&ctx, reg, const_id);
+    });
+    let (inc_sys, inc_site_id, inc_did) =
+        crate::services::pve_special_sites::read_pve_special_reg(&ctx, |reg| {
+            let inc = reg.incursions.get(&const_id).expect("seeded incursion");
+            let s = inc.sites.first().expect("staging incursion site");
+            (s.solar_system_id, s.site_id.clone(), s.dungeon_id)
+        });
+    sess.solar_system_id = Some(inc_sys);
+    let _ = ctx
+        .systems
+        .get_or_spawn(inc_sys)
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+    for state in ["Ended", "Withdrawing"] {
+        crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+            reg.incursions.get_mut(&const_id).unwrap().state = state.into();
+        });
+        for inc_arg in [inc_site_id.clone(), format!("INC-{inc_did}")] {
+            let err = handle_pve_exploration(
+                &ctx,
+                &mut sess,
+                "keeper",
+                "ActivateAccelerationGate",
+                &[PyRep::String(inc_arg.clone())],
+                &kw,
+            )
+            .await
+            .expect("handled")
+            .expect_err("Ended/Withdrawing incursion must reject INC-* gate");
+            assert_eq!(err.code, "DungeonNotFound", "state={state}, arg={inc_arg}");
+        }
+    }
+}

@@ -632,13 +632,60 @@ fn matching_unseeded_seed_needs(
     let mut need_mining = false;
     if !mining_seeded && !unscanned_sig && target_iid.is_none() {
         if let (Some(did), Some(sys)) = (target_did, ctx.sde.solar_systems.get(&sys_id)) {
-            use crate::services::mining_sites::SiteKind;
+            use crate::services::mining_sites::{
+                resolve_wormhole_gas_site, resolve_wormhole_ore_site_with_dungeon,
+                wormhole_ore_sites_for_class, SiteKind, WORMHOLE_GAS_SITES, WORMHOLE_ORE_SITES,
+            };
             let region = crate::services::mining_sites::region_name(&ctx.sde, sys_id);
             need_mining = COSMIC_ORE_SITES
                 .iter()
                 .filter(|d| d.kind == SiteKind::Anomaly && d.band.matches_system(sys))
                 .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
                 .any(|s| s.dungeon_id == did);
+            if !need_mining && sys.region_id == 10_000_070 {
+                const POCHVEN_SPECIAL_ORE_DUNGEONS: [u32; 5] = [8987, 8988, 8989, 8990, 8991];
+                let primary_did =
+                    POCHVEN_SPECIAL_ORE_DUNGEONS[(sys_id as usize) % POCHVEN_SPECIAL_ORE_DUNGEONS.len()];
+                need_mining = [primary_did, 8974].into_iter().any(|p_did| {
+                    p_did == did
+                        && ctx.sde.dungeons.contains_key(&p_did)
+                        && ctx.sde.dungeon_asteroids.get(&p_did).is_some_and(|v| {
+                            !v.is_empty() && v.iter().all(|e| ctx.sde.types.contains_key(&e.type_id))
+                        })
+                });
+            }
+            let wh_class_opt = sys
+                .wormhole_class_id
+                .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.wormhole_class_id))
+                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.wormhole_class_id))
+                .map(|c| c as u8);
+            let is_wh = (31_000_000..32_000_000).contains(&sys_id)
+                || wh_class_opt.is_some_and(|c| matches!(c, 1..=6 | 12..=18));
+            if !need_mining && is_wh {
+                let wh_c = wh_class_opt.unwrap_or(3);
+                let has_shattered_celestial = ctx
+                    .sde
+                    .celestials_in_system_slice(sys_id)
+                    .iter()
+                    .any(|c| c.type_id == 30889);
+                let wh_candidates: Vec<_> = if (1..=6).contains(&wh_c) && has_shattered_celestial {
+                    let lo = wh_c.saturating_sub(1).max(1);
+                    let hi = (wh_c + 1).min(6);
+                    WORMHOLE_ORE_SITES
+                        .iter()
+                        .filter(|d| {
+                            (d.wh_class_min <= hi && d.wh_class_max >= lo)
+                                || d.dungeon_name == "Shattered Debris Field"
+                        })
+                        .collect()
+                } else {
+                    wormhole_ore_sites_for_class(wh_c)
+                };
+                need_mining = wh_candidates
+                    .into_iter()
+                    .filter_map(|def| resolve_wormhole_ore_site_with_dungeon(&ctx.sde, def).ok())
+                    .any(|(wh_did, _)| wh_did == did);
+            }
             if !need_mining && !need_pve {
                 let matches_mining_sig = COSMIC_ORE_SITES
                     .iter()
@@ -652,7 +699,12 @@ fn matching_unseeded_seed_needs(
                                 && region.is_some_and(|r| d.region_names.contains(&r))
                         })
                         .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
-                        .is_some_and(|s| s.dungeon_id == did);
+                        .is_some_and(|s| s.dungeon_id == did)
+                    || (is_wh
+                        && WORMHOLE_GAS_SITES
+                            .first()
+                            .and_then(|wh_def| resolve_wormhole_gas_site(&ctx.sde, wh_def).ok())
+                            .is_some_and(|(wh_gas_did, _)| wh_gas_did == did));
                 if matches_mining_sig {
                     unscanned_sig = true;
                 }
@@ -1332,10 +1384,10 @@ pub async fn handle(
                 }
             }
             if need_pve {
-                ensure_system_pve_sites_seeded(ctx, sys_id).await;
+                Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
             }
             if need_mining {
-                seed_system_mining_sites_from_sde(ctx, sys_id).await;
+                Box::pin(seed_system_mining_sites_from_sde(ctx, sys_id)).await;
             }
             let (re_pos, re_unscanned, _, _) =
                 resolve_warp_target_readonly(ctx, char_id, sys_id, target_iid, target_did);

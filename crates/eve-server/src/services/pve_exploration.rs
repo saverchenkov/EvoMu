@@ -1080,10 +1080,10 @@ fn is_naturally_seedable_pve_site_id(
     }
     crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
         .iter()
-        .any(|spec| spec.site_id == site_id)
+        .any(|spec| spec.site_id == site_id || spec.dungeon_id.to_string() == site_id)
         || crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
             .iter()
-            .any(|(_, sig_id)| sig_id == site_id)
+            .any(|(did, sig_id)| sig_id == site_id || did.to_string() == site_id)
 }
 
 fn is_naturally_seedable_ded_gate_ball(
@@ -1173,19 +1173,19 @@ pub async fn handle_pve_exploration(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if let Some(res) = handle_pve_hacking(ctx, session, service, method, args, kwargs).await {
+    if let Some(res) = Box::pin(handle_pve_hacking(ctx, session, service, method, args, kwargs)).await {
         return Some(res);
     }
 
     match (service, method) {
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites
         ("scanSvc", "GetCombatAnomalyInstances") => {
-            Some(handle_get_combat_anomaly_instances(ctx, session, args).await)
+            Some(Box::pin(handle_get_combat_anomaly_instances(ctx, session, args)).await)
         }
 
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites, feat:pve.escalations, feat:pve.expeditions
         ("scanSvc", "EnterCombatAnomaly") => {
-            Some(handle_enter_combat_anomaly(ctx, session, args).await)
+            Some(Box::pin(handle_enter_combat_anomaly(ctx, session, args)).await)
         }
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
@@ -1230,7 +1230,8 @@ pub async fn handle_pve_exploration(
                     ded_rating_opt = Some(did.clamp(1, 10) as u8);
                 }
             } else if let Some(sid) = arg0_str {
-                read_pve_exploration_reg(ctx, |reg| {
+                let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
+                    let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
                     if let Some(sites) = reg.sites_by_system.get(&sys_id) {
                         if let Some(s) = sites.iter().find(|x| x.site_id == sid || x.dungeon_id.to_string() == sid) {
                             if s.site_category == "SleeperCache" {
@@ -1240,9 +1241,54 @@ pub async fn handle_pve_exploration(
                             } else if let Some(r) = s.ded_rating {
                                 ded_rating_opt = Some(r);
                             }
+                            return (true, seeded);
                         }
                     }
+                    (false, seeded)
                 });
+                if !matched_seeded && !already_seeded {
+                    if let Some((sig_did, sig_id)) = crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
+                        .into_iter()
+                        .find(|(sig_did, sig_id)| sig_id == sid || sig_did.to_string() == sid)
+                    {
+                        matched_seeded = true;
+                        if let Some(tier) = sleeper_cache_tier_for_dungeon(sig_did) {
+                            let name = match tier {
+                                SleeperCacheTier::Limited => "Limited Sleeper Cache",
+                                SleeperCacheTier::Standard => "Standard Sleeper Cache",
+                                SleeperCacheTier::Superior => "Superior Sleeper Cache",
+                            };
+                            sleeper_tier_opt = Some((tier, sig_did, name));
+                        } else if let Some(rating) = sig_id
+                            .strip_prefix("DED-")
+                            .and_then(|rest| rest.rsplit('-').next())
+                            .and_then(|r| r.parse::<u8>().ok())
+                        {
+                            ded_rating_opt = Some(rating);
+                        } else if let Some(d) = ctx.sde.dungeons.get(&sig_did) {
+                            let dname = if d.name.trim().is_empty() {
+                                format!("Dungeon {sig_did}")
+                            } else {
+                                d.name.trim().to_string()
+                            };
+                            explicit_sde_dungeon = Some((sig_did, dname));
+                        } else {
+                            explicit_sde_dungeon = Some((sig_did, sig_id));
+                        }
+                    } else if let Some(spec) = crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
+                        .into_iter()
+                        .find(|spec| spec.site_id == sid || spec.dungeon_id.to_string() == sid)
+                    {
+                        matched_seeded = true;
+                        explicit_sde_dungeon = Some((spec.dungeon_id, spec.dungeon_name));
+                    }
+                }
+                if !matched_seeded {
+                    return Some(Err(rpc_msg_err(
+                        "DungeonNotFound",
+                        format!("Dungeon site {sid} not found"),
+                    )));
+                }
             }
 
             let (did, dname, ded_rating_val, max_mass, label, allowed_groups) = if let Some((tier, d_id, name)) = sleeper_tier_opt {
@@ -1289,12 +1335,12 @@ pub async fn handle_pve_exploration(
         ("keeper", "ActivateAccelerationGate")
         | ("beyonce", "ActivateAccelerationGate")
         | ("keeper", "EnterNextDungeonRoom") => {
-            handle_activate_acceleration_gate(ctx, session, method, args).await
+            Box::pin(handle_activate_acceleration_gate(ctx, session, method, args)).await
         }
 
         // parity: feat:pve.sleeper-caches, feat:pve.ded-complexes
         ("keeper", "GetDungeonInfo") | ("keeper", "GetDungeonObjectivesData") => {
-            Some(handle_get_dungeon_info(ctx, session, args).await)
+            Some(Box::pin(handle_get_dungeon_info(ctx, session, args)).await)
         }
 
         // parity: feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
@@ -1514,9 +1560,9 @@ async fn handle_activate_acceleration_gate(
             resolve_session_system_id(ctx, session),
             args.first().and_then(|a| a.as_i64()),
         ) {
-            if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
+            if let Some(res) = Box::pin(crate::services::pve_fob_observatory::try_activate_observatory_gate(
                 ctx, session, pre_sys, gate_id,
-            )
+            ))
             .await
             {
                 return Some(res);
@@ -1537,9 +1583,9 @@ async fn handle_activate_acceleration_gate(
         if session.ship_id.is_none() {
             return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
         }
-        if let Some(res) = crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
+        if let Some(res) = Box::pin(crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
             ctx, session, sys_id, args,
-        )
+        ))
         .await
         {
             return Some(res);
@@ -1567,7 +1613,7 @@ async fn handle_activate_acceleration_gate(
             && session.ship_id.is_some()
             && is_naturally_seedable_ded_gate_ball(ctx, sys_id, item_id)
         {
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
             gate_site = read_pve_exploration_reg(ctx, |reg| {
                 reg.sites_by_system.get(&sys_id).and_then(|l| {
                     l.iter()
@@ -1588,7 +1634,7 @@ async fn handle_activate_acceleration_gate(
                     return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
                 }
                 let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
-                let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
+                let res = Box::pin(crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count)).await;
                 if let Ok(ref rep) = res {
                     let is_done = rep.dict_get("completed").or_else(|| rep.dict_get("cleared")) == Some(&PyRep::Bool(true));
                     if is_done {
@@ -1637,30 +1683,36 @@ async fn handle_activate_acceleration_gate(
         let (mut inc_exists, special_initialized) =
             crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
                 let exists = reg.incursions.values().any(|inc| {
-                    inc.sites.iter().any(|s| {
-                        s.solar_system_id == sys_id
-                            && (s.site_id == site_id
-                                || s.site_id.ends_with(&site_id)
-                                || site_id.ends_with(&format!("-{}", s.dungeon_id)))
-                    })
+                    inc.state != "Ended"
+                        && inc.state != "Withdrawing"
+                        && inc.sites.iter().any(|s| {
+                            s.solar_system_id == sys_id
+                                && (s.site_id == site_id
+                                    || s.site_id.ends_with(&site_id)
+                                    || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                        })
                 });
                 (exists, reg.initialized)
             });
         if !inc_exists {
             if !special_initialized && is_naturally_seedable_incursion_site(ctx, sys_id, &site_id)
             {
-                crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
-                    ctx, sys_id,
+                Box::pin(
+                    crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                        ctx, sys_id,
+                    ),
                 )
                 .await;
                 inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
                     reg.incursions.values().any(|inc| {
-                        inc.sites.iter().any(|s| {
-                            s.solar_system_id == sys_id
-                                && (s.site_id == site_id
-                                    || s.site_id.ends_with(&site_id)
-                                    || site_id.ends_with(&format!("-{}", s.dungeon_id)))
-                        })
+                        inc.state != "Ended"
+                            && inc.state != "Withdrawing"
+                            && inc.sites.iter().any(|s| {
+                                s.solar_system_id == sys_id
+                                    && (s.site_id == site_id
+                                        || s.site_id.ends_with(&site_id)
+                                        || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                            })
                     })
                 });
             }
@@ -1671,8 +1723,10 @@ async fn handle_activate_acceleration_gate(
                 )));
             }
         }
-        let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
-            ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
+        let res = Box::pin(
+            crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+                ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
+            ),
         ).await.map(|r| {
             PyRep::keyval([
                 ("siteID", PyRep::String(r.site_id)), ("tier", PyRep::String(r.tier)),
@@ -1695,7 +1749,7 @@ async fn handle_activate_acceleration_gate(
     });
     if !site_exists {
         if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            Box::pin(ensure_system_pve_sites_seeded(ctx, sys_id)).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {
             reg.sites_by_system.get(&sys_id).is_some_and(|l| {
@@ -1711,9 +1765,9 @@ async fn handle_activate_acceleration_gate(
         }
     }
     Some(
-        crate::services::pve_expeditions::validate_and_advance_pve_site_room(
+        Box::pin(crate::services::pve_expeditions::validate_and_advance_pve_site_room(
             ctx, session, sys_id, &site_id,
-        )
+        ))
         .await,
     )
 }
