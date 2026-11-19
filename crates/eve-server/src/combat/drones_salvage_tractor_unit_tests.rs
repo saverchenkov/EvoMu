@@ -877,7 +877,7 @@ async fn commit_salvaged_wreck_rejects_already_consumed_or_relocated_wreck() {
     });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deactivation() {
     let mut ctx = test_ctx();
     let sys_id = 30_000_142_u32;
@@ -929,21 +929,23 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.drain_observer_updates(ship_id).await.unwrap();
-    sys_handle
-        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
-            ship_id,
-            module_id: mod_id,
-            module_type_id: mod_tid,
-            owner_char_id: Some(char_id),
-            effect_name: "salvaging".to_string(),
-            target_id: Some(wreck_id),
-            repeat: 1000,
-            duration_s: 5.0,
-            elapsed_s: 0.0,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    for module_id in [mod_id, mod_second] {
+        sys_handle
+            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+                ship_id,
+                module_id,
+                module_type_id: mod_tid,
+                owner_char_id: Some(char_id),
+                effect_name: "salvaging".to_string(),
+                target_id: Some(wreck_id),
+                repeat: 1000,
+                duration_s: 5.0,
+                elapsed_s: 0.0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
     {
         let mut st = sys_handle.actor_state.write().unwrap();
         st.pending_cycle_actions
@@ -960,16 +962,27 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
             });
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RecordedEvent {
+        RemoveBall,
+        GodmaDeactivate(i64),
+        SpecialFxStop(i64),
+    }
+
     let mut sys_rx = sys_handle.subscribe();
     let mut notify_rx = ctx.notify_tx.subscribe();
-    let timeline = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let timeline_bg = std::sync::Arc::clone(&timeline);
-    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-    let recorder = tokio::spawn(async move {
-        loop {
+    let mut recorded = Vec::new();
+    {
+        let exec_fut =
+            crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id);
+        tokio::pin!(exec_fut);
+        let mut exec_done = false;
+        while !exec_done || !sys_rx.is_empty() || !notify_rx.is_empty() {
             tokio::select! {
-                biased;
-                msg = sys_rx.recv() => {
+                _ = &mut exec_fut, if !exec_done => {
+                    exec_done = true;
+                }
+                msg = sys_rx.recv(), if !exec_done || !sys_rx.is_empty() => {
                     if let Ok(bcast) = msg {
                         if bcast
                             .observer_events
@@ -979,85 +992,89 @@ async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deacti
                                 eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
                             )))
                         {
-                            timeline_bg.lock().unwrap().push("RemoveBall".to_string());
+                            recorded.push(RecordedEvent::RemoveBall);
                         }
                     }
                 }
-                msg = notify_rx.recv() => {
+                msg = notify_rx.recv(), if !exec_done || !notify_rx.is_empty() => {
                     if let Ok((cid, notif)) = msg {
                         if cid == char_id {
-                            if notif.event == "OnGodmaShipEffect"
-                                && notif.args.first().and_then(|v| v.as_i64()) == Some(mod_id)
-                                && notif.args.get(2) == Some(&eve_proto::PyRep::Bool(false))
-                            {
-                                timeline_bg.lock().unwrap().push("OnGodmaShipEffect(false)".to_string());
+                            if notif.event == "OnGodmaShipEffect" {
+                                if let Some(module_id) = notif.args.first().and_then(|v| v.as_i64()) {
+                                    let is_three_arg_stop =
+                                        notif.args.get(2) == Some(&eve_proto::PyRep::Bool(false));
+                                    let is_ten_arg_stop =
+                                        notif.args.get(3) == Some(&eve_proto::PyRep::Integer(0))
+                                            && notif.args.get(4) == Some(&eve_proto::PyRep::Integer(0));
+                                    if (module_id == mod_id || module_id == mod_second)
+                                        && (is_three_arg_stop || is_ten_arg_stop)
+                                    {
+                                        recorded.push(RecordedEvent::GodmaDeactivate(module_id));
+                                    }
+                                }
                             } else if notif.event == "OnSpecialFX"
-                                && notif.args.get(1).and_then(|v| v.as_i64()) == Some(mod_id)
-                                && notif.args.get(7).and_then(|v| v.as_i64()) == Some(0)
+                                && notif.args.get(7) == Some(&eve_proto::PyRep::Integer(0))
+                                && notif.args.get(8) == Some(&eve_proto::PyRep::Integer(0))
                             {
-                                timeline_bg.lock().unwrap().push("OnSpecialFX(start=0)".to_string());
+                                if let Some(module_id) = notif
+                                    .args
+                                    .get(1)
+                                    .and_then(|v| v.as_i64())
+                                    .filter(|id| *id == mod_id || *id == mod_second)
+                                {
+                                    recorded.push(RecordedEvent::SpecialFxStop(module_id));
+                                }
                             }
                         }
                     }
-                }
-                _ = &mut done_rx => {
-                    while let Ok(bcast) = sys_rx.try_recv() {
-                        if bcast
-                            .observer_events
-                            .get(&ship_id)
-                            .is_some_and(|evs| evs.iter().any(|ev| matches!(
-                                ev,
-                                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
-                            )))
-                        {
-                            timeline_bg.lock().unwrap().push("RemoveBall".to_string());
-                        }
-                    }
-                    while let Ok((cid, notif)) = notify_rx.try_recv() {
-                        if cid == char_id {
-                            if notif.event == "OnGodmaShipEffect"
-                                && notif.args.first().and_then(|v| v.as_i64()) == Some(mod_id)
-                                && notif.args.get(2) == Some(&eve_proto::PyRep::Bool(false))
-                            {
-                                timeline_bg.lock().unwrap().push("OnGodmaShipEffect(false)".to_string());
-                            } else if notif.event == "OnSpecialFX"
-                                && notif.args.get(1).and_then(|v| v.as_i64()) == Some(mod_id)
-                                && notif.args.get(7).and_then(|v| v.as_i64()) == Some(0)
-                            {
-                                timeline_bg.lock().unwrap().push("OnSpecialFX(start=0)".to_string());
-                            }
-                        }
-                    }
-                    break;
                 }
             }
         }
-    });
+    }
 
-    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
-    let _ = done_tx.send(());
-    recorder.await.unwrap();
-
-    let recorded = timeline.lock().unwrap().clone();
     let remove_pos = recorded
         .iter()
-        .position(|e| e == "RemoveBall")
+        .position(|e| matches!(e, RecordedEvent::RemoveBall))
         .expect("RemoveBall must be broadcast");
-    let godma_positions: Vec<usize> = recorded
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| (e == "OnGodmaShipEffect(false)").then_some(i))
-        .collect();
-    let sfx_positions: Vec<usize> = recorded
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| (e == "OnSpecialFX(start=0)").then_some(i))
-        .collect();
-    assert_eq!(godma_positions.len(), 1, "must emit exactly one OnGodmaShipEffect(false): {recorded:?}");
-    assert_eq!(sfx_positions.len(), 1, "must emit exactly one OnSpecialFX(start=0): {recorded:?}");
+    let positions_for = |target: RecordedEvent| -> Vec<usize> {
+        recorded
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| (*e == target).then_some(i))
+            .collect()
+    };
+    let mod_godma_positions = positions_for(RecordedEvent::GodmaDeactivate(mod_id));
+    let mod_sfx_positions = positions_for(RecordedEvent::SpecialFxStop(mod_id));
+    let sibling_godma_positions = positions_for(RecordedEvent::GodmaDeactivate(mod_second));
+    let sibling_sfx_positions = positions_for(RecordedEvent::SpecialFxStop(mod_second));
+    assert_eq!(
+        mod_godma_positions.len(),
+        1,
+        "mod_id must emit exactly one OnGodmaShipEffect deactivation: {recorded:?}"
+    );
+    assert_eq!(
+        mod_sfx_positions.len(),
+        1,
+        "mod_id must emit exactly one OnSpecialFX(start=0, active=0): {recorded:?}"
+    );
     assert!(
-        remove_pos < godma_positions[0] && remove_pos < sfx_positions[0],
-        "RemoveBall must flush BEFORE OnGodmaShipEffect(false) and OnSpecialFX(start=0): {recorded:?}"
+        remove_pos < mod_godma_positions[0] && remove_pos < mod_sfx_positions[0],
+        "RemoveBall must flush BEFORE mod_id OnGodmaShipEffect and OnSpecialFX(start=0, active=0): {recorded:?}"
+    );
+    // Sibling active salvager (`mod_second`) targeting `wreck_id` is deactivated via
+    // `wire_module_deactivation_hook` (10-arg `OnGodmaShipEffect` + `OnSpecialFX(start=0, active=0)`)
+    // when `wreck_id` is removed in Step 1. Deferring sibling-cycle deactivation in
+    // `finalize_salvaged_wreck_ball` until after `RemoveBall` flushes is tracked in #1381 once
+    // `drones_salvage_tractor.rs` unlocks; here we verify exact Step 1 counts and zero Step 2 duplicates.
+    assert_eq!(
+        sibling_godma_positions.len(),
+        1,
+        "mod_second must emit exactly one OnGodmaShipEffect deactivation in Step 1: {recorded:?}"
+    );
+    assert_eq!(
+        sibling_sfx_positions.len(),
+        1,
+        "mod_second must emit exactly one OnSpecialFX(start=0, active=0) in Step 1: {recorded:?}"
     );
 
     // If a second repeating SalvageEnd ticks after the wreck and cycle were already removed,
