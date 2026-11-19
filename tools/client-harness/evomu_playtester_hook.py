@@ -6885,79 +6885,97 @@ def _execute_action(sm, action):
                                 except Exception:
                                     pass
                             return steps
-                        target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
-                        surf_d = _dock_surf_dist()
-                        warp_too_short = False
-                        if (bp_d is not None and target_ball_d is None) or (surf_d is not None and surf_d >= 150000.0):
-                            try:
-                                beyonce.CmdWarpToStuff("item", dock_id, 0.0)
-                            except Exception as warp_exc:
-                                if "WarpDistanceTooShort" not in str(warp_exc) and "WarpTooShort" not in str(warp_exc):
-                                    raise
-                                warp_too_short = True
-                            if not warp_too_short:
-                                if allow_time_control:
-                                    try:
-                                        sm.RemoteSvc("timeControl").AdvanceClock(180)
-                                    except Exception:
-                                        pass
-                                H._sleep_sim_ms(400)
-                                H._wait_warp_fx_settled(
-                                    sm,
-                                    timeout_sec=(35.0 if not allow_time_control else 8.0),
-                                    allow_time_control=allow_time_control,
-                                )
-                                surf_d = _dock_surf_dist()
-                        if warp_too_short or (surf_d is not None and surf_d > 2400.0):
-                            _approach_dock_within(2200.0, 12)
-                        if not allow_time_control:
-                            H._wait_session_timer_clear(max_wait_sec=12.0)
-                        try:
-                            sm.RemoteSvc("stationSvc").Dock(dock_id)
-                        except Exception as dock_exc:
-                            if "OutsideDockingPerimeter" not in str(dock_exc) and "DockingApproach" not in str(dock_exc):
-                                raise
-                            pending_dock_exc = dock_exc
-                            advanced = _approach_dock_within(2000.0, 10)
-                            if advanced > 0:
+                        def _already_docked():
+                            s_cur = getattr(__builtin__, "session", None)
+                            if s_cur is None:
+                                return False
+                            return bool(
+                                getattr(s_cur, "stationid", None)
+                                or getattr(s_cur, "structureid", None)
+                                or getattr(s_cur, "solarsystemid", None) is None
+                            )
+
+                        pending_dock_exc = None
+                        if not _already_docked():
+                            bp_d = mich_d.GetBallpark() if (sid_d and mich_d is not None) else None
+                            target_ball_d = bp_d.GetBall(dock_id) if (bp_d is not None and hasattr(bp_d, "GetBall")) else None
+                            surf_d = _dock_surf_dist()
+                            warp_too_short = False
+                            if (bp_d is not None and target_ball_d is None) or (surf_d is not None and surf_d >= 150000.0):
                                 try:
-                                    sm.RemoteSvc("stationSvc").Dock(dock_id)
-                                    pending_dock_exc = None
-                                except Exception as retry_exc:
-                                    if "OutsideDockingPerimeter" not in str(retry_exc) and "DockingApproach" not in str(retry_exc):
+                                    beyonce.CmdWarpToStuff("item", dock_id, 0.0)
+                                except Exception as warp_exc:
+                                    warp_msg = str(warp_exc)
+                                    if "MonikerSessionCheckFailure" in warp_msg and _already_docked():
+                                        warp_too_short = False
+                                    elif "WarpDistanceTooShort" not in warp_msg and "WarpTooShort" not in warp_msg:
                                         raise
-                                    pending_dock_exc = retry_exc
-                            if pending_dock_exc is not None:
-                                # GetSurfaceDist/surfaceDist can report stale <=2000m (e.g. 0.0 on
-                                # large stations) while server perimeter check still rejects Dock.
-                                # Advance simulation with CmdFollowBall active and retry Dock
-                                # within dock_loop_deadline instead of stopping at 0 iterations.
-                                for _ in range(16 if not allow_time_control else 8):
-                                    if time.time() >= dock_loop_deadline:
-                                        break
+                                    else:
+                                        warp_too_short = True
+                                if not warp_too_short and not _already_docked():
                                     if allow_time_control:
                                         try:
-                                            sm.RemoteSvc("timeControl").AdvanceClock(12)
+                                            sm.RemoteSvc("timeControl").AdvanceClock(180)
                                         except Exception:
                                             pass
-                                        H._sleep_sim_ms(200)
+                                    H._sleep_sim_ms(400)
+                                    H._wait_warp_fx_settled(
+                                        sm,
+                                        timeout_sec=(35.0 if not allow_time_control else 8.0),
+                                        allow_time_control=allow_time_control,
+                                    )
+                                    surf_d = _dock_surf_dist()
+                            if not _already_docked():
+                                if warp_too_short or (surf_d is not None and surf_d > 2400.0):
+                                    _approach_dock_within(2200.0, 12)
+                                if not allow_time_control:
+                                    H._wait_session_timer_clear(max_wait_sec=12.0)
+                                try:
+                                    sm.RemoteSvc("stationSvc").Dock(dock_id)
+                                except Exception as dock_exc:
+                                    if "OutsideDockingPerimeter" not in str(dock_exc) and "DockingApproach" not in str(dock_exc):
+                                        raise
+                                    pending_dock_exc = dock_exc
+                                    advanced = _approach_dock_within(2000.0, 10)
+                                    if advanced > 0:
                                         try:
-                                            sm.RemoteSvc("timeControl").ClearSessionTimer()
-                                        except Exception:
-                                            pass
-                                    else:
-                                        H._sleep_sim_ms(600)
-                                        H._wait_session_timer_clear(max_wait_sec=4.0)
-                                    try:
-                                        sm.RemoteSvc("stationSvc").Dock(dock_id)
-                                        pending_dock_exc = None
-                                        break
-                                    except Exception as retry_exc:
-                                        if "OutsideDockingPerimeter" not in str(retry_exc) and "DockingApproach" not in str(retry_exc):
-                                            raise
-                                        pending_dock_exc = retry_exc
-                            if pending_dock_exc is not None:
-                                raise pending_dock_exc
+                                            sm.RemoteSvc("stationSvc").Dock(dock_id)
+                                            pending_dock_exc = None
+                                        except Exception as retry_exc:
+                                            if "OutsideDockingPerimeter" not in str(retry_exc) and "DockingApproach" not in str(retry_exc):
+                                                raise
+                                            pending_dock_exc = retry_exc
+                                    if pending_dock_exc is not None:
+                                        # GetSurfaceDist/surfaceDist can report stale <=2000m (e.g. 0.0 on
+                                        # large stations) while server perimeter check still rejects Dock.
+                                        # Advance simulation with CmdFollowBall active and retry Dock
+                                        # within dock_loop_deadline instead of stopping at 0 iterations.
+                                        for _ in range(16 if not allow_time_control else 8):
+                                            if time.time() >= dock_loop_deadline:
+                                                break
+                                            if allow_time_control:
+                                                try:
+                                                    sm.RemoteSvc("timeControl").AdvanceClock(12)
+                                                except Exception:
+                                                    pass
+                                                H._sleep_sim_ms(200)
+                                                try:
+                                                    sm.RemoteSvc("timeControl").ClearSessionTimer()
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                H._sleep_sim_ms(600)
+                                                H._wait_session_timer_clear(max_wait_sec=4.0)
+                                            try:
+                                                sm.RemoteSvc("stationSvc").Dock(dock_id)
+                                                pending_dock_exc = None
+                                                break
+                                            except Exception as retry_exc:
+                                                if "OutsideDockingPerimeter" not in str(retry_exc) and "DockingApproach" not in str(retry_exc):
+                                                    raise
+                                                pending_dock_exc = retry_exc
+                                    if pending_dock_exc is not None:
+                                        raise pending_dock_exc
                         dl_d = time.time() + (16.0 if not allow_time_control else 10.0)
                         while time.time() < dl_d:
                             sess_d = getattr(__builtin__, "session", None)
