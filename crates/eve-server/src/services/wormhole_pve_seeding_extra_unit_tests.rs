@@ -442,3 +442,171 @@ async fn sleeper_sentry_and_site_loot_container_slim_item_meta_fields() {
     assert_eq!(cm.security_status, 0.0);
     assert!(!cm.is_cloaked);
 }
+
+#[test]
+fn gh1391_non_sleeper_npcs_default_ewar_and_neut_to_zero_unless_sde() {
+    let ctx = crate::router::context::ServerContext::new();
+    let sys_id = 30_000_142u32;
+
+    // Live-client #1391 regression: Guristas Arrogator (2382) has zeroed 20/103/514, missing
+    // 97/105, and non-zero chase attrs 580/582=10000; must get zero neut/web/scram.
+    let (_b, _cs, arrogator) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_101, 2_382, "Pirate", 1, DVec3::ZERO,
+    );
+    assert_eq!(arrogator.neut_amount, 0.0, "Guristas Arrogator lacks attr 97");
+    assert_eq!(arrogator.scram_strength, 0.0, "Guristas Arrogator lacks attr 105");
+    assert_eq!(arrogator.scram_range, 0.0);
+    assert_eq!(arrogator.web_speed_factor, 0.0);
+    assert_eq!(arrogator.web_range, 0.0);
+
+    // Non-Sleeper archetypes with missing or empty SDE attributes (`56680` / unknown type)
+    // must never inherit Sleeper `-50%` web, `2.0` scram, or `120.0` neut fallbacks.
+    for (idx, arch) in [
+        "Pirate",
+        "BeltRat",
+        "Officer",
+        "RogueDrone",
+        "Triglavian",
+        "EDENCOM",
+        "IncursionSansha",
+        "MorduCommander",
+        "Drifter",
+        "PochvenHypnosianSleeper",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for tid in [56_680u32, 999_999_999u32] {
+            let (_b, _cs, npc) = build_specialized_npc_components(
+                &ctx,
+                sys_id,
+                9_139_200 + (idx as i64) * 10 + i64::from(tid == 999_999_999),
+                tid,
+                arch,
+                1,
+                DVec3::ZERO,
+            );
+            assert_eq!(npc.neut_amount, 0.0, "{arch} ({tid}) neut_amount must default to 0.0");
+            assert_eq!(npc.web_speed_factor, 0.0, "{arch} ({tid}) web_speed_factor must default to 0.0");
+            assert_eq!(npc.web_range, 0.0, "{arch} ({tid}) web_range must default to 0.0");
+            assert_eq!(npc.scram_strength, 0.0, "{arch} ({tid}) scram_strength must default to 0.0");
+            assert_eq!(npc.scram_range, 0.0, "{arch} ({tid}) scram_range must default to 0.0");
+        }
+    }
+
+    // Zero-strength/zero-factor guards in SDE:
+    // - 13647 (Shadow Serpentis Defender): attr 20=0.0 with attr 514=4000.0 must NOT enable web.
+    let (_b, _cs, zero_web) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_301, 13_647, "Pirate", 1, DVec3::ZERO,
+    );
+    assert_eq!((zero_web.web_speed_factor, zero_web.web_range), (0.0, 0.0));
+    assert_eq!((zero_web.scram_strength, zero_web.scram_range, zero_web.neut_amount), (0.0, 0.0, 0.0));
+
+    // - 2126 (Anakism): attr 103=8000.0 without attr 105 must NOT invent scram.
+    let (_b, _cs, no_scram_str) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_302, 2_126, "Pirate", 1, DVec3::ZERO,
+    );
+    assert_eq!((no_scram_str.scram_strength, no_scram_str.scram_range), (0.0, 0.0));
+
+    // - 16024 (Mordus Squad Leader): attr 20=-75.0 with attr 514=0.0 disables web despite attr 580.
+    let (_b, _cs, zero_web_range) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_303, 16_024, "MorduCommander", 1, DVec3::ZERO,
+    );
+    assert_eq!((zero_web_range.web_speed_factor, zero_web_range.web_range), (0.0, 0.0));
+
+    // Explicit SDE EWAR on Pirates is preserved while absent neut remains 0.0 (`13032` Arch Angel Rogue).
+    let (_b, _cs, aa_rogue) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_304, 13_032, "Pirate", 1, DVec3::ZERO,
+    );
+    assert_eq!(aa_rogue.web_speed_factor, -50.0);
+    assert_eq!(aa_rogue.web_range, 10_000.0);
+    assert_eq!(aa_rogue.scram_strength, 1.0);
+    assert_eq!(aa_rogue.scram_range, 20_000.0);
+    assert_eq!(aa_rogue.neut_amount, 0.0);
+}
+
+#[test]
+fn gh1391_sleeper_clone_soldier_and_explicit_sde_ewar_preserved() {
+    let ctx = crate::router::context::ServerContext::new();
+    let sys_id = 30_000_142u32;
+
+    // Counter-Insurgency Sentry Gun (79507) and static structures always stay zero-EWAR/zero-neut.
+    let (_b, _cs, ci_sentry) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_401, 79_507, "CounterInsurgencySentry", 1, DVec3::ZERO,
+    );
+    assert_eq!(
+        (ci_sentry.web_speed_factor, ci_sentry.web_range, ci_sentry.scram_strength, ci_sentry.scram_range, ci_sentry.neut_amount),
+        (0.0, 0.0, 0.0, 0.0, 0.0)
+    );
+    for (idx, arch) in ["SleeperSentry", "TransmissionRelay"].iter().enumerate() {
+        let (_b, _cs, static_npc) = build_specialized_npc_components(
+            &ctx, sys_id, 9_139_402 + idx as i64, 30_201, arch, 1, DVec3::ZERO,
+        );
+        assert_eq!(
+            (static_npc.web_speed_factor, static_npc.web_range, static_npc.scram_strength, static_npc.scram_range, static_npc.neut_amount),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    // Sleepers retain Sleeper fallbacks when SDE EWAR attributes are absent (`30203` Awakened Defender & synthetic),
+    // while honoring explicit SDE attributes (`30201` neut=60.0, `37472` Upgraded Avenger).
+    let (_b, _cs, sleeper_def) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_410, 30_203, "Sleeper", 1, DVec3::ZERO,
+    );
+    assert_eq!(sleeper_def.web_speed_factor, -50.0);
+    assert_eq!(sleeper_def.scram_strength, 2.0);
+    assert_eq!(sleeper_def.neut_amount, 120.0);
+
+    let (_b, _cs, sleeper_syn) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_411, 999_999_999, "Sleeper", 1, DVec3::ZERO,
+    );
+    assert_eq!(
+        (sleeper_syn.web_speed_factor, sleeper_syn.web_range, sleeper_syn.scram_strength, sleeper_syn.scram_range, sleeper_syn.neut_amount),
+        (-50.0, 10_000.0, 2.0, 20_000.0, 120.0)
+    );
+
+    let (_b, _cs, watchman) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_412, 30_201, "Sleeper", 1, DVec3::ZERO,
+    );
+    assert_eq!(watchman.web_speed_factor, -50.0);
+    assert_eq!(watchman.neut_amount, 60.0);
+
+    let (_b, _cs, avenger) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_413, 37_472, "Sleeper", 1, DVec3::ZERO,
+    );
+    assert_eq!(
+        (avenger.web_speed_factor, avenger.web_range, avenger.scram_strength, avenger.scram_range, avenger.neut_amount),
+        (-50.0, 100_000.0, 15.0, 100_000.0, 1500.0)
+    );
+
+    // Explicit SDE Drifter (`34495` Drifter Battleship) preserves full SDE values.
+    let (_b, _cs, drifter) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_414, 34_495, "Drifter", 1, DVec3::ZERO,
+    );
+    assert_eq!(
+        (drifter.web_speed_factor, drifter.web_range, drifter.scram_strength, drifter.scram_range, drifter.neut_amount),
+        (-10.0, 500_000.0, 5.0, 500_000.0, 60.0)
+    );
+
+    // Clone Soldier tier rules preserved with 0.0 neut fallback:
+    let (_b, _cs, cs_trans) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_420, 33_173, "CloneSoldier", 1, DVec3::ZERO,
+    );
+    assert_eq!((cs_trans.web_speed_factor, cs_trans.web_range, cs_trans.scram_strength, cs_trans.neut_amount), (-60.0, 10_000.0, 0.0, 0.0));
+
+    let (_b, _cs, cs_neg) = build_specialized_npc_components(
+        &ctx, sys_id, 9_139_421, 33_175, "CloneSoldier", 1, DVec3::ZERO,
+    );
+    assert_eq!((cs_neg.web_speed_factor, cs_neg.scram_range, cs_neg.neut_amount), (0.0, 24_000.0, 0.0));
+    assert!(cs_neg.scram_strength >= 2.0);
+
+    for (idx, tid) in [33_132u32, 33_143u32].into_iter().enumerate() {
+        let (_b, _cs, cs_other) = build_specialized_npc_components(
+            &ctx, sys_id, 9_139_422 + idx as i64, tid, "CloneSoldier", 1, DVec3::ZERO,
+        );
+        assert_eq!(
+            (cs_other.web_speed_factor, cs_other.web_range, cs_other.scram_strength, cs_other.scram_range, cs_other.neut_amount),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+    }
+}
