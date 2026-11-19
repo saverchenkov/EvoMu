@@ -412,96 +412,112 @@ async fn assert_actor_matches_fresh_fit(
         .expect("get_ball_snapshot")
         .expect("ball exists");
 
-    let fresh_fit = ctx
-        .fit(char_id, ship_id)
-        .unwrap_or_else(|e| panic!("{label}: ctx.fit failed: {e:?}"));
     let actor_proj = sys
         .latest_fit_projection(ship_id)
         .unwrap_or_else(|| panic!("{label}: SystemActor missing FitProjection for {ship_id}"));
-    let expected_proj = fresh_fit.to_projection(actor_proj.rev, &ctx.sde);
 
-    assert_eq!(actor_proj.ship_id, expected_proj.ship_id, "{label}: ship_id");
-    assert_eq!(actor_proj.ship_type_id, expected_proj.ship_type_id, "{label}: ship_type_id");
-    assert_eq!(
-        actor_proj.active_stance_type_id, expected_proj.active_stance_type_id,
-        "{label}: active_stance_type_id"
-    );
-    assert_eq!(
-        actor_proj.last_stance_switch_ms, expected_proj.last_stance_switch_ms,
-        "{label}: last_stance_switch_ms"
-    );
-    assert_baseline_eq(&actor_proj.baseline, &expected_proj.baseline, label);
-    assert_propulsion_eq(
-        actor_proj.propulsion.as_ref(),
-        expected_proj.propulsion.as_ref(),
-        label,
-    );
+    let assert_fit_matches = |fit: &eve_dogma::ShipFittingEngine, pass_label: &str| {
+        let expected_proj = fit.to_projection(actor_proj.rev, &ctx.sde);
 
-    let mut actor_keys: Vec<i64> = actor_proj.modules.keys().copied().collect();
-    let mut exp_keys: Vec<i64> = expected_proj.modules.keys().copied().collect();
-    actor_keys.sort_unstable();
-    exp_keys.sort_unstable();
-    assert_eq!(actor_keys, exp_keys, "{label}: fitted module keys");
-    for mid in exp_keys {
-        assert_module_eq(
-            &actor_proj.modules[&mid],
-            &expected_proj.modules[&mid],
-            &format!("{label}.mod[{mid}]"),
+        assert_eq!(actor_proj.ship_id, expected_proj.ship_id, "{pass_label}: ship_id");
+        assert_eq!(actor_proj.ship_type_id, expected_proj.ship_type_id, "{pass_label}: ship_type_id");
+        assert_eq!(
+            actor_proj.active_stance_type_id, expected_proj.active_stance_type_id,
+            "{pass_label}: active_stance_type_id"
         );
-    }
+        assert_eq!(
+            actor_proj.last_stance_switch_ms, expected_proj.last_stance_switch_ms,
+            "{pass_label}: last_stance_switch_ms"
+        );
+        assert_baseline_eq(&actor_proj.baseline, &expected_proj.baseline, pass_label);
+        assert_propulsion_eq(
+            actor_proj.propulsion.as_ref(),
+            expected_proj.propulsion.as_ref(),
+            pass_label,
+        );
 
-    assert_close(cs.max_shield_hp, expected_proj.baseline.max_shield_hp, 1e-6, &format!("{label}.cs.max_shield_hp"));
-    assert_close(cs.max_armor_hp, expected_proj.baseline.max_armor_hp, 1e-6, &format!("{label}.cs.max_armor_hp"));
-    assert_close(cs.max_structure_hp, expected_proj.baseline.max_structure_hp, 1e-6, &format!("{label}.cs.max_structure_hp"));
-    assert_close(cs.max_capacitor, expected_proj.baseline.max_capacitor, 1e-6, &format!("{label}.cs.max_capacitor"));
-    assert_close(cs.shield_recharge_time_ms, expected_proj.baseline.shield_recharge_time_ms, 1e-6, &format!("{label}.cs.shield_recharge_time_ms"));
-    assert_close(cs.capacitor_recharge_time_ms, expected_proj.baseline.capacitor_recharge_time_ms, 1e-6, &format!("{label}.cs.capacitor_recharge_time_ms"));
-    for ch in 0..4 {
-        assert_close(cs.shield_resonance[ch], expected_proj.baseline.shield_resonance[ch], 1e-9, &format!("{label}.cs.shield_resonance[{ch}]"));
-        assert_close(cs.armor_resonance[ch], expected_proj.baseline.armor_resonance[ch], 1e-9, &format!("{label}.cs.armor_resonance[{ch}]"));
-        assert_close(cs.structure_resonance[ch], expected_proj.baseline.structure_resonance[ch], 1e-9, &format!("{label}.cs.structure_resonance[{ch}]"));
-    }
+        let mut actor_keys: Vec<i64> = actor_proj.modules.keys().copied().collect();
+        let mut exp_keys: Vec<i64> = expected_proj.modules.keys().copied().collect();
+        actor_keys.sort_unstable();
+        exp_keys.sort_unstable();
+        assert_eq!(actor_keys, exp_keys, "{pass_label}: fitted module keys");
+        for mid in exp_keys {
+            assert_module_eq(
+                &actor_proj.modules[&mid],
+                &expected_proj.modules[&mid],
+                &format!("{pass_label}.mod[{mid}]"),
+            );
+        }
 
-    assert_close(ball.inertia, expected_proj.baseline.agility, 1e-6, &format!("{label}.ball.inertia"));
-    if let Some(prop) = expected_proj.propulsion {
-        assert_close(
-            ball.max_velocity,
-            expected_proj.baseline.max_velocity * (1.0 + prop.speed_boost),
-            1e-6,
-            &format!("{label}.ball.max_velocity(prop)"),
-        );
-        assert_close(
-            ball.mass,
-            expected_proj.baseline.mass + prop.mass_addition,
-            1e-3,
-            &format!("{label}.ball.mass(prop)"),
-        );
-        assert_close(
-            cs.signature_radius,
-            expected_proj.baseline.signature_radius * (1.0 + prop.signature_radius_bonus_pct / 100.0),
-            1e-6,
-            &format!("{label}.cs.signature_radius(prop)"),
-        );
-    } else {
-        assert_close(
-            ball.max_velocity,
-            expected_proj.baseline.max_velocity,
-            1e-6,
-            &format!("{label}.ball.max_velocity(base)"),
-        );
-        assert_close(
-            ball.mass,
-            expected_proj.baseline.mass,
-            1e-3,
-            &format!("{label}.ball.mass(base)"),
-        );
-        assert_close(
-            cs.signature_radius,
-            expected_proj.baseline.signature_radius,
-            1e-6,
-            &format!("{label}.cs.signature_radius(base)"),
-        );
-    }
+        assert_close(cs.max_shield_hp, expected_proj.baseline.max_shield_hp, 1e-6, &format!("{pass_label}.cs.max_shield_hp"));
+        assert_close(cs.max_armor_hp, expected_proj.baseline.max_armor_hp, 1e-6, &format!("{pass_label}.cs.max_armor_hp"));
+        assert_close(cs.max_structure_hp, expected_proj.baseline.max_structure_hp, 1e-6, &format!("{pass_label}.cs.max_structure_hp"));
+        assert_close(cs.max_capacitor, expected_proj.baseline.max_capacitor, 1e-6, &format!("{pass_label}.cs.max_capacitor"));
+        assert_close(cs.shield_recharge_time_ms, expected_proj.baseline.shield_recharge_time_ms, 1e-6, &format!("{pass_label}.cs.shield_recharge_time_ms"));
+        assert_close(cs.capacitor_recharge_time_ms, expected_proj.baseline.capacitor_recharge_time_ms, 1e-6, &format!("{pass_label}.cs.capacitor_recharge_time_ms"));
+        for ch in 0..4 {
+            assert_close(cs.shield_resonance[ch], expected_proj.baseline.shield_resonance[ch], 1e-9, &format!("{pass_label}.cs.shield_resonance[{ch}]"));
+            assert_close(cs.armor_resonance[ch], expected_proj.baseline.armor_resonance[ch], 1e-9, &format!("{pass_label}.cs.armor_resonance[{ch}]"));
+            assert_close(cs.structure_resonance[ch], expected_proj.baseline.structure_resonance[ch], 1e-9, &format!("{pass_label}.cs.structure_resonance[{ch}]"));
+        }
+
+        assert_close(ball.inertia, expected_proj.baseline.agility, 1e-6, &format!("{pass_label}.ball.inertia"));
+        if let Some(prop) = expected_proj.propulsion {
+            assert_close(
+                ball.max_velocity,
+                expected_proj.baseline.max_velocity * (1.0 + prop.speed_boost),
+                1e-6,
+                &format!("{pass_label}.ball.max_velocity(prop)"),
+            );
+            assert_close(
+                ball.mass,
+                expected_proj.baseline.mass + prop.mass_addition,
+                1e-3,
+                &format!("{pass_label}.ball.mass(prop)"),
+            );
+            assert_close(
+                cs.signature_radius,
+                expected_proj.baseline.signature_radius * (1.0 + prop.signature_radius_bonus_pct / 100.0),
+                1e-6,
+                &format!("{pass_label}.cs.signature_radius(prop)"),
+            );
+        } else {
+            assert_close(
+                ball.max_velocity,
+                expected_proj.baseline.max_velocity,
+                1e-6,
+                &format!("{pass_label}.ball.max_velocity(base)"),
+            );
+            assert_close(
+                ball.mass,
+                expected_proj.baseline.mass,
+                1e-3,
+                &format!("{pass_label}.ball.mass(base)"),
+            );
+            assert_close(
+                cs.signature_radius,
+                expected_proj.baseline.signature_radius,
+                1e-6,
+                &format!("{pass_label}.cs.signature_radius(base)"),
+            );
+        }
+    };
+
+    let warm_fit = ctx
+        .fit(char_id, ship_id)
+        .unwrap_or_else(|e| panic!("{label} (warm): ctx.fit failed: {e:?}"));
+    assert_fit_matches(&warm_fit, &format!("{label} (warm)"));
+
+    // Evict cached ShipFittingEngine so ctx.fit rebuilds fitted modules, module states,
+    // and tactical stance cold from WorldStateSnapshot and persisted fit inputs.
+    ctx.ship_fittings
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&ship_id);
+    let cold_fit = ctx
+        .fit(char_id, ship_id)
+        .unwrap_or_else(|e| panic!("{label} (cold): ctx.fit failed: {e:?}"));
+    assert_fit_matches(&cold_fit, &format!("{label} (cold)"));
 
     actor_proj
 }
@@ -538,7 +554,7 @@ async fn fit_projection_actor_parity_differential_in_space_mutations() {
             STANDARD_DROP_BOOSTER,
         ],
     );
-    // Fitting, Thermodynamics IV, Biology V, Cybernetics V, Navigation V, Capacitor V.
+    // Fitting, Thermodynamics V, Biology V, Cybernetics V, Navigation V, Capacitor V.
     set_skills(
         &ctx,
         char_id,
@@ -1134,7 +1150,7 @@ async fn fit_projection_actor_parity_ecm_jam_and_tracking_disruption_next_cycle(
             (3413, 5),
             (3417, 5),
             (3418, 5),
-            (3428, 5), // Target Management V
+            (3428, 5), // Long Range Targeting V
         ],
     );
     grant_required_skills_recursive(
@@ -1153,7 +1169,7 @@ async fn fit_projection_actor_parity_ecm_jam_and_tracking_disruption_next_cycle(
             (3417, 5),
             (3418, 5),
             (3427, 5), // Electronic Warfare V
-            (3428, 5), // Target Management V
+            (3428, 5), // Long Range Targeting V
             (3434, 5), // Weapon Disruption V
             (19_759, 5), // Turret Destabilization V (+5%/lvl TD)
         ],
@@ -1586,14 +1602,16 @@ async fn fit_projection_actor_parity_5mn_mwd_on_battleship_mass_scaled() {
         mwd_ball.max_velocity
     );
 
-    // Accelerate in space across one MWD cycle and verify actual velocity exceeds base_vmax without overshooting cap.
-    for _ in 0..8 {
+    // Accelerate in space across 25s (~2.5 MWD cycles so turning from the station undock vector
+    // settles onto +X) and verify actual velocity exceeds base_vmax without overshooting cap.
+    for _ in 0..25 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, accel_ball) = sys.get_ball_snapshot(raven_id).await.unwrap().unwrap();
+    let accel_speed = accel_ball.velocity.length();
     assert!(
-        accel_ball.velocity.length() <= expected_vmax + 1e-3,
-        "accelerated velocity must remain bounded by mass-scaled 5MN MWD cap"
+        accel_speed > base_vmax && accel_speed <= expected_vmax + 1e-3,
+        "accelerated velocity ({accel_speed:.4}) must exceed base_vmax ({base_vmax:.4}) without overshooting mass-scaled 5MN MWD cap ({expected_vmax:.4})"
     );
 
     // Deactivate 5MN MWD and verify base max_velocity and mass restore immediately.
