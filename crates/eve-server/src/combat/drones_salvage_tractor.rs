@@ -208,9 +208,11 @@ fn commit_salvaged_wreck_inventory_and_notify(
 /// emits target-lost notices for locked observers, and flushes peer observer `DoDestinyUpdate`
 /// frames immediately before module deactivation / `OnSpecialFX(start=0, active=0)` fires.
 ///
-/// When `active_module_id_opt` is `Some(module_id)`, removes that active module cycle from the
-/// system actor prior to `remove_ball` so the target-removal deactivation hook does not emit
-/// `OnGodmaShipEffect(false)` / `OnSpecialFX(start=0)` before `RemoveBall` flushes.
+/// Pre-removes `active_module_id_opt` (when `Some`) and every sibling active module cycle targeting
+/// `wreck_id` (same ship or another pilot) prior to `remove_ball` so the actor's target-removal
+/// cleanup does not emit `OnGodmaShipEffect(false)` / `OnSpecialFX(start=0)` before `RemoveBall`
+/// flushes (`#1361`, `#1381`), then runs the module deactivation hook for those sibling cycles
+/// after `flush_peer_observer_updates(None)`.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_salvaged_wreck_ball(
     ctx: &ServerContext,
@@ -297,6 +299,31 @@ async fn finalize_salvaged_wreck_ball(
         false
     };
 
+    let sibling_candidates: Vec<crate::system_actor::ActiveModuleCycle> = {
+        let st = sys_handle.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles
+            .iter()
+            .filter(|c| {
+                (c.target_id == Some(wreck_id) || c.ship_id == wreck_id)
+                    && !active_module_id_opt
+                        .is_some_and(|mid| c.ship_id == ship_id && c.module_id == mid)
+            })
+            .cloned()
+            .collect()
+    };
+    let mut deferred_sibling_cycles = Vec::with_capacity(sibling_candidates.len());
+    for cycle in sibling_candidates {
+        if sys_handle
+            .remove_module_cycle(cycle.ship_id, cycle.module_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            deferred_sibling_cycles.push(cycle);
+        }
+    }
+
     let _ = sys_handle.remove_ball(wreck_id).await;
 
     if !affected_locks.is_empty() {
@@ -356,6 +383,38 @@ async fn finalize_salvaged_wreck_ball(
     }
 
     let _ = sys_handle.flush_peer_observer_updates(None).await;
+    if !deferred_sibling_cycles.is_empty() {
+        tokio::task::yield_now().await;
+        let deact_hook = sys_handle
+            .module_deactivation_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = deact_hook {
+            for cycle in &deferred_sibling_cycles {
+                let owner_char_id = cycle
+                    .owner_char_id
+                    .or_else(|| view.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id))
+                    .or_else(|| {
+                        ctx.db.with_snapshot(|s| {
+                            s.characters
+                                .values()
+                                .find(|c| c.active_ship_id == cycle.ship_id)
+                                .map(|c| c.character_id)
+                                .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
+                        })
+                    })
+                    .or_else(|| {
+                        view.ball_slim_meta
+                            .get(&cycle.ship_id)
+                            .and_then(|m| (m.owner_id > 0).then_some(m.owner_id))
+                    });
+                if let Some(cid) = owner_char_id {
+                    hook(cid, cycle);
+                }
+            }
+        }
+    }
     record_wreck_salvage_progression(ctx, sys_id, char_id);
     pre_removed_cycle
 }
