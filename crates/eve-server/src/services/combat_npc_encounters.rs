@@ -1071,8 +1071,21 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
                 .insert(wid, [npc.spawn_position.x, npc.spawn_position.y, npc.spawn_position.z]);
             wid
         });
+        let wreck_sde = ctx.sde.types.get(&wreck_tid);
+        let wreck_group_id = wreck_sde.map(|t| t.group_id).unwrap_or(186);
+        let wreck_category_id = wreck_sde.map(|t| t.category_id).unwrap_or(2);
+        let wreck_name = wreck_sde
+            .map(|t| t.name.clone())
+            .filter(|name| !name.is_empty());
+        let is_abandoned = killer_char_id == 0
+            || ctx
+                .crimewatch
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_create(killer_char_id)
+                .is_criminal(now_unix);
         let _ = handle
-            .spawn_ball_with_combat(
+            .spawn_ball_with_meta(
                 eve_destiny::Ball {
                     id: wreck_id,
                     type_id: wreck_tid,
@@ -1085,9 +1098,30 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
                     speed_fraction: 0.0,
                     mode: eve_destiny::MovementMode::Stop,
                 },
-                eve_destiny::CombatState::default(),
+                ctx.build_type_combat_state(wreck_tid),
+                eve_destiny::SlimItemMeta {
+                    group_id: wreck_group_id,
+                    category_id: wreck_category_id,
+                    owner_id: killer_char_id,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                    name: wreck_name,
+                    ..Default::default()
+                },
             )
             .await;
+        crate::services::combat_crimewatch::register_container_lifetime(
+            ctx,
+            wreck_id,
+            solar_system_id,
+            wreck_tid,
+            killer_char_id,
+            now_unix,
+            is_abandoned,
+        );
         let mut dropped = Vec::new();
         let _ = populate_npc_wreck_on_turret_kill(
             ctx,

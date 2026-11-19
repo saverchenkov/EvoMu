@@ -188,10 +188,33 @@ async fn officer_commander_mordu_sde_drops_and_finalize_cycle_destroyed_npcs() {
         ent.threat_table.insert(ship_id, 500.0);
         rt.destroyed_npc_cache.insert(950_002, ent);
     });
+    let prev_next_id = ctx.db.with_snapshot(|snap| snap.next_entity_id);
     finalize_cycle_destroyed_npcs(&ctx, sys_id).await;
     with_combat_runtime(&ctx, |rt| {
         assert!(!rt.destroyed_npc_cache.contains_key(&950_002));
     });
+    let sleeper_wreck_id = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.items
+                .values()
+                .find(|i| i.item_id > prev_next_id && i.location_id == sys_id as i64)
+                .map(|i| (i.item_id, i.owner_id))
+        })
+        .expect("sleeper wreck item persisted");
+    assert_eq!(sleeper_wreck_id.1, char_id);
+    let sleeper_meta = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .view()
+        .slim_meta(sleeper_wreck_id.0)
+        .cloned()
+        .expect("sleeper wreck slim_meta");
+    assert_eq!(sleeper_meta.group_id, 186);
+    assert_eq!(sleeper_meta.category_id, 2);
+    assert_eq!(sleeper_meta.owner_id, char_id);
+    assert_eq!(sleeper_meta.corp_id, -1);
+    assert_eq!(sleeper_meta.alliance_id, -1);
 
     record_npc_kill_progression(&ctx, char_id, Some(930_001));
 }
@@ -314,4 +337,388 @@ async fn populate_npc_wreck_on_turret_kill_handles_pithi_invader_and_faction_loo
             "no synthetic loot items may be inserted into player ship wreck"
         );
     });
+}
+
+#[tokio::test]
+async fn finalize_cycle_destroyed_npcs_spawns_owner_slim_meta_and_allows_green_safety_loot_all() {
+    let sde = {
+        let mut loaded = None;
+        if let Some(env_path) = std::env::var_os("EVOMU_SDE_PATH").filter(|v| !v.is_empty()) {
+            let p = std::path::PathBuf::from(env_path);
+            if p.exists() {
+                loaded = Some(Arc::new(
+                    eve_sde::SdeRegistry::open(&p).expect("open EVOMU_SDE_PATH sqlite"),
+                ));
+            }
+        }
+        if loaded.is_none() {
+            let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            for _ in 0..5 {
+                let candidate = dir.join("data/evomu_sde.sqlite");
+                if candidate.exists() {
+                    loaded = Some(Arc::new(
+                        eve_sde::SdeRegistry::open(&candidate).expect("open evomu_sde.sqlite"),
+                    ));
+                    break;
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+        loaded.unwrap_or_else(|| {
+            let (_tmp_ctx, _, _, _, _) = make_fighter_ctx_and_session();
+            let mut sde = (*_tmp_ctx.sde).clone();
+            let mut base = sde.types.get(&23_915).cloned().expect("fighter ship template");
+            base.capacity = 5_000.0;
+            sde.types.insert(23_915, base.clone());
+
+            let mut pithi = base.clone();
+            pithi.type_id = 16_997;
+            pithi.group_id = 552;
+            pithi.category_id = 11;
+            pithi.name = "Pithi Invader".into();
+            pithi.faction_id = Some(500_010);
+            pithi.race_id = Some(32);
+            sde.types.insert(16_997, pithi);
+
+            let mut wreck = base.clone();
+            wreck.type_id = 26_573;
+            wreck.group_id = 186;
+            wreck.category_id = 2;
+            wreck.name = "Guristas Small Wreck".into();
+            wreck.capacity = 5_000.0;
+            wreck.volume = 500.0;
+            sde.types.insert(26_573, wreck);
+
+            let mut scraps = base;
+            scraps.type_id = 15_331;
+            scraps.group_id = 18;
+            scraps.category_id = 4;
+            scraps.name = "Metal Scraps".into();
+            scraps.volume = 0.01;
+            sde.types.insert(15_331, scraps);
+
+            sde.wrecks.insert(16_997, 26_573);
+            Arc::new(sde)
+        })
+    };
+
+    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let char_id = 90_000_001i64;
+    let ship_id = 200_000_001i64;
+    let other_char = 90_000_999i64;
+    let other_ship = 200_000_999i64;
+    let sys_id = 30_000_142u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 23_915,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        let mut other_ch = snap.characters.get(&char_id).cloned().expect("seed char");
+        other_ch.character_id = other_char;
+        other_ch.name = "Other Pilot".into();
+        other_ch.corporation_id = 1_000_010;
+        other_ch.active_ship_id = other_ship;
+        other_ch.solar_system_id = sys_id;
+        other_ch.station_id = None;
+        other_ch.structure_id = None;
+        snap.characters.insert(other_char, other_ch);
+        snap.items.insert(
+            other_ship,
+            eve_db::InventoryItemRecord {
+                item_id: other_ship,
+                type_id: 23_915,
+                owner_id: other_char,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut owner_session = eve_machonet::SessionState::default();
+    owner_session.user_id = Some(1);
+    owner_session.character_id = Some(char_id);
+    owner_session.corporation_id = Some(1_000_009);
+    owner_session.ship_id = Some(ship_id);
+    owner_session.solar_system_id = Some(sys_id);
+
+    let mut other_session = eve_machonet::SessionState::default();
+    other_session.user_id = Some(2);
+    other_session.character_id = Some(other_char);
+    other_session.corporation_id = Some(1_000_010);
+    other_session.ship_id = Some(other_ship);
+    other_session.solar_system_id = Some(sys_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (sid, _oid) in [(ship_id, char_id), (other_ship, other_char)] {
+        sys_handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 23_915,
+                    position: glam::DVec3::ZERO,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 120.0,
+                    inertia: 0.5,
+                    mass: 1_000_000_000.0,
+                    radius: 500.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
+        rt.safety_levels
+            .insert(other_char, crate::services::combat_crimewatch::SafetyLevel::Green);
+        let mut pithi =
+            crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+                951_001,
+                16_997,
+                sys_id,
+                "Pirate",
+            );
+        pithi.faction_id = 500_010;
+        pithi.spawn_position = glam::DVec3::new(1_000.0, 0.0, 0.0);
+        pithi.threat_table.insert(ship_id, 500.0);
+        pithi.aggression_threat.insert(ship_id, 500.0);
+        rt.destroyed_npc_cache.insert(951_001, pithi);
+    });
+
+    let prev_next_id = ctx.db.with_snapshot(|snap| snap.next_entity_id);
+    finalize_cycle_destroyed_npcs(&ctx, sys_id).await;
+
+    let (wreck_id, wreck_rec) = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.items
+                .values()
+                .find(|i| i.item_id > prev_next_id && i.location_id == sys_id as i64)
+                .map(|i| (i.item_id, i.clone()))
+        })
+        .expect("Pithi Invader wreck persisted in DB");
+    assert_eq!(wreck_rec.type_id, 26_573);
+    assert_eq!(wreck_rec.owner_id, char_id);
+
+    let view = sys_handle.view();
+    let wreck_ball = view.ball(wreck_id).expect("wreck ball spawned");
+    let wreck_meta = view.slim_meta(wreck_id).expect("wreck slim_meta populated");
+    assert_eq!(wreck_meta.group_id, 186);
+    assert_eq!(wreck_meta.category_id, 2);
+    assert_eq!(wreck_meta.owner_id, char_id);
+    assert_eq!(wreck_meta.corp_id, -1);
+    assert_eq!(wreck_meta.alliance_id, -1);
+    assert_eq!(wreck_meta.name.as_deref(), Some("Guristas Small Wreck"));
+
+    let wire_slim = eve_destiny::wire::slim_item_dict(wreck_ball, wreck_meta);
+    assert_eq!(wire_slim.dict_get("ownerID"), Some(&eve_proto::PyRep::Integer(char_id)));
+    assert_eq!(wire_slim.dict_get("groupID"), Some(&eve_proto::PyRep::Integer(186)));
+    assert_eq!(wire_slim.dict_get("categoryID"), Some(&eve_proto::PyRep::Integer(2)));
+    assert_eq!(
+        wire_slim.dict_get("name"),
+        Some(&eve_proto::PyRep::String("Guristas Small Wreck".into()))
+    );
+
+    with_combat_runtime(&ctx, |rt| {
+        assert!(!rt.destroyed_npc_cache.contains_key(&951_001));
+        let lifetime = rt
+            .container_lifetimes
+            .get(&wreck_id)
+            .expect("container lifetime registered for cycle-killed NPC wreck");
+        assert_eq!(lifetime.owner_id, char_id);
+        assert_eq!(lifetime.type_id, 26_573);
+        assert!(!lifetime.is_abandoned);
+    });
+
+    let mut loot_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == wreck_id)
+            .map(|i| i.item_id)
+            .collect()
+    });
+    if loot_ids.is_empty() {
+        let fallback_loot_id = ctx.db.with_mut_snapshot(|snap| {
+            snap.next_entity_id += 1;
+            let lid = snap.next_entity_id;
+            snap.items.insert(
+                lid,
+                eve_db::InventoryItemRecord {
+                    item_id: lid,
+                    type_id: 15_331,
+                    owner_id: char_id,
+                    location_id: wreck_id,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            lid
+        });
+        loot_ids.push(fallback_loot_id);
+    }
+
+    let kwargs = std::collections::HashMap::new();
+    // Foreign pilot with Green safety is denied looting owned NPC wreck.
+    let foreign_err = crate::services::combat_crimewatch::handle_wrecks_killmails(
+        &ctx,
+        &mut other_session,
+        "invbroker",
+        "LootAll",
+        &[eve_proto::PyRep::Integer(wreck_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(foreign_err.code, "CantDoInCurrentSafetyLevel");
+
+    // Owner/killer pilot with Green safety loots cleanly without suspect flag.
+    let owner_loot_res = crate::services::combat_crimewatch::handle_wrecks_killmails(
+        &ctx,
+        &mut owner_session,
+        "invbroker",
+        "LootAll",
+        &[eve_proto::PyRep::Integer(wreck_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        owner_loot_res.dict_get("suspectFlagTriggered"),
+        Some(&eve_proto::PyRep::Bool(false))
+    );
+    let Some(eve_proto::PyRep::List(moved_ids)) = owner_loot_res.dict_get("lootedItemIDs") else {
+        panic!("expected lootedItemIDs list in LootAll response");
+    };
+    assert_eq!(moved_ids.len(), loot_ids.len());
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.values().any(|i| i.location_id == wreck_id));
+        for lid in &loot_ids {
+            assert_eq!(
+                snap.items.get(lid).map(|i| (i.location_id, i.flag)),
+                Some((ship_id, eve_db::InventoryFlag::Cargo))
+            );
+        }
+    });
+
+    // Unknown killer (killer_char_id == 0) keeps DB owner_id == 0, maps wire ownerID -> 1, and marks abandoned.
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut pithi_unknown =
+            crate::services::combat_crimewatch::combat_npc_ai::combat_npc_ai_tests::make_test_npc_entity(
+                951_002,
+                16_997,
+                sys_id,
+                "Pirate",
+            );
+        pithi_unknown.faction_id = 500_010;
+        pithi_unknown.spawn_position = glam::DVec3::new(1_200.0, 0.0, 0.0);
+        rt.destroyed_npc_cache.insert(951_002, pithi_unknown);
+    });
+    let prev_unknown_id = ctx.db.with_snapshot(|snap| snap.next_entity_id);
+    finalize_cycle_destroyed_npcs(&ctx, sys_id).await;
+
+    let (unknown_wreck_id, unknown_rec) = ctx
+        .db
+        .with_snapshot(|snap| {
+            snap.items
+                .values()
+                .find(|i| i.item_id > prev_unknown_id && i.location_id == sys_id as i64)
+                .map(|i| (i.item_id, i.clone()))
+        })
+        .expect("unknown-killer wreck persisted");
+    assert_eq!(unknown_rec.owner_id, 0);
+
+    let view2 = sys_handle.view();
+    let unknown_ball = view2.ball(unknown_wreck_id).expect("unknown wreck ball");
+    let unknown_meta = view2
+        .slim_meta(unknown_wreck_id)
+        .expect("unknown wreck slim_meta");
+    assert_eq!(unknown_meta.group_id, 186);
+    assert_eq!(unknown_meta.category_id, 2);
+    assert_eq!(unknown_meta.owner_id, 0);
+    assert_eq!(unknown_meta.corp_id, -1);
+    assert_eq!(unknown_meta.alliance_id, -1);
+    let unknown_wire = eve_destiny::wire::slim_item_dict(unknown_ball, unknown_meta);
+    assert_eq!(unknown_wire.dict_get("ownerID"), Some(&eve_proto::PyRep::Integer(1)));
+
+    with_combat_runtime(&ctx, |rt| {
+        let lifetime = rt
+            .container_lifetimes
+            .get(&unknown_wreck_id)
+            .expect("abandoned lifetime registered");
+        assert_eq!(lifetime.owner_id, 0);
+        assert!(lifetime.is_abandoned);
+    });
+
+    // Ensure at least one item in unknown_wreck_id and confirm Green-safety pilot can loot abandoned wreck cleanly.
+    let unknown_has_loot = ctx
+        .db
+        .with_snapshot(|snap| snap.items.values().any(|i| i.location_id == unknown_wreck_id));
+    if !unknown_has_loot {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.next_entity_id += 1;
+            let lid = snap.next_entity_id;
+            snap.items.insert(
+                lid,
+                eve_db::InventoryItemRecord {
+                    item_id: lid,
+                    type_id: 15_331,
+                    owner_id: 0,
+                    location_id: unknown_wreck_id,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    let abandoned_loot_res = crate::services::combat_crimewatch::handle_wrecks_killmails(
+        &ctx,
+        &mut other_session,
+        "invbroker",
+        "LootAll",
+        &[eve_proto::PyRep::Integer(unknown_wreck_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        abandoned_loot_res.dict_get("suspectFlagTriggered"),
+        Some(&eve_proto::PyRep::Bool(false))
+    );
 }
