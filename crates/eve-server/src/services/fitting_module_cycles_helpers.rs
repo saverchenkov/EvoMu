@@ -964,40 +964,43 @@ pub(crate) fn evaluate_ship_dogma_attributes(
 
 /// Builds the `godma` item-info entry map for a docked Upwell structure so `StateManager.UpdateItem`
 /// primes `itemsByLocationID[structure_id]` before priming ships located inside the structure.
+/// Returns `None` when `struct_id` cannot be resolved from persisted structures/items or lacks a
+/// positive solar system ID.
 fn build_structure_info_entries(
     ctx: &ServerContext,
-    session: &SessionState,
+    session_solar_system_id: Option<u32>,
     struct_id: i64,
     now_ft: i64,
     header: &eve_proto::DBRowDescriptor,
-) -> Vec<(PyRep, PyRep)> {
+) -> Option<Vec<(PyRep, PyRep)>> {
     let (type_id, owner_id, solar_system_id, name) = ctx.db.with_snapshot(|snap| {
         if let Some(st) = snap.structures.get(&struct_id) {
-            (
-                st.type_id,
-                st.owner_corp_id,
-                i64::from(st.solar_system_id),
-                st.name.clone(),
-            )
+            let sys_id = (st.solar_system_id > 0)
+                .then(|| i64::from(st.solar_system_id))
+                .or_else(|| session_solar_system_id.filter(|&id| id > 0).map(i64::from))?;
+            Some((st.type_id, st.owner_corp_id, sys_id, st.name.clone()))
         } else if let Some(it) = snap.items.get(&struct_id) {
-            (
+            let sys_id = (it.location_id > 0)
+                .then(|| {
+                    ctx.sde
+                        .location_solar_system(it.location_id)
+                        .map(i64::from)
+                        .unwrap_or(it.location_id)
+                })
+                .or_else(|| session_solar_system_id.filter(|&id| id > 0).map(i64::from))?;
+            Some((
                 it.type_id,
                 it.owner_id,
-                it.location_id,
+                sys_id,
                 snap.item_custom_names
                     .get(&struct_id)
                     .cloned()
                     .unwrap_or_default(),
-            )
+            ))
         } else {
-            (
-                35_832,
-                session.corporation_id.unwrap_or(0),
-                session.solar_system_id.map(i64::from).unwrap_or(30_000_142),
-                String::new(),
-            )
+            None
         }
-    });
+    })?;
     let (grp, cat, default_attrs) = ctx
         .sde
         .types
@@ -1023,7 +1026,7 @@ fn build_structure_info_entries(
         PyRep::Integer(cat),
         PyRep::String(name),
     ]);
-    vec![(
+    Some(vec![(
         PyRep::Integer(struct_id),
         PyRep::keyval([
             ("itemID", PyRep::Integer(struct_id)),
@@ -1034,7 +1037,7 @@ fn build_structure_info_entries(
             ("wallclockTime", PyRep::Integer(now_ft)),
             ("description", PyRep::String(String::new())),
         ]),
-    )]
+    )])
 }
 
 fn emit_godma_prime_location_and_ship_state(
@@ -1267,20 +1270,21 @@ fn emit_godma_prime_location_and_ship_state(
     }
 
     if session.structure_id == Some(ship_location_id) && ship_location_id > 0 {
-        let structure_entries = build_structure_info_entries(
+        if let Some(structure_entries) = build_structure_info_entries(
             ctx,
-            session,
+            session.solar_system_id,
             ship_location_id,
             now_ft,
             header,
-        );
-        ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::ProcessGodmaPrimeLocation {
-                location_id: ship_location_id,
-                data: PyRep::Dict(structure_entries),
-            },
-        );
+        ) {
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::ProcessGodmaPrimeLocation {
+                    location_id: ship_location_id,
+                    data: PyRep::Dict(structure_entries),
+                },
+            );
+        }
     }
 
     ctx.emit_typed(
@@ -1469,12 +1473,14 @@ pub(crate) fn build_all_info(
         Some(PyRep::Integer(id)) if *id > 0 => session.structure_id == Some(*id),
         _ => false,
     };
-    let structure_info = match session.structure_id.filter(|_| requested_structure_ok) {
-        Some(struct_id) => PyRep::Dict(build_structure_info_entries(
-            ctx, session, struct_id, now_ft, &header,
-        )),
-        None => PyRep::None,
-    };
+    let structure_info = session
+        .structure_id
+        .filter(|_| requested_structure_ok)
+        .and_then(|struct_id| {
+            build_structure_info_entries(ctx, session.solar_system_id, struct_id, now_ft, &header)
+        })
+        .map(PyRep::Dict)
+        .unwrap_or(PyRep::None);
 
     let (ship_info_entries, ship_state) = emit_godma_prime_location_and_ship_state(
         ctx,

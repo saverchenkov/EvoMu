@@ -1158,8 +1158,8 @@ mod tests {
         }
         assert_eq!(report.patterns["master_wallet"].occurrences, 0);
         assert_eq!(report.patterns["direct_member_roles_get"].occurrences, 0);
-        assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].occurrences, 3);
-        assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].files, 2);
+        assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].occurrences, 0);
+        assert_eq!(report.patterns["hardcoded_fallback_entity_ids"].files, 0);
 
         // 2. Synthetic tempdir workspace verifies comment/cfg(test)/literal filtering, regression
         //    blocking, exact-drop rejection (both occurrence and file count), and zero_required guard.
