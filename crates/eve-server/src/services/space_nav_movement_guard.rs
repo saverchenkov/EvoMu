@@ -510,7 +510,14 @@ impl ServerContext {
             });
         }
 
-        let cs_opt = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+        let cs_opt = sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .map_err(|e| BridgeRpcError {
+                code: "DestinyQueryFailed".into(),
+                message: e,
+                client_error: None,
+            })?;
 
         // Reject if already in active warp (or aligning only where allowed).
         if let Some(ref ball) = ball_opt {
@@ -659,15 +666,15 @@ impl ServerContext {
                         "Cannot activate filament while cloaked",
                     ));
                 }
-                MovementIntent::CynoBridge { .. }
-                | MovementIntent::ConduitJump { .. }
-                | MovementIntent::AccelerationGate {
+                MovementIntent::AccelerationGate {
                     kind: AccelerationGateKind::EssBank,
                     ..
                 } => {}
                 MovementIntent::StargateJump { .. }
                 | MovementIntent::AnsiblexJump { .. }
                 | MovementIntent::WormholeJump { .. }
+                | MovementIntent::CynoBridge { .. }
+                | MovementIntent::ConduitJump { .. }
                 | MovementIntent::ShipcasterJump { .. }
                 | MovementIntent::AccelerationGate { .. } => {
                     return Err(BridgeRpcError::from_user_key(
