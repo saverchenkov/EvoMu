@@ -703,9 +703,9 @@ async fn force_decloak_on_ess_gate_activation(
             || cs.cloak_velocity_multiplier.is_some()
     });
     let had_slim_cloaked = sys_handle
-        .ballpark
-        .read()
-        .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|m| m.is_cloaked));
+        .view()
+        .slim_meta(ship_id)
+        .is_some_and(|m| m.is_cloaked);
 
     // Align owner/slot filtering with `resolve_active_fitting_cloak_read_only`: only clear fitted
     // group-330 cloak modules (slots 11..=34 or 125..=132) owned by `char_id` that are active
@@ -765,12 +765,16 @@ async fn force_decloak_on_ess_gate_activation(
             .ok()
             .flatten()
             .unwrap_or(0.0);
+        // Prefer SDE attribute 669 (`moduleReactivationDelay`, ms) directly when present (> 0)
+        // so `remove_module_cycle`'s `rem_cycle + reactivation_delay_s` does not inflate the
+        // cloak reactivation cooldown by up to +1.0s compared to `dogmaIM.Deactivate` (GH #1423).
         let react_delay_s = ctx
             .sde
             .types
             .get(&mtid)
             .and_then(|t| t.default_attributes.get(&669).copied())
-            .map(|ms| (ms / 1000.0).max(removed_delay))
+            .filter(|&ms| ms.is_finite() && ms > 0.0)
+            .map(|ms| ms / 1000.0)
             .unwrap_or(removed_delay);
         if react_delay_s > 0.0 {
             ctx.record_module_reactivation_delay(ship_id, mid, react_delay_s);
@@ -928,12 +932,16 @@ async fn force_decloak_on_ess_gate_activation(
     if cloak_recorded {
         crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
     }
-    crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
-        ctx,
-        char_id,
-        "DecloakProximityOrDeactivation",
-        2000.0,
-    );
+    let deactivated_non_gate_cloak = !active_cloaks.is_empty()
+        || (!was_gate_cloak && (pre_was_cloaked || had_residual_cs_cloak));
+    if deactivated_non_gate_cloak {
+        crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
+            ctx,
+            char_id,
+            "DecloakProximityOrDeactivation",
+            2000.0,
+        );
+    }
 }
 
 pub async fn try_activate_ess_acceleration_gate(
