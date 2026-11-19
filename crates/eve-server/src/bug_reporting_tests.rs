@@ -501,3 +501,198 @@ async fn test_bundle_snapshot_enrichment_and_http_bug_lifecycle() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_bundle_cumulative_rpc_and_handshake_telemetry() {
+    let ctx = ServerContext::new();
+    let empty_kwargs = HashMap::new();
+    for idx in 0..34 {
+        ctx.flight_recorder.record(
+            777,
+            "dogmaIM",
+            Some(10_001),
+            "Activate",
+            &[PyRep::Integer(idx as i64)],
+            &empty_kwargs,
+            Duration::from_millis(1),
+            "ok",
+        );
+    }
+    ctx.flight_recorder.record(
+        777,
+        "publicGatewaySvc",
+        None,
+        "Send",
+        &[],
+        &empty_kwargs,
+        Duration::from_millis(2),
+        "OK",
+    );
+    ctx.flight_recorder.record_gateway_request(Some(777), Some(42));
+    ctx.flight_recorder.record_gateway_request(Some(777), Some(42));
+    ctx.flight_recorder.record_handshake_builds(
+        777,
+        Some(42),
+        Some(3_698_100),
+        eve_machonet::V24_BOOT_BUILD,
+        true,
+    );
+
+    let mut session = SessionState::new(777);
+    session.user_id = Some(42);
+    session.character_id = Some(90_000_001);
+
+    let bundle = BugIncidentBundle::build_snapshot(
+        &ctx,
+        &session,
+        -12345,
+        "ui.window:Open",
+        "Traceback (most recent call last):\n  File \"window.py\", line 10, in Open\nKeyError: 'id'",
+    );
+    assert_eq!(bundle.server_request_count, 35);
+    assert_eq!(bundle.gateway_request_count, 3);
+    assert_eq!(bundle.flight_recorder.len(), 20);
+    let hs = bundle.handshake.as_ref().expect("handshake metadata populated");
+    assert_eq!(hs.client_boot_build, Some(3_698_100));
+    assert_eq!(hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(hs.build_mismatch, Some(true));
+
+    let encoded = serde_json::to_string(&bundle).expect("serialize bundle");
+    let decoded: BugIncidentBundle = serde_json::from_str(&encoded).expect("deserialize bundle");
+    assert_eq!(decoded.server_request_count, 35);
+    assert_eq!(decoded.gateway_request_count, 3);
+    assert_eq!(decoded.handshake.as_ref(), Some(hs));
+}
+
+#[tokio::test]
+async fn test_bundle_telemetry_defaults_and_user_fallback() {
+    // Legacy bundle JSON without new BF-1344-02 / BF-1344-03 fields still deserializes cleanly.
+    let legacy_json = serde_json::json!({
+        "incident_id": "legacy-1",
+        "timestamp": "2026-11-18T00:00:00Z",
+        "timestamp_millis": 1000,
+        "stack_hash": 1,
+        "stack_key": "k",
+        "trace": "",
+        "session": BugSessionSnapshot::default(),
+        "flight_recorder": [],
+        "server_logs_before": [],
+        "server_logs_after": []
+    });
+    let parsed: BugIncidentBundle = serde_json::from_value(legacy_json).expect("legacy defaults");
+    assert_eq!(parsed.server_request_count, 0);
+    assert_eq!(parsed.gateway_request_count, 0);
+    assert!(parsed.handshake.is_none());
+
+    // User-keyed Quasar gateway & handshake build lookups still resolve when session_id is 0.
+    let ctx = ServerContext::new();
+    ctx.flight_recorder.record_gateway_request(None, Some(99));
+    ctx.flight_recorder.record_handshake_builds(
+        888,
+        Some(99),
+        Some(eve_machonet::V24_BOOT_BUILD),
+        eve_machonet::V24_BOOT_BUILD,
+        false,
+    );
+
+    let mut http_only_session = SessionState::new(0);
+    http_only_session.user_id = Some(99);
+    let snap = BugIncidentBundle::build_snapshot(&ctx, &http_only_session, 0, "UI", "");
+    assert_eq!(snap.server_request_count, 0);
+    assert_eq!(snap.gateway_request_count, 1);
+    let hs = snap.handshake.as_ref().expect("user-fallback handshake");
+    assert_eq!(hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(hs.build_mismatch, Some(false));
+
+    // When session_id > 0, stale prior user_gateway_counts must NOT leak across sessions,
+    // and upgrading the client build clears prior build_mismatch flags.
+    ctx.flight_recorder.record_handshake_builds(
+        900,
+        Some(123),
+        Some(3_600_000),
+        eve_machonet::V24_BOOT_BUILD,
+        true,
+    );
+    ctx.flight_recorder.record_gateway_request(Some(900), Some(123));
+    ctx.flight_recorder.reset_user_telemetry(123);
+    ctx.flight_recorder.record_handshake_builds(
+        901,
+        Some(123),
+        Some(eve_machonet::V24_BOOT_BUILD),
+        eve_machonet::V24_BOOT_BUILD,
+        false,
+    );
+    let mut upgraded_session = SessionState::new(901);
+    upgraded_session.user_id = Some(123);
+    let upgraded_snap = BugIncidentBundle::build_snapshot(&ctx, &upgraded_session, 0, "UI", "");
+    assert_eq!(upgraded_snap.gateway_request_count, 0);
+    let upgraded_hs = upgraded_snap.handshake.as_ref().expect("upgraded handshake");
+    assert_eq!(upgraded_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(upgraded_hs.build_mismatch, Some(false));
+
+    // Unknown client build omits `build_mismatch` in serialized JSON instead of claiming false compatibility.
+    let mut bare_session = SessionState::new(999);
+    bare_session.user_id = Some(555);
+    let bare = BugIncidentBundle::build_snapshot(&ctx, &bare_session, 1, "UI", "");
+    let bare_hs = bare.handshake.as_ref().expect("default server build");
+    assert_eq!(bare_hs.client_boot_build, None);
+    assert_eq!(bare_hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(bare_hs.build_mismatch, None);
+    let bare_json = serde_json::to_value(&bare).expect("serialize bare");
+    assert!(
+        bare_json["handshake"].get("build_mismatch").is_none(),
+        "unknown client build must omit build_mismatch instead of emitting false"
+    );
+
+    // Enriched `sess_snap.user_id` (from character_id) resolves user-keyed telemetry even when
+    // raw `session.user_id` is None.
+    ctx.flight_recorder.record_gateway_request(None, Some(1));
+    ctx.flight_recorder.record_handshake_builds(
+        777,
+        Some(1),
+        Some(eve_machonet::V24_BOOT_BUILD),
+        eve_machonet::V24_BOOT_BUILD,
+        false,
+    );
+    let mut char_only_session = SessionState::new(0);
+    char_only_session.user_id = None;
+    char_only_session.character_id = Some(90_000_001);
+    let char_snap = BugIncidentBundle::build_snapshot(&ctx, &char_only_session, 2, "UI", "");
+    assert_eq!(char_snap.session.user_id, Some(1));
+    assert_eq!(char_snap.gateway_request_count, 1);
+    let char_hs = char_snap.handshake.as_ref().expect("enriched user handshake");
+    assert_eq!(char_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(char_hs.build_mismatch, Some(false));
+
+    // HTTP `/bugs/api/issue` with `"Build": 0` treats client_build == 0 as unknown (not stale mismatch).
+    let dir = make_temp_queue_dir("bug_build_zero");
+    let issue_ctx = ServerContext::new();
+    issue_ctx.bug_reporting.set_queue_dir_override(Some(dir.clone()));
+    let zero_build_payload = serde_json::to_vec(&json!({
+        "categoryID": "UI",
+        "summary": "Build zero sentinel test",
+        "description": "No character session attached",
+        "reproductionSteps": "N/A",
+        "computerInfo": "macOS",
+        "Build": 0
+    }))
+    .unwrap();
+    let zero_resp = handle_bugs_http_request(
+        &issue_ctx,
+        "POST",
+        "/bugs/api/issue",
+        &HashMap::new(),
+        &zero_build_payload,
+    );
+    assert_eq!(zero_resp.status_code, 201);
+    let zero_json: serde_json::Value = serde_json::from_slice(&zero_resp.body).unwrap();
+    let zero_key = zero_json["key"].as_str().unwrap();
+    let zero_path = issue_ctx.bug_reporting.lookup_report_path(zero_key).unwrap();
+    let zero_bundle: BugIncidentBundle =
+        serde_json::from_slice(&std::fs::read(&zero_path).unwrap()).unwrap();
+    let zero_hs = zero_bundle.handshake.as_ref().expect("server build present");
+    assert_eq!(zero_hs.client_boot_build, None);
+    assert_eq!(zero_hs.build_mismatch, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -14,9 +14,9 @@ use crate::outbound_sequencer::{DestinyDrain, DestinyStream, RpcCompletion};
 use crate::router::ServerContext;
 use anyhow::Result;
 use eve_machonet::{
-    GPSTransportClosed, HandshakeIdentity, HandshakeStepOutput, MachoAddress,
-    MachoHandshakeStateMachine, MachoPacket, MachoPacketType, SessionState, VersionExchange,
-    MACHO_PROXY_NODE_ID,
+    CryptoChallengePacket, GPSTransportClosed, HandshakeIdentity, HandshakeStepOutput,
+    MachoAddress, MachoHandshakeStateMachine, MachoPacket, MachoPacketType, SessionState,
+    VersionExchange, MACHO_PROXY_NODE_ID,
 };
 use eve_proto::{marshal, BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -25,6 +25,59 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
+
+fn extract_handshake_client_build(pyrep: &PyRep) -> Option<u32> {
+    if let Some(vx) = VersionExchange::from_pyrep(pyrep) {
+        return Some(vx.build_version);
+    }
+    if let Some(pkt) = MachoPacket::from_pyrep(pyrep) {
+        if let Some(vx) = VersionExchange::from_pyrep(&pkt.payload) {
+            return Some(vx.build_version);
+        }
+        if let Some(ch) = CryptoChallengePacket::from_pyrep(&pkt.payload) {
+            return Some(ch.boot_build);
+        }
+    }
+    if let Some(ch) = CryptoChallengePacket::from_pyrep(pyrep) {
+        return Some(ch.boot_build);
+    }
+    None
+}
+
+fn record_and_warn_handshake_failure(
+    ctx: &ServerContext,
+    session_id: u64,
+    user_id: Option<u64>,
+    peer_addr: &str,
+    client_boot_build: Option<u32>,
+    server_boot_build: u32,
+    closed: &GPSTransportClosed,
+) {
+    let is_build_mismatch = closed.reason.contains("Boot Build Mismatch")
+        || closed.reason_code.as_deref() == Some("HANDSHAKE_INCOMPATIBLEBUILD");
+    ctx.flight_recorder.record_handshake_builds(
+        session_id,
+        user_id,
+        client_boot_build,
+        server_boot_build,
+        is_build_mismatch,
+    );
+    if is_build_mismatch {
+        let client_build_str = client_boot_build
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        warn!(
+            session_id,
+            user_id = ?user_id,
+            peer_addr = %peer_addr,
+            client_build = %client_build_str,
+            server_build = server_boot_build,
+            reason_code = ?closed.reason_code,
+            reason = %closed.reason,
+            "Rejected MachoNet client handshake: Boot Build Mismatch"
+        );
+    }
+}
 
 /// Maximum frame length accepted on TCP listeners (4 MiB, matching `eve_proto::marshal::MAX_FRAME_SIZE`) to prevent memory exhaustion.
 pub const MAX_MACHO_FRAME_LEN: usize = eve_proto::marshal::MAX_FRAME_SIZE;
@@ -2118,8 +2171,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     let mut ver = VersionExchange::default();
     ver.user_count = ctx.db.online_session_count().max(1);
+    let server_boot_build = ver.build_version;
     let mut handshake =
         MachoHandshakeStateMachine::new(ver, MACHO_PROXY_NODE_ID, session_id, client_id);
+    let mut client_boot_build: Option<u32> = None;
     handshake.set_config_vals(crate::bug_reporting::build_client_global_config(
         &ctx,
         local_ip.as_deref(),
@@ -2775,8 +2830,20 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 };
 
                 if !handshake.is_authenticated() {
+                    if let Some(detected_build) = extract_handshake_client_build(&pyrep) {
+                        client_boot_build = Some(detected_build);
+                    }
                     match handshake.step(&pyrep) {
                         Err(closed) => {
+                            record_and_warn_handshake_failure(
+                                &ctx,
+                                session_id,
+                                None,
+                                &peer_addr,
+                                client_boot_build,
+                                server_boot_build,
+                                &closed,
+                            );
                             let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                             break;
                         }
@@ -2793,6 +2860,9 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             }
                         }
                         Ok(HandshakeStepOutput::NeedsAuthentication(challenge)) => {
+                            if challenge.boot_build > 0 {
+                                client_boot_build = Some(challenge.boot_build);
+                            }
                             let now_unix = ctx.now_unix();
                             let username = challenge.user_name.as_deref().unwrap_or("");
                             let token = if let Some(sso_tok) =
@@ -2876,6 +2946,15 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     }
                                 }
                                 Err(closed) => {
+                                    record_and_warn_handshake_failure(
+                                        &ctx,
+                                        session_id,
+                                        None,
+                                        &peer_addr,
+                                        client_boot_build,
+                                        server_boot_build,
+                                        &closed,
+                                    );
                                     let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                                     break;
                                 }
@@ -2948,6 +3027,14 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             session.language_id = identity.language_id.clone();
                             session.address = identity.address.clone();
                             session.user_type = identity.user_type;
+                            ctx.flight_recorder.reset_user_telemetry(identity.user_id);
+                            ctx.flight_recorder.record_handshake_builds(
+                                session_id,
+                                Some(identity.user_id),
+                                client_boot_build,
+                                server_boot_build,
+                                false,
+                            );
                             is_authenticated_flag.store(true, Ordering::Release);
                             preauth_guard.complete_auth();
                             crate::lifecycle::set_open_sessions(ctx.db.online_session_count() as usize);
@@ -3345,6 +3432,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     reader_task.abort();
     ctx.flight_recorder.remove_wire_state(session_id);
+    ctx.flight_recorder.remove_session_telemetry(session_id);
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;

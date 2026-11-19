@@ -101,6 +101,7 @@ def _make_crash_bundle(
     flight_recorder: list | None = None,
     server_logs_before: list | None = None,
     server_logs_after: list | None = None,
+    session: dict | None = None,
     extra: dict | None = None,
 ) -> dict:
     bundle = {
@@ -110,14 +111,18 @@ def _make_crash_bundle(
         "stack_hash": stack_hash,
         "stack_key": stack_key,
         "trace": trace,
-        "session": {
-            "character_id": 2100000001,
-            "character_name": "Playtester Alpha",
-            "solar_system_id": 30000142,
-            "solar_system_name": "Jita",
-            "ship_type_name": "Rifter",
-            "station_id": 60003760,
-        },
+        "session": (
+            {
+                "character_id": 2100000001,
+                "character_name": "Playtester Alpha",
+                "solar_system_id": 30000142,
+                "solar_system_name": "Jita",
+                "ship_type_name": "Rifter",
+                "station_id": 60003760,
+            }
+            if session is None
+            else session
+        ),
         "flight_recorder": [] if flight_recorder is None else flight_recorder,
         "server_logs_before": [] if server_logs_before is None else server_logs_before,
         "server_logs_after": [] if server_logs_after is None else server_logs_after,
@@ -238,6 +243,7 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
                     f'  File "eve/client/script/ui/mod_{idx}.py", line {10 + idx}, in Handler{idx}\n'
                     f"RuntimeError: distinct failure #{idx}"
                 ),
+                session={},
                 extra={"server_request_count": 0},
             )
             for idx in range(12)
@@ -268,10 +274,12 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         b1 = _make_crash_bundle(
             stack_hash=-111,
             trace='Traceback (most recent call last):\n  File "a.py", line 1, in f\nKeyError: "x"',
+            session={},
         )
         b2 = _make_crash_bundle(
             stack_hash=-222,
             trace='Traceback (most recent call last):\n  File "b.py", line 2, in g\nValueError: "y"',
+            session={},
         )
         self.assertEqual(sync_mod._effective_bundle_hash(b1), sync_mod._effective_bundle_hash(b2))
         title, labels = sync_mod.build_issue_title_and_labels(b1)
@@ -508,6 +516,384 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         h2 = sync_mod._effective_bundle_hash(molly)
         self.assertEqual(h1, h2)
         self.assertNotEqual(h1, -1040548311)
+
+    def test_bf1344_01_evomu_site_log_exception_prefers_throw_site_over_callstack(self) -> None:
+        trace_a = (
+            "log.general.LogException args=(RuntimeError('missing attribute: foo'),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/scanner.py", line 412, in DoScan\n'
+            "    self.ScanArea()\n"
+            "RuntimeError: missing attribute: foo\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/lib/uthread2.py", line 111, in wrapper\n'
+            "    res = {'k': 'val: with colon'}\n"
+        )
+        exc_class, msg, loc = sync_mod.parse_traceback_summary(trace_a, "")
+        self.assertEqual(exc_class, "RuntimeError")
+        self.assertEqual(msg, "missing attribute: foo")
+        self.assertEqual(loc, "scanner.py:412 in DoScan")
+
+        trace_b = (
+            "log.general.LogException args=(RuntimeError('missing attribute: foo'),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/shared/neocom/wallet.py", line 88, in OpenWallet\n'
+            "    self.LoadBalance()\n"
+            "RuntimeError: missing attribute: foo\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/lib/uthread2.py", line 111, in wrapper\n'
+            "    res = {'k': 'val: with colon'}\n"
+        )
+        bundle_a = _make_crash_bundle(stack_hash=-6001, trace=trace_a)
+        bundle_b = _make_crash_bundle(stack_hash=-6002, trace=trace_b)
+        trace_a_alt_callstack = (
+            "log.general.LogException args=(RuntimeError('missing attribute: foo'),) kwargs={}\n"
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/inflight/scanner.py", line 412, in DoScan\n'
+            "    self.ScanArea()\n"
+            "RuntimeError: missing attribute: foo\n"
+            "CALLSTACK:\n"
+            '  File "carbon/common/lib/other_caller.py", line 999, in OtherEntry\n'
+            "    x = {'a': 1}\n"
+        )
+        bundle_a_alt = _make_crash_bundle(stack_hash=-6003, trace=trace_a_alt_callstack)
+        self.assertEqual(
+            sync_mod._effective_bundle_hash(bundle_a),
+            sync_mod._effective_bundle_hash(bundle_a_alt),
+        )
+        self.assertNotEqual(
+            sync_mod._effective_bundle_hash(bundle_a),
+            sync_mod._effective_bundle_hash(bundle_b),
+        )
+
+    def test_bf1344_01_log_traceback_args_variants_and_callstack_fallback(self) -> None:
+        trace_mod = (
+            "logmodule.LogTraceback args=('channel open failed: timeout=30s',) kwargs={}\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/ui/shared/neocom/wallet.py", line 88, in OpenWallet\n'
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_mod, ""),
+            ("LogTraceback", "channel open failed: timeout=30s", "wallet.py:88 in OpenWallet"),
+        )
+
+        trace_qual = (
+            "service.CoreMixIn.LogTraceback args=('service crash: code 42', 'extra') kwargs={'verbose': True}\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/ui/shared/agency.py", line 19, in Load\n'
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_qual, ""),
+            ("LogTraceback", "service crash: code 42 extra", "agency.py:19 in Load"),
+        )
+
+        trace_logexc = (
+            "log.general.LogException args=('scan aborted: no probe',) kwargs={}\n"
+            "NoneType: None\n"
+            "CALLSTACK:\n"
+            '  File "eve/client/script/ui/probe.py", line 55, in Launch\n'
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_logexc, ""),
+            ("LogException", "scan aborted: no probe", "probe.py:55 in Launch"),
+        )
+
+    def test_bf1344_01_pre_frame_spaces_and_pyj_pyc_wrappers(self) -> None:
+        trace_pre = (
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/eve/client/script/ui/my window.py(88) OnOpen\n"
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/eve/common/lib/moniker.pyj(14) Call\n"
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/evomu_site.pyc(120) _wrap\n"
+            "KeyError: 'foo'\n"
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_pre, ""),
+            ("KeyError", "'foo'", "my window.py:88 in OnOpen"),
+        )
+
+        trace_pyj = (
+            "<pre>/Applications/EVE Online.app/Contents/eve/client/script/ui/shipui.pyj(312) DoWarp\n"
+            "<pre>/Applications/EVE Online.app/Contents/bluepyimpl.pyc(44) __call__\n"
+            "RuntimeError: warp failed\n"
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_pyj, ""),
+            ("RuntimeError", "warp failed", "shipui.pyj:312 in DoWarp"),
+        )
+
+        # Exception line containing `<file>.py(N)` without `<pre>` must NOT be misclassified as a stack frame (GH1358-06).
+        trace_exc_with_py_ref = (
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/handler.py", line 17, in Invoke\n'
+            "RuntimeError: failed in /app/foo.py(42)\n"
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_exc_with_py_ref, ""),
+            ("RuntimeError", "failed in /app/foo.py(42)", "handler.py:17 in Invoke"),
+        )
+
+    def test_bf1344_02_noisy_server_logs_ignored_and_session_evidence_prevents_zero_server_requests(self) -> None:
+        tb = 'Traceback (most recent call last):\n  File "eve/client/ui/test.py", line 12, in Run\nRuntimeError: boom'
+        noisy_pre_auth = _make_crash_bundle(
+            stack_hash=-7001,
+            trace=tb,
+            session={},
+            server_logs_before=[f"INFO server_tick line {i}" for i in range(25)],
+            server_logs_after=["INFO cleanup done"],
+        )
+        fault = sync_mod.classify_environment_fault(noisy_pre_auth)
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertEqual(fault[0], "zero_server_requests")
+
+        # Authenticated session / ledger / destiny evidence proves client reached server even with 0 step RPCs.
+        authenticated_cases = [
+            {"session": {"character_id": 2100000001}},
+            {"session": {"user_id": 1001}},
+            {"session": {"userid": 1002}},
+            {"session": {}, "extra": {"outbound_ledger": [{"service": "machoNet", "method": "GetTime"}]}},
+            {"session": {}, "extra": {"destiny_stamps": [{"stamp": 42}]}},
+        ]
+        for idx, case in enumerate(authenticated_cases):
+            extra = dict(case.get("extra") or {})
+            extra["server_request_count"] = 0
+            bundle = _make_crash_bundle(
+                stack_hash=-(7100 + idx),
+                trace=tb,
+                session=case["session"],
+                extra=extra,
+            )
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(bundle),
+                f"Authenticated evidence case {case} was misclassified as env fault",
+            )
+            title, labels = sync_mod.build_issue_title_and_labels(bundle)
+            self.assertTrue(title.startswith("[Client Crash]"), f"Unexpected title: {title}")
+            self.assertNotIn("environment", labels)
+
+    def test_bf1344_02_non_python_f12_manual_report_not_collapsed_as_zero_server_requests(self) -> None:
+        manual_ui_bundle = _make_crash_bundle(
+            stack_hash=0,
+            trace="",
+            session={},
+            extra={
+                "report_source": "f12_manual",
+                "server_request_count": 0,
+                "manual_report": {
+                    "category_id": "UI",
+                    "title": "Hangar overlay clips window header",
+                    "description": "Visual overlap after resizing client window.",
+                },
+            },
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(manual_ui_bundle))
+        title, labels = sync_mod.build_issue_title_and_labels(manual_ui_bundle)
+        self.assertEqual(title, "[Bug Report][UI] Hangar overlay clips window header")
+        self.assertIn("player-reported", labels)
+        self.assertNotIn("environment", labels)
+
+    def test_bf1344_03_build_mismatch_compatible_client_vs_stale_client(self) -> None:
+        tb = 'Traceback (most recent call last):\n  File "eve/client/ui/map.py", line 9, in Open\nValueError: bad map'
+        compatible = _make_crash_bundle(
+            stack_hash=-8001,
+            trace=tb,
+            extra={
+                "server_request_count": 5,
+                "handshake": {
+                    "client_boot_build": 3699000,
+                    "server_boot_build": 3698585,
+                },
+            },
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(compatible))
+
+        stale = _make_crash_bundle(
+            stack_hash=-8002,
+            trace=tb,
+            extra={
+                "server_request_count": 0,
+                "handshake": {
+                    "client_boot_build": 3600000,
+                    "server_boot_build": 3698585,
+                },
+            },
+        )
+        fault = sync_mod.classify_environment_fault(stale)
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertEqual(fault[0], "build_mismatch")
+        self.assertEqual(fault[1], "env:build_mismatch:client=3600000:server=3698585")
+
+        # `handshake.build_mismatch: False` (especially when handshake lacks `client_boot_build`) must NOT mask numeric mismatch.
+        masked_unknown = _make_crash_bundle(
+            stack_hash=-8003,
+            trace=tb,
+            extra={
+                "server_request_count": 5,
+                "handshake": {
+                    "server_boot_build": 3698585,
+                    "build_mismatch": False,
+                },
+                "manual_report": {"client_build": 3600000},
+            },
+        )
+        fault_masked_unknown = sync_mod.classify_environment_fault(masked_unknown)
+        self.assertIsNotNone(fault_masked_unknown)
+        assert fault_masked_unknown is not None
+        self.assertEqual(fault_masked_unknown[0], "build_mismatch")
+
+        masked_numeric = _make_crash_bundle(
+            stack_hash=-8004,
+            trace=tb,
+            extra={
+                "server_request_count": 5,
+                "handshake": {
+                    "client_boot_build": 3600000,
+                    "server_boot_build": 3698585,
+                    "build_mismatch": False,
+                },
+            },
+        )
+        fault_masked_numeric = sync_mod.classify_environment_fault(masked_numeric)
+        self.assertIsNotNone(fault_masked_numeric)
+        assert fault_masked_numeric is not None
+        self.assertEqual(fault_masked_numeric[0], "build_mismatch")
+
+    def test_bf1344_03_public_gateway_client_transport_error_and_startup_log_still_zero_gateway_requests(self) -> None:
+        for gw_extra in ({}, {"gateway_request_count": 0}):
+            bundle = _make_crash_bundle(
+                stack_hash=-8101,
+                trace="quasar_grpc channel failed: Connection refused",
+                flight_recorder=[
+                    {"kind": "quasar", "service": "publicGateway", "method": "Send", "error": "Connection refused"},
+                    {
+                        "kind": "quasar",
+                        "service": "publicGateway",
+                        "method": "Publish",
+                        "status": "ERR(status=500 Request timed out)",
+                    },
+                ],
+                server_logs_before=["2026-11-19T12:00:00Z INFO eve_server::quasar_grpc: listening on 127.0.0.1:50051"],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            fault = sync_mod.classify_environment_fault(bundle)
+            self.assertIsNotNone(fault, f"expected zero_gateway_requests for gw_extra={gw_extra}")
+            assert fault is not None
+            self.assertEqual(fault[0], "zero_gateway_requests")
+
+    def test_bf1344_03_server_reached_quasar_failure_not_collapsed_as_zero_gateway_requests(self) -> None:
+        base_trace = "quasar gateway returned UNAUTHENTICATED for mission payload"
+        b_explicit = _make_crash_bundle(
+            stack_hash=-8201,
+            trace=base_trace,
+            extra={"server_request_count": 10, "gateway_request_count": 2},
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(b_explicit))
+
+        for gw_extra in ({}, {"gateway_request_count": 0}):
+            b_flight_ok = _make_crash_bundle(
+                stack_hash=-8202,
+                trace=base_trace,
+                flight_recorder=[{"service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(b_flight_ok),
+                f"gateway_request_count={gw_extra} shadowed observed flight_recorder call",
+            )
+
+            b_srv_log = _make_crash_bundle(
+                stack_hash=-8203,
+                trace=base_trace,
+                server_logs_before=[
+                    "2026-11-19T12:00:05Z WARN eve_server::quasar_grpc: /eve_public.gateway.Requests/Send -> UNAUTHENTICATED"
+                ],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(b_srv_log),
+                f"gateway_request_count={gw_extra} shadowed observed server log warning",
+            )
+
+    def test_bf1344_01_eve_pre_frame_does_not_shadow_log_args_or_py_frames(self) -> None:
+        # 1. LogException args containing `foo.py(42)` must still extract fallback message.
+        trace_with_py_ref = (
+            "Traceback (most recent call last):\n"
+            '  File "packages/ui/window.py", line 88, in Open\n'
+            'logmodule.LogException args=("Failed in helper.py(42)",)\n'
+        )
+        exc_cls, msg, loc = sync_mod.parse_traceback_summary(trace_with_py_ref, "FallbackKey")
+        self.assertEqual(exc_cls, "LogException")
+        self.assertEqual(msg, "Failed in helper.py(42)")
+        self.assertEqual(loc, "window.py:88 in Open")
+
+        # 2. Inline prose/STACKTRACE lines with `.py(N)` outside Thrown at:/Traced at:
+        # must not override real `File "...", line N` frames.
+        trace_mixed = (
+            "Traceback (most recent call last):\n"
+            '  File "packages/ui/real_module.py", line 19, in Render\n'
+            "    return draw()\n"
+            "STACKTRACE #1 decoy.py(999)\n"
+            "RuntimeError: broken while calling foo.py(42)\n"
+        )
+        exc_cls2, msg2, loc2 = sync_mod.parse_traceback_summary(trace_mixed, "FallbackKey")
+        self.assertEqual(exc_cls2, "RuntimeError")
+        self.assertEqual(msg2, "broken while calling foo.py(42)")
+        self.assertEqual(loc2, "real_module.py:19 in Render")
+
+        # 3. Real `<pre>` frames including `<module>` and trailing `</pre>` still parse cleanly.
+        trace_pre = (
+            "Thrown at:\n"
+            "<pre>e:\\Program Files (x86)\\EVE\\packages\\boot.py(12) <module></pre>\n"
+            "KeyError: 'id'\n"
+        )
+        exc_cls3, msg3, loc3 = sync_mod.parse_traceback_summary(trace_pre, "FallbackKey")
+        self.assertEqual(exc_cls3, "KeyError")
+        self.assertEqual(msg3, "'id'")
+        self.assertEqual(loc3, "boot.py:12 in <module>")
+
+    def test_bf1344_03_kind_quasar_recognized_without_gateway_name(self) -> None:
+        # `kind == "quasar"` identifies a gateway call even when service/method omit "quasar"/"gateway".
+        b_ok = _make_crash_bundle(
+            stack_hash=9901,
+            trace=(
+                "Traceback (most recent call last):\n"
+                '  File "char.py", line 10, in Create\n'
+                "GatewayError: public gateway RPC response invalid\n"
+            ),
+            flight_recorder=[
+                {
+                    "kind": "quasar",
+                    "service": "eve_public.character.api.CreateRequest",
+                    "method": "Send",
+                    "status": "OK",
+                }
+            ],
+            extra={"server_request_count": 5, "gateway_request_count": 0},
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(b_ok))
+
+        b_err = _make_crash_bundle(
+            stack_hash=9902,
+            trace=(
+                "Traceback (most recent call last):\n"
+                '  File "char.py", line 10, in Create\n'
+                "RuntimeError: service unavailable\n"
+            ),
+            flight_recorder=[
+                {
+                    "kind": "quasar",
+                    "service": "eve_public.character.api.CreateRequest",
+                    "method": "Send",
+                    "status": "UNAVAILABLE",
+                    "error": "DNS resolution failed",
+                }
+            ],
+            extra={"server_request_count": 5, "gateway_request_count": 0},
+        )
+        fault = sync_mod.classify_environment_fault(b_err)
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertEqual(fault[0], "zero_gateway_requests")
+        self.assertEqual(fault[1], "env:zero_gateway_requests")
 
 
 if __name__ == "__main__":

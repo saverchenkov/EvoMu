@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use crate::flight_recorder::{
-    DestinyStampRecord, FlightRecorderEntry, OutboundLedgerEntry,
+    DestinyStampRecord, FlightRecorderEntry, HandshakeBuildMetadata, OutboundLedgerEntry,
     MAX_DESTINY_STAMPS_PER_SESSION, MAX_OUTBOUND_LEDGER_PER_SESSION,
 };
 use crate::log_ring_buffer::global_log_ring;
@@ -356,8 +356,43 @@ pub struct BugIncidentBundle {
     pub outbound_ledger: Vec<OutboundLedgerEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub destiny_stamps: Vec<DestinyStampRecord>,
+    #[serde(default)]
+    pub server_request_count: u64,
+    #[serde(default)]
+    pub gateway_request_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake: Option<HandshakeBuildMetadata>,
     pub server_logs_before: Vec<String>,
     pub server_logs_after: Vec<String>,
+}
+
+fn resolve_bundle_handshake(
+    recorded: Option<HandshakeBuildMetadata>,
+    fallback_client_build: Option<u32>,
+) -> Option<HandshakeBuildMetadata> {
+    let server_build = eve_machonet::V24_BOOT_BUILD;
+    match recorded {
+        Some(mut hs) => {
+            if hs.client_boot_build.is_none() {
+                hs.client_boot_build = fallback_client_build;
+            }
+            if hs.server_boot_build.is_none() {
+                hs.server_boot_build = Some(server_build);
+            }
+            if hs.build_mismatch != Some(true) {
+                hs.build_mismatch = hs
+                    .client_boot_build
+                    .zip(hs.server_boot_build)
+                    .map(|(c, s)| c < s);
+            }
+            Some(hs)
+        }
+        None => Some(HandshakeBuildMetadata {
+            client_boot_build: fallback_client_build,
+            server_boot_build: Some(server_build),
+            build_mismatch: fallback_client_build.map(|c| c < server_build),
+        }),
+    }
 }
 
 fn enrich_session_snapshot(
@@ -482,6 +517,10 @@ impl BugIncidentBundle {
         let destiny_stamps = ctx
             .flight_recorder
             .get_destiny_stamps(session.session_id, MAX_DESTINY_STAMPS_PER_SESSION);
+        let telemetry = ctx
+            .flight_recorder
+            .get_session_telemetry(session.session_id, sess_snap.user_id);
+        let handshake = resolve_bundle_handshake(telemetry.handshake, None);
         let server_logs_before = global_log_ring().snapshot_recent(40);
 
         let trace_str: String = trace.into();
@@ -501,6 +540,9 @@ impl BugIncidentBundle {
             flight_recorder,
             outbound_ledger,
             destiny_stamps,
+            server_request_count: telemetry.server_request_count,
+            gateway_request_count: telemetry.gateway_request_count,
+            handshake,
             server_logs_before,
             server_logs_after: Vec::new(),
         }
@@ -971,6 +1013,12 @@ fn handle_post_bug_issue(
         title.to_ascii_lowercase()
     ));
 
+    let telemetry = ctx
+        .flight_recorder
+        .get_session_telemetry(sess_snap.session_id, sess_snap.user_id);
+    let fallback_client_build = client_build.and_then(|b| u32::try_from(b).ok()).filter(|&b| b > 0);
+    let handshake = resolve_bundle_handshake(telemetry.handshake, fallback_client_build);
+
     let bundle = BugIncidentBundle {
         incident_id: incident_id.clone(),
         timestamp: iso_time,
@@ -998,6 +1046,9 @@ fn handle_post_bug_issue(
         flight_recorder,
         outbound_ledger,
         destiny_stamps,
+        server_request_count: telemetry.server_request_count,
+        gateway_request_count: telemetry.gateway_request_count,
+        handshake,
         server_logs_before,
         server_logs_after: Vec::new(),
     };
