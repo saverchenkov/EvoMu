@@ -1646,6 +1646,32 @@ fn corp_item_visible_to_role(
     eve_db::corp_roles::has_role(loc_role, div_role)
 }
 
+#[derive(Clone, Copy)]
+enum ListStationsErrorCode {
+    CorporationNotFound,
+    CorpRoleDenied,
+}
+
+impl ListStationsErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CorporationNotFound => "CorporationNotFound",
+            Self::CorpRoleDenied => "CorpRoleDenied",
+        }
+    }
+}
+
+fn list_stations_rpc_error(
+    code: ListStationsErrorCode,
+    message: impl Into<String>,
+) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.as_str().to_string(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 /// Builds the `ListStations` `util.Rowset` for `charMgr` / `charUnboundMgr` (#1369).
 ///
 /// Matches V24 `assetsWindow.py:1131-1135` and `invbroker.ListStations` by returning
@@ -1672,10 +1698,11 @@ pub(crate) fn handle_list_stations(
         session
             .corporation_id
             .filter(|&cid| cid > 0)
-            .ok_or_else(|| BridgeRpcError {
-                code: "CorporationNotFound".into(),
-                message: "No corporation in active session".into(),
-                client_error: None,
+            .ok_or_else(|| {
+                list_stations_rpc_error(
+                    ListStationsErrorCode::CorporationNotFound,
+                    "No corporation in active session",
+                )
             })?
     } else {
         char_id
@@ -1696,11 +1723,10 @@ pub(crate) fn handle_list_stations(
     let rows = ctx.db.with_snapshot(|snap| -> Result<Vec<Vec<PyRep>>, BridgeRpcError> {
         let has_full_global_corp_access = if is_corp {
             if !snap.corporations.contains_key(&owner_id) {
-                return Err(BridgeRpcError {
-                    code: "CorporationNotFound".into(),
-                    message: format!("Corporation {owner_id} not found"),
-                    client_error: None,
-                });
+                return Err(list_stations_rpc_error(
+                    ListStationsErrorCode::CorporationNotFound,
+                    format!("Corporation {owner_id} not found"),
+                ));
             }
             let (is_ceo, global_role) =
                 snap.effective_corp_roles_at(owner_id, char_id, None, 0, now_unix);
@@ -1717,11 +1743,10 @@ pub(crate) fn handle_list_stations(
                 && (global_role & any_asset_query_roles) == 0
                 && !has_scoped_query_role
             {
-                return Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Viewing corporation asset stations requires Director, Accountant, Trader, Station Manager, or Hangar Query role".into(),
-                    client_error: None,
-                });
+                return Err(list_stations_rpc_error(
+                    ListStationsErrorCode::CorpRoleDenied,
+                    "Viewing corporation asset stations requires Director, Accountant, Trader, Station Manager, or Hangar Query role",
+                ));
             }
             is_ceo || global_role == u64::MAX || (global_role & full_corp_roles) != 0
         } else {
