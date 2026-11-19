@@ -406,8 +406,8 @@ async fn agent_info_location_and_mission_metadata_rpcs() {
     .unwrap();
     let _ = ep_empty;
 
-    // WarpToLocation / GotoLocation / WarpToAgentInSpace
-    let _ = handle(
+    // WarpToLocation / GotoLocation / WarpToAgentInSpace reject docked callers (#1367)
+    let goto_err = handle(
         &ctx,
         &mut sess,
         "agentMgr",
@@ -417,8 +417,9 @@ async fn agent_info_location_and_mission_metadata_rpcs() {
     )
     .await
     .unwrap()
-    .unwrap();
-    let _ = handle(
+    .unwrap_err();
+    assert_eq!(goto_err.code, "ShipDocked");
+    let warp_agent_err = handle(
         &ctx,
         &mut sess,
         "agentMgr",
@@ -428,7 +429,20 @@ async fn agent_info_location_and_mission_metadata_rpcs() {
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(warp_agent_err.code, "ShipDocked");
+    let warp_loc_err = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(TEST_LOC_DUNGEON.into()), PyRep::Integer(0), PyRep::Real(0.0)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(warp_loc_err.code, "ShipDocked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1100,4 +1114,650 @@ async fn do_action_accept_guards_lp_tax_and_remote_complete_rejection() {
     .unwrap()
     .unwrap_err();
     assert_eq!(rm_missing.code, "MissionNotActive");
+}
+
+const TEST_LOC_DUNGEON: &str = "dungeon";
+
+async fn setup_undocked_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    start_pos: DVec3,
+) -> (SessionState, crate::system_actor::SystemHandle) {
+    ensure_char(ctx, char_id, None, sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..InventoryItemRecord::default()
+            },
+        );
+    });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: start_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                capacitor: 1_000.0,
+                max_capacitor: 1_000.0,
+                shield_hp: 500.0,
+                max_shield_hp: 500.0,
+                armor_hp: 500.0,
+                max_armor_hp: 500.0,
+                structure_hp: 500.0,
+                max_structure_hp: 500.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta::default(),
+        )
+        .await;
+    let mut sess = char_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    (sess, sys_h)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warp_to_location_dungeon_initiates_warp_arrives_and_spawns_wave_gh1367() {
+    let ctx = test_ctx();
+    let inoue_sys_id = 30_002_738_u32;
+    let agent_id = 3_012_050_i64; // Velmudainen Tykigi in Inoue
+    let mission_id = 875_u32; // The Guristas Spies
+    let char_id = 91_001_367_i64;
+    let ship_id = 100_910_367_i64;
+    let agent_station_id = ctx
+        .sde
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.station_id)
+        .unwrap_or(60_003_910);
+    let undock_anchor = ctx
+        .sde
+        .stations
+        .get(&agent_station_id)
+        .map(|st| st.position + DVec3::new(35_000.0, 0.0, 0.0))
+        .unwrap_or(DVec3::new(35_000.0, 0.0, 0.0));
+
+    ensure_char(&ctx, char_id, Some(agent_station_id), inoue_sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(agent_station_id);
+            ch.solar_system_id = inoue_sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: agent_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..InventoryItemRecord::default()
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id,
+                agent_id,
+                solar_system_id: inoue_sys_id,
+                state: "Offered".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+
+    // Accept the offered mission via DoAction(3) while docked at the agent station.
+    let mut docked_sess = char_session(char_id, inoue_sys_id, Some(agent_station_id));
+    docked_sess.ship_id = Some(ship_id);
+    let accept_rep = handle(
+        &ctx,
+        &mut docked_sess,
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(3),
+            PyRep::Integer(agent_id),
+            PyRep::Integer(i64::from(mission_id)),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        accept_rep.dict_get("state"),
+        Some(&PyRep::String("Accepted".into()))
+    );
+
+    // Docked pilot calling WarpToLocation('dungeon', ...) must fail with ShipDocked.
+    let docked_err = handle(
+        &ctx,
+        &mut docked_sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(TEST_LOC_DUNGEON.into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, "ShipDocked");
+
+    // Simulate downtime/stale NPC ball IDs so pocket entry must spawn fresh mission NPCs.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+            m.spawned_npc_ball_ids = vec![999_999_888];
+            m.npcs_remaining = 3;
+        }
+    });
+
+    let (mut space_sess, sys_h) =
+        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, undock_anchor).await;
+    let first_station_pos = ctx
+        .sde
+        .solar_systems
+        .get(&inoue_sys_id)
+        .and_then(|s| s.stations.first().map(|st| st.position))
+        .unwrap_or(DVec3::ZERO);
+    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
+    assert!(
+        site_origin.distance(first_station_pos) > 150_000.0,
+        "mission site must sit well outside station undock grids"
+    );
+
+    // Exact V24 client payload for Encounter Coordinate -> Warp to Location.
+    let formation = PyRep::Dict(vec![
+        (PyRep::String("formationType".into()), PyRep::Integer(0)),
+        (
+            PyRep::String("formationSpacing".into()),
+            PyRep::Integer(1_000),
+        ),
+        (
+            PyRep::String("formationSize".into()),
+            PyRep::Integer(10_000),
+        ),
+    ]);
+    let warp_rep = handle(
+        &ctx,
+        &mut space_sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::None,
+            formation,
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(warp_rep, PyRep::Bool(true));
+
+    // Verify Destiny ball immediately entered MovementMode::Warp toward site_origin.
+    let (_, warping_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let dest = match warping_ball.mode {
+        MovementMode::Warp { destination, .. } => destination,
+        other => panic!("expected ship in MovementMode::Warp, got {other:?}"),
+    };
+    assert!(
+        dest.distance(site_origin) < 1_000.0,
+        "warp destination {dest:?} should match dungeon origin {site_origin:?}"
+    );
+
+    // Verify stale NPC ball was reconciled and pocket NPC wave spawned in ballpark near site_origin.
+    let spawned_ids = ctx.db.with_snapshot(|snap| {
+        snap.active_missions
+            .get(&(char_id, mission_id))
+            .map(|m| (m.npcs_remaining, m.spawned_npc_ball_ids.clone()))
+            .unwrap()
+    });
+    assert!(spawned_ids.0 > 0);
+    assert!(!spawned_ids.1.is_empty());
+    assert!(!spawned_ids.1.contains(&999_999_888));
+    for &npc_id in &spawned_ids.1 {
+        let npc_pos = sys_h
+            .get_ball_position_sync(npc_id)
+            .expect("mission NPC ball must be spawned in system ballpark");
+        assert!(npc_pos.distance(site_origin) < 50_000.0);
+    }
+
+    // Advance simulation until warp completes and confirm ship lands near the spawned NPCs.
+    for _ in 0..80 {
+        let _ = sys_h.step_manual(1.0).await.unwrap();
+        let (_, b) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if !matches!(b.mode, MovementMode::Warp { .. }) {
+            break;
+        }
+    }
+    let (_, landed_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        !matches!(landed_ball.mode, MovementMode::Warp { .. }),
+        "ship should complete warp within 80s"
+    );
+    assert!(landed_ball.position.distance(site_origin) < 10_000.0);
+    let first_npc_pos = sys_h.get_ball_position_sync(spawned_ids.1[0]).unwrap();
+    assert!(
+        landed_ball.position.distance(first_npc_pos) < 50_000.0,
+        "landed ship must have mission NPCs reachable on grid"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warp_to_location_range_homebase_objective_and_agent_in_space() {
+    let ctx = test_ctx();
+    let inoue_sys_id = 30_002_738_u32;
+    let agent_id = 3_012_050_i64;
+    let home_st_id = ctx
+        .sde
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.station_id)
+        .unwrap_or(60_003_910);
+    let dest_st_id = ctx
+        .sde
+        .solar_systems
+        .get(&inoue_sys_id)
+        .and_then(|s| s.stations.iter().find(|st| st.station_id != home_st_id))
+        .map(|st| st.station_id)
+        .expect("Inoue must have a second station");
+    let home_pos = ctx.sde.stations.get(&home_st_id).unwrap().position;
+    let dest_pos = ctx.sde.stations.get(&dest_st_id).unwrap().position;
+
+    let char_id = 91_001_368_i64;
+    let ship_id = 100_910_368_i64;
+    let mission_id = 875_u32;
+    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
+    // Start far (> 1 AU / >= 1,000 km) from both stations and dungeon so every leg > 150 km.
+    let start_pos = home_pos + DVec3::new(10_000_000.0, -5_000_000.0, 0.0);
+    let (mut sess, sys_h) =
+        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, start_pos).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id,
+                agent_id,
+                solar_system_id: inoue_sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &MissionTimingAndCargoMeta {
+                mission_id,
+                agent_id,
+                offered_at_unix: 1,
+                offer_expiry_unix: u64::MAX / 2,
+                accepted_at_unix: Some(1),
+                accept_expiry_unix: Some(u64::MAX / 2),
+                bonus_expiry_unix: None,
+                completed_at_unix: None,
+                required_delivery_type_id: None,
+                required_delivery_qty: 0,
+                granted_courier_item_id: None,
+                granted_courier_qty: 0,
+                origin_station_id: Some(home_st_id),
+                destination_station_id: Some(dest_st_id),
+                is_anomic_burner: false,
+                chosen_branch: None,
+                offered_level: None,
+            },
+        );
+    });
+
+    // 1. Non-zero warpRange (25 km) lands 25 km short of dungeon anchor while NPCs spawn at anchor.
+    let r_dungeon = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("dungeon".into()),
+            PyRep::Integer(0),
+            PyRep::Real(25_000.0),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r_dungeon, PyRep::Bool(true));
+    let (_, b1) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let d1 = match b1.mode {
+        MovementMode::Warp { destination, .. } => destination,
+        other => panic!("expected Warp, got {other:?}"),
+    };
+    assert!((d1.distance(site_origin) - 25_000.0).abs() < 500.0);
+
+    // Reset ship to start_pos (Stop) for next legs.
+    let _ = sys_h.set_ball_position(ship_id, start_pos).await;
+    let _ = sys_h
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await;
+
+    // 2. "agenthomebase" warps to agent's home station docking perimeter (outside station radius).
+    let r_home = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String("agenthomebase".into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+        ],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r_home, PyRep::Bool(true));
+    let (_, b2) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let d2 = match b2.mode {
+        MovementMode::Warp { destination, .. } => destination,
+        other => panic!("expected Warp, got {other:?}"),
+    };
+    let home_st = ctx.sde.stations.get(&home_st_id).unwrap();
+    let st_radius = ctx
+        .sde
+        .types
+        .get(&home_st.station_type_id)
+        .map(|t| t.radius)
+        .unwrap_or(5_000.0);
+    assert!(d2.distance(home_pos) >= st_radius - 1.0);
+
+    // 3. "objective.destination" via GotoLocation warps to mission destination station.
+    let _ = sys_h
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await;
+    let r_obj = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GotoLocation",
+        &[PyRep::String("objective.destination".into()), PyRep::Integer(0)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r_obj, PyRep::Bool(true));
+    let (_, b3) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let d3 = match b3.mode {
+        MovementMode::Warp { destination, .. } => destination,
+        other => panic!("expected Warp, got {other:?}"),
+    };
+    assert!(d3.distance(dest_pos) < 100_000.0);
+
+    // 4. WarpToAgentInSpace targets an in-space agent ball directly.
+    let _ = sys_h
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await;
+    let space_agent_id = 3_099_901_i64;
+    let agent_space_pos = start_pos + DVec3::new(0.0, 2_000_000.0, 0.0);
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            Ball {
+                id: space_agent_id,
+                type_id: 24,
+                position: agent_space_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta::default(),
+        )
+        .await;
+    let r_ag = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToAgentInSpace",
+        &[PyRep::Integer(space_agent_id)],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r_ag, PyRep::Bool(true));
+    let (_, b4) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    match b4.mode {
+        MovementMode::Warp { destination, .. } => {
+            assert!(destination.distance(agent_space_pos) < 1.0);
+        }
+        other => panic!("expected Warp to in-space agent, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warp_to_location_negative_guards_do_not_mutate_state() {
+    let ctx = test_ctx();
+    let inoue_sys_id = 30_002_738_u32;
+    let jita_sys_id = 30_000_142_u32;
+    let char_id = 91_001_369_i64;
+    let ship_id = 100_910_369_i64;
+
+    // 1. Unauthenticated session -> error without character
+    let mut anon = SessionState::default();
+    assert!(
+        handle(
+            &ctx,
+            &mut anon,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+
+    // 2. No active ship -> NoActiveShip
+    let mut no_ship = char_session(char_id, inoue_sys_id, None);
+    no_ship.ship_id = None;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut no_ship,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "NoActiveShip"
+    );
+
+    // 3. Undocked session without ball in system -> ShipNotInSpace
+    let mut missing_ball = char_session(char_id, inoue_sys_id, None);
+    missing_ball.ship_id = Some(ship_id + 99);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut missing_ball,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "ShipNotInSpace"
+    );
+
+    // Spawn stopped ship in Inoue.
+    let mission_id = 875_u32;
+    let site_origin = deterministic_mission_site_origin(&ctx, inoue_sys_id, mission_id);
+    let close_pos = site_origin + DVec3::new(50_000.0, 0.0, 0.0); // < 150 km from site_origin
+    let (mut sess, sys_h) =
+        setup_undocked_pilot(&ctx, char_id, ship_id, inoue_sys_id, close_pos).await;
+
+    // 4. Non-finite warpRange -> InvalidArgument
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "WarpToLocation",
+            &[
+                PyRep::String(TEST_LOC_DUNGEON.into()),
+                PyRep::Integer(0),
+                PyRep::Real(f64::NAN),
+            ],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidArgument"
+    );
+
+    // 5. Missing active mission -> InvalidMissionLocation
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InvalidMissionLocation"
+    );
+
+    // 6. Cross-system mission in Jita while pilot is in Inoue -> CrossSystemWarp
+    let jita_agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.solar_system_id == Some(jita_sys_id) && a.station_id.is_some())
+        .map(|a| a.agent_id)
+        .unwrap_or(3_008_416);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, mission_id),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id,
+                agent_id: jita_agent,
+                solar_system_id: jita_sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrossSystemWarp"
+    );
+
+    // 7. Same-system mission < 150 km away -> WarpDistanceTooShort
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+            m.solar_system_id = inoue_sys_id;
+            m.agent_id = 3_012_050;
+        }
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "WarpToLocation",
+            &[PyRep::String(TEST_LOC_DUNGEON.into())],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "WarpDistanceTooShort"
+    );
+
+    // Rejected warps must leave ship stopped with no spawned NPC balls.
+    let (_, final_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(final_ball.mode, MovementMode::Stop));
+    let npc_ids = ctx.db.with_snapshot(|snap| {
+        snap.active_missions
+            .get(&(char_id, mission_id))
+            .map(|m| m.spawned_npc_ball_ids.clone())
+            .unwrap()
+    });
+    assert!(npc_ids.is_empty());
 }
