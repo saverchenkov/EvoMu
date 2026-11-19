@@ -550,7 +550,7 @@ async fn test_mn04_deactivate_requires_the_cycle_owner() {
     let kw = HashMap::new();
     let deact = [PyRep::Integer(laser), PyRep::String("miningLaser".into())];
     let err = p.ctx.dispatch_rpc(&mut other, "dogmaIM", None, "Deactivate", &deact, &kw, None).await.unwrap_err();
-    assert_eq!(err.code, "ModuleNotFound");
+    assert_eq!(err.code, "ModuleNotOwnedByShip");
     assert!(running(&p, laser), "the owner's cycle keeps running");
     assert_eq!(hold(&p, InventoryFlag::SpecializedOreHold, VELDSPAR), 0, "no short-cycle delivery for the intruder");
     p.ctx.set_mechanic_rng_seed(Some(seed_for(&[false], 0.01)));

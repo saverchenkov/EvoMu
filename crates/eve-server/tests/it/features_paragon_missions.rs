@@ -244,10 +244,77 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
             "moduleActivate" | "activateModule" | "moduleActivated" | "activateShipModule" => {
                 let mtid = pick_sde_type_matching(ctx, &conds, 439);
                 let sid = sess.ship_id.unwrap();
-                let mid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: mtid, owner_id: char_id, location_id: sid, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
+                let mod_type = ctx.sde.types.get(&mtid);
+                let mod_group = mod_type.map(|t| t.group_id).unwrap_or(0);
+                let requires_target = matches!(
+                    mod_group,
+                    53 | 55 | 74 | 82 | 506..=511 | 524 | 650 | 771 | 1122 | 1245 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
+                );
+                let charge_tid = mod_type.and_then(|mt| {
+                    let uses_charges = [604_u16, 605, 606, 609, 610]
+                        .iter()
+                        .any(|attr| mt.default_attributes.contains_key(attr));
+                    if !uses_charges {
+                        return None;
+                    }
+                    ctx.sde
+                        .types
+                        .values()
+                        .filter(|c| c.category_id == 8 && c.group_id != 908 && ServerContext::is_charge_compatible_with_weapon(mt, c))
+                        .min_by_key(|c| c.type_id)
+                        .map(|c| c.type_id)
+                });
+                let mid = ctx.db.with_mut_snapshot(|s| {
+                    s.items.retain(|_, it| !(it.location_id == sid && it.flag == InventoryFlag::MedSlot0));
+                    let sk = s.skills.entry(char_id).or_default();
+                    for (req_tid, _) in ctx
+                        .sde
+                        .required_skills_for_type(mtid)
+                        .into_iter()
+                        .chain(charge_tid.into_iter().flat_map(|ctid| ctx.sde.required_skills_for_type(ctid)))
+                    {
+                        sk.entry(req_tid).or_insert(eve_db::TrainedSkillRecord { type_id: req_tid, level: 5, skill_points: 256_000.0 });
+                    }
+                    s.next_entity_id += 1;
+                    let id = s.next_entity_id;
+                    s.items.insert(id, InventoryItemRecord { item_id: id, type_id: mtid, owner_id: char_id, location_id: sid, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
+                    s.module_online_states.insert(id, true);
+                    if let Some(ctid) = charge_tid {
+                        s.next_entity_id += 1;
+                        let cid = s.next_entity_id;
+                        s.items.insert(cid, InventoryItemRecord { item_id: cid, type_id: ctid, owner_id: char_id, location_id: sid, flag: InventoryFlag::MedSlot0, quantity: 100, singleton: false, version: 1, ..Default::default() });
+                        s.module_active_charges.insert(id, ctid);
+                    }
+                    id
+                });
                 ctx.invalidate_ship_fitting(sid);
                 ensure_dock_state(ctx, sess, false).await;
-                rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(mid), PyRep::String("online".into())]).await.unwrap();
+                if requires_target {
+                    let sys = ctx.systems.get_or_spawn(JITA_SYS);
+                    let ship_pos = sys.get_ball_snapshot(sid).await.ok().flatten().map(|b| b.1.position).unwrap_or(DVec3::ZERO);
+                    let target_id = if matches!(mod_group, 650 | 1122) {
+                        let wid = ctx.db.with_mut_snapshot(|s| {
+                            s.next_entity_id += 1;
+                            let wid = s.next_entity_id;
+                            s.items.insert(wid, InventoryItemRecord { item_id: wid, type_id: 26_557, owner_id: char_id, location_id: i64::from(JITA_SYS), flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default() });
+                            wid
+                        });
+                        let _ = sys.spawn_ball(Ball { id: wid, type_id: 26_557, position: ship_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+                        wid
+                    } else {
+                        spawn_specialized_npc_entity(ctx, JITA_SYS, 10_042, "BeltRat", 0, ship_pos + DVec3::new(500.0, 0.0, 0.0)).await
+                    };
+                    rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await.unwrap();
+                    for _ in 0..30 {
+                        if sys.get_target_locks(sid).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) {
+                            break;
+                        }
+                        let _ = sys.step_manual(1.0).await;
+                    }
+                    rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(mid), PyRep::String("online".into()), PyRep::Integer(target_id)]).await.unwrap();
+                } else {
+                    rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(mid), PyRep::String("online".into())]).await.unwrap();
+                }
             }
             "lootItemCount" => {
                 ensure_dock_state(ctx, sess, false).await;
