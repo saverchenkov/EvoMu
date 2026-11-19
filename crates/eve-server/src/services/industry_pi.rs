@@ -229,7 +229,8 @@ fn resolve_industry_job_solar_system_id(
     facility_id: i64,
 ) -> Option<u32> {
     let mut cur = facility_id;
-    for _ in 0..4 {
+    // Evaluate `facility_id` plus up to 4 item-container hops before failing closed.
+    for _ in 0..=4 {
         if cur <= 0 {
             return None;
         }

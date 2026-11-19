@@ -1106,4 +1106,50 @@ fn build_all_info_does_not_fabricate_missing_structure_and_resolves_item_structu
         .filter_map(|n| n.args.first().and_then(|a| a.as_i64()))
         .collect();
     assert_eq!(item_prime_locs, vec![item_struct_id, ship_id]);
+
+    // 3. Negative: item-backed structure whose location_id is not a valid SDE solar system or
+    //    celestial/station (and no session solar_system_id) returns structureInfo = None.
+    let unresolvable_item_struct_id = 1_000_991_199_i64;
+    insert_item(
+        &ctx,
+        unresolvable_item_struct_id,
+        35_832,
+        corp_id,
+        999_999_999,
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = unresolvable_item_struct_id;
+        }
+    });
+    let unresolvable_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ship_id: Some(ship_id),
+        solar_system_id: None,
+        station_id: None,
+        structure_id: Some(unresolvable_item_struct_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let unresolvable_info = build_all_info(
+        &ctx,
+        &unresolvable_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[
+            PyRep::Bool(false),
+            PyRep::Bool(true),
+            PyRep::Integer(unresolvable_item_struct_id),
+        ],
+    );
+    assert_eq!(unresolvable_info.dict_get("structureInfo"), Some(&PyRep::None));
 }

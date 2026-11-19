@@ -984,9 +984,14 @@ fn build_structure_info_entries(
                 .then(|| {
                     ctx.sde
                         .location_solar_system(it.location_id)
+                        .or_else(|| {
+                            u32::try_from(it.location_id)
+                                .ok()
+                                .filter(|sid| ctx.sde.solar_systems.contains_key(sid))
+                        })
                         .map(i64::from)
-                        .unwrap_or(it.location_id)
                 })
+                .flatten()
                 .or_else(|| session_solar_system_id.filter(|&id| id > 0).map(i64::from))?;
             Some((
                 it.type_id,
