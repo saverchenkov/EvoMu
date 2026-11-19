@@ -1583,6 +1583,7 @@ mod homefront_operations_it {
         let salv_sess = setup_pilot_in_space(&ctx, 893_102, salv_cid, salv_ship, 16_236, jita, DVec3::ZERO).await;
         let _unentered_sess = setup_pilot_in_space(&ctx, 893_103, unentered_cid, unentered_ship, 16_236, jita, DVec3::ZERO).await;
         seed_item(&ctx, 743_300_002, 25_861, salv_cid, salv_ship, InventoryFlag::HiSlot0, 1, true);
+        seed_item(&ctx, 743_300_004, 31_083, salv_cid, salv_ship, InventoryFlag::RigSlot0, 1, true);
         seed_item(&ctx, 743_300_003, 25_861, unentered_cid, unentered_ship, InventoryFlag::HiSlot0, 1, true);
         grant_skills(&ctx, salv_cid, &[(25_863, 5), (3426, 5), (3413, 5)]);
         grant_skills(&ctx, unentered_cid, &[(25_863, 5), (3426, 5), (3413, 5)]);
@@ -1634,7 +1635,14 @@ mod homefront_operations_it {
                     hit_cap_err = true;
                     break;
                 }
-                Ok(v) if v.dict_get("salvaged").and_then(|b| b.as_bool()) != Some(true) => continue,
+                Ok(v) if v.dict_get("salvaged").and_then(|b| b.as_bool()) != Some(true) => {
+                    assert_ne!(
+                        v.dict_get("reason").and_then(|r| r.as_str()),
+                        Some("InsufficientAccessChance"),
+                        "entered pilot must meet >=20% salvage bonus threshold: {v:?}"
+                    );
+                    continue;
+                }
                 other => panic!("expected NotEnoughCargoSpace on full cargo, got {other:?}"),
             }
         }
@@ -1658,6 +1666,11 @@ mod homefront_operations_it {
                 salv_ok = true;
                 break;
             }
+            assert_ne!(
+                cyc.dict_get("reason").and_then(|r| r.as_str()),
+                Some("InsufficientAccessChance"),
+                "entered pilot must meet >=20% salvage bonus threshold: {cyc:?}"
+            );
         }
         assert!(salv_ok, "Salvager I must salvage Homefront wreck with free cargo");
         assert!(ctx.db.with_snapshot(|snap| {
