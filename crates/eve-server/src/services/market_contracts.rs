@@ -1849,10 +1849,10 @@ fn parse_contract_container_query_opts(
     let rpc = RpcArgs::new(args, kwargs);
     let for_corp = rpc.opt_boolish(2, "forCorp")?.unwrap_or(false);
     let flag_num = rpc.opt_i64(3, "flag")?;
-    let location_hint = if args.get(1).is_some() {
-        args.first().and_then(PyRep::as_i64).filter(|&v| v > 0)
-    } else if kwargs.contains_key("containerID") || kwargs.contains_key("containerIDs") {
-        rpc.opt_positive_i64(0, "locationID")?
+    let location_hint = if rpc.get_raw_any(1, &["containerID", "containerIDs"]).is_some() {
+        rpc.get_raw(0, "locationID")
+            .and_then(PyRep::as_i64)
+            .filter(|&v| v > 0)
     } else {
         None
     };
