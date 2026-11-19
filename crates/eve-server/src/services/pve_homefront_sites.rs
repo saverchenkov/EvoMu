@@ -1549,18 +1549,7 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
                     ctx,
                     &sys_h,
                     sys_id,
-                    Ball {
-                        id: hauler_id,
-                        type_id: hauler_tid,
-                        position: h_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 180.0,
-                        inertia: 0.8,
-                        mass: 15_000_000.0,
-                        radius: 260.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    },
+                    raid_hauler_ball(hauler_id, hauler_tid, h_pos),
                     ctx.build_type_combat_state(hauler_tid),
                 );
                 spawned.push(hauler_id);
@@ -3031,6 +3020,15 @@ pub async fn abyssal_clear_wave(
                     Err(Ok(timed_out_state)) => return Ok(Ok((timed_out_state, None))),
                     Err(Err(e)) => return Ok(Err(e)),
                 };
+                if !matches!(
+                    rec.progress,
+                    HomefrontProgressRecord::AbyssalArtifactRecovery { .. }
+                ) {
+                    return Ok(Err(hf_err(
+                        "InvalidArchetypeAction",
+                        "Abyssal wave progression applies only to Abyssal Artifact Recovery",
+                    )));
+                }
                 sys_id_out = rec.solar_system_id;
                 site_pos_out = DVec3::from_array(rec.pocket_position);
                 let c = ensure_contribution(rec, char_id);
@@ -3039,52 +3037,45 @@ pub async fn abyssal_clear_wave(
                 if recover_cache {
                     c.objective_actions += 1;
                 }
-                match &mut rec.progress {
-                    HomefrontProgressRecord::AbyssalArtifactRecovery {
-                        current_wave,
-                        total_waves,
-                        mutanite_units_remaining,
-                        wave_hostiles_remaining,
-                        warp_bubble_active,
-                        caches_recovered,
-                        wave_time_remaining_secs,
-                        evacuation_active,
-                        extraction_window_secs,
-                        ..
-                    } => {
-                        *mutanite_units_remaining =
-                            mutanite_units_remaining.saturating_sub(mined_units);
-                        if *mutanite_units_remaining == 0 && *warp_bubble_active {
-                            *warp_bubble_active = false;
-                            disperse_bubble = true;
-                        }
-                        if hostile_damage >= HOMEFRONT_MIN_SKILL_CONTRIBUTION {
-                            *wave_hostiles_remaining = 0;
-                        }
-                        if recover_cache {
-                            *caches_recovered += 1;
-                        }
-                        if *mutanite_units_remaining == 0 && *wave_hostiles_remaining == 0 {
-                            cleared_wave_opt = Some(*current_wave);
-                            if *current_wave < *total_waves {
-                                *current_wave += 1;
-                                *mutanite_units_remaining = (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32)
-                                    * HOMEFRONT_AAR_UNITS_PER_ROCK;
-                                *wave_hostiles_remaining = 3 + *current_wave / 2;
-                                *wave_time_remaining_secs = aar_wave_duration_secs(*current_wave);
-                                *warp_bubble_active = true;
-                                respawn_bubble = true;
-                            } else {
-                                *evacuation_active = true;
-                                *extraction_window_secs = 60;
-                            }
-                        }
+                if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    current_wave,
+                    total_waves,
+                    mutanite_units_remaining,
+                    wave_hostiles_remaining,
+                    warp_bubble_active,
+                    caches_recovered,
+                    wave_time_remaining_secs,
+                    evacuation_active,
+                    extraction_window_secs,
+                    ..
+                } = &mut rec.progress
+                {
+                    *mutanite_units_remaining =
+                        mutanite_units_remaining.saturating_sub(mined_units);
+                    if *mutanite_units_remaining == 0 && *warp_bubble_active {
+                        *warp_bubble_active = false;
+                        disperse_bubble = true;
                     }
-                    _ => {
-                        return Ok(Err(hf_err(
-                            "InvalidArchetypeAction",
-                            "Abyssal wave progression applies only to Abyssal Artifact Recovery",
-                        )));
+                    if hostile_damage >= HOMEFRONT_MIN_SKILL_CONTRIBUTION {
+                        *wave_hostiles_remaining = 0;
+                    }
+                    if recover_cache {
+                        *caches_recovered += 1;
+                    }
+                    if *mutanite_units_remaining == 0 && *wave_hostiles_remaining == 0 {
+                        cleared_wave_opt = Some(*current_wave);
+                        if *current_wave < *total_waves {
+                            *current_wave += 1;
+                            *mutanite_units_remaining = (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32)
+                                * HOMEFRONT_AAR_UNITS_PER_ROCK;
+                            *wave_hostiles_remaining = 3 + *current_wave / 2;
+                            *wave_time_remaining_secs = aar_wave_duration_secs(*current_wave);
+                            *warp_bubble_active = true;
+                            respawn_bubble = true;
+                        } else {
+                            *evacuation_active = true;
+                            *extraction_window_secs = 60;
+                        }
                     }
                 }
             }
@@ -4137,6 +4128,49 @@ pub async fn on_homefront_combat_damage_event(
     );
 }
 
+fn raid_hauler_ball(id: i64, type_id: TypeId, position: DVec3) -> Ball {
+    Ball {
+        id,
+        type_id,
+        position,
+        velocity: DVec3::ZERO,
+        max_velocity: 180.0,
+        inertia: 0.8,
+        mass: 15_000_000.0,
+        radius: 260.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }
+}
+
+fn advance_next_raid_hauler(
+    inst_id: i64,
+    now: u64,
+    hauler_tid: TypeId,
+    pocket_pos: DVec3,
+    haulers_spawned: &mut u8,
+    haulers_destroyed: u8,
+    required_deliveries: u8,
+    active_hauler_ball_id: &mut Option<i64>,
+    active_hauler_tackled: &mut bool,
+    active_hauler_escape_at_sec: &mut u64,
+    spawned_ball_ids: &mut Vec<i64>,
+) -> Option<(i64, TypeId, DVec3)> {
+    *active_hauler_tackled = false;
+    if haulers_destroyed < required_deliveries {
+        *haulers_spawned = haulers_spawned.saturating_add(1);
+        let hid = 1_897_800_000 + inst_id * 100 + 30 + i64::from(*haulers_spawned);
+        *active_hauler_ball_id = Some(hid);
+        *active_hauler_escape_at_sec = now.saturating_add(90);
+        spawned_ball_ids.push(hid);
+        Some((hid, hauler_tid, pocket_pos + DVec3::new(4_000.0, 0.0, 2_000.0)))
+    } else {
+        *active_hauler_ball_id = None;
+        *active_hauler_escape_at_sec = 0;
+        None
+    }
+}
+
 /// Live entity destruction handler called by `pve_special_sites_combat`.
 /// Returns `None` if `ball_id` is not part of an active Homefront site, or `Some(account_changes)`
 /// (`(character_id, new_balance_isk)`) when handled so the caller emits `OnAccountChange`.
@@ -4150,6 +4184,11 @@ pub async fn on_homefront_entity_destroyed_core(
 ) -> Option<Vec<(i64, f64)>> {
     enum PostKillAction {
         None,
+        SpawnRaidHauler {
+            hauler_id: i64,
+            hauler_tid: TypeId,
+            hauler_pos: DVec3,
+        },
         DropRaidCrate {
             crate_id: i64,
             crate_pos: DVec3,
@@ -4224,6 +4263,7 @@ pub async fn on_homefront_entity_destroyed_core(
             let mut post = PostKillAction::None;
             let mut add_crate_to_snap: Option<(i64, [f64; 3])> = None;
 
+            let spawned_ball_ids = &mut rec.spawned_ball_ids;
             match &mut rec.progress {
                 HomefrontProgressRecord::Raid {
                     haulers_spawned,
@@ -4237,35 +4277,49 @@ pub async fn on_homefront_entity_destroyed_core(
                     required_deliveries,
                     ..
                 } if *active_hauler_ball_id == Some(ball_id) => {
+                    spawned_ball_ids.retain(|&id| id != ball_id);
                     if !*active_hauler_tackled && !was_scrambled {
                         *haulers_escaped = haulers_escaped.saturating_add(1);
+                        if let Some((hauler_id, h_tid, hauler_pos)) = advance_next_raid_hauler(
+                            inst_id,
+                            now,
+                            hauler_tid,
+                            pocket_pos,
+                            haulers_spawned,
+                            *haulers_destroyed,
+                            *required_deliveries,
+                            active_hauler_ball_id,
+                            active_hauler_tackled,
+                            active_hauler_escape_at_sec,
+                            spawned_ball_ids,
+                        ) {
+                            post = PostKillAction::SpawnRaidHauler {
+                                hauler_id,
+                                hauler_tid: h_tid,
+                                hauler_pos,
+                            };
+                        }
                     } else {
                         *haulers_destroyed = haulers_destroyed.saturating_add(1);
                         *cargo_dropped = cargo_dropped.saturating_add(1);
                         let crate_pos = ball_pos.unwrap_or(pocket_pos + DVec3::new(3_500.0, 0.0, 0.0));
                         dropped_crate_ball_ids.push(extra_id);
-                        rec.spawned_ball_ids.push(extra_id);
+                        spawned_ball_ids.push(extra_id);
                         add_crate_to_snap = Some((extra_id, crate_pos.to_array()));
 
-                        let next_hauler = if *haulers_destroyed < *required_deliveries {
-                            *haulers_spawned = haulers_spawned.saturating_add(1);
-                            let hid = 1_897_800_000
-                                + inst_id * 100
-                                + 30
-                                + i64::from(*haulers_spawned);
-                            *active_hauler_ball_id = Some(hid);
-                            *active_hauler_tackled = false;
-                            *active_hauler_escape_at_sec = now.saturating_add(90);
-                            rec.spawned_ball_ids.push(hid);
-                            Some((
-                                hid,
-                                hauler_tid,
-                                pocket_pos + DVec3::new(4_000.0, 0.0, 2_000.0),
-                            ))
-                        } else {
-                            *active_hauler_ball_id = None;
-                            None
-                        };
+                        let next_hauler = advance_next_raid_hauler(
+                            inst_id,
+                            now,
+                            hauler_tid,
+                            pocket_pos,
+                            haulers_spawned,
+                            *haulers_destroyed,
+                            *required_deliveries,
+                            active_hauler_ball_id,
+                            active_hauler_tackled,
+                            active_hauler_escape_at_sec,
+                            spawned_ball_ids,
+                        );
                         post = PostKillAction::DropRaidCrate {
                             crate_id: extra_id,
                             crate_pos,
@@ -4409,6 +4463,19 @@ pub async fn on_homefront_entity_destroyed_core(
     let mut account_changes = Vec::new();
     match post {
         PostKillAction::None => {}
+        PostKillAction::SpawnRaidHauler {
+            hauler_id,
+            hauler_tid,
+            hauler_pos,
+        } => {
+            spawn_ball_db_with_claim(
+                systems,
+                &sys_h,
+                sys_id,
+                raid_hauler_ball(hauler_id, hauler_tid, hauler_pos),
+                build_type_combat_state_from_sde(sde, hauler_tid),
+            );
+        }
         PostKillAction::DropRaidCrate {
             crate_id,
             crate_pos,
@@ -4441,18 +4508,7 @@ pub async fn on_homefront_entity_destroyed_core(
                     systems,
                     &sys_h,
                     sys_id,
-                    Ball {
-                        id: nh_id,
-                        type_id: nh_tid,
-                        position: nh_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 180.0,
-                        inertia: 0.8,
-                        mass: 15_000_000.0,
-                        radius: 260.0,
-                        speed_fraction: 0.0,
-                        mode: MovementMode::Stop,
-                    },
+                    raid_hauler_ball(nh_id, nh_tid, nh_pos),
                     build_type_combat_state_from_sde(sde, nh_tid),
                 );
             }
@@ -4861,7 +4917,109 @@ pub async fn on_homefront_cargo_scanned(
     });
 }
 
+fn reconcile_raid_depot_in_snap(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    sys_id_opt: Option<SolarSystemId>,
+    depot_id: i64,
+    item_type_id: TypeId,
+) -> Vec<i64> {
+    let mut complete_insts: Vec<i64> = Vec::new();
+    let mut depot_counts: Vec<(i64, u8, BTreeMap<i64, u32>)> = Vec::new();
+    for rec in snap.dungeon_runtime.homefront_runtimes.values() {
+        if !rec.started
+            || rec.completed
+            || rec.failed
+            || sys_id_opt.is_some_and(|sid| rec.solar_system_id != sid)
+        {
+            continue;
+        }
+        if let HomefrontProgressRecord::Raid {
+            delivery_depot_ball_id,
+            ..
+        } = &rec.progress
+        {
+            let loot_tid = rec
+                .blueprint
+                .loot_commodity_type_id
+                .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
+            if *delivery_depot_ball_id == depot_id && item_type_id == loot_tid {
+                let mut total: i64 = 0;
+                let mut per_owner: BTreeMap<i64, u32> = BTreeMap::new();
+                for it in snap.items.values() {
+                    if it.location_id == *delivery_depot_ball_id
+                        && it.type_id == loot_tid
+                        && it.quantity > 0
+                        && rec.entered_pilots.contains_key(&it.owner_id)
+                    {
+                        let qty = i64::from(it.quantity);
+                        total += qty;
+                        let entry = per_owner.entry(it.owner_id).or_insert(0);
+                        *entry = entry.saturating_add(u32::try_from(qty).unwrap_or(u32::MAX));
+                    }
+                }
+                depot_counts.push((
+                    rec.instance_id,
+                    u8::try_from(total.max(0)).unwrap_or(u8::MAX),
+                    per_owner,
+                ));
+            }
+        }
+    }
+    for (inst_id, delivered_in_depot, per_owner) in depot_counts {
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
+            let char_entered = rec.entered_pilots.contains_key(&char_id);
+            if let HomefrontProgressRecord::Raid {
+                cargo_delivered,
+                required_deliveries,
+                ..
+            } = &mut rec.progress
+            {
+                if delivered_in_depot > *cargo_delivered {
+                    if char_entered {
+                        let delta = delivered_in_depot - *cargo_delivered;
+                        *cargo_delivered = delivered_in_depot;
+                        ensure_contribution_fields(
+                            &mut rec.contributions,
+                            &mut rec.next_entry_sequence,
+                            char_id,
+                        )
+                        .cargo_delivered += u32::from(delta);
+                    }
+                } else if delivered_in_depot < *cargo_delivered {
+                    let mut remaining_to_deduct = u32::from(*cargo_delivered - delivered_in_depot);
+                    *cargo_delivered = delivered_in_depot;
+                    if let Some(c) = rec.contributions.get_mut(&char_id) {
+                        let sub = c.cargo_delivered.min(remaining_to_deduct);
+                        c.cargo_delivered -= sub;
+                        remaining_to_deduct -= sub;
+                    }
+                    if remaining_to_deduct > 0 {
+                        // Reconcile unentered or cross-pilot withdrawals against crates left in depot.
+                        for (&cid, c) in rec.contributions.iter_mut() {
+                            if remaining_to_deduct == 0 {
+                                break;
+                            }
+                            let held = per_owner.get(&cid).copied().unwrap_or(0);
+                            if c.cargo_delivered > held {
+                                let sub = (c.cargo_delivered - held).min(remaining_to_deduct);
+                                c.cargo_delivered -= sub;
+                                remaining_to_deduct -= sub;
+                            }
+                        }
+                    }
+                }
+                if *cargo_delivered >= *required_deliveries {
+                    complete_insts.push(inst_id);
+                }
+            }
+        }
+    }
+    complete_insts
+}
+
 /// Synchronous live item move hook called when cargo items are transferred into a Raid delivery depot.
+/// Reconciles depot deliveries and crate ownership strictly against `snap.items`.
 pub fn on_homefront_item_moved_sync(
     ctx: &ServerContext,
     char_id: i64,
@@ -4872,49 +5030,12 @@ pub fn on_homefront_item_moved_sync(
     if quantity == 0 {
         return;
     }
-    let mut complete_inst = None;
+    let mut complete_insts: Vec<i64> = Vec::new();
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-        for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if !rec.started
-                || rec.completed
-                || rec.failed
-                || !rec.entered_pilots.contains_key(&char_id)
-            {
-                continue;
-            }
-            let loot_tid = rec
-                .blueprint
-                .loot_commodity_type_id
-                .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
-            if item_type_id != loot_tid {
-                continue;
-            }
-            if let HomefrontProgressRecord::Raid {
-                delivery_depot_ball_id,
-                cargo_delivered,
-                required_deliveries,
-                ..
-            } = &mut rec.progress
-            {
-                if *delivery_depot_ball_id == dest_id {
-                    let add = u8::try_from(quantity).unwrap_or(u8::MAX);
-                    *cargo_delivered = cargo_delivered.saturating_add(add);
-                    ensure_contribution_fields(
-                        &mut rec.contributions,
-                        &mut rec.next_entry_sequence,
-                        char_id,
-                    )
-                    .cargo_delivered += u32::from(add);
-                    if *cargo_delivered >= *required_deliveries {
-                        complete_inst = Some(rec.instance_id);
-                    }
-                    return Ok(());
-                }
-            }
-        }
+        complete_insts = reconcile_raid_depot_in_snap(snap, char_id, None, dest_id, item_type_id);
         Ok(())
     });
-    if let Some(inst_id) = complete_inst {
+    for inst_id in complete_insts {
         try_settle_completed_homefront_live(ctx, inst_id);
     }
 }
@@ -4930,7 +5051,7 @@ pub async fn on_homefront_item_moved(
     on_homefront_item_moved_sync(ctx, char_id, dest_id, item_type_id, quantity);
 }
 
-/// Synchronous live inventory-movement hook verifying depot deliveries in `snap.items`.
+/// Synchronous live inventory-movement hook verifying depot deposits and withdrawals in `snap.items`.
 pub fn on_homefront_inventory_event_sync(
     ctx: &ServerContext,
     char_id: i64,
@@ -4940,74 +5061,13 @@ pub fn on_homefront_inventory_event_sync(
 ) {
     let mut complete_insts: Vec<i64> = Vec::new();
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-        let mut depot_counts: Vec<(i64, u8)> = Vec::new();
-        for rec in snap.dungeon_runtime.homefront_runtimes.values() {
-            if !rec.started
-                || rec.completed
-                || rec.failed
-                || !rec.entered_pilots.contains_key(&char_id)
-                || sys_id_opt.is_some_and(|sid| rec.solar_system_id != sid)
-            {
-                continue;
-            }
-            if let HomefrontProgressRecord::Raid {
-                delivery_depot_ball_id,
-                ..
-            } = &rec.progress
-            {
-                let loot_tid = rec
-                    .blueprint
-                    .loot_commodity_type_id
-                    .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
-                if *delivery_depot_ball_id == source_or_dest_id && item_type_id == loot_tid {
-                    let count: i64 = snap
-                        .items
-                        .values()
-                        .filter(|it| {
-                            it.location_id == *delivery_depot_ball_id
-                                && it.type_id == loot_tid
-                                && it.quantity > 0
-                                && rec.entered_pilots.contains_key(&it.owner_id)
-                        })
-                        .map(|it| i64::from(it.quantity))
-                        .sum();
-                    depot_counts.push((
-                        rec.instance_id,
-                        u8::try_from(count.max(0)).unwrap_or(u8::MAX),
-                    ));
-                }
-            }
-        }
-        for (inst_id, delivered_in_depot) in depot_counts {
-            if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
-                if let HomefrontProgressRecord::Raid {
-                    cargo_delivered,
-                    required_deliveries,
-                    ..
-                } = &mut rec.progress
-                {
-                    if delivered_in_depot > *cargo_delivered {
-                        let delta = delivered_in_depot - *cargo_delivered;
-                        *cargo_delivered = delivered_in_depot;
-                        ensure_contribution_fields(
-                            &mut rec.contributions,
-                            &mut rec.next_entry_sequence,
-                            char_id,
-                        )
-                        .cargo_delivered += u32::from(delta);
-                    } else if delivered_in_depot < *cargo_delivered {
-                        let removed = u32::from(*cargo_delivered - delivered_in_depot);
-                        *cargo_delivered = delivered_in_depot;
-                        if let Some(c) = rec.contributions.get_mut(&char_id) {
-                            c.cargo_delivered = c.cargo_delivered.saturating_sub(removed);
-                        }
-                    }
-                    if *cargo_delivered >= *required_deliveries {
-                        complete_insts.push(inst_id);
-                    }
-                }
-            }
-        }
+        complete_insts = reconcile_raid_depot_in_snap(
+            snap,
+            char_id,
+            sys_id_opt,
+            source_or_dest_id,
+            item_type_id,
+        );
         Ok(())
     });
     for inst_id in complete_insts {
@@ -5410,10 +5470,12 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
         match &mut rec.progress {
             HomefrontProgressRecord::Raid {
                 haulers_spawned,
+                haulers_destroyed,
                 haulers_escaped,
                 active_hauler_ball_id,
                 active_hauler_tackled,
                 active_hauler_escape_at_sec,
+                required_deliveries,
                 ..
             } => {
                 if live_raid_scrambled {
@@ -5425,21 +5487,22 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                         && now >= *active_hauler_escape_at_sec
                     {
                         *haulers_escaped = haulers_escaped.saturating_add(1);
-                        *haulers_spawned = haulers_spawned.saturating_add(1);
-                        let new_hid = 1_897_800_000
-                            + inst_id * 100
-                            + 30
-                            + i64::from(*haulers_spawned);
-                        *active_hauler_ball_id = Some(new_hid);
-                        *active_hauler_escape_at_sec = now.saturating_add(90);
-                        rec.spawned_ball_ids.push(new_hid);
-                        fx.respawn_raid_hauler = Some((
-                            sys_id,
-                            old_hid,
+                        rec.spawned_ball_ids.retain(|&id| id != old_hid);
+                        if let Some((new_hid, h_tid, h_pos)) = advance_next_raid_hauler(
+                            inst_id,
+                            now,
                             hauler_tid,
-                            pocket_pos + DVec3::new(4_000.0, 0.0, 2_000.0),
-                            new_hid,
-                        ));
+                            pocket_pos,
+                            haulers_spawned,
+                            *haulers_destroyed,
+                            *required_deliveries,
+                            active_hauler_ball_id,
+                            active_hauler_tackled,
+                            active_hauler_escape_at_sec,
+                            &mut rec.spawned_ball_ids,
+                        ) {
+                            fx.respawn_raid_hauler = Some((sys_id, old_hid, h_tid, h_pos, new_hid));
+                        }
                     }
                 }
             }
@@ -5749,18 +5812,7 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
             ctx,
             &sys_h,
             sys_id,
-            Ball {
-                id: new_hid,
-                type_id: h_tid,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 180.0,
-                inertia: 0.8,
-                mass: 15_000_000.0,
-                radius: 260.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
+            raid_hauler_ball(new_hid, h_tid, pos),
             ctx.build_type_combat_state(h_tid),
         );
     }

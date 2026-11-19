@@ -1189,4 +1189,264 @@ mod multi_role_edge_tests {
             "energyNeutralizerFalloff rollover must drain StabilizeRift array ({arr_pct_post} < {arr_pct_pre})"
         );
     }
+
+    async fn spawn_ship_for_gate_test(
+        ctx: &ServerContext,
+        sys_id: SolarSystemId,
+        ship_id: i64,
+        ship_type_id: TypeId,
+        pos: DVec3,
+    ) {
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        sys_h
+            .spawn_ball(Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 0.5,
+                mass: 10_000_000.0,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await
+            .unwrap();
+        sys_h
+            .set_combat_state(
+                ship_id,
+                eve_destiny::CombatState {
+                    shield_hp: 5_000_000.0,
+                    max_shield_hp: 5_000_000.0,
+                    armor_hp: 5_000_000.0,
+                    max_armor_hp: 5_000_000.0,
+                    structure_hp: 5_000_000.0,
+                    max_structure_hp: 5_000_000.0,
+                    ..eve_destiny::CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn homefront_abyssal_clear_wave_rejects_non_aar_without_mutating_contributions() {
+        use crate::services::pve_homefront_sites::abyssal_clear_wave;
+
+        let sys_id = 30_000_142_u32;
+        let char_id = 971_101_i64;
+        let ship_id = 871_101_i64;
+        let (ctx, sess) = test_ctx_with_pilot(char_id, ship_id, 620, sys_id);
+        fit_module_in_ctx(&ctx, char_id, ship_id, 871_101_01, 483, InventoryFlag::HiSlot0, true);
+        let aid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_238).expect("spawn Emergency Aid");
+        spawn_ship_for_gate_test(&ctx, sys_id, ship_id, 620, aid.site_position + DVec3::new(300.0, 0.0, 0.0))
+            .await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess, aid.instance_id)
+            .await
+            .expect("enter Emergency Aid gate");
+
+        let err = abyssal_clear_wave(&ctx, &sess, aid.instance_id, 1_500, 2_500.0, true)
+            .await
+            .expect_err("abyssal_clear_wave must fail on non-AAR site");
+        assert_eq!(err.code, "InvalidArchetypeAction");
+
+        ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aid.instance_id];
+            let contrib = &rec.contributions[&char_id];
+            assert_eq!(contrib.ore_mined_units, 0, "error path must not mutate ore_mined_units");
+            assert_eq!(contrib.damage_dealt, 0.0, "error path must not mutate damage_dealt");
+            assert_eq!(contrib.objective_actions, 0, "error path must not mutate objective_actions");
+        });
+    }
+
+    #[tokio::test]
+    async fn homefront_raid_untackled_kill_counts_single_escape_and_respawns_without_double_count() {
+        use crate::services::pve_homefront_sites::{
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sys_id = 30_000_142_u32;
+        let char_id = 971_102_i64;
+        let ship_id = 871_102_i64;
+        let (ctx, sess) = test_ctx_with_pilot(char_id, ship_id, 620, sys_id);
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).expect("spawn Raid");
+        spawn_ship_for_gate_test(&ctx, sys_id, ship_id, 620, raid.site_position + DVec3::new(300.0, 0.0, 0.0))
+            .await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess, raid.instance_id)
+            .await
+            .expect("enter Raid gate");
+
+        let h1 = match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress {
+            HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                active_hauler_ball_id.expect("initial hauler spawned")
+            }
+            other => panic!("expected Raid progress, got {other:?}"),
+        };
+
+        // Advance near original 90s escape deadline before destroying untackled hauler h1.
+        ctx.advance_secs(80);
+        tick_homefront_operations_sync(&ctx);
+
+        let killed_accts = on_homefront_entity_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            h1,
+            Some(char_id),
+        )
+        .await;
+        assert!(killed_accts.is_some(), "Raid hauler destruction must be handled");
+
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let h2 = ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id];
+            assert!(!rec.spawned_ball_ids.contains(&h1), "dead hauler h1 removed from spawned_ball_ids");
+            match &rec.progress {
+                HomefrontProgressRecord::Raid {
+                    haulers_escaped,
+                    haulers_spawned,
+                    haulers_destroyed,
+                    cargo_dropped,
+                    active_hauler_ball_id,
+                    ..
+                } => {
+                    assert_eq!(*haulers_escaped, 1);
+                    assert_eq!(*haulers_spawned, 2);
+                    assert_eq!(*haulers_destroyed, 0);
+                    assert_eq!(*cargo_dropped, 0);
+                    let next_id = active_hauler_ball_id.expect("replacement hauler spawned");
+                    assert_ne!(next_id, h1);
+                    assert!(rec.spawned_ball_ids.contains(&next_id));
+                    next_id
+                }
+                other => panic!("expected Raid, got {other:?}"),
+            }
+        });
+        assert!(
+            sys_h.get_ball_snapshot(h2).await.unwrap().is_some(),
+            "replacement hauler ball must exist in SystemHandle"
+        );
+
+        // Advance past h1's original escape deadline: h1 must not double-count, and h2 keeps its fresh 90s timer.
+        ctx.advance_secs(20);
+        tick_homefront_operations_sync(&ctx);
+        ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::Raid {
+                    haulers_escaped,
+                    active_hauler_ball_id,
+                    ..
+                } => {
+                    assert_eq!(*haulers_escaped, 1, "untackled kill must not double-count escape");
+                    assert_eq!(*active_hauler_ball_id, Some(h2));
+                }
+                other => panic!("expected Raid, got {other:?}"),
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn homefront_raid_reconciles_unentered_withdrawal_and_zero_owner_crate_moves() {
+        use crate::services::pve_homefront_sites::{
+            on_homefront_inventory_event_sync, on_homefront_item_moved_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sys_id = 30_000_142_u32;
+        let char_entered = 971_103_i64;
+        let ship_entered = 871_103_i64;
+        let char_outsider = 971_199_i64;
+        let (ctx, sess_entered) = test_ctx_with_pilot(char_entered, ship_entered, 649, sys_id);
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).expect("spawn Raid");
+        spawn_ship_for_gate_test(
+            &ctx,
+            sys_id,
+            ship_entered,
+            649,
+            raid.site_position + DVec3::new(300.0, 0.0, 0.0),
+        )
+        .await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess_entered, raid.instance_id)
+            .await
+            .expect("entered pilot passes gate");
+
+        let (depot_id, loot_tid) = ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::Raid { delivery_depot_ball_id, .. } => (
+                    *delivery_depot_ball_id,
+                    rec.blueprint.loot_commodity_type_id.unwrap_or(77_473),
+                ),
+                other => panic!("expected Raid, got {other:?}"),
+            }
+        });
+
+        // Unowned (owner_id == 0) crate moved into depot must not diverge between item_moved and inventory_event.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                9_710_001,
+                InventoryItemRecord {
+                    item_id: 9_710_001,
+                    type_id: loot_tid,
+                    owner_id: 0,
+                    location_id: depot_id,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        on_homefront_item_moved_sync(&ctx, char_entered, depot_id, loot_tid, 1);
+        on_homefront_inventory_event_sync(&ctx, char_entered, Some(sys_id), depot_id, loot_tid);
+        let st_zero = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_zero.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 0, .. }
+        ));
+        assert_eq!(st_zero.contributions[&char_entered].cargo_delivered, 0);
+
+        // Entered-owned crate deposited via item_moved reconciles cleanly and does not double-count on repeat calls.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                9_710_002,
+                InventoryItemRecord {
+                    item_id: 9_710_002,
+                    type_id: loot_tid,
+                    owner_id: char_entered,
+                    location_id: depot_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        on_homefront_item_moved_sync(&ctx, char_entered, depot_id, loot_tid, 1);
+        on_homefront_item_moved_sync(&ctx, char_entered, depot_id, loot_tid, 5);
+        let st_one = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_one.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 1, .. }
+        ));
+        assert_eq!(st_one.contributions[&char_entered].cargo_delivered, 1);
+
+        // Unentered pilot withdrawing crate from depot must reconcile cargo_delivered and contributions back to 0.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&9_710_002);
+        });
+        on_homefront_inventory_event_sync(&ctx, char_outsider, Some(sys_id), depot_id, loot_tid);
+        let st_withdrawn = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_withdrawn.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 0, .. }
+        ));
+        assert_eq!(st_withdrawn.contributions[&char_entered].cargo_delivered, 0);
+        assert!(!st_withdrawn.contributions.contains_key(&char_outsider));
+    }
 }
