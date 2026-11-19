@@ -2898,13 +2898,11 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
             "Target {target_id} is not locked"
         )));
     }
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.is_cloaked {
-            return Err(BridgeRpcError { code: "Cloaked".into(), message: "Cannot activate module while cloaked".into(), client_error: None });
-        }
-        if cs.is_tethered {
-            return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into(), client_error: None });
-        }
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(ctx, sys, ship_id).await {
+        return Err(BridgeRpcError { code: "Cloaked".into(), message: "Cannot activate module while cloaked".into(), client_error: None });
+    }
+    if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered) {
+        return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into(), client_error: None });
     }
     let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
     let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);

@@ -49,19 +49,13 @@ pub(crate) async fn is_ship_actively_cloaked(
 }
 
 /// Rejects undocked module online/offline/deactivate calls while actively module-cloaked
-/// (`CannotActivateCloaked`), excluding gate cloaks and optionally allowing `Deactivate` on
-/// cloaking devices (`group_id == 330`) so ships can decloak (`#1351`).
+/// (`CannotActivateCloaked`), excluding gate cloaks (`#1351`).
 pub(crate) async fn enforce_space_active_cloak_module_guard(
     ctx: &ServerContext,
     session: &SessionState,
     ship_id: i64,
-    allow_cloak_module_group: bool,
-    mod_group_id: Option<u32>,
 ) -> Result<(), BridgeRpcError> {
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Ok(());
-    }
-    if allow_cloak_module_group && mod_group_id == Some(330) {
         return Ok(());
     }
     let sys_opt = session
@@ -144,6 +138,9 @@ pub(crate) async fn break_gate_cloak_on_space_action(
 
 /// Enforces active-warp (`CantActivateInWarp`), gate-cloak break (`gate_cloak_remaining_ticks > 0`),
 /// and non-gate cloak (`CannotActivateCloaked`) checks before activating a ship module in space (`#494`).
+/// Kept under `#[cfg(test)]` for existing guard unit tests while production callers use
+/// `check_space_module_cloak_and_warp_readonly` + deferred `break_gate_cloak_on_space_action`.
+#[cfg(test)]
 pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
@@ -156,13 +153,12 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
     Ok(())
 }
 
-/// Enforces active-warp (`CantActivateInWarp`), gate-cloak break, and non-gate cloak
-/// (`CannotActivateCloaked`) checks for non-module space actions (`LaunchDrones`, `CmdEngage`,
-/// `superWeaponMgr`, `#494`, `#495`, `#496`).
-pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
+/// Validates active-warp (`CantActivateInWarp`) and non-gate cloak (`CannotActivateCloaked`)
+/// read-only for non-module space actions (`superWeaponMgr`, `#1403`), leaving gate cloak intact
+/// until the action commits.
+pub(crate) async fn check_space_action_cloak_and_warp_readonly(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
-    char_id: i64,
     ship_id: i64,
     action_label: &str,
 ) -> Result<(), BridgeRpcError> {
@@ -180,19 +176,25 @@ pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
         }
     }
 
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.gate_cloak_remaining_ticks > 0 {
-            let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-                ctx, sys, char_id, ship_id,
-            )
-            .await;
-        }
-    }
-
     if is_ship_actively_cloaked(ctx, sys, ship_id).await {
         return Err(BridgeRpcError::user_error("CannotActivateCloaked"));
     }
 
+    Ok(())
+}
+
+/// Enforces active-warp (`CantActivateInWarp`), gate-cloak break, and non-gate cloak
+/// (`CannotActivateCloaked`) checks for non-module space actions (`LaunchDrones`, `CmdEngage`,
+/// `superWeaponMgr`, `#494`, `#495`, `#496`).
+pub(crate) async fn enforce_space_action_cloak_and_warp_guard(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    action_label: &str,
+) -> Result<(), BridgeRpcError> {
+    check_space_action_cloak_and_warp_readonly(ctx, sys, ship_id, action_label).await?;
+    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
     Ok(())
 }
 

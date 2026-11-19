@@ -3539,3 +3539,433 @@ async fn handle_weapons_rejects_overload_on_standup_weapons_without_firing() {
     assert_eq!(fallback_err.code, "CannotOverloadStructureModule");
 }
 
+#[tokio::test]
+async fn f02_weapons_and_aoe_preserve_gate_cloak_on_rejections_and_break_on_commit() {
+    use crate::rng::TEST_MODE_DEFAULT_SEED;
+    use crate::services::combat_crimewatch::{
+        activate_aoe_or_defender_module_with_cap, with_mut_combat_runtime, SafetyLevel,
+    };
+    use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    ctx = ctx.with_seeded_rng(TEST_MODE_DEFAULT_SEED);
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(hull) = sde.types.get_mut(&23_915) {
+        hull.default_attributes.insert(14, 8.0); // hiSlots
+        hull.default_attributes.insert(11, 1_000_000.0); // powerOutput
+        hull.default_attributes.insert(48, 10_000.0); // cpuOutput
+        hull.default_attributes.insert(482, 500.0); // capacitorCapacity
+    }
+    // 1. Entropic Disintegrator (1986) + plasma (1987)
+    sde.types.insert(
+        19_861,
+        make_fighter_type(
+            19_861,
+            1986,
+            7,
+            3.0,
+            vec![(6, 10.0), (51, 3_000.0), (54, 20_000.0), (158, 5_000.0), (160, 1.0), (604, 1987.0), (620, 40_000.0), (64, 1.0), (2733, 0.15), (2734, 10.0)],
+        ),
+    );
+    sde.types.insert(19_871, make_fighter_type(19_871, 1987, 8, 0.01, vec![(117, 15.0), (118, 25.0)]));
+    // 2. Vorton Projector (4060) + condenser pack (4061)
+    sde.types.insert(
+        40_601,
+        make_fighter_type(
+            40_601,
+            4060,
+            7,
+            3.0,
+            vec![
+                (6, 10.0), (51, 3_000.0), (54, 25_000.0), (158, 5_000.0), (604, 4061.0), (64, 1.0),
+                (3036, 10_000.0), (3037, 5.0), (653, 190.0), (654, 43.0), (1353, 0.40),
+            ],
+        ),
+    );
+    sde.types.insert(40_611, make_fighter_type(40_611, 4061, 8, 0.01, vec![(114, 30.0), (117, 30.0)]));
+    // 3. Breacher Pod Launcher (4500) + Breacher Pod (4070)
+    sde.types.insert(
+        45_001,
+        make_fighter_type(45_001, 4500, 7, 5.0, vec![(6, 10.0), (51, 3_000.0), (604, 4070.0)]),
+    );
+    sde.types.insert(
+        85_001,
+        make_fighter_type(
+            85_001,
+            4070,
+            8,
+            0.1,
+            vec![(37, 4_000.0), (281, 2_000.0), (9, 75.0), (5735, 10_000.0), (5736, 250.0), (5737, 5.0)],
+        ),
+    );
+    // 4. Bomb Launcher (862) + Bomb (90)
+    sde.types.insert(
+        86_208,
+        make_fighter_type(86_208, 862, 7, 75.0, vec![(51, 5_000.0), (604, 90.0), (128, 1.0)]),
+    );
+    sde.types.insert(
+        90_008,
+        make_fighter_type(90_008, 90, 8, 75.0, vec![(114, 500.0), (37, 2_500.0), (281, 12_000.0), (99, 15_000.0), (654, 400.0)]),
+    );
+    // 5. Smartbomb (72)
+    let mut sb_t = make_fighter_type(72_001, 72, 7, 5.0, vec![(6, 25.0), (73, 5_000.0), (197, 3_000.0)]);
+    sb_t.effect_ids = vec![12, 16];
+    sde.types.insert(72_001, sb_t);
+    // Target NPC type
+    sde.types.insert(
+        10_098,
+        make_fighter_type(10_098, 550, 11, 1_000.0, vec![(eve_sde::attr_ids::ENTITY_KILL_BOUNTY, 10_000.0)]),
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+    ctx.db
+        .acquire_online_lock(session.user_id.unwrap_or(1), 999_225, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+
+    let victim_char = 99_140_302_i64;
+    let victim_ship = 99_140_303_i64;
+    let near_npc = 99_140_304_i64;
+    let far_npc = 99_140_305_i64;
+    let unlocked_npc = 99_140_306_i64;
+
+    let entropic_id = 840_001_i64;
+    let entropic_ammo = 840_002_i64;
+    let entropic_unloaded_id = 840_003_i64;
+    let vorton_id = 840_004_i64;
+    let vorton_ammo = 840_005_i64;
+    let breacher_id = 840_006_i64;
+    let breacher_ammo = 840_007_i64;
+    let bomb_id = 840_008_i64;
+    let sb_id = 840_009_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut vch = snap.characters[&char_id].clone();
+        vch.character_id = victim_char;
+        vch.user_id = victim_char as u64;
+        vch.corporation_id = 1_000_010;
+        vch.active_ship_id = victim_ship;
+        vch.solar_system_id = sys_id;
+        vch.station_id = None;
+        vch.structure_id = None;
+        snap.characters.insert(victim_char, vch);
+        snap.items.insert(
+            victim_ship,
+            make_fighter_item(victim_ship, 23_915, victim_char, i64::from(sys_id), InventoryFlag::None, 1),
+        );
+
+        snap.items.insert(entropic_id, make_fighter_item(entropic_id, 19_861, char_id, ship_id, InventoryFlag::HiSlot0, 1));
+        let mut ea = make_fighter_item(entropic_ammo, 19_871, char_id, ship_id, InventoryFlag::HiSlot0, 10);
+        ea.singleton = false;
+        snap.items.insert(entropic_ammo, ea);
+
+        snap.items.insert(entropic_unloaded_id, make_fighter_item(entropic_unloaded_id, 19_861, char_id, ship_id, InventoryFlag::HiSlot1, 1));
+
+        snap.items.insert(vorton_id, make_fighter_item(vorton_id, 40_601, char_id, ship_id, InventoryFlag::HiSlot2, 1));
+        let mut va = make_fighter_item(vorton_ammo, 40_611, char_id, ship_id, InventoryFlag::HiSlot2, 10);
+        va.singleton = false;
+        snap.items.insert(vorton_ammo, va);
+
+        snap.items.insert(breacher_id, make_fighter_item(breacher_id, 45_001, char_id, ship_id, InventoryFlag::HiSlot3, 1));
+        let mut ba = make_fighter_item(breacher_ammo, 85_001, char_id, ship_id, InventoryFlag::HiSlot3, 10);
+        ba.singleton = false;
+        snap.items.insert(breacher_ammo, ba);
+
+        snap.items.insert(bomb_id, make_fighter_item(bomb_id, 86_208, char_id, ship_id, InventoryFlag::HiSlot4, 1));
+        snap.items.insert(sb_id, make_fighter_item(sb_id, 72_001, char_id, ship_id, InventoryFlag::HiSlot5, 1));
+
+        for mid in [entropic_id, entropic_unloaded_id, vorton_id, breacher_id, bomb_id, sb_id] {
+            snap.module_online_states.insert(mid, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (id, tid, pos, tethered, cloaked, gate_ticks, undock_ticks) in [
+        (ship_id, 23_915_u32, DVec3::ZERO, true, true, 30_u32, 15_u32),
+        (victim_ship, 23_915_u32, DVec3::new(0.0, 15_000.0, 0.0), false, false, 0_u32, 0_u32),
+        (near_npc, 10_098_u32, DVec3::new(5_000.0, 0.0, 0.0), false, false, 0_u32, 0_u32),
+        (far_npc, 10_098_u32, DVec3::new(200_000.0, 0.0, 0.0), false, false, 0_u32, 0_u32),
+        (unlocked_npc, 10_098_u32, DVec3::new(6_000.0, 0.0, 0.0), false, false, 0_u32, 0_u32),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                Ball {
+                    id,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 200.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 50.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 50_000.0,
+                    max_shield_hp: 50_000.0,
+                    armor_hp: 50_000.0,
+                    max_armor_hp: 50_000.0,
+                    structure_hp: 50_000.0,
+                    max_structure_hp: 50_000.0,
+                    capacitor: 500.0,
+                    max_capacitor: 500.0,
+                    signature_radius: 100.0,
+                    base_signature_radius: Some(100.0),
+                    is_tethered: tethered,
+                    is_cloaked: cloaked,
+                    gate_cloak_remaining_ticks: gate_ticks,
+                    undock_invulnerable_remaining_ticks: undock_ticks,
+                    ..CombatState::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for tid in [victim_ship, near_npc, far_npc] {
+        sys_handle
+            .add_target_lock(
+                ship_id,
+                TargetLock {
+                    target_id: tid,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(250_000.0),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let reset_gate_cloak = |tethered: bool, cap: f64| {
+        let sys_h = sys_handle.clone();
+        async move {
+            sys_h
+                .set_combat_state(
+                    ship_id,
+                    CombatState {
+                        shield_hp: 50_000.0,
+                        max_shield_hp: 50_000.0,
+                        armor_hp: 50_000.0,
+                        max_armor_hp: 50_000.0,
+                        structure_hp: 50_000.0,
+                        max_structure_hp: 50_000.0,
+                        capacitor: cap,
+                        max_capacitor: 500.0,
+                        signature_radius: 100.0,
+                        base_signature_radius: Some(100.0),
+                        is_tethered: tethered,
+                        is_cloaked: true,
+                        gate_cloak_remaining_ticks: 30,
+                        undock_invulnerable_remaining_ticks: 15,
+                        ..CombatState::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    // Part A: Entropic Disintegrator (1986) rejected paths MUST preserve gate cloak & undock invuln.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    for (args, tethered, cap, expected_code, label) in [
+        (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)], true, 500.0, "CantActivateWhileTethered", "tethered"),
+        (vec![PyRep::Integer(entropic_id)], false, 500.0, "TargetRequired", "targetless"),
+        (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(unlocked_npc)], false, 500.0, "TargetNotLocked", "unlocked"),
+        (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(victim_ship)], false, 500.0, "CantDoInCurrentSafetyLevel", "safety"),
+        (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(far_npc)], false, 500.0, "TargetOutOfRange", "range"),
+        (vec![PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)], false, 1.0, "NotEnoughCapacitor", "capacitor"),
+        (vec![PyRep::Integer(entropic_unloaded_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)], false, 500.0, "NoAmmoLoaded", "unloaded"),
+    ] {
+        reset_gate_cloak(tethered, cap).await;
+        let err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &args, &kwargs)
+            .await
+            .unwrap()
+            .expect_err("rejected Entropic activation must return Err");
+        assert_eq!(err.code, expected_code, "Entropic rejection case {label}");
+        let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked, "Entropic {label} must keep is_cloaked");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Entropic {label} must keep gate cloak");
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 15, "Entropic {label} must keep undock invuln");
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    }
+
+    // Valid Entropic activation breaks gate cloak on commit.
+    reset_gate_cloak(false, 500.0).await;
+    handle_weapons(
+        &ctx,
+        &mut session,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(entropic_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("valid gate-cloaked Entropic activation must succeed");
+    let cs_ent_ok = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_ent_ok.is_cloaked);
+    assert_eq!(cs_ent_ok.gate_cloak_remaining_ticks, 0);
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // Part B: Vorton Projector (4060) & Breacher Pod (4500, zero cap cost) preserve gate cloak on rejection and break on commit.
+    let vorton_cases = [
+        (false, unlocked_npc, 500.0, "TargetNotLocked"),
+        (false, far_npc, 500.0, "TargetOutOfRange"),
+        (false, near_npc, 1.0, "NotEnoughCapacitor"),
+    ];
+    let breacher_cases = [
+        (true, near_npc, 500.0, "CantActivateWhileTethered"),
+        (false, unlocked_npc, 500.0, "TargetNotLocked"),
+        (false, far_npc, 500.0, "TargetOutOfRange"),
+    ];
+    for (mod_id, label, cases) in [
+        (vorton_id, "Vorton", &vorton_cases[..]),
+        (breacher_id, "Breacher", &breacher_cases[..]),
+    ] {
+        for &(tethered, target_id, cap, expected_code) in cases {
+            reset_gate_cloak(tethered, cap).await;
+            let err = handle_weapons(
+                &ctx,
+                &mut session,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(target_id)],
+                &kwargs,
+            )
+            .await
+            .unwrap()
+            .expect_err("rejected Vorton/Breacher activation must return Err");
+            assert_eq!(err.code, expected_code, "{label} rejection");
+            let cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+            assert!(cs.is_cloaked);
+            assert_eq!(cs.gate_cloak_remaining_ticks, 30);
+            assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+        }
+
+        reset_gate_cloak(false, 500.0).await;
+        handle_weapons(
+            &ctx,
+            &mut session,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(mod_id), PyRep::String("targetAttack".into()), PyRep::Integer(near_npc)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .expect("valid gate-cloaked Vorton/Breacher activation must succeed");
+        let cs_ok = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(!cs_ok.is_cloaked);
+        assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0);
+        assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    }
+
+    // Part C: Bomb Launcher (862) preserves gate cloak on highsec/safety/no-ammo rejections, breaks on launch.
+    reset_gate_cloak(false, 500.0).await;
+    let bomb_hs_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect_err("Bomb Launcher in highsec must reject");
+    assert_eq!(bomb_hs_err.code, "BombDisallowedInHighSec");
+    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, 0.2);
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    let bomb_green_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect_err("Bomb Launcher on Green safety in lowsec must reject");
+    assert_eq!(bomb_green_err.code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    let bomb_ammo_err = handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect_err("Bomb Launcher with no bomb must reject");
+    assert_eq!(bomb_ammo_err.code, "NoAmmoLoaded");
+    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut b = make_fighter_item(840_010, 90_008, char_id, ship_id, InventoryFlag::HiSlot4, 1);
+        b.singleton = false;
+        snap.items.insert(840_010, b);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    handle_weapons(&ctx, &mut session, "dogmaIM", "Activate", &[PyRep::Integer(bomb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect("valid gate-cloaked Bomb launch must succeed");
+    let cs_bomb_ok = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_bomb_ok.is_cloaked);
+    assert_eq!(cs_bomb_ok.gate_cloak_remaining_ticks, 0);
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // Part D: Smartbomb (72) / AoE preserves gate cloak on safety & capacitor rejections in both direct AoE and handle_module_cycles.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, 0.9);
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let sb_fm = fit.modules[&sb_id].clone();
+    let sb_type = ctx.sde.types[&72_001].clone();
+    let attacker_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+
+    reset_gate_cloak(false, 500.0).await;
+    let aoe_safety_err = activate_aoe_or_defender_module_with_cap(
+        &ctx, char_id, ship_id, sys_id, 0.9, ctx.now_unix(), sb_id, &sb_fm, &sb_type, &attacker_ball, None, &kwargs, true,
+    )
+    .await
+    .unwrap()
+    .expect_err("direct AoE smartbomb in highsec on Green safety must reject");
+    assert_eq!(aoe_safety_err.code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    let cyc_safety_err = handle_module_cycles(&ctx, &mut session, None, "dogmaIM", "Activate", &[PyRep::Integer(sb_id)], &kwargs)
+        .await
+        .unwrap()
+        .expect_err("handle_module_cycles smartbomb in highsec on Green safety must reject");
+    assert_eq!(cyc_safety_err.code, "CantDoInCurrentSafetyLevel");
+    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    reset_gate_cloak(false, 1.0).await;
+    let aoe_cap_err = activate_aoe_or_defender_module_with_cap(
+        &ctx, char_id, ship_id, sys_id, 0.9, ctx.now_unix(), sb_id, &sb_fm, &sb_type, &attacker_ball, None, &kwargs, true,
+    )
+    .await
+    .unwrap()
+    .expect_err("direct AoE smartbomb with insufficient cap must reject");
+    assert_eq!(aoe_cap_err.code, "NotEnoughCapacitor");
+    let cs_aoe_cap = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_aoe_cap.is_cloaked);
+    assert_eq!(cs_aoe_cap.gate_cloak_remaining_ticks, 30);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    reset_gate_cloak(false, 500.0).await;
+    activate_aoe_or_defender_module_with_cap(
+        &ctx, char_id, ship_id, sys_id, 0.9, ctx.now_unix(), sb_id, &sb_fm, &sb_type, &attacker_ball, None, &kwargs, true,
+    )
+    .await
+    .unwrap()
+    .expect("valid gate-cloaked direct AoE smartbomb must succeed");
+    let cs_sb_ok = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_sb_ok.is_cloaked);
+    assert_eq!(cs_sb_ok.gate_cloak_remaining_ticks, 0);
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+}
+
+

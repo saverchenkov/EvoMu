@@ -623,15 +623,59 @@ pub async fn activate_aoe_or_defender_module_with_cap(
     deduct_capacitor: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    if matches!(mod_type.group_id, 72 | 80 | 353 | 842 | 1154) {
-        if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_module_cloak_and_warp_guard(
-            ctx, &sys_handle, char_id, ship_id, mod_type,
+    let needs_space_guard = matches!(mod_type.group_id, 72 | 80 | 353 | 842 | 1154);
+    if needs_space_guard {
+        if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::check_space_module_cloak_and_warp_readonly(
+            ctx, &sys_handle, ship_id, mod_type,
         )
         .await
         {
             return Some(Err(e));
         }
     }
+    let res = activate_aoe_or_defender_module_with_cap_inner(
+        ctx,
+        &sys_handle,
+        char_id,
+        ship_id,
+        sys_id,
+        sys_sec,
+        now_unix,
+        module_id,
+        m,
+        mod_type,
+        attacker_ball,
+        target_id_opt,
+        _kwargs,
+        deduct_capacitor,
+    )
+    .await;
+    if needs_space_guard && matches!(res, Some(Ok(_))) {
+        crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
+            ctx, &sys_handle, char_id, ship_id,
+        )
+        .await;
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_aoe_or_defender_module_with_cap_inner(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+    now_unix: u64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    attacker_ball: &eve_destiny::Ball,
+    target_id_opt: Option<i64>,
+    _kwargs: &HashMap<String, PyRep>,
+    deduct_capacitor: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
             // 2. Smartbomb (`group_id == 72`, `feat:modules.smartbomb`, `feat:combat.smartbomb-aoe-damage`)
             // parity: feat:crimewatch.safety-setting-action-block, feat:crimewatch.limited-engagement-duel
             if mod_type.group_id == 72 {

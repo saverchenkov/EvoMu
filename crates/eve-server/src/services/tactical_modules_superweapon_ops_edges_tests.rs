@@ -1008,3 +1008,255 @@ async fn doomsday_activation_exact_fuel_deletion_emits_on_item_change_tombstone_
         "Doomsday exact fuel stack deletion must emit OnItemChange tombstone for client invCache"
     );
 }
+
+#[tokio::test]
+async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_on_commit() {
+    let mut ctx = test_ctx();
+    let null_sys = find_nullsec_sys(&ctx.sde);
+    let low_sys = find_lowsec_sys(&ctx.sde);
+    let char_id = 90_000_001_i64;
+    let victim_char = 90_000_002_i64;
+
+    let lancer_tid = 77_281_u32;
+    let lance_tid = 77_398_u32;
+    let titan_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 30)
+        .map(|t| t.type_id)
+        .unwrap_or(11_567);
+    let dd_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 588 && !matches!(t.type_id, 77_398..=77_401))
+        .map(|t| t.type_id)
+        .unwrap_or(24_550);
+    let dread_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 485)
+        .map(|t| t.type_id)
+        .unwrap_or(19_720);
+
+    {
+        let sde_mut = Arc::make_mut(&mut ctx.sde);
+        let fallback_ship = sde_mut.types.get(&dread_tid).cloned().unwrap_or_else(|| {
+            sde_mut.types.values().next().cloned().expect("seed type")
+        });
+        let mut lancer_ship_t = sde_mut.types.get(&lancer_tid).cloned().unwrap_or(fallback_ship.clone());
+        lancer_ship_t.type_id = lancer_tid;
+        lancer_ship_t.group_id = 4594;
+        lancer_ship_t.category_id = 6;
+        sde_mut.types.insert(lancer_tid, lancer_ship_t);
+
+        let fallback_mod = sde_mut.types.get(&dd_tid).cloned().unwrap_or(fallback_ship);
+        let mut dd_t = sde_mut.types.get(&dd_tid).cloned().unwrap_or(fallback_mod.clone());
+        dd_t.type_id = dd_tid;
+        dd_t.group_id = 588;
+        dd_t.category_id = 7;
+        dd_t.default_attributes.insert(713, 16_274.0);
+        dd_t.default_attributes.insert(714, 100.0);
+        dd_t.default_attributes.insert(6, 1_000.0);
+        dd_t.default_attributes.insert(114, 50_000.0);
+        dd_t.default_attributes.insert(54, 250_000.0);
+        sde_mut.types.insert(dd_tid, dd_t);
+
+        let mut lance_t = sde_mut.types.get(&lance_tid).cloned().unwrap_or(fallback_mod);
+        lance_t.type_id = lance_tid;
+        lance_t.group_id = 588;
+        lance_t.category_id = 7;
+        lance_t.default_attributes.insert(713, 16_274.0);
+        lance_t.default_attributes.insert(714, 100.0);
+        lance_t.default_attributes.insert(6, 1_000.0);
+        lance_t.default_attributes.insert(114, 50_000.0);
+        lance_t.default_attributes.insert(54, 150_000.0);
+        sde_mut.types.insert(lance_tid, lance_t);
+    }
+
+    // 1. Disruptive Lance (is_lancer == true): rejected tether/cap/fuel paths preserve gate cloak; valid breaks it.
+    let lancer_id = 100_830_001_i64;
+    let lance_mod = 100_830_002_i64;
+    let siege_mod = 100_830_003_i64;
+    setup_ship_and_module(&ctx, low_sys, char_id, lancer_id, lancer_tid, lance_mod, lance_tid, DVec3::ZERO);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            siege_mod,
+            InventoryItemRecord {
+                item_id: siege_mod,
+                type_id: 20_280,
+                owner_id: char_id,
+                location_id: lancer_id,
+                flag: InventoryFlag::HiSlot1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(siege_mod);
+        for sk in [77_739_u32, 77_738_u32] {
+            snap.skills.entry(char_id).or_default().insert(
+                sk,
+                eve_db::TrainedSkillRecord {
+                    type_id: sk,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let sys_low = ctx.systems.get_or_spawn(low_sys);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
+    let set_lancer_gate_cloak = |tethered: bool, cap: f64| {
+        let mut bp = sys_low.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&lancer_id).unwrap();
+        cs.is_tethered = tethered;
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 30;
+        cs.undock_invulnerable_remaining_ticks = 15;
+        cs.capacitor = cap;
+        cs.max_capacitor = 200_000.0;
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    for (tethered, cap, expected_code, label) in [
+        (true, 200_000.0, "CantActivateWhileTethered", "tethered"),
+        (false, 10.0, "NotEnoughCapacitor", "capacitor"),
+        (false, 200_000.0, "InsufficientFuel", "fuel"),
+    ] {
+        set_lancer_gate_cloak(tethered, cap);
+        let err = activate_superweapon_with_args(&ctx, char_id, lancer_id, low_sys, lance_mod, "Activate", None, &[])
+            .await
+            .expect_err("rejected Lancer activation must return Err");
+        assert_eq!(err.code, expected_code, "Lancer {label} rejection");
+        let cs = sys_low.get_combat_state(lancer_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked, "Lancer {label} must preserve is_cloaked");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Lancer {label} must preserve gate cloak");
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_830_004,
+            InventoryItemRecord {
+                item_id: 100_830_004,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: lancer_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    set_lancer_gate_cloak(false, 200_000.0);
+    activate_superweapon_with_args(&ctx, char_id, lancer_id, low_sys, lance_mod, "Activate", None, &[])
+        .await
+        .expect("valid gate-cloaked Lancer activation must succeed");
+    let cs_lance_ok = sys_low.get_combat_state(lancer_id).await.unwrap().unwrap();
+    assert!(!cs_lance_ok.is_cloaked);
+    assert_eq!(cs_lance_ok.gate_cloak_remaining_ticks, 0);
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // 2. Titan Doomsday (!is_lancer): rejected tether/lock/cap/fuel paths preserve gate cloak; valid breaks it.
+    let titan_id = 100_830_011_i64;
+    let dd_mod = 100_830_012_i64;
+    let tgt_id = 100_830_050_i64;
+    setup_ship_and_module(&ctx, null_sys, char_id, titan_id, titan_tid, dd_mod, dd_tid, DVec3::ZERO);
+    setup_ship_and_module(
+        &ctx,
+        null_sys,
+        victim_char,
+        tgt_id,
+        dread_tid,
+        100_830_051,
+        519,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    );
+    let sys_null = ctx.systems.get_or_spawn(null_sys);
+    let set_titan_gate_cloak = |tethered: bool, cap: f64| {
+        let mut bp = sys_null.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+        cs.is_tethered = tethered;
+        cs.is_cloaked = true;
+        cs.gate_cloak_remaining_ticks = 30;
+        cs.undock_invulnerable_remaining_ticks = 15;
+        cs.capacitor = cap;
+        cs.max_capacitor = 200_000.0;
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    set_titan_gate_cloak(true, 200_000.0);
+    let dd_teth_err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+        .await
+        .expect_err("tethered Doomsday must reject");
+    assert_eq!(dd_teth_err.code, "CantActivateWhileTethered");
+    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    set_titan_gate_cloak(false, 200_000.0);
+    let dd_lock_err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+        .await
+        .expect_err("unlocked target Doomsday must reject");
+    assert_eq!(dd_lock_err.code, "TargetNotLocked");
+    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+
+    sys_null
+        .add_target_lock(
+            titan_id,
+            TargetLock {
+                target_id: tgt_id,
+                lock_time_ms: 1_000.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    for (cap, expected_code, label) in [
+        (10.0, "NotEnoughCapacitor", "capacitor"),
+        (200_000.0, "InsufficientFuel", "fuel"),
+    ] {
+        set_titan_gate_cloak(false, cap);
+        let err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+            .await
+            .expect_err("rejected Doomsday activation must return Err");
+        assert_eq!(err.code, expected_code, "Doomsday {label} rejection");
+        let cs = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
+        assert!(cs.is_cloaked, "Doomsday {label} must preserve is_cloaked");
+        assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Doomsday {label} must preserve gate cloak");
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            100_830_014,
+            InventoryItemRecord {
+                item_id: 100_830_014,
+                type_id: 16_274,
+                owner_id: char_id,
+                location_id: titan_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    set_titan_gate_cloak(false, 200_000.0);
+    activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+        .await
+        .expect("valid gate-cloaked Doomsday activation must succeed");
+    let cs_dd_ok = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert!(!cs_dd_ok.is_cloaked);
+    assert_eq!(cs_dd_ok.gate_cloak_remaining_ticks, 0);
+    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+}
+

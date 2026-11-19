@@ -928,7 +928,11 @@ pub async fn activate_clone_vat_bay(
             client_error: None,
         });
     }
-    if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+    if crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+        ctx, sys, ship_id,
+    )
+    .await
+    {
         return Err(BridgeRpcError {
             code: "ShipCloaked".into(),
             message: "Cannot activate Clone Vat Bay while cloaked".into(),

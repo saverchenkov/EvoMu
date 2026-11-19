@@ -403,14 +403,65 @@ pub async fn handle_weapons(
                 );
             }
             if !controlling_structure {
-                if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::enforce_space_module_cloak_and_warp_guard(
-                    ctx, &sys_handle, char_id, ship_id, mod_type,
+                if let Err(e) = crate::services::inventory_fitting::fitting_module_cycles::check_space_module_cloak_and_warp_readonly(
+                    ctx, &sys_handle, ship_id, mod_type,
                 )
                 .await
                 {
                     return Some(Err(e));
                 }
             }
+            let res = crate::router::box_fut(|| {
+                handle_weapons_after_cloak_guard(
+                    ctx,
+                    session.character_id,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    &sys_handle,
+                    attacker_tick,
+                    &attacker_ball,
+                    method,
+                    module_id,
+                    target_id_opt,
+                    m,
+                    mod_type,
+                    fit,
+                    kwargs,
+                )
+            })
+            .await;
+            if !controlling_structure && matches!(res, Some(Ok(_))) {
+                crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
+                    ctx, &sys_handle, char_id, ship_id,
+                )
+                .await;
+            }
+            res
+        }
+
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_weapons_after_cloak_guard(
+    ctx: &ServerContext,
+    session_character_id: Option<i64>,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle: &crate::system_actor::SystemHandle,
+    attacker_tick: u64,
+    attacker_ball: &eve_destiny::Ball,
+    method: &str,
+    module_id: i64,
+    target_id_opt: Option<i64>,
+    mut m: eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    mut fit: eve_dogma::ShipFittingEngine,
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
             let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
             if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
                 if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
@@ -1721,7 +1772,7 @@ pub async fn handle_weapons(
                 let is_invuln = crate::services::insurgency_services::is_insurgency_stronghold_invulnerable(ctx, sys_id, target_ball_id);
                 let (app, dest) = if !is_invuln && final_dmg.total() > 0.0 {
                     sys_handle
-                        .apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id)
+                        .apply_damage_with_attacker(target_ball_id, final_dmg, session_character_id)
                         .await
                         .ok()
                         .flatten()
@@ -2012,10 +2063,6 @@ pub async fn handle_weapons(
                 ("corpseItemID", PyRep::Integer(generated_corpse_id)),
                 ("state", st_state.map(PyRep::String).unwrap_or(PyRep::None)),
             ])))
-        }
-
-        _ => None,
-    }
 }
 
 pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_multiplier, handle_link_all_weapons, reset_entropic_spool};

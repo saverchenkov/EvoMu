@@ -334,8 +334,42 @@ fn precheck_doomsday_structure_target(
     Ok(())
 }
 
+/// Activates a Titan Superweapon / Doomsday / Lancer Disruptive Lance and defers gate-cloak
+/// break until activation succeeds (`#1403`).
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_superweapon_with_args(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    module_id: i64,
+    action_method: &str,
+    target_id_opt: Option<i64>,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let res = activate_superweapon_with_args_inner(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        module_id,
+        action_method,
+        target_id_opt,
+        args,
+    )
+    .await;
+    if res.is_ok() {
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
+            ctx, &sys, char_id, ship_id,
+        )
+        .await;
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_superweapon_with_args_inner(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -449,10 +483,9 @@ pub async fn activate_superweapon_with_args(
                 client_error: None,
             });
         }
-        crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
+        crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
             ctx,
             &sys,
-            char_id,
             ship_id,
             "activate Disruptive Lance",
         )
@@ -619,10 +652,9 @@ pub async fn activate_superweapon_with_args(
             client_error: None,
         });
     };
-    crate::services::inventory_fitting::fitting_module_cycles::enforce_space_action_cloak_and_warp_guard(
+    crate::services::inventory_fitting::fitting_module_cycles::check_space_action_cloak_and_warp_readonly(
         ctx,
         &sys,
-        char_id,
         ship_id,
         "activate Superweapon",
     )
