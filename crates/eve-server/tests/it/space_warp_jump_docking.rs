@@ -4140,43 +4140,8 @@ async fn gate_opens_through_activating_state() {
     );
 }
 
-#[tokio::test]
-async fn jump_closed_gate_raises_custominfo_gateclosed() {
-    // parity: feat:navigation.stargate-jump
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    ctx.systems.set_lazy_stargate_activation(true);
-    let gate = pick_non_special_roundtrip_gate(&ctx);
-    let kw = HashMap::new();
-
-    let gate_radius = stargate_radius(&ctx, &gate);
-    let char_id = 91_080_002_i64;
-    let ship_id = 101_080_002_i64;
-    let mut sess = setup_nav_pilot(
-        &ctx,
-        char_id,
-        ship_id,
-        587,
-        gate.from_solar_system_id,
-        gate.position + DVec3::new(gate_radius + 1_000.0, 0.0, 0.0),
-    )
-    .await;
-    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
-
-    let err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdStargateJump",
-            &[PyRep::Integer(gate.stargate_id)],
-            &kw,
-            None,
-        )
-        .await
-        .unwrap_err();
+fn assert_gate_closed_client_error(err: &eve_proto::BridgeRpcError) {
     assert_eq!(err.code, "GateClosed");
-    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
     match err.to_client_error("beyonce", "CmdStargateJump") {
         eve_proto::ClientError::User { key, args } => {
             assert_eq!(key, eve_proto::UserErrorKey::CustomInfo);
@@ -4196,6 +4161,104 @@ async fn jump_closed_gate_raises_custominfo_gateclosed() {
             eve_proto::UI_LABEL_GATE_CLOSED
         ),
     }
+}
+
+#[tokio::test]
+async fn jump_closed_gate_raises_custominfo_gateclosed() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_080_002_i64;
+    let ship_id = 101_080_002_i64;
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 1_000.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+
+    // 1. Explicitly closed gate (lazy activation disabled) raises CustomInfo GateClosed.
+    assert!(src_h.set_stargate_activation_state(
+        gate.stargate_id,
+        eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED,
+        0,
+        0,
+    ));
+    let err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    assert_gate_closed_client_error(&err);
+
+    // 2. Explicitly closed gate under lazy_stargate_activation=true when destination is already loaded
+    //    must still reject with CustomInfo GateClosed.
+    ctx.systems.set_lazy_stargate_activation(true);
+    let _ = ctx.systems.get_or_spawn(gate.to_solar_system_id);
+    assert!(ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    assert!(src_h.set_stargate_activation_state(
+        gate.stargate_id,
+        eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED,
+        0,
+        0,
+    ));
+    let err_loaded_closed = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    assert_gate_closed_client_error(&err_loaded_closed);
+
+    // 3. Mid-transition ACTIVATING gate must still reject with CustomInfo GateClosed until settled.
+    let now_ms = ctx.now_machonet_wallclock_ms();
+    assert!(src_h.set_stargate_activation_state(
+        gate.stargate_id,
+        eve_destiny::STARGATE_ACTIVATION_STATE_ACTIVATING,
+        eve_destiny::STARGATE_ACTIVATION_TRANSITION_MS,
+        now_ms.saturating_add(eve_destiny::STARGATE_ACTIVATION_TRANSITION_MS),
+    ));
+    let err_activating = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    assert_gate_closed_client_error(&err_activating);
 }
 
 async fn jump_outside_2500m_on_gate(
@@ -4295,7 +4358,6 @@ async fn closed_gate_jump_does_not_load_destination() {
     // parity: feat:navigation.stargate-jump
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    ctx.systems.set_lazy_stargate_activation(true);
     let gate = pick_non_special_roundtrip_gate(&ctx);
     let kw = HashMap::new();
 
@@ -4312,6 +4374,16 @@ async fn closed_gate_jump_does_not_load_destination() {
     )
     .await;
     let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+    assert!(src_h.set_stargate_activation_state(
+        gate.stargate_id,
+        eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED,
+        0,
+        0,
+    ));
 
     assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
     let err = ctx
@@ -4327,10 +4399,333 @@ async fn closed_gate_jump_does_not_load_destination() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "GateClosed");
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+    assert_gate_closed_client_error(&err);
     assert!(
         !ctx.systems.is_system_loaded(gate.to_solar_system_id),
-        "jumping a closed gate must NOT lazily load destination system"
+        "jumping an explicitly closed gate must NOT lazily load destination system"
     );
+}
+
+#[tokio::test]
+async fn direct_stargate_jump_within_2500m_wakes_lazy_unloaded_gate_gh_1413() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+    let gate = ctx
+        .sde
+        .jumps
+        .get(&50_006_698)
+        .filter(|j| is_non_special_roundtrip_gate(&ctx, j))
+        .cloned()
+        .unwrap_or_else(|| pick_non_special_roundtrip_gate(&ctx));
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_413_001_i64;
+    let ship_id = 101_413_001_i64;
+    // Simulate login / server restart with pilot already 1,480.7 m from gate (no prior warp/approach).
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 1_480.7, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+
+    assert!(
+        !ctx.systems.is_system_loaded(gate.to_solar_system_id),
+        "destination solar system must start unloaded"
+    );
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED),
+        "unloaded destination gate initializes CLOSED under lazy_stargate_activation"
+    );
+
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("direct CmdStargateJump within 2,500 m must wake lazy-unloaded gate (#1413)");
+
+    let PyRep::KeyVal(kv) = res else {
+        panic!("expected KeyVal from CmdStargateJump, got {res:?}");
+    };
+    assert_eq!(
+        kv.get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(gate.to_solar_system_id as i64)
+    );
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+    assert!(
+        ctx.systems.is_system_loaded(gate.to_solar_system_id),
+        "destination solar system must be loaded after direct lazy-wake jump"
+    );
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_OPEN),
+        "source stargate must settle to OPEN after direct lazy-wake jump"
+    );
+    let dest_h = ctx
+        .systems
+        .get_handle(gate.to_solar_system_id)
+        .expect("destination handle loaded");
+    assert!(
+        dest_h
+            .get_ball_snapshot(ship_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "ship must be materialized in destination solar system"
+    );
+}
+
+#[tokio::test]
+async fn rejected_stargate_jump_never_loads_lazy_destination_gh_1413() {
+    // parity: feat:navigation.stargate-jump
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.systems.set_lazy_stargate_activation(true);
+    let gate = pick_non_special_roundtrip_gate(&ctx);
+    let kw = HashMap::new();
+
+    let gate_radius = stargate_radius(&ctx, &gate);
+    let char_id = 91_413_002_i64;
+    let ship_id = 101_413_002_i64;
+    // Start outside 2,500 m perimeter.
+    let mut sess = setup_nav_pilot(
+        &ctx,
+        char_id,
+        ship_id,
+        587,
+        gate.from_solar_system_id,
+        gate.position + DVec3::new(gate_radius + 120.0 + 2_600.0, 0.0, 0.0),
+    )
+    .await;
+    let beyonce_id = bind_beyonce_in_sys(&ctx, &mut sess, gate.from_solar_system_id).await;
+    let src_h = ctx
+        .systems
+        .get_handle(gate.from_solar_system_id)
+        .expect("source system loaded");
+
+    // 1. Out of jump range -> NotCloseEnoughToJump, destination NOT loaded.
+    let err_range = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_range.code, "NotCloseEnoughToJump");
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED)
+    );
+
+    // Move ship within 2,500 m for remaining pre-jump guard assertions.
+    assert!(
+        src_h
+            .set_ball_position(
+                ship_id,
+                gate.position + DVec3::new(gate_radius + 800.0, 0.0, 0.0),
+            )
+            .await
+    );
+
+    // 2. Docked session (DB + session) -> ShipDocked, destination NOT loaded.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    sess.station_id = Some(60_003_760);
+    let err_docked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_docked.code, "ShipDocked");
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
+    sess.station_id = None;
+
+    // 3. Cloaked (active non-gate cloak) -> ShipCloaked, destination NOT loaded.
+    src_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = true;
+            cs.is_covert_cloak = false;
+            cs.gate_cloak_remaining_ticks = 0;
+        })
+        .await
+        .unwrap();
+    let err_cloaked = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_cloaked.code, "ShipCloaked");
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+
+    // 4. Disruptive Lance tackle/debuff -> DisruptiveLanceDebuffActive, destination NOT loaded.
+    src_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = false;
+            cs.lance_disrupted_remaining_s = 15.0;
+        })
+        .await
+        .unwrap();
+    let err_lance = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_lance.code, "DisruptiveLanceDebuffActive");
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+
+    // Clear lance debuff and verify Weapons Timer (Crimewatch) blocks without loading destination.
+    src_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.lance_disrupted_remaining_s = 0.0;
+        })
+        .await
+        .unwrap();
+    {
+        let now_unix = ctx.now_unix();
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let state = cw.get_or_create(char_id);
+        state.weapon_timer_until_unix = now_unix + 60;
+    }
+    let err_weapons = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err_weapons.code.contains("Weapon") || err_weapons.code.contains("Crimewatch"),
+        "expected weapons timer rejection, got {err_weapons:?}"
+    );
+    assert!(!ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).weapon_timer_until_unix = 0;
+    }
+
+    // 5. Approach intent transitions gate to ACTIVATING: jumping while ACTIVATING still raises
+    //    GateClosed, and once the 3s transition settles to OPEN, CmdStargateJump succeeds.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdFollowBall",
+        &[PyRep::Integer(gate.stargate_id), PyRep::Real(500.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdFollowBall to stargate");
+    assert!(ctx.systems.is_system_loaded(gate.to_solar_system_id));
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_ACTIVATING)
+    );
+    src_h.step_manual(1.0).await.unwrap();
+    let err_activating = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdStargateJump",
+            &[PyRep::Integer(gate.stargate_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_gate_closed_client_error(&err_activating);
+    assert_eq!(sess.solar_system_id, Some(gate.from_solar_system_id));
+
+    // Advance past STARGATE_ACTIVATION_TRANSITION_MS (~3s) and verify jump now succeeds.
+    src_h.step_manual(1.0).await.unwrap();
+    src_h.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        src_h
+            .stargate_activation_state(gate.stargate_id)
+            .map(|s| s.activation_state),
+        Some(eve_destiny::STARGATE_ACTIVATION_STATE_OPEN)
+    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_id),
+        "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdStargateJump must succeed once ACTIVATING settles to OPEN");
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
 }
 
 #[tokio::test]

@@ -1305,16 +1305,48 @@ async fn handle_cmd_stargate_jump(
     }
 
     let arrived_at_warp_dest = warp_perimeter?;
+    let dest_sys_id = jump.to_solar_system_id;
+    let now_ms = ctx.now_machonet_wallclock_ms();
 
-    let _ = old_handle.settle_stargate_activation_states(ctx.now_machonet_wallclock_ms());
-    if old_handle
-        .stargate_activation_state(gate_id)
-        .is_some_and(|st| st.activation_state != eve_destiny::STARGATE_ACTIVATION_STATE_OPEN)
-    {
-        return Err(BridgeRpcError::gate_closed(gate_id));
+    let _ = old_handle.settle_stargate_activation_states(now_ms);
+    if let Some(st) = old_handle.stargate_activation_state(gate_id) {
+        if st.activation_state != eve_destiny::STARGATE_ACTIVATION_STATE_OPEN {
+            // Under `lazy_stargate_activation = true`, gates pointing to not-yet-loaded
+            // destination systems initialize as `CLOSED` until navigation intent wakes them
+            // (`#1080`). A pilot already within jump range (`<= 2,500 m`, e.g. after login or
+            // server restart) sends `CmdStargateJump` directly without a preceding
+            // `CmdWarpToStuff`/`CmdFollowBall`, so lazily load the unloaded destination and
+            // open the gate here after all pre-jump validation/range/lock guards pass (`#1413`).
+            // Explicitly closed gates (`lazy_stargate_activation == false`, or destination
+            // already loaded while `CLOSED`) and mid-transition `ACTIVATING` gates still reject
+            // with `GateClosed`.
+            let is_lazy_unloaded_gate =
+                st.activation_state == eve_destiny::STARGATE_ACTIVATION_STATE_CLOSED
+                    && ctx.systems.lazy_stargate_activation()
+                    && !ctx.systems.is_system_loaded(dest_sys_id);
+            if is_lazy_unloaded_gate {
+                check_jump_session_lease(ctx, session, char_id, entry_had_online_lease)?;
+                if ctx
+                    .systems
+                    .ensure_stargate_destination_loaded_for_intent(old_sys, gate_id, now_ms)
+                    .is_some()
+                    && ctx.systems.is_system_loaded(dest_sys_id)
+                {
+                    let _ = old_handle.set_stargate_activation_state(
+                        gate_id,
+                        eve_destiny::STARGATE_ACTIVATION_STATE_OPEN,
+                        0,
+                        0,
+                    );
+                } else {
+                    return Err(BridgeRpcError::gate_closed(gate_id));
+                }
+            } else {
+                return Err(BridgeRpcError::gate_closed(gate_id));
+            }
+        }
     }
 
-    let dest_sys_id = jump.to_solar_system_id;
     let dest_gate_pos = ctx
         .sde
         .jumps
