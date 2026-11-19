@@ -1000,3 +1000,76 @@ async fn probe_scanning_read_purity_and_docked_guards() {
     let sys_wh = ctx_wh.systems.get_or_spawn(30_000_142);
     assert!(sys_wh.get_ball_snapshot(wh_item_id).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn unbound_request_scans_rejects_docked_and_shipless_before_fallthrough() {
+    let err_not_in_space = "NotInSpace";
+    let err_no_active_ship = "NoActiveShip";
+    let svc_scan_mgr = "scanMgr";
+    let m_request_scans = "RequestScans";
+
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let kw = HashMap::new();
+    let scan_args = [PyRep::Real(4.0 * 149_597_870_700.0), PyRep::Real(40.0)];
+
+    // Docked session must be rejected with NotInSpace before any fallthrough/DB mutation.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
+    sess.station_id = Some(60_003_760);
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    let direct_err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        None,
+        svc_scan_mgr,
+        m_request_scans,
+        &scan_args,
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(direct_err.code, err_not_in_space);
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // First dispatch_rpc runs fleet_social_notify::tick_fleet_lifecycle once; capture post-warmup epochs and check repeat docked + shipless guard calls stay pure.
+    let err = ctx
+        .dispatch_rpc(&mut sess, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_not_in_space);
+    let e_warm = ctx.db.state_epoch();
+    let c_warm = ctx.db.tx_commit_count();
+    let err = ctx
+        .dispatch_rpc(&mut sess, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_not_in_space);
+    assert_eq!(ctx.db.state_epoch(), e_warm);
+    assert_eq!(ctx.db.tx_commit_count(), c_warm);
+
+    // Undocked without an active ship and with no active probes must fail with NoActiveShip before fallthrough.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.active_ship_id = 0;
+        }
+    });
+    sess.station_id = None;
+    sess.ship_id = None;
+    let e1 = ctx.db.state_epoch();
+    let c1 = ctx.db.tx_commit_count();
+    let err = ctx
+        .dispatch_rpc(&mut sess, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_no_active_ship);
+    assert!(ctx.active_scanner_probes.read().unwrap().is_empty());
+    assert_eq!(ctx.db.state_epoch(), e1);
+    assert_eq!(ctx.db.tx_commit_count(), c1);
+}

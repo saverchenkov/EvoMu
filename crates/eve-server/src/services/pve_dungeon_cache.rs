@@ -45,9 +45,12 @@ pub const DUNGEON_ARCHETYPE_ICE_BELT: u32 = 28;
 pub const ICE_BELT_ANOMALY_TYPE: &str = "IceBelt";
 
 fn rpc_msg_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    let mut err = BridgeRpcError::user_error(code);
-    err.message = message.into();
-    err
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        code,
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
 }
 
 /// Parses the security ceiling an ice type advertises in its SDE description

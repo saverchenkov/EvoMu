@@ -643,7 +643,20 @@ fn dungeon_instance_kv_for_id(
 }
 
 pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: CharacterId) -> PyRep {
-    let (active_entries, expired_entries) =
+    let (has_expired, active_readonly) =
+        crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
+            let now = now_sec(reg);
+            let Some(list) = reg.escalations_by_char.get(&char_id) else {
+                return (false, Vec::new());
+            };
+            let has_expired = list.iter().any(|e| now >= e.expires_at_sec);
+            if has_expired {
+                (true, Vec::new())
+            } else {
+                (false, list.clone())
+            }
+        });
+    let (active_entries, expired_entries) = if has_expired {
         crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
             let now = now_sec(reg);
             let mut expired = Vec::new();
@@ -662,7 +675,10 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
                 Vec::new()
             };
             (active, expired)
-        });
+        })
+    } else {
+        (active_readonly, Vec::new())
+    };
 
     if !expired_entries.is_empty() {
         let expired_instance_ids: Vec<i64> = expired_entries.iter().map(|e| e.instance_id).collect();

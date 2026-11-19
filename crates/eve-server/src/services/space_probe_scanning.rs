@@ -27,13 +27,22 @@ fn resolve_caller_solar_system(ctx: &ServerContext, session: &SessionState, char
         .unwrap_or(0)
 }
 
+fn probe_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        code,
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
 fn require_undocked_probe_space(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<(i64, u32), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError::user_error("NotInSpace"));
+        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
     }
     if session.solar_system_id.is_none()
         && ctx.db.with_snapshot(|s| {
@@ -42,7 +51,7 @@ fn require_undocked_probe_space(
                 .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
         })
     {
-        return Err(BridgeRpcError::user_error("NotInSpace"));
+        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
     }
     Ok((char_id, resolve_caller_solar_system(ctx, session, char_id)))
 }
@@ -1099,13 +1108,19 @@ async fn handle_request_scans(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     let has_any_tracked_probes = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
         map.values().any(|p| p.owner_char_id == char_id && p.state >= 0)
     });
+    if !has_any_tracked_probes && session.ship_id.is_none() {
+        return Some(Err(probe_rpc_err(
+            "NoActiveShip",
+            "Session has no active ship",
+        )));
+    }
     if !has_any_tracked_probes
         && bound_entry.is_none()
         && (args.is_empty() || matches!(args.first(), Some(PyRep::Real(_))))
@@ -1114,17 +1129,12 @@ async fn handle_request_scans(
         return None;
     }
 
-    let (_, caller_sys) = match require_undocked_probe_space(ctx, session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
     if let Some(b) = bound_entry {
         if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot request probe scans for a remote solar system".into(),
-                client_error: None,
-            }));
+            return Some(Err(probe_rpc_err(
+                "AccessDenied",
+                "Cannot request probe scans for a remote solar system",
+            )));
         }
     }
     let sys_id = caller_sys;
@@ -1137,9 +1147,10 @@ async fn handle_request_scans(
             .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
     });
     if !has_active_in_sys {
-        let mut err = BridgeRpcError::user_error("NoActiveProbes");
-        err.message = "No active scanner probes in space".into();
-        return Some(Err(err));
+        return Some(Err(probe_rpc_err(
+            "NoActiveProbes",
+            "No active scanner probes in space",
+        )));
     }
 
     let override_range_step = args

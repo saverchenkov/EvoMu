@@ -429,3 +429,110 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
     assert_eq!(ctx.db.state_epoch(), e1);
     assert_eq!(ctx.db.tx_commit_count(), c1);
 }
+
+#[tokio::test]
+async fn escalation_queries_and_special_gate_guards_are_read_pure() {
+    let err_no_active_ship = "NoActiveShip";
+    let err_not_in_space = "NotInSpace";
+    let svc_exp_mgr = "dungeonExplorationMgr";
+    let svc_scan_svc = "scanSvc";
+    let svc_keeper = "keeper";
+    let m_get_path = "GetMyEscalatingPathDetails";
+    let m_get_esc = "GetEscalations";
+    let m_activate_gate = "ActivateAccelerationGate";
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_800_000)));
+    let kw = HashMap::new();
+    let sys_id = 30_000_142;
+
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(90_000_088),
+        solar_system_id: Some(sys_id),
+        ..Default::default()
+    };
+
+    // Empty-repo escalation reads must not create or touch DB mutations.
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for (svc, method) in [
+        (svc_exp_mgr, m_get_path),
+        (svc_scan_svc, m_get_path),
+        (svc_exp_mgr, m_get_esc),
+    ] {
+        let res = handle_pve_exploration(&ctx, &mut sess, svc, method, &[], &kw)
+            .await
+            .unwrap();
+        assert!(res.is_ok(), "{svc}.{method} failed: {res:?}");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Seed a special Homefront site without touching DB again after setup; undocked shipless gate activation -> NoActiveShip (and read-only special-site lookup).
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.homefront_sites.entry(sys_id).or_default().push(
+            crate::services::pve_special_sites::HomefrontSiteRecord {
+                instance_id: 710_701,
+                dungeon_id: 900_001,
+                dungeon_name: "Test Homefront Raid".to_string(),
+                solar_system_id: sys_id,
+                optimal_fleet_size: 5,
+                base_pilot_isk: 1_000_000,
+                completed: false,
+                reward_paid_isk: 0,
+                boss_npc_ball_id: 9_888_777_667,
+                boss_type_id: 0,
+            },
+        );
+    });
+    let e1 = ctx.db.state_epoch();
+    let c1 = ctx.db.tx_commit_count();
+
+    let hf_str_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        svc_keeper,
+        m_activate_gate,
+        &[PyRep::String(format!("HF-{sys_id}-0"))],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(hf_str_err.code, err_no_active_ship);
+
+    let hf_int_err = handle_pve_exploration(
+        &ctx,
+        &mut sess,
+        svc_keeper,
+        m_activate_gate,
+        &[PyRep::Integer(710_701)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(hf_int_err.code, err_no_active_ship);
+
+    // Docked non-observatory acceleration gate activation -> NotInSpace and zero DB mutation.
+    let mut docked = sess.clone();
+    docked.station_id = Some(60_003_760);
+    docked.ship_id = Some(500_000_088);
+    let docked_err = handle_pve_exploration(
+        &ctx,
+        &mut docked,
+        svc_keeper,
+        m_activate_gate,
+        &[PyRep::Integer(710_701)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(docked_err.code, err_not_in_space);
+    assert_eq!(ctx.db.state_epoch(), e1);
+    assert_eq!(ctx.db.tx_commit_count(), c1);
+}

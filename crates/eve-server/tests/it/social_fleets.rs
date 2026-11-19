@@ -1001,7 +1001,11 @@ async fn test_so6_cosmic_signatures_generation_and_probing_math() {
         (sig.signature_id.clone(), sig.position)
     });
 
-    // 2. Wide probe scan (16 AU): probes detect signal and group
+    // 2. Undock into space before wide probe scan (16 AU)
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    ctx.advance_secs(12);
     let wide_scan = ctx
         .dispatch_rpc(
             &mut sess,

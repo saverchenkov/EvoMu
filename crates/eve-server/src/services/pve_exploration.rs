@@ -1031,9 +1031,12 @@ fn resolve_session_system_id(
 }
 
 fn rpc_msg_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    let mut err = BridgeRpcError::user_error(code);
-    err.message = message.into();
-    err
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        code,
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
 }
 
 fn require_undocked_exploration_space(
@@ -1043,7 +1046,10 @@ fn require_undocked_exploration_space(
 ) -> Result<(i64, SolarSystemId), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(BridgeRpcError::user_error("NotInSpace"));
+        return Err(rpc_msg_err(
+            "NotInSpace",
+            "Cannot access dungeon site while docked",
+        ));
     }
     let sys_id = resolve_session_system_id(ctx, session)?;
     if session.solar_system_id.is_none()
@@ -1053,10 +1059,13 @@ fn require_undocked_exploration_space(
                 .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
         })
     {
-        return Err(BridgeRpcError::user_error("NotInSpace"));
+        return Err(rpc_msg_err(
+            "NotInSpace",
+            "Cannot access dungeon site while docked",
+        ));
     }
     if require_ship && session.ship_id.is_none() {
-        return Err(BridgeRpcError::user_error("NoActiveShip"));
+        return Err(rpc_msg_err("NoActiveShip", "Session has no active ship"));
     }
     Ok((char_id, sys_id))
 }
@@ -1351,75 +1360,33 @@ async fn handle_enter_combat_anomaly(
     res
 }
 
-fn resolve_special_site_string_instance_id_readonly(
-    ctx: &ServerContext,
-    site_str: &str,
-) -> Option<i64> {
-    let parts: Vec<&str> = site_str.split('-').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let sys_id: u32 = parts[1].parse().ok()?;
-    let idx: usize = parts[2].parse().ok()?;
-    crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| match parts[0] {
-        "HF" => reg
-            .homefront_sites
-            .get(&sys_id)
-            .and_then(|list| list.get(idx).map(|s| s.instance_id))
-            .or_else(|| (idx >= 1000).then_some(idx as i64)),
-        "TRIG" => reg
-            .triglavian_sites
-            .get(&sys_id)
-            .and_then(|list| list.get(idx).map(|s| s.instance_id))
-            .or_else(|| (idx >= 1000).then_some(idx as i64)),
-        "DRIFTER" => reg
-            .drifter_hives
-            .values()
-            .find(|h| h.site_id == site_str || h.solar_system_id == sys_id)
-            .map(|h| h.solar_system_id as i64),
-        _ => None,
-    })
-}
-
-fn is_known_special_site_instance_id_readonly(ctx: &ServerContext, instance_id: i64) -> bool {
-    crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-        reg.drifter_hives.contains_key(&(instance_id as u32))
-            || reg
-                .drifter_hives
-                .values()
-                .any(|h| (h.solar_system_id as i64) == instance_id)
-            || reg
-                .homefront_sites
-                .values()
-                .flatten()
-                .any(|s| s.instance_id == instance_id)
-            || reg
-                .triglavian_sites
-                .values()
-                .flatten()
-                .any(|s| s.instance_id == instance_id)
-    })
-}
-
 async fn handle_activate_acceleration_gate(
     ctx: &ServerContext,
     session: &mut SessionState,
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if method == "ActivateAccelerationGate" {
+        if let Err(e) = ServerContext::require_character(session) {
+            return Some(Err(e));
+        }
+        if let (Ok(pre_sys), Some(gate_id)) = (
+            resolve_session_system_id(ctx, session),
+            args.first().and_then(|a| a.as_i64()),
+        ) {
+            if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
+                ctx, session, pre_sys, gate_id,
+            )
+            .await
+            {
+                return Some(res);
+            }
+        }
+    }
     let (_, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    if let Some(gate_id) = args.first().and_then(|a| a.as_i64()) {
-        if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
-            ctx, session, sys_id, gate_id,
-        )
-        .await
-        {
-            return Some(res);
-        }
-    }
     let has_runtime_gate = ctx.db.with_snapshot(|snap| {
         snap.dungeon_runtime
             .instances
@@ -1428,7 +1395,7 @@ async fn handle_activate_acceleration_gate(
     });
     if has_runtime_gate {
         if session.ship_id.is_none() {
-            return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+            return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
         }
         if let Some(res) = crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
             ctx, session, sys_id, args,
@@ -1439,18 +1406,10 @@ async fn handle_activate_acceleration_gate(
         }
     }
     let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let special_id_arg = args.first().and_then(|a| a.as_i64()).or_else(|| {
-        let candidate = resolve_special_site_string_instance_id_readonly(ctx, &site_id)?;
-        if session.ship_id.is_some()
-            && is_known_special_site_instance_id_readonly(ctx, candidate)
-        {
-            crate::services::r6_t1_p0_helpers::resolve_special_site_string_instance_id(
-                ctx, &site_id,
-            )
-        } else {
-            Some(candidate)
-        }
-    });
+    let special_id_arg = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| super::r6_t1_p0_helpers::resolve_special_site_string_instance_id(ctx, &site_id));
     if let Some(item_id) = special_id_arg {
         // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
         // any other gate item belongs to the in-space gate / mission handlers.
@@ -1480,18 +1439,13 @@ async fn handle_activate_acceleration_gate(
         match gate_site {
             Some(sid) => {
                 if session.ship_id.is_none() {
-                    return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+                    return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
                 }
                 site_id = sid;
             }
-            None if session.ship_id.is_some()
-                && is_known_special_site_instance_id_readonly(ctx, item_id)
-                && crate::services::r6_t1_p0_helpers::is_known_special_site_instance_id(
-                    ctx, item_id,
-                ) =>
-            {
+            None if super::r6_t1_p0_helpers::is_known_special_site_instance_id(ctx, item_id) => {
                 if session.ship_id.is_none() {
-                    return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+                    return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
                 }
                 let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
                 let res = crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count).await;
@@ -1523,7 +1477,7 @@ async fn handle_activate_acceleration_gate(
             }
             None if method == "EnterNextDungeonRoom" => {
                 if session.ship_id.is_none() {
-                    return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+                    return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
                 }
                 return Some(Err(rpc_msg_err(
                     "DungeonNotFound",
@@ -1534,7 +1488,7 @@ async fn handle_activate_acceleration_gate(
         }
     }
     if session.ship_id.is_none() {
-        return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+        return Some(Err(rpc_msg_err("NoActiveShip", "Session has no active ship")));
     }
     if site_id.is_empty() {
         return Some(Err(rpc_msg_err("DungeonNotFound", "Dungeon siteID is required")));

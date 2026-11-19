@@ -1280,6 +1280,15 @@ async fn handle_cone_scan(
     if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
         return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
     }
+    if session.ship_id.is_none() {
+        return Some(Err(BridgeRpcError::with_client_error(
+            "NoActiveShip",
+            "Directional scanner requires an active ship",
+            eve_proto::ClientError::CustomInfo(
+                "Directional scanner requires an active ship".into(),
+            ),
+        )));
+    }
     let raw_angle = args
         .first()
         .and_then(|a| a.as_f64())

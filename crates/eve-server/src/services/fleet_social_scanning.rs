@@ -44,6 +44,43 @@ fn read_system_signatures_ready(
     })
 }
 
+fn scan_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        code,
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
+fn require_undocked_scanning_system(
+    session: &SessionState,
+    docked_code: &str,
+    docked_msg: &str,
+) -> Result<(i64, u32), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(scan_rpc_err(docked_code, docked_msg));
+    }
+    let sys_id = match session.solar_system_id {
+        Some(s) if s > 0 => s,
+        _ => return Err(scan_rpc_err("NoSolarSystem", "Session has no active solar system")),
+    };
+    Ok((char_id, sys_id))
+}
+
+fn require_undocked_scanning_ship(
+    session: &SessionState,
+    docked_code: &str,
+    docked_msg: &str,
+) -> Result<(i64, u32), BridgeRpcError> {
+    let (char_id, sys_id) = require_undocked_scanning_system(session, docked_code, docked_msg)?;
+    if session.ship_id.is_none() {
+        return Err(scan_rpc_err("NoActiveShip", "Session has no active ship"));
+    }
+    Ok((char_id, sys_id))
+}
+
 pub(super) async fn handle_scanning_and_wormholes(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -289,13 +326,13 @@ pub(super) async fn handle_scanning_and_wormholes(
             if args.len() <= 1 && (args.is_empty() || matches!(args.first(), Some(PyRep::Real(_)))) {
                 return None;
             }
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
+            let (char_id, sys_id) = match require_undocked_scanning_ship(
+                session,
+                "NotInSpace",
+                "Cannot request probe scans while docked",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
             if read_system_signatures_ready(ctx, sys_id, now_unix).is_none() {
@@ -503,22 +540,22 @@ pub(super) async fn handle_scanning_and_wormholes(
         }
 
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError::user_error("CannotDirectionalScanWhileDocked")));
-            }
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
+            let (char_id, sys_id) = match require_undocked_scanning_system(
+                session,
+                "CannotDirectionalScanWhileDocked",
+                "Directional scanner cannot be used while docked",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
                 return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
             }
             if session.ship_id.is_none() {
-                return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+                return Some(Err(scan_rpc_err(
+                    "NoActiveShip",
+                    "Directional scanner requires an active ship",
+                )));
             }
             let scan_angle = args
                 .first()
@@ -609,7 +646,11 @@ pub(super) async fn handle_scanning_and_wormholes(
         }
 
         ("scanMgr", "LaunchProbes") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, _sys_id) = match require_undocked_scanning_ship(
+                session,
+                "NotInSpace",
+                "Cannot launch scanner probes while docked",
+            ) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
