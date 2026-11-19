@@ -676,7 +676,7 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
 
     let bcast_a = sys_rx
         .try_recv()
-        .expect("execute_wreck_salvage_cycle must flush RemoveBall immediately before OnRemoveFX");
+        .expect("execute_wreck_salvage_cycle must flush RemoveBall immediately before module deactivation");
     assert!(
         bcast_a
             .observer_events
@@ -780,4 +780,312 @@ async fn salvage_emits_item_change_flushes_remove_ball_and_clears_target_locks()
         }),
         "loot moved from salvaged wreck into jetcan must emit OnItemChange from old wreck location: {notifs_b:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_salvaged_wreck_rejects_already_consumed_or_relocated_wreck() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_331_001_i64;
+    let wreck_gone = 100_331_010_i64;
+    let wreck_relocated = 100_331_011_i64;
+    let loot_id = 100_331_020_i64;
+
+    spawn_ship_ball(&ctx, sys_id, ship_id, char_id, 587, DVec3::ZERO, 40.0);
+    spawn_wreck_ball(
+        &ctx,
+        sys_id,
+        wreck_gone,
+        26_573,
+        char_id,
+        DVec3::new(900.0, 0.0, 0.0),
+        30.0,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            loot_id,
+            make_item(loot_id, 15_331, char_id, wreck_gone, InventoryFlag::Cargo, 3),
+        );
+        snap.items.insert(
+            wreck_relocated,
+            make_item(
+                wreck_relocated,
+                26_573,
+                char_id,
+                60_003_760, // wrong location (not in solar system sys_id)
+                InventoryFlag::None,
+                1,
+            ),
+        );
+    });
+
+    let mats = vec![(25_588_u32, 2_i32)];
+    let first_can = commit_salvaged_wreck_inventory_and_notify(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_gone,
+        [900.0, 0.0, 0.0],
+        &mats,
+    )
+    .expect("first salvage commit succeeds");
+    assert!(first_can.is_some());
+    let snap_len_after_first = ctx.db.with_snapshot(|snap| snap.items.len());
+    let cargo_after_first: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+            .map(|i| i.item_id)
+            .collect()
+    });
+    assert_eq!(cargo_after_first.len(), 1);
+
+    // Second salvage commit on already-consumed wreck must fail closed with WreckMissing and mint zero items/cans.
+    let second_res = commit_salvaged_wreck_inventory_and_notify(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_gone,
+        [900.0, 0.0, 0.0],
+        &mats,
+    );
+    assert!(matches!(second_res, Err(CommitSalvageError::WreckMissing)));
+
+    // Wreck outside the solar system must likewise be rejected with WreckMissing.
+    let relocated_res = commit_salvaged_wreck_inventory_and_notify(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_relocated,
+        [0.0, 0.0, 0.0],
+        &mats,
+    );
+    assert!(matches!(relocated_res, Err(CommitSalvageError::WreckMissing)));
+
+    let err_second_cycle =
+        execute_wreck_salvage_cycle(&ctx, sys_id, char_id, ship_id, wreck_gone, None)
+            .await
+            .expect_err("second cycle on consumed wreck must return TargetNotInSpace");
+    assert_eq!(err_second_cycle.code, "TargetNotInSpace");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.len(), snap_len_after_first);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeating_salvager_salvage_end_flushes_remove_ball_before_single_deactivation() {
+    let mut ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_332_001_i64;
+    let mod_id = 100_332_002_i64;
+    let mod_second = 100_332_003_i64;
+    let wreck_id = 100_332_010_i64;
+    let mod_tid = 999_862_u32;
+
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        let mut salv_mod = sde.types[&25_861].clone();
+        salv_mod.type_id = mod_tid;
+        salv_mod.default_attributes.insert(902, 200.0);
+        sde.types.insert(mod_tid, salv_mod);
+    }
+
+    spawn_ship_ball(&ctx, sys_id, ship_id, char_id, 587, DVec3::ZERO, 40.0);
+    spawn_wreck_ball(
+        &ctx,
+        sys_id,
+        wreck_id,
+        26_573,
+        char_id,
+        DVec3::new(1_000.0, 0.0, 0.0),
+        30.0,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod_id,
+            make_item(mod_id, mod_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod_second,
+            make_item(mod_second, mod_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.module_active_states.insert(mod_id);
+        snap.module_active_states.insert(mod_second);
+    });
+    let user_id = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.user_id))
+        .expect("demo char exists");
+    ctx.db
+        .acquire_online_lock(user_id, 9_730, Some(char_id), true, ctx.now_unix())
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    sys_handle
+        .add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id,
+            module_id: mod_id,
+            module_type_id: mod_tid,
+            owner_char_id: Some(char_id),
+            effect_name: "salvaging".to_string(),
+            target_id: Some(wreck_id),
+            repeat: 1000,
+            duration_s: 5.0,
+            elapsed_s: 0.0,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    {
+        let mut st = sys_handle.actor_state.write().unwrap();
+        st.pending_cycle_actions
+            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                char_id,
+                ship_id,
+                module_id: mod_id,
+                module_type_id: mod_tid,
+                wreck_id,
+                repeat: 1000,
+                effect_name: "salvaging".to_string(),
+                next_cycle_cap_deducted: false,
+                deducted_cap_gj: 0.0,
+            });
+    }
+
+    let mut sys_rx = sys_handle.subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let timeline = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let timeline_bg = std::sync::Arc::clone(&timeline);
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+    let recorder = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                msg = sys_rx.recv() => {
+                    if let Ok(bcast) = msg {
+                        if bcast
+                            .observer_events
+                            .get(&ship_id)
+                            .is_some_and(|evs| evs.iter().any(|ev| matches!(
+                                ev,
+                                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
+                            )))
+                        {
+                            timeline_bg.lock().unwrap().push("RemoveBall".to_string());
+                        }
+                    }
+                }
+                msg = notify_rx.recv() => {
+                    if let Ok((cid, notif)) = msg {
+                        if cid == char_id {
+                            if notif.event == "OnGodmaShipEffect"
+                                && notif.args.first().and_then(|v| v.as_i64()) == Some(mod_id)
+                                && notif.args.get(2) == Some(&eve_proto::PyRep::Bool(false))
+                            {
+                                timeline_bg.lock().unwrap().push("OnGodmaShipEffect(false)".to_string());
+                            } else if notif.event == "OnSpecialFX"
+                                && notif.args.get(1).and_then(|v| v.as_i64()) == Some(mod_id)
+                                && notif.args.get(7).and_then(|v| v.as_i64()) == Some(0)
+                            {
+                                timeline_bg.lock().unwrap().push("OnSpecialFX(start=0)".to_string());
+                            }
+                        }
+                    }
+                }
+                _ = &mut done_rx => {
+                    while let Ok(bcast) = sys_rx.try_recv() {
+                        if bcast
+                            .observer_events
+                            .get(&ship_id)
+                            .is_some_and(|evs| evs.iter().any(|ev| matches!(
+                                ev,
+                                eve_destiny::DestinyEvent::RemoveBall { ball_id } if *ball_id == wreck_id
+                            )))
+                        {
+                            timeline_bg.lock().unwrap().push("RemoveBall".to_string());
+                        }
+                    }
+                    while let Ok((cid, notif)) = notify_rx.try_recv() {
+                        if cid == char_id {
+                            if notif.event == "OnGodmaShipEffect"
+                                && notif.args.first().and_then(|v| v.as_i64()) == Some(mod_id)
+                                && notif.args.get(2) == Some(&eve_proto::PyRep::Bool(false))
+                            {
+                                timeline_bg.lock().unwrap().push("OnGodmaShipEffect(false)".to_string());
+                            } else if notif.event == "OnSpecialFX"
+                                && notif.args.get(1).and_then(|v| v.as_i64()) == Some(mod_id)
+                                && notif.args.get(7).and_then(|v| v.as_i64()) == Some(0)
+                            {
+                                timeline_bg.lock().unwrap().push("OnSpecialFX(start=0)".to_string());
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+    let _ = done_tx.send(());
+    recorder.await.unwrap();
+
+    let recorded = timeline.lock().unwrap().clone();
+    let remove_pos = recorded
+        .iter()
+        .position(|e| e == "RemoveBall")
+        .expect("RemoveBall must be broadcast");
+    let godma_positions: Vec<usize> = recorded
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (e == "OnGodmaShipEffect(false)").then_some(i))
+        .collect();
+    let sfx_positions: Vec<usize> = recorded
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| (e == "OnSpecialFX(start=0)").then_some(i))
+        .collect();
+    assert_eq!(godma_positions.len(), 1, "must emit exactly one OnGodmaShipEffect(false): {recorded:?}");
+    assert_eq!(sfx_positions.len(), 1, "must emit exactly one OnSpecialFX(start=0): {recorded:?}");
+    assert!(
+        remove_pos < godma_positions[0] && remove_pos < sfx_positions[0],
+        "RemoveBall must flush BEFORE OnGodmaShipEffect(false) and OnSpecialFX(start=0): {recorded:?}"
+    );
+
+    // If a second repeating SalvageEnd ticks after the wreck and cycle were already removed,
+    // it must NOT emit a duplicate OnGodmaShipEffect(false).
+    let _ = ctx.drain_notifications_for_char(char_id);
+    {
+        let mut st = sys_handle.actor_state.write().unwrap();
+        st.pending_cycle_actions
+            .push(crate::system_actor::PendingCycleAction::SalvageEnd {
+                char_id,
+                ship_id,
+                module_id: mod_second,
+                module_type_id: mod_tid,
+                wreck_id,
+                repeat: 1000,
+                effect_name: "salvaging".to_string(),
+                next_cycle_cap_deducted: false,
+                deducted_cap_gj: 0.0,
+            });
+    }
+    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+    let dup_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !dup_notifs.iter().any(|n| n.event == "OnGodmaShipEffect" || n.event == "OnSpecialFX"),
+        "already-removed cycle must not emit a duplicate OnGodmaShipEffect/OnSpecialFX: {dup_notifs:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.module_active_states.contains(&mod_id));
+        assert!(!snap.module_active_states.contains(&mod_second));
+    });
 }

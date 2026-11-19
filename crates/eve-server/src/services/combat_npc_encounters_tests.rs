@@ -280,4 +280,38 @@ async fn populate_npc_wreck_on_turret_kill_handles_pithi_invader_and_faction_loo
         resolve_npc_faction_id_for_loot(&ctx, 999_999_888, Some(500_011), None),
         500_011
     );
+
+    // Negative case (F-02): empty unpiloted player ship (category_id == 6, e.g. Rifter 587)
+    // with npc_opt == None must NEVER mint synthetic fallback scraps, materials, or ammo.
+    let player_ship_tid = 587_u32;
+    assert_eq!(ctx.sde.types[&player_ship_tid].category_id, 6);
+    let player_wreck_id = 960_201_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            player_wreck_id,
+            make_fighter_item(player_wreck_id, 26_557, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    let mut dropped_player = Vec::new();
+    let _ = populate_npc_wreck_on_turret_kill(
+        &ctx,
+        sys_id,
+        960_102,
+        player_ship_tid,
+        DVec3::ZERO,
+        player_wreck_id,
+        char_id,
+        &mut dropped_player,
+    )
+    .await;
+    assert!(
+        dropped_player.is_empty(),
+        "empty unpiloted player ship wreck must not mint synthetic NPC loot: {dropped_player:?}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.values().any(|i| i.location_id == player_wreck_id),
+            "no synthetic loot items may be inserted into player ship wreck"
+        );
+    });
 }

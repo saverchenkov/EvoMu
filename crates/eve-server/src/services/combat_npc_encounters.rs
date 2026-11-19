@@ -685,6 +685,11 @@ pub fn resolve_officer_or_commander_sde_drop(ctx: &ServerContext, npc_type_id: u
     None
 }
 
+/// DERIVED: Resolves a fallback NPC faction ID for generic wreck loot selection when
+/// `sde_types.faction_id` is `NULL` (for example `/spawnnpc Pithi Invader`, type `16997`).
+/// The name/group/wreck-title keyword table below is a synthesized fallback mapping rather than
+/// an imported CCP faction-drop relation, followed by runtime `npc_faction_id`, `spawn_faction_id`,
+/// and `race_id` fallbacks.
 fn resolve_npc_faction_id_for_loot(
     ctx: &ServerContext,
     npc_type_id: u32,
@@ -757,6 +762,11 @@ fn resolve_npc_faction_id_for_loot(
         .unwrap_or(0)
 }
 
+/// DERIVED: Synthesized default fallback loot table for killed NPC entities (`category_id == 11`
+/// or tracked NPC spawn) when specialized SDE/mission/convoy/Sleeper/Triglavian loot tables leave
+/// `loot_to_insert` empty. Uses clamped `type_materials` (`1..=50`), synthesized `Metal Scraps`
+/// (`15_331` x10, or `34` fallback), and hardcoded faction-matched ammo x100 matching `npc_ai.rs`
+/// rather than imported CCP NPC loot drop tables.
 fn append_default_npc_wreck_loot(
     ctx: &ServerContext,
     npc_type_id: u32,
@@ -892,7 +902,14 @@ pub async fn populate_npc_wreck_on_turret_kill(
         loot_to_insert.push((48121, 1, false));
     }
 
-    if wreck_id > 0 && loot_to_insert.is_empty() {
+    let is_npc_entity = ctx
+        .sde
+        .types
+        .get(&npc_type_id)
+        .is_some_and(|t| t.category_id == 11)
+        || npc_opt.is_some()
+        || spawn_faction_id.is_some();
+    if wreck_id > 0 && is_npc_entity && loot_to_insert.is_empty() {
         let effective_faction_id = resolve_npc_faction_id_for_loot(
             ctx,
             npc_type_id,
