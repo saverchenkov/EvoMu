@@ -7,11 +7,14 @@ use crate::router::ServerContext;
 use eve_db::types::{
     KillRightRecord, StandingTransactionRecord, TrainedSkillRecord, UpwellStructureRecord,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, JumpCloneRecord, WorldStateSnapshot};
+use eve_db::{
+    corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, JumpCloneRecord,
+    WorldStateSnapshot,
+};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
 use eve_sde::{InvType, SdeRegistry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 fn put_item(
@@ -223,7 +226,7 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
         Some(1)
     );
 
-    // ListStations reports items in station_id
+    // ListStations reports items in station_id with V24 typeID column
     let stations_rs = handle_clones_and_sheet(
         &ctx,
         &mut sess,
@@ -234,10 +237,21 @@ fn get_character_info_and_list_stations_cover_alpha_omega_and_ownership() {
     )
     .expect("handled")
     .expect("stations ok");
-    let PyRep::Rowset { rows, .. } = stations_rs else {
+    let PyRep::Rowset { columns, rows } = stations_rs else {
         panic!("expected Rowset");
     };
-    assert!(rows.iter().any(|r| r.first().and_then(PyRep::as_i64) == Some(station_id)));
+    assert_eq!(
+        columns,
+        vec!["stationID", "solarSystemID", "itemCount", "typeID"]
+    );
+    let expected_st = ctx.sde.stations.get(&station_id).expect("station in SDE");
+    let row = rows
+        .iter()
+        .find(|r| r.first().and_then(PyRep::as_i64) == Some(station_id))
+        .expect("station row present");
+    assert_eq!(row[1], PyRep::Integer(i64::from(expected_st.solar_system_id)));
+    assert!(row[2].as_i64().unwrap_or(0) >= 1);
+    assert_eq!(row[3], PyRep::Integer(i64::from(expected_st.station_type_id)));
 }
 
 #[test]
@@ -932,6 +946,447 @@ fn destroy_installed_clone_unknown_id_does_not_create_empty_entry() {
     ctx.db.with_snapshot(|snap| {
         assert!(snap.jump_clones.get(&char_id).is_some_and(Vec::is_empty));
     });
+}
+
+#[test]
+fn list_stations_includes_type_id_filters_and_isolates_non_gm_ownership() {
+    let ctx = test_ctx();
+    let mut st_iter = ctx.sde.stations.values();
+    let st1 = st_iter.next().expect("first SDE station").clone();
+    let st2 = st_iter
+        .find(|s| s.station_id != st1.station_id)
+        .expect("second SDE station")
+        .clone();
+    let bp_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 9)
+        .expect("blueprint SDE type")
+        .type_id;
+
+    let char_id = 90_000_099_i64;
+    let other_char_id = 90_000_199_i64;
+    let ceo_id = 90_000_299_i64;
+    let plain_id = 90_000_399_i64;
+    let sag1_id = 90_000_499_i64;
+    let corp_id = 98_000_099_i64;
+    let other_corp_id = 98_000_199_i64;
+    let struct_a = 1_001_896_954_561_i64;
+    let struct_b = 1_048_000_000_099_i64;
+    let struct_other = 1_048_000_000_100_i64;
+    let struct_destroyed = 1_048_000_000_101_i64;
+    let struct_unanchored = 1_048_000_000_102_i64;
+    let empty_kw = HashMap::new();
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("demo char");
+        let uid = base_ch.user_id;
+        for (cid, cid_corp) in [
+            (char_id, corp_id),
+            (ceo_id, corp_id),
+            (plain_id, corp_id),
+            (sag1_id, corp_id),
+            (other_char_id, other_corp_id),
+        ] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = cid_corp;
+            ch.station_id = Some(st1.station_id);
+            snap.characters.insert(cid, ch);
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "ListStationsTest", "LSTT", ceo_id);
+        corp.hq_station_id = Some(st1.station_id);
+        corp.members = HashSet::from([ceo_id, char_id, plain_id, sag1_id]);
+        corp.member_roles
+            .insert(char_id, corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(sag1_id, corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        snap.corporations.insert(corp_id, corp);
+
+        let mut other_corp =
+            CorporationRecord::new(other_corp_id, "ForeignCorp", "FCRP", other_char_id);
+        other_corp.members = HashSet::from([other_char_id]);
+        snap.corporations.insert(other_corp_id, other_corp);
+
+        snap.structures.insert(
+            struct_a,
+            UpwellStructureRecord {
+                structure_id: struct_a,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Player Astrahus".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_b,
+            UpwellStructureRecord {
+                structure_id: struct_b,
+                type_id: 35_835,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_144,
+                name: "Player Raitaru".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_other,
+            UpwellStructureRecord {
+                structure_id: struct_other,
+                type_id: 35_825,
+                owner_corp_id: other_corp_id,
+                solar_system_id: 30_000_142,
+                name: "Foreign Structure".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_destroyed,
+            UpwellStructureRecord {
+                structure_id: struct_destroyed,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                state: "Destroyed".into(),
+                name: "Destroyed Astrahus".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            struct_unanchored,
+            UpwellStructureRecord {
+                structure_id: struct_unanchored,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                state: "Unanchored".into(),
+                name: "Unanchored Astrahus".into(),
+                ..Default::default()
+            },
+        );
+
+        // Non-station/non-structure/unknown/destroyed locations & zero-qty/marker/fitted items
+        // must never appear in ListStations.
+        put_item(snap, 34, char_id, 30_000_142, InventoryFlag::None, 5, false);
+        put_item(snap, 34, char_id, char_id, InventoryFlag::Wardrobe, 1, true);
+        put_item(snap, 34, char_id, 9_900_100, InventoryFlag::Hangar, 1, false);
+        put_item(snap, 34, char_id, 69_999_999, InventoryFlag::Hangar, 1, false);
+        put_item(snap, 34, char_id, 1_999_999_999_999, InventoryFlag::Hangar, 1, false);
+        put_item(snap, 34, char_id, st2.station_id, InventoryFlag::Hangar, 0, false);
+        put_item(snap, 34, char_id, st2.station_id, InventoryFlag::HiSlot0, 1, false);
+        put_item(snap, 34, char_id, struct_destroyed, InventoryFlag::Hangar, 10, false);
+        put_item(snap, 34, char_id, struct_unanchored, InventoryFlag::Hangar, 10, false);
+        uid
+    });
+
+    let mut sess = make_session(uid, char_id, corp_id, Some(st1.station_id), None);
+    assert!(!sess.has_gm_role());
+
+    let call_ls = |s: &mut SessionState, svc: &str, args: &[PyRep], kw: &HashMap<String, PyRep>| -> (Vec<String>, Vec<Vec<i64>>) {
+        let rep = handle_clones_and_sheet(&ctx, s, svc, "ListStations", args, kw)
+            .expect("handled")
+            .expect("ListStations ok");
+        let PyRep::Rowset { columns, rows } = rep else {
+            panic!("expected Rowset, got {rep:?}");
+        };
+        let parsed = rows
+            .into_iter()
+            .map(|r| r.into_iter().map(|c| c.as_i64().expect("int cell")).collect())
+            .collect();
+        (columns, parsed)
+    };
+
+    let expected_cols = vec![
+        "stationID".to_string(),
+        "solarSystemID".to_string(),
+        "itemCount".to_string(),
+        "typeID".to_string(),
+    ];
+
+    // 1. Empty station/structure result set preserves the 4-column Rowset schema.
+    for svc in ["charMgr", "charUnboundMgr"] {
+        let (cols, rows) = call_ls(&mut sess, svc, &[], &empty_kw);
+        assert_eq!(cols, expected_cols);
+        assert!(rows.is_empty(), "non-station items must not appear: {rows:?}");
+    }
+
+    // Populate personal, foreign character, session corp, and foreign corp assets.
+    ctx.db.with_mut_snapshot(|snap| {
+        // char_id personal items
+        put_item(snap, 34, char_id, st1.station_id, InventoryFlag::Hangar, 10, false);
+        put_item(snap, bp_tid, char_id, st1.station_id, InventoryFlag::Hangar, 1, true);
+        put_item(snap, 34, char_id, struct_a, InventoryFlag::Hangar, 20, false);
+        put_item(snap, bp_tid, char_id, struct_b, InventoryFlag::Hangar, 1, false);
+
+        // other_char_id items (must stay invisible to non-GM sess)
+        put_item(snap, 34, other_char_id, st2.station_id, InventoryFlag::Hangar, 1, false);
+        put_item(snap, bp_tid, other_char_id, struct_other, InventoryFlag::Hangar, 1, true);
+
+        // corp_id items (office at st1 + direct SAG1 at st2 & struct_a + filtered markers/fittings/destroyed)
+        let office_st1_id = put_item(snap, 27, corp_id, st1.station_id, InventoryFlag::Hangar, 1, true);
+        put_item(snap, 34, corp_id, office_st1_id, InventoryFlag::CorpSAG2, 10, false);
+        put_item(snap, 34, corp_id, st2.station_id, InventoryFlag::CorpSAG1, 5, false);
+        put_item(snap, bp_tid, corp_id, struct_a, InventoryFlag::CorpSAG1, 1, false);
+        put_item(snap, 27, corp_id, struct_b, InventoryFlag::Hangar, 1, true);
+        put_item(snap, 35_894, corp_id, struct_b, InventoryFlag::ServiceSlot0, 1, true);
+        put_item(snap, 4051, corp_id, struct_b, InventoryFlag::StructureFuel, 200, false);
+        put_item(snap, 56_201, corp_id, struct_b, InventoryFlag::StructureDeedBay, 1, true);
+        put_item(snap, 34, corp_id, struct_b, InventoryFlag::HiSlot0, 1, true);
+        put_item(snap, 34, corp_id, struct_destroyed, InventoryFlag::CorpSAG1, 5, false);
+
+        // other_corp_id item (must stay invisible even with is_corp=true)
+        put_item(snap, 34, other_corp_id, struct_other, InventoryFlag::CorpSAG1, 5, false);
+    });
+
+    // 2. NPC station + Upwell structures include exact typeID, solarSystemID, and itemCount,
+    //    and ignore extra caller-supplied IDs for non-GM sessions.
+    let expected_personal = vec![
+        vec![st1.station_id, i64::from(st1.solar_system_id), 2, i64::from(st1.station_type_id)],
+        vec![struct_a, 30_000_142, 1, 35_832],
+        vec![struct_b, 30_000_144, 1, 35_835],
+    ];
+    for svc in ["charMgr", "charUnboundMgr"] {
+        let (cols, rows) = call_ls(&mut sess, svc, &[], &empty_kw);
+        assert_eq!(cols, expected_cols);
+        assert_eq!(rows, expected_personal);
+    }
+    let (_, spoofed_rows) = call_ls(
+        &mut sess,
+        "charMgr",
+        &[PyRep::Bool(false), PyRep::Bool(false), PyRep::Integer(other_char_id)],
+        &empty_kw,
+    );
+    assert_eq!(spoofed_rows, expected_personal);
+
+    // 3. blueprint_only=true filters out non-blueprint stations/structures & decrements counts.
+    let expected_bp_personal = vec![
+        vec![st1.station_id, i64::from(st1.solar_system_id), 1, i64::from(st1.station_type_id)],
+        vec![struct_b, 30_000_144, 1, 35_835],
+    ];
+    let (_, bp_bool_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Bool(true), PyRep::Bool(false)], &empty_kw);
+    assert_eq!(bp_bool_rows, expected_bp_personal);
+    let (_, bp_int_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Integer(1)], &empty_kw);
+    assert_eq!(bp_int_rows, expected_bp_personal);
+    let mut kw_bp = HashMap::new();
+    kw_bp.insert("blueprintOnly".to_string(), PyRep::Bool(true));
+    let (_, bp_kw_rows) = call_ls(&mut sess, "charMgr", &[], &kw_bp);
+    assert_eq!(bp_kw_rows, expected_bp_personal);
+
+    // 4. is_corp=true scopes strictly to authorized player corp, resolves office containers,
+    //    excludes marker/fitted/fuel/core/destroyed items, and supports blueprint_only.
+    let mut expected_corp = vec![
+        vec![st1.station_id, i64::from(st1.solar_system_id), 1, i64::from(st1.station_type_id)],
+        vec![st2.station_id, i64::from(st2.solar_system_id), 1, i64::from(st2.station_type_id)],
+        vec![struct_a, 30_000_142, 1, 35_832],
+    ];
+    expected_corp.sort_by_key(|r| r[0]);
+    let (corp_cols, corp_rows) = call_ls(&mut sess, "charMgr", &[PyRep::Bool(false), PyRep::Bool(true)], &empty_kw);
+    assert_eq!(corp_cols, expected_cols);
+    assert_eq!(corp_rows, expected_corp);
+
+    let mut kw_corp_bp = HashMap::new();
+    kw_corp_bp.insert("blueprintOnly".to_string(), PyRep::Integer(1));
+    kw_corp_bp.insert("isCorporation".to_string(), PyRep::Bool(true));
+    let (_, corp_bp_rows) = call_ls(&mut sess, "charUnboundMgr", &[], &kw_corp_bp);
+    assert_eq!(corp_bp_rows, vec![vec![struct_a, 30_000_142, 1, 35_832]]);
+
+    // 5. Corp RBAC: zero-role member is denied even with forged session.corp_role,
+    //    hangar-query role sees only authorized division(s), and CEO sees all corp assets.
+    let mut plain_sess = make_session(uid, plain_id, corp_id, Some(st1.station_id), None);
+    plain_sess.corp_role = u64::MAX;
+    let denied_err = handle_clones_and_sheet(
+        &ctx,
+        &mut plain_sess,
+        "charMgr",
+        "ListStations",
+        &[PyRep::Bool(false), PyRep::Bool(true)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(denied_err.code, "CorpRoleDenied");
+    let (_, plain_personal) = call_ls(&mut plain_sess, "charMgr", &[], &empty_kw);
+    assert!(plain_personal.is_empty());
+
+    let mut sag1_sess = make_session(uid, sag1_id, corp_id, Some(st1.station_id), None);
+    let mut expected_sag1 = vec![
+        vec![st2.station_id, i64::from(st2.solar_system_id), 1, i64::from(st2.station_type_id)],
+        vec![struct_a, 30_000_142, 1, 35_832],
+    ];
+    expected_sag1.sort_by_key(|r| r[0]);
+    let (_, sag1_rows) = call_ls(&mut sag1_sess, "charMgr", &[PyRep::Bool(false), PyRep::Bool(true)], &empty_kw);
+    assert_eq!(sag1_rows, expected_sag1);
+
+    let mut ceo_sess = make_session(uid, ceo_id, corp_id, Some(st1.station_id), None);
+    let (_, ceo_rows) = call_ls(&mut ceo_sess, "charUnboundMgr", &[PyRep::Bool(false), PyRep::Bool(true)], &empty_kw);
+    assert_eq!(ceo_rows, expected_corp);
+
+    // 6. Missing or NPC session corporation with is_corp=true fails closed (CorporationNotFound).
+    sess.corporation_id = None;
+    let err_missing = handle_clones_and_sheet(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "ListStations",
+        &[PyRep::Bool(false), PyRep::Bool(true)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err_missing.code, "CorporationNotFound");
+
+    sess.corporation_id = Some(1_000_009);
+    let err_npc = handle_clones_and_sheet(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "ListStations",
+        &[PyRep::Bool(false), PyRep::Bool(true)],
+        &empty_kw,
+    )
+    .expect("handled")
+    .unwrap_err();
+    assert_eq!(err_npc.code, "CorporationNotFound");
+}
+
+#[test]
+fn list_stations_corp_governance_office_and_role_matrix() {
+    let ctx = test_ctx();
+    let mut st_iter = ctx.sde.stations.values();
+    let st_hq = st_iter.next().expect("first SDE station").clone();
+    let st_other = st_iter
+        .find(|s| s.station_id != st_hq.station_id)
+        .expect("second SDE station")
+        .clone();
+
+    let corp_id = 98_000_299_i64;
+    let ceo_id = 90_001_001_i64;
+    let hq_sag1_id = 90_001_002_i64;
+    let deliveries_id = 90_001_003_i64;
+    let trader_id = 90_001_004_i64;
+    let struct_citadel = 1_048_000_000_299_i64;
+    let gov_office_station_id = 920_500_001_i64;
+    let gov_office_struct_id = 920_500_002_i64;
+    let empty_kw = HashMap::new();
+
+    let uid = ctx.db.with_mut_snapshot(|snap| {
+        let base_ch = snap.characters.values().next().cloned().expect("demo char");
+        let uid = base_ch.user_id;
+        for cid in [ceo_id, hq_sag1_id, deliveries_id, trader_id] {
+            let mut ch = base_ch.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            ch.station_id = None;
+            snap.characters.insert(cid, ch);
+        }
+
+        let mut corp = CorporationRecord::new(corp_id, "GovOfficeCorp", "GOFC", ceo_id);
+        corp.hq_station_id = Some(st_hq.station_id);
+        corp.members = HashSet::from([ceo_id, hq_sag1_id, deliveries_id, trader_id]);
+        corp.member_roles
+            .insert(deliveries_id, corp_roles::ROLE_DELIVERIES_HANGAR_QUERY);
+        corp.member_roles
+            .insert(trader_id, corp_roles::ROLE_TRADER);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.corp_role_assignments.insert(
+            (corp_id, hq_sag1_id),
+            eve_db::CorpMemberRoleAssignment {
+                character_id: hq_sag1_id,
+                roles_at_hq: corp_roles::ROLE_HANGAR_CAN_QUERY[0],
+                ..Default::default()
+            },
+        );
+
+        snap.structures.insert(
+            struct_citadel,
+            UpwellStructureRecord {
+                structure_id: struct_citadel,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                state: "ShieldVulnerable".into(),
+                name: "Governance Citadel".into(),
+                ..Default::default()
+            },
+        );
+
+        let gov = snap.corp_governance.entry(corp_id).or_default();
+        gov.offices.insert(st_hq.station_id, gov_office_station_id);
+        gov.offices.insert(gov_office_struct_id, struct_citadel);
+
+        put_item(snap, 34, corp_id, gov_office_station_id, InventoryFlag::CorpSAG1, 10, false);
+        put_item(snap, 34, corp_id, gov_office_struct_id, InventoryFlag::CorpSAG1, 5, false);
+        put_item(snap, 34, corp_id, st_other.station_id, InventoryFlag::Deliveries, 3, false);
+        put_item(snap, 34, corp_id, st_other.station_id, InventoryFlag::CorpSAG1, 2, false);
+        uid
+    });
+
+    let call_corp = |cid: i64| -> Vec<Vec<i64>> {
+        let mut s = make_session(uid, cid, corp_id, None, None);
+        let rep = handle_clones_and_sheet(
+            &ctx,
+            &mut s,
+            "charMgr",
+            "ListStations",
+            &[PyRep::Bool(false), PyRep::Bool(true)],
+            &empty_kw,
+        )
+        .expect("handled")
+        .expect("ListStations ok");
+        let PyRep::Rowset { columns, rows } = rep else {
+            panic!("expected Rowset, got {rep:?}");
+        };
+        assert_eq!(
+            columns,
+            vec!["stationID", "solarSystemID", "itemCount", "typeID"]
+        );
+        rows.into_iter()
+            .map(|r| r.into_iter().map(|c| c.as_i64().expect("int")).collect())
+            .collect()
+    };
+
+    // HQ-scoped ROLE_HANGAR_CAN_QUERY[0] sees only HQ CorpSAG1 resolved through gov.offices.
+    assert_eq!(
+        call_corp(hq_sag1_id),
+        vec![vec![
+            st_hq.station_id,
+            i64::from(st_hq.solar_system_id),
+            1,
+            i64::from(st_hq.station_type_id),
+        ]]
+    );
+
+    // Deliveries query role sees only st_other's Deliveries stack (count=1), not CorpSAG1.
+    assert_eq!(
+        call_corp(deliveries_id),
+        vec![vec![
+            st_other.station_id,
+            i64::from(st_other.solar_system_id),
+            1,
+            i64::from(st_other.station_type_id),
+        ]]
+    );
+
+    // Trader sees all 3 locations resolved across gov.offices (NPC station + structure) & Deliveries.
+    let mut expected_all = vec![
+        vec![st_hq.station_id, i64::from(st_hq.solar_system_id), 1, i64::from(st_hq.station_type_id)],
+        vec![st_other.station_id, i64::from(st_other.solar_system_id), 2, i64::from(st_other.station_type_id)],
+        vec![struct_citadel, 30_000_142, 1, 35_832],
+    ];
+    expected_all.sort_by_key(|r| r[0]);
+    assert_eq!(call_corp(trader_id), expected_all);
+
+    // Station Manager & Junior Accountant also have full corp asset station access.
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.get_mut(&corp_id).unwrap();
+        corp.member_roles
+            .insert(deliveries_id, corp_roles::ROLE_STATION_MANAGER);
+    });
+    assert_eq!(call_corp(deliveries_id), expected_all);
 }
 
 #[cfg(test)]
