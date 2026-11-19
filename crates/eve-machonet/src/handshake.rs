@@ -100,59 +100,42 @@ impl GPSTransportClosed {
         self
     }
 
+    /// Encodes as V24 `blue.marshal` `Op_PyObjectEx1` (`is_type_2 = false`) for the new-style
+    /// `exceptions.GPSTransportClosed` class (`<type 'type'>`), passing positional `__init__` args.
     pub fn to_pyrep(&self) -> PyRep {
+        let mut reason_args: Vec<_> = self.reason_args.iter().collect();
+        reason_args.sort_by(|(a, _), (b, _)| a.cmp(b));
         let args_dict = PyRep::Dict(
-            self.reason_args
-                .iter()
-                .map(|(k, v)| (PyRep::ascii_bytes(k), v.clone()))
+            reason_args
+                .into_iter()
+                .map(|(k, v)| (wire_text(k), v.clone()))
                 .collect(),
         );
-        let state_dict = PyRep::Dict(vec![
-            (
-                PyRep::ascii_bytes("reason"),
-                PyRep::ascii_bytes(&self.reason),
-            ),
-            (
-                PyRep::ascii_bytes("reasonCode"),
-                self.reason_code
-                    .as_ref()
-                    .map(PyRep::ascii_bytes)
-                    .unwrap_or(PyRep::None),
-            ),
-            (PyRep::ascii_bytes("reasonArgs"), args_dict.clone()),
-            (
-                PyRep::ascii_bytes("machoVersion"),
-                PyRep::Integer(self.macho_version as i64),
-            ),
-            (PyRep::ascii_bytes("version"), PyRep::Real(self.version)),
-            (
-                PyRep::ascii_bytes("build"),
-                PyRep::Integer(self.build as i64),
-            ),
-            (
-                PyRep::ascii_bytes("codename"),
-                PyRep::ascii_bytes(&self.codename),
-            ),
-            (
-                PyRep::ascii_bytes("region"),
-                PyRep::ascii_bytes(&self.region),
-            ),
-            (
-                PyRep::ascii_bytes("loggedOnUserCount"),
-                PyRep::Integer(self.logged_on_user_count as i64),
-            ),
-        ]);
-        PyRep::Object {
-            type_name: "exceptions.GPSTransportClosed".into(),
-            args: Box::new(PyRep::Tuple(vec![
-                PyRep::ascii_bytes(&self.reason),
-                self.reason_code
-                    .as_ref()
-                    .map(PyRep::ascii_bytes)
-                    .unwrap_or(PyRep::None),
-                args_dict,
-                state_dict,
+        let reason_rep = wire_text(&self.reason);
+        let reason_code_rep = self
+            .reason_code
+            .as_deref()
+            .map(wire_text)
+            .unwrap_or(PyRep::None);
+        PyRep::ObjectEx {
+            is_type_2: false,
+            header: Box::new(PyRep::Tuple(vec![
+                PyRep::Token("exceptions.GPSTransportClosed".into()),
+                PyRep::Tuple(vec![
+                    reason_rep,
+                    reason_code_rep,
+                    args_dict,
+                    PyRep::Integer(i64::from(self.macho_version)),
+                    PyRep::Real(self.version),
+                    PyRep::Integer(i64::from(self.build)),
+                    wire_text(&self.codename),
+                    wire_text(&self.region),
+                    PyRep::None,
+                    PyRep::Integer(i64::from(self.logged_on_user_count)),
+                ]),
             ])),
+            list: Vec::new(),
+            dict: Vec::new(),
         }
     }
 
@@ -1292,6 +1275,15 @@ impl MachoHandshakeStateMachine {
         } else {
             Ok(vec![PyRep::Integer(2), server_hs.to_pyrep()])
         }
+    }
+}
+
+/// Encodes ASCII text as Python 2 `str` bytes and non-ASCII text as UTF-8 unicode.
+fn wire_text(s: &str) -> PyRep {
+    if s.is_ascii() {
+        PyRep::ascii_bytes(s)
+    } else {
+        PyRep::String(s.to_owned())
     }
 }
 

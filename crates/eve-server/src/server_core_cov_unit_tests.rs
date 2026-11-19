@@ -18,7 +18,8 @@ use eve_db::WorldRepository;
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, DamageVector, MovementMode};
 use eve_machonet::{
     placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
-    CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,
+    CryptoRequestPacket, CryptoServerHandshake, GPSTransportClosed, MachoAddress, MachoPacket,
+    MachoPacketType,
     SessionState, VersionExchange, MACHO_PROXY_NODE_ID,
 };
 use eve_proto::quasar::{
@@ -1358,7 +1359,8 @@ async fn macho_listener_displacement_space_ballpark_and_error_paths() {
         bad.write_all(&(corrupt.len() as u32).to_le_bytes()).await.unwrap();
         bad.write_all(&corrupt).await.unwrap();
         let close_rsp = read_framed_pyrep(&mut bad).await.unwrap().unwrap();
-        assert!(matches!(close_rsp, PyRep::Object { .. }));
+        assert!(matches!(close_rsp, PyRep::ObjectEx { is_type_2: false, .. }));
+        assert!(GPSTransportClosed::from_pyrep(&close_rsp).is_some());
     }
 
     async fn connect_and_select(addr: std::net::SocketAddr) -> (TcpStream, u64, u64) {
@@ -1413,9 +1415,17 @@ async fn macho_listener_displacement_space_ballpark_and_error_paths() {
     // 2. Connect client A, then displace with client B
     let (mut client_a, _uid_a, _cid_a) = connect_and_select(addr).await;
     let (mut client_b, uid_b, cid_b) = connect_and_select(addr).await;
-    // Client A receives GPSTransportClosed from displacement
-    let disp_rsp = read_framed_pyrep(&mut client_a).await.unwrap().unwrap();
-    assert!(matches!(disp_rsp, PyRep::Object { .. }));
+    // Client A receives GPSTransportClosed from displacement (draining any preceding notifications)
+    let disp_rsp = loop {
+        let frame = read_framed_pyrep(&mut client_a)
+            .await
+            .unwrap()
+            .expect("client_a closed before receiving GPSTransportClosed displacement frame");
+        if GPSTransportClosed::from_pyrep(&frame).is_some() {
+            break frame;
+        }
+    };
+    assert!(matches!(disp_rsp, PyRep::ObjectEx { is_type_2: false, .. }));
 
     // 3. On client B: post-auth non-MachoPacket frame ignored, slash SlashError, invalid bound OID
     write_framed_pyrep(&mut client_b, &PyRep::Integer(42)).await.unwrap();

@@ -382,3 +382,68 @@ async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
     }
     assert!(received_skills_trained, "Expected OnSkillsTrained over TCP");
 }
+
+#[tokio::test]
+async fn rejected_handshake_sends_object_ex1_gps_transport_closed_frame() {
+    let addr = spawn_listener().await;
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let stale_build = i64::from(eve_machonet::V24_BOOT_BUILD) - 1;
+    write_framed_pyrep(
+        &mut s,
+        &real_client_request(stale_build, eve_machonet::V24_CODENAME_AT_REGION),
+    )
+    .await
+    .unwrap();
+
+    let rsp = read_framed_pyrep(&mut s)
+        .await
+        .expect("transport must deliver GPSTransportClosed frame")
+        .expect("expected GPSTransportClosed payload");
+    let PyRep::ObjectEx {
+        is_type_2,
+        header,
+        list,
+        dict,
+    } = &rsp
+    else {
+        panic!("V24 GPSTransportClosed wire frame must be ObjectEx1 (not PyRep::Object), got {rsp:?}");
+    };
+    assert!(!is_type_2, "must encode as Op_PyObjectEx1 (is_type_2 = false)");
+    assert!(list.is_empty());
+    assert!(dict.is_empty());
+
+    let PyRep::Tuple(hdr) = header.as_ref() else {
+        panic!("expected ObjectEx1 header tuple");
+    };
+    assert_eq!(
+        hdr[0],
+        PyRep::Token("exceptions.GPSTransportClosed".into())
+    );
+    let PyRep::Tuple(args) = &hdr[1] else {
+        panic!("expected ObjectEx1 positional __init__ args tuple");
+    };
+    assert_eq!(args.len(), 10);
+    assert_eq!(args[1].as_str(), Some("HANDSHAKE_INCOMPATIBLEBUILD"));
+    assert_eq!(
+        args[3],
+        PyRep::Integer(i64::from(eve_machonet::V24_MACHO_VERSION))
+    );
+    assert_eq!(args[4], PyRep::Real(eve_machonet::V24_VERSION_NUMBER));
+    assert_eq!(
+        args[5],
+        PyRep::Integer(i64::from(eve_machonet::V24_BOOT_BUILD))
+    );
+    assert_eq!(
+        eve_proto::marshal::encode(&rsp)[5],
+        eve_proto::MarshalOpcode::PyObjectEx1 as u8
+    );
+
+    let closed = GPSTransportClosed::from_pyrep(&rsp)
+        .expect("from_pyrep must parse live listener GPSTransportClosed");
+    assert_eq!(
+        closed.reason_code.as_deref(),
+        Some("HANDSHAKE_INCOMPATIBLEBUILD")
+    );
+}
+
