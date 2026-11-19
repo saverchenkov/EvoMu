@@ -295,7 +295,7 @@ async fn measure_live_pvp_loot_drop_fraction(
     victim_ship: i64,
     item_base_id: i64,
 ) -> f64 {
-    const N_ITEMS: i64 = 400;
+    const N_ITEMS: i64 = 2_500;
     set_pilot_location(ctx, killer_sess, sys_id, None);
     let kill_pos = DVec3::new(250_000.0, 250_000.0, 0.0);
     ctx.db.with_mut_snapshot(|s| {

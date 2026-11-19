@@ -145,15 +145,107 @@ pub(crate) async fn undock_player_to_space(
     pos: DVec3,
 ) -> (i64, u64) {
     let char_id = sess.character_id.expect("character_id");
-    let _ = rpc(ctx, sess, "stationSvc", "Undock", &[]).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = None;
-            ch.solar_system_id = sys_id;
+    let (pre_sys, pre_station, pre_structure, ship_id, ship_in_station) =
+        ctx.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&char_id).expect("character exists");
+            let ship_in_st = ch.station_id.is_some_and(|st| {
+                snap.items
+                    .get(&ch.active_ship_id)
+                    .is_some_and(|it| it.location_id == st)
+            });
+            (
+                ch.solar_system_id,
+                ch.station_id,
+                ch.structure_id,
+                ch.active_ship_id,
+                ship_in_st,
+            )
+        });
+    let sess_prev_sys = sess.solar_system_id;
+    let sess_prev_ship = sess.ship_id;
+
+    let same_sys_station_undock = pre_station.is_some()
+        && pre_structure.is_none()
+        && pre_sys == sys_id
+        && ship_in_station
+        && sess_prev_ship == Some(ship_id);
+
+    if same_sys_station_undock {
+        rpc(ctx, sess, "stationSvc", "Undock", &[])
+            .await
+            .expect("stationSvc.Undock");
+    } else {
+        let mut old_systems = Vec::new();
+        for s in [Some(pre_sys), sess_prev_sys].into_iter().flatten() {
+            if s != 0 && !old_systems.contains(&s) {
+                old_systems.push(s);
+            }
         }
-        sess.station_id = None;
-        sess.solar_system_id = Some(sys_id);
-    });
+        let mut old_ships = Vec::new();
+        for sid in [Some(ship_id), sess_prev_ship].into_iter().flatten() {
+            if sid > 0 && !old_ships.contains(&sid) {
+                old_ships.push(sid);
+            }
+        }
+        for &sid in &old_ships {
+            eve_server::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                ctx, char_id, sid,
+            );
+        }
+        for old_sys in old_systems {
+            if let Some(old_handle) = ctx.systems.get_handle(old_sys) {
+                for &sid in &old_ships {
+                    let _ = old_handle.clear_target_locks(sid).await;
+                    let _ = old_handle.remove_ball(sid).await;
+                }
+            }
+        }
+
+        let was_docked = pre_station.is_some() || pre_structure.is_some();
+        ctx.db.with_mut_snapshot(|snap| {
+            for &sid in &old_ships {
+                if sid != ship_id {
+                    eve_server::sp6_lifecycle::leave_space_in_snap(snap, sid, None, None, None);
+                } else if !was_docked {
+                    eve_server::sp6_lifecycle::leave_space_in_snap(
+                        snap,
+                        ship_id,
+                        None,
+                        Some(sys_id),
+                        None,
+                    );
+                }
+            }
+            let updated_ch =
+                eve_server::router::session_transition::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    eve_server::router::session_transition::TransitionLocation::Space {
+                        solar_system_id: sys_id,
+                    },
+                    None,
+                    true,
+                    false,
+                )
+                .expect("apply_character_transition_in_snap to space");
+            snap.item_positions.insert(ship_id, pos.to_array());
+            eve_server::sp6_lifecycle::enter_space_in_snap(snap, ship_id, sys_id);
+            eve_server::router::session_transition::apply_session_from_character(
+                sess,
+                &updated_ch,
+                Some(Some(ship_id)),
+                Some(&ctx.sde),
+            );
+        });
+        ctx.invalidate_bound_objects_for_session_transition(
+            char_id,
+            sys_id,
+            None,
+            "test_undock_or_transition",
+        );
+    }
+
     let bind = rpc(
         ctx,
         sess,
@@ -171,7 +263,18 @@ pub(crate) async fn undock_player_to_space(
         .db
         .with_snapshot(|s| s.characters[&char_id].active_ship_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle.set_ball_position(ship_id, pos).await;
+    assert!(
+        sys_handle.set_ball_position(ship_id, pos).await,
+        "expected ship ball {ship_id} in system {sys_id} before set_ball_position"
+    );
+    assert!(
+        sys_handle
+            .get_ball_snapshot(ship_id)
+            .await
+            .expect("get_ball_snapshot")
+            .is_some(),
+        "ship ball {ship_id} not spawned in system {sys_id}"
+    );
     ctx.advance_secs(12);
     (ship_id, beyonce_oid)
 }
@@ -185,18 +288,28 @@ pub(crate) async fn fire_and_destroy_target(
     target_ball_id: i64,
 ) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = rpc(
+    rpc(
         ctx,
         attacker_sess,
         "dogmaIM",
         "AddTarget",
         &[PyRep::Integer(target_ball_id)],
     )
-    .await;
-    sys_handle.step_manual(5.0).await.expect("lock step");
+    .await
+    .expect("dogmaIM.AddTarget");
+    sys_handle.step_manual(8.0).await.expect("lock step");
 
-    for _ in 0..24 {
-        let _ = rpc(
+    let mut last_act: Option<Result<PyRep, eve_proto::BridgeRpcError>> = None;
+    for _ in 0..48 {
+        if sys_handle
+            .get_ball_snapshot(target_ball_id)
+            .await
+            .expect("get_ball_snapshot")
+            .is_none()
+        {
+            break;
+        }
+        let res = rpc(
             ctx,
             attacker_sess,
             "dogmaIM",
@@ -208,17 +321,33 @@ pub(crate) async fn fire_and_destroy_target(
             ],
         )
         .await;
+        if let Err(ref err) = res {
+            if !matches!(err.code.as_str(), "ModuleAlreadyActive" | "AlreadyActive") {
+                panic!(
+                    "dogmaIM.Activate failed unexpectedly for gun {gun_id} -> target {target_ball_id} in system {sys_id}: {err:?}"
+                );
+            }
+        }
+        last_act = Some(res);
         if sys_handle
             .get_ball_snapshot(target_ball_id)
             .await
-            .unwrap()
+            .expect("get_ball_snapshot")
             .is_none()
         {
             break;
         }
-        ctx.advance_secs(4);
-        sys_handle.step_manual(4.0).await.expect("combat step");
+        ctx.advance_secs(6);
+        sys_handle.step_manual(6.0).await.expect("combat step");
     }
+    assert!(
+        sys_handle
+            .get_ball_snapshot(target_ball_id)
+            .await
+            .expect("get_ball_snapshot")
+            .is_none(),
+        "target ball {target_ball_id} was not destroyed by gun {gun_id} in system {sys_id} (last_act={last_act:?})"
+    );
 }
 
 #[allow(dead_code)]
