@@ -1992,6 +1992,15 @@ async fn handle_invbroker_add(
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
+                    if orig_source_loc_id != new_loc {
+                        crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
+                            ctx,
+                            char_id,
+                            new_loc,
+                            moved_tid,
+                            u64::try_from(moved_qty).unwrap_or(0),
+                        );
+                    }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }
@@ -2147,6 +2156,15 @@ async fn handle_invbroker_add(
                             updated.type_id,
                         )
                         .await;
+                        if orig_source_loc_id != updated.location_id {
+                            crate::services::pve_homefront_sites::on_homefront_item_moved_sync(
+                                ctx,
+                                char_id,
+                                updated.location_id,
+                                updated.type_id,
+                                u64::try_from(updated.quantity).unwrap_or(0),
+                            );
+                        }
                     }
                     write_container_ship_state(ctx, |st| {
                         if let Some((cid, entry)) = pending_alsc_take {

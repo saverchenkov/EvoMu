@@ -789,6 +789,31 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
 
     let access_chance_pct =
         mod_access_bonus + extra_skill_bonus + rig_access_bonus + wreck_difficulty_bonus;
+    let is_homefront_salvage_wreck =
+        match crate::services::pve_homefront_sites::validate_homefront_salvage_attempt(
+            ctx,
+            char_id,
+            sys_id,
+            wreck_id,
+            mod_access_bonus,
+            extra_skill_bonus,
+            rig_access_bonus,
+        ) {
+            Ok(is_hf) => is_hf,
+            Err(err) => {
+                return Ok((
+                    PyRep::keyval([
+                        ("wreckID", PyRep::Integer(wreck_id)),
+                        ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
+                        ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
+                        ("accessChancePct", PyRep::Real(access_chance_pct)),
+                        ("salvaged", PyRep::Bool(false)),
+                        ("reason", PyRep::String(err.code)),
+                    ]),
+                    false,
+                ));
+            }
+        };
     if access_chance_pct <= 0.0 {
         return Ok((
             PyRep::keyval([
@@ -827,7 +852,13 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
 
     // Select T1, T2, or Sleeper salvage loot table from SDE-derived `SalvageMaterialPools`
     // (`sde_types` group 754/966 + `sde_blueprints` + `wrecks.static` + Dogma attribute `901`).
-    let salvage_table = ctx.sde.salvage_materials_for_wreck(wreck_type_id, true);
+    let mut salvage_table = ctx.sde.salvage_materials_for_wreck(wreck_type_id, true);
+    if is_homefront_salvage_wreck {
+        salvage_table.push((
+            crate::services::pve_homefront_sites::HOMEFRONT_SALVAGE_DATA_TYPE_ID,
+            1,
+        ));
+    }
 
     let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
     let wreck_pos = wreck_ball_opt
@@ -873,6 +904,11 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
         wreck_pos,
         spawned_can_opt,
         active_module_id_opt,
+    )
+    .await;
+
+    let _ = crate::services::pve_homefront_sites::on_homefront_wreck_salvaged(
+        ctx, char_id, sys_id, wreck_id,
     )
     .await;
 

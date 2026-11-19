@@ -10,7 +10,6 @@ use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::with_pve_exploration_reg;
 use eve_server::services::pve_special_sites::{
     advance_pve_special_clock, ensure_special_sites_spawned, record_system_interference_activity,
-    with_pve_special_reg,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -221,14 +220,51 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let hf_init = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances initial");
     let PyRep::Dict(hf_dict) = &hf_init else { panic!("Expected Dict") };
     let dungeons = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::List(d) => Some(d), _ => None }).expect("Jita sites");
-    let hf_inst_id = dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
-    let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&30_000_142].iter().find(|s| s.instance_id == hf_inst_id).unwrap().boss_npc_ball_id);
+    assert!(!dungeons.is_empty(), "Jita must list seeded Homefront sites");
+
+    let hf_st = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, 30_000_142, 10_387).expect("spawn Homefront 10_387");
+    let hf_inst_id = hf_st.instance_id;
+    let ship_id = sess.ship_id.expect("pilot ship id");
+    let miner_mod_id = 710_999_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_001).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(miner_mod_id, InventoryItemRecord {
+            item_id: miner_mod_id, type_id: 483, owner_id: 90_000_001,
+            location_id: ship_id, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(miner_mod_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    jita_sys.set_ball_position(ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+    let PyRep::Tuple(bound_jita) = ctx.dispatch_rpc(&mut sess, "beyonce", None, "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None], &kw, None).await.expect("bind beyonce") else { panic!("Expected tuple") };
+    let jita_beyonce = bound_jita[0].as_i64().unwrap() as u64;
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(jita_beyonce), "ActivateAccelerationGate", &[PyRep::Integer(hf_st.outer_gate_ball_id)], &kw, None).await.expect("ActivateAccelerationGate in Rifter");
+
+    let rock_id = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().expect("rock ball").1.position;
+    jita_sys.set_ball_position(ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+
     let init_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
     let _ = ctx.drain_notifications_for_char(90_000_001);
-    let _ = jita_sys.apply_damage_with_attacker(hf_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await;
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Mine", &[PyRep::Integer(rock_id)], &kw, None).await.expect("dogmaIM.Mine");
+    let rem = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    if rem > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx, &sess, hf_inst_id, rem, 0).unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().completed {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(&ctx, &sess, hf_inst_id).await.expect("complete_homefront_operation_and_pay");
+    }
+
     let after_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
-    assert!(after_bal > init_bal, "Homefront kill must pay ISK to pilot");
+    assert!(after_bal > init_bal, "Homefront completion must pay ISK to pilot");
     assert!(ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == 90_000_001 && j.reason.contains("Homefront Operation Payout"))));
     assert!(ctx.drain_notifications_for_char(90_000_001).iter().any(|n| n.event == "OnAccountChange"));
 

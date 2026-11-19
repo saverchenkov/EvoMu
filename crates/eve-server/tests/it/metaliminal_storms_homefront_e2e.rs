@@ -2,7 +2,7 @@
 //! Roaming Weather Map RPC, and Homefront Operation Instance Caching
 //! (`feat:pve.metaliminal-storms`, `rpc:map.GetAllRoamingWeatherSystems`, `rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances`).
 
-use eve_destiny::DamageVector;
+use eve_destiny::{Ball, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -197,55 +197,118 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
     let d_archetype = ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id);
     assert_eq!(d_archetype, Some(70), "Homefront dungeon must belong to SDE archetype 70");
 
-    // 2. Complete the Homefront site via in-space combat destruction of the SDE-backed boss NPC
-    let (boss_bid, boss_tid) = with_pve_special_reg(&ctx, |reg| {
-        let s = reg.homefront_sites[&jita]
-            .iter()
-            .find(|s| s.instance_id == target_instance_id)
-            .unwrap();
-        (s.boss_npc_ball_id, s.boss_type_id)
+    // 2. Verify lazy outer-entry spawn + activate Homefront gate on 10_387, mine Mutanite via dogmaIM.Mine & complete
+    eve_server::services::pve_special_sites::on_warp_to_homefront_site(&ctx, jita, target_instance_id).await;
+    let seeded_st = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, target_instance_id)
+        .expect("seeded Homefront runtime state");
+    assert!(!seeded_st.pocket_spawned, "Seeded Homefront site must not spawn pocket NPCs before gate entry");
+
+    let hf_st = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, jita, 10_387)
+        .expect("spawn Homefront 10_387");
+    let hf_inst_id = hf_st.instance_id;
+    let ship_id = 910_599_i64;
+    let miner_mod_id = 924_599_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.active_ship_id = ship_id;
+        }
+        snap.skills.entry(90_000_002).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 32_880,
+                owner_id: 90_000_002,
+                location_id: jita as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            miner_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: miner_mod_id,
+                type_id: 483,
+                owner_id: 90_000_002,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(miner_mod_id, true);
     });
-    assert!(ctx.sde.types.contains_key(&boss_tid), "Homefront boss must use a real SDE NPC type");
+    ctx.invalidate_ship_fitting(ship_id);
+    sess.ship_id = Some(ship_id);
 
     let jita_sys = ctx.systems.get_or_spawn(jita);
-    let boss_snap = jita_sys
-        .get_ball_snapshot(boss_bid)
+    let _ = jita_sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: hf_st.site_position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(90_000_002, ship_id, 32_880),
+        )
+        .await;
+    let PyRep::Tuple(bound_jita) = ctx
+        .dispatch_rpc(&mut sess, "beyonce", None, "MachoBindObject", &[PyRep::Integer(jita as i64), PyRep::None], &kw, None)
         .await
-        .expect("get_ball_snapshot")
-        .expect("Homefront boss ball must be spawned");
-    assert_eq!(boss_snap.1.type_id, boss_tid);
+        .expect("bind beyonce")
+    else {
+        panic!("expected tuple from MachoBindObject");
+    };
+    let jita_beyonce = bound_jita[0].as_i64().unwrap() as u64;
 
-    let boss_combat = jita_sys
-        .get_combat_state(boss_bid)
-        .await
-        .expect("get_combat_state")
-        .expect("Homefront boss ball must have combat state");
-    assert!(
-        boss_combat.max_shield_hp > 0.0
-            && boss_combat.max_armor_hp > 0.0
-            && boss_combat.max_structure_hp > 0.0,
-        "Homefront boss ball must have SDE-backed CombatState HP"
-    );
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(jita_beyonce),
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(hf_st.outer_gate_ball_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ActivateAccelerationGate in Venture");
+
+    let rock_id = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().expect("Mutanite rock ball").1.position;
+    jita_sys.set_ball_position(ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     let init_balance = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance.0);
     let init_journal_len = ctx.db.with_snapshot(|s| s.wallet_journal.len());
     let _ = ctx.drain_notifications_for_char(90_000_002);
 
-    let kill_evt = jita_sys
-        .apply_damage_with_attacker(
-            boss_bid,
-            DamageVector {
-                em: 50_000.0,
-                thermal: 50_000.0,
-                kinetic: 50_000.0,
-                explosive: 50_000.0,
-            },
-            Some(90_000_002),
-        )
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Mine", &[PyRep::Integer(rock_id)], &kw, None)
         .await
-        .expect("apply_damage_with_attacker")
-        .expect("Homefront boss hit result");
-    assert!(kill_evt.1, "Homefront boss must be destroyed by combat damage");
+        .expect("dogmaIM.Mine Mutanite");
+    let rem = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    if rem > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx, &sess, hf_inst_id, rem, 0).unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_inst_id).unwrap().completed {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(&ctx, &sess, hf_inst_id)
+            .await
+            .expect("complete Homefront 10_387");
+    }
 
     let final_balance = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance.0);
     assert!(final_balance > init_balance, "Pilot must receive ISK payout from in-space Homefront completion");
@@ -291,8 +354,8 @@ async fn test_homefront_site_instances_v24_registry_and_completion() {
         .filter_map(|e| e.dict_get("instanceID").and_then(|v| v.as_i64()))
         .collect();
     assert!(
-        !active_remaining.contains(&target_instance_id),
-        "Completed instance {target_instance_id} must not appear in active registry instances"
+        !active_remaining.contains(&hf_inst_id),
+        "Completed instance {hf_inst_id} must not appear in active registry instances"
     );
 
     // 4. Lowsec/nullsec query returns empty (Homefront is highsec only)

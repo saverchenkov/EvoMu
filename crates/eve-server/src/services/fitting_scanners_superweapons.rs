@@ -799,6 +799,14 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     )
                 })
                 .collect();
+            crate::services::pve_homefront_sites::on_homefront_cargo_scanned(
+                ctx,
+                char_id,
+                sys.solar_system_id,
+                target_id,
+                &cargo_list,
+            )
+            .await;
             ctx.emit_typed(
                 crate::router::NotificationTarget::Character(char_id),
                 crate::router::notify_registry::OnCargoScanComplete {

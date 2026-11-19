@@ -572,7 +572,7 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
     ];
 
     let (mut hf1, hf1_mods) = gm_pilot_fitted_in_space(&ctx, 72_040, 92_100_040, 28_659 /* Paladin */, JITA_SYS, &gun_skill, &gun_mod).await;
-    let (mut hf2, _) = gm_pilot_fitted_in_space(&ctx, 72_041, 92_100_041, 626, JITA_SYS, &[], &[]).await;
+    let (mut hf2, _) = gm_pilot_fitted_in_space(&ctx, 72_041, 92_100_041, 626, JITA_SYS, &[(3386, 5)], &[(483, HIGH_SLOT_0, None)]).await;
     let fid = ok(&ctx, &mut hf1.sess, "fleetObjectHandler", "CreateFleet", &[]).await.as_i64().unwrap();
     hf1.sess.fleet_id = Some(fid);
     ok(&ctx, &mut hf1.sess, "fleetObjectHandler", "Invite", &[int(hf2.char_id)]).await;
@@ -587,11 +587,111 @@ async fn test_homefront_drifter_hives_and_triglavian_sites_live() {
     assert!(jita_site_count > 0, "High-sec Jita must have archetype-70 Homefront sites");
 
     let jita_h = ctx.systems.get_or_spawn(JITA_SYS);
-    let hf_boss_id = 1_897_700_000 + (i64::from(JITA_SYS) * 1000 + 1);
-    let hf_boss = jita_h.get_ball_snapshot(hf_boss_id).await.unwrap().expect("Homefront boss ball").1;
+    let _ = &hf1_mods;
+    let hf_st = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_387)
+        .expect("spawn Homefront 10_387");
+    assert!(!hf_st.pocket_spawned, "Pocket NPCs must not spawn prior to acceleration gate activation");
+
+    // Paladin Marauder (28_659) is rejected at the Homefront acceleration gate
+    jita_h.set_ball_position(hf1.ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+    let paladin_err = ctx
+        .dispatch_rpc(
+            &mut hf1.sess,
+            "beyonce",
+            Some(hf1.beyonce),
+            "ActivateAccelerationGate",
+            &[int(hf_st.outer_gate_ball_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Marauder must be rejected by Homefront acceleration gate");
+    assert_eq!(paladin_err.code, "ShipRestrictedByGate");
+
+    // Re-board hf1 into a T1 Venture (32_880) with online Miner I (483); both hf1 (Venture) + hf2 (Vexor) enter & mine
+    let hf1_venture_id = 92_100_140_i64;
+    let hf1_miner_id = 92_100_141_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&hf1.char_id) {
+            ch.active_ship_id = hf1_venture_id;
+        }
+        snap.skills.entry(hf1.char_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(
+            hf1_venture_id,
+            eve_db::InventoryItemRecord {
+                item_id: hf1_venture_id,
+                type_id: 32_880,
+                owner_id: hf1.char_id,
+                location_id: JITA_SYS as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hf1_miner_id,
+            eve_db::InventoryItemRecord {
+                item_id: hf1_miner_id,
+                type_id: 483,
+                owner_id: hf1.char_id,
+                location_id: hf1_venture_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(hf1_miner_id, true);
+    });
+    ctx.invalidate_ship_fitting(hf1_venture_id);
+    hf1.ship_id = hf1_venture_id;
+    hf1.sess.ship_id = Some(hf1_venture_id);
+    let _ = jita_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: hf1_venture_id,
+                type_id: 32_880,
+                position: hf_st.site_position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(hf1.char_id, hf1_venture_id, 32_880),
+        )
+        .await;
+    jita_h.set_ball_position(hf2.ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+
+    ok(&ctx, &mut hf1.sess, "beyonce", "ActivateAccelerationGate", &[int(hf_st.outer_gate_ball_id)]).await;
+    ok(&ctx, &mut hf2.sess, "beyonce", "ActivateAccelerationGate", &[int(hf_st.outer_gate_ball_id)]).await;
+
+    let entered_st = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap();
+    let rock_id = match entered_st.progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_h.get_ball_snapshot(rock_id).await.unwrap().expect("Mutanite rock").1.position;
+    jita_h.set_ball_position(hf1.ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    jita_h.set_ball_position(hf2.ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+
     let isk1_0 = ok(&ctx, &mut hf1.sess, "account", "GetCashBalance", &[]).await.as_f64().unwrap();
     let isk2_0 = ok(&ctx, &mut hf2.sess, "account", "GetCashBalance", &[]).await.as_f64().unwrap();
-    kill_npc_with_weapons(&ctx, &mut hf1, &hf1_mods[..4], hf_boss.id, hf_boss.position).await;
+    ok(&ctx, &mut hf1.sess, "dogmaIM", "Mine", &[int(rock_id)]).await;
+    ok(&ctx, &mut hf2.sess, "dogmaIM", "Mine", &[int(rock_id)]).await;
+    let rem_units = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    if rem_units > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx, &hf1.sess, hf_st.instance_id, rem_units, 0).unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap().completed {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(&ctx, &hf1.sess, hf_st.instance_id).await.unwrap();
+    }
     let isk1_delta = ok(&ctx, &mut hf1.sess, "account", "GetCashBalance", &[]).await.as_f64().unwrap() - isk1_0;
     let isk2_delta = ok(&ctx, &mut hf2.sess, "account", "GetCashBalance", &[]).await.as_f64().unwrap() - isk2_0;
     assert_eq!(isk1_delta, isk2_delta);

@@ -8,10 +8,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::notify_registry::{
-    push_typed_session_notification, OnAccountChange, OnSolarsystemInterferenceChanged,
+    push_typed_session_notification, OnSolarsystemInterferenceChanged,
 };
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SolarSystemId;
@@ -155,6 +155,7 @@ pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
         }
     });
     crate::services::pve_crab_beacons::tick_all_crab_beacons(ctx);
+    crate::services::pve_homefront_sites::tick_homefront_operations_sync(ctx);
     if delta_sec > 0 {
         crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);
     }
@@ -488,6 +489,13 @@ async fn ensure_special_sites_spawned_for_systems(
     filter_sys: Option<SolarSystemId>,
 ) {
     ensure_special_sites_initialized(ctx);
+    if let Some(sys_id) = filter_sys {
+        with_pve_special_reg(ctx, |reg| {
+            crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
+                ctx, reg, sys_id,
+            );
+        });
+    }
     let want_sys = |sid: SolarSystemId| filter_sys.is_none_or(|target| target == sid);
     let (general_to_spawn, hf_to_spawn, trig_to_spawn) = read_pve_special_reg(ctx, |reg| {
         let mut g_list = Vec::new();
@@ -523,16 +531,9 @@ async fn ensure_special_sites_spawned_for_systems(
         }
         let mut hf_list = Vec::new();
         for sites in reg.homefront_sites.values() {
-            for (idx, s) in sites.iter().enumerate() {
-                if !want_sys(s.solar_system_id) {
-                    continue;
-                }
-                if !s.completed {
-                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
-                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
-                    let pos = DVec3::new(offset_x, offset_y, 0.0);
-                    hf_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, pos));
+            for s in sites {
+                if want_sys(s.solar_system_id) && !s.completed {
+                    hf_list.push((s.solar_system_id, s.instance_id));
                 }
             }
         }
@@ -576,18 +577,14 @@ async fn ensure_special_sites_spawned_for_systems(
         (g_list, hf_list, t_list)
     });
 
-    // Per-ball "already spawned" tracking on the SystemRegistry (no sentinel ball in space):
-    // a ball is spawned the first time it is seen in this ballpark, and never re-spawned after
-    // being destroyed. Sites seeded later in any system are picked up on the next call.
-    for (sys_id, bid, tid, pos) in hf_to_spawn {
-        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
-            continue;
-        }
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-            let cs = ctx.build_type_combat_state(tid);
-            let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-        }
+    // Homefront Operations spawn ONLY their outer entry beacon + acceleration gate;
+    // pocket NPCs and archetype objectives spawn upon gate activation.
+    for (sys_id, inst_id) in hf_to_spawn {
+        crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
+            ctx,
+            Some(sys_id),
+            Some(inst_id),
+        );
     }
     for (sys_id, bid, tid, pos) in general_to_spawn {
         if !ctx.systems.claim_special_site_ball(sys_id, bid) {
@@ -625,29 +622,11 @@ pub async fn on_warp_to_homefront_site(
     instance_id: i64,
 ) {
     ensure_special_sites_initialized(ctx);
-    let to_spawn = with_pve_special_reg(ctx, |reg| {
-        if let Some(sites) = reg.homefront_sites.get(&solar_system_id) {
-            if let Some((idx, s)) = sites.iter().enumerate().find(|(_, s)| s.instance_id == instance_id) {
-                if !s.completed {
-                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
-                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
-                    let pos = DVec3::new(offset_x, offset_y, 0.0);
-                    return Some((s.boss_npc_ball_id, boss_tid, pos));
-                }
-            }
-        }
-        None
-    });
-    if let Some((bid, tid, pos)) = to_spawn {
-        if ctx.systems.claim_special_site_ball(solar_system_id, bid) {
-            let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-                let cs = ctx.build_type_combat_state(tid);
-                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-            }
-        }
-    }
+    crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
+        ctx,
+        Some(solar_system_id),
+        Some(instance_id),
+    );
 }
 
 
@@ -655,7 +634,7 @@ pub async fn complete_special_dungeon_instance(
     ctx: &ServerContext,
     session: &mut SessionState,
     instance_id: i64,
-    fleet_count: usize,
+    _fleet_count: usize,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -771,94 +750,24 @@ pub async fn complete_special_dungeon_instance(
         return Ok(kv);
     }
 
-    // 2. Check Homefront Sites (710_001..710_002)
-    let hf_lookup = with_pve_special_reg(ctx, |reg| {
-        reg.homefront_sites.values().flatten().enumerate().find(|(_, s)| s.instance_id == instance_id).map(|(idx, s)| (idx, s.clone()))
-    });
-    if let Some((hf_idx, hf)) = hf_lookup {
-        if caller_sys != hf.solar_system_id {
-            return Err(rpc_err("NotInSiteSystem", format!("Must be in system {} to complete {}", hf.solar_system_id, hf.dungeon_name)));
-        }
-        if hf.completed {
-            return Err(rpc_err("SiteAlreadyCompleted", format!("Homefront site {} is already completed", hf.instance_id)));
-        }
-        if sys_handle.get_ball_snapshot(hf.boss_npc_ball_id).await.ok().flatten().is_some() {
-            return Err(rpc_err("WaveNpcsRemaining", format!("Homefront site wave NPC {} is still alive", hf.boss_npc_ball_id)));
-        }
-        let hf_pos = DVec3::new(
-            10_000.0 + ((hf.instance_id % 100) as f64) * 5_000.0 + (hf_idx as f64) * 2_500.0,
-            ((hf.instance_id % 10) as f64) * 1_000.0,
-            0.0,
-        );
-        crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
-            ctx, session, &sys_handle, char_id, hf_pos, &hf.dungeon_name,
-        ).await?;
-        let actual_fleet_count = ctx.db.with_snapshot(|snap| {
-            let fleet_id = snap.characters.get(&char_id).and_then(|c| c.fleet_id);
-            if let Some(fid) = fleet_id {
-                snap.characters
-                    .values()
-                    .filter(|c| {
-                        c.fleet_id == Some(fid)
-                            && c.solar_system_id == caller_sys
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
-                    .count()
-                    .max(1)
-            } else {
-                1
-            }
-        });
-        let eff_fleet_count = if fleet_count == 0 {
-            actual_fleet_count
-        } else {
-            fleet_count.min(actual_fleet_count)
-        };
-        let mult = if eff_fleet_count == hf.optimal_fleet_size {
-            1.0
-        } else if eff_fleet_count < hf.optimal_fleet_size {
-            (eff_fleet_count as f64) / (hf.optimal_fleet_size as f64)
-        } else {
-            0.75
-        };
-        let reward_paid = ((hf.base_pilot_isk as f64) * mult).round() as i64;
-        with_pve_special_reg(ctx, |reg| {
-            if let Some(list) = reg.homefront_sites.get_mut(&hf.solar_system_id) {
-                if let Some(s) = list.iter_mut().find(|s| s.instance_id == instance_id) {
-                    s.completed = true;
-                    s.reward_paid_isk = reward_paid;
-                }
-            }
-        });
-        let mut new_bal_isk = 0.0;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
-                let new_bal = ch.balance;
-                new_bal_isk = new_bal.to_wire_f64();
-                snap.append_journal(
-                    char_id,
-                    "CorporateRewardPayout",
-                    IskCents::from_isk(reward_paid),
-                    new_bal,
-                    format!("Homefront Operation Payout ({})", hf.dungeon_name),
-                );
-            }
-        });
-        let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal_isk);
-        push_typed_session_notification(
-            session,
-            OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: char_id,
-                balance: new_bal_isk,
-            },
-        );
+    // 2. Check Homefront Operations via real multi-role archetype completion.
+    if is_homefront_pve_completion_target(ctx, caller_sys, instance_id) {
+        let (payouts, summary) =
+            complete_homefront_from_special_dungeon(ctx, session, caller_sys, instance_id)?;
+        let reward_paid = payouts
+            .iter()
+            .find(|&&(cid, _, _)| cid == char_id)
+            .map(|p| p.1)
+            .unwrap_or(0);
+        let arch_key = get_homefront_runtime_state(ctx, instance_id)
+            .map(|s| s.blueprint.archetype.as_str())
+            .unwrap_or("Unknown");
         return Ok(PyRep::keyval([
-            ("instanceID", PyRep::Integer(hf.instance_id)),
+            ("instanceID", PyRep::Integer(instance_id)),
             ("completed", PyRep::Bool(true)),
             ("rewardPaidIsk", PyRep::Integer(reward_paid)),
+            ("totalFleetIsk", PyRep::Integer(summary.total_fleet_isk)),
+            ("archetype", PyRep::String(arch_key.into())),
         ]));
     }
 
@@ -968,6 +877,11 @@ pub async fn handle_pve_special_sites(
     ) {
         return None;
     }
+    if (service, method) == ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") {
+        // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
+        return Some(handle_get_homefront_site_instances(ctx, session, args));
+    }
+
     ensure_special_sites_initialized(ctx);
 
     if let Some(res) = crate::services::pve_incursion_sites::handle_incursion_rpc(
@@ -979,21 +893,6 @@ pub async fn handle_pve_special_sites(
     }
 
     match (service, method) {
-        // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
-        ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
-            let res = handle_get_homefront_site_instances(ctx, session, args);
-            let queried_sys = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|raw| u32::try_from(raw).ok())
-                .or(session.solar_system_id);
-            if let (Some(target_sys), true) = (queried_sys, res.is_ok()) {
-                if session.solar_system_id == Some(target_sys) {
-                    ensure_special_sites_spawned_for_system(ctx, target_sys).await;
-                }
-            }
-            Some(res)
-        }
 
         // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {

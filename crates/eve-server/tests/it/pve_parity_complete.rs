@@ -4809,22 +4809,100 @@ async fn test_p1_track_d_regressions_issues_12_55_56_57() {
     let npc_cs = wh_sys.get_combat_state(first_npc_bid).await.unwrap().expect("Drifter NPC must have CombatState");
     assert!(npc_cs.max_shield_hp >= 600.0 && npc_cs.max_armor_hp >= 600.0 && npc_cs.max_structure_hp >= 600.0);
 
-    // Homefront completion ignores spoofed fleet_count when solo
-    let hf_inst_id = with_pve_special_reg(&ctx1, |reg| {
-        let s = &reg.homefront_sites[&30_000_142][0];
-        (s.instance_id, s.boss_npc_ball_id, s.base_pilot_isk, s.optimal_fleet_size)
+    // Homefront completion verifies gate entry & ignores spoofed fleet_count when solo
+    let hf_st = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx1, 30_000_142, 10_387)
+        .expect("spawn Homefront 10_387");
+    let unentered_err = eve_server::services::pve_special_sites::complete_special_dungeon_instance(
+        &ctx1,
+        &mut sess_b,
+        hf_st.instance_id,
+        hf_st.blueprint.optimal_fleet_size,
+    )
+    .await
+    .expect_err("Unentered pilot must not complete Homefront instance");
+    assert_eq!(unentered_err.code, "GateNotEntered");
+
+    let hf_ship_id = 750_000_202_i64;
+    let hf_miner_id = 750_000_299_i64;
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_002).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(
+            hf_miner_id,
+            InventoryItemRecord {
+                item_id: hf_miner_id,
+                type_id: 483,
+                owner_id: 90_000_002,
+                location_id: hf_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(hf_miner_id, true);
     });
+    ctx1.invalidate_ship_fitting(hf_ship_id);
+
     let jita_sys = ctx1.systems.get_or_spawn(30_000_142);
-    jita_sys.try_remove_ball(hf_inst_id.1);
+    jita_sys.set_ball_position(hf_ship_id, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+    let PyRep::Tuple(bound_jita) = ctx1
+        .dispatch_rpc(&mut sess_b, "beyonce", None, "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None], &kw, None)
+        .await
+        .expect("bind beyonce")
+    else {
+        panic!("expected tuple from MachoBindObject");
+    };
+    let jita_beyonce = bound_jita[0].as_i64().unwrap() as u64;
+    ctx1.dispatch_rpc(
+        &mut sess_b,
+        "beyonce",
+        Some(jita_beyonce),
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(hf_st.outer_gate_ball_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("ActivateAccelerationGate");
+
+    let rock_id = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx1, hf_st.instance_id)
+        .unwrap()
+        .progress
+    {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().expect("rock ball").1.position;
+    jita_sys.set_ball_position(hf_ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    ctx1.dispatch_rpc(&mut sess_b, "dogmaIM", None, "Mine", &[PyRep::Integer(rock_id)], &kw, None)
+        .await
+        .expect("dogmaIM.Mine Mutanite");
+    let rem = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx1, hf_st.instance_id)
+        .unwrap()
+        .progress
+    {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    assert!(rem > 0, "Single Miner I cycle leaves Mutanite units before manual completion");
+    eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx1, &sess_b, hf_st.instance_id, rem, 0)
+        .unwrap();
+
     let hf_done = eve_server::services::pve_special_sites::complete_special_dungeon_instance(
         &ctx1,
         &mut sess_b,
-        hf_inst_id.0,
-        hf_inst_id.3, // spoofed optimal fleet size while solo
+        hf_st.instance_id,
+        hf_st.blueprint.optimal_fleet_size, // spoofed optimal fleet size while solo
     )
     .await
     .expect("complete_special_dungeon_instance");
-    let expected_solo_isk = ((hf_inst_id.2 as f64) * (1.0 / (hf_inst_id.3 as f64))).round() as i64;
+    let expected_solo_isk = eve_server::services::pve_special_sites_ops::scale_homefront_reward_cents(
+        eve_db::IskCents::from_isk(hf_st.blueprint.base_pilot_isk),
+        hf_st.blueprint.optimal_fleet_size,
+        1,
+    )
+    .raw_cents()
+        / 100;
     assert_eq!(hf_done.dict_get("rewardPaidIsk"), Some(&PyRep::Integer(expected_solo_isk)));
 }
 

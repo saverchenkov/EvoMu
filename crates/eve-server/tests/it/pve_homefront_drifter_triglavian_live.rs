@@ -81,38 +81,147 @@ async fn test_homefront_operations_live() {
     let PyRep::List(null_dngs) = &null_hf[0].1 else { panic!() };
     assert!(null_dngs.is_empty(), "Null-sec system must have 0 Homefront Operation instances");
 
-    // 3. Locate boss ball and verify combat state in space
-    let (boss_bid, boss_tid) = with_pve_special_reg(&ctx, |reg| {
-        let s = reg.homefront_sites[&jita]
-            .iter()
-            .find(|s| s.instance_id == target_instance_id)
-            .unwrap();
-        (s.boss_npc_ball_id, s.boss_type_id)
-    });
+    let _ = (&guns, jita_beyonce);
+    // 3. Verify outer gate lazy-spawn + Battleship gate rejection on seeded site, then run live 10_387 Metaliminal Meteoroid
+    eve_server::services::pve_special_sites::on_warp_to_homefront_site(&ctx, jita, target_instance_id).await;
+    let seeded_st = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, target_instance_id)
+        .expect("seeded Homefront runtime state");
+    assert!(!seeded_st.pocket_spawned, "Pocket NPCs must not spawn until gate activation");
+
     let jita_sys = ctx.systems.get_or_spawn(jita);
-    let boss_snap = jita_sys
-        .get_ball_snapshot(boss_bid)
-        .await
-        .expect("get_ball_snapshot")
-        .expect("Homefront boss ball must be spawned");
-    assert_eq!(boss_snap.1.type_id, boss_tid);
+    jita_sys.set_ball_position(910_401, seeded_st.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+    let gate_err = rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(seeded_st.outer_gate_ball_id)],
+    )
+    .await
+    .expect_err("Thunderchild Battleship must be rejected by Homefront acceleration gate");
+    assert_eq!(gate_err.code, "ShipRestrictedByGate");
+
+    // 4. Spawn deterministic Metaliminal Meteoroid (10_387), board a Venture (32_880) with Miner I (483), mine Mutanite & settle
+    let met = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, jita, 10_387)
+        .expect("spawn Homefront 10_387");
+    let venture_ship_id = 910_499_i64;
+    let miner_mod_id = 924_901_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.active_ship_id = venture_ship_id;
+        }
+        snap.skills.entry(90_000_001).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 },
+        );
+        snap.items.insert(
+            venture_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: venture_ship_id,
+                type_id: 32_880,
+                owner_id: 90_000_001,
+                location_id: jita as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            miner_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: miner_mod_id,
+                type_id: 483,
+                owner_id: 90_000_001,
+                location_id: venture_ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(miner_mod_id, true);
+    });
+    ctx.invalidate_ship_fitting(venture_ship_id);
+    sess.ship_id = Some(venture_ship_id);
+    let _ = jita_sys
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: venture_ship_id,
+                type_id: 32_880,
+                position: met.site_position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(90_000_001, venture_ship_id, 32_880),
+        )
+        .await;
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(met.outer_gate_ball_id)],
+    )
+    .await
+    .expect("Venture enters Homefront 10_387 gate");
+
+    let entered_st = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id).unwrap();
+    assert!(entered_st.pocket_spawned, "Pocket entities must spawn on gate activation");
+    let (rock_id, rem_before) = match entered_st.progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid {
+            meteoroid_ball_id,
+            remaining_units,
+            ..
+        } => (meteoroid_ball_id, remaining_units),
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().expect("rock ball").1.position;
+    jita_sys.set_ball_position(venture_ship_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     let init_balance = ctx.db.get_character(90_000_001).unwrap().balance.0;
     let init_journal_len = ctx.db.with_snapshot(|s| s.wallet_journal.len());
 
-    // 4. Destroy boss via live combat RPC dogmaIM.Activate
-    warp_lock_and_destroy_via_rpc(
-        &ctx,
-        &mut sess,
-        jita_beyonce,
-        jita,
-        910_401,
-        &guns,
-        boss_bid,
-        None,
-        25,
-    )
-    .await;
+    rpc(&ctx, &mut sess, "dogmaIM", "Mine", &[PyRep::Integer(rock_id)])
+        .await
+        .expect("dogmaIM.Mine Mutanite meteoroid");
+    let after_mine = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id).unwrap();
+    let rem_after = match after_mine.progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid {
+            remaining_units,
+            ..
+        } => remaining_units,
+        _ => unreachable!(),
+    };
+    assert!(rem_after < rem_before, "dogmaIM.Mine must extract Mutanite units");
+    if rem_after > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(
+            &ctx,
+            &sess,
+            met.instance_id,
+            rem_after,
+            0,
+        )
+        .unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id)
+        .unwrap()
+        .completed
+    {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(
+            &ctx,
+            &sess,
+            met.instance_id,
+        )
+        .await
+        .expect("complete Homefront 10_387");
+    }
 
     // 5. Verify ISK payout and CorporateRewardPayout wallet entry
     let final_balance = ctx.db.get_character(90_000_001).unwrap().balance.0;
@@ -152,8 +261,9 @@ async fn test_homefront_operations_live() {
         .filter_map(|e| e.dict_get("instanceID").and_then(|v| v.as_i64()))
         .collect();
     assert!(
-        !remaining_instances.contains(&target_instance_id),
-        "Completed instance {target_instance_id} must not appear in active registry instances"
+        !remaining_instances.contains(&met.instance_id),
+        "Completed instance {} must not appear in active registry instances",
+        met.instance_id
     );
 }
 

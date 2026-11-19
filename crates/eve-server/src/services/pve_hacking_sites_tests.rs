@@ -399,3 +399,312 @@ async fn wave4_hacking_wins_not_double_counted_when_already_hacked() {
         "re-winning an already_hacked container must not increment hacking_wins or spawn duplicate spew"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
+    use crate::services::pve_homefront_sites::{
+        activate_homefront_acceleration_gate, get_homefront_runtime_state,
+        is_homefront_hackable_structure, spawn_homefront_site_for_dungeon,
+        HomefrontArchetypeProgress,
+    };
+
+    let sys_id: SolarSystemId = 30_000_142;
+    let (char_id, ship_id) = (90_041_111, 1_040_001_111);
+    let mut sde = (*shared_sde()).clone();
+    if !sde.types.contains_key(&22_586) {
+        if let Some(mut t) = sde.types.values().next().cloned() {
+            t.type_id = 22_586;
+            t.group_id = 538;
+            t.name = "Data Analyzer I".into();
+            t.published = true;
+            t.default_attributes.insert(1909, 60.0);
+            t.default_attributes.insert(1910, 30.0);
+            t.default_attributes.insert(1911, 2.0);
+            t.default_attributes.insert(54, 5_000.0);
+            sde.types.insert(22_586, t);
+        }
+    }
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("hf_hacker", "pw", char_id, "HfHacker");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        for (id, tid, loc, flag) in [
+            (ship_id, 587_u32, sys_id as i64, eve_db::InventoryFlag::None),
+            (ship_id + 1, 22_586, ship_id, eve_db::InventoryFlag::MedSlot0),
+        ] {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_700_000)));
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let mut session = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 1. Salvage Research Werpost hacking via hackingMgr -> werpost_activated = true
+    let sr = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_713).expect("spawn Salvage Research");
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: sr.site_position + DVec3::new(400.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    activate_homefront_acceleration_gate(&ctx, &session, sr.instance_id)
+        .await
+        .expect("enter Salvage Research gate");
+    let werpost_id = ctx.db.with_snapshot(|snap| {
+        match snap.dungeon_runtime.homefront_runtimes[&sr.instance_id].progress {
+            eve_db::service_domains::pve_sites::HomefrontProgressRecord::SalvageResearch {
+                werpost_ball_id,
+                ..
+            } => werpost_ball_id,
+            _ => panic!("expected SalvageResearch"),
+        }
+    });
+    let gate_err = is_homefront_hackable_structure(&ctx, 9_999_999, sys_id, werpost_id)
+        .expect_err("unentered pilot must receive GateNotEntered");
+    assert_eq!(gate_err.code, "GateNotEntered");
+    assert!(matches!(
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, werpost_id),
+        Ok(Some((false, _)))
+    ));
+    let (_, werpost_ball) = sys_handle
+        .get_ball_snapshot(werpost_id)
+        .await
+        .unwrap()
+        .expect("werpost ball spawned");
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: werpost_ball.position + DVec3::new(werpost_ball.radius + 300.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let mut unentered_session = session.clone();
+    unentered_session.character_id = Some(char_id + 900);
+    unentered_session.ship_id = Some(ship_id + 900);
+    let gate_rpc_err = handle_pve_hacking(
+        &ctx,
+        &mut unentered_session,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(werpost_id), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .expect("Homefront gate error returns RPC Some(Err)")
+    .expect_err("unentered pilot must fail StartNewGameInstance with GateNotEntered");
+    assert_eq!(gate_rpc_err.code, "GateNotEntered");
+    assert!(
+        with_pve_exploration_reg(&ctx, |reg| !reg
+            .hacking_games
+            .contains_key(&(char_id + 900, werpost_id))),
+        "rejected GateNotEntered call must NOT insert hacking game state"
+    );
+
+    let start_wp = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(werpost_id), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("start Werpost hack");
+    assert_eq!(start_wp.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+    with_pve_exploration_reg(&ctx, |reg| {
+        let game = reg.hacking_games.get_mut(&(char_id, werpost_id)).unwrap();
+        assert_eq!(game.site_id, format!("HOMEFRONT_{werpost_id}"));
+        game.tiles[1].revealed = true;
+        game.tiles[1].kind = HackingNodeKind::SystemCore;
+        game.tiles[1].coherence = 1;
+        game.tiles[1].strength = 1;
+    });
+    let won_wp = handle_pve_hacking(
+        &ctx,
+        &mut session,
+        "hackingMgr",
+        "ClickedOnTile",
+        &[PyRep::Integer(werpost_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("win Werpost hack");
+    assert_eq!(won_wp.dict_get("status"), Some(&PyRep::String("Won".into())));
+    assert!(matches!(
+        get_homefront_runtime_state(&ctx, sr.instance_id).unwrap().progress,
+        HomefrontArchetypeProgress::SalvageResearch {
+            werpost_activated: true,
+            ..
+        }
+    ));
+    assert!(
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, werpost_id)
+            .expect("entered pilot check")
+            .is_none(),
+        "already-activated Werpost must no longer report as hackable"
+    );
+
+    // 2. Suspicious Signal: quitting twice must NOT permanently lock out array;
+    //    hacking all 3 arrays clears relay is_tethered in Ballpark.
+    let ss = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367).expect("spawn Suspicious Signal");
+    let _ = sys_handle
+        .set_ball_position(ship_id, ss.site_position + DVec3::new(400.0, 0.0, 0.0))
+        .await;
+    activate_homefront_acceleration_gate(&ctx, &session, ss.instance_id)
+        .await
+        .expect("enter Suspicious Signal gate");
+    let (relay_id, array_ids) = match get_homefront_runtime_state(&ctx, ss.instance_id).unwrap().progress {
+        HomefrontArchetypeProgress::SuspiciousSignal {
+            relay_ball_id,
+            array_ball_ids,
+            ..
+        } => (relay_ball_id, array_ball_ids),
+        other => panic!("expected SuspiciousSignal, got {other:?}"),
+    };
+    assert!(
+        sys_handle
+            .get_combat_state(relay_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_tethered,
+        "relay starts tethered before all 3 arrays are hacked"
+    );
+
+    let (_, arr0_ball) = sys_handle
+        .get_ball_snapshot(array_ids[0])
+        .await
+        .unwrap()
+        .expect("array 0 ball");
+    let _ = sys_handle
+        .set_ball_position(ship_id, arr0_ball.position + DVec3::new(arr0_ball.radius + 300.0, 0.0, 0.0))
+        .await;
+    for _ in 0..2 {
+        handle_pve_hacking(
+            &ctx,
+            &mut session,
+            "hackingMgr",
+            "StartNewGameInstance",
+            &[PyRep::Integer(array_ids[0]), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("retryable Homefront array hack starts");
+        handle_pve_hacking(&ctx, &mut session, "hackingMgr", "QuitHackingAttempt", &[], &kw)
+            .await
+            .unwrap()
+            .expect("quit attempt");
+    }
+
+    for &arr_id in &array_ids {
+        let (_, ab) = sys_handle
+            .get_ball_snapshot(arr_id)
+            .await
+            .unwrap()
+            .expect("array ball");
+        let _ = sys_handle
+            .set_ball_position(ship_id, ab.position + DVec3::new(ab.radius + 300.0, 0.0, 0.0))
+            .await;
+        handle_pve_hacking(
+            &ctx,
+            &mut session,
+            "hackingMgr",
+            "StartNewGameInstance",
+            &[PyRep::Integer(arr_id), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("start array hack");
+        with_pve_exploration_reg(&ctx, |reg| {
+            let game = reg.hacking_games.get_mut(&(char_id, arr_id)).unwrap();
+            game.tiles[1].revealed = true;
+            game.tiles[1].kind = HackingNodeKind::SystemCore;
+            game.tiles[1].coherence = 1;
+            game.tiles[1].strength = 1;
+        });
+        let won_arr = handle_pve_hacking(
+            &ctx,
+            &mut session,
+            "hackingMgr",
+            "ClickedOnTile",
+            &[PyRep::Integer(arr_id), PyRep::Integer(1)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("win array hack");
+        assert_eq!(won_arr.dict_get("status"), Some(&PyRep::String("Won".into())));
+    }
+
+    assert!(
+        !sys_handle
+            .get_combat_state(relay_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_tethered,
+        "all 3 arrays hacked via hackingMgr must clear relay is_tethered"
+    );
+    match get_homefront_runtime_state(&ctx, ss.instance_id).unwrap().progress {
+        HomefrontArchetypeProgress::SuspiciousSignal {
+            arrays_hacked,
+            vulnerability_window_secs,
+            ..
+        } => {
+            assert_eq!(arrays_hacked, [true; 3]);
+            assert!(vulnerability_window_secs > 0);
+        }
+        other => panic!("expected SuspiciousSignal, got {other:?}"),
+    }
+    assert!(
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, array_ids[0])
+            .expect("entered pilot check")
+            .is_none(),
+        "hacked array must not be re-hackable during open vulnerability window"
+    );
+}

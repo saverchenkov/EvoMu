@@ -3546,7 +3546,7 @@ pub(crate) mod pve_incursions_and_homefront_suite {
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
-use eve_destiny::{Ball, DamageVector, DVec3, MovementMode};
+use eve_destiny::{Ball, DVec3, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, EvePublicNotice, EvePublicRequest, EvePublicResponse, GoogleAny,
@@ -3958,13 +3958,46 @@ async fn test_pve_incursion_payout_and_homefront_ops() {
     let PyRep::Dict(hf_dict) = rpc(&ctx, &mut sess1, "dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", &[PyRep::Integer(JITA_SYS as i64)]).await.unwrap() else { panic!("Expected Dict") };
     let (_, PyRep::List(jita_dungeons)) = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(JITA_SYS as i64)).unwrap() else { panic!() };
     let did = jita_dungeons[0].dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap() as u32;
-    let inst_id = jita_dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    assert!(jita_dungeons[0].dict_get("instanceID").and_then(|v| v.as_i64()).is_some());
     assert_eq!(ctx.sde.dungeons.get(&did).and_then(|d| d.archetype_id), Some(70));
 
-    let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&JITA_SYS].iter().find(|s| s.instance_id == inst_id).unwrap().boss_npc_ball_id);
+    let hf_st = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_387).unwrap();
+    let venture_id = 840_021_i64;
+    let miner_id = 840_022_i64;
+    spawn_ship_in_space(&ctx, &mut sess1, p1, venture_id, 32_880, JITA_SYS, hf_st.site_position + DVec3::new(500.0, 0.0, 0.0), 1_200_000.0).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(p1).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(miner_id, eve_db::InventoryItemRecord {
+            item_id: miner_id, type_id: 483, owner_id: p1, location_id: venture_id,
+            flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(miner_id, true);
+    });
+    ctx.invalidate_ship_fitting(venture_id);
+    let PyRep::Tuple(bound_jita) = rpc(&ctx, &mut sess1, "beyonce", "MachoBindObject", &[PyRep::Integer(JITA_SYS as i64), PyRep::None]).await.unwrap() else { panic!("bind beyonce") };
+    let jita_beyonce = bound_jita[0].as_i64().unwrap() as u64;
+    rpc_bound(&ctx, &mut sess1, jita_beyonce, "ActivateAccelerationGate", &[PyRep::Integer(hf_st.outer_gate_ball_id)]).await.unwrap();
+
+    let rock_id = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let jita_sys = ctx.systems.get_or_spawn(JITA_SYS);
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().unwrap().1.position;
+    jita_sys.set_ball_position(venture_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+
     let hf_isk_before = ctx.db.with_snapshot(|s| s.characters[&p1].balance.0);
-    let kill = ctx.systems.get_or_spawn(JITA_SYS).apply_damage_with_attacker(hf_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(p1)).await.unwrap().unwrap();
-    assert!(kill.1);
+    rpc(&ctx, &mut sess1, "dogmaIM", "Mine", &[PyRep::Integer(rock_id)]).await.unwrap();
+    let rem = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    if rem > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx, &sess1, hf_st.instance_id, rem, 0).unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_st.instance_id).unwrap().completed {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(&ctx, &sess1, hf_st.instance_id).await.unwrap();
+    }
     assert!(ctx.db.with_snapshot(|s| s.characters[&p1].balance.0) > hf_isk_before);
 }
 

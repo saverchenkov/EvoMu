@@ -1101,22 +1101,84 @@ async fn test_sde_backed_pirate_strongholds_homefront_and_triglavian_sites() {
     let PyRep::List(jita_dngs) = &jita_hf[0].1 else {
         panic!()
     };
+    let _ = &guns;
     let hf_did = jita_dngs[0].dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap() as u32;
     assert_eq!(ctx.sde.dungeons[&hf_did].archetype_id, Some(70));
     let hf_iid = jita_dngs[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
-    let hf_boss_bid = with_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites[&jita]
-            .iter()
-            .find(|s| s.instance_id == hf_iid)
-            .unwrap()
-            .boss_npc_ball_id
+
+    eve_server::services::pve_special_sites::on_warp_to_homefront_site(&ctx, jita, hf_iid).await;
+    let seeded_hf = eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf_iid).unwrap();
+    let jita_sys = ctx.systems.get_or_spawn(jita);
+    jita_sys.set_ball_position(910_401, seeded_hf.site_position + DVec3::new(500.0, 0.0, 0.0)).await;
+    let bs_gate_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(jita_beyonce),
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(seeded_hf.outer_gate_ball_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Thunderchild Battleship must be rejected by Homefront acceleration gate");
+    assert_eq!(bs_gate_err.code, "ShipRestrictedByGate");
+
+    let met = eve_server::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, jita, 10_387).unwrap();
+    let venture_id = 910_411_i64;
+    let miner_id = 924_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.active_ship_id = venture_id;
+        }
+        snap.skills.entry(90_000_001).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(venture_id, make_item(venture_id, 32_880, 90_000_001, jita as i64, InventoryFlag::None, 1));
+        snap.items.insert(miner_id, make_item(miner_id, 483, 90_000_001, venture_id, InventoryFlag::HiSlot0, 1));
+        snap.module_online_states.insert(miner_id, true);
     });
+    ctx.invalidate_ship_fitting(venture_id);
+    sess.ship_id = Some(venture_id);
+    let _ = jita_sys
+        .spawn_ball_with_combat(
+            Ball {
+                id: venture_id,
+                type_id: 32_880,
+                position: met.site_position + DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(90_000_001, venture_id, 32_880),
+        )
+        .await;
+    rpc(&ctx, &mut sess, "beyonce", "ActivateAccelerationGate", &[PyRep::Integer(met.outer_gate_ball_id)]).await.unwrap();
+
+    let rock_id = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+        other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+    };
+    let rock_pos = jita_sys.get_ball_snapshot(rock_id).await.unwrap().unwrap().1.position;
+    jita_sys.set_ball_position(venture_id, rock_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     let bal_before_hf = ctx.db.get_character(90_000_001).unwrap().balance.0;
-    warp_lock_and_destroy_via_rpc(&ctx, &mut sess, jita_beyonce, jita, 910_401, &guns, hf_boss_bid, None, 25).await;
+    rpc(&ctx, &mut sess, "dogmaIM", "Mine", &[PyRep::Integer(rock_id)]).await.unwrap();
+    let rem = match eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id).unwrap().progress {
+        eve_server::services::pve_homefront_sites::HomefrontArchetypeProgress::MetaliminalMeteoroid { remaining_units, .. } => remaining_units,
+        _ => unreachable!(),
+    };
+    if rem > 0 {
+        eve_server::services::pve_homefront_sites::metaliminal_mine_mutanite(&ctx, &sess, met.instance_id, rem, 0).unwrap();
+    }
+    if !eve_server::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, met.instance_id).unwrap().completed {
+        eve_server::services::pve_homefront_sites::complete_homefront_operation_and_pay(&ctx, &sess, met.instance_id).await.unwrap();
+    }
     assert!(
         ctx.db.get_character(90_000_001).unwrap().balance.0 > bal_before_hf,
-        "Killing Homefront boss via dogmaIM.Activate must award CorporateRewardPayout ISK"
+        "Completing Homefront site via gate + dogmaIM.Mine must award CorporateRewardPayout ISK"
     );
 
     // 2. Triglavian Sites (`feat:pve.triglavian-sites`): Gammel (30003076) Striking Leshak (48122) killed via dogmaIM.Activate -> Survey DB (48121) + dual standings

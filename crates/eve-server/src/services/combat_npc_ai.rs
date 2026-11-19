@@ -480,6 +480,10 @@ struct PrecomputedCandidate {
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     crate::services::mobile_deployables_ext::step_system_deployables_sync(ctx, solar_system_id);
     crate::services::gm_soak_commands::step_gm_soak_and_deadwarp_for_system(ctx, solar_system_id);
+    crate::services::pve_homefront_sites::tick_homefront_operations_for_system_sync(
+        ctx,
+        solar_system_id,
+    );
     let (mut npcs_in_sys, has_scram, prev_npc_scram_targets, is_debugged) = {
         let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
         let npcs: Vec<_> = guard
@@ -1019,6 +1023,10 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 npc.archetype.as_str(),
                 "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
             );
+            let is_homefront_hostile = matches!(
+                npc.archetype.as_str(),
+                "HomefrontHostile" | "HomefrontProtecteeTarget"
+            );
             let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
             let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
             let is_zarzakh_patrol = matches!(npc.archetype.as_str(), "ZarzakhPatrol" | "OuterZarzakhPatrol");
@@ -1064,7 +1072,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         npc.aggression_threat.contains_key(&osid) || npc.threat_table.contains_key(&osid)
                     });
 
-                    let should_skip = if is_pirate {
+                    let should_skip = if is_pirate || is_homefront_hostile {
                         false
                     } else if is_insurgency_pirate {
                         let c_stage = *cached_c_stage.get_or_insert_with(|| {
@@ -1189,6 +1197,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         // 3. Apply NPC EWAR & 4. Archetype Weapon Application synchronously on Ballpark
         let mut destroyed_in_tick: Vec<(i64, i64, eve_destiny::Ball)> = Vec::new();
+        let mut homefront_damage_events: Vec<(i64, i64, f64)> = Vec::new();
         let did_aggress = {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
@@ -1308,13 +1317,27 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 true
             };
             if can_fire {
-                if let Some((_, true, Some(dead_ball))) = bp.apply_damage_to_ball(target_id, cycle_dmg) {
-                    destroyed_in_tick.push((nid, target_id, dead_ball));
+                if let Some((applied, destroyed, dead_opt)) =
+                    bp.apply_damage_to_ball(target_id, cycle_dmg)
+                {
+                    if applied > 0.0 {
+                        homefront_damage_events.push((nid, target_id, applied));
+                    }
+                    if destroyed {
+                        if let Some(dead_ball) = dead_opt {
+                            destroyed_in_tick.push((nid, target_id, dead_ball));
+                        }
+                    }
                 }
             }
             crate::system_actor::sync_ball_positions(&bp, &sys_handle.ball_positions, &sys_handle.scrambled_balls);
             can_fire || active_npc_scram_targets.contains(&target_id)
         };
+        for (atk_id, dst_id, app) in homefront_damage_events {
+            crate::services::pve_homefront_sites::on_homefront_combat_damage_event_sync(
+                ctx, None, atk_id, dst_id, app,
+            );
+        }
         if !destroyed_in_tick.is_empty() {
             for &(_, did, _) in &destroyed_in_tick {
                 destroyed_in_call.insert(did);
@@ -1411,12 +1434,25 @@ pub fn record_npc_threat_event(
     is_ewar: bool,
     is_logistics: bool,
 ) {
-    let sig_radius = ctx.db.with_snapshot(|snap| {
-        snap.items
+    let (sig_radius, attacker_char_opt) = ctx.db.with_snapshot(|snap| {
+        let sig = snap
+            .items
             .get(&attacker_ball_id)
             .and_then(|i| ctx.sde.types.get(&i.type_id))
             .and_then(|t| t.default_attributes.get(&552).copied())
-            .unwrap_or(40.0)
+            .unwrap_or(40.0);
+        let char_opt = snap
+            .characters
+            .values()
+            .find(|c| c.active_ship_id == attacker_ball_id)
+            .map(|c| c.character_id)
+            .or_else(|| {
+                snap.items
+                    .get(&attacker_ball_id)
+                    .map(|i| i.owner_id)
+                    .filter(|&cid| snap.characters.contains_key(&cid))
+            });
+        (sig, char_opt)
     });
     // DERIVED: signature radius bonus relative to 40m baseline; EWAR 1.5x and logistics 1.3x multipliers.
     let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
@@ -1446,6 +1482,15 @@ pub fn record_npc_threat_event(
         }
         None
     });
+    if damage_dealt.is_finite() && damage_dealt > 0.0 && !is_ewar && !is_logistics {
+        crate::services::pve_homefront_sites::on_homefront_combat_damage_event_sync(
+            ctx,
+            attacker_char_opt,
+            attacker_ball_id,
+            npc_ball_id,
+            damage_dealt,
+        );
+    }
     if let Some(relay_sys) = relay_sys_opt {
         let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(
             ctx,

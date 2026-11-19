@@ -367,72 +367,19 @@ pub async fn on_special_site_npc_destroyed_core(
     let now_sec = db.clock().now_unix_secs();
     let mut acct_changes = Vec::new();
 
-    // 0. Check Homefront sites when destroyed with attacker attribution in space
-    if let Some(cid) = killer_char_id {
-        let fleet_pilots: Vec<CharacterId> = db.with_snapshot(|snap| {
-            let fleet_id = snap.characters.get(&cid).and_then(|c| c.fleet_id);
-            if let Some(fid) = fleet_id {
-                let mut members: Vec<CharacterId> = snap
-                    .characters
-                    .values()
-                    .filter(|c| {
-                        c.fleet_id == Some(fid)
-                            && c.solar_system_id == solar_system_id
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
-                    .map(|c| c.character_id)
-                    .collect();
-                if !members.contains(&cid) {
-                    members.push(cid);
-                }
-                members.sort_unstable();
-                members
-            } else {
-                vec![cid]
-            }
-        });
-        let fleet_count = fleet_pilots.len().max(1);
-        let hf_res = with_pve_special_reg_db(db, now_sec, |reg| {
-            if let Some(list) = reg.homefront_sites.get_mut(&solar_system_id) {
-                for site in list.iter_mut() {
-                    if site.boss_npc_ball_id == npc_ball_id && !site.completed {
-                        let reward_paid =
-                            crate::services::pve_special_sites_ops::compute_homefront_combat_pilot_isk(
-                                site.base_pilot_isk,
-                                site.optimal_fleet_size,
-                                fleet_count,
-                            );
-                        site.completed = true;
-                        site.reward_paid_isk = reward_paid;
-                        return Some((site.dungeon_name.clone(), reward_paid));
-                    }
-                }
-            }
-            None
-        });
-        if let Some((dungeon_name, reward_paid)) = hf_res {
-            db.with_mut_snapshot(|snap| {
-                for &pid in &fleet_pilots {
-                    if let Some(ch) = snap.characters.get_mut(&pid) {
-                        ch.balance = ch
-                            .balance
-                            .checked_add(IskCents::from_isk(reward_paid))
-                            .unwrap_or(ch.balance);
-                        let new_bal = ch.balance;
-                        acct_changes.push((pid, new_bal.to_wire_f64()));
-                        snap.append_journal(
-                            pid,
-                            "CorporateRewardPayout",
-                            IskCents::from_isk(reward_paid),
-                            new_bal,
-                            format!("Homefront Operation Payout ({dungeon_name})"),
-                        );
-                    }
-                }
-            });
-            return acct_changes;
-        }
+    // 0. Delegate Homefront Operations entities & structures (even when killer_char_id is None,
+    //    e.g., protectee/smuggler/dread destruction or NPC/environment deaths).
+    if let Some(hf_accts) = crate::services::pve_homefront_sites::on_homefront_entity_destroyed_core(
+        _systems,
+        db,
+        _sde,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    )
+    .await
+    {
+        return hf_accts;
     }
 
     // 1. Check Triglavian sites
