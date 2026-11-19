@@ -441,6 +441,25 @@ pub fn is_omega_weekly_sp_offer(
     })
 }
 
+/// Returns whether a store catalog offer is eligible for FastCheckout advertising and billing.
+///
+/// Weekly Omega Free SP claim offers belong exclusively to `storeManager`, and unpriced,
+/// zero-price, or negative-price catalog offers cannot be billed in FastCheckout.
+pub fn is_fast_checkout_catalog_offer(
+    offer: &StoreOffer,
+    catalog: &StoreCatalog,
+    offer_tags: &[String],
+) -> bool {
+    if is_omega_weekly_sp_offer(offer, catalog, offer_tags) {
+        return false;
+    }
+    offer.price_plex > 0
+        || (offer.price_plex == 0
+            && offer
+                .price_cents
+                .is_some_and(|c| c > 0 && u32::try_from(c).is_ok()))
+}
+
 pub fn resolve_omega_weekly_free_sp_grant(
     snap: &WorldStateSnapshot,
     offer_id: i64,

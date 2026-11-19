@@ -256,11 +256,11 @@ fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
     );
 
     // Enable user and seed custom store catalog with:
-    // - Offer 101: USD-priced PLEX + Omega (category_id = 1) + non-PLEX item product (Tritanium x10)
-    // - Offer 102: PLEX-priced product offer (price_plex = 50)
-    // - Offer 103: Negative price_plex (-1) -> InvalidOffer
-    // - Offer 104: Zero USD & zero PLEX price -> InvalidOffer
-    // - Offer 105: Empty products (filtered out by load_catalog_plex_offers)
+    // - Offer 201: USD-priced PLEX + Omega (category_id = 1) + non-PLEX item product (Tritanium x10)
+    // - Offer 202: PLEX-priced product offer (price_plex = 50)
+    // - Offer 203: Negative price_plex (-1) -> filtered out by load_catalog_plex_offers
+    // - Offer 204: Zero USD & zero PLEX price -> filtered out by load_catalog_plex_offers
+    // - Offer 205: Empty products -> filtered out by load_catalog_plex_offers
     set_user_fast_checkout_enabled(&ctx, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
         let cat = StoreCatalog {
@@ -346,11 +346,19 @@ fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
         snap.account_plex_vault.insert(1, 0);
     });
 
-    // Clear cache and populate cached_offers via GetOffersForUser
+    // Clear cache and populate cached_offers via GetOffersForUser; only valid priced offers (201, 202) appear
     let offers_rep = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
         .unwrap()
         .unwrap();
-    assert!(!offers_rep.dict_get("offers").unwrap().as_list().unwrap().is_empty());
+    let offer_ids: Vec<i64> = offers_rep
+        .dict_get("offers")
+        .unwrap()
+        .as_list()
+        .unwrap()
+        .iter()
+        .filter_map(|o| o.dict_get("offerId").and_then(PyRep::as_i64))
+        .collect();
+    assert_eq!(offer_ids, vec![201, 202]);
 
     // Find valid password for demo user_id 1 or set known password hash
     let pw = "evomu_test_pw";
@@ -402,7 +410,7 @@ fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
         "OfferNotFound"
     );
 
-    // Offer 203 / 204 -> InvalidOffer
+    // Filtered offers 203 / 204 -> OfferNotFound
     assert_eq!(
         handle(
             &ctx,
@@ -415,7 +423,7 @@ fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
         .unwrap()
         .unwrap_err()
         .code,
-        "InvalidOffer"
+        "OfferNotFound"
     );
     assert_eq!(
         handle(
@@ -429,7 +437,7 @@ fn buy_offer_payment_tokens_plex_vault_products_omega_and_error_edges() {
         .unwrap()
         .unwrap_err()
         .code,
-        "InvalidOffer"
+        "OfferNotFound"
     );
 
     // Offer 201 without quick-pay payment token -> PaymentTokenRequired

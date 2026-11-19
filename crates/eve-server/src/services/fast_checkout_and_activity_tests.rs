@@ -471,6 +471,28 @@ fn fast_checkout_mining_details_and_paid_omega_buy_offer_paths() {
     let mut psess = auth_session(real_uid, paid_cid, corp_id, sys_id);
     psess.station_id = Some(station_id);
     let _ = handle(&ctx, &psess, "FastCheckoutService", "ClearFastCheckoutCacheForUser", &[], &kw);
+    let advertised = handle(&ctx, &psess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let advertised_list = advertised.dict_get("offers").and_then(|v| v.as_list()).unwrap();
+    assert!(
+        !advertised_list
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(plex_offer_id)),
+        "negative-price offer must be omitted from GetOffersForUser"
+    );
+    let adv_omega = advertised_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(omega_offer_id))
+        .expect("dual-priced Omega offer in GetOffersForUser");
+    assert_eq!(adv_omega.dict_get("price"), Some(&PyRep::Real(500.0)));
+    assert_eq!(adv_omega.dict_get("currency"), Some(&PyRep::String("PLX".into())));
+    let adv_usd = advertised_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(usd_offer_id))
+        .expect("USD offer in GetOffersForUser");
+    assert_eq!(adv_usd.dict_get("price"), Some(&PyRep::Real(4.99)));
+    assert_eq!(adv_usd.dict_get("currency"), Some(&PyRep::String("USD".into())));
 
     // Missing password -> InvalidPassword
     assert_eq!(
@@ -517,7 +539,7 @@ fn fast_checkout_mining_details_and_paid_omega_buy_offer_paths() {
         .code,
         "InvalidPassword"
     );
-    // Zero-price offer in paid mode -> InvalidOffer
+    // Excluded negative-price catalog offer -> OfferNotFound
     assert_eq!(
         handle(
             &ctx,
@@ -530,7 +552,7 @@ fn fast_checkout_mining_details_and_paid_omega_buy_offer_paths() {
         .unwrap()
         .unwrap_err()
         .code,
-        "InvalidOffer"
+        "OfferNotFound"
     );
     // No quick-pay token -> PaymentTokenRequired
     assert_eq!(
@@ -797,6 +819,17 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
                     price_cents: None,
                     currency: None,
                 },
+                StoreOffer {
+                    id: 5004,
+                    name: "Priced Huge Qty".into(),
+                    description: "Overflow test offer".into(),
+                    category_id: 2,
+                    price_plex: 0,
+                    product_ids: vec![502],
+                    targeted: false,
+                    price_cents: Some(100),
+                    currency: Some("USD".into()),
+                },
             ],
         };
         save_store_catalog(snap, &catalog);
@@ -837,7 +870,7 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
         "OfferNotFound"
     );
 
-    // InvalidOffer negative price_plex and unpriced offer in paid mode
+    // Filtered negative price_plex (5002) and unpriced offer (5003) -> OfferNotFound
     assert_eq!(
         handle(
             &ctx,
@@ -850,7 +883,7 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
         .unwrap()
         .unwrap_err()
         .code,
-        "InvalidOffer"
+        "OfferNotFound"
     );
     assert_eq!(
         handle(
@@ -864,7 +897,7 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
         .unwrap()
         .unwrap_err()
         .code,
-        "InvalidOffer"
+        "OfferNotFound"
     );
 
     // ArithmeticOverflow on PLEX quantity multiplication and i32 product quantity overflow
@@ -897,7 +930,7 @@ fn fast_checkout_buy_offer_edge_errors_and_free_plex_delivery() {
             &sess,
             "FastCheckoutService",
             "BuyOffer",
-            &[PyRep::Integer(5003), PyRep::Integer(2)],
+            &[PyRep::Integer(5004), PyRep::Integer(2)],
             &kw
         )
         .unwrap()
@@ -1452,4 +1485,335 @@ fn fast_checkout_no_free_pack_fallback_in_paid_mode_emits_item_change_and_readon
         (next_eid_before, ledger_before, structs_before),
         (next_eid_after, ledger_after, structs_after)
     );
+}
+
+#[test]
+fn fast_checkout_filters_free_weekly_sp_and_aligns_dual_price_billing() {
+    use crate::services::quasar_payment_store_types::{
+        ensure_store_catalog_seeded, read_store_catalog, save_store_catalog, PaymentTokenRecord,
+        StoreOffer, StoreProduct,
+    };
+
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let cid = 90_300_555_i64;
+    ctx.db.provision_gm_account("fc_billing_pilot", "billpw", cid, "BillingPilot");
+    let (uid, corp_id, sys_id, station_id) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&cid).unwrap();
+        (ch.user_id, ch.corporation_id, ch.solar_system_id, ch.home_station_id)
+    });
+    let mut sess = auth_session(uid, cid, corp_id, sys_id);
+    sess.station_id = Some(station_id);
+    set_user_fast_checkout_enabled(&ctx, uid, true);
+
+    // Seed default NES catalog (includes dual-priced 1001..=1004 and 0-price 1005 weekly free SP)
+    // plus a custom fiat-only PLEX pack offer 6001 ($14.99).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(snap, &ctx.sde);
+        let mut cat = read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 601,
+            name: "300 PLEX".into(),
+            description: "300 PLEX".into(),
+            type_id: crate::services::market_contracts::PLEX_TYPE_ID,
+            quantity: 300,
+        });
+        cat.offers.push(StoreOffer {
+            id: 6001,
+            name: "300 PLEX USD".into(),
+            description: "Fiat PLEX offer".into(),
+            category_id: 1,
+            price_plex: 0,
+            product_ids: vec![601],
+            targeted: false,
+            price_cents: Some(1499),
+            currency: Some("USD".into()),
+        });
+        save_store_catalog(snap, &cat);
+        snap.account_plex_vault.insert(uid, 700);
+        snap.quasar_commerce.payment_tokens = vec![PaymentTokenRecord {
+            id: 600_001,
+            user_id: uid,
+            token_str: "tok_6001".into(),
+            is_quick_pay: true,
+            consumed: false,
+        }];
+    });
+
+    // 1. Paid mode: GetOffersForUser omits 1005 (and custom 0-price), advertises 1001/1002 in PLX and 6001 in USD
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
+    let _ = handle(&ctx, &sess, "FastCheckoutService", "ClearFastCheckoutCacheForUser", &[], &kw);
+    let paid_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let paid_list = paid_offers.dict_get("offers").and_then(PyRep::as_list).unwrap();
+    assert!(
+        !paid_list
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1005)),
+        "Offer 1005 (0-price weekly free SP) must never appear in FastCheckoutService.GetOffersForUser"
+    );
+
+    let o1001 = paid_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1001))
+        .expect("1001 in GetOffersForUser");
+    assert_eq!(o1001.dict_get("price"), Some(&PyRep::Real(500.0)));
+    assert_eq!(o1001.dict_get("pricePlex"), Some(&PyRep::Integer(500)));
+    assert_eq!(o1001.dict_get("currency"), Some(&PyRep::String("PLX".into())));
+
+    let o1002 = paid_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1002))
+        .expect("1002 in GetOffersForUser");
+    assert_eq!(o1002.dict_get("price"), Some(&PyRep::Real(110.0)));
+    assert_eq!(o1002.dict_get("currency"), Some(&PyRep::String("PLX".into())));
+
+    let o6001 = paid_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(6001))
+        .expect("6001 in GetOffersForUser");
+    assert_eq!(o6001.dict_get("price"), Some(&PyRep::Real(14.99)));
+    assert_eq!(o6001.dict_get("currency"), Some(&PyRep::String("USD".into())));
+
+    // BuyOffer(1005) returns OfferNotFound
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(1005), PyRep::Integer(1), PyRep::String("billpw".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
+    );
+
+    // Even if an old cached_offers snapshot still contains 1005, resolve/GetOffersForUser strips it
+    let mut stale = get_user_fast_checkout_state(&ctx, uid);
+    stale.cached_offers.get_or_insert_with(Vec::new).push(FastCheckoutOfferRecord {
+        offer_id: 1005,
+        plex_amount: 0,
+        price_usd: 0.0,
+        price_plex: 0,
+        name: "Omega Weekly 15,000 Free SP".into(),
+        description: "Stale cache entry".into(),
+        tags: vec!["omega-weekly-free-sp".into()],
+        products: vec![FastCheckoutProductRecord {
+            type_id: 0,
+            quantity: 15_000,
+        }],
+        category_id: 3,
+    });
+    save_user_fast_checkout_state(&ctx, uid, &stale);
+    let stale_checked = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !stale_checked
+            .dict_get("offers")
+            .and_then(PyRep::as_list)
+            .unwrap()
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1005)),
+        "stale cached Offer 1005 must be filtered out"
+    );
+
+    // 2. Dual-priced Offer 1002 debits 110 PLEX without consuming the quick-pay token or writing USD receipt
+    let buy_1002 = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(1002), PyRep::Integer(1), PyRep::String("billpw".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(buy_1002.dict_get("status"), Some(&PyRep::String("CONFIRMED".into())));
+    assert_eq!(buy_1002.dict_get("newPlexBalance"), Some(&PyRep::Integer(590)));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.quasar_commerce.payment_receipts.is_empty());
+        assert!(!snap.quasar_commerce.payment_tokens[0].consumed);
+    });
+
+    // 3. Fiat offer 6001 consumes quick-pay token once, writes receipt, and blocks second purchase
+    let buy_6001 = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(6001), PyRep::Integer(1), PyRep::String("billpw".into())],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(buy_6001.dict_get("newPlexBalance"), Some(&PyRep::Integer(890)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.quasar_commerce.payment_receipts.len(), 1);
+        assert_eq!(snap.quasar_commerce.payment_receipts[0].amount_in_cents, 1499);
+        assert!(snap.quasar_commerce.payment_tokens[0].consumed);
+    });
+    assert_eq!(
+        handle(
+            &ctx,
+            &sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[PyRep::Integer(6001), PyRep::Integer(1), PyRep::String("billpw".into())],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "PaymentTokenRequired"
+    );
+
+    // 4. Free mode (`free_fast_checkout_plex = true`) keeps 1005 omitted, advertises 6001 as 0.0 FREE
+    //    while keeping PLEX-priced 1002 consistent at 110.0 PLX
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = true;
+    let _ = handle(&ctx, &sess, "FastCheckoutService", "ClearFastCheckoutCacheForUser", &[], &kw);
+    let free_offers = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let free_list = free_offers.dict_get("offers").and_then(PyRep::as_list).unwrap();
+    assert!(
+        !free_list
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1005)),
+        "Offer 1005 must remain hidden in free FastCheckout mode"
+    );
+    let free_6001 = free_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(6001))
+        .expect("6001 in free mode");
+    assert_eq!(free_6001.dict_get("price"), Some(&PyRep::Real(0.0)));
+    assert_eq!(free_6001.dict_get("currency"), Some(&PyRep::String("FREE".into())));
+    let free_1002 = free_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1002))
+        .expect("1002 in free mode");
+    assert_eq!(free_1002.dict_get("price"), Some(&PyRep::Real(110.0)));
+    assert_eq!(free_1002.dict_get("currency"), Some(&PyRep::String("PLX".into())));
+
+    let free_buy_6001 = handle(
+        &ctx,
+        &sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(6001), PyRep::Integer(1)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(free_buy_6001.dict_get("status"), Some(&PyRep::String("COMPLETED".into())));
+    assert_eq!(free_buy_6001.dict_get("newPlexBalance"), Some(&PyRep::Integer(1190)));
+
+    // 5. Malformed non-catalog cached_offers are hidden by GetOffersForUser and rejected by BuyOffer
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = false;
+    let nan_record = FastCheckoutOfferRecord {
+        offer_id: 91_003,
+        plex_amount: 100,
+        price_usd: f64::NAN,
+        price_plex: 0,
+        name: "Bad NaN usd".into(),
+        description: String::new(),
+        tags: Vec::new(),
+        products: Vec::new(),
+        category_id: 1,
+    };
+    assert_eq!(
+        resolve_fast_checkout_billing(&nan_record, false)
+            .unwrap_err()
+            .code,
+        "InvalidOffer"
+    );
+    let bad_records = vec![
+        FastCheckoutOfferRecord {
+            offer_id: 91_001,
+            plex_amount: 100,
+            price_usd: 0.0,
+            price_plex: -1,
+            name: "Bad neg plex".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            products: Vec::new(),
+            category_id: 1,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 91_002,
+            plex_amount: 100,
+            price_usd: -5.0,
+            price_plex: 0,
+            name: "Bad neg usd".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            products: Vec::new(),
+            category_id: 1,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 91_004,
+            plex_amount: 100,
+            price_usd: 0.0,
+            price_plex: 0,
+            name: "Bad zero price".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            products: Vec::new(),
+            category_id: 1,
+        },
+        FastCheckoutOfferRecord {
+            offer_id: 91_005,
+            plex_amount: 100,
+            price_usd: 1e12,
+            price_plex: 0,
+            name: "Bad overflow usd".into(),
+            description: String::new(),
+            tags: Vec::new(),
+            products: Vec::new(),
+            category_id: 1,
+        },
+    ];
+    for rec in &bad_records {
+        assert!(resolve_fast_checkout_billing(rec, false).is_err());
+    }
+    let mut bad_state = get_user_fast_checkout_state(&ctx, uid);
+    bad_state.cached_offers = Some(bad_records);
+    save_user_fast_checkout_state(&ctx, uid, &bad_state);
+    let filtered_bad = handle(&ctx, &sess, "FastCheckoutService", "GetOffersForUser", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        filtered_bad
+            .dict_get("offers")
+            .and_then(PyRep::as_list)
+            .map(<[PyRep]>::len),
+        Some(0),
+        "malformed cached records must never be advertised"
+    );
+    for (bad_id, expected_code) in [
+        (91_001, "InvalidOffer"),
+        (91_002, "InvalidOffer"),
+        (91_004, "InvalidOffer"),
+        (91_005, "ArithmeticOverflow"),
+    ] {
+        assert_eq!(
+            handle(
+                &ctx,
+                &sess,
+                "FastCheckoutService",
+                "BuyOffer",
+                &[PyRep::Integer(bad_id), PyRep::Integer(1), PyRep::String("billpw".into())],
+                &kw,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            expected_code
+        );
+    }
 }

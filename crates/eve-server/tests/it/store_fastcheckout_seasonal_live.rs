@@ -569,3 +569,301 @@ async fn test_seasonal_login_campaign_lifecycle_live() {
         .unwrap_err();
     assert_eq!(dup_err.code, ERR_ALREADY_CLAIMED);
 }
+
+#[tokio::test]
+async fn test_fast_checkout_excludes_weekly_sp_and_aligns_dual_price_billing_live() {
+    use eve_server::services::quasar_payment_store_types::{
+        add_user_quick_pay_token, ensure_store_catalog_seeded, read_store_catalog,
+        save_store_catalog, PaymentTokenRecord, StoreOffer, StoreProduct,
+    };
+
+    // parity: rpc:FastCheckoutService.GetOffersForUser
+    // parity: rpc:FastCheckoutService.BuyOffer
+    // parity: rpc:storeManager.get_offers
+    // parity: rpc:storeManager.buy_offer
+    eve_testkit::attest(&[
+        "rpc:FastCheckoutService.GetOffersForUser",
+        "rpc:FastCheckoutService.BuyOffer",
+        "rpc:storeManager.get_offers",
+        "rpc:storeManager.buy_offer",
+    ]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut sess = SessionState::new(96_401);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(PILOT_1)],
+    )
+    .await
+    .expect("SelectCharacterID");
+    assert_eq!(slash(&ctx, &mut sess, "/fastcheckout 1").await, PyRep::Bool(true));
+
+    // Seed default NES catalog (adds dual-priced 1001..=1004 + free 1005 weekly SP)
+    ctx.db.with_mut_snapshot(|s| {
+        s.quasar_commerce.nes_store_catalog = None;
+        ensure_store_catalog_seeded(s, &ctx.sde);
+    });
+    let store_offers = rpc(&ctx, &mut sess, "storeManager", "get_offers", &[])
+        .await
+        .expect("storeManager.get_offers");
+    let PyRep::List(store_list) = store_offers else {
+        panic!("expected list from storeManager.get_offers");
+    };
+    assert!(
+        store_list.iter().any(|o| match o {
+            PyRep::Object { args, .. } => args.dict_get("offerID").and_then(PyRep::as_i64) == Some(1005),
+            _ => o.dict_get("offerID").and_then(PyRep::as_i64) == Some(1005),
+        }),
+        "storeManager must still advertise Offer 1005 weekly free SP"
+    );
+
+    let uid = sess.user_id.expect("user_id");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cat = read_store_catalog(snap);
+        cat.products.push(StoreProduct {
+            id: 701,
+            name: "100 PLEX".into(),
+            description: "100 PLEX USD".into(),
+            type_id: PLEX_TYPE_ID,
+            quantity: 100,
+        });
+        cat.offers.push(StoreOffer {
+            id: 7001,
+            name: "100 PLEX USD Pack".into(),
+            description: "Fiat-only PLEX pack".into(),
+            category_id: 1,
+            price_plex: 0,
+            product_ids: vec![701],
+            targeted: false,
+            price_cents: Some(1499),
+            currency: Some("USD".into()),
+        });
+        save_store_catalog(snap, &cat);
+        snap.account_plex_vault.insert(uid, 500);
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.plex_balance = 0;
+        }
+    });
+    add_user_quick_pay_token(
+        &ctx.db,
+        &ctx.quasar_gateway.pending_notices,
+        uid,
+        PaymentTokenRecord {
+            id: 96_401,
+            user_id: uid,
+            token_str: "tok_live_96401".into(),
+            is_quick_pay: true,
+            consumed: false,
+        },
+    );
+
+    // Paid mode: GetOffersForUser omits 1005, aligns 1001/1002 to PLX and 7001 to USD
+    let fc_offers = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+        .await
+        .expect("GetOffersForUser");
+    let PyRep::List(fc_list) = fc_offers
+        .dict_get("offers")
+        .cloned()
+        .expect("offers list")
+    else {
+        panic!("expected List for offers");
+    };
+    assert!(
+        !fc_list
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1005)),
+        "FastCheckoutService.GetOffersForUser must exclude 0-price Offer 1005"
+    );
+
+    let offer_1001 = fc_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1001))
+        .expect("1001 present");
+    assert_eq!(offer_1001.dict_get("price"), Some(&PyRep::Real(500.0)));
+    assert_eq!(
+        offer_1001.dict_get("currency"),
+        Some(&PyRep::String("PLX".into()))
+    );
+
+    let offer_1002 = fc_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1002))
+        .expect("1002 present");
+    assert_eq!(offer_1002.dict_get("price"), Some(&PyRep::Real(110.0)));
+    assert_eq!(
+        offer_1002.dict_get("currency"),
+        Some(&PyRep::String("PLX".into()))
+    );
+
+    let offer_7001 = fc_list
+        .iter()
+        .find(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(7001))
+        .expect("7001 present");
+    assert_eq!(offer_7001.dict_get("price"), Some(&PyRep::Real(14.99)));
+    assert_eq!(
+        offer_7001.dict_get("currency"),
+        Some(&PyRep::String("USD".into()))
+    );
+
+    // Direct BuyOffer(1005) returns OfferNotFound
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[
+                PyRep::Integer(1005),
+                PyRep::Integer(1),
+                PyRep::String("demo-secret".into()),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "OfferNotFound"
+    );
+
+    // Dual-priced Offer 1002 debits 110 vault PLEX without consuming quick-pay token or writing USD receipt
+    let buy_1002 = rpc(
+        &ctx,
+        &mut sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[
+            PyRep::Integer(1002),
+            PyRep::Integer(1),
+            PyRep::String("demo-secret".into()),
+        ],
+    )
+    .await
+    .expect("BuyOffer 1002");
+    assert_eq!(
+        buy_1002.dict_get("newPlexBalance").and_then(PyRep::as_i64),
+        Some(390)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.quasar_commerce.payment_receipts.is_empty());
+        assert!(!snap.quasar_commerce.payment_tokens[0].consumed);
+    });
+
+    // Insufficient PLEX on 1001 fails with UserError (not fiat billing)
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[
+                PyRep::Integer(1001),
+                PyRep::Integer(1),
+                PyRep::String("demo-secret".into()),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "UserError"
+    );
+
+    // Fiat offer 7001 consumes quick-pay token, records USD receipt, and grants 100 PLEX (390 -> 490)
+    let buy_7001 = rpc(
+        &ctx,
+        &mut sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[
+            PyRep::Integer(7001),
+            PyRep::Integer(1),
+            PyRep::String("demo-secret".into()),
+        ],
+    )
+    .await
+    .expect("BuyOffer 7001");
+    assert_eq!(
+        buy_7001.dict_get("newPlexBalance").and_then(PyRep::as_i64),
+        Some(490)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.quasar_commerce.payment_receipts.len(), 1);
+        assert_eq!(snap.quasar_commerce.payment_receipts[0].amount_in_cents, 1499);
+        assert!(snap.quasar_commerce.payment_tokens[0].consumed);
+    });
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "FastCheckoutService",
+            "BuyOffer",
+            &[
+                PyRep::Integer(7001),
+                PyRep::Integer(1),
+                PyRep::String("demo-secret".into()),
+            ],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "PaymentTokenRequired"
+    );
+
+    // Free FastCheckout mode keeps 1005 omitted while storeManager.buy_offer(1005) still claims weekly SP
+    ctx.feature_flags.write().unwrap().free_fast_checkout_plex = true;
+    rpc(
+        &ctx,
+        &mut sess,
+        "FastCheckoutService",
+        "ClearFastCheckoutCacheForUser",
+        &[],
+    )
+    .await
+    .expect("ClearFastCheckoutCacheForUser");
+    let free_fc = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+        .await
+        .expect("GetOffersForUser free mode");
+    let PyRep::List(free_list) = free_fc
+        .dict_get("offers")
+        .cloned()
+        .expect("free offers list")
+    else {
+        panic!("expected List for free offers");
+    };
+    assert!(
+        !free_list
+            .iter()
+            .any(|o| o.dict_get("offerId").and_then(PyRep::as_i64) == Some(1005)),
+        "Offer 1005 must remain hidden in free FastCheckout mode"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 500);
+    });
+    rpc(
+        &ctx,
+        &mut sess,
+        "FastCheckoutService",
+        "BuyOffer",
+        &[PyRep::Integer(1001), PyRep::Integer(1)],
+    )
+    .await
+    .expect("Activate Omega via 1001");
+    let claimed_1005 = rpc(&ctx, &mut sess, "storeManager", "buy_offer", &[PyRep::Integer(1005)])
+        .await
+        .expect("storeManager.buy_offer(1005) succeeds for Omega pilot");
+    assert_eq!(
+        claimed_1005.dict_get("offerID").and_then(PyRep::as_i64),
+        Some(1005)
+    );
+    assert_eq!(
+        claimed_1005
+            .dict_get("freeSkillPointsGranted")
+            .and_then(PyRep::as_i64),
+        Some(15_000)
+    );
+}
