@@ -16,11 +16,11 @@ use crate::services::pve_exploration_seeding::build_type_combat_state_from_sde;
 use crate::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats;
 use crate::services::pve_special_sites::PveSpecialSitesRegistry;
 use crate::services::pve_special_sites_ops::{
-    compute_homefront_fleet_payouts, resolve_homefront_archetype_blueprint,
-    resolve_sde_homefront_templates_for_system, validate_homefront_ship_eligibility,
-    HomefrontArchetype, HomefrontFleetPayoutSummary, HomefrontOperationBlueprint,
-    HomefrontParticipantContribution, HomefrontPilotPayout, HomefrontRole,
-    HomefrontShipEligibility, HOMEFRONT_RAID_CARGO_VOLUME_M3,
+    compute_homefront_fleet_payouts, is_homefront_exordium_system,
+    resolve_homefront_archetype_blueprint, resolve_sde_homefront_templates_for_system,
+    validate_homefront_ship_eligibility, HomefrontArchetype, HomefrontFleetPayoutSummary,
+    HomefrontOperationBlueprint, HomefrontParticipantContribution, HomefrontPilotPayout,
+    HomefrontRole, HomefrontShipEligibility, HOMEFRONT_RAID_CARGO_VOLUME_M3,
 };
 use crate::services::space_nav_movement_guard::{AccelerationGateKind, MovementIntent};
 use crate::system_actor::{AsteroidState, SystemHandle, SystemRegistry};
@@ -137,6 +137,8 @@ pub enum HomefrontArchetypeProgress {
         required_hold_secs: u64,
     },
     TrafficStop {
+        survival_elapsed_secs: u64,
+        required_survival_secs: u64,
         smugglers_destroyed: u8,
         required_smugglers: u8,
         smugglers_escaped: u8,
@@ -217,12 +219,16 @@ impl HomefrontRuntimeState {
                 ..
             } => *held_low_secs >= *required_hold_secs,
             HomefrontArchetypeProgress::TrafficStop {
+                survival_elapsed_secs,
+                required_survival_secs,
                 smugglers_destroyed,
                 required_smugglers,
                 smugglers_escaped,
                 civilians_harmed,
             } => {
-                *smugglers_destroyed >= *required_smugglers
+                let req_secs = (*required_survival_secs).max(HOMEFRONT_TRAFFIC_TIMER_SECS);
+                *survival_elapsed_secs >= req_secs
+                    && *smugglers_destroyed >= *required_smugglers
                     && *smugglers_escaped < 5
                     && *civilians_harmed <= 2
             }
@@ -622,12 +628,16 @@ fn progress_record_to_public(p: &HomefrontProgressRecord) -> HomefrontArchetypeP
             required_hold_secs: *required_hold_secs,
         },
         HomefrontProgressRecord::TrafficStop {
+            survival_elapsed_secs,
+            required_survival_secs,
             smugglers_destroyed,
             required_smugglers,
             smugglers_escaped,
             civilians_harmed,
             ..
         } => HomefrontArchetypeProgress::TrafficStop {
+            survival_elapsed_secs: *survival_elapsed_secs,
+            required_survival_secs: *required_survival_secs,
             smugglers_destroyed: *smugglers_destroyed,
             required_smugglers: *required_smugglers,
             smugglers_escaped: *smugglers_escaped,
@@ -872,34 +882,29 @@ fn resolve_site_record_completed_in_snap(snap: &WorldStateSnapshot, instance_id:
 }
 
 /// Seeds up to 2 high-sec Homefront Operations for `sys_id` using V24 `archetype_id == 70` templates
-/// and archetype/faction blueprints.
-pub fn ensure_homefront_sites_for_system_locked(
-    ctx: &ServerContext,
-    reg: &mut PveSpecialSitesRegistry,
+/// Pure deterministic Homefront site selection from SDE data for `sys_id`.
+/// Shared by write-time seeding and read-only `GetHomefrontSiteInstances` so cold reads
+/// stay consistent with materialized `PveSpecialSitesRegistry.homefront_sites`.
+pub(crate) fn select_homefront_site_records(
+    sde: &SdeRegistry,
     sys_id: SolarSystemId,
-) {
-    if reg.homefront_sites.contains_key(&sys_id) {
-        return;
-    }
-    let sec = ctx
-        .sde
+) -> Vec<HomefrontSiteRecord> {
+    let sec = sde
         .solar_systems
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(0.0);
     if sec < 0.45 || sys_id >= 31_000_000 {
-        reg.homefront_sites.insert(sys_id, Vec::new());
-        return;
+        return Vec::new();
     }
 
-    let templates = resolve_sde_homefront_templates_for_system(&ctx.sde, sys_id);
+    let templates = resolve_sde_homefront_templates_for_system(sde, sys_id);
     if templates.is_empty() {
-        reg.homefront_sites.insert(sys_id, Vec::new());
-        return;
+        return Vec::new();
     }
 
     let rng = crate::rng::MechanicRng::seeded(
-        (sys_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ctx.now_unix(),
+        (sys_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
     );
     let idx1 = (rng.try_next_u64().unwrap_or(sys_id as u64) as usize) % templates.len();
     let idx2 = if templates.len() > 1 {
@@ -928,53 +933,75 @@ pub fn ensure_homefront_sites_for_system_locked(
     let t1 = &templates[idx1];
     let t2 = &templates[idx2];
     let bp1 = resolve_homefront_archetype_blueprint(
-        &ctx.sde,
+        sde,
         t1.dungeon_id,
         &t1.dungeon_name,
         sys_id,
         t1.difficulty,
     );
     let bp2 = resolve_homefront_archetype_blueprint(
-        &ctx.sde,
+        sde,
         t2.dungeon_id,
         &t2.dungeon_name,
         sys_id,
         t2.difficulty,
     );
 
-    reg.homefront_sites.insert(
-        sys_id,
-        vec![
-            HomefrontSiteRecord {
-                instance_id: base_inst + 1,
-                dungeon_id: t1.dungeon_id,
-                dungeon_name: t1.dungeon_name.clone(),
-                solar_system_id: sys_id,
-                optimal_fleet_size: bp1.optimal_fleet_size,
-                base_pilot_isk: bp1.base_pilot_isk,
-                completed: false,
-                reward_paid_isk: 0,
-                boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
-                boss_type_id: bp1.dispatch_commander_type_id,
-            },
-            HomefrontSiteRecord {
-                instance_id: base_inst + 2,
-                dungeon_id: t2.dungeon_id,
-                dungeon_name: t2.dungeon_name.clone(),
-                solar_system_id: sys_id,
-                optimal_fleet_size: bp2.optimal_fleet_size,
-                base_pilot_isk: bp2.base_pilot_isk,
-                completed: false,
-                reward_paid_isk: 0,
-                boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
-                boss_type_id: bp2.dispatch_commander_type_id,
-            },
-        ],
-    );
+    vec![
+        HomefrontSiteRecord {
+            instance_id: base_inst + 1,
+            dungeon_id: t1.dungeon_id,
+            dungeon_name: t1.dungeon_name.clone(),
+            solar_system_id: sys_id,
+            optimal_fleet_size: bp1.optimal_fleet_size,
+            base_pilot_isk: bp1.base_pilot_isk,
+            completed: false,
+            reward_paid_isk: 0,
+            boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
+            boss_type_id: bp1.dispatch_commander_type_id,
+        },
+        HomefrontSiteRecord {
+            instance_id: base_inst + 2,
+            dungeon_id: t2.dungeon_id,
+            dungeon_name: t2.dungeon_name.clone(),
+            solar_system_id: sys_id,
+            optimal_fleet_size: bp2.optimal_fleet_size,
+            base_pilot_isk: bp2.base_pilot_isk,
+            completed: false,
+            reward_paid_isk: 0,
+            boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
+            boss_type_id: bp2.dispatch_commander_type_id,
+        },
+    ]
+}
+
+/// and archetype/faction blueprints.
+pub fn ensure_homefront_sites_for_system_locked(
+    ctx: &ServerContext,
+    reg: &mut PveSpecialSitesRegistry,
+    sys_id: SolarSystemId,
+) {
+    if reg.homefront_sites.contains_key(&sys_id) {
+        return;
+    }
+    let records = select_homefront_site_records(&ctx.sde, sys_id);
+    reg.homefront_sites.insert(sys_id, records);
 }
 
 pub fn init_homefront_sites(ctx: &ServerContext, reg: &mut PveSpecialSitesRegistry) {
     for &sys_id in HOMEFRONT_SYSTEMS {
+        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
+    }
+    let mut exordium_sys_ids: Vec<SolarSystemId> = ctx
+        .sde
+        .schools
+        .values()
+        .filter(|sc| is_homefront_exordium_system(&ctx.sde, sc.solar_system_id))
+        .map(|sc| sc.solar_system_id)
+        .collect();
+    exordium_sys_ids.sort_unstable();
+    exordium_sys_ids.dedup();
+    for sys_id in exordium_sys_ids {
         ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
     }
 }
@@ -3331,13 +3358,23 @@ pub fn traffic_stop_scan_and_intercept(
             .homefront_runtimes
             .get_mut(&instance_id)
             .ok_or_else(|| hf_err("HomefrontSiteNotFound", "Site missing"))?;
-        match &mut rec.progress {
+        let drained = match &mut rec.progress {
             HomefrontProgressRecord::TrafficStop {
+                active_hauler_ball_ids,
+                smuggler_ball_ids,
                 smugglers_destroyed,
                 required_smugglers,
                 civilians_harmed,
                 ..
             } => {
+                let drain_count = usize::from(smugglers_caught).min(smuggler_ball_ids.len());
+                let drained: Vec<i64> = if drain_count > 0 {
+                    let ids: Vec<i64> = smuggler_ball_ids.drain(..drain_count).collect();
+                    active_hauler_ball_ids.retain(|id| !ids.contains(id));
+                    ids
+                } else {
+                    Vec::new()
+                };
                 *smugglers_destroyed = smugglers_destroyed
                     .saturating_add(smugglers_caught)
                     .min(*required_smugglers);
@@ -3352,6 +3389,7 @@ pub fn traffic_stop_scan_and_intercept(
                         "Traffic Stop failed: >= 3 civilian haulers harmed",
                     ));
                 }
+                drained
             }
             _ => {
                 return Err(hf_err(
@@ -3359,6 +3397,9 @@ pub fn traffic_stop_scan_and_intercept(
                     "Convoy interception applies only to Traffic Stop operations",
                 ));
             }
+        };
+        if !drained.is_empty() {
+            rec.spawned_ball_ids.retain(|id| !drained.contains(id));
         }
         let c = ensure_contribution(rec, char_id);
         c.damage_dealt += damage_dealt;
@@ -3446,10 +3487,10 @@ fn credit_payouts_in_snap(
                 / (ratio_den as i128);
             IskCents::from_raw_cents(scaled as i64)
         };
-        let mut new_bal = IskCents::ZERO;
-        let mut lp_delta = None;
-        let mut append_journal_entry = false;
         if let Some(ch) = snap.characters.get_mut(&payout.character_id) {
+            let mut new_bal = ch.balance;
+            let mut lp_delta = None;
+            let mut append_journal_entry = false;
             if credit_cents.raw_cents() > 0 {
                 ch.balance = ch.balance.checked_add(credit_cents).unwrap_or(ch.balance);
                 new_bal = ch.balance;
@@ -3461,20 +3502,20 @@ fn credit_payouts_in_snap(
                 ch.loyalty_points.insert(issuer_corp_id, after);
                 lp_delta = Some((issuer_corp_id, before, after));
             }
+            if append_journal_entry {
+                snap.append_journal(
+                    payout.character_id,
+                    "CorporateRewardPayout",
+                    credit_cents,
+                    new_bal,
+                    format!("Homefront Operation Payout ({dname})"),
+                );
+            }
+            let mut adjusted = payout.clone();
+            adjusted.isk_cents = credit_cents;
+            adjusted.isk = credit_cents.raw_cents() / 100;
+            emitted.push((adjusted, new_bal, lp_delta));
         }
-        if append_journal_entry {
-            snap.append_journal(
-                payout.character_id,
-                "CorporateRewardPayout",
-                credit_cents,
-                new_bal,
-                format!("Homefront Operation Payout ({dname})"),
-            );
-        }
-        let mut adjusted = payout.clone();
-        adjusted.isk_cents = credit_cents;
-        adjusted.isk = credit_cents.raw_cents() / 100;
-        emitted.push((adjusted, new_bal, lp_delta));
     }
     emitted
 }
@@ -3577,39 +3618,9 @@ fn settle_homefront_completion_atomic_db(
                     )
                 })?;
 
-            // Compute unpaid share delta for Abyssal Artifact Recovery waves already paid live
+            // Abyssal Artifact Recovery pays exclusively per wave cleared live via `pay_aar_wave_in_snap`.
             let (unpaid_num, unpaid_den) = match &rec.progress {
-                HomefrontProgressRecord::AbyssalArtifactRecovery {
-                    total_waves,
-                    waves_paid,
-                    waves_paid_mask,
-                    ..
-                } if (*waves_paid_mask != 0 || *waves_paid > 0)
-                    && !rec.blueprint.abyssal_wave_payouts_isk.is_empty() =>
-                {
-                    let total_isk: i64 = rec.blueprint.abyssal_wave_payouts_isk.iter().sum();
-                    let paid_isk: i64 = if *waves_paid_mask != 0 {
-                        rec.blueprint
-                            .abyssal_wave_payouts_isk
-                            .iter()
-                            .take(usize::from(*total_waves))
-                            .enumerate()
-                            .filter(|&(idx, _)| (*waves_paid_mask & (1_u16 << idx)) != 0)
-                            .map(|(_, &isk)| isk)
-                            .sum()
-                    } else {
-                        rec.blueprint
-                            .abyssal_wave_payouts_isk
-                            .iter()
-                            .take(usize::from((*waves_paid).min(*total_waves)))
-                            .sum()
-                    };
-                    let rem = total_isk.saturating_sub(paid_isk);
-                    (
-                        usize::try_from(rem.max(0)).unwrap_or(0),
-                        usize::try_from(total_isk.max(1)).unwrap_or(1),
-                    )
-                }
+                HomefrontProgressRecord::AbyssalArtifactRecovery { .. } => (0, 1),
                 _ => (1, 1),
             };
 
@@ -3773,62 +3784,82 @@ fn try_settle_completed_homefront_live(ctx: &ServerContext, instance_id: i64) {
     let _ = settle_homefront_completion_atomic_sync(ctx, instance_id, None);
 }
 
-fn spawn_next_aar_wave_db(
+fn spawn_next_aar_wave_db_with_despawns(
     systems: &SystemRegistry,
     db: &WorldRepository,
     sde: &SdeRegistry,
     instance_id: i64,
     next_wave: u8,
-) -> Vec<(SolarSystemId, i64, TypeId, DVec3)> {
+) -> (Vec<i64>, Vec<(SolarSystemId, i64, TypeId, DVec3)>) {
     let mut allocated_ids: Vec<i64> = Vec::new();
     let info = db.try_with_mut_snapshot(
-        |snap| -> Result<Option<(SolarSystemId, DVec3, Vec<TypeId>, Vec<i64>)>, BridgeRpcError> {
+        |snap| -> Result<Option<(SolarSystemId, DVec3, Vec<TypeId>, Vec<i64>, Vec<i64>)>, BridgeRpcError> {
             let mut ids = Vec::with_capacity(HOMEFRONT_AAR_ROCKS_PER_WAVE);
             for _ in 0..HOMEFRONT_AAR_ROCKS_PER_WAVE {
                 snap.next_entity_id += 1;
                 ids.push(snap.next_entity_id);
             }
-            let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&instance_id) else {
-                return Ok(None);
+            let esc = {
+                let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get(&instance_id) else {
+                    return Ok(None);
+                };
+                rec.blueprint.escort_wave_type_ids.clone()
             };
-            let sys_id = rec.solar_system_id;
-            let pos = DVec3::from_array(rec.pocket_position);
-            let esc = rec.blueprint.escort_wave_type_ids.clone();
             let mut esc_ids = Vec::with_capacity(esc.len());
             for _ in 0..esc.len() {
                 snap.next_entity_id += 1;
                 esc_ids.push(snap.next_entity_id);
             }
-            if let HomefrontProgressRecord::AbyssalArtifactRecovery {
-                current_wave,
-                rock_ball_ids,
-                wave_hostile_ball_ids,
-                mutanite_units_remaining,
-                wave_hostiles_remaining,
-                warp_bubble_active,
-                wave_time_remaining_secs,
-                ..
-            } = &mut rec.progress
-            {
-                *current_wave = next_wave;
-                *rock_ball_ids = ids.clone();
-                *wave_hostile_ball_ids = esc_ids.clone();
-                *mutanite_units_remaining =
-                    (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32) * HOMEFRONT_AAR_UNITS_PER_ROCK;
-                *wave_hostiles_remaining = esc_ids.len() as u8;
-                *warp_bubble_active = true;
-                *wave_time_remaining_secs = aar_wave_duration_secs(next_wave);
+            let mut prev_balls = Vec::new();
+            let (sys_id, pos) = {
+                let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&instance_id) else {
+                    return Ok(None);
+                };
+                let sys_id = rec.solar_system_id;
+                let pos = DVec3::from_array(rec.pocket_position);
+                if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    current_wave,
+                    rock_ball_ids,
+                    wave_hostile_ball_ids,
+                    mutanite_units_remaining,
+                    wave_hostiles_remaining,
+                    warp_bubble_active,
+                    wave_time_remaining_secs,
+                    ..
+                } = &mut rec.progress
+                {
+                    prev_balls.extend(rock_ball_ids.iter().copied());
+                    prev_balls.extend(wave_hostile_ball_ids.iter().copied());
+                    *current_wave = next_wave;
+                    *rock_ball_ids = ids.clone();
+                    *wave_hostile_ball_ids = esc_ids.clone();
+                    *mutanite_units_remaining =
+                        (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32) * HOMEFRONT_AAR_UNITS_PER_ROCK;
+                    *wave_hostiles_remaining = esc_ids.len() as u8;
+                    *warp_bubble_active = true;
+                    *wave_time_remaining_secs = aar_wave_duration_secs(next_wave);
+                }
+                rec.spawned_ball_ids.retain(|id| !prev_balls.contains(id));
+                rec.spawned_ball_ids.extend(ids.iter().copied());
+                rec.spawned_ball_ids.extend(esc_ids.iter().copied());
+                (sys_id, pos)
+            };
+            for pid in &prev_balls {
+                snap.asteroids.remove(pid);
             }
-            rec.spawned_ball_ids.extend(ids.iter().copied());
-            rec.spawned_ball_ids.extend(esc_ids.iter().copied());
             allocated_ids = ids;
-            Ok(Some((sys_id, pos, esc, esc_ids)))
+            Ok(Some((sys_id, pos, esc, esc_ids, prev_balls)))
         },
     );
 
+    let mut despawned_balls = Vec::new();
     let mut spawned_escorts = Vec::new();
-    if let Ok(Some((sys_id, pos, esc_tids, esc_ids))) = info {
+    if let Ok(Some((sys_id, pos, esc_tids, esc_ids, prev_balls))) = info {
         let sys_h = systems.get_or_spawn(sys_id);
+        for pid in &prev_balls {
+            sys_h.try_remove_ball(*pid);
+        }
+        despawned_balls = prev_balls;
         let bubble_id = 1_897_800_000 + instance_id.saturating_mul(100) + 9;
         sys_h.try_add_mobile_warp_disruptor(bubble_id, pos, 150_000.0);
         for (idx, rock_id) in allocated_ids.into_iter().enumerate() {
@@ -3869,11 +3900,29 @@ fn spawn_next_aar_wave_db(
             spawned_escorts.push((sys_id, eid, etid, epos));
         }
     }
-    spawned_escorts
+    (despawned_balls, spawned_escorts)
+}
+
+fn spawn_next_aar_wave_db(
+    systems: &SystemRegistry,
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    instance_id: i64,
+    next_wave: u8,
+) -> Vec<(SolarSystemId, i64, TypeId, DVec3)> {
+    spawn_next_aar_wave_db_with_despawns(systems, db, sde, instance_id, next_wave).1
 }
 
 fn spawn_next_aar_wave_in_space(ctx: &ServerContext, instance_id: i64, next_wave: u8) {
-    let spawned = spawn_next_aar_wave_db(&ctx.systems, &ctx.db, &ctx.sde, instance_id, next_wave);
+    let (despawned, spawned) =
+        spawn_next_aar_wave_db_with_despawns(&ctx.systems, &ctx.db, &ctx.sde, instance_id, next_wave);
+    if !despawned.is_empty() {
+        with_mut_combat_ephemeral(ctx, |rt| {
+            for bid in &despawned {
+                rt.npc_entities.remove(bid);
+            }
+        });
+    }
     for (sys_id, eid, etid, epos) in spawned {
         register_homefront_npc_entity(
             ctx,
@@ -3996,6 +4045,21 @@ pub fn complete_homefront_from_special_dungeon(
     Ok((payouts, summary))
 }
 
+fn is_allied_homefront_ball(rec: &HomefrontRuntimeRecord, ball_id: i64) -> bool {
+    match &rec.progress {
+        HomefrontProgressRecord::EmergencyAid {
+            protectee_ball_id, ..
+        } => *protectee_ball_id == ball_id,
+        HomefrontProgressRecord::DreadAssault { dread_ball_id, .. } => *dread_ball_id == ball_id,
+        HomefrontProgressRecord::TrafficStop {
+            station_ball_id,
+            civilian_ball_ids,
+            ..
+        } => *station_ball_id == ball_id || civilian_ball_ids.contains(&ball_id),
+        _ => false,
+    }
+}
+
 /// Synchronous weapon/drone/NPC damage tracking for Homefront NPCs and structures.
 pub fn on_homefront_combat_damage_event_sync(
     ctx: &ServerContext,
@@ -4015,8 +4079,11 @@ pub fn on_homefront_combat_damage_event_sync(
             if attacker_char_opt.is_some_and(|cid| !rec.entered_pilots.contains_key(&cid)) {
                 continue;
             }
+            let allied_target = is_allied_homefront_ball(rec, target_ball_id);
             if let Some(cid) = attacker_char_opt {
-                ensure_contribution(rec, cid).damage_dealt += damage_dealt;
+                if !allied_target {
+                    ensure_contribution(rec, cid).damage_dealt += damage_dealt;
+                }
             }
             match &mut rec.progress {
                 HomefrontProgressRecord::EmergencyAid {
@@ -4136,7 +4203,10 @@ pub async fn on_homefront_entity_destroyed_core(
                         && ch.station_id.is_none()
                         && ch.structure_id.is_none()
                 });
-                if in_space_sys && rec.entered_pilots.contains_key(&cid) {
+                if in_space_sys
+                    && rec.entered_pilots.contains_key(&cid)
+                    && !is_allied_homefront_ball(rec, ball_id)
+                {
                     let c = ensure_contribution(rec, cid);
                     c.damage_dealt += HOMEFRONT_MIN_SKILL_CONTRIBUTION;
                 }
@@ -4542,38 +4612,46 @@ pub async fn on_homefront_ore_mined(
 }
 
 /// Identifies a Homefront hackable object (`SuspiciousSignal` Data Arrays or `SalvageResearch` Werpost).
-/// Returns `Some((is_relic=false, site_difficulty))` if matched.
+/// Returns `Ok(Some((is_relic=false, site_difficulty)))` if matched for an entered pilot,
+/// `Err(GateNotEntered)` if matched for an unentered pilot, or `Ok(None)` if not a Homefront target.
 pub fn is_homefront_hackable_structure(
     ctx: &ServerContext,
+    char_id: i64,
     sys_id: SolarSystemId,
     ball_id: i64,
-) -> Option<(bool, i64)> {
+) -> Result<Option<(bool, i64)>, BridgeRpcError> {
     ctx.db.with_snapshot(|snap| {
         for rec in snap.dungeon_runtime.homefront_runtimes.values() {
             if rec.solar_system_id != sys_id || rec.completed || rec.failed {
                 continue;
             }
-            match &rec.progress {
+            let matched = match &rec.progress {
                 HomefrontProgressRecord::SuspiciousSignal {
                     array_ball_ids,
                     arrays_hacked,
                     ..
-                } if array_ball_ids.iter().position(|&id| id == ball_id).is_some_and(|idx| {
-                    !arrays_hacked.get(idx).copied().unwrap_or(false)
-                }) => {
-                    return Some((false, i64::from(rec.blueprint.difficulty.max(1))));
-                }
+                } => array_ball_ids
+                    .iter()
+                    .position(|&id| id == ball_id)
+                    .is_some_and(|idx| !arrays_hacked.get(idx).copied().unwrap_or(false)),
                 HomefrontProgressRecord::SalvageResearch {
                     werpost_ball_id,
                     werpost_activated,
                     ..
-                } if *werpost_ball_id == ball_id && !*werpost_activated => {
-                    return Some((false, i64::from(rec.blueprint.difficulty.max(1))));
+                } => *werpost_ball_id == ball_id && !*werpost_activated,
+                _ => false,
+            };
+            if matched {
+                if !rec.started || !rec.entered_pilots.contains_key(&char_id) {
+                    return Err(hf_err(
+                        "GateNotEntered",
+                        "Pilot has not entered the Homefront acceleration gate",
+                    ));
                 }
-                _ => {}
+                return Ok(Some((false, i64::from(rec.blueprint.difficulty.max(1)))));
             }
         }
-        None
+        Ok(None)
     })
 }
 
@@ -4908,7 +4986,11 @@ pub async fn on_homefront_inventory_event(
                         )
                         .cargo_delivered += u32::from(delta);
                     } else if delivered_in_depot < *cargo_delivered {
+                        let removed = u32::from(*cargo_delivered - delivered_in_depot);
                         *cargo_delivered = delivered_in_depot;
+                        if let Some(c) = rec.contributions.get_mut(&char_id) {
+                            c.cargo_delivered = c.cargo_delivered.saturating_sub(removed);
+                        }
                     }
                     if *cargo_delivered >= *required_deliveries {
                         complete_insts.push(inst_id);
@@ -5109,6 +5191,8 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
     struct SideEffects {
         settle_complete: bool,
         despawn_fail: Option<(SolarSystemId, Vec<i64>)>,
+        despawn_escaped_balls: Option<(SolarSystemId, Vec<i64>)>,
+        spawn_traffic_smugglers: Option<(SolarSystemId, Vec<(i64, DVec3)>)>,
         retether_relay: Option<(SolarSystemId, i64)>,
         spawn_aar_wave: Option<u8>,
         spawn_basileus: Option<(SolarSystemId, DVec3)>,
@@ -5131,6 +5215,7 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
     let mut live_protectee_hp: Option<f64> = None;
     let mut live_raid_scrambled = false;
     let mut live_hostile_target: Option<i64> = None;
+    let mut scrambled_traffic_smugglers: Vec<i64> = Vec::new();
 
     if let Some(sys_h) = sys_h_opt.as_ref() {
         let view = sys_h.view();
@@ -5168,6 +5253,13 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
             } => {
                 live_raid_scrambled = sys_h.is_ball_scrambled_sync(*hid);
             }
+            HomefrontProgressRecord::TrafficStop { smuggler_ball_ids, .. } => {
+                for &sid in smuggler_ball_ids {
+                    if sys_h.is_ball_scrambled_sync(sid) {
+                        scrambled_traffic_smugglers.push(sid);
+                    }
+                }
+            }
             HomefrontProgressRecord::SalvageResearch {
                 werpost_activated: true,
                 ..
@@ -5184,7 +5276,7 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
 
     let fx_res = ctx.db.try_with_mut_snapshot(|snap| -> Result<SideEffects, BridgeRpcError> {
         let mut fx = SideEffects::default();
-        let (raid_depot_count, raid_last_pilot_opt) = snap
+        let (raid_depot_count, raid_per_owner) = snap
             .dungeon_runtime
             .homefront_runtimes
             .get(&inst_id)
@@ -5198,74 +5290,96 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                         .loot_commodity_type_id
                         .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
                     let mut total: i64 = 0;
-                    let mut owner_opt = None;
+                    let mut per_owner: BTreeMap<i64, u32> = BTreeMap::new();
                     for it in snap.items.values() {
                         if it.location_id == *delivery_depot_ball_id
                             && it.type_id == loot_tid
                             && it.quantity > 0
                             && rec.entered_pilots.contains_key(&it.owner_id)
                         {
+                            let qty = u32::try_from(it.quantity).unwrap_or(0);
                             total += i64::from(it.quantity);
-                            if owner_opt.is_none() {
-                                owner_opt = Some(it.owner_id);
-                            }
+                            *per_owner.entry(it.owner_id).or_insert(0) += qty;
                         }
                     }
                     Some((
                         u8::try_from(total.max(0)).unwrap_or(u8::MAX),
-                        owner_opt,
+                        per_owner,
                     ))
                 }
                 _ => None,
             })
-            .unwrap_or((0, None));
-        let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) else {
-            return Ok(fx);
-        };
-        if !rec.started || rec.completed || rec.failed {
-            return Ok(fx);
-        }
-        let dt = now.saturating_sub(rec.last_tick_sec.max(rec.started_at_sec));
-        rec.last_tick_sec = now;
+            .unwrap_or_else(|| (0, BTreeMap::new()));
+        let mut traffic_replacement_req: Option<(SolarSystemId, DVec3, u32, u8)> = None;
+        let mut traffic_failed = false;
+        let mut traffic_escaped_balls: Vec<i64> = Vec::new();
+        let (sys_id, hostile_faction_id) = {
+            let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) else {
+                return Ok(fx);
+            };
+            if !rec.started || rec.completed || rec.failed {
+                return Ok(fx);
+            }
+            let dt = now.saturating_sub(rec.last_tick_sec.max(rec.started_at_sec));
+            rec.last_tick_sec = now;
 
-        if rec.expires_at_sec > 0 && now >= rec.expires_at_sec {
-            rec.failed = true;
-            rec.failure_reason = Some(format!(
-                "Homefront {} exceeded {}-second operation timer",
-                rec.blueprint.dungeon_name, rec.blueprint.time_limit_secs
-            ));
-            fx.despawn_fail = Some((rec.solar_system_id, rec.spawned_ball_ids.clone()));
-            return Ok(fx);
-        }
+            if rec.expires_at_sec > 0 && now >= rec.expires_at_sec {
+                rec.failed = true;
+                rec.failure_reason = Some(format!(
+                    "Homefront {} exceeded {}-second operation timer",
+                    rec.blueprint.dungeon_name, rec.blueprint.time_limit_secs
+                ));
+                fx.despawn_fail = Some((rec.solar_system_id, rec.spawned_ball_ids.clone()));
+                return Ok(fx);
+            }
 
-        if let HomefrontProgressRecord::Raid {
-            cargo_delivered,
-            required_deliveries,
-            ..
-        } = &mut rec.progress
-        {
-            if raid_depot_count > *cargo_delivered {
-                let delta = raid_depot_count - *cargo_delivered;
-                *cargo_delivered = raid_depot_count;
-                if let Some(pid) = raid_last_pilot_opt {
-                    ensure_contribution_fields(
-                        &mut rec.contributions,
-                        &mut rec.next_entry_sequence,
-                        pid,
-                    )
-                    .cargo_delivered += u32::from(delta);
-                }
-                if *cargo_delivered >= *required_deliveries {
-                    fx.settle_complete = true;
+            if let HomefrontProgressRecord::Raid {
+                cargo_delivered,
+                required_deliveries,
+                ..
+            } = &mut rec.progress
+            {
+                if raid_depot_count > *cargo_delivered {
+                    let mut rem = u32::from(raid_depot_count - *cargo_delivered);
+                    *cargo_delivered = raid_depot_count;
+                    for (&pid, &owned_qty) in &raid_per_owner {
+                        if rem == 0 {
+                            break;
+                        }
+                        let already = rec.contributions.get(&pid).map_or(0, |c| c.cargo_delivered);
+                        let credit = owned_qty.saturating_sub(already).min(rem);
+                        if credit > 0 {
+                            ensure_contribution_fields(
+                                &mut rec.contributions,
+                                &mut rec.next_entry_sequence,
+                                pid,
+                            )
+                            .cargo_delivered += credit;
+                            rem -= credit;
+                        }
+                    }
+                    if rem > 0 {
+                        if let Some((&fallback_pid, _)) = raid_per_owner.iter().next() {
+                            ensure_contribution_fields(
+                                &mut rec.contributions,
+                                &mut rec.next_entry_sequence,
+                                fallback_pid,
+                            )
+                            .cargo_delivered += rem;
+                        }
+                    }
+                    if *cargo_delivered >= *required_deliveries {
+                        fx.settle_complete = true;
+                    }
                 }
             }
-        }
-        if dt == 0 {
-            return Ok(fx);
-        }
+            if dt == 0 {
+                return Ok(fx);
+            }
 
-        let sys_id = rec.solar_system_id;
-        let pocket_pos = DVec3::from_array(rec.pocket_position);
+            let sys_id = rec.solar_system_id;
+            let pocket_pos = DVec3::from_array(rec.pocket_position);
+            let hostile_faction_id = rec.blueprint.hostile_faction_id;
         let hauler_tid = rec
             .blueprint
             .objective_structure_type_id
@@ -5398,9 +5512,14 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                     }
                 } else if *mutanite_units_remaining > 0 {
                     if dt >= *wave_time_remaining_secs {
-                        if *current_wave < *total_waves {
-                            fx.spawn_aar_wave = Some(*current_wave + 1);
-                        }
+                        *wave_time_remaining_secs = 0;
+                        rec.failed = true;
+                        rec.failure_reason = Some(format!(
+                            "Abyssal Artifact Recovery wave {} timed out with {} Mutanite unmined",
+                            *current_wave, *mutanite_units_remaining
+                        ));
+                        fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
+                        return Ok(fx);
                     } else {
                         *wave_time_remaining_secs -= dt;
                     }
@@ -5453,31 +5572,154 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                 }
             }
             HomefrontProgressRecord::TrafficStop {
+                active_hauler_ball_ids,
+                smuggler_ball_ids,
                 survival_elapsed_secs,
                 required_survival_secs,
+                smugglers_destroyed,
+                required_smugglers,
                 smugglers_escaped,
                 civilians_harmed,
                 ..
             } => {
-                *survival_elapsed_secs = survival_elapsed_secs.saturating_add(dt);
+                const ESCAPE_CHECKPOINTS: [u64; 6] = [90, 165, 240, 315, 390, 465];
+                let prev_elapsed = *survival_elapsed_secs;
+                let req_secs = (*required_survival_secs).max(HOMEFRONT_TRAFFIC_TIMER_SECS);
+                let next_elapsed = prev_elapsed.saturating_add(dt).min(req_secs);
+                *survival_elapsed_secs = next_elapsed;
+
+                for cp in ESCAPE_CHECKPOINTS {
+                    if cp > prev_elapsed && cp <= next_elapsed {
+                        if let Some(pos_idx) = smuggler_ball_ids
+                            .iter()
+                            .position(|id| !scrambled_traffic_smugglers.contains(id))
+                        {
+                            let escaped_id = smuggler_ball_ids.remove(pos_idx);
+                            active_hauler_ball_ids.retain(|&id| id != escaped_id);
+                            traffic_escaped_balls.push(escaped_id);
+                            *smugglers_escaped = smugglers_escaped.saturating_add(1);
+                        }
+                    }
+                }
+
                 if *smugglers_escaped >= 5 || *civilians_harmed >= 3 {
-                    rec.failed = true;
-                    rec.failure_reason = Some("Traffic Stop objectives failed".into());
-                    fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
-                } else if *survival_elapsed_secs >= *required_survival_secs
-                    && runtime_record_objective_complete(rec)
-                {
-                    fx.settle_complete = true;
+                    traffic_failed = true;
+                } else if !traffic_escaped_balls.is_empty() {
+                    let alive_plus_killed =
+                        smugglers_destroyed.saturating_add(smuggler_ball_ids.len() as u8);
+                    let need_rep = required_smugglers.saturating_sub(alive_plus_killed);
+                    if need_rep > 0 {
+                        traffic_replacement_req =
+                            Some((sys_id, pocket_pos, hostile_faction_id, need_rep));
+                    }
                 }
             }
             _ => {}
         }
+
+        if !traffic_escaped_balls.is_empty() {
+            rec.spawned_ball_ids
+                .retain(|id| !traffic_escaped_balls.contains(id));
+            fx.despawn_escaped_balls = Some((sys_id, traffic_escaped_balls));
+        }
+        if traffic_failed {
+            rec.failed = true;
+            rec.failure_reason = Some("Traffic Stop objectives failed".into());
+            fx.despawn_escaped_balls = None;
+            fx.despawn_fail = Some((sys_id, rec.spawned_ball_ids.clone()));
+            return Ok(fx);
+        }
+        if matches!(rec.progress, HomefrontProgressRecord::TrafficStop { .. })
+            && runtime_record_objective_complete(rec)
+        {
+            fx.settle_complete = true;
+        }
+        let _ = rec;
+        (sys_id, hostile_faction_id)
+    };
+
+    if let Some((rep_sys, rep_pos, rep_faction, rep_count)) = traffic_replacement_req {
+        let mut rep_allocs = Vec::with_capacity(usize::from(rep_count));
+        for i in 0..rep_count {
+            snap.next_entity_id += 1;
+            let hid = snap.next_entity_id;
+            snap.next_entity_id += 1;
+            let cargo_id = snap.next_entity_id;
+            insert_scene_item_in_snap(
+                snap,
+                InventoryItemRecord {
+                    item_id: cargo_id,
+                    type_id: HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID,
+                    owner_id: i64::from(rep_faction),
+                    location_id: hid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let spawn_pos = rep_pos + DVec3::new((f64::from(i) + 1.0) * 2_500.0, 2_000.0, -3_000.0);
+            rep_allocs.push((hid, spawn_pos));
+        }
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
+            if let HomefrontProgressRecord::TrafficStop {
+                active_hauler_ball_ids,
+                smuggler_ball_ids,
+                ..
+            } = &mut rec.progress
+            {
+                for &(hid, _) in &rep_allocs {
+                    active_hauler_ball_ids.push(hid);
+                    smuggler_ball_ids.push(hid);
+                    rec.spawned_ball_ids.push(hid);
+                }
+            }
+        }
+        fx.spawn_traffic_smugglers = Some((rep_sys, rep_allocs));
+    }
+    let _ = (sys_id, hostile_faction_id);
         Ok(fx)
     });
 
     let Ok(fx) = fx_res else {
         return;
     };
+    if let Some((sys_id, balls)) = fx.despawn_escaped_balls {
+        despawn_homefront_balls_sync(ctx, sys_id, inst_id, &balls);
+    }
+    if let Some((sys_id, new_smugglers)) = fx.spawn_traffic_smugglers {
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        for (hid, h_pos) in new_smugglers {
+            spawn_ball_sync_with_claim(
+                ctx,
+                &sys_h,
+                sys_id,
+                Ball {
+                    id: hid,
+                    type_id: 649_u32,
+                    position: h_pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 140.0,
+                    inertia: 0.9,
+                    mass: 12_000_000.0,
+                    radius: 220.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                CombatState {
+                    shield_hp: 10_000.0,
+                    max_shield_hp: 10_000.0,
+                    armor_hp: 8_000.0,
+                    max_armor_hp: 8_000.0,
+                    structure_hp: 8_000.0,
+                    max_structure_hp: 8_000.0,
+                    is_tethered: false,
+                    ..CombatState::default()
+                },
+            );
+        }
+    }
     if let Some((sys_id, old_hid, h_tid, pos, new_hid)) = fx.respawn_raid_hauler {
         let sys_h = ctx.systems.get_or_spawn(sys_id);
         sys_h.try_remove_ball(old_hid);
@@ -5690,6 +5932,20 @@ pub fn handle_get_homefront_site_instances(
         let mut entries: Vec<(u32, i64)> = Vec::new();
         if let Some(list) = snap.pve_special_sites.homefront_sites.get(&sys_id) {
             for s in list {
+                let rt_closed = snap
+                    .dungeon_runtime
+                    .homefront_runtimes
+                    .get(&s.instance_id)
+                    .is_some_and(|r| r.completed || r.failed);
+                if !s.completed && !rt_closed {
+                    entries.push((s.dungeon_id, s.instance_id));
+                }
+            }
+        } else if !snap.pve_special_sites.initialized
+            && (HOMEFRONT_SYSTEMS.contains(&sys_id)
+                || is_homefront_exordium_system(&ctx.sde, sys_id))
+        {
+            for s in select_homefront_site_records(&ctx.sde, sys_id) {
                 let rt_closed = snap
                     .dungeon_runtime
                     .homefront_runtimes

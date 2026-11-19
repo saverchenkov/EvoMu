@@ -103,8 +103,28 @@ fn homefront_archetypes_ship_restrictions_and_role_cap_payouts() {
         );
     }
     assert!(validate_homefront_ship_eligibility(&sde, 32_880, HomefrontArchetype::TrafficStop).is_ok());
-    assert!(validate_homefront_ship_eligibility(&sde, 621, HomefrontArchetype::TrafficStop).is_err());
-    assert!(validate_homefront_ship_eligibility(&sde, 73_789, HomefrontArchetype::TrafficStop).is_err());
+    for &ok_3p_dest in &[16_236_u32, 16_238, 16_240, 16_242, 32_872, 32_874, 32_876, 32_878] {
+        assert!(
+            validate_homefront_ship_eligibility(&sde, ok_3p_dest, HomefrontArchetype::TrafficStop).is_ok(),
+            "Expected T1 Empire destroyer {ok_3p_dest} allowed in 3-pilot Homefront"
+        );
+    }
+    for &bad_3p in &[621_u32, 73_789, 89_240, 49_710, 42_685, 78_333, 91_174] {
+        assert_eq!(
+            validate_homefront_ship_eligibility(&sde, bad_3p, HomefrontArchetype::TrafficStop)
+                .expect_err("non-T1-Empire hull must fail 3-pilot gate")
+                .code,
+            "ShipRestrictedByGate",
+            "Expected 3-pilot site to reject {bad_3p}"
+        );
+    }
+    assert!(templates.iter().any(|t| {
+        HomefrontArchetype::from_dungeon(t.dungeon_id, &t.dungeon_name)
+            == HomefrontArchetype::AbyssalArtifactRecovery
+            && resolve_homefront_archetype_blueprint(&sde, t.dungeon_id, &t.dungeon_name, jita, t.difficulty)
+                .time_limit_secs
+                >= 1_500
+    }));
 
     // Canonical 5-pilot role cap payout scaling (no infinite/linear-over-cap ISK/LP multiplication)
     let contribs: Vec<HomefrontParticipantContribution> = (1..=12)

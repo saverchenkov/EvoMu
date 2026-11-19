@@ -492,7 +492,13 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
             _ => panic!("expected SalvageResearch"),
         }
     });
-    assert!(is_homefront_hackable_structure(&ctx, sys_id, werpost_id).is_some());
+    let gate_err = is_homefront_hackable_structure(&ctx, 9_999_999, sys_id, werpost_id)
+        .expect_err("unentered pilot must receive GateNotEntered");
+    assert_eq!(gate_err.code, "GateNotEntered");
+    assert!(matches!(
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, werpost_id),
+        Ok(Some((false, _)))
+    ));
     let (_, werpost_ball) = sys_handle
         .get_ball_snapshot(werpost_id)
         .await
@@ -512,6 +518,28 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
             mode: MovementMode::Stop,
         })
         .await;
+
+    let mut unentered_session = session.clone();
+    unentered_session.character_id = Some(char_id + 900);
+    unentered_session.ship_id = Some(ship_id + 900);
+    let gate_rpc_err = handle_pve_hacking(
+        &ctx,
+        &mut unentered_session,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(werpost_id), PyRep::Integer(0), PyRep::Integer(1), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .expect("Homefront gate error returns RPC Some(Err)")
+    .expect_err("unentered pilot must fail StartNewGameInstance with GateNotEntered");
+    assert_eq!(gate_rpc_err.code, "GateNotEntered");
+    assert!(
+        with_pve_exploration_reg(&ctx, |reg| !reg
+            .hacking_games
+            .contains_key(&(char_id + 900, werpost_id))),
+        "rejected GateNotEntered call must NOT insert hacking game state"
+    );
 
     let start_wp = handle_pve_hacking(
         &ctx,
@@ -553,7 +581,9 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
         }
     ));
     assert!(
-        is_homefront_hackable_structure(&ctx, sys_id, werpost_id).is_none(),
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, werpost_id)
+            .expect("entered pilot check")
+            .is_none(),
         "already-activated Werpost must no longer report as hackable"
     );
 
@@ -672,7 +702,9 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
         other => panic!("expected SuspiciousSignal, got {other:?}"),
     }
     assert!(
-        is_homefront_hackable_structure(&ctx, sys_id, array_ids[0]).is_none(),
+        is_homefront_hackable_structure(&ctx, char_id, sys_id, array_ids[0])
+            .expect("entered pilot check")
+            .is_none(),
         "hacked array must not be re-hackable during open vulnerability window"
     );
 }

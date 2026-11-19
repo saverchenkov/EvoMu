@@ -1087,6 +1087,28 @@ mod homefront_operations_it {
         assert_eq!(
             complete_homefront_operation_and_pay(&ctx, &sessions[1], traf.instance_id)
                 .await
+                .expect_err("Traffic Stop requires 9-min (540s) survival timer")
+                .code,
+            "ObjectivesIncomplete"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let eve_db::HomefrontProgressRecord::TrafficStop {
+                survival_elapsed_secs,
+                required_survival_secs,
+                ..
+            } = &mut snap
+                .dungeon_runtime
+                .homefront_runtimes
+                .get_mut(&traf.instance_id)
+                .unwrap()
+                .progress
+            {
+                *survival_elapsed_secs = *required_survival_secs;
+            }
+        });
+        assert_eq!(
+            complete_homefront_operation_and_pay(&ctx, &sessions[1], traf.instance_id)
+                .await
                 .unwrap()
                 .total_fleet_isk,
             7_680_000
@@ -1319,43 +1341,57 @@ mod homefront_operations_it {
         let jita = 30_000_142_u32;
         let perim = 30_000_144_u32;
 
-        // 1. Non-hub Perimeter (30_000_144): cold GetHomefrontSiteInstances must remain strictly read-only (0 sites),
-        // then ensure_special_sites_spawned_for_system seeds sovereign Caldari Homefront sites.
+        // 1. Non-hub Perimeter (30_000_144), hub Jita (30_000_142), and Exordium career-agent system:
+        // cold GetHomefrontSiteInstances must remain strictly read-only (`!initialized`, 0 DB writes, 0 actors),
+        // returning 2 for Jita & Exordium and 0 for Perimeter; then ensure_special_sites_spawned_for_system
+        // seeds Perimeter and Exordium (with halved Exordium payouts).
+        let exordium_sys = ctx
+            .sde
+            .schools
+            .values()
+            .find(|sc| {
+                eve_server::services::pve_special_sites_ops::is_homefront_exordium_system(
+                    &ctx.sde,
+                    sc.solar_system_id,
+                )
+            })
+            .map(|sc| sc.solar_system_id)
+            .expect("Exordium career-agent system in SDE");
         let mut perim_sess = setup_pilot_in_space(&ctx, 893_100, 940_010, 743_200_010, 620, perim, DVec3::ZERO).await;
+        let (hf_keys_before, init_before, rt_len_before, sim_clk_before) = (
+            with_pve_special_reg(&ctx, |reg| reg.homefront_sites.keys().copied().collect::<Vec<_>>()),
+            with_pve_special_reg(&ctx, |reg| reg.initialized),
+            ctx.db.with_snapshot(|s| s.dungeon_runtime.homefront_runtimes.len()),
+            with_pve_special_reg(&ctx, |reg| reg.sim_clock_sec),
+        );
+        assert!(!init_before, "fresh test context must start uninitialized");
         let cold_jita = ctx
             .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(jita))], &kw, None)
             .await
             .expect("GetHomefrontSiteInstances Jita");
         assert_eq!(count_nested_instances(&cold_jita, jita), 2);
-
-        let (hf_keys_before, rt_len_before, sim_clk_before) = (
-            with_pve_special_reg(&ctx, |reg| {
-                (
-                    reg.homefront_sites.keys().copied().collect::<Vec<_>>(),
-                    reg.sim_clock_sec,
-                )
-            }),
-            ctx.db.with_snapshot(|s| s.dungeon_runtime.homefront_runtimes.len()),
-            with_pve_special_reg(&ctx, |reg| reg.sim_clock_sec),
-        );
+        let cold_exordium = ctx
+            .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(exordium_sys))], &kw, None)
+            .await
+            .expect("GetHomefrontSiteInstances Exordium");
+        assert_eq!(count_nested_instances(&cold_exordium, exordium_sys), 2);
         let cold_perim = ctx
             .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(perim))], &kw, None)
             .await
             .expect("cold GetHomefrontSiteInstances Perimeter");
         assert_eq!(count_nested_instances(&cold_perim, perim), 0);
-        let (hf_keys_after_cold, rt_len_after_cold, sim_clk_after_cold) = (
-            with_pve_special_reg(&ctx, |reg| {
-                (
-                    reg.homefront_sites.keys().copied().collect::<Vec<_>>(),
-                    reg.sim_clock_sec,
-                )
-            }),
+
+        let (hf_keys_after_cold, init_after_cold, rt_len_after_cold, sim_clk_after_cold) = (
+            with_pve_special_reg(&ctx, |reg| reg.homefront_sites.keys().copied().collect::<Vec<_>>()),
+            with_pve_special_reg(&ctx, |reg| reg.initialized),
             ctx.db.with_snapshot(|s| s.dungeon_runtime.homefront_runtimes.len()),
             with_pve_special_reg(&ctx, |reg| reg.sim_clock_sec),
         );
-        assert_eq!(hf_keys_after_cold, hf_keys_before, "GetHomefrontSiteInstances must not seed non-hub systems");
+        assert!(!init_after_cold, "cold GetHomefrontSiteInstances must not flip reg.initialized");
+        assert_eq!(hf_keys_after_cold, hf_keys_before, "GetHomefrontSiteInstances must not write homefront_sites");
         assert_eq!(rt_len_after_cold, rt_len_before, "GetHomefrontSiteInstances must not create runtimes");
         assert_eq!(sim_clk_after_cold, sim_clk_before, "GetHomefrontSiteInstances must not mutate registry clock");
+        assert!(ctx.systems.get_handle(exordium_sys).is_none(), "cold Exordium query must not spawn system actors");
 
         ensure_special_sites_spawned_for_system(&ctx, perim).await;
         let seeded_perim = ctx
@@ -1366,6 +1402,18 @@ mod homefront_operations_it {
             count_nested_instances(&seeded_perim, perim) >= 1,
             "ensure_special_sites_spawned_for_system must seed sovereign Homefront sites in Perimeter"
         );
+        ensure_special_sites_spawned_for_system(&ctx, exordium_sys).await;
+        let ex_sites = with_pve_special_reg(&ctx, |reg| reg.homefront_sites.get(&exordium_sys).cloned().unwrap_or_default());
+        assert_eq!(ex_sites.len(), 2, "Exordium system must seed 2 sites");
+        let non_ex_base = eve_server::services::pve_special_sites_ops::resolve_homefront_archetype_blueprint(
+            &ctx.sde,
+            ex_sites[0].dungeon_id,
+            &ex_sites[0].dungeon_name,
+            jita,
+            2,
+        )
+        .base_pilot_isk;
+        assert_eq!(ex_sites[0].base_pilot_isk, non_ex_base / 2, "Exordium career-agent system must halve payouts");
 
         // 2. Live 9-wave dogmaIM.Mine AAR lifecycle + Wave 9 escort evacuation guard + Basileus/Cache + Wreck
         let miner_cid = 940_011_i64;
@@ -1686,5 +1734,185 @@ mod homefront_operations_it {
             get_homefront_runtime_state(&ctx, sal.instance_id).unwrap().progress,
             HomefrontArchetypeProgress::SalvageResearch { wrecks_salvaged: 1, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn homefront_raid_two_pilot_real_invbroker_add_and_multiadd_e2e() {
+        let ctx = ServerContext::new();
+        let kw = HashMap::new();
+        let jita = 30_000_142_u32;
+
+        let cid_a = 940_101_i64;
+        let ship_a = 743_300_101_i64;
+        let cid_b = 940_102_i64;
+        let ship_b = 743_300_102_i64;
+
+        let mut sess_a = setup_pilot_in_space(&ctx, 893_201, cid_a, ship_a, 649, jita, DVec3::ZERO).await;
+        let mut sess_b = setup_pilot_in_space(&ctx, 893_202, cid_b, ship_b, 649, jita, DVec3::ZERO).await;
+
+        let raid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).expect("spawn Raid");
+        position_ship_at(&ctx, jita, ship_a, raid.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        position_ship_at(&ctx, jita, ship_b, raid.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess_a, raid.instance_id)
+            .await
+            .expect("pilot A enters Raid gate");
+        activate_homefront_acceleration_gate(&ctx, &sess_b, raid.instance_id)
+            .await
+            .expect("pilot B enters Raid gate");
+
+        let delivery_depot_id: i64 = match &get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress {
+            HomefrontArchetypeProgress::Raid { .. } => ctx.db.with_snapshot(|snap| {
+                match &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id].progress {
+                    eve_db::HomefrontProgressRecord::Raid { delivery_depot_ball_id, .. } => {
+                        *delivery_depot_ball_id
+                    }
+                    _ => unreachable!(),
+                }
+            }),
+            other => panic!("expected Raid, got {other:?}"),
+        };
+        let depot_pos = ctx
+            .systems
+            .get_or_spawn(jita)
+            .get_ball_snapshot(delivery_depot_id)
+            .await
+            .unwrap()
+            .expect("depot ball spawned")
+            .1
+            .position;
+        position_ship_at(&ctx, jita, ship_a, depot_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+        position_ship_at(&ctx, jita, ship_b, depot_pos + DVec3::new(600.0, 0.0, 0.0)).await;
+
+        let crate_tid = 77_473_u32;
+        seed_item(&ctx, 743_350_001, crate_tid, cid_a, ship_a, InventoryFlag::Cargo, 1, false);
+        seed_item(&ctx, 743_350_002, crate_tid, cid_a, ship_a, InventoryFlag::Cargo, 1, false);
+        seed_item(&ctx, 743_350_003, crate_tid, cid_b, ship_b, InventoryFlag::Cargo, 1, false);
+        seed_item(&ctx, 743_350_004, crate_tid, cid_b, ship_b, InventoryFlag::Cargo, 1, false);
+
+        let depot_bound_a = ctx.bind_object(&sess_a, "invbroker", delivery_depot_id).unwrap();
+        let depot_bound_b = ctx.bind_object(&sess_b, "invbroker", delivery_depot_id).unwrap();
+        let ship_bound_b = ctx.bind_object(&sess_b, "invbroker", ship_b).unwrap();
+
+        // Pilot A deposits 2 crates via real `invbroker.Add` (no artificial combat/skill seed).
+        ctx.dispatch_rpc(
+            &mut sess_a,
+            "invbroker",
+            Some(depot_bound_a),
+            "Add",
+            &[PyRep::Integer(743_350_001), PyRep::Integer(ship_a), PyRep::Integer(InventoryFlag::None as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Pilot A invbroker.Add crate 1");
+        ctx.dispatch_rpc(
+            &mut sess_a,
+            "invbroker",
+            Some(depot_bound_a),
+            "Add",
+            &[PyRep::Integer(743_350_002), PyRep::Integer(ship_a), PyRep::Integer(InventoryFlag::None as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Pilot A invbroker.Add crate 2");
+
+        // Pilot B deposits 1 crate via `invbroker.MultiAdd`, then withdraws it back to ship cargo ->
+        // withdrawal MUST decrement both `cargo_delivered` and Pilot B's `contributions.cargo_delivered`.
+        ctx.dispatch_rpc(
+            &mut sess_b,
+            "invbroker",
+            Some(depot_bound_b),
+            "MultiAdd",
+            &[
+                PyRep::List(vec![PyRep::Integer(743_350_003)]),
+                PyRep::Integer(ship_b),
+                PyRep::Integer(InventoryFlag::None as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Pilot B invbroker.MultiAdd crate 3");
+
+        let mid = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert_eq!(mid.contributions[&cid_a].cargo_delivered, 2);
+        assert_eq!(mid.contributions[&cid_b].cargo_delivered, 1);
+
+        let deposited_b_id = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .find(|it| {
+                    it.location_id == delivery_depot_id
+                        && it.type_id == crate_tid
+                        && it.owner_id == cid_b
+                })
+                .expect("Pilot B crate in depot")
+                .item_id
+        });
+        ctx.dispatch_rpc(
+            &mut sess_b,
+            "invbroker",
+            Some(ship_bound_b),
+            "Add",
+            &[
+                PyRep::Integer(deposited_b_id),
+                PyRep::Integer(delivery_depot_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Pilot B withdraws crate back to ship cargo");
+
+        let after_withdraw = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert_eq!(after_withdraw.contributions[&cid_b].cargo_delivered, 0);
+
+        // Pilot B deposits all remaining crates in ship_b cargo via `invbroker.MultiAdd`
+        // (withdrawn `deposited_b_id` auto-merged with `743_350_004` into quantity 2) reaching 4/4 -> settles and pays BOTH A & B!
+        let ship_b_crate_ids: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+            let mut total_qty = 0_i32;
+            let mut ids = Vec::new();
+            for it in snap.items.values() {
+                if it.location_id == ship_b && it.type_id == crate_tid && it.quantity > 0 {
+                    total_qty += it.quantity;
+                    ids.push(PyRep::Integer(it.item_id));
+                }
+            }
+            assert_eq!(total_qty, 2, "ship_b must hold 2 crates after withdrawal");
+            ids
+        });
+        ctx.dispatch_rpc(
+            &mut sess_b,
+            "invbroker",
+            Some(depot_bound_b),
+            "MultiAdd",
+            &[
+                PyRep::List(ship_b_crate_ids),
+                PyRep::Integer(ship_b),
+                PyRep::Integer(InventoryFlag::None as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Pilot B invbroker.MultiAdd remaining crates to complete 4/4");
+
+        let settled = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(settled.completed, "4/4 Raid crates via invbroker RPCs must settle Raid");
+        assert_eq!(settled.contributions[&cid_a].cargo_delivered, 2);
+        assert_eq!(settled.contributions[&cid_b].cargo_delivered, 2);
+        ctx.db.with_snapshot(|snap| {
+            assert!(
+                snap.characters[&cid_a].balance > IskCents::from_isk(500_000_000),
+                "Pilot A must be paid via invbroker.Add cargo delivery"
+            );
+            assert!(
+                snap.characters[&cid_b].balance > IskCents::from_isk(500_000_000),
+                "Pilot B must be paid via invbroker.MultiAdd cargo delivery"
+            );
+        });
     }
 }

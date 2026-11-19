@@ -187,6 +187,7 @@ impl HomefrontArchetype {
     pub fn time_limit_secs(self) -> u64 {
         match self {
             Self::EmergencyAid => 600,
+            Self::AbyssalArtifactRecovery => 1_800,
             _ => 1_200,
         }
     }
@@ -298,13 +299,17 @@ pub fn validate_homefront_ship_eligibility(
         // Group 420: T1 / Navy / Pirate / Mining Destroyers (`Pioneer` 89240 / 89647 / `Perseverance` 91174).
         420 if matches!(meta, 0 | 1 | 4) => {
             let is_mining_dest = matches!(ship_type_id, 89_240 | 89_647 | 91_174);
-            if policy == HomefrontShipPolicy::ThreePilotFrigateDestroyer && meta != 1 {
+            let is_t1_empire_destroyer =
+                meta == 1 && ship.published && matches!(ship.race_id, Some(1 | 2 | 4 | 8));
+            if policy == HomefrontShipPolicy::ThreePilotFrigateDestroyer && !is_t1_empire_destroyer
+            {
                 return Err(hf_ops_err(
                     "ShipRestrictedByGate",
                     format!(
-                        "3-pilot Homefront site {} allows only Tech 1 Destroyers, not faction hull {}",
+                        "3-pilot Homefront site {} allows only Tech 1 Empire Destroyers, rejecting {} ({})",
                         archetype.as_str(),
-                        ship.name
+                        ship.name,
+                        ship_type_id
                     ),
                 ));
             }

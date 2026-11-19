@@ -284,13 +284,23 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     };
     assert_eq!(hf_entries.len(), 2);
     assert!(hf_entries[0].dict_get("dungeonID").and_then(|v| v.as_i64()).is_some());
-    assert!(hf_entries[0].dict_get("instanceID").and_then(|v| v.as_i64()).is_some());
+    let cold_inst0 = hf_entries[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(hf_entries[0].dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(hs_sys as i64));
+    read_pve_special_reg(&ctx, |reg| {
+        assert!(!reg.initialized, "cold GetHomefrontSiteInstances must not initialize registry");
+        assert!(reg.homefront_sites.is_empty(), "cold GetHomefrontSiteInstances must not write homefront_sites");
+    });
 
+    crate::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     let hf = read_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites.get(&hs_sys).and_then(|v| v.first().cloned())
+        let list = reg.homefront_sites.get(&hs_sys).expect("seeded homefront site in highsec");
+        assert!(list.iter().any(|s| s.instance_id == cold_inst0));
+        list.iter()
+            .find(|s| s.dungeon_id != 10_346)
+            .cloned()
+            .or_else(|| list.first().cloned())
     })
-    .expect("seeded homefront site in highsec");
+    .expect("seeded non-AAR homefront site in highsec");
 
     on_warp_to_homefront_site(&ctx, hs_sys, hf.instance_id).await;
     let sys_handle = ctx.systems.get_or_spawn(hs_sys);
@@ -440,10 +450,15 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
                     ..
                 } => *held_low_secs = *required_hold_secs,
                 eve_db::service_domains::pve_sites::HomefrontProgressRecord::TrafficStop {
+                    survival_elapsed_secs,
+                    required_survival_secs,
                     smugglers_destroyed,
                     required_smugglers,
                     ..
-                } => *smugglers_destroyed = *required_smugglers,
+                } => {
+                    *survival_elapsed_secs = *required_survival_secs;
+                    *smugglers_destroyed = *required_smugglers;
+                }
             }
         }
     });

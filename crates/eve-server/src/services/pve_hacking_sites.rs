@@ -270,11 +270,15 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into(), client_error: None }));
             }
 
-            let hf_hack = crate::services::pve_homefront_sites::is_homefront_hackable_structure(
+            let hf_hack = match crate::services::pve_homefront_sites::is_homefront_hackable_structure(
                 ctx,
+                char_id,
                 sys_id,
                 container_id,
-            );
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let struct_info = if hf_hack.is_some() {
                 None
             } else {

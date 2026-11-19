@@ -490,13 +490,11 @@ async fn ensure_special_sites_spawned_for_systems(
 ) {
     ensure_special_sites_initialized(ctx);
     if let Some(sys_id) = filter_sys {
-        if !crate::services::pve_special_sites_ops::is_homefront_exordium_system(&ctx.sde, sys_id) {
-            with_pve_special_reg(ctx, |reg| {
-                crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
-                    ctx, reg, sys_id,
-                );
-            });
-        }
+        with_pve_special_reg(ctx, |reg| {
+            crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
+                ctx, reg, sys_id,
+            );
+        });
     }
     let want_sys = |sid: SolarSystemId| filter_sys.is_none_or(|target| target == sid);
     let (general_to_spawn, hf_to_spawn, trig_to_spawn) = read_pve_special_reg(ctx, |reg| {
@@ -756,7 +754,11 @@ pub async fn complete_special_dungeon_instance(
     if is_homefront_pve_completion_target(ctx, caller_sys, instance_id) {
         let (payouts, summary) =
             complete_homefront_from_special_dungeon(ctx, session, caller_sys, instance_id)?;
-        let reward_paid = payouts.first().map(|p| p.1).unwrap_or(0);
+        let reward_paid = payouts
+            .iter()
+            .find(|&&(cid, _, _)| cid == char_id)
+            .map(|p| p.1)
+            .unwrap_or(0);
         let arch_key = get_homefront_runtime_state(ctx, instance_id)
             .map(|s| s.blueprint.archetype.as_str())
             .unwrap_or("Unknown");
@@ -875,6 +877,11 @@ pub async fn handle_pve_special_sites(
     ) {
         return None;
     }
+    if (service, method) == ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") {
+        // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
+        return Some(handle_get_homefront_site_instances(ctx, session, args));
+    }
+
     ensure_special_sites_initialized(ctx);
 
     if let Some(res) = crate::services::pve_incursion_sites::handle_incursion_rpc(
@@ -886,10 +893,6 @@ pub async fn handle_pve_special_sites(
     }
 
     match (service, method) {
-        // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
-        ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
-            Some(handle_get_homefront_site_instances(ctx, session, args))
-        }
 
         // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {

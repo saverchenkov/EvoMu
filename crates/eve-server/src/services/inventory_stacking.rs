@@ -571,6 +571,24 @@ pub(crate) async fn handle_multi_add(
             let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, fin_id);
         }
         fitting_containers_ships::record_container_add_log(ctx, char_id, fin_id, it_tid, it_qty, new_loc);
+        if pre_item.location_id != new_loc {
+            crate::services::pve_homefront_sites::on_homefront_inventory_event(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                pre_item.location_id,
+                it_tid,
+            )
+            .await;
+            crate::services::pve_homefront_sites::on_homefront_item_moved(
+                ctx,
+                char_id,
+                new_loc,
+                it_tid,
+                u64::try_from(it_qty).unwrap_or(0),
+            )
+            .await;
+        }
         if let Some(fin) = fin_opt {
             if fin.item_id != pre_item.item_id {
                 super::inventory_bound::emit_inv_item_deleted(ctx, char_id, &pre_item);
@@ -1126,6 +1144,16 @@ async fn handle_multi_add_auto_fit(
                 updated.type_id,
             )
             .await;
+            if old_loc != ship_id {
+                crate::services::pve_homefront_sites::on_homefront_item_moved(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    updated.type_id,
+                    u64::try_from(updated.quantity).unwrap_or(0),
+                )
+                .await;
+            }
             despawn_set.insert(old_loc);
         }
         fitting_containers_ships::record_container_add_log(

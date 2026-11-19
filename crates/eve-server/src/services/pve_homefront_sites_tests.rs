@@ -33,7 +33,8 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
     session.character_id = Some(90_050_001);
     session.solar_system_id = Some(hs_sys);
 
-    // GetHomefrontSiteInstances must remain strictly read-only on an uninitialized snapshot.
+    // GetHomefrontSiteInstances must remain strictly read-only on an uninitialized snapshot
+    // while deterministically returning hub & Exordium sites and 0 for non-hub systems.
     let cold_res = handle_get_homefront_site_instances(&ctx, &session, &[])
         .expect("cold highsec homefront query succeeds read-only");
     let PyRep::Dict(ref cold_outer) = cold_res else {
@@ -42,10 +43,62 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
     let (_, PyRep::List(ref cold_entries)) = cold_outer[0] else {
         panic!("expected cold system list in outer dict, got {cold_outer:?}");
     };
-    assert!(cold_entries.is_empty(), "cold GetHomefrontSiteInstances must not seed on read");
+    assert_eq!(cold_entries.len(), 2, "cold hub GetHomefrontSiteInstances must read-only compute 2 entries");
+    let cold_pairs: Vec<(i64, i64)> = cold_entries
+        .iter()
+        .map(|e| {
+            (
+                e.dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap(),
+                e.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap(),
+            )
+        })
+        .collect();
+
+    if sde.solar_systems.contains_key(&30_000_144) {
+        let cold_perim = handle_get_homefront_site_instances(&ctx, &session, &[PyRep::Integer(30_000_144)])
+            .expect("cold non-hub highsec query succeeds read-only");
+        let PyRep::Dict(ref p_outer) = cold_perim else { panic!(); };
+        let (_, PyRep::List(ref p_entries)) = p_outer[0] else { panic!(); };
+        assert!(p_entries.is_empty(), "non-hub highsec Perimeter must return 0 cold entries");
+    }
+
+    let exordium_sys_opt = sde
+        .schools
+        .values()
+        .find(|sc| {
+            crate::services::pve_special_sites_ops::is_homefront_exordium_system(
+                &sde,
+                sc.solar_system_id,
+            )
+        })
+        .map(|sc| sc.solar_system_id);
+    let cold_exordium_pairs: Option<Vec<(i64, i64)>> = exordium_sys_opt.map(|ex_sys| {
+        let ex_res = handle_get_homefront_site_instances(
+            &ctx,
+            &session,
+            &[PyRep::Integer(i64::from(ex_sys))],
+        )
+        .expect("cold Exordium query succeeds read-only");
+        let PyRep::Dict(ref ex_outer) = ex_res else { panic!(); };
+        let (_, PyRep::List(ref ex_entries)) = ex_outer[0] else { panic!(); };
+        assert_eq!(ex_entries.len(), 2, "cold Exordium system must return 2 deterministic entries");
+        ex_entries
+            .iter()
+            .map(|e| {
+                (
+                    e.dict_get("dungeonID").and_then(|v| v.as_i64()).unwrap(),
+                    e.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap(),
+                )
+            })
+            .collect()
+    });
+
     with_pve_special_reg(&ctx, |reg| {
         assert!(!reg.initialized, "GetHomefrontSiteInstances must not initialize special-sites registry");
         assert!(!reg.homefront_sites.contains_key(&hs_sys));
+        if let Some(ex_sys) = exordium_sys_opt {
+            assert!(!reg.homefront_sites.contains_key(&ex_sys));
+        }
     });
 
     crate::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
@@ -68,6 +121,19 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
         assert_eq!(sites.len(), 2);
         assert_ne!(sites[0].instance_id, sites[1].instance_id);
         assert!(matches!(sites[0].optimal_fleet_size, 3 | 5));
+        let warm_pairs: Vec<(i64, i64)> = sites
+            .iter()
+            .map(|s| (i64::from(s.dungeon_id), s.instance_id))
+            .collect();
+        assert_eq!(cold_pairs, warm_pairs, "cold read must match warm deterministic seeding");
+        if let (Some(ex_sys), Some(ex_cold)) = (exordium_sys_opt, cold_exordium_pairs.as_ref()) {
+            let ex_sites = reg.homefront_sites.get(&ex_sys).expect("Exordium seeded by init_homefront_sites");
+            let ex_warm: Vec<(i64, i64)> = ex_sites
+                .iter()
+                .map(|s| (i64::from(s.dungeon_id), s.instance_id))
+                .collect();
+            assert_eq!(ex_cold, &ex_warm, "cold Exordium read must match warm seeding");
+        }
     });
 
     with_pve_special_reg(&ctx, |reg| {
@@ -561,18 +627,72 @@ mod multi_role_unit_tests {
         let traf = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_705).unwrap();
         enter_hf_gate_at_site(&ctx, &logi, traf.instance_id).await.unwrap();
         traffic_stop_scan_and_intercept(&ctx, &logi, traf.instance_id, 6, 1, 6_000.0).unwrap();
+        assert_eq!(
+            complete_homefront_operation_and_pay(&ctx, &logi, traf.instance_id)
+                .await
+                .expect_err("Traffic Stop must require 9-minute (540s) survival timer")
+                .code,
+            "ObjectivesIncomplete"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            if let HomefrontProgressRecord::TrafficStop {
+                survival_elapsed_secs,
+                required_survival_secs,
+                ..
+            } = &mut snap.dungeon_runtime.homefront_runtimes.get_mut(&traf.instance_id).unwrap().progress
+            {
+                *survival_elapsed_secs = *required_survival_secs;
+            }
+        });
         assert_eq!(complete_homefront_operation_and_pay(&ctx, &logi, traf.instance_id).await.unwrap().total_fleet_isk, 7_680_000);
 
-        // Optimal 3-pilot Traffic Stop (n=3 on opt=3) -> full 36,000,000 ISK pool
+        // Optimal 3-pilot Traffic Stop (n=3 on opt=3) -> full 36,000,000 ISK pool after 9-min timer
+        for sid in [810_002_i64, 810_003, 810_004] {
+            let _ = sys_h.try_update_combat_state(sid, |cs| {
+                cs.shield_hp = 5_000_000.0;
+                cs.max_shield_hp = 5_000_000.0;
+                cs.armor_hp = 5_000_000.0;
+                cs.max_armor_hp = 5_000_000.0;
+                cs.structure_hp = 5_000_000.0;
+                cs.max_structure_hp = 5_000_000.0;
+            });
+        }
         let traf3 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_705).unwrap();
         for s in [&dps2, &logi, &venture] {
             enter_hf_gate_at_site(&ctx, s, traf3.instance_id).await.unwrap();
             record_homefront_combat_and_logistics(&ctx, s, traf3.instance_id, 2_000.0, 0.0).unwrap();
         }
         traffic_stop_scan_and_intercept(&ctx, &logi, traf3.instance_id, 6, 0, 2_000.0).unwrap();
-        let traf3_pay = complete_homefront_operation_and_pay(&ctx, &logi, traf3.instance_id).await.unwrap();
-        assert_eq!(traf3_pay.eligible_pilot_count, 3);
-        assert_eq!(traf3_pay.total_fleet_isk, 36_000_000);
+        ctx.advance_secs(539);
+        tick_homefront_operations_sync(&ctx);
+        assert!(!get_homefront_runtime_record(&ctx, traf3.instance_id).unwrap().completed);
+        ctx.advance_secs(1);
+        tick_homefront_operations_sync(&ctx);
+        assert!(get_homefront_runtime_record(&ctx, traf3.instance_id).unwrap().completed);
+
+        // Traffic Stop live smuggler escape & warp scramble prevention:
+        // Scrambled smugglers stay pinned across checkpoints; unscrambled smugglers escape & fail at 5.
+        let traf_esc = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_705).unwrap();
+        enter_hf_gate_at_site(&ctx, &logi, traf_esc.instance_id).await.unwrap();
+        let first_smuggler = match &get_homefront_runtime_record(&ctx, traf_esc.instance_id).unwrap().progress {
+            HomefrontProgressRecord::TrafficStop { smuggler_ball_ids, .. } => smuggler_ball_ids[0],
+            other => panic!("expected TrafficStop, got {other:?}"),
+        };
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys_h.try_update_combat_state(first_smuggler, |cs| cs.warp_scramble_strength = 2);
+        for dt_step in [90_u64, 75, 75, 75, 75] {
+            ctx.advance_secs(dt_step);
+            tick_homefront_operations_sync(&ctx);
+        }
+        let esc_rec = get_homefront_runtime_record(&ctx, traf_esc.instance_id).unwrap();
+        assert!(esc_rec.failed, "5 unscrambled smuggler escapes must fail Traffic Stop");
+        match &esc_rec.progress {
+            HomefrontProgressRecord::TrafficStop { smugglers_escaped, smuggler_ball_ids, .. } => {
+                assert_eq!(*smugglers_escaped, 5);
+                assert!(smuggler_ball_ids.contains(&first_smuggler), "scrambled smuggler must remain pinned while others escaped");
+            }
+            other => panic!("expected TrafficStop, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -802,77 +922,153 @@ mod multi_role_unit_tests {
             .expect("complete AAR #1");
         assert_eq!(pay1.total_fleet_isk, 27_648_000);
 
-        // Part B: Skipped wave 2 (bit 1 unset while bits 0,2..=8 are set => mask 0x01FD) recovers
-        // exact Wave 2 solo share (2,048,000 ISK) at settlement without double-paying paid waves.
+        // Part B: Wave timeout with unmined Mutanite must FAIL immediately (both Wave 2 and Wave 9)
+        // and completion settlement must NEVER pay retroactive skipped-wave ISK (`(0, 1)`).
         let pilot2 = seed_hf_pilot(&ctx, 7602, 960_002, 860_002, 32_880, sys_id, &[483]).await;
+        let _ = sys_h.try_update_combat_state(860_002, |cs| {
+            cs.shield_hp = 5_000_000.0;
+            cs.max_shield_hp = 5_000_000.0;
+            cs.armor_hp = 5_000_000.0;
+            cs.max_armor_hp = 5_000_000.0;
+            cs.structure_hp = 5_000_000.0;
+            cs.max_structure_hp = 5_000_000.0;
+        });
         let aar2 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn AAR #2");
         enter_hf_gate_at_site(&ctx, &pilot2, aar2.instance_id)
             .await
             .expect("enter AAR #2");
         abyssal_clear_wave(&ctx, &pilot2, aar2.instance_id, 324, 2_500.0, true)
             .await
-            .expect("wave 1 pays bit 0");
-        ctx.db.with_mut_snapshot(|snap| {
-            let rec = snap
-                .dungeon_runtime
-                .homefront_runtimes
-                .get_mut(&aar2.instance_id)
-                .unwrap();
-            if let HomefrontProgressRecord::AbyssalArtifactRecovery {
-                current_wave,
-                waves_paid,
-                ..
-            } = &mut rec.progress
-            {
-                *current_wave = 3;
-                *waves_paid = 2;
-            }
-        });
-        for _ in 3..=9_u8 {
-            abyssal_clear_wave(&ctx, &pilot2, aar2.instance_id, 324, 2_500.0, true)
-                .await
-                .expect("waves 3..9 pay bits 2..=8");
-        }
-        ctx.db.with_snapshot(|snap| {
+            .expect("wave 1 pays bit 0 (2,048,000 ISK)");
+        let (setup2, wave2_limit) = ctx.db.with_snapshot(|snap| {
             let rec = &snap.dungeon_runtime.homefront_runtimes[&aar2.instance_id];
             match &rec.progress {
-                HomefrontProgressRecord::AbyssalArtifactRecovery { waves_paid_mask, .. } => {
-                    assert_eq!(*waves_paid_mask, 0x01FD);
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    current_wave,
+                    setup_remaining_secs,
+                    wave_time_remaining_secs,
+                    mutanite_units_remaining,
+                    ..
+                } => {
+                    assert_eq!(*current_wave, 2);
+                    assert!(*mutanite_units_remaining > 0);
+                    (*setup_remaining_secs, *wave_time_remaining_secs)
                 }
                 other => panic!("expected AAR record, got {other:?}"),
             }
-            // Live payouts so far: 27,648,000 - 2,048,000 (Wave 2) = 25,600,000 across 8 rows.
-            assert_eq!(snap.characters[&960_002].balance, IskCents::from_isk(26_600_000));
-            let rows: Vec<_> = snap
-                .wallet_journal
-                .iter()
-                .filter(|j| j.character_id == 960_002 && j.entry_type == "CorporateRewardPayout")
-                .collect();
-            assert_eq!(rows.len(), 8);
-            assert!(rows.iter().all(|j| j.amount > IskCents(0)));
         });
         let _ = ctx.drain_notifications_for_char(960_002);
-        let pay2 = complete_homefront_operation_and_pay(&ctx, &pilot2, aar2.instance_id)
-            .await
-            .expect("complete AAR #2 recovering skipped wave 2");
-        assert_eq!(pay2.total_fleet_isk, 27_648_000);
+        if setup2 > 0 {
+            ctx.advance_secs(setup2);
+            tick_homefront_operations_sync(&ctx);
+        }
+        ctx.advance_secs(wave2_limit);
+        tick_homefront_operations_sync(&ctx);
+        let aar2_after = get_homefront_runtime_record(&ctx, aar2.instance_id).unwrap();
+        assert!(aar2_after.failed, "AAR Wave 2 timeout with unmined Mutanite must fail immediately");
+        assert!(!aar2_after.completed);
+        assert!(
+            aar2_after
+                .failure_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("wave 2 timed out")),
+            "unexpected failure reason: {:?}",
+            aar2_after.failure_reason
+        );
         ctx.db.with_snapshot(|snap| {
             assert_eq!(
                 snap.characters[&960_002].balance,
-                IskCents::from_isk(28_648_000),
-                "settlement must pay exact skipped Wave 2 share (2,048,000 ISK)"
+                IskCents::from_isk(3_048_000),
+                "timed-out AAR must retain only Wave 1 live payout (2,048,000) and pay zero extra"
             );
-            let rows: Vec<_> = snap
-                .wallet_journal
-                .iter()
-                .filter(|j| j.character_id == 960_002 && j.entry_type == "CorporateRewardPayout")
-                .collect();
-            assert_eq!(rows.len(), 9);
-            assert!(rows.iter().all(|j| j.amount > IskCents(0)));
         });
-        assert!(ctx
-            .drain_notifications_for_char(960_002)
-            .iter()
-            .any(|n| n.event == "OnAccountChange"));
+
+        // Wave 9 timeout must ALSO fail immediately, and final completion pays 0 retroactive ISK.
+        let pilot3 = seed_hf_pilot(&ctx, 7603, 960_003, 860_003, 32_880, sys_id, &[483]).await;
+        let aar3 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn AAR #3");
+        enter_hf_gate_at_site(&ctx, &pilot3, aar3.instance_id)
+            .await
+            .expect("enter AAR #3");
+        for _ in 1..=8_u8 {
+            abyssal_clear_wave(&ctx, &pilot3, aar3.instance_id, 324, 2_500.0, true)
+                .await
+                .expect("waves 1..8 cleared live");
+        }
+        let (setup9, wave9_limit) = ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aar3.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    current_wave,
+                    setup_remaining_secs,
+                    wave_time_remaining_secs,
+                    mutanite_units_remaining,
+                    ..
+                } => {
+                    assert_eq!(*current_wave, 9);
+                    assert!(*mutanite_units_remaining > 0);
+                    (*setup_remaining_secs, *wave_time_remaining_secs)
+                }
+                other => panic!("expected AAR record, got {other:?}"),
+            }
+        });
+        if setup9 > 0 {
+            ctx.advance_secs(setup9);
+            tick_homefront_operations_sync(&ctx);
+        }
+        ctx.advance_secs(wave9_limit);
+        tick_homefront_operations_sync(&ctx);
+        let aar3_after = get_homefront_runtime_record(&ctx, aar3.instance_id).unwrap();
+        assert!(aar3_after.failed, "AAR Wave 9 timeout with unmined Mutanite must fail immediately");
+        assert!(!aar3_after.completed);
+        assert!(
+            aar3_after
+                .failure_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("wave 9 timed out")),
+            "unexpected failure reason: {:?}",
+            aar3_after.failure_reason
+        );
+
+        let pilot4 = seed_hf_pilot(&ctx, 7604, 960_004, 860_004, 32_880, sys_id, &[483]).await;
+        let aar4 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn AAR #4");
+        enter_hf_gate_at_site(&ctx, &pilot4, aar4.instance_id)
+            .await
+            .expect("enter AAR #4");
+        abyssal_clear_wave(&ctx, &pilot4, aar4.instance_id, 324, 2_500.0, true)
+            .await
+            .expect("wave 1 paid");
+        ctx.db.with_mut_snapshot(|snap| {
+            let rec = snap.dungeon_runtime.homefront_runtimes.get_mut(&aar4.instance_id).unwrap();
+            if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+                current_wave,
+                mutanite_units_remaining,
+                wave_hostiles_remaining,
+                warp_bubble_active,
+                evacuation_active,
+                basileus_spawned,
+                cache_ball_id,
+                ..
+            } = &mut rec.progress
+            {
+                *current_wave = 9;
+                *mutanite_units_remaining = 0;
+                *wave_hostiles_remaining = 0;
+                *warp_bubble_active = false;
+                *evacuation_active = true;
+                *basileus_spawned = true;
+                *cache_ball_id = None;
+            }
+        });
+        let _ = ctx.drain_notifications_for_char(960_004);
+        let _pay4 = complete_homefront_operation_and_pay(&ctx, &pilot4, aar4.instance_id)
+            .await
+            .expect("AAR completion settles");
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.characters[&960_004].balance,
+                IskCents::from_isk(3_048_000),
+                "AAR completion must NEVER pay retroactive ISK for skipped/unmined waves"
+            );
+        });
     }
 }
