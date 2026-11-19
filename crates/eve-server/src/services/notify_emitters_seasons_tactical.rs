@@ -18,9 +18,10 @@ use crate::router::notify_registry::{
 };
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::season_manager::{
-    default_fsd_seasons, ensure_character_challenges, load_challenge_definitions,
-    load_season_state_from_blobs, load_seasons_catalog, save_season_state_to_blobs,
-    sync_character_challenges, with_season_state, SeasonConfig,
+    clear_all_season_sessions_initialized, clear_season_session_initialized, default_fsd_seasons,
+    ensure_character_challenges, load_challenge_definitions, load_season_state_from_blobs,
+    load_seasons_catalog, save_season_state_to_blobs, sync_character_challenges, with_season_state,
+    SeasonConfig,
 };
 use crate::system_actor::SystemHandle;
 use eve_machonet::SessionState;
@@ -57,9 +58,16 @@ pub(crate) fn broadcast_char_event(
     fallback_char_id: Option<i64>,
 ) {
     match event {
-        "OnSeasonStarted" => broadcast_typed_char_event(ctx, OnSeasonStarted {}, fallback_char_id),
-        "OnSeasonEnded" => broadcast_typed_char_event(ctx, OnSeasonEnded {}, fallback_char_id),
+        "OnSeasonStarted" => {
+            clear_all_season_sessions_initialized(ctx);
+            broadcast_typed_char_event(ctx, OnSeasonStarted {}, fallback_char_id);
+        }
+        "OnSeasonEnded" => {
+            clear_all_season_sessions_initialized(ctx);
+            broadcast_typed_char_event(ctx, OnSeasonEnded {}, fallback_char_id);
+        }
         "OnSeasonsFsdDataChanged" => {
+            clear_all_season_sessions_initialized(ctx);
             broadcast_typed_char_event(ctx, OnSeasonsFsdDataChanged {}, fallback_char_id);
         }
         other => {
@@ -168,6 +176,7 @@ pub fn check_and_emit_season_transitions(ctx: &ServerContext) {
         broadcast_char_event(ctx, "OnSeasonEnded", vec![], None);
     }
     for cid in cleared_chars {
+        clear_season_session_initialized(ctx, cid);
         ctx.emit_typed(
             NotificationTarget::Character(cid),
             OnSeasonSelectionCleared {},
@@ -204,6 +213,7 @@ pub fn handle_select_season_clear_if_none_or_zero(
     });
     match res {
         Ok(()) => {
+            clear_season_session_initialized(ctx, char_id);
             ctx.emit_typed(
                 NotificationTarget::Character(char_id),
                 OnSeasonSelectionCleared {},
@@ -299,6 +309,7 @@ fn end_season_impl(
 
     broadcast_char_event(ctx, "OnSeasonEnded", vec![], Some(caller_char_id));
     for &cid in &cleared_chars {
+        clear_season_session_initialized(ctx, cid);
         ctx.emit_typed(
             NotificationTarget::Character(cid),
             OnSeasonSelectionCleared {},

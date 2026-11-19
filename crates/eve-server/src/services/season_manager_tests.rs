@@ -1101,3 +1101,258 @@ fn season_end_time_honors_operator_override_expired_none_and_fsd_reload() {
         .expect("restored fsd end time");
     assert!(restored_end.as_i64().unwrap_or(0) > now_ft);
 }
+
+#[test]
+fn issue_1348_ended_season_and_broadcast_resets_suppress_challenge_expired_and_clear_sessions() {
+    use crate::services::notify_emitters_seasons_tactical::check_and_emit_season_transitions;
+    use eve_db::service_domains::progression_seasons::SeasonConfig;
+
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let kw = HashMap::new();
+
+    let uid_a = ctx.db.provision_player_account("hf1348_a", "pw");
+    let cid_a = ctx
+        .db
+        .create_character(uid_a, "Pilot A", 1, 1, 11, 17, &ctx.sde)
+        .expect("char a")
+        .character_id;
+    let mut sess_a = season_session(cid_a, true);
+    sess_a.session_id = 1348_01;
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid_a, sess_a.session_id, Some(cid_a), true, ctx.now_unix());
+
+    let uid_b = ctx.db.provision_player_account("hf1348_b", "pw");
+    let cid_b = ctx
+        .db
+        .create_character(uid_b, "Pilot B", 1, 1, 11, 17, &ctx.sde)
+        .expect("char b")
+        .character_id;
+    let mut sess_b = season_session(cid_b, false);
+    sess_b.session_id = 1348_02;
+    let _ = ctx
+        .db
+        .acquire_online_lock(uid_b, sess_b.session_id, Some(cid_b), false, ctx.now_unix());
+
+    // 1. Replace catalog with a single active season ending in 120s and initialize both sessions.
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    const TICKS_PER_SEC: i64 = 10_000_000;
+    let season_end_ft = now_ft + 120 * TICKS_PER_SEC;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.seasons_catalog = std::collections::BTreeMap::from([(
+            888,
+            SeasonConfig {
+                season_id: 888,
+                template_id: 888,
+                max_active_challenges: 4,
+                max_season_points: 100,
+                season_name: "HF1348 Season".into(),
+                start_time_ft: now_ft - 60 * TICKS_PER_SEC,
+                end_time_ft: season_end_ft,
+                ..Default::default()
+            },
+        )]);
+        snap.seasons_and_campaigns.announced_season_init = true;
+        snap.seasons_and_campaigns
+            .announced_season_states
+            .insert(888, "active".into());
+    });
+
+    assert_eq!(
+        handle_season_manager(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(888)], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    let _ = handle_season_manager(
+        &ctx,
+        &mut sess_a,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("progress a");
+    let _ = handle_season_manager(
+        &ctx,
+        &mut sess_b,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("progress b");
+    assert!(is_season_session_initialized(&ctx, cid_a, sess_a.session_id));
+    assert!(is_season_session_initialized(&ctx, cid_b, sess_b.session_id));
+
+    // Seed challenge 297 (and an active challenge on char B) expiring right at `season_end_ft`.
+    let b_cid = ctx.db.with_snapshot(|snap| {
+        *load_season_state_from_blobs(snap, cid_b)
+            .challenges
+            .keys()
+            .next()
+            .expect("char b challenge")
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st_a = load_season_state_from_blobs(snap, cid_a);
+        let first_a = *st_a.challenges.keys().next().expect("char a challenge");
+        let mut ch_297 = st_a.challenges.remove(&first_a).unwrap();
+        ch_297.challenge_id = 297;
+        ch_297.expiration_date = season_end_ft;
+        ch_297.client_event_driven = true;
+        st_a.challenges.insert(297, ch_297);
+        save_season_state_to_blobs(snap, cid_a, &st_a);
+
+        let mut st_b = load_season_state_from_blobs(snap, cid_b);
+        if let Some(ch) = st_b.challenges.get_mut(&b_cid) {
+            ch.expiration_date = now_ft + 60 * TICKS_PER_SEC;
+        }
+        save_season_state_to_blobs(snap, cid_b, &st_b);
+    });
+    let _ = ctx.drain_notifications_for_char(cid_a);
+    let _ = ctx.drain_notifications_for_char(cid_b);
+
+    // 2. reload_fsd_data broadcasts OnSeasonsFsdDataChanged to NotificationTarget::All:
+    //    must clear BOTH caller A and online peer B's initialized markers before tick sweep.
+    assert_eq!(
+        handle_season_manager(&ctx, &mut sess_a, "seasonManager", "reload_fsd_data", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(!is_season_session_initialized(&ctx, cid_a, sess_a.session_id));
+    assert!(!is_season_session_initialized(&ctx, cid_b, sess_b.session_id));
+    let _ = ctx.drain_notifications_for_char(cid_a);
+    let _ = ctx.drain_notifications_for_char(cid_b);
+
+    // Re-seed single active season ending in 120s and re-initialize A via get_character_progress.
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let end_ft = now_ft + 120 * TICKS_PER_SEC;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.seasons_and_campaigns.seasons_catalog = std::collections::BTreeMap::from([(
+            888,
+            SeasonConfig {
+                season_id: 888,
+                template_id: 888,
+                max_active_challenges: 4,
+                max_season_points: 100,
+                season_name: "HF1348 Season".into(),
+                start_time_ft: now_ft - 60 * TICKS_PER_SEC,
+                end_time_ft: end_ft,
+                ..Default::default()
+            },
+        )]);
+        snap.seasons_and_campaigns.announced_season_init = true;
+        snap.seasons_and_campaigns
+            .announced_season_states
+            .insert(888, "active".into());
+        let mut st_a = load_season_state_from_blobs(snap, cid_a);
+        st_a.selected_season_id = 888;
+        if let Some(ch) = st_a.challenges.get_mut(&297) {
+            ch.expiration_date = end_ft;
+        }
+        save_season_state_to_blobs(snap, cid_a, &st_a);
+    });
+    assert_eq!(
+        handle_season_manager(&ctx, &mut sess_a, "seasonManager", "select_season", &[PyRep::Integer(888)], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert!(is_season_session_initialized(&ctx, cid_a, sess_a.session_id));
+    let _ = ctx.drain_notifications_for_char(cid_a);
+
+    // 3. Exact #1348 reproduction: advance past season end -> check_and_emit_season_transitions +
+    //    sweep_expired_online_challenges run on the same tick. get_season_data_for_character returns
+    //    PyRep::None, initialized marker is cleared, and OnChallengeExpired must NOT fire!
+    ctx.advance_secs(125);
+    check_and_emit_season_transitions(&ctx);
+    sweep_expired_online_challenges(&ctx);
+
+    let season_data_after_end = handle_season_manager(
+        &ctx,
+        &mut sess_a,
+        "seasonManager",
+        "get_season_data_for_character",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .expect("get_season_data_for_character after end");
+    assert_eq!(season_data_after_end, PyRep::None);
+
+    let end_notifs = ctx.drain_notifications_for_char(cid_a);
+    assert!(end_notifs.iter().any(|n| n.event == "OnSeasonEnded"));
+    assert!(end_notifs.iter().any(|n| n.event == "OnSeasonSelectionCleared"));
+    assert!(
+        end_notifs.iter().all(|n| n.event != "OnChallengeExpired"),
+        "OnChallengeExpired must never fire alongside OnSeasonEnded/OnSeasonSelectionCleared: {end_notifs:?}"
+    );
+    assert!(!is_season_session_initialized(&ctx, cid_a, sess_a.session_id));
+
+    // 4. Negative check: even if a stale marker remained while catalog is all-ended,
+    //    sweep_expired_online_challenges clears it without mutating challenge 297 or emitting OnChallengeExpired.
+    mark_season_session_initialized(&ctx, cid_a, sess_a.session_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st_a = load_season_state_from_blobs(snap, cid_a);
+        if let Some(ch) = st_a.challenges.get_mut(&297) {
+            ch.expiration_date = 100;
+        }
+        save_season_state_to_blobs(snap, cid_a, &st_a);
+    });
+    sweep_expired_online_challenges(&ctx);
+    assert!(!is_season_session_initialized(&ctx, cid_a, sess_a.session_id));
+    let stale_notifs = ctx.drain_notifications_for_char(cid_a);
+    assert!(
+        stale_notifs.iter().all(|n| n.event != "OnChallengeExpired"),
+        "stale marker with ended catalog must not emit OnChallengeExpired: {stale_notifs:?}"
+    );
+    let still_297 = ctx
+        .db
+        .with_snapshot(|snap| load_season_state_from_blobs(snap, cid_a).challenges.contains_key(&297));
+    assert!(still_297, "tick sweep must not evict challenges when no season is active");
+
+    // 5. Negative check: process_client_event when catalog is ended does not emit OnChallengeExpired
+    //    or OnChallengeProgressUpdate into a client with current_user_progress == None.
+    let client_def = fsd_challenge_definitions(&ctx.sde)
+        .iter()
+        .find(|d| d.client_event_driven && !d.is_dormant && !d.event_type.is_empty())
+        .cloned()
+        .expect("FSD client_event_driven challenge");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st_a = load_season_state_from_blobs(snap, cid_a);
+        let mut ch_ev = client_def.to_character_challenge(888, ctx.now_blueos_filetime_ticks());
+        ch_ev.progress = 0;
+        ch_ev.max_progress = 2;
+        ch_ev.completed = false;
+        ch_ev.claimed = false;
+        ch_ev.is_dormant = false;
+        st_a.challenges.insert(client_def.challenge_id, ch_ev);
+        save_season_state_to_blobs(snap, cid_a, &st_a);
+    });
+    assert_eq!(
+        handle_season_manager(
+            &ctx,
+            &mut sess_a,
+            "seasonManager",
+            "process_client_event",
+            &[PyRep::String(client_def.event_type.clone()), PyRep::Integer(1)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    let pce_notifs = ctx.drain_notifications_for_char(cid_a);
+    assert!(
+        pce_notifs.iter().all(|n| {
+            n.event != "OnChallengeExpired"
+                && n.event != "OnChallengeProgressUpdate"
+                && n.event != "OnChallengeCompleted"
+        }),
+        "ended season process_client_event must not emit challenge UI mutations: {pce_notifs:?}"
+    );
+}
