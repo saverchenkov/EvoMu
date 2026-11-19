@@ -241,7 +241,16 @@ async fn social_wars_dispatch_unauth_unbind_timestamps_gm_and_get_top50_edges() 
         .await
         .is_err());
 
-    // 7. GM warRegistry commands all return Bool(true).
+    // 7. GM warRegistry commands deny non-GM roles and return Bool(true) for ROLE_GMH.
+    assert_eq!(
+        call_wars(&ctx, &mut agg_sess, "warRegistry", "GMActivateDefender", &[], None)
+            .await
+            .unwrap_err()
+            .code,
+        "InsufficientRole"
+    );
+    let prev_agg_role = agg_sess.role;
+    agg_sess.role = eve_machonet::service_roles::ROLE_GMH;
     for gm in [
         "GMActivateDefender",
         "GMDeactivateDefender",
@@ -257,6 +266,7 @@ async fn social_wars_dispatch_unauth_unbind_timestamps_gm_and_get_top50_edges() 
             PyRep::Bool(true)
         );
     }
+    agg_sess.role = prev_agg_role;
 
     // 8. GetPublicWarInfo / GetBaseInfo / GetKills / GetKillsByGroup with unknown war_id -> WarNotFound.
     for (svc, meth) in [

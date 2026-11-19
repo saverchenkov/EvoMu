@@ -531,10 +531,26 @@ async fn test_rpc_char_unbound_mgr_batch() {
     let cohorts = as_list(&res);
     assert!(!cohorts.is_empty());
 
-    // 5. GetQAStarterSystemIDs
-    let res = ctx
+    // 5. GetQAStarterSystemIDs (player denied; GM allowed)
+    let qa_denied = ctx
         .dispatch_rpc(
             &mut sess,
+            "charUnboundMgr",
+            None,
+            "GetQAStarterSystemIDs",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(qa_denied.code, "InsufficientRole");
+
+    let mut gm_sess = sess.clone();
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    let res = ctx
+        .dispatch_rpc(
+            &mut gm_sess,
             "charUnboundMgr",
             None,
             "GetQAStarterSystemIDs",
@@ -548,9 +564,15 @@ async fn test_rpc_char_unbound_mgr_batch() {
     assert_eq!(starter_ids.len(), 4);
     assert_eq!(starter_ids[0].as_i64(), Some(30_000_142));
 
-    // 6. ToggleValidation
-    let res = ctx
+    // 6. ToggleValidation (player denied; GM allowed)
+    let tv_denied = ctx
         .dispatch_rpc(&mut sess, "charUnboundMgr", None, "ToggleValidation", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(tv_denied.code, "InsufficientRole");
+
+    let res = ctx
+        .dispatch_rpc(&mut gm_sess, "charUnboundMgr", None, "ToggleValidation", &[], &kw, None)
         .await
         .expect("ToggleValidation");
     assert_eq!(res.as_bool(), Some(true));

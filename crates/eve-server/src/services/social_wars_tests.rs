@@ -781,3 +781,164 @@ fn test_social_wars_helpers_predicates_sync_notifications_and_resolution() {
         assert!(snap.war_state.wars[&5003].finish_at_unix.is_some());
     });
 }
+
+#[test]
+fn war_registry_gm_gates_and_war_stat_bind_enforced() {
+    use eve_db::PersistedWarMeta;
+    use eve_machonet::service_roles::{ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_PLAYER_DEFAULT, ROLE_QA};
+
+    let (ctx, mut agg_sess, _agg_char, mut def_sess, def_corp, _ally_sess, _ally_corp, agg_hq_id) =
+        setup_wars_ctx();
+    let declared = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp), PyRep::Integer(agg_hq_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&declared, "warID").unwrap();
+
+    // Seed an expired side war to prove rejected GM* and Bind calls are read-pure (never trigger sync_wars).
+    let expired_side_war = 5_099_i64;
+    let outsider_corp = 98_000_999_i64;
+    let outsider_char = 90_000_999_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut out_ch = snap.characters[&90_000_001].clone();
+        out_ch.character_id = outsider_char;
+        out_ch.user_id = 999;
+        out_ch.corporation_id = outsider_corp;
+        snap.characters.insert(outsider_char, out_ch);
+        snap.corporations.insert(
+            outsider_corp,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = outsider_corp;
+                c.name = "Outsider".into();
+                c.ticker = "OUT".into();
+                c.ceo_id = outsider_char;
+                c
+            },
+        );
+        snap.wars.insert(
+            expired_side_war,
+            WarRecord {
+                war_id: expired_side_war,
+                aggressor_corp_id: 98_000_101,
+                defender_corp_id: def_corp,
+                mutual: true,
+                started_unix: 100,
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            expired_side_war,
+            PersistedWarMeta {
+                war_hq_id: Some(agg_hq_id),
+                open_for_allies: false,
+                finish_at_unix: Some(1),
+            },
+        );
+    });
+
+    let expected_err_code = "InsufficientRole";
+    let before_rejects = ctx.db.snapshot_tables();
+    for bad_role in [0u64, ROLE_PLAYER_DEFAULT, ROLE_QA] {
+        agg_sess.role = bad_role;
+        for method in [
+            "GMActivateDefender",
+            "GMDeactivateDefender",
+            "GMExtendAllyContract",
+            "GMJoinDefender",
+            "GMSetDeclareTime",
+            "GMSetWarFinishTime",
+        ] {
+            let err = handle_wars(&ctx, &mut agg_sess, "warRegistry", method, &[], None)
+                .unwrap()
+                .expect_err(&format!("warRegistry.{method} must deny role {bad_role:#x}"));
+            assert_eq!(err.code, expected_err_code);
+        }
+    }
+    assert_eq!(ctx.db.snapshot_tables(), before_rejects);
+
+    for ok_role in [ROLE_GMH, ROLE_GML, ROLE_ADMIN] {
+        agg_sess.role = ok_role;
+        for method in [
+            "GMActivateDefender",
+            "GMDeactivateDefender",
+            "GMExtendAllyContract",
+            "GMJoinDefender",
+            "GMSetDeclareTime",
+            "GMSetWarFinishTime",
+        ] {
+            assert_eq!(
+                handle_wars(&ctx, &mut agg_sess, "warRegistry", method, &[], None)
+                    .unwrap()
+                    .unwrap(),
+                PyRep::Bool(true)
+            );
+        }
+    }
+
+    // warStatisticMgr.Bind rejects outsiders and non-existent wars without mutating snapshot or bound_objects
+    let mut outsider_sess = agg_sess.clone();
+    outsider_sess.user_id = Some(999);
+    outsider_sess.character_id = Some(outsider_char);
+    outsider_sess.corporation_id = Some(outsider_corp);
+    outsider_sess.role = ROLE_PLAYER_DEFAULT;
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut outsider_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_id)],
+            None
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_id + 777)],
+            None
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+    assert_eq!(ctx.db.snapshot_tables(), before_rejects);
+    assert!(ctx.bound_objects.read().unwrap().is_empty());
+
+    // Involved defender binds cleanly
+    def_sess.role = ROLE_PLAYER_DEFAULT;
+    let bound_id = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warStatisticMgr",
+        "Bind",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let bid = bound_id.as_i64().unwrap();
+    assert!(bid > 0);
+    assert_eq!(
+        ctx.bound_objects
+            .read()
+            .unwrap()
+            .get(&(bid as u64))
+            .map(|e| (e.service.as_str(), e.object_id)),
+        Some(("warStatisticMgr", war_id))
+    );
+}

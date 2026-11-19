@@ -334,12 +334,30 @@ async fn macho_resolve_and_bind_object_argument_shapes_beyonce_and_piggybacked_s
         .expect("MachoResolveObject");
     assert_eq!(node_rep, PyRep::Integer(eve_machonet::MACHO_PROXY_NODE_ID as i64));
 
-    // 2) MachoBindObject argument shapes: String, Token, Tuple(Int), Tuple(Str), empty Tuple, None
-    for bind_arg in [
+    // 2) MachoBindObject argument shapes: non-SDE string/token/fake-id keys denied on agentMgr, valid SDE Int/Tuple(Int) bind, empty Tuple/None rejected
+    for denied_arg in [
         PyRep::String("moniker_alpha".into()),
         PyRep::Token("moniker_token".into()),
         PyRep::Tuple(vec![PyRep::Integer(3_018_922)]),
         PyRep::Tuple(vec![PyRep::String("moniker_tuple_str".into())]),
+    ] {
+        let err = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "agentMgr",
+                None,
+                "MachoBindObject",
+                &[denied_arg],
+                &kw,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "BindAuthorizationDenied");
+    }
+    for valid_bind_arg in [
+        PyRep::Integer(3_008_416),
+        PyRep::Tuple(vec![PyRep::Integer(3_008_416)]),
     ] {
         let rep = ctx
             .dispatch_rpc(
@@ -347,12 +365,12 @@ async fn macho_resolve_and_bind_object_argument_shapes_beyonce_and_piggybacked_s
                 "agentMgr",
                 None,
                 "MachoBindObject",
-                &[bind_arg],
+                &[valid_bind_arg],
                 &kw,
                 None,
             )
             .await
-            .expect("MachoBindObject valid arg shape");
+            .expect("MachoBindObject valid SDE agent arg shape");
         let PyRep::Tuple(items) = rep else {
             panic!("Expected (oid, call_result) tuple");
         };

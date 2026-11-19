@@ -201,13 +201,45 @@ pub(super) fn handle_wars(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let arg_i64 = |i: usize| args.get(i).and_then(|a| a.as_i64());
+    match (service, method) {
+        (
+            "warRegistry",
+            "GMActivateDefender"
+            | "GMDeactivateDefender"
+            | "GMExtendAllyContract"
+            | "GMJoinDefender"
+            | "GMSetDeclareTime"
+            | "GMSetWarFinishTime",
+        ) => {
+            if (session.role
+                & (eve_machonet::service_roles::ROLE_GMH
+                    | eve_machonet::service_roles::ROLE_GML
+                    | eve_machonet::service_roles::ROLE_ADMIN))
+                == 0
+            {
+                return err(
+                    "InsufficientRole",
+                    format!("warRegistry.{method} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"),
+                );
+            }
+            return Some(Ok(PyRep::Bool(true)));
+        }
+        ("warStatisticMgr", "Bind") => {
+            let object_id = arg_i64(0).unwrap_or(0);
+            return match ctx.bind_object(session, "warStatisticMgr", object_id) {
+                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
+                Err(e) => Some(Err(e)),
+            };
+        }
+        _ => {}
+    }
     let my_corp = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id)).or(session.corporation_id).unwrap_or(0);
     let now = ctx.now_unix();
     if my_corp > 0 {
         crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, my_corp);
     }
     sync_wars(ctx);
-    let arg_i64 = |i: usize| args.get(i).and_then(|a| a.as_i64());
     let has_war_director_role = ctx.db.with_snapshot(|snap| {
         snap.corporations.get(&my_corp).is_some_and(|_| {
             let (is_ceo, eff_roles) =
@@ -639,15 +671,6 @@ pub(super) fn handle_wars(
             });
             Some(res)
         }
-        (
-            "warRegistry",
-            "GMActivateDefender"
-            | "GMDeactivateDefender"
-            | "GMExtendAllyContract"
-            | "GMJoinDefender"
-            | "GMSetDeclareTime"
-            | "GMSetWarFinishTime",
-        ) => Some(Ok(PyRep::Bool(true))),
 
         ("warsInfoMgr" | "warRegistry", "AcceptSurrender" | "DeclineSurrender") => {
             if !has_war_director_role {
@@ -1188,14 +1211,6 @@ pub(super) fn handle_wars(
                 ],
             );
             Some(Ok(PyRep::keyval([("accepted", PyRep::Bool(true)), ("warID", PyRep::Integer(war_id)), ("mutual", PyRep::Bool(true))])))
-        }
-
-        ("warStatisticMgr", "Bind") => {
-            let object_id = arg_i64(0).unwrap_or(0);
-            match ctx.bind_object(session, "warStatisticMgr", object_id) {
-                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
-                Err(e) => Some(Err(e)),
-            }
         }
 
         ("warStatisticMgr", "UnBind") => handle_war_stat_unbind(ctx, session, arg_i64(0)),

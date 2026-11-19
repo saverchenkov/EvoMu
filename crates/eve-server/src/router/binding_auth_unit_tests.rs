@@ -424,10 +424,43 @@ fn authorize_and_verify_binding_cover_every_service_and_edge_case() {
     assert_both(&sess, "contractProxy", i64::from(sys_id), true);
     assert_both(&sess, "contractProxy", char_id + 1, false);
 
-    for svc in ["agentMgr", "keeper", "tourneyMgr"] {
-        assert_both(&sess, svc, 1, true);
-        assert_both(&sess, svc, 0, false);
+    assert_both(&sess, "agentMgr", 3_008_416, true);
+    assert_both(&sess, "agentMgr", 1, false);
+    assert_both(&sess, "agentMgr", 0, false);
+
+    assert_both(&sess, "keeper", i64::from(sys_id), true);
+    assert_both(&sess, "keeper", i64::from(other_sys_id), false);
+    assert_both(&sess, "keeper", 1, false);
+    assert_both(&sess, "keeper", 0, false);
+    if let Some(&dungeon_id) = ctx.sde.dungeons.keys().next() {
+        assert_both(&sess, "keeper", i64::from(dungeon_id), true);
+        let mut player_sess = sess.clone();
+        player_sess.role = 0;
+        assert_both(&player_sess, "keeper", i64::from(dungeon_id), false);
     }
+
+    assert_both(&sess, "tourneyMgr", 1, false);
+    assert_both(&sess, "tourneyMgr", 0, false);
+    let tourney_match_id = 5_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut m = eve_db::TourneyMatch::new(
+            tourney_match_id,
+            77,
+            i64::from(other_sys_id),
+            100,
+            600,
+            120,
+            1,
+        );
+        m.red_players.push(eve_db::TourneyPilot {
+            character_id: char_id,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 5,
+        });
+        snap.tourney_state.matches.insert(tourney_match_id, m);
+    });
+    assert_both(&sess, "tourneyMgr", tourney_match_id, true);
     assert_both(&sess, "unknownService", 1, false);
 
     // invbroker docked vs undocked branches
@@ -853,4 +886,463 @@ fn invbroker_solar_system_binding_and_invalidation_for_upwell_structures() {
         "invbroker",
         i64::from(sys_id)
     ));
+}
+
+#[test]
+fn binding_auth_1350_invbroker_office_war_keeper_agent_tourney_boundaries() {
+    use eve_db::{
+        corp_roles, CorporationRecord, PersistedNegKind, PersistedWarNegotiation, TourneyArenaSystem,
+        TourneyMatch, TourneyPilot,
+    };
+    use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let other_sys_id = 30_000_144_u32;
+    let st_id = 60_003_760_i64;
+    let ceo_char = 90_000_001_i64;
+    let member_char = 90_000_002_i64;
+    let outsider_char = 90_000_777_i64;
+    let corp_id = 98_000_001_i64;
+    let same_ally_corp = 98_000_050_i64;
+    let accepted_ally_corp = 98_000_051_i64;
+    let future_ally_corp = 98_000_052_i64;
+    let unrelated_corp = 98_000_099_i64;
+    let war_id = 700_555_001_i64;
+    let alliance_id = 99_555_001_i64;
+
+    let other_ship_in_station = 880_555_001_i64;
+    let corp_item_in_station = 880_555_002_i64;
+    let own_item_in_station = 880_555_003_i64;
+    let other_item_in_space = 880_555_004_i64;
+    let tourney_match_id = 910_001_i64;
+    let tourney_id = 42_i64;
+
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.alliance_id = Some(alliance_id);
+        }
+        snap.corporations.insert(
+            same_ally_corp,
+            {
+                let mut c = CorporationRecord::default();
+                c.corporation_id = same_ally_corp;
+                c.name = "Same Ally".into();
+                c.ticker = "SAL".into();
+                c.ceo_id = outsider_char;
+                c.alliance_id = Some(alliance_id);
+                c
+            },
+        );
+        for cid in [accepted_ally_corp, future_ally_corp, unrelated_corp] {
+            snap.corporations.insert(
+                cid,
+                {
+                    let mut c = CorporationRecord::default();
+                    c.corporation_id = cid;
+                    c.name = format!("Corp {cid}");
+                    c.ticker = "CRP".into();
+                    c.ceo_id = outsider_char;
+                    c
+                },
+            );
+        }
+        snap.items.insert(
+            other_ship_in_station,
+            InventoryItemRecord {
+                item_id: other_ship_in_station,
+                type_id: 587,
+                owner_id: outsider_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            corp_item_in_station,
+            InventoryItemRecord {
+                item_id: corp_item_in_station,
+                type_id: 3293,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            own_item_in_station,
+            InventoryItemRecord {
+                item_id: own_item_in_station,
+                type_id: 34,
+                owner_id: member_char,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 10,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            other_item_in_space,
+            InventoryItemRecord {
+                item_id: other_item_in_space,
+                type_id: 3293,
+                owner_id: outsider_char,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: corp_id,
+                defender_corp_id: unrelated_corp,
+                mutual: false,
+                started_unix: now_unix.saturating_sub(100),
+                active: true,
+            },
+        );
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 1,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: accepted_ally_corp,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(now_unix.saturating_sub(10)),
+        });
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 2,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: future_ally_corp,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(now_unix + 3_600),
+        });
+        let mut tm = TourneyMatch::new(
+            tourney_match_id,
+            tourney_id,
+            i64::from(other_sys_id),
+            100,
+            600,
+            120,
+            1,
+        );
+        tm.blue_players.push(TourneyPilot {
+            character_id: member_char,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 10,
+        });
+        tm.referees.push(ceo_char);
+        snap.tourney_state.matches.insert(tourney_match_id, tm);
+        snap.tourney_state
+            .tournaments
+            .insert(tourney_id, "AT".into());
+        snap.tourney_state.arena_systems.insert(
+            i64::from(other_sys_id),
+            TourneyArenaSystem::default(),
+        );
+    });
+
+    let before = ctx.db.snapshot_tables();
+
+    let mut member_sess = SessionState {
+        session_id: 601,
+        user_id: Some(2),
+        character_id: Some(member_char),
+        solar_system_id: Some(sys_id),
+        station_id: Some(st_id),
+        corporation_id: Some(corp_id),
+        role: ROLE_PLAYER_DEFAULT,
+        ..Default::default()
+    };
+
+    // 1. invbroker item ownership + corp hangar role checks (including pending role exclusion)
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        other_ship_in_station
+    ));
+    assert!(!verify_service_binding_context(
+        &ctx,
+        &member_sess,
+        &make_entry("invbroker", other_ship_in_station, member_char)
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        own_item_in_station
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+
+    assert_eq!(ctx.db.snapshot_tables(), before);
+
+    // Pending (unmatured) corp hangar grant must NOT authorize corp item bind yet;
+    // matured hangar take role / director / CEO must authorize it.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .pending_role_grants
+            .insert(
+                member_char,
+                (corp_roles::ROLE_HANGAR_CAN_TAKE[0], now_unix + 86_400),
+            );
+    });
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(gov) = snap.corp_governance.get_mut(&corp_id) {
+            gov.pending_role_grants.remove(&member_char);
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles
+                .insert(member_char, corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        }
+    });
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        corp_item_in_station
+    ));
+    assert!(verify_service_binding_context(
+        &ctx,
+        &member_sess,
+        &make_entry("invbroker", corp_item_in_station, member_char)
+    ));
+
+    // Undocked space items still reject cross-owner binding
+    member_sess.station_id = None;
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "invbroker",
+        other_item_in_space
+    ));
+
+    // 2. officeManager: station match allowed when docked; corp ID requires hangar/office/CEO role
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        st_id
+    ));
+    member_sess.station_id = Some(st_id);
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    )); // holds ROLE_HANGAR_CAN_QUERY[0]
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(member_char, 0);
+        }
+    });
+    assert!(!authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        st_id
+    ));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles
+                .insert(member_char, corp_roles::ROLE_RENT_OFFICE);
+        }
+    });
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "officeManager",
+        corp_id
+    ));
+
+    // Capture snapshot baseline after role transitions so read-only checks prove zero mutation.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(member_char, 0);
+        }
+    });
+    let before = ctx.db.snapshot_tables();
+
+    // 3. warStatisticMgr: involvement + existence checks (participant, same alliance, active ally, GM)
+    let mut ally_sess = SessionState {
+        session_id: 602,
+        user_id: Some(3),
+        character_id: Some(outsider_char),
+        corporation_id: Some(same_ally_corp),
+        ..Default::default()
+    };
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(accepted_ally_corp);
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(future_ally_corp);
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.corporation_id = Some(98_999_888);
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    ally_sess.role = ROLE_GMH;
+    assert!(authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &ally_sess,
+        outsider_char,
+        "warStatisticMgr",
+        war_id + 999
+    )); // nonexistent war rejected even for GM
+
+    // 4. tourneyMgr & keeper & agentMgr scoping
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        tourney_match_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        tourney_id
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &member_sess,
+        member_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    )); // via participant match in other_sys_id
+    let mut unrelated_sess = SessionState {
+        session_id: 603,
+        user_id: Some(4),
+        character_id: Some(outsider_char),
+        solar_system_id: Some(sys_id),
+        corporation_id: Some(98_999_888),
+        ..Default::default()
+    };
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_match_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        tourney_id
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    ));
+    unrelated_sess.solar_system_id = Some(other_sys_id);
+    assert!(authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "tourneyMgr",
+        i64::from(other_sys_id)
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "agentMgr",
+        1
+    ));
+    assert!(authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "agentMgr",
+        3_008_416
+    ));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &unrelated_sess,
+        outsider_char,
+        "keeper",
+        1
+    ));
+    assert_eq!(ctx.db.snapshot_tables(), before);
 }

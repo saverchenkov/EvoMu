@@ -773,6 +773,64 @@ impl ServerContext {
         )
     }
 
+    fn is_genuine_preauth_rpc(effective_service: &str, method: &str) -> bool {
+        Self::is_preauth_individual_rpc(effective_service, method)
+            || matches!(
+                (effective_service, method),
+                (
+                    "machoNet",
+                    "ClientHasReleasedTheseObjects"
+                        | "GetGlobalConfig"
+                        | "GetConnectedClusterMode"
+                        | "GetConnectedClusterName"
+                        | "GetConnectionProperties"
+                ) | ("petitioner", "MayPetition")
+                    | ("pingService", "Ping")
+            )
+    }
+
+    fn extract_moniker_object_id(args: &[PyRep], rpc_name: &str) -> Result<i64, BridgeRpcError> {
+        match args.first() {
+            Some(PyRep::Integer(id)) => Ok(*id),
+            Some(PyRep::String(s)) | Some(PyRep::Token(s)) if !s.is_empty() => Ok(s
+                .bytes()
+                .fold(1_000i64, |acc, b| {
+                    acc.wrapping_mul(31).wrapping_add(b as i64)
+                })
+                .saturating_abs()
+                .max(1)),
+            Some(PyRep::Tuple(items)) => {
+                if let Some(id) = items.first().and_then(|v| v.as_i64()) {
+                    Ok(id)
+                } else if let Some(s) = items
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    Ok(s.bytes()
+                        .fold(1_000i64, |acc, b| {
+                            acc.wrapping_mul(31).wrapping_add(b as i64)
+                        })
+                        .saturating_abs()
+                        .max(1))
+                } else {
+                    Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: format!("{rpc_name} bind tuple missing objectID"),
+                        client_error: None,
+                    })
+                }
+            }
+            _ => Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: format!(
+                    "{rpc_name} requires an explicit integer or string objectID"
+                ),
+                client_error: None,
+            }),
+        }
+    }
+
     /// Returns `true` for bootstrap RPCs expected during login/character-select/undock bursts.
     pub(crate) fn is_bootstrap_burst_rpc(service: &str, method: &str) -> bool {
         matches!(
@@ -1066,6 +1124,10 @@ impl ServerContext {
             .map(|b| b.service.as_str())
             .unwrap_or(service);
 
+        if session.user_id.is_none() && !Self::is_genuine_preauth_rpc(effective_service, method) {
+            let _ = Self::require_auth(session)?;
+        }
+
         let (enable_living_world, enable_quasar_gateway) = {
             let flags = self.feature_flags.read().unwrap_or_else(|e| e.into_inner());
             (flags.enable_living_world, flags.enable_quasar_gateway)
@@ -1207,6 +1269,41 @@ impl ServerContext {
             return Ok(PyRep::Bool(true));
         }
 
+        // Explicit camelCase GM / QA RPC gate (`#1350`): must hold `ROLE_GMH | ROLE_GML | ROLE_ADMIN` (`ROLE_QA` alone is denied).
+        let is_privileged_gm_camel_rpc = matches!(
+            (effective_service, method),
+            (
+                "warRegistry",
+                "GMActivateDefender"
+                    | "GMDeactivateDefender"
+                    | "GMExtendAllyContract"
+                    | "GMJoinDefender"
+                    | "GMSetDeclareTime"
+                    | "GMSetWarFinishTime"
+            ) | (
+                "charUnboundMgr",
+                "ToggleValidation" | "GetQAStarterSystemIDs"
+            )
+        );
+        if is_privileged_gm_camel_rpc {
+            const ERR_INSUFFICIENT_ROLE: &str = "InsufficientRole";
+            let _ = Self::require_auth(session)?;
+            if (session.role
+                & (eve_machonet::service_roles::ROLE_GMH
+                    | eve_machonet::service_roles::ROLE_GML
+                    | eve_machonet::service_roles::ROLE_ADMIN))
+                == 0
+            {
+                return Err(BridgeRpcError {
+                    code: ERR_INSUFFICIENT_ROLE.into(),
+                    message: format!(
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"
+                    ),
+                    client_error: None,
+                });
+            }
+        }
+
         // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
         // rpc-lint: allow prefix check for QA method gating
         let is_qa_surface = effective_service == "publicQaToolsServer"
@@ -1340,7 +1437,28 @@ impl ServerContext {
 
         // Handle universal `MachoResolveObject` moniker node lookup (`carbon/common/script/net/moniker.pyj`)
         if method == "MachoResolveObject" {
-            let _ = Self::require_auth(session)?;
+            if matches!(effective_service, "keeper" | "tourneyMgr" | "planetMgr") {
+                let (_, char_id) = Self::require_character(session)?;
+                let obj_id = Self::extract_moniker_object_id(args, "MachoResolveObject")?;
+                if !crate::router::binding_auth::authorize_service_binding(
+                    self,
+                    session,
+                    char_id,
+                    effective_service,
+                    obj_id,
+                ) {
+                    const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
+                    return Err(BridgeRpcError {
+                        code: ERR_BIND_AUTH_DENIED.into(),
+                        message: format!(
+                            "MachoResolveObject denied for {effective_service}({obj_id})"
+                        ),
+                        client_error: None,
+                    });
+                }
+            } else {
+                let _ = Self::require_auth(session)?;
+            }
             return Ok(PyRep::Integer(eve_machonet::MACHO_PROXY_NODE_ID as i64));
         }
 
@@ -1351,46 +1469,7 @@ impl ServerContext {
             } else {
                 let _ = Self::require_auth(session)?;
             }
-            let obj_id = match args.first() {
-                Some(PyRep::Integer(id)) => *id,
-                Some(PyRep::String(s)) | Some(PyRep::Token(s)) if !s.is_empty() => s
-                    .bytes()
-                    .fold(1_000i64, |acc, b| {
-                        acc.wrapping_mul(31).wrapping_add(b as i64)
-                    })
-                    .saturating_abs()
-                    .max(1),
-                Some(PyRep::Tuple(items)) => {
-                    if let Some(id) = items.first().and_then(|v| v.as_i64()) {
-                        id
-                    } else if let Some(s) = items
-                        .first()
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        s.bytes()
-                            .fold(1_000i64, |acc, b| {
-                                acc.wrapping_mul(31).wrapping_add(b as i64)
-                            })
-                            .saturating_abs()
-                            .max(1)
-                    } else {
-                        return Err(BridgeRpcError {
-                            code: "InvalidArgument".into(),
-                            message: "MachoBindObject bind tuple missing objectID".into(),
-                            client_error: None,
-                        });
-                    }
-                }
-                _ => {
-                    return Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "MachoBindObject requires an explicit integer or string objectID"
-                            .into(),
-                        client_error: None,
-                    })
-                }
-            };
+            let obj_id = Self::extract_moniker_object_id(args, "MachoBindObject")?;
             let parsed_piggyback = Self::parse_macho_bind_piggyback(args.get(1));
             let (bid, bound_in_map) = match self.bind_object(session, effective_service, obj_id) {
                 Ok(bid) => (bid, true),

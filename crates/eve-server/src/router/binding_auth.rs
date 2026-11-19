@@ -54,13 +54,7 @@ pub(super) fn authorize_service_binding(
                     || session.station_id == Some(object_id)
                     || session.structure_id == Some(object_id))
         }
-        "officeManager" => {
-            object_id > 0
-                && session.station_id.or(session.structure_id).is_some()
-                && (session.station_id == Some(object_id)
-                    || session.structure_id == Some(object_id)
-                    || session.corporation_id == Some(object_id))
-        }
+        "officeManager" => authorize_office_manager_binding(ctx, session, char_id, object_id),
         "allianceRegistry" => object_id > 0 && session.alliance_id == Some(object_id),
         "fleetObjectHandler" => object_id > 0 && session.fleet_id == Some(object_id),
         "planetMgr" => authorize_planet_binding(ctx, session, char_id, object_id),
@@ -76,9 +70,7 @@ pub(super) fn authorize_service_binding(
                 && (session.corporation_id == Some(object_id)
                     || session.alliance_id == Some(object_id))
         }
-        "warStatisticMgr" => {
-            object_id > 0 && ctx.db.with_snapshot(|snap| snap.wars.contains_key(&object_id))
-        }
+        "warStatisticMgr" => authorize_war_stat_binding(ctx, session, char_id, object_id),
         "devIndexManager" => {
             object_id > 0
                 && (session.solar_system_id.map(i64::from) == Some(object_id)
@@ -94,12 +86,9 @@ pub(super) fn authorize_service_binding(
                     || session.structure_id == Some(object_id)
                     || session.solar_system_id.map(i64::from) == Some(object_id))
         }
-        "keeper" => {
-            object_id > 0
-                && (!is_solar_system_id(ctx, object_id)
-                    || session.solar_system_id.map(i64::from) == Some(object_id))
-        }
-        "agentMgr" | "tourneyMgr" => object_id > 0,
+        "keeper" => authorize_keeper_binding(ctx, session, object_id),
+        "agentMgr" => authorize_agent_binding(ctx, object_id),
+        "tourneyMgr" => authorize_tourney_binding(ctx, session, char_id, object_id),
         _ => false,
     }
 }
@@ -154,11 +143,7 @@ pub(super) fn verify_service_binding_context(
                     || session.structure_id == Some(entry.object_id))
         }
         "officeManager" => {
-            entry.object_id > 0
-                && session.station_id.or(session.structure_id).is_some()
-                && (session.station_id == Some(entry.object_id)
-                    || session.structure_id == Some(entry.object_id)
-                    || session.corporation_id == Some(entry.object_id))
+            authorize_office_manager_binding(ctx, session, entry.character_id, entry.object_id)
         }
         "allianceRegistry" => entry.object_id > 0 && session.alliance_id == Some(entry.object_id),
         "fleetObjectHandler" => entry.object_id > 0 && session.fleet_id == Some(entry.object_id),
@@ -176,10 +161,7 @@ pub(super) fn verify_service_binding_context(
                     || session.alliance_id == Some(entry.object_id))
         }
         "warStatisticMgr" => {
-            entry.object_id > 0
-                && ctx
-                    .db
-                    .with_snapshot(|snap| snap.wars.contains_key(&entry.object_id))
+            authorize_war_stat_binding(ctx, session, entry.character_id, entry.object_id)
         }
         "devIndexManager" => {
             entry.object_id > 0
@@ -200,12 +182,11 @@ pub(super) fn verify_service_binding_context(
                     || session.structure_id == Some(entry.object_id)
                     || session.solar_system_id.map(i64::from) == Some(entry.object_id))
         }
-        "keeper" => {
-            entry.object_id > 0
-                && (!is_solar_system_id(ctx, entry.object_id)
-                    || session.solar_system_id.map(i64::from) == Some(entry.object_id))
+        "keeper" => authorize_keeper_binding(ctx, session, entry.object_id),
+        "agentMgr" => authorize_agent_binding(ctx, entry.object_id),
+        "tourneyMgr" => {
+            authorize_tourney_binding(ctx, session, entry.character_id, entry.object_id)
         }
-        "agentMgr" | "tourneyMgr" => entry.object_id > 0,
         _ => false,
     }
 }
@@ -384,12 +365,208 @@ pub(super) fn should_invalidate_bound_object(
     }
 }
 
+fn fold_role_bits(bits: &[u64; 7]) -> u64 {
+    bits.iter().copied().fold(0u64, |acc, bit| acc | bit)
+}
+
+fn has_corp_hangar_or_director_role(role_mask: u64) -> bool {
+    let hangar_mask = fold_role_bits(&eve_db::corp_roles::ROLE_HANGAR_CAN_TAKE)
+        | fold_role_bits(&eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY)
+        | fold_role_bits(&eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE);
+    let deliveries_and_office_mask = eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE
+        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY
+        | eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE
+        | eve_db::corp_roles::ROLE_STATION_MANAGER
+        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+        | eve_db::corp_roles::ROLE_TRADER;
+    eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_DIRECTOR)
+        || (role_mask & (hangar_mask | deliveries_and_office_mask)) != 0
+}
+
+fn authorize_invbroker_item_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    it: &eve_db::InventoryItemRecord,
+    now_unix: u64,
+) -> bool {
+    let in_session_location = Some(it.location_id) == session.station_id
+        || Some(it.location_id) == session.structure_id
+        || Some(it.location_id) == session.ship_id
+        || (session.station_id.is_none()
+            && session.structure_id.is_none()
+            && Some(it.location_id) == session.solar_system_id.map(i64::from));
+    if !in_session_location {
+        return false;
+    }
+    if it.owner_id == char_id {
+        return true;
+    }
+    let Some(corp_id) = session.corporation_id else {
+        return false;
+    };
+    if it.owner_id != corp_id {
+        return false;
+    }
+    let (is_ceo, role_mask) =
+        snap.effective_corp_roles_at(corp_id, char_id, Some(it.location_id), 0, now_unix);
+    is_ceo || has_corp_hangar_or_director_role(role_mask)
+}
+
+fn authorize_office_manager_binding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    object_id: i64,
+) -> bool {
+    if object_id <= 0 {
+        return false;
+    }
+    let Some(dock_id) = session.station_id.or(session.structure_id) else {
+        return false;
+    };
+    if session.station_id == Some(object_id) || session.structure_id == Some(object_id) {
+        return true;
+    }
+    if session.corporation_id != Some(object_id) {
+        return false;
+    }
+    let now_unix = ctx.now_unix();
+    let (is_ceo, role_mask) = ctx.db.with_snapshot(|snap| {
+        snap.effective_corp_roles_at(object_id, char_id, Some(dock_id), 0, now_unix)
+    });
+    is_ceo
+        || has_corp_hangar_or_director_role(role_mask)
+        || eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_RENT_OFFICE)
+}
+
+fn authorize_war_stat_binding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    object_id: i64,
+) -> bool {
+    if object_id <= 0 {
+        return false;
+    }
+    let now_unix = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let Some(w) = snap.wars.get(&object_id) else {
+            return false;
+        };
+        if session.has_gm_role() {
+            return true;
+        }
+        if session
+            .alliance_id
+            .filter(|&a| a > 0)
+            .is_some_and(|aid| aid == w.aggressor_corp_id || aid == w.defender_corp_id)
+        {
+            return true;
+        }
+        let corp_id = session.corporation_id.or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .filter(|&id| id > 0)
+        });
+        let Some(my_corp) = corp_id else {
+            return false;
+        };
+        if my_corp == w.aggressor_corp_id || my_corp == w.defender_corp_id {
+            return true;
+        }
+        let corp_alliance = |cid: i64| -> Option<i64> {
+            snap.corporations
+                .get(&cid)
+                .and_then(|c| c.alliance_id)
+                .filter(|&a| a > 0)
+        };
+        if let Some(my_alliance) = corp_alliance(my_corp) {
+            if corp_alliance(w.aggressor_corp_id) == Some(my_alliance)
+                || corp_alliance(w.defender_corp_id) == Some(my_alliance)
+            {
+                return true;
+            }
+        }
+        snap.war_state.negotiations.iter().any(|n| {
+            n.war_id == object_id
+                && n.kind == eve_db::PersistedNegKind::Ally
+                && n.status == "Accepted"
+                && now_unix >= n.effective_unix.unwrap_or(0)
+                && n.from_corp == my_corp
+        })
+    })
+}
+
+fn authorize_keeper_binding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    object_id: i64,
+) -> bool {
+    if object_id <= 0 {
+        return false;
+    }
+    if session.solar_system_id.map(i64::from) == Some(object_id) {
+        return true;
+    }
+    session.has_gm_role()
+        && u32::try_from(object_id)
+            .ok()
+            .is_some_and(|dungeon_id| ctx.sde.dungeons.contains_key(&dungeon_id))
+}
+
+fn authorize_agent_binding(ctx: &ServerContext, object_id: i64) -> bool {
+    object_id > 0 && ctx.sde.agents.contains_key(&object_id)
+}
+
+fn match_includes_caller(m: &eve_db::TourneyMatch, session: &SessionState, char_id: i64) -> bool {
+    session.has_gm_role()
+        || m.referees.contains(&char_id)
+        || m.red_players.iter().any(|p| p.character_id == char_id)
+        || m.blue_players.iter().any(|p| p.character_id == char_id)
+        || session.solar_system_id.map(i64::from) == Some(m.solar_system_id)
+}
+
+fn authorize_tourney_binding(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    object_id: i64,
+) -> bool {
+    if object_id <= 0 {
+        return false;
+    }
+    ctx.db.with_snapshot(|snap| {
+        let store = &snap.tourney_state;
+        if let Some(m) = store.matches.get(&object_id) {
+            return match_includes_caller(m, session, char_id);
+        }
+        if store.tournaments.contains_key(&object_id) {
+            return session.has_gm_role()
+                || store
+                    .matches
+                    .values()
+                    .any(|m| m.tourney_id == object_id && match_includes_caller(m, session, char_id));
+        }
+        if store.arena_systems.contains_key(&object_id) {
+            return session.has_gm_role()
+                || session.solar_system_id.map(i64::from) == Some(object_id)
+                || store.matches.values().any(|m| {
+                    m.solar_system_id == object_id && match_includes_caller(m, session, char_id)
+                });
+        }
+        false
+    })
+}
+
 fn authorize_invbroker_binding(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     object_id: i64,
 ) -> bool {
+    let now_unix = ctx.now_unix();
     Some(object_id) == session.character_id
         || Some(object_id) == session.ship_id
         || Some(object_id) == session.station_id
@@ -406,12 +583,7 @@ fn authorize_invbroker_binding(
                 .get(&object_id)
                 .is_some_and(|st| Some(st.solar_system_id) == session.solar_system_id)
                 || snap.items.get(&object_id).is_some_and(|it| {
-                    Some(it.location_id) == session.station_id
-                        || Some(it.location_id) == session.structure_id
-                        || Some(it.location_id) == session.ship_id
-                        || (session.station_id.is_none()
-                            && session.structure_id.is_none()
-                            && Some(it.location_id) == session.solar_system_id.map(i64::from))
+                    authorize_invbroker_item_in_snap(snap, session, char_id, it, now_unix)
                 })
         })
         || (session.user_id.is_some()

@@ -260,6 +260,18 @@ fn binding_auth_and_session_transitions_enforce_service_rules() {
     sess.structure_id = None;
 
     assert!(ctx.bind_object(&sess, "tourneyMgr", 0).is_err());
+    assert!(ctx.bind_object(&sess, "tourneyMgr", 1).is_err());
+    ctx.db.with_mut_snapshot(|s| {
+        let mut tm = eve_db::TourneyMatch::new(1, 1, 30_000_142, 100, 600, 120, 1);
+        tm.blue_players.push(eve_db::TourneyPilot {
+            character_id: 90_000_001,
+            ship_type_id: 587,
+            ship_id: 0,
+            points: 0,
+        });
+        s.tourney_state.tournaments.insert(1, "AT".into());
+        s.tourney_state.matches.insert(1, tm);
+    });
     assert!(ctx.bind_object(&sess, "tourneyMgr", 1).is_ok());
 
     assert!(ctx.bind_object(&sess, "planetOrbitalRegistryBroker", 99_999_999).is_err());

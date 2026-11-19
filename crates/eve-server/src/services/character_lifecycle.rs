@@ -40,6 +40,21 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+fn has_privileged_gm_role(session: &SessionState) -> bool {
+    (session.role
+        & (eve_machonet::service_roles::ROLE_GMH
+            | eve_machonet::service_roles::ROLE_GML
+            | eve_machonet::service_roles::ROLE_ADMIN))
+        != 0
+}
+
+fn insufficient_gm_role_err(rpc: &str) -> BridgeRpcError {
+    err(
+        "InsufficientRole",
+        format!("{rpc} requires ROLE_GMH, ROLE_GML, or ROLE_ADMIN"),
+    )
+}
+
 pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> LifecycleStore {
     snap.item_custom_names
         .get(&CHARACTER_LIFECYCLE_STORE_KEY)
@@ -180,6 +195,11 @@ pub fn handle(
             Some(handle_delete_character(ctx, session, user_id, args))
         }
         ("charUnboundMgr", "GetQAStarterSystemIDs") => {
+            if !has_privileged_gm_role(session) {
+                return Some(Err(insufficient_gm_role_err(
+                    "charUnboundMgr.GetQAStarterSystemIDs",
+                )));
+            }
             let primary_sys = session
                 .solar_system_id
                 .or_else(|| {
@@ -294,6 +314,11 @@ fn handle_toggle_validation(
         Ok(uid) => uid,
         Err(e) => return Some(Err(e)),
     };
+    if !has_privileged_gm_role(session) {
+        return Some(Err(insufficient_gm_role_err(
+            "charUnboundMgr.ToggleValidation",
+        )));
+    }
     let next_state = ctx.db.with_mut_snapshot(|snap| {
         let mut store = load_store(snap);
         let entry = store.validation_toggled_by_user.entry(user_id).or_insert(false);

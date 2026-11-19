@@ -30,6 +30,24 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
         .unwrap()
         .unwrap();
     assert!(matches!(num_rep, PyRep::Tuple(_)));
+    for bad_role in [0u64, eve_machonet::service_roles::ROLE_QA] {
+        sess.role = bad_role;
+        assert_eq!(
+            handle(&ctx, &mut sess, "charUnboundMgr", "GetQAStarterSystemIDs", &[], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "InsufficientRole"
+        );
+        assert_eq!(
+            handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "InsufficientRole"
+        );
+    }
+    sess.role = eve_machonet::service_roles::ROLE_GMH;
     let qa_sys = handle(&ctx, &mut sess, "charUnboundMgr", "GetQAStarterSystemIDs", &[], &kw)
         .unwrap()
         .unwrap();
@@ -40,6 +58,7 @@ fn char_unbound_mgr_prepare_cancel_delete_bloodline_and_gender() {
             .unwrap(),
         PyRep::Bool(true)
     );
+    sess.role = 0;
 
     // UpdateCharacterGender & UpdateCharacterBloodline
     assert_eq!(
@@ -489,6 +508,7 @@ fn char_unbound_mgr_toggle_validation_persists_per_user_state() {
     let mut sess = auth_session(42, 90_000_001, 98_000_001, 30_000_142);
     let kw = HashMap::new();
 
+    sess.role = eve_machonet::service_roles::ROLE_GML;
     let first = handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
         .unwrap()
         .unwrap();
@@ -771,4 +791,44 @@ fn char_mgr_combat_log_resolves_war_id_and_isk_values() {
     assert_eq!(rows[2][war_i], PyRep::None);
     assert_eq!(rows[2][lost_i], PyRep::None);
     assert_eq!(rows[2][dest_i], PyRep::None);
+}
+
+#[test]
+fn char_unbound_mgr_gm_gates_deny_player_and_qa_without_mutation() {
+    use eve_machonet::service_roles::{ROLE_ADMIN, ROLE_GMH, ROLE_GML, ROLE_PLAYER_DEFAULT, ROLE_QA};
+
+    let ctx = test_ctx();
+    let mut sess = auth_session(88, 90_000_001, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+    let before = ctx.db.snapshot_tables();
+
+    let expected_err_code = "InsufficientRole";
+    for bad_role in [0u64, ROLE_PLAYER_DEFAULT, ROLE_QA] {
+        sess.role = bad_role;
+        for method in ["GetQAStarterSystemIDs", "ToggleValidation"] {
+            let err = handle(&ctx, &mut sess, "charUnboundMgr", method, &[], &kw)
+                .unwrap()
+                .expect_err(&format!("charUnboundMgr.{method} must reject role {bad_role:#x}"));
+            assert_eq!(err.code, expected_err_code);
+        }
+    }
+    assert_eq!(ctx.db.snapshot_tables(), before);
+    let stored_before = ctx
+        .db
+        .with_snapshot(|s| load_store(s).validation_toggled_by_user.get(&88).copied());
+    assert_eq!(stored_before, None);
+
+    for ok_role in [ROLE_GMH, ROLE_GML, ROLE_ADMIN] {
+        sess.role = ok_role;
+        let systems = handle(&ctx, &mut sess, "charUnboundMgr", "GetQAStarterSystemIDs", &[], &kw)
+            .unwrap()
+            .unwrap();
+        assert_eq!(systems.as_list().map(|l| l.len()), Some(4));
+        assert!(matches!(
+            handle(&ctx, &mut sess, "charUnboundMgr", "ToggleValidation", &[], &kw)
+                .unwrap()
+                .unwrap(),
+            PyRep::Bool(_)
+        ));
+    }
 }
