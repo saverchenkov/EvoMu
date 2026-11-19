@@ -1038,13 +1038,14 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
     // ROLE_STARBASE_CARETAKER authorizes fuel/silo queries, NOT config or gunnery control.
     assert!(handle(&ctx, &mut caretaker_sess, "posMgr", "GetConsumptionFactor", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
     assert!(handle(&ctx, &mut caretaker_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    let role_err = "RoleNotAuthorized";
     for method in ["GetStarbasePermissions", "AssumeStructureControl", "RelinquishStructureControl"] {
         assert_eq!(
             handle(&ctx, &mut caretaker_sess, "posMgr", method, &[PyRep::Integer(tower_id)], &kw)
                 .unwrap()
                 .unwrap_err()
                 .code,
-            "RoleNotAuthorized",
+            role_err,
             "caretaker {method}"
         );
     }
