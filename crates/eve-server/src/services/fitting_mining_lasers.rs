@@ -28,27 +28,88 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(v) => v.unwrap_or("defaultEffect").to_string(),
                 Err(_) => "defaultEffect".to_string(),
             };
+            let Some(ship_id) = session.ship_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "No active ship in session".into(),
+                    client_error: None,
+                }));
+            };
             if effect_name == "online" {
-                let Some(ship_id) = session.ship_id else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoActiveShip".into(),
-                        message: "No active ship in session".into(),
-                        client_error: None,
-                    }));
+                let is_structure =
+                    ctx.db.with_snapshot(|snap| snap.structures.contains_key(&ship_id));
+                if is_structure {
+                    return Some(
+                        crate::services::notify_emitters_skills_trade_godma::handle_dogma_take_module_offline(
+                            ctx,
+                            session,
+                            &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
+                        )
+                        .await,
+                    );
+                }
+                if let Err(e) = validate_ship_and_fitted_module(ctx, char_id, ship_id, module_id) {
+                    return Some(Err(e));
+                }
+                let prepared = match crate::services::notify_emitters_skills_trade_godma::prepare_dogma_take_module_offline(
+                    ctx,
+                    session,
+                    char_id,
+                    ship_id,
+                    module_id,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
                 };
-                let _ = crate::services::mining_cycle::deactivate(ctx, char_id, Some(ship_id), module_id).await;
+                let _ = crate::services::mining_cycle::deactivate(
+                    ctx,
+                    char_id,
+                    Some(ship_id),
+                    module_id,
+                )
+                .await;
                 return Some(
-                    crate::services::notify_emitters_skills_trade_godma::handle_dogma_take_module_offline(
+                    crate::services::notify_emitters_skills_trade_godma::commit_dogma_take_module_offline(
                         ctx,
                         session,
-                        &[PyRep::Integer(ship_id), PyRep::Integer(module_id)],
+                        char_id,
+                        ship_id,
+                        module_id,
+                        prepared,
                     )
                     .await,
                 );
             }
+            // Validate ship, fitted-module ownership, and active space cloak BEFORE mutating any
+            // mining cycle, EWAR, remote-assist, or module_active_states state so a rejected call
+            // or cloaked pilot cannot stop cycles or alter fitting/ballpark state. Note: active
+            // modules cycling before cloak (e.g. MWD+cloak) plus groups 330/481/4117 may stop cleanly.
+            let (mod_type_id, mod_group_id) =
+                match validate_ship_and_fitted_module(ctx, char_id, ship_id, module_id) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            let is_cloak_exempt_group = matches!(mod_group_id, Some(330 | 481 | 4117));
+            if !is_cloak_exempt_group
+                && !is_module_currently_active(ctx, session, char_id, ship_id, module_id).await
+            {
+                if let Err(e) = super::fitting_module_cycles::enforce_space_active_cloak_module_guard(
+                    ctx,
+                    session,
+                    ship_id,
+                    true,
+                    mod_group_id,
+                )
+                .await
+                {
+                    return Some(Err(e));
+                }
+            }
             // Mining modules stop their MN-04 cycle (delivering a short cycle's share of ore); only
             // the pilot whose active ship runs the cycle may stop it.
-            match crate::services::mining_cycle::deactivate(ctx, char_id, session.ship_id, module_id).await {
+            match crate::services::mining_cycle::deactivate(ctx, char_id, Some(ship_id), module_id).await {
                 Some(Ok(_)) => {
                     return Some(Ok(PyRep::keyval([
                         ("moduleID", PyRep::Integer(module_id)),
@@ -58,51 +119,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Some(Err(e)) => return Some(Err(e)),
                 None => {}
             }
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "No active ship in session".into(),
-                    client_error: None,
-                }));
-            };
-            // Validate ship and fitted-module ownership BEFORE mutating any EWAR, remote-assist,
-            // cycle, or module_active_states state so a target cannot deactivate an attacker's module.
-            let mod_type_opt = match ctx.db.with_snapshot(|snap| {
-                let Some(ship_item) = snap.items.get(&ship_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Active ship {ship_id} not found"),
-                        client_error: None,
-                    });
-                };
-                if ship_item.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by character {char_id}"),
-                        client_error: None,
-                    });
-                }
-                let Some(mod_item) = snap.items.get(&module_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ModuleNotFound".into(),
-                        message: format!("Module {module_id} not found"),
-                        client_error: None,
-                    });
-                };
-                let flag_u16 = mod_item.flag as u16;
-                let is_fitted_slot = matches!(flag_u16, 11..=34 | 125..=129 | 158 | 159..=163);
-                if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !is_fitted_slot {
-                    return Err(BridgeRpcError {
-                        code: "ModuleNotOwnedByShip".into(),
-                        message: format!("Module {module_id} is not fitted to active ship {ship_id}"),
-                        client_error: None,
-                    });
-                }
-                Ok(mod_item.type_id)
-            }) {
-                Ok(tid) => Some(tid),
-                Err(e) => return Some(Err(e)),
-            };
+            let mod_type_opt = Some(mod_type_id);
             let is_mining = mod_type_opt
                 .and_then(|tid| ctx.sde.types.get(&tid))
                 .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
@@ -1085,6 +1102,100 @@ pub(crate) fn compute_nanite_repair_params(
     let repair_rate_hp_per_s = base_rate * (1.0 + 0.20 * (nanite_interfacing_lvl.min(5) as f64));
     let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
     (paste_needed, repair_rate_hp_per_s, duration_s)
+}
+
+/// Validates ship ownership and fitted-module ownership read-only and returns `(type_id, group_id)`.
+fn validate_ship_and_fitted_module(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+) -> Result<(u32, Option<u32>), BridgeRpcError> {
+    let mod_type_id = ctx.db.with_snapshot(|snap| {
+        let Some(ship_item) = snap.items.get(&ship_id) else {
+            return Err(BridgeRpcError {
+                code: "ShipNotFound".into(),
+                message: format!("Active ship {ship_id} not found"),
+                client_error: None,
+            });
+        };
+        if ship_item.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "ShipOwnershipViolation".into(),
+                message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                client_error: None,
+            });
+        }
+        let Some(mod_item) = snap.items.get(&module_id) else {
+            return Err(BridgeRpcError {
+                code: "ModuleNotFound".into(),
+                message: format!("Module {module_id} not found"),
+                client_error: None,
+            });
+        };
+        let flag_u16 = mod_item.flag as u16;
+        let is_fitted_slot = matches!(flag_u16, 11..=34 | 125..=129 | 158 | 159..=163);
+        if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !is_fitted_slot {
+            return Err(BridgeRpcError {
+                code: "ModuleNotOwnedByShip".into(),
+                message: format!("Module {module_id} is not fitted to active ship {ship_id}"),
+                client_error: None,
+            });
+        }
+        Ok(mod_item.type_id)
+    })?;
+    let mod_group_id = ctx.sde.types.get(&mod_type_id).map(|t| t.group_id);
+    Ok((mod_type_id, mod_group_id))
+}
+
+async fn is_module_currently_active(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+) -> bool {
+    if ctx
+        .mining_cycles
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&module_id)
+    {
+        return true;
+    }
+    if ctx
+        .db
+        .with_snapshot(|s| s.module_active_states.contains(&module_id))
+    {
+        return true;
+    }
+    if let Some(sys) = session
+        .solar_system_id
+        .and_then(|sid| ctx.systems.get_handle(sid))
+    {
+        if sys.has_module_cycle(ship_id, module_id).await {
+            return true;
+        }
+    }
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    if ctx
+        .tactical_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .entosis_active_links
+        .get(&(db_key, ship_id))
+        .is_some_and(|l| l.module_id == module_id)
+    {
+        return true;
+    }
+    ctx.fit(char_id, ship_id).ok().is_some_and(|f| {
+        f.modules.get(&module_id).is_some_and(|m| {
+            matches!(
+                m.state,
+                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+            )
+        })
+    })
 }
 
 #[cfg(test)]

@@ -564,14 +564,7 @@ pub fn emit_sell_repackage_errors(
     );
 }
 
-/// Extracted `dogmaIM.SetModuleOnline` handler updating online state and emitting
-/// `OnModuleAttributeChanges` and `OnGodmaShipEffect` without re-priming `effectsByItemEffect` (`#1073`).
-pub async fn handle_dogma_set_module_online(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
+fn parse_ship_and_module_ids(session: &SessionState, args: &[PyRep]) -> (i64, i64) {
     let ship_id = args
         .first()
         .and_then(|a| a.as_i64())
@@ -582,178 +575,42 @@ pub async fn handle_dogma_set_module_online(
         .and_then(|a| a.as_i64())
         .or_else(|| args.first().and_then(|a| a.as_i64()))
         .unwrap_or(0);
-    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
-        return crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
-            ctx, session, ship_id, module_id, true,
-        );
-    }
-    let (owns_ship, mod_type_id, was_fitted_in_db) = ctx.db.with_snapshot(|s| {
-        let owns = s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id);
-        let mod_it = s.items.get(&module_id);
-        let mtid = mod_it.map(|m| m.type_id).unwrap_or(0);
-        let fitted = mod_it.is_some_and(|m| {
-            m.location_id == ship_id
-                && matches!(m.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
-        });
-        (owns, mtid, fitted)
-    });
-    if !owns_ship {
-        return Err(err(
-            "ShipOwnershipViolation",
-            format!("Ship {ship_id} is not owned by character {char_id}"),
-        ));
-    }
-
-    let is_burned = ctx.db.with_snapshot(|s| {
-        let it = s.items.get(&module_id);
-        let dmg = it
-            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
-            .unwrap_or(0.0);
-        let hp = it
-            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-            .or_else(|| {
-                it.and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-            })
-            .unwrap_or(40.0);
-        dmg >= hp - 1e-6
-    });
-    if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
-        return Err(err(
-            "ModuleBurnedOut",
-            format!("Module {module_id} is burned out and cannot be onlined in space"),
-        ));
-    }
-
-    if session.station_id.is_none() && session.structure_id.is_none() {
-        if let Some(sys_id) = session.solar_system_id {
-            let sys = ctx.systems.get_or_spawn(sys_id);
-            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
-                    return Err(err(
-                        "NotEnoughCapacitorToOnline",
-                        format!(
-                            "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
-                            cs.capacitor, cs.max_capacitor
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
-    let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
-    if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
-        let code = if e.starts_with("ModuleBurnedOut") {
-            "ModuleBurnedOut"
-        } else {
-            "FittingValidationFailed"
-        };
-        return Err(err(code, e));
-    }
-    let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
-    let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {
-        if !snap.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id) {
-            return Err(err(
-                "ShipOwnershipViolation",
-                format!("Ship {ship_id} is not owned by character {char_id}"),
-            ));
-        }
-        let mut resolved_type_id = 0_u32;
-        if was_fitted_in_db {
-            let mod_it = snap.items.get(&module_id).ok_or_else(|| {
-                err(
-                    "ModuleNotFound",
-                    format!("Module {module_id} no longer fitted on ship {ship_id}"),
-                )
-            })?;
-            let flag_u16 = mod_it.flag as u16;
-            if mod_it.location_id != ship_id || !matches!(flag_u16, 11..=34 | 92..=99 | 125..=132 | 164..=171) {
-                return Err(err(
-                    "ModuleNotFound",
-                    format!("Module {module_id} is not fitted on ship {ship_id}"),
-                ));
-            }
-            let dmg = mod_it
-                .dynamic_attributes
-                .get(&eve_sde::attr_ids::DAMAGE)
-                .copied()
-                .unwrap_or(0.0);
-            let hp = mod_it
-                .dynamic_attributes
-                .get(&eve_sde::attr_ids::HP_STRUCT)
-                .copied()
-                .or_else(|| {
-                    ctx.sde
-                        .types
-                        .get(&mod_it.type_id)
-                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-                })
-                .unwrap_or(40.0);
-            let ch_docked = snap
-                .characters
-                .get(&char_id)
-                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some());
-            if dmg >= hp - 1e-6 && !ch_docked {
-                return Err(err(
-                    "ModuleBurnedOut",
-                    format!("Module {module_id} is burned out and cannot be onlined in space"),
-                ));
-            }
-            resolved_type_id = mod_it.type_id;
-        }
-        snap.module_online_states.insert(module_id, true);
-        Ok(resolved_type_id)
-    })?;
-    ctx.invalidate_and_push_fit(ship_id);
-
-    let _ = ctx.notify_module_online_state(char_id, module_id, true);
-    emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
-    let eff_tid = if committed_mod_type_id > 0 { committed_mod_type_id } else { mod_type_id };
-    if eff_tid > 0 {
-        let eff_id = ctx
-            .effect_id_for_module(eff_tid, Some("online"))
-            .unwrap_or(16) as i32;
-        let _ = ctx.notify_godma_ship_effect(
-            NotificationTarget::Character(char_id),
-            module_id,
-            eff_id,
-            true,
-            0,
-            0,
-        );
-    }
-
-    Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("online", PyRep::Bool(true)),
-    ]))
+    (ship_id, module_id)
 }
 
-/// Extracted `dogmaIM.TakeModuleOffline` handler emitting online/overload/EWAR end updates
-/// without flushing the fitted module from client `godma.invitems`.
-pub async fn handle_dogma_take_module_offline(
+fn is_module_burned_out(ctx: &ServerContext, item: Option<&InventoryItemRecord>) -> bool {
+    let dmg = item
+        .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
+        .unwrap_or(0.0);
+    let hp = item
+        .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+        .or_else(|| {
+            item.and_then(|i| ctx.sde.types.get(&i.type_id))
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
+        })
+        .unwrap_or(40.0);
+    dmg >= hp - 1e-6
+}
+
+/// Pre-validated state computed read-only before taking a ship module offline (`#1351`).
+pub(crate) struct PreparedTakeModuleOffline {
+    fit: eve_dogma::ShipFittingEngine,
+    before_ship_attrs: BTreeMap<u16, f64>,
+    after_ship_attrs: BTreeMap<u16, f64>,
+    mod_type_id: u32,
+    was_active_type: Option<u32>,
+    offline_mod_ids: Vec<i64>,
+}
+
+/// Validates ownership, space burnout, active space cloak, and fitting rules without mutating
+/// DB or actor cycle state so callers (like `Deactivate(..., "online")`) never leave partial mutations.
+pub(crate) async fn prepare_dogma_take_module_offline(
     ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let ship_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .or(session.ship_id)
-        .unwrap_or(0);
-    let module_id = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .or_else(|| args.first().and_then(|a| a.as_i64()))
-        .unwrap_or(0);
-    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
-        return crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
-            ctx, session, ship_id, module_id, false,
-        );
-    }
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+) -> Result<PreparedTakeModuleOffline, BridgeRpcError> {
     let owns_ship = ctx
         .db
         .with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
@@ -764,20 +621,9 @@ pub async fn handle_dogma_take_module_offline(
         ));
     }
 
-    let is_burned = ctx.db.with_snapshot(|s| {
-        let it = s.items.get(&module_id);
-        let dmg = it
-            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied())
-            .unwrap_or(0.0);
-        let hp = it
-            .and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-            .or_else(|| {
-                it.and_then(|i| ctx.sde.types.get(&i.type_id))
-                    .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::HP_STRUCT).copied())
-            })
-            .unwrap_or(40.0);
-        dmg >= hp - 1e-6
-    });
+    let is_burned = ctx
+        .db
+        .with_snapshot(|s| is_module_burned_out(ctx, s.items.get(&module_id)));
     if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
         return Err(err(
             "ModuleBurnedOut",
@@ -785,31 +631,63 @@ pub async fn handle_dogma_take_module_offline(
         ));
     }
 
+    crate::services::inventory_fitting::fitting_module_cycles::enforce_space_active_cloak_module_guard(
+        ctx, session, ship_id, false, None,
+    )
+    .await?;
+
     let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
     let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
     let mod_type_id = fit.modules.get(&module_id).map(|m| m.type_id).unwrap_or(0);
     let was_active_type = fit
         .modules
         .get(&module_id)
-        .filter(|m| matches!(m.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded))
+        .filter(|m| {
+            matches!(
+                m.state,
+                eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+            )
+        })
         .map(|m| m.type_id);
     if let Err(e) = fit.take_module_offline(module_id, &ctx.sde) {
         return Err(err("FittingValidationFailed", e));
     }
     let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
-    if let Some(m_tid) = was_active_type {
-        let mod_state = fit.build_effective_module_state(module_id, m_tid, false, &ctx.sde);
-        let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
-        if react_delay_ms > 0.0 {
-            ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
-        }
-    }
-    let offline_mod_ids: Vec<i64> = fit
+    let offline_mod_ids = fit
         .modules
         .values()
         .filter(|m| m.state == eve_dogma::ModuleState::Offline)
         .map(|m| m.item_id)
         .collect();
+
+    Ok(PreparedTakeModuleOffline {
+        fit,
+        before_ship_attrs,
+        after_ship_attrs,
+        mod_type_id,
+        was_active_type,
+        offline_mod_ids,
+    })
+}
+
+/// Persists a validated `TakeModuleOffline` transition and emits cycle/EWAR/Godma updates.
+pub(crate) async fn commit_dogma_take_module_offline(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    prepared: PreparedTakeModuleOffline,
+) -> Result<PyRep, BridgeRpcError> {
+    let PreparedTakeModuleOffline {
+        fit,
+        before_ship_attrs,
+        after_ship_attrs,
+        mod_type_id,
+        was_active_type,
+        offline_mod_ids,
+    } = prepared;
+
     ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         snap.module_online_states.insert(module_id, false);
         snap.module_active_states.remove(&module_id);
@@ -821,6 +699,13 @@ pub async fn handle_dogma_take_module_offline(
         }
         Ok(())
     })?;
+    if let Some(m_tid) = was_active_type {
+        let mod_state = fit.build_effective_module_state(module_id, m_tid, false, &ctx.sde);
+        let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
+        if react_delay_ms > 0.0 {
+            ctx.record_module_reactivation_delay(ship_id, module_id, react_delay_ms / 1000.0);
+        }
+    }
     ctx.invalidate_and_push_fit(ship_id);
     let mut cleanup_mods = vec![module_id];
     for &mid in &offline_mod_ids {
@@ -886,6 +771,160 @@ pub async fn handle_dogma_take_module_offline(
         ("moduleID", PyRep::Integer(module_id)),
         ("online", PyRep::Bool(false)),
     ]))
+}
+
+/// Extracted `dogmaIM.SetModuleOnline` handler updating online state and emitting
+/// `OnModuleAttributeChanges` and `OnGodmaShipEffect` without re-priming `effectsByItemEffect` (`#1073`).
+pub async fn handle_dogma_set_module_online(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (ship_id, module_id) = parse_ship_and_module_ids(session, args);
+    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+        return crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
+            ctx, session, ship_id, module_id, true,
+        );
+    }
+    let (owns_ship, mod_type_id, was_fitted_in_db) = ctx.db.with_snapshot(|s| {
+        let owns = s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id);
+        let mod_it = s.items.get(&module_id);
+        let mtid = mod_it.map(|m| m.type_id).unwrap_or(0);
+        let fitted = mod_it.is_some_and(|m| {
+            m.location_id == ship_id
+                && matches!(m.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
+        });
+        (owns, mtid, fitted)
+    });
+    if !owns_ship {
+        return Err(err(
+            "ShipOwnershipViolation",
+            format!("Ship {ship_id} is not owned by character {char_id}"),
+        ));
+    }
+
+    let is_burned = ctx
+        .db
+        .with_snapshot(|s| is_module_burned_out(ctx, s.items.get(&module_id)));
+    if is_burned && session.station_id.is_none() && session.structure_id.is_none() {
+        return Err(err(
+            "ModuleBurnedOut",
+            format!("Module {module_id} is burned out and cannot be onlined in space"),
+        ));
+    }
+
+    crate::services::inventory_fitting::fitting_module_cycles::enforce_space_active_cloak_module_guard(
+        ctx, session, ship_id, false, None,
+    )
+    .await?;
+
+    if session.station_id.is_none() && session.structure_id.is_none() {
+        if let Some(sys_id) = session.solar_system_id {
+            let sys = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                if cs.max_capacitor > 0.0 && cs.capacitor < 0.75 * cs.max_capacitor {
+                    return Err(err(
+                        "NotEnoughCapacitorToOnline",
+                        format!(
+                            "Capacitor level ({:.1} GJ / {:.1} GJ) is below 75% requirement to online modules in space",
+                            cs.capacitor, cs.max_capacitor
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    let before_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
+    if let Err(e) = fit.set_module_online(module_id, &ctx.sde) {
+        let code = if e.starts_with("ModuleBurnedOut") {
+            "ModuleBurnedOut"
+        } else {
+            "FittingValidationFailed"
+        };
+        return Err(err(code, e));
+    }
+    let after_ship_attrs = snapshot_ship_fitting_attrs(ctx, &fit);
+    let committed_mod_type_id = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id) {
+            return Err(err(
+                "ShipOwnershipViolation",
+                format!("Ship {ship_id} is not owned by character {char_id}"),
+            ));
+        }
+        let mut resolved_type_id = 0_u32;
+        if was_fitted_in_db {
+            let mod_it = snap.items.get(&module_id).ok_or_else(|| {
+                err(
+                    "ModuleNotFound",
+                    format!("Module {module_id} no longer fitted on ship {ship_id}"),
+                )
+            })?;
+            let flag_u16 = mod_it.flag as u16;
+            if mod_it.location_id != ship_id || !matches!(flag_u16, 11..=34 | 92..=99 | 125..=132 | 164..=171) {
+                return Err(err(
+                    "ModuleNotFound",
+                    format!("Module {module_id} is not fitted on ship {ship_id}"),
+                ));
+            }
+            let ch_docked = snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some());
+            if is_module_burned_out(ctx, Some(mod_it)) && !ch_docked {
+                return Err(err(
+                    "ModuleBurnedOut",
+                    format!("Module {module_id} is burned out and cannot be onlined in space"),
+                ));
+            }
+            resolved_type_id = mod_it.type_id;
+        }
+        snap.module_online_states.insert(module_id, true);
+        Ok(resolved_type_id)
+    })?;
+    ctx.invalidate_and_push_fit(ship_id);
+
+    let _ = ctx.notify_module_online_state(char_id, module_id, true);
+    emit_ship_fitting_attr_changes(ctx, char_id, ship_id, &before_ship_attrs, &after_ship_attrs);
+    let eff_tid = if committed_mod_type_id > 0 { committed_mod_type_id } else { mod_type_id };
+    if eff_tid > 0 {
+        let eff_id = ctx
+            .effect_id_for_module(eff_tid, Some("online"))
+            .unwrap_or(16) as i32;
+        let _ = ctx.notify_godma_ship_effect(
+            NotificationTarget::Character(char_id),
+            module_id,
+            eff_id,
+            true,
+            0,
+            0,
+        );
+    }
+
+    Ok(PyRep::keyval([
+        ("moduleID", PyRep::Integer(module_id)),
+        ("online", PyRep::Bool(true)),
+    ]))
+}
+
+/// Extracted `dogmaIM.TakeModuleOffline` handler emitting online/overload/EWAR end updates
+/// without flushing the fitted module from client `godma.invitems`.
+pub async fn handle_dogma_take_module_offline(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (ship_id, module_id) = parse_ship_and_module_ids(session, args);
+    if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+        return crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
+            ctx, session, ship_id, module_id, false,
+        );
+    }
+    let prepared = prepare_dogma_take_module_offline(ctx, session, char_id, ship_id, module_id).await?;
+    commit_dogma_take_module_offline(ctx, session, char_id, ship_id, module_id, prepared).await
 }
 
 /// Emits `OnGodmaEffectInfo` for a module activation event.

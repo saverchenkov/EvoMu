@@ -981,3 +981,263 @@ async fn dogma_set_and_take_module_offline_cover_all_guards_structure_and_notifi
     let _ = handle_dogma_take_module_offline(&ctx, &mut sess, &[PyRep::Integer(structure_id), PyRep::Integer(st_mod_id)]).await;
 }
 
+#[tokio::test]
+async fn set_module_online_and_take_module_offline_enforce_active_space_cloak_zero_mutation() {
+    use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
+    use glam::DVec3;
+
+    let low_mod_tid = 996_011_u32;
+    let cloak_tid = 996_330_u32;
+    let mut sde = (*shared_sde()).clone();
+    let mut low_mod = sde.types.get(&587).expect("seed type").clone();
+    low_mod.type_id = low_mod_tid;
+    low_mod.group_id = 60;
+    low_mod.category_id = 7;
+    low_mod.name = "Test Low Module I".into();
+    low_mod.default_attributes.clear();
+    low_mod.default_attributes.insert(eve_sde::attr_ids::CPU, 1.0);
+    low_mod.default_attributes.insert(eve_sde::attr_ids::POWER, 1.0);
+    low_mod.default_attributes.insert(669, 5_000.0);
+    low_mod.effect_ids = vec![11, 16];
+    sde.types.insert(low_mod_tid, low_mod);
+
+    let mut cloak_mod = sde.types.get(&587).expect("seed type").clone();
+    cloak_mod.type_id = cloak_tid;
+    cloak_mod.group_id = 330;
+    cloak_mod.category_id = 7;
+    cloak_mod.name = "Test Cloaking Device I".into();
+    cloak_mod.default_attributes.clear();
+    cloak_mod.default_attributes.insert(eve_sde::attr_ids::CPU, 1.0);
+    cloak_mod.default_attributes.insert(eve_sde::attr_ids::POWER, 1.0);
+    cloak_mod.effect_ids = vec![12, 16];
+    sde.types.insert(cloak_tid, cloak_mod);
+
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let char_id = 90_990_001_i64;
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+    let sys_id = 30_002_505_u32;
+    let ship_id = 910_990_001_i64;
+    let offline_mod_id = 910_990_002_i64;
+    let online_mod_id = 910_990_003_i64;
+    let cloak_mod_id = 910_990_004_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.accounts.insert(
+            format!("user_{char_id}"),
+            eve_db::AccountRecord {
+                user_id: char_id as u64,
+                username: format!("user_{char_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (iid, tid, flag) in [
+            (offline_mod_id, low_mod_tid, InventoryFlag::LoSlot0),
+            (online_mod_id, low_mod_tid, InventoryFlag::LoSlot1),
+            (cloak_mod_id, cloak_tid, InventoryFlag::HiSlot0),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.module_online_states.insert(offline_mod_id, false);
+        snap.module_online_states.insert(online_mod_id, true);
+        snap.module_online_states.insert(cloak_mod_id, true);
+        snap.module_active_states.insert(online_mod_id);
+    });
+    ctx.db
+        .acquire_online_lock(char_id as u64, 501, Some(char_id), true, 1_775_400_000)
+        .expect("online lock");
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = CombatState::default();
+    cs.capacitor = 500.0;
+    cs.max_capacitor = 500.0;
+    cs.is_cloaked = true;
+    cs.gate_cloak_remaining_ticks = 0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 1_000_009,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut space_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(1_000_009),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 1. Actively cloaked in space: SetModuleOnline and TakeModuleOffline reject with 0 mutations.
+    let on_err = handle_dogma_set_module_online(
+        &ctx,
+        &mut space_sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(offline_mod_id)],
+    )
+    .await
+    .expect_err("actively cloaked SetModuleOnline must reject");
+    assert_eq!(on_err.code, "CannotActivateCloaked");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.module_online_states.get(&offline_mod_id), Some(&false));
+    });
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    for off_target in [online_mod_id, cloak_mod_id] {
+        let off_err = handle_dogma_take_module_offline(
+            &ctx,
+            &mut space_sess,
+            &[PyRep::Integer(ship_id), PyRep::Integer(off_target)],
+        )
+        .await
+        .expect_err("actively cloaked TakeModuleOffline must reject");
+        assert_eq!(off_err.code, "CannotActivateCloaked");
+        assert!(!ctx.is_module_in_reactivation_delay(ship_id, off_target));
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.module_online_states.get(&online_mod_id), Some(&true));
+        assert_eq!(snap.module_online_states.get(&cloak_mod_id), Some(&true));
+        assert!(snap.module_active_states.contains(&online_mod_id));
+    });
+    assert!(ctx.drain_notifications_for_char(char_id).is_empty());
+
+    // 2. DB-active cloak fallback (solar_system_id = None, undocked) also blocks both calls.
+    let mut no_sys_sess = space_sess.clone();
+    no_sys_sess.solar_system_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    assert_eq!(
+        handle_dogma_set_module_online(
+            &ctx,
+            &mut no_sys_sess,
+            &[PyRep::Integer(ship_id), PyRep::Integer(offline_mod_id)],
+        )
+        .await
+        .expect_err("DB-active cloak fallback must block SetModuleOnline")
+        .code,
+        "CannotActivateCloaked"
+    );
+    assert_eq!(
+        handle_dogma_take_module_offline(
+            &ctx,
+            &mut no_sys_sess,
+            &[PyRep::Integer(ship_id), PyRep::Integer(online_mod_id)],
+        )
+        .await
+        .expect_err("DB-active cloak fallback must block TakeModuleOffline")
+        .code,
+        "CannotActivateCloaked"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+    });
+
+    // 3. Docked session allows SetModuleOnline / TakeModuleOffline cleanly even if hull had cloaked state.
+    let mut docked_sess = space_sess.clone();
+    docked_sess.station_id = Some(60_003_760);
+    let docked_on = handle_dogma_set_module_online(
+        &ctx,
+        &mut docked_sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(offline_mod_id)],
+    )
+    .await
+    .expect("docked SetModuleOnline must succeed");
+    assert_eq!(docked_on.dict_get("online"), Some(&PyRep::Bool(true)));
+    let docked_off = handle_dogma_take_module_offline(
+        &ctx,
+        &mut docked_sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(offline_mod_id)],
+    )
+    .await
+    .expect("docked TakeModuleOffline must succeed");
+    assert_eq!(docked_off.dict_get("online"), Some(&PyRep::Bool(false)));
+
+    // 4. Gate-cloaked in space (gate_cloak_remaining_ticks > 0) allows SetModuleOnline / TakeModuleOffline.
+    let mut gate_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    gate_cs.is_cloaked = true;
+    gate_cs.gate_cloak_remaining_ticks = 20;
+    sys.set_combat_state(ship_id, gate_cs).await.unwrap();
+
+    let gate_on = handle_dogma_set_module_online(
+        &ctx,
+        &mut space_sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(offline_mod_id)],
+    )
+    .await
+    .expect("gate-cloaked SetModuleOnline must succeed");
+    assert_eq!(gate_on.dict_get("online"), Some(&PyRep::Bool(true)));
+
+    let gate_off = handle_dogma_take_module_offline(
+        &ctx,
+        &mut space_sess,
+        &[PyRep::Integer(ship_id), PyRep::Integer(online_mod_id)],
+    )
+    .await
+    .expect("gate-cloaked TakeModuleOffline must succeed");
+    assert_eq!(gate_off.dict_get("online"), Some(&PyRep::Bool(false)));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.module_online_states.get(&online_mod_id), Some(&false));
+        assert!(!snap.module_active_states.contains(&online_mod_id));
+    });
+}
+

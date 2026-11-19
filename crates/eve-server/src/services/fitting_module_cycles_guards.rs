@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+use eve_machonet::SessionState;
 use eve_proto::BridgeRpcError;
 
 /// Returns `true` when `mod_type` (`group_id == 330`) is a Covert Ops warp-safe cloaking device.
@@ -15,6 +16,20 @@ pub(crate) fn is_warp_safe_cloak_module(ctx: &ServerContext, mod_type: &eve_sde:
                 .iter()
                 .any(|eid| ctx.sde.effects.get(eid).is_some_and(|e| e.is_warp_safe))
             || mod_type.name.contains("Covert Ops"))
+}
+
+fn has_active_db_cloak_module(ctx: &ServerContext, ship_id: i64) -> bool {
+    ctx.db.with_snapshot(|s| {
+        s.items.values().any(|it| {
+            it.location_id == ship_id
+                && s.module_active_states.contains(&it.item_id)
+                && ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .is_some_and(|t| t.group_id == 330)
+        })
+    })
 }
 
 /// Returns `true` when `ship_id` has an active non-gate cloak in `sys` or `ctx.db`.
@@ -30,25 +45,54 @@ pub(crate) async fn is_ship_actively_cloaked(
             return true;
         }
     }
-    ctx.db.with_snapshot(|s| {
-        s.items.values().any(|it| {
-            it.location_id == ship_id
-                && s.module_active_states.contains(&it.item_id)
-                && ctx
-                    .sde
-                    .types
-                    .get(&it.type_id)
-                    .is_some_and(|t| t.group_id == 330)
-        })
-    })
+    has_active_db_cloak_module(ctx, ship_id)
 }
 
-/// Enforces active-warp (`CantActivateInWarp`), gate-cloak break (`gate_cloak_remaining_ticks > 0`),
-/// and non-gate cloak (`CannotActivateCloaked`) checks before activating a ship module in space (`#494`).
-pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
+/// Rejects undocked module online/offline/deactivate calls while actively module-cloaked
+/// (`CannotActivateCloaked`), excluding gate cloaks and optionally allowing `Deactivate` on
+/// cloaking devices (`group_id == 330`) so ships can decloak (`#1351`).
+pub(crate) async fn enforce_space_active_cloak_module_guard(
+    ctx: &ServerContext,
+    session: &SessionState,
+    ship_id: i64,
+    allow_cloak_module_group: bool,
+    mod_group_id: Option<u32>,
+) -> Result<(), BridgeRpcError> {
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Ok(());
+    }
+    if allow_cloak_module_group && mod_group_id == Some(330) {
+        return Ok(());
+    }
+    let sys_opt = session
+        .solar_system_id
+        .and_then(|sys_id| ctx.systems.get_handle(sys_id));
+    for check_ship_id in std::iter::once(ship_id).chain(
+        session
+            .ship_id
+            .filter(|&sess_ship_id| sess_ship_id != ship_id),
+    ) {
+        let actively_cloaked = match sys_opt.as_ref() {
+            Some(sys) => is_ship_actively_cloaked(ctx, sys, check_ship_id).await,
+            None => has_active_db_cloak_module(ctx, check_ship_id),
+        };
+        if actively_cloaked {
+            return Err(BridgeRpcError {
+                code: "CannotActivateCloaked".into(),
+                message: "CannotActivateCloaked".into(),
+                client_error: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validates active-warp (`CantActivateInWarp`) and non-gate cloak (`CannotActivateCloaked`)
+/// read-only before activating a ship module in space (`#494`, `#1351`), leaving gate cloak intact
+/// until downstream validation succeeds.
+pub(crate) async fn check_space_module_cloak_and_warp_readonly(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
-    char_id: i64,
     ship_id: i64,
     mod_type: &eve_sde::InvType,
 ) -> Result<(), BridgeRpcError> {
@@ -70,15 +114,6 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
         }
     }
 
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.gate_cloak_remaining_ticks > 0 {
-            let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
-                ctx, sys, char_id, ship_id,
-            )
-            .await;
-        }
-    }
-
     // Cloaking devices (`330`), Scan Probe Launchers (`481`), and Interdiction Nullifiers (`4117`)
     // may be activated while cloaked; all weapons, bombs, smartbombs, bursts, tank, and EWAR cannot.
     if !matches!(mod_type.group_id, 330 | 481 | 4117)
@@ -87,6 +122,37 @@ pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
         return Err(BridgeRpcError::user_error("CannotActivateCloaked"));
     }
 
+    Ok(())
+}
+
+/// Breaks any active gate cloak / undock invulnerability when a space action commits (`#494`, `#1351`).
+pub(crate) async fn break_gate_cloak_on_space_action(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+) {
+    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+        if cs.gate_cloak_remaining_ticks > 0 {
+            let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
+                ctx, sys, char_id, ship_id,
+            )
+            .await;
+        }
+    }
+}
+
+/// Enforces active-warp (`CantActivateInWarp`), gate-cloak break (`gate_cloak_remaining_ticks > 0`),
+/// and non-gate cloak (`CannotActivateCloaked`) checks before activating a ship module in space (`#494`).
+pub(crate) async fn enforce_space_module_cloak_and_warp_guard(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    mod_type: &eve_sde::InvType,
+) -> Result<(), BridgeRpcError> {
+    check_space_module_cloak_and_warp_readonly(ctx, sys, ship_id, mod_type).await?;
+    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
     Ok(())
 }
 
