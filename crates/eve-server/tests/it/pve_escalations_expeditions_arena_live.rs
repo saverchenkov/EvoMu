@@ -601,9 +601,11 @@ async fn test_live_proving_grounds_validation_queue_and_sphere_hazard() {
     ok(&ctx, &mut p4, "beyonce", "CmdGotoPoint", &[PyRep::Real(outside_pt.x), PyRep::Real(outside_pt.y + 1_000.0), PyRep::Real(outside_pt.z)]).await;
 
     let (mut dmg_steps, mut prev_hp, old_p3, old_p4, mut p3_pod) = (Vec::new(), None, p3.ship_id, p4.ship_id, None);
-    for _ in 0..160 {
-        arena_sys.step_manual(2.0).await.unwrap();
-        ctx.advance_secs(2);
+    // Sphere hazard ticks at 1 Hz (SystemActor steps whole simulated seconds per step_manual call);
+    // sample at 1.0 s so each iteration records one hazard tick rather than two combined ticks.
+    for _ in 0..320 {
+        arena_sys.step_manual(1.0).await.unwrap();
+        ctx.advance_secs(1);
         if let Some((_, b)) = arena_sys.get_ball_snapshot(old_p3).await.unwrap() {
             if b.position.distance(center) > 75_000.0 {
                 if let Some(cs) = arena_sys.get_combat_state(old_p3).await.unwrap() {
