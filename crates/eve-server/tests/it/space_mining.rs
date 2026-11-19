@@ -2757,8 +2757,9 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
         panic!("Expected missions List");
     };
     assert!(
-        j_missions.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)
-            && m.dict_get("missionState").and_then(|v| v.as_i64()) == Some(2))
+        j_missions.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.len() == 10
+            && t[9].as_i64() == Some(mission_id as i64)
+            && t[0].as_i64() == Some(2)))
     );
 
     let briefing_info = ctx

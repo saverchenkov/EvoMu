@@ -843,74 +843,185 @@ fn on_module_attribute_changes_notify_and_client_compat_boundaries() {
     assert_eq!(nt3[7], PyRep::None);
 }
 
-#[test]
-fn agent_mission_objective_compat_and_aggression_settings_all_combinations() {
-    // 1. normalize_macho_rpc_reply("agentMgr", "GetMissionObjectiveInfo", ...):
-    //    originStationID <= 0 must not fabricate synthetic Jita fallback IDs,
-    //    explicit originStationID/solarSystemID are preserved, destinationStationID <= 0 vs > 0,
-    //    contentID <= 0 clamped to 1, and transport hasCargo across (completion_status, mission_state)
-    for (sys_in, origin_in, exp_loc, exp_sys) in [
-        (0_i64, 0_i64, None, None),
-        (30_002_187, 60_008_494, Some(60_008_494), Some(30_002_187)),
-    ] {
-        let combat_raw = PyRep::keyval([
-            ("contentID", PyRep::Integer(0)),
-            ("missionState", PyRep::Integer(1)),
-            ("completionStatus", PyRep::Integer(0)),
-            ("solarSystemID", PyRep::Integer(sys_in)),
-            ("originStationID", PyRep::Integer(origin_in)),
-            ("destinationStationID", PyRep::Integer(0)),
-            ("iskReward", PyRep::Integer(50_000)),
-            ("bonusReward", PyRep::Integer(25_000)),
-            ("loyaltyPoints", PyRep::Integer(100)),
-        ]);
-        let combat_norm = normalize_macho_rpc_reply(
-            "agentMgr",
-            "GetMissionObjectiveInfo",
-            Ok(combat_raw),
-        )
-        .unwrap();
-        let Some(PyRep::List(dungeons)) = combat_norm.dict_get("dungeons") else {
-            panic!("expected dungeons list");
-        };
-        assert_eq!(dungeons.len(), 1);
-        assert_eq!(dungeons[0].dict_get("dungeonID"), Some(&PyRep::Integer(1)));
-        assert_eq!(dungeons[0].dict_get("locationID"), exp_loc.map(PyRep::Integer).as_ref());
-        assert_eq!(dungeons[0].dict_get("solarsystemID"), exp_sys.map(PyRep::Integer).as_ref());
-        assert_eq!(dungeons[0].dict_get("completed"), Some(&PyRep::Bool(false)));
-    }
+#[tokio::test]
+async fn agent_mission_objective_compat_and_aggression_settings_all_combinations() {
+    use crate::services::agents_missions::{MissionTimingAndCargoMeta, save_mission_meta};
+    use eve_db::ActiveMissionRecord;
 
-    for (comp_status, m_state, expected_has_cargo) in [
-        (0_i64, 1_i64, false),
-        (1, 1, true),
-        (0, 2, true),
-    ] {
-        let courier_raw = PyRep::keyval([
-            ("contentID", PyRep::Integer(42)),
-            ("agentID", PyRep::Integer(3_008_416)),
-            ("solarSystemID", PyRep::Integer(30_000_142)),
-            ("missionState", PyRep::Integer(m_state)),
-            ("completionStatus", PyRep::Integer(comp_status)),
-            ("originStationID", PyRep::Integer(60_003_760)),
-            ("destinationStationID", PyRep::Integer(60_003_761)),
-        ]);
-        let courier_norm = normalize_macho_rpc_reply(
+    // 1. Direct MachoNet dispatch (`agentMgr.GetMissionObjectiveInfo`) verifies combat deadspace
+    //    dungeon emits `stationID == None` / `typeID == 5` / `locationID == sys_id` and courier
+    //    transport `hasCargo` transitions across Offered -> Accepted -> Completed.
+    let obj_ctx = ServerContext::new().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let obj_char_id = 90_000_001_i64;
+    let ag = obj_ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_type_id == 2
+                && a.division_id == 24
+                && a.station_id.is_some()
+                && a.solar_system_id.is_some()
+        })
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("SDE security agent");
+    let obj_sys = ag.solar_system_id.unwrap();
+    let obj_st = ag.station_id.unwrap();
+    let dest_st = obj_ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.station_id != obj_st)
+        .map(|s| s.station_id)
+        .unwrap_or(obj_st);
+    let combat_mid = obj_ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            !m.is_courier
+                && !ct.contains("Mining")
+                && !ct.contains("Trade")
+                && !ct.contains("Heraldry")
+                && (ct.contains("Kill") || ct.contains("Encounter"))
+        })
+        .min_by_key(|m| m.mission_id)
+        .map(|m| m.mission_id)
+        .expect("SDE combat mission");
+    let courier_mid = obj_ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            m.is_courier && !ct.contains("Trade") && !ct.contains("Heraldry")
+        })
+        .min_by_key(|m| m.mission_id)
+        .map(|m| m.mission_id)
+        .expect("SDE courier mission");
+    let (obj_uid, obj_corp) = obj_ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&obj_char_id).unwrap();
+        ch.solar_system_id = obj_sys;
+        ch.station_id = Some(obj_st);
+        let uid = ch.user_id;
+        let cid = ch.corporation_id;
+        snap.active_missions.insert(
+            (obj_char_id, combat_mid),
+            ActiveMissionRecord {
+                mission_id: combat_mid,
+                character_id: obj_char_id,
+                agent_id: ag.agent_id,
+                solar_system_id: obj_sys,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        (uid, cid)
+    });
+    let mut obj_sess = SessionState {
+        session_id: 758_001,
+        user_id: Some(obj_uid),
+        character_id: Some(obj_char_id),
+        corporation_id: Some(obj_corp),
+        solar_system_id: Some(obj_sys),
+        station_id: Some(obj_st),
+        ..Default::default()
+    };
+    let obj_kw = HashMap::new();
+    let combat_wire = obj_ctx
+        .dispatch_rpc(
+            &mut obj_sess,
             "agentMgr",
+            None,
             "GetMissionObjectiveInfo",
-            Ok(courier_raw),
+            &[PyRep::Integer(ag.agent_id), PyRep::Integer(combat_mid as i64)],
+            &obj_kw,
+            Some("machoNet:26000"),
         )
-        .unwrap();
+        .await
+        .expect("combat GetMissionObjectiveInfo");
+    let Some(PyRep::List(dungeons)) = combat_wire.dict_get("dungeons") else {
+        panic!("expected dungeons list");
+    };
+    assert_eq!(dungeons.len(), 1);
+    assert_eq!(dungeons[0].dict_get("stationID"), Some(&PyRep::None));
+    assert_eq!(dungeons[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+    assert_eq!(dungeons[0].dict_get("locationID"), Some(&PyRep::Integer(i64::from(obj_sys))));
+    assert_eq!(dungeons[0].dict_get("solarsystemID"), Some(&PyRep::Integer(i64::from(obj_sys))));
+    assert_eq!(dungeons[0].dict_get("completed"), Some(&PyRep::Bool(false)));
+
+    let now0 = obj_ctx.now_unix();
+    for (m_state_str, expected_has_cargo, expected_comp) in [
+        ("Offered", false, 0_i64),
+        ("Accepted", true, 0_i64),
+        ("Completed", true, 1_i64),
+    ] {
+        obj_ctx.db.with_mut_snapshot(|snap| {
+            snap.active_missions.insert(
+                (obj_char_id, courier_mid),
+                ActiveMissionRecord {
+                    mission_id: courier_mid,
+                    character_id: obj_char_id,
+                    agent_id: ag.agent_id,
+                    solar_system_id: obj_sys,
+                    state: m_state_str.into(),
+                    current_room_id: 1,
+                    npcs_remaining: 0,
+                    spawned_npc_ball_ids: Vec::new(),
+                    bookmark_id: None,
+                },
+            );
+            save_mission_meta(
+                snap,
+                obj_char_id,
+                &MissionTimingAndCargoMeta {
+                    mission_id: courier_mid,
+                    agent_id: ag.agent_id,
+                    offered_at_unix: now0,
+                    offer_expiry_unix: now0 + 86_400,
+                    accepted_at_unix: (m_state_str != "Offered").then_some(now0),
+                    accept_expiry_unix: (m_state_str != "Offered").then_some(now0 + 86_400),
+                    origin_station_id: Some(obj_st),
+                    destination_station_id: Some(dest_st),
+                    required_delivery_type_id: Some(34),
+                    required_delivery_qty: 10,
+                    ..Default::default()
+                },
+            );
+        });
+        let courier_wire = obj_ctx
+            .dispatch_rpc(
+                &mut obj_sess,
+                "agentMgr",
+                None,
+                "GetMissionObjectiveInfo",
+                &[PyRep::Integer(ag.agent_id), PyRep::Integer(courier_mid as i64)],
+                &obj_kw,
+                Some("machoNet:26000"),
+            )
+            .await
+            .expect("courier GetMissionObjectiveInfo");
         assert_eq!(
-            courier_norm.dict_get("dungeons"),
+            courier_wire.dict_get("completionStatus"),
+            Some(&PyRep::Integer(expected_comp))
+        );
+        assert_eq!(
+            courier_wire.dict_get("dungeons"),
             Some(&PyRep::List(Vec::new()))
         );
-        let Some(PyRep::List(objs)) = courier_norm.dict_get("objectives") else {
+        let Some(PyRep::List(objs)) = courier_wire.dict_get("objectives") else {
             panic!("expected objectives");
         };
         assert_eq!(objs.len(), 2);
         let PyRep::Tuple(ref transport_tup) = objs[1] else {
             panic!("expected transport tuple");
         };
+        assert_eq!(transport_tup[0], PyRep::String("transport".into()));
         let PyRep::Tuple(ref transport_data) = transport_tup[1] else {
             panic!("expected transport data");
         };
