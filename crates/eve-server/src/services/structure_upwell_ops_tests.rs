@@ -749,3 +749,126 @@ async fn test_hangar_view_state_covers_v24_upkeep_damage_and_timer_fields() {
     assert_eq!(kv_fb["timerIsProgressing"].as_bool(), Some(false));
     assert_eq!(kv_fb["timerIsPaused"].as_bool(), Some(false));
 }
+
+#[tokio::test]
+async fn get_items_in_safety_for_corp_enforces_config_equipment_or_director() {
+    let ctx = test_ctx();
+    let corp_id = 98_000_851;
+    let ceo_id = 90_000_851;
+    let dir_id = 90_000_852;
+    let cfg_id = 90_000_853;
+    let st_mgr_id = 90_000_854;
+    let plain_id = 90_000_855;
+    let unseeded_corp_id = 98_000_852;
+    let unseeded_plain_id = 90_000_856;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "SafetyRbacCorp".into();
+        corp.ticker = "SRBC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, dir_id, cfg_id, st_mgr_id, plain_id]);
+        corp.member_roles.insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(cfg_id, eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT);
+        corp.member_roles
+            .insert(st_mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, coid) in [
+            (ceo_id, corp_id),
+            (dir_id, corp_id),
+            (cfg_id, corp_id),
+            (st_mgr_id, corp_id),
+            (plain_id, corp_id),
+            (unseeded_plain_id, unseeded_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut ext = load_ext_state(snap);
+        ext.asset_safety_wraps.insert(
+            7_900_851,
+            AssetSafetyWrapRecord {
+                wrap_id: 7_900_851,
+                owner_id: corp_id,
+                is_corp: true,
+                source_structure_id: 1_090_000_851,
+                source_structure_name: "Test Fortizar".into(),
+                solar_system_id: 30_000_142,
+                created_unix: 1_000,
+                deliverable_after_unix: 2_000,
+                nearest_npc_station_id: Some(60_003_760),
+                delivered_to_id: None,
+                auto_delivered: false,
+                retrieval_fee_paid: false,
+                item_ids: vec![1],
+                estimated_value_isk: 1_000.0,
+            },
+        );
+        save_ext_state(snap, &ext);
+    });
+
+    let kw = HashMap::new();
+    for (cid, label) in [(ceo_id, "ceo"), (dir_id, "director"), (cfg_id, "config_equipment")] {
+        let mut sess = make_session(cid, corp_id, None, service_roles::ROLE_PLAYER);
+        sess.corp_role = 0;
+        let PyRep::List(rows) = handle(
+            &ctx,
+            &mut sess,
+            "structureAssetSafety",
+            "GetItemsInSafetyForCorp",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{label} must be permitted: {e:?}")) else {
+            panic!("expected List from GetItemsInSafetyForCorp");
+        };
+        assert_eq!(rows.len(), 1, "{label} should see corporate safety wrap");
+    }
+
+    for (cid, label) in [(plain_id, "roleless"), (st_mgr_id, "station_manager_only")] {
+        let mut sess = make_session(cid, corp_id, None, service_roles::ROLE_PLAYER);
+        sess.corp_role = 0;
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "structureAssetSafety",
+            "GetItemsInSafetyForCorp",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "CorpRoleDenied", "unexpected error for {label}");
+    }
+
+    // Player corp >= 98M without snap.corporations record still enforces session.corp_role.
+    let mut unseeded_denied = make_session(unseeded_plain_id, unseeded_corp_id, None, service_roles::ROLE_PLAYER);
+    unseeded_denied.corp_role = 0;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut unseeded_denied,
+            "structureAssetSafety",
+            "GetItemsInSafetyForCorp",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+}

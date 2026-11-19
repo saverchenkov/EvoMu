@@ -858,9 +858,50 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let skyhooks = ctx.db.with_snapshot(|snap| {
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                snap.structures
+            let now_unix = ctx.now_unix();
+            let skyhooks = ctx.db.with_snapshot(|snap| -> Result<Vec<PyRep>, BridgeRpcError> {
+                let corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0);
+                let corp_record = snap.corporations.get(&corp_id);
+                if corp_id <= 0
+                    || (corp_record.is_none()
+                        && ((1_000_000..2_000_000).contains(&corp_id)
+                            || ctx.sde.npc_corporations.contains_key(&corp_id)))
+                {
+                    return Err(crate::services::account_services::err(
+                        "CorpRoleDenied",
+                        "NPC corporations cannot manage Skyhooks",
+                    ));
+                }
+                if !session.has_gm_role() {
+                    if let Some(corp) = corp_record {
+                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                            corp_id,
+                            char_id,
+                            None,
+                            session.corp_role,
+                            now_unix,
+                        );
+                        if corp.ceo_id != char_id
+                            && !is_ceo
+                            && !eve_db::corp_roles::has_role(
+                                eff_roles,
+                                eve_db::corp_roles::ROLE_STATION_MANAGER,
+                            )
+                        {
+                            return Err(crate::services::account_services::err(
+                                "CorpRoleDenied",
+                                "Viewing corporation Skyhooks requires Station Manager or Director role",
+                            ));
+                        }
+                    }
+                }
+                Ok(snap
+                    .structures
                     .values()
                     .filter(|s| {
                         s.type_id == TYPE_ORBITAL_SKYHOOK
@@ -885,9 +926,9 @@ pub async fn handle(
                             ("reagentQuantity", PyRep::Integer(reagents.1 as i64)),
                         ])
                     })
-                    .collect::<Vec<PyRep>>()
+                    .collect::<Vec<PyRep>>())
             });
-            Some(Ok(PyRep::List(skyhooks)))
+            Some(skyhooks.map(PyRep::List))
         }
 
         ("devIndexManager", "GetAllDevelopmentIndices") => {

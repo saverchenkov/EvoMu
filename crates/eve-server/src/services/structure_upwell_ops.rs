@@ -614,9 +614,60 @@ pub fn sync_auto_delivered_asset_safety_wraps(ctx: &ServerContext) {
 
 fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, is_corp: bool) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
+    if is_corp && !session.has_gm_role() {
+        ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let owner_id = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            if let Some(corp) = snap.corporations.get(&owner_id) {
+                let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+                    owner_id,
+                    char_id,
+                    None,
+                    session.corp_role,
+                    now_unix,
+                );
+                if corp.ceo_id != char_id
+                    && !is_ceo
+                    && !eve_db::corp_roles::has_role(
+                        eff_roles,
+                        eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
+                    )
+                {
+                    return Err(err(
+                        "CorpRoleDenied",
+                        "Viewing corporate asset safety requires Config Equipment or Director role",
+                    ));
+                }
+            } else if owner_id >= 98_000_000
+                && !eve_db::corp_roles::has_role(
+                    session.corp_role,
+                    eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
+                )
+            {
+                return Err(err(
+                    "CorpRoleDenied",
+                    "Viewing corporate asset safety requires Config Equipment or Director role",
+                ));
+            }
+            Ok(())
+        })?;
+    }
     sync_auto_delivered_asset_safety_wraps(ctx);
     ctx.db.with_snapshot(|snap| {
-        let owner_id = if is_corp { snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0) } else { char_id };
+        let owner_id = if is_corp {
+            snap.characters
+                .get(&char_id)
+                .map(|c| c.corporation_id)
+                .or(session.corporation_id)
+                .unwrap_or(0)
+        } else {
+            char_id
+        };
         let ext = load_ext_state(snap);
         let mut wraps: Vec<&AssetSafetyWrapRecord> = ext
             .asset_safety_wraps

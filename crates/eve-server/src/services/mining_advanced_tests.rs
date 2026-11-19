@@ -595,6 +595,122 @@ async fn test_metenox_fuel_no_double_count_disposal_sync_and_reinforce_pause() {
     }
 }
 
+#[tokio::test]
+async fn get_extractions_for_corp_enforces_station_manager_or_director_role() {
+    let ctx = make_ctx();
+    let corp_id = 98_000_831;
+    let ceo_id = 90_000_831;
+    let mgr_id = 90_000_832;
+    let dir_id = 90_000_833;
+    let plain_id = 90_000_834;
+    let outsider_id = 90_000_835;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "MoonRbacCorp".into();
+        corp.ticker = "MRBC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, mgr_id, dir_id, plain_id]);
+        corp.member_roles
+            .insert(mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles
+            .insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
+        for cid in [ceo_id, mgr_id, dir_id, plain_id, outsider_id] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: corp_id,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    for (cid, label) in [(ceo_id, "ceo"), (mgr_id, "station_mgr"), (dir_id, "director")] {
+        let mut sess = SessionState {
+            user_id: Some(cid as u64),
+            character_id: Some(cid),
+            corporation_id: Some(corp_id),
+            ..Default::default()
+        };
+        let res = handle(&ctx, &mut sess, "moonExtractions", "GetExtractionsForCorp", &[], &kw)
+            .await
+            .unwrap();
+        assert!(res.is_ok(), "{label} must be permitted to query GetExtractionsForCorp");
+    }
+
+    let mut plain_sess = SessionState {
+        user_id: Some(plain_id as u64),
+        character_id: Some(plain_id),
+        corporation_id: Some(corp_id),
+        ..Default::default()
+    };
+    let err = handle(
+        &ctx,
+        &mut plain_sess,
+        "moonExtractions",
+        "GetExtractionsForCorp",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "AccessDenied");
+
+    // Even with ROLE_STARBASE_CONFIG only, member is denied because Station Manager / Director is required.
+    let mut sb_sess = SessionState {
+        user_id: Some(plain_id as u64),
+        character_id: Some(plain_id),
+        corporation_id: Some(corp_id),
+        corp_role: eve_db::corp_roles::ROLE_STARBASE_CONFIG,
+        ..Default::default()
+    };
+    let err_sb = handle(
+        &ctx,
+        &mut sb_sess,
+        "moonExtractions",
+        "GetExtractionsForCorp",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_sb.code, "AccessDenied");
+
+    // Non-member pretending via session.corporation_id must be denied even if character corporation matches.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.remove(&outsider_id);
+        }
+    });
+    let mut outsider_sess = SessionState {
+        user_id: Some(outsider_id as u64),
+        character_id: Some(outsider_id),
+        corporation_id: Some(corp_id),
+        corp_role: eve_db::corp_roles::ROLE_DIRECTOR,
+        ..Default::default()
+    };
+    let err_out = handle(
+        &ctx,
+        &mut outsider_sess,
+        "moonExtractions",
+        "GetExtractionsForCorp",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_out.code, "AccessDenied");
+}
+
 #[cfg(test)]
 #[path = "mining_advanced_extra_unit_tests.rs"]
 mod extra_unit_tests;

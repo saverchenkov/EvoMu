@@ -1493,6 +1493,90 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     assert_eq!(after_skyhooks, PyRep::List(Vec::new()));
 }
 
+#[tokio::test]
+async fn get_my_corporation_skyhooks_enforces_station_manager_or_director_and_rejects_npc() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142;
+    let corp_id = 98_000_841;
+    let npc_corp_id = 1_000_009;
+    let ceo_id = 90_000_841;
+    let mgr_id = 90_000_842;
+    let dir_id = 90_000_843;
+    let plain_id = 90_000_844;
+    let npc_char_id = 90_000_845;
+    let skyhook_id = 1_090_000_841;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "SkyhookRbacCorp".into();
+        corp.ticker = "SHRB".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, mgr_id, dir_id, plain_id]);
+        corp.member_roles
+            .insert(mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles
+            .insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, coid) in [
+            (ceo_id, corp_id),
+            (mgr_id, corp_id),
+            (dir_id, corp_id),
+            (plain_id, corp_id),
+            (npc_char_id, npc_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    solar_system_id: sys_id,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "RBAC Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+
+    for (cid, label) in [(ceo_id, "ceo"), (mgr_id, "station_mgr"), (dir_id, "director")] {
+        let mut sess = sov_session(cid, corp_id, sys_id, None);
+        let PyRep::List(rows) = handle(&ctx, &mut sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{label} must be permitted: {e:?}")) else {
+                panic!("expected list from GetMyCorporationSkyhooks");
+            };
+        assert_eq!(rows.len(), 1, "{label} should see corporate skyhook");
+    }
+
+    let mut plain_sess = sov_session(plain_id, corp_id, sys_id, None);
+    let plain_err = handle(&ctx, &mut plain_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(plain_err.code, "CorpRoleDenied");
+
+    let mut npc_sess = sov_session(npc_char_id, npc_corp_id, sys_id, None);
+    let npc_err = handle(&ctx, &mut npc_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(npc_err.code, "CorpRoleDenied");
+}
+
 #[test]
 fn resolve_sov_hub_id_prefers_sov_hubs_registered_live_hub_over_unregistered() {
     use eve_db::durable_domain_types::PersistedSovHubData;

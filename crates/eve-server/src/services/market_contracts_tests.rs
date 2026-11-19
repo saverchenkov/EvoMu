@@ -420,6 +420,168 @@ fn get_system_asks_and_plex_best_sweep_expired_orders() {
     });
 }
 
+#[test]
+fn startup_check_and_contract_container_rbac() {
+    let ctx = test_ctx();
+    let kw = std::collections::HashMap::new();
+    let corp_id = 98_000_811;
+    let ceo_id = 2_000_811;
+    let q1_id = 2_000_812;
+    let q2_id = 2_000_813;
+    let plain_id = 2_000_814;
+    let npc_corp_id = 1_000_009;
+    let corp_cont_id = 9_100_811;
+    let corp_item_id = 9_100_812;
+    let npc_cont_id = 9_100_813;
+
+    // 1. Unauthenticated StartupCheck must fail closed without mutating market_orders.
+    let before_orders = ctx.db.with_snapshot(|s| s.market_orders.len());
+    let mut unauth_sess = SessionState::new(9199);
+    let unauth_err = handle(&ctx, &mut unauth_sess, "marketProxy", "StartupCheck", &[], &kw)
+        .unwrap()
+        .unwrap_err();
+    assert!(!unauth_err.code.is_empty());
+    assert_eq!(ctx.db.with_snapshot(|s| s.market_orders.len()), before_orders);
+
+    // 2. Authenticated StartupCheck seeds Sleeper orders on first call, then runs read-pure on subsequent calls.
+    let mut sess_q2 = jita_session(q2_id, corp_id);
+    let first = handle(&ctx, &mut sess_q2, "marketProxy", "StartupCheck", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.dict_get("status"), Some(&PyRep::String("ok".into())));
+    let after_first_orders = ctx.db.with_snapshot(|s| s.market_orders.len());
+    let next_eid_after_first = ctx.db.with_snapshot(|s| s.next_entity_id);
+    assert!(after_first_orders > before_orders);
+
+    let second = handle(&ctx, &mut sess_q2, "marketProxy", "StartupCheck", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.dict_get("status"), Some(&PyRep::String("ok".into())));
+    assert_eq!(second.dict_get("expiredOrdersSwept"), Some(&PyRep::Integer(0)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), next_eid_after_first);
+
+    // 3. contractProxy.{GetItemsInContainer, GetNumItemsInContainers} enforce container ownership & hangar query roles.
+    ctx.db.with_mut_snapshot(|s| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "ContainerCorp".into();
+        corp.ticker = "CCNT".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, q1_id, q2_id, plain_id]);
+        corp.member_roles
+            .insert(q1_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[0]);
+        corp.member_roles
+            .insert(q2_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
+        s.corporations.insert(corp_id, corp);
+
+        s.items.insert(
+            corp_cont_id,
+            InventoryItemRecord {
+                item_id: corp_cont_id,
+                type_id: 17_366,
+                owner_id: corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::CorpSAG2,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            corp_item_id,
+            InventoryItemRecord {
+                item_id: corp_item_id,
+                type_id: 34,
+                owner_id: corp_id,
+                location_id: corp_cont_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 50,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        s.items.insert(
+            npc_cont_id,
+            InventoryItemRecord {
+                item_id: npc_cont_id,
+                type_id: 17_366,
+                owner_id: npc_corp_id,
+                location_id: JITA_STATION_ID,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess_plain = jita_session(plain_id, corp_id);
+    let mut sess_q1 = jita_session(q1_id, corp_id);
+    let mut sess_npc = jita_session(plain_id, npc_corp_id);
+
+    // Missing container fails closed on both RPCs.
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(99_888_777)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ContainerNotFound"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetNumItemsInContainers", &[PyRep::Integer(99_888_777)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ContainerNotFound"
+    );
+
+    // Roleless member & wrong-division member are denied CorpRoleDenied.
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(corp_cont_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_q1, "contractProxy", "GetNumItemsInContainers", &[PyRep::List(vec![PyRep::Integer(corp_cont_id)])], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_npc, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(npc_cont_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Matching division hangar query role (CorpSAG2 -> ROLE_HANGAR_CAN_QUERY[1]) succeeds.
+    let items_rep = handle(&ctx, &mut sess_q2, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(corp_cont_id)], &kw)
+        .unwrap()
+        .unwrap();
+    let PyRep::List(rows) = items_rep else { panic!("expected List from GetItemsInContainer"); };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dict_get("itemID"), Some(&PyRep::Integer(corp_item_id)));
+
+    let counts_rep = handle(
+        &ctx,
+        &mut sess_q2,
+        "contractProxy",
+        "GetNumItemsInContainers",
+        &[PyRep::List(vec![PyRep::Integer(corp_cont_id)])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        counts_rep,
+        PyRep::Dict(vec![(PyRep::Integer(corp_cont_id), PyRep::Integer(1))])
+    );
+}
+
 #[cfg(test)]
 #[path = "market_contracts_extra_unit_tests.rs"]
 mod market_contracts_extra_unit_tests;

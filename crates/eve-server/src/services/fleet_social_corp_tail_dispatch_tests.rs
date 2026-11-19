@@ -261,3 +261,224 @@ fn corp_gov_tail_settings_assets_and_applications() {
     assert_eq!(corp_entries[0].0, PyRep::Integer(char_id));
     assert_eq!(corp_entries[0].1.dict_get("applicationText"), Some(&PyRep::String("apply".into())));
 }
+
+#[test]
+fn corp_gov_tail_rbac_and_npc_corp_guards() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_id = 98_000_777;
+    let ceo_id = 2_000_701;
+    let dir_id = 2_000_702;
+    let personnel_id = 2_000_703;
+    let chat_id = 2_000_704;
+    let plain_id = 2_000_705;
+    let npc_corp_id = 1_000_009;
+    let missing_corp_id = 98_300_999;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "RbacCorp".into();
+        corp.ticker = "RBAC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, dir_id, personnel_id, chat_id, plain_id]);
+        corp.member_roles.insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles
+            .insert(personnel_id, eve_db::corp_roles::ROLE_PERSONNEL_MANAGER);
+        corp.member_roles
+            .insert(chat_id, eve_db::corp_roles::ROLE_CHAT_MANAGER);
+        snap.corporations.insert(corp_id, corp);
+    });
+
+    let mut ceo_sess = make_session(ceo_id, corp_id);
+    let mut dir_sess = make_session(dir_id, corp_id);
+    let mut personnel_sess = make_session(personnel_id, corp_id);
+    let mut chat_sess = make_session(chat_id, corp_id);
+    let mut plain_sess = make_session(plain_id, corp_id);
+    let mut npc_sess = make_session(plain_id, npc_corp_id);
+    let mut missing_sess = make_session(plain_id, missing_corp_id);
+
+    // GetPendingAutoKicks: Director & Personnel Manager allowed; Chat Manager, roleless, and NPC corp denied.
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut dir_sess,
+        "corpRegistry",
+        "GetPendingAutoKicks",
+        &[],
+        corp_id,
+        dir_id,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut personnel_sess,
+        "corpRegistry",
+        "GetPendingAutoKicks",
+        &[],
+        corp_id,
+        personnel_id,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut chat_sess,
+            "corpRegistry",
+            "GetPendingAutoKicks",
+            &[],
+            corp_id,
+            chat_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut plain_sess,
+            "corpRegistry",
+            "GetPendingAutoKicks",
+            &[],
+            corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut npc_sess,
+            "corpRegistry",
+            "GetPendingAutoKicks",
+            &[],
+            npc_corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // GetCorpWelcomeMail: Personnel Manager & Chat Manager allowed; roleless and NPC corp denied.
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut personnel_sess,
+        "corpRegistry",
+        "GetCorpWelcomeMail",
+        &[],
+        corp_id,
+        personnel_id,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut chat_sess,
+        "corpRegistry",
+        "GetCorpWelcomeMail",
+        &[],
+        corp_id,
+        chat_id,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut plain_sess,
+            "corpRegistry",
+            "GetCorpWelcomeMail",
+            &[],
+            corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle_corp_gov_tail(
+            &ctx,
+            &mut npc_sess,
+            "corpRegistry",
+            "GetCorpWelcomeMail",
+            &[],
+            npc_corp_id,
+            plain_id,
+            1000,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // UpdateAttributes & UpdateCorporationAbilities: CEO/Director allowed; roleless, NPC corp, missing corp denied without mutating state.
+    let denied_role_code = "CorpRoleDenied";
+    let corp_missing_code = "CorporationNotFound";
+    for method in ["UpdateAttributes", "UpdateCorporationAbilities"] {
+        assert!(handle_corp_gov_tail(&ctx, &mut ceo_sess, "corpRegistry", method, &[], corp_id, ceo_id, 1000)
+            .unwrap()
+            .is_ok());
+        assert_eq!(
+            handle_corp_gov_tail(&ctx, &mut plain_sess, "corpRegistry", method, &[], corp_id, plain_id, 1000)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            denied_role_code
+        );
+        assert_eq!(
+            handle_corp_gov_tail(
+                &ctx,
+                &mut npc_sess,
+                "corpRegistry",
+                method,
+                &[],
+                npc_corp_id,
+                plain_id,
+                1000,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            denied_role_code
+        );
+        assert_eq!(
+            handle_corp_gov_tail(
+                &ctx,
+                &mut missing_sess,
+                "corpRegistry",
+                method,
+                &[],
+                missing_corp_id,
+                plain_id,
+                1000,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            corp_missing_code
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.corp_member_limits.contains_key(&npc_corp_id));
+        assert!(!snap.corp_governance.contains_key(&npc_corp_id));
+        assert!(!snap.corp_member_limits.contains_key(&missing_corp_id));
+    });
+}

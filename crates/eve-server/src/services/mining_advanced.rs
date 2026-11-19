@@ -895,24 +895,57 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let caller_corp = ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0)
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(0)
             });
             let corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_corp);
-            if corp_id != caller_corp && !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AccessDenied".into(),
-                    message: format!("Cannot query moon extractions for foreign corporation {corp_id}"),
-                    client_error: None,
-                }));
+            if (corp_id <= 0 || corp_id != caller_corp) && !session.has_gm_role() {
+                return Some(Err(crate::services::account_services::err(
+                    "AccessDenied",
+                    format!("Cannot query moon extractions for foreign corporation {corp_id}"),
+                )));
             }
             let now = ctx.now_unix();
-            let extractions = ctx.db.with_snapshot(|snap| {
-                snap.moon_extractions
+            let extractions = match ctx.db.with_snapshot(|snap| -> Result<Vec<_>, BridgeRpcError> {
+                if !session.has_gm_role() {
+                    if let Some(corp) = snap.corporations.get(&corp_id) {
+                        if corp.ceo_id != char_id
+                            && !corp.members.is_empty()
+                            && !corp.members.contains(&char_id)
+                        {
+                            return Err(crate::services::account_services::err(
+                                "AccessDenied",
+                                format!("Character {char_id} is not a member of corporation {corp_id}"),
+                            ));
+                        }
+                        let (is_ceo, eff_roles) =
+                            snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now);
+                        if !is_ceo
+                            && !eve_db::corp_roles::has_role(
+                                eff_roles,
+                                eve_db::corp_roles::ROLE_STATION_MANAGER,
+                            )
+                        {
+                            return Err(crate::services::account_services::err(
+                                "AccessDenied",
+                                "Querying corporate moon extractions requires Station Manager or Director role",
+                            ));
+                        }
+                    }
+                }
+                Ok(snap
+                    .moon_extractions
                     .values()
                     .filter(|ext| snap.structures.get(&ext.structure_id).map(|s| s.owner_corp_id == corp_id).unwrap_or(false))
                     .cloned()
-                    .collect::<Vec<_>>()
-            });
+                    .collect::<Vec<_>>())
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let list: Vec<PyRep> = extractions
                 .into_iter()

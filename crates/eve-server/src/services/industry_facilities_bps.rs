@@ -928,25 +928,13 @@ pub fn handle_industry_facilities_bps(
                 let owner_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64())).unwrap_or(char_id);
                 let facility_filter = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64())).filter(|&id| id > 0);
                 let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                    if owner_id != char_id && !session.has_gm_role() {
-                        const CORP_BP_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
-                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
-                            | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
-                            | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
-                        let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
-                        let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
-                            owner_id,
-                            char_id,
-                            facility_filter,
-                            session.corp_role,
-                            ctx.now_unix(),
-                        );
-                        let has_corp_access = owner_id == caller_corp_id
-                            && !(1_000_000..2_000_000).contains(&owner_id)
-                            && (is_ceo || (eff_roles & CORP_BP_ROLES) != 0);
-                        if !has_corp_access {
-                            return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}"), client_error: None });
-                        }
+                    if owner_id != char_id && !session.has_gm_role()
+                        && !caller_has_corp_blueprint_access(ctx, snap, session, char_id, owner_id, facility_filter)
+                    {
+                        return Err(crate::services::account_services::err(
+                            "OwnerAccessDenied",
+                            format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}"),
+                        ));
                     }
                     let mut active_jobs: HashMap<i64, i64> = HashMap::new();
                     for j in snap.industry_jobs.values() {
@@ -1034,8 +1022,24 @@ pub fn handle_industry_facilities_bps(
                 if let Some(it) = snap.items.get(&raw_id) {
                     if ctx.sde.blueprints.contains_key(&it.type_id) {
                         let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        let mut root_loc = it.location_id;
+                        for _ in 0..8 {
+                            if let Some(parent) = snap.items.get(&root_loc) {
+                                root_loc = parent.location_id;
+                            } else {
+                                break;
+                            }
+                        }
                         let is_owned = it.owner_id == char_id
-                            || (caller_corp_id > 0 && it.owner_id == caller_corp_id);
+                            || session.has_gm_role()
+                            || caller_has_corp_blueprint_access(
+                                ctx,
+                                snap,
+                                session,
+                                char_id,
+                                it.owner_id,
+                                (root_loc > 0).then_some(root_loc),
+                            );
                         let caller_alliance_id = if caller_corp_id > 0 {
                             snap.corporations.get(&caller_corp_id).and_then(|c| c.alliance_id).unwrap_or(0)
                         } else {
@@ -1814,6 +1818,43 @@ pub fn handle_industry_facilities_bps(
 
         _ => None,
     }
+}
+
+/// Returns `true` when `char_id` holds corporate industry blueprint access for `corp_id`.
+fn caller_has_corp_blueprint_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    corp_id: i64,
+    facility_filter: Option<i64>,
+) -> bool {
+    const CORP_BP_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+        | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+        | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
+    if session.has_gm_role() {
+        return true;
+    }
+    let caller_corp_id = session
+        .corporation_id
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        .unwrap_or(0);
+    if corp_id <= 0
+        || corp_id != caller_corp_id
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+    {
+        return false;
+    }
+    let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
+        corp_id,
+        char_id,
+        facility_filter,
+        session.corp_role,
+        ctx.now_unix(),
+    );
+    is_ceo || (eff_roles & CORP_BP_ROLES) != 0
 }
 
 #[cfg(test)] #[path = "industry_facilities_bps_unit_tests.rs"] mod industry_facilities_bps_unit_tests;
