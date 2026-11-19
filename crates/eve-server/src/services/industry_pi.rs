@@ -1049,14 +1049,15 @@ pub(crate) fn handle_industry_job_queries(
                     });
                 }
                 let Some(sys_id) = resolve_industry_job_solar_system_id(ctx, snap, j.facility_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FacilityNotFound".into(),
-                        message: format!(
-                            "Cannot resolve solar system for industry job {} facility {}",
-                            j.job_id, j.facility_id
-                        ),
-                        client_error: None,
-                    });
+                    let msg = format!(
+                        "Cannot resolve solar system for industry job {} facility {}",
+                        j.job_id, j.facility_id
+                    );
+                    return Err(BridgeRpcError::with_client_error(
+                        "FacilityNotFound",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
                 };
                 Ok(format_industry_job_pyrep_with_system(
                     j,
