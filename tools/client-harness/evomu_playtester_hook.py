@@ -1711,6 +1711,175 @@ def _inspect_charsel_state(sm):
     return out
 
 
+def _is_window_minimized(wnd):
+    if wnd is None:
+        return False
+    try:
+        return bool(getattr(wnd, "minimized", False) or (hasattr(wnd, "IsMinimized") and wnd.IsMinimized()))
+    except Exception:
+        return False
+
+
+def _is_chain_visible(node, stop_at=None, max_depth=24, allow_minimized=False):
+    cur = node
+    for _ in range(max_depth):
+        if cur is None:
+            break
+        cur_min = _is_window_minimized(cur)
+        if cur_min and not allow_minimized:
+            return False
+        if cur is stop_at:
+            return _is_visible(cur) or (allow_minimized and cur_min)
+        if not _is_visible(cur) and not (allow_minimized and cur_min):
+            return False
+        cur = getattr(cur, "parent", None)
+    return True
+
+
+def _maximize_dscan_surface(ds_cont, ds_host):
+    maximized = False
+    targets = [ds_host] if (ds_cont is ds_host) else [ds_host, ds_cont]
+    for target_node in targets:
+        if target_node is None or not _is_window_minimized(target_node):
+            continue
+        if hasattr(target_node, "Maximize"):
+            try:
+                target_node.Maximize()
+                maximized = True
+            except Exception:
+                pass
+    if maximized:
+        H._sleep_ms(300)
+
+
+def _collect_dscan_candidate_roots(uicore):
+    win_roots = []
+    layer_roots = []
+    seen = set()
+
+    def _add(bucket, obj):
+        if obj is not None and id(obj) not in seen and not getattr(obj, "destroyed", False):
+            seen.add(id(obj))
+            bucket.append(obj)
+
+    if uicore is not None:
+        reg = getattr(uicore, "registry", None)
+        if reg is not None and hasattr(reg, "GetWindows"):
+            try:
+                for w in list(reg.GetWindows() or []):
+                    _add(win_roots, w)
+            except Exception:
+                pass
+    for mod_path, cls_name in (
+        ("eve.client.script.ui.inflight.scannerFiles.directionalScannerWindow", "DirectionalScanner"),
+        ("eve.client.script.ui.shared.mapView.solarSystemViewPanel", "SolarSystemViewPanel"),
+    ):
+        try:
+            mod = __import__(mod_path, fromlist=[cls_name])
+            cls_obj = getattr(mod, cls_name, None)
+            if cls_obj is not None and hasattr(cls_obj, "GetIfOpen"):
+                _add(win_roots, cls_obj.GetIfOpen())
+        except Exception:
+            pass
+    if uicore is not None:
+        for _, lobj in _iter_visible_layers(uicore):
+            try:
+                for ch in list(getattr(lobj, "children", []) or []):
+                    _add(win_roots, ch)
+            except Exception:
+                pass
+            _add(layer_roots, lobj)
+    return win_roots + layer_roots
+
+
+def _find_solar_system_map_panel(uicore=None, include_minimized=False):
+    if uicore is None:
+        uicore = _get_uicore()
+    for w in _collect_dscan_candidate_roots(uicore):
+        is_min = _is_window_minimized(w)
+        if is_min and not include_minimized:
+            continue
+        if not _is_visible(w) and not (is_min and include_minimized):
+            continue
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        cls_n = w.__class__.__name__
+        if wid == "solar_system_map_panel" or cls_n == "SolarSystemViewPanel" or hasattr(w, "mapView"):
+            return w
+    return None
+
+
+def _find_directional_scanner_surface(uicore=None, include_minimized=False):
+    """Locate visible standalone DirectionalScanner or embedded DirectionalScannerPalette.
+
+    Returns (kind, container, host_window, is_minimized) or (None, None, None, False).
+    """
+    if uicore is None:
+        uicore = _get_uicore()
+    roots = _collect_dscan_candidate_roots(uicore)
+
+    for w in roots:
+        wid = _safe_str(getattr(w, "windowID", None) or getattr(w, "name", ""), 64)
+        cls_n = w.__class__.__name__
+        is_standalone = bool(
+            wid == "directionalScannerWindow"
+            or cls_n == "DirectionalScanner"
+            or (cls_n.startswith("DirectionalScanner") and "Palette" not in cls_n)
+        )
+        if not is_standalone:
+            continue
+        is_min = _is_window_minimized(w)
+        if is_min and not include_minimized:
+            continue
+        if _is_visible(w) or (is_min and include_minimized):
+            return ("standalone", w, w, is_min)
+
+    for host in roots:
+        is_host_min = _is_window_minimized(host)
+        if is_host_min and not include_minimized:
+            continue
+        if not _is_visible(host) and not (is_host_min and include_minimized):
+            continue
+        mv = getattr(host, "mapView", None)
+        pal = getattr(mv, "directionalScannerPalette", None) if mv is not None else None
+        if pal is None:
+            pal = getattr(host, "directionalScannerPalette", None)
+        if pal is None:
+            q = [(host, 0)]
+            q_seen = set()
+            while q and len(q_seen) < 300:
+                cur, depth = q.pop(0)
+                if cur is None or id(cur) in q_seen or getattr(cur, "destroyed", False):
+                    continue
+                q_seen.add(id(cur))
+                if cur is not host:
+                    cur_min = _is_window_minimized(cur)
+                    if cur_min and not include_minimized:
+                        continue
+                    if not _is_visible(cur) and not (cur_min and include_minimized):
+                        continue
+                cur_cls = cur.__class__.__name__
+                cur_name = _safe_str(getattr(cur, "name", ""), 64)
+                if cur_cls == "DirectionalScannerPalette" or cur_name == "DirectionalScannerPalette":
+                    pal = cur
+                    break
+                if depth < 14 and "Marker" not in cur_cls and "Bracket" not in cur_cls:
+                    for ch in list(getattr(cur, "children", []) or [])[:40]:
+                        if id(ch) not in q_seen:
+                            q.append((ch, depth + 1))
+        if (
+            pal is not None
+            and not getattr(pal, "destroyed", False)
+            and (_is_visible(pal) or (include_minimized and _is_window_minimized(pal)))
+            and _is_chain_visible(pal, host, allow_minimized=include_minimized)
+        ):
+            eff_min = bool(is_host_min or _is_window_minimized(pal))
+            if eff_min and not include_minimized:
+                continue
+            return ("embedded", pal, host, eff_min)
+
+    return (None, None, None, False)
+
+
 def _inspect_uicore_tree():
     uicore = _get_uicore()
     if uicore is None:
@@ -1878,13 +2047,49 @@ def _inspect_uicore_tree():
                         })
             except Exception:
                 pass
+        ds_kind, ds_cont, ds_host, ds_min = _find_directional_scanner_surface(uicore, include_minimized=False)
+        if ds_cont is not None and not ds_min and not any(
+            "directionalscanner" in _normalize_window_tok(o.get("window_id") or o.get("cls") or "")
+            for o in open_windows
+        ):
+            pal_x, pal_y, pal_w, pal_h = _widget_abs_rect(ds_cont)
+            if (pal_w <= 0 or pal_h <= 0) and ds_host is not None:
+                pal_x, pal_y, pal_w, pal_h = _widget_abs_rect(ds_host)
+            pal_c = _inspect_window_content(ds_cont)
+            ds_entry = {
+                "window_id": "directionalScannerWindow",
+                "name": _safe_str(getattr(ds_cont, "name", None) or ds_cont.__class__.__name__, 64),
+                "cls": ds_cont.__class__.__name__,
+                "caption": _strip_tags(_safe_str(getattr(ds_cont, "caption", None) or "Directional Scanner", 100)),
+                "x": pal_x,
+                "y": pal_y,
+                "w": pal_w,
+                "h": pal_h,
+                "minimized": False,
+                "has_loading": pal_c["has_loading"],
+                "has_error": pal_c["has_error"],
+                "tab_count": pal_c["tab_count"],
+                "row_count": pal_c["row_count"],
+                "populated_count": pal_c["populated_count"],
+                "sample_texts": pal_c["sample_texts"],
+            }
+            if ds_kind == "embedded":
+                ds_entry["embedded"] = True
+                if ds_host is not None:
+                    ds_entry["host_window_id"] = _safe_str(
+                        getattr(ds_host, "windowID", None) or getattr(ds_host, "name", "") or ds_host.__class__.__name__,
+                        64,
+                    )
+            open_windows.append(ds_entry)
     except Exception:
         pass
 
     visited_nodes = set()
 
-    def _walk(node, path_prefix, depth, bucket):
-        if depth > 16 or len(bucket) >= 160 or id(node) in visited_nodes or not _is_pickable(node):
+    def _walk(node, path_prefix, depth, bucket, scroll_state=None):
+        if depth > 18 or len(bucket) >= 320 or id(node) in visited_nodes or not _is_pickable(node):
+            return
+        if scroll_state is not None and scroll_state[0] >= 96:
             return
         visited_nodes.add(id(node))
         name = _safe_str(getattr(node, "name", ""), 64) or node.__class__.__name__
@@ -1932,17 +2137,26 @@ def _inspect_uicore_tree():
                     context_menu.append(item)
                 else:
                     bucket.append(item)
+                    if scroll_state is not None:
+                        scroll_state[0] += 1
         clip_flag = getattr(node, "clipChildren", False)
         if isinstance(clip_flag, (bool, int)) and clip_flag:
             if hasattr(node, "GetAbsolute") or hasattr(node, "width") or hasattr(node, "displayWidth"):
                 cx, cy, cw, ch = _widget_clipped_rect(node)
                 if cw < 4 or ch < 4:
                     return
+        is_scroll_bucket = (
+            cls_name in ("ScrollContainer", "BasicDynamicScroll", "Scroll")
+            or name in ("clipCont", "__clipper")
+        )
+        child_scroll_state = [0] if (scroll_state is None and is_scroll_bucket) else scroll_state
         children = getattr(node, "children", None)
         if children:
             try:
                 for ch in list(children):
-                    _walk(ch, cur_path, depth + 1, bucket)
+                    _walk(ch, cur_path, depth + 1, bucket, child_scroll_state)
+                    if child_scroll_state is not None and child_scroll_state[0] >= 96:
+                        break
             except Exception:
                 pass
 
@@ -1952,10 +2166,27 @@ def _inspect_uicore_tree():
     if len(clickables) > 75:
         head = clickables[:55]
         tail = clickables[55:]
-        priority_tail = [
-            w for w in tail
-            if w.get("editable") or "/l_shipui/" in w.get("path", "") or w.get("path", "").startswith(("utilmenu/", "abovemain/", "menu/"))
-        ]
+
+        def _is_priority_clickable(w):
+            p = w.get("path", "")
+            wcls = w.get("cls", "")
+            wnm = w.get("name", "")
+            if w.get("editable") or "/l_shipui/" in p or p.startswith(("utilmenu/", "abovemain/", "menu/")):
+                return True
+            if wcls in ("ScanButton", "DirectionalScannerPalette", "ScannerPaletteHeader", "ProbeScannerPalette"):
+                return True
+            if wnm in ("ScanButton", "auInput", "distanceSlider", "angleSlider", "alignWithCameraBtn", "showConeBtn"):
+                return True
+            if "/scroll/" not in p.lower() and (
+                "/DirectionalScannerPalette/" in p
+                or "/DirectionalScanner/" in p
+                or "/directionalScannerWindow/" in p
+                or "/ScannerPaletteHeader/" in p
+            ):
+                return True
+            return False
+
+        priority_tail = [w for w in tail if _is_priority_clickable(w)]
         if priority_tail:
             prio_ids = set(id(w) for w in priority_tail)
             other_tail = [w for w in tail if id(w) not in prio_ids]
@@ -1988,7 +2219,7 @@ def _find_widget(target, layers_root, hint_x=None, hint_y=None):
         cur_modal = None
 
     def _search(node, cur_path, depth):
-        if depth > 17 or not _is_pickable(node):
+        if depth > 19 or not _is_pickable(node):
             return
         name = _safe_str(getattr(node, "name", ""), 64) or node.__class__.__name__
         path = "%s/%s" % (cur_path, name) if cur_path else name
@@ -4462,6 +4693,11 @@ def _find_matching_secondary_or_drawer_container(sm, t_norm):
                 return sp_wnd, "SkillPlanDockablePanel", "dockable_panel"
         except Exception:
             pass
+    if any(tok in ("dscan", "directionalscanner", "directionalscannerwindow", "directionalscannerpalette") for tok in tokens):
+        ds_kind, ds_cont, _, ds_min = _find_directional_scanner_surface(_get_uicore(), include_minimized=False)
+        if ds_cont is not None and not ds_min:
+            wid_ds = _safe_str(getattr(ds_cont, "windowID", None) or "directionalScannerWindow", 64)
+            return ds_cont, wid_ds, ("embedded_panel" if ds_kind == "embedded" else "window")
     sec_name = _current_secondary_view_name(sm)
     if sec_name and _target_matches_view(t_norm, sec_name):
         vs = svcs.get("viewState") if isinstance(svcs, dict) else None
@@ -4758,6 +4994,19 @@ def _open_client_window(sm, target, require_open=False):
         if sess is None or (getattr(sess, "stationid", None) is None and getattr(sess, "structureid", None) is None):
             return {"ok": False, "error": "%s requires being docked at a station or structure; call dock first" % (mname,)}
     if cmd_svc is not None and hasattr(cmd_svc, mname):
+        if mname == "OpenDirectionalScanner":
+            pre_ds_kind, pre_ds_cont, pre_ds_host, pre_ds_min = _find_directional_scanner_surface(uicore, include_minimized=True)
+            if pre_ds_cont is not None:
+                if pre_ds_min:
+                    _maximize_dscan_surface(pre_ds_cont, pre_ds_host)
+                ds_kind, ds_cont, _, ds_min = _find_directional_scanner_surface(uicore, include_minimized=False)
+                if ds_cont is not None and not ds_min:
+                    return {
+                        "ok": True,
+                        "opened_via": "DirectionalScanner (%s, already open)" % (ds_kind,),
+                        "opened_window_count": 0,
+                    }
+
         def _reg_window_vis_map():
             snap = {}
             if reg is None or not hasattr(reg, "GetWindows"):
@@ -4778,6 +5027,7 @@ def _open_client_window(sm, target, require_open=False):
         pre_snap = _reg_window_vis_map()
         fn = getattr(cmd_svc, mname)
         cmd_args = ()
+        cmd_kwargs = {}
         if mname == "OpenAgencyContentGroup" and t == "agentfinder":
             cg_id = 28
             try:
@@ -4786,12 +5036,23 @@ def _open_client_window(sm, target, require_open=False):
             except Exception:
                 pass
             cmd_args = (cg_id,)
+        elif mname == "OpenDirectionalScanner" and _find_solar_system_map_panel(uicore, include_minimized=True) is not None:
+            # When SolarSystemViewPanel is already open (visible or minimized), V24
+            # OpenDirectionalScanner(toggle=True) toggles D-Scan; pass toggle=False when
+            # supported so open never acts as close.
+            try:
+                code_obj = getattr(fn, "__code__", None)
+                varnames = getattr(code_obj, "co_varnames", ()) if code_obj is not None else ()
+                if "toggle" in varnames:
+                    cmd_kwargs["toggle"] = False
+            except Exception:
+                pass
         try:
-            fn(*cmd_args)
+            fn(*cmd_args, **cmd_kwargs)
         except Exception as exc:
             if "WindowBlockedFromOpening" in repr(exc) or getattr(exc, "msg", None) == "WindowBlockedFromOpening":
                 H._sleep_ms(1200)
-                fn(*cmd_args)
+                fn(*cmd_args, **cmd_kwargs)
             else:
                 raise
         H._sleep_ms(500)
@@ -4809,11 +5070,28 @@ def _open_client_window(sm, target, require_open=False):
         if (closed_ids and not opened_vis_ids) or sec_toggled_closed:
             # ToggleOpenClose-style commands (e.g. OpenLedger / CmdToggleMap) close an already-open
             # window, secondary view, or zombie; re-invoke once so open_window guarantees opening.
-            fn(*cmd_args)
+            fn(*cmd_args, **cmd_kwargs)
             H._sleep_ms(500)
             retried = True
             post_snap = _reg_window_vis_map()
             opened_vis_ids = [wid for wid, vis in post_snap.items() if wid not in pre_snap and vis]
+
+        if mname == "OpenDirectionalScanner":
+            ds_kind, ds_cont, ds_host, ds_min = _find_directional_scanner_surface(uicore, include_minimized=True)
+            if ds_cont is not None and ds_min:
+                _maximize_dscan_surface(ds_cont, ds_host)
+            ds_kind, ds_cont, ds_host, ds_min = _find_directional_scanner_surface(uicore, include_minimized=False)
+            if ds_cont is None or ds_min:
+                return {
+                    "ok": False,
+                    "error": "open_window %r produced no visible Directional Scanner window or panel (cmd=%s)" % (raw_target, mname),
+                }
+            via_msg = "uicore.cmd.%s (retried after toggle-close)" % mname if retried else "uicore.cmd.%s" % mname
+            return {
+                "ok": True,
+                "opened_via": "%s (%s)" % (via_msg, ds_kind),
+                "opened_window_count": len(opened_vis_ids) if opened_vis_ids else 1,
+            }
 
         if require_open and not _verify_matching_surface_open(pre_sec_view=pre_sec_view, opened_vis_ids=opened_vis_ids):
             return {
@@ -5756,6 +6034,30 @@ def _execute_action(sm, action):
                             elif hasattr(nc_c, "Hide"):
                                 nc_c.Hide()
                             closed.append("notifications")
+                except Exception:
+                    pass
+                try:
+                    if t_norm and _target_matches_window(t_norm, "directionalScannerWindow", "Directional Scanner", "DirectionalScannerPalette"):
+                        ds_kind_c, ds_cont_c, ds_host_c, _ = _find_directional_scanner_surface(uicore, include_minimized=True)
+                        if ds_kind_c == "embedded" and ds_cont_c is not None:
+                            mv_c = getattr(ds_host_c, "mapView", None) if ds_host_c is not None else None
+                            if mv_c is not None and hasattr(mv_c, "CloseDirectionalScannerPalette"):
+                                mv_c.CloseDirectionalScannerPalette()
+                            elif mv_c is not None and hasattr(mv_c, "ToggleDirectionalScanner"):
+                                mv_c.ToggleDirectionalScanner()
+                            elif hasattr(ds_cont_c, "Close"):
+                                ds_cont_c.Close()
+                            else:
+                                ds_cont_c.display = False
+                            closed.append("directionalScannerWindow")
+                        elif ds_kind_c == "standalone" and ds_cont_c is not None and not any("directionalscanner" in _normalize_window_tok(c) for c in closed):
+                            if hasattr(ds_cont_c, "CloseByUser"):
+                                ds_cont_c.CloseByUser()
+                            elif hasattr(ds_cont_c, "Close"):
+                                ds_cont_c.Close()
+                            else:
+                                ds_cont_c.display = False
+                            closed.append("directionalScannerWindow")
                 except Exception:
                     pass
                 try:
