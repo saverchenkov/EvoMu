@@ -51,6 +51,13 @@ fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<
     let corp_id = session.corporation_id.unwrap_or(0);
     let now_unix = ctx.now_unix();
     let ok = ctx.db.with_snapshot(|snap| {
+        if corp_id <= 0
+            || (1_000_000..2_000_000).contains(&corp_id)
+            || ctx.sde.npc_corporations.contains_key(&corp_id)
+            || !snap.corporations.contains_key(&corp_id)
+        {
+            return false;
+        }
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
         is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
@@ -1428,30 +1435,98 @@ fn handle_get_alliance_applications(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let caller_corp = require_corp_director(ctx, session)?;
     let target_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
-    let caller_corp = session.corporation_id.filter(|&id| id > 0);
-    let caller_alliance = session.alliance_id.filter(|&id| id > 0);
-    if let Some(aid) = target_aid.or(caller_alliance) {
+    let (caller_alliance, mut executor_aids, snap_target_exec, snap_target_exists) =
+        ctx.db.with_snapshot(|snap| {
+            let caller_alliance = snap
+                .corporations
+                .get(&caller_corp)
+                .and_then(|c| c.alliance_id)
+                .or_else(|| {
+                    snap.alliances
+                        .values()
+                        .find(|a| a.member_corp_ids.contains(&caller_corp))
+                        .map(|a| a.alliance_id)
+                });
+            let executor_aids: std::collections::HashSet<i64> = snap
+                .alliances
+                .values()
+                .filter(|a| a.executor_corp_id == caller_corp)
+                .map(|a| a.alliance_id)
+                .collect();
+            let target_rec = target_aid.and_then(|aid| snap.alliances.get(&aid));
+            let target_exec = target_rec.is_some_and(|a| a.executor_corp_id == caller_corp);
+            (caller_alliance, executor_aids, target_exec, target_rec.is_some())
+        });
+
+    let sync_ids: Vec<i64> = read_alliance_war_state(ctx, |st| -> Result<Vec<i64>, BridgeRpcError> {
+        match target_aid {
+            Some(aid) => {
+                let war_entry = st.alliances.get(&aid);
+                if !snap_target_exists && war_entry.is_none() {
+                    return Err(crate::services::account_services::err(
+                        "AllianceNotFound",
+                        format!("Alliance {aid} not found"),
+                    ));
+                }
+                let is_member = caller_alliance == Some(aid);
+                let has_own_corp_app = war_entry
+                    .is_some_and(|m| m.applications.iter().any(|(cid, ..)| *cid == caller_corp));
+                if !snap_target_exec && !is_member && !has_own_corp_app {
+                    return Err(crate::services::account_services::err(
+                        "CrpAccessDenied",
+                        format!("Not authorized to view applications for alliance {aid}"),
+                    ));
+                }
+                Ok(if war_entry.is_some() { vec![aid] } else { Vec::new() })
+            }
+            None => {
+                let mut ids: Vec<i64> = st
+                    .alliances
+                    .iter()
+                    .filter(|(&aid, m)| {
+                        executor_aids.contains(&aid)
+                            || caller_alliance == Some(aid)
+                            || m.applications.iter().any(|(cid, ..)| *cid == caller_corp)
+                    })
+                    .map(|(&aid, _)| aid)
+                    .collect();
+                ids.sort_unstable();
+                Ok(ids)
+            }
+        }
+    })?;
+
+    for aid in sync_ids {
         let _ = sync_alliance_timers(ctx, aid);
-    } else {
-        sync_all_alliance_timers(ctx);
     }
+
+    executor_aids = ctx.db.with_snapshot(|snap| {
+        snap.alliances
+            .values()
+            .filter(|a| a.executor_corp_id == caller_corp)
+            .map(|a| a.alliance_id)
+            .collect()
+    });
+
     let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
         let mut out = Vec::new();
-        let mut alliance_ids: Vec<i64> = match target_aid {
+        let alliance_ids: Vec<i64> = match target_aid {
             Some(aid) => vec![aid],
-            None => st.alliances.keys().copied().collect(),
+            None => {
+                let mut ids: Vec<i64> = st.alliances.keys().copied().collect();
+                ids.sort_unstable();
+                ids
+            }
         };
-        alliance_ids.sort_unstable();
         for aid in alliance_ids {
             let Some(m) = st.alliances.get(&aid) else {
                 continue;
             };
-            let is_own_alliance = caller_alliance == Some(aid);
+            let is_executor = executor_aids.contains(&aid);
             for (cid, msg, ts, status, eff) in &m.applications {
-                let is_own_corp = caller_corp == Some(*cid);
-                if !is_own_alliance && !is_own_corp {
+                if !is_executor && caller_corp != *cid {
                     continue;
                 }
                 out.push(vec![

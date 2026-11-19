@@ -394,46 +394,90 @@ pub fn handle(
     if service == "marketProxy" {
         match method {
             "StartupCheck" => {
+                if let Err(e) = ServerContext::require_character(session) {
+                    return Some(Err(e));
+                }
                 let now_unix = ctx.now_unix();
                 let station_id = session.station_id.unwrap_or(JITA_STATION_ID);
                 let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
-                let ( npc_count, swept_list ) = ctx.db.with_mut_snapshot(|snap| {
-                    // 1. Replenish depleted NPC seeded orders (`feat:market.npc-seeded-orders`)
-                    let npc_meta = MarketOrderMeta { range: 32767, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
-                    let npc_ids: Vec<i64> = snap
+                let (needs_mutation, cached_npc_count) = ctx.db.with_snapshot(|snap| {
+                    let has_depleted_npc = snap
                         .market_orders
                         .values()
-                        .filter(|o| o.is_npc && o.vol_remaining < o.vol_entered)
-                        .map(|o| o.order_id)
-                        .collect();
-                    for oid in npc_ids {
-                        if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
-                            o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
+                        .any(|o| o.is_npc && o.vol_remaining < o.vol_entered);
+                    let needs_sleeper_seed = SLEEPER_BLUE_LOOT_ORDERS.iter().any(|&(loot_tid, _)| {
+                        [(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)]
+                            .iter()
+                            .any(|&(st_id, _)| {
+                                !snap.market_orders.values().any(|o| {
+                                    o.is_npc
+                                        && o.is_bid
+                                        && o.type_id == loot_tid
+                                        && o.station_id == st_id
+                                        && o.vol_remaining > 0
+                                })
+                            })
+                    });
+                    let has_expired = snap.market_orders.values().any(|o| {
+                        if o.is_npc || o.vol_remaining <= 0 {
+                            return false;
                         }
-                        save_market_order_meta(snap, oid, npc_meta);
-                    }
-                    // 2. Seed permanent NPC buy orders for Sleeper blue loot (`feat:market.npc-buy-orders-sleeper-loot`)
-                    for &(loot_tid, price_isk) in SLEEPER_BLUE_LOOT_ORDERS {
-                        for &(st_id, reg_id) in &[(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)] {
-                            let exists = snap.market_orders.values().any(|o| o.is_npc && o.is_bid && o.type_id == loot_tid && o.station_id == st_id && o.vol_remaining > 0);
-                            if !exists {
-                                snap.next_entity_id += 1;
-                                let new_oid = snap.next_entity_id;
-                                snap.market_orders.insert(new_oid, MarketOrderRecord {
-                                    order_id: new_oid, owner_id: 1_000_125, station_id: st_id, region_id: reg_id,
-                                    type_id: loot_tid, is_bid: true, price: IskCents::from_isk(price_isk),
-                                    vol_entered: 1_000_000, vol_remaining: 1_000_000, min_volume: 1, is_npc: true, escrow: IskCents(0),
-                                });
-                                save_market_order_meta(snap, new_oid, npc_meta);
+                        if !snap.market_order_meta.contains_key(&o.order_id)
+                            && !snap.owner_notes.contains_key(
+                                &-(4_000_000_000_000_i64.saturating_add(o.order_id.abs())),
+                            )
+                        {
+                            return false;
+                        }
+                        let meta = load_market_order_meta(snap, o, now_unix);
+                        let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
+                        meta.issue_unix.saturating_add(dur_secs) <= now_unix
+                    });
+                    let npc_count = snap.market_orders.values().filter(|o| o.is_npc).count() as i64;
+                    (has_depleted_npc || needs_sleeper_seed || has_expired, npc_count)
+                });
+                let (npc_count, swept_count) = if !needs_mutation {
+                    (cached_npc_count, 0)
+                } else {
+                    let (npc_count, swept_list) = ctx.db.with_mut_snapshot(|snap| {
+                        // 1. Replenish depleted NPC seeded orders (`feat:market.npc-seeded-orders`)
+                        let npc_meta = MarketOrderMeta { range: 32767, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
+                        let npc_ids: Vec<i64> = snap
+                            .market_orders
+                            .values()
+                            .filter(|o| o.is_npc && o.vol_remaining < o.vol_entered)
+                            .map(|o| o.order_id)
+                            .collect();
+                        for oid in npc_ids {
+                            if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
+                                o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
+                            }
+                            save_market_order_meta(snap, oid, npc_meta);
+                        }
+                        // 2. Seed permanent NPC buy orders for Sleeper blue loot (`feat:market.npc-buy-orders-sleeper-loot`)
+                        for &(loot_tid, price_isk) in SLEEPER_BLUE_LOOT_ORDERS {
+                            for &(st_id, reg_id) in &[(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)] {
+                                let exists = snap.market_orders.values().any(|o| o.is_npc && o.is_bid && o.type_id == loot_tid && o.station_id == st_id && o.vol_remaining > 0);
+                                if !exists {
+                                    snap.next_entity_id += 1;
+                                    let new_oid = snap.next_entity_id;
+                                    snap.market_orders.insert(new_oid, MarketOrderRecord {
+                                        order_id: new_oid, owner_id: 1_000_125, station_id: st_id, region_id: reg_id,
+                                        type_id: loot_tid, is_bid: true, price: IskCents::from_isk(price_isk),
+                                        vol_entered: 1_000_000, vol_remaining: 1_000_000, min_volume: 1, is_npc: true, escrow: IskCents(0),
+                                    });
+                                    save_market_order_meta(snap, new_oid, npc_meta);
+                                }
                             }
                         }
-                    }
-                    let swept = sweep_expired_orders(snap, now_unix);
-                    let total_npc = snap.market_orders.values().filter(|o| o.is_npc).count() as i64;
-                    (total_npc, swept)
-                });
-                let swept_count = swept_list.len() as i64;
-                emit_expired_order_notifications(ctx, &swept_list);
+                        let swept = sweep_expired_orders(snap, now_unix);
+                        let total_npc = snap.market_orders.values().filter(|o| o.is_npc).count() as i64;
+                        (total_npc, swept)
+                    });
+                    let swept_count = swept_list.len() as i64;
+                    emit_expired_order_notifications(ctx, &swept_list);
+                    (npc_count, swept_count)
+                };
                 return Some(Ok(PyRep::keyval([
                     ("status", PyRep::String("ok".into())),
                     ("npcOrdersActive", PyRep::Integer(npc_count)),
@@ -1706,15 +1750,39 @@ pub fn handle(
                 Ok(None) => match rpc.req_positive_i64(0, "containerID") { Ok(v) => v, Err(e) => return Some(Err(e)) },
                 Err(e) => return Some(Err(e)),
             };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.items.values().filter(|i| i.location_id == container_id && (i.owner_id == char_id || Some(i.owner_id) == session.corporation_id))
-                    .map(|i| PyRep::keyval([
-                        ("itemID", PyRep::Integer(i.item_id)), ("typeID", PyRep::Integer(i.type_id as i64)),
-                        ("stacksize", PyRep::Integer(i.quantity as i64)), ("flagID", PyRep::Integer(i.flag as i64)),
-                        ("singleton", PyRep::Integer(i32::from(i.singleton) as i64)),
-                    ])).collect::<Vec<_>>()
+            let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(items) = inspect_contract_container_items(
+                    ctx,
+                    snap,
+                    session,
+                    char_id,
+                    container_id,
+                    location_hint,
+                    for_corp,
+                    req_flag_num,
+                    now_unix,
+                )? else {
+                    return Ok(Vec::new());
+                };
+                Ok(items
+                    .into_iter()
+                    .map(|i| {
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(i.item_id)),
+                            ("typeID", PyRep::Integer(i.type_id as i64)),
+                            ("stacksize", PyRep::Integer(i.quantity as i64)),
+                            ("flagID", PyRep::Integer(i.flag as i64)),
+                            ("singleton", PyRep::Integer(i32::from(i.singleton) as i64)),
+                        ])
+                    })
+                    .collect::<Vec<_>>())
             });
-            Some(Ok(PyRep::List(rows)))
+            Some(res.map(PyRep::List))
         }
         ("contractProxy", "GetItemsInDockableLocation") => {
             Some(crate::services::sov_services::handle_contract_get_items_in_dockable(ctx, session, args))
@@ -1734,23 +1802,398 @@ pub fn handle(
         }
         ("contractProxy", "GetNumItemsInContainers") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
+            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs")) {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|v| v.as_i64()).collect(),
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
-            let corp_id = session.corporation_id;
-            let pairs = ctx.db.with_snapshot(|snap| {
-                cids.into_iter().filter(|cid| snap.items.get(cid).is_some_and(|c| c.owner_id == char_id || Some(c.owner_id) == corp_id)).map(|cid| {
-                    let cnt = snap.items.values().filter(|i| i.location_id == cid && (i.owner_id == char_id || Some(i.owner_id) == corp_id)).count() as i64;
-                    (PyRep::Integer(cid), PyRep::Integer(cnt))
-                }).collect()
+            if cids.is_empty() || cids.iter().any(|&cid| cid <= 0) {
+                return Some(Err(rpc_err("InvalidContainer", "containerID must be positive")));
+            }
+            let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.with_snapshot(|snap| {
+                let mut pairs = Vec::with_capacity(cids.len());
+                for cid in cids {
+                    if let Some(items) = inspect_contract_container_items(
+                        ctx,
+                        snap,
+                        session,
+                        char_id,
+                        cid,
+                        location_hint,
+                        for_corp,
+                        req_flag_num,
+                        now_unix,
+                    )? {
+                        pairs.push((PyRep::Integer(cid), PyRep::Integer(items.len() as i64)));
+                    }
+                }
+                Ok(PyRep::Dict(pairs))
             });
-            Some(Ok(PyRep::Dict(pairs)))
+            Some(res)
         }
 
         _ => None,
     }
+}
+
+/// Extracts `(location_hint, for_corp, flag_num)` for `contractProxy` container queries.
+fn parse_contract_container_query_opts(
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<(Option<i64>, bool, Option<i64>), BridgeRpcError> {
+    let rpc = RpcArgs::new(args, kwargs);
+    let for_corp = rpc.opt_boolish(2, "forCorp")?.unwrap_or(false);
+    let flag_num = rpc.opt_i64(3, "flag")?;
+    let location_hint = if rpc.get_raw_any(1, &["containerID", "containerIDs"]).is_some() {
+        rpc.get_raw(0, "locationID")
+            .and_then(PyRep::as_i64)
+            .filter(|&v| v > 0)
+    } else {
+        None
+    };
+    Ok((location_hint, for_corp, flag_num))
+}
+
+fn is_npc_corp_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    (1_000_000..2_000_000).contains(&corp_id) || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+/// Returns `true` when `flag_num` names a corporate hangar division (`CorpSAG1..7`) or deliveries bay.
+fn is_corp_division_or_deliveries_flag(flag_num: i64) -> bool {
+    (116..=122).contains(&flag_num)
+        || flag_num == InventoryFlag::CorpDeliveries as i64
+        || flag_num == InventoryFlag::Deliveries as i64
+}
+
+/// Walks up to 8 parent item hops from `start_id` to resolve `(root_location_id, enclosing_division_flag)`.
+fn resolve_corp_container_context(
+    snap: &eve_db::WorldStateSnapshot,
+    start_id: i64,
+) -> (Option<i64>, Option<i64>) {
+    let mut cur_id = start_id;
+    let mut enclosing_div_flag: Option<i64> = None;
+    let mut root_loc: Option<i64> = None;
+    for _ in 0..8 {
+        if let Some(item) = snap.items.get(&cur_id) {
+            let f = item.flag as i64;
+            if enclosing_div_flag.is_none() && is_corp_division_or_deliveries_flag(f) {
+                enclosing_div_flag = Some(f);
+            }
+            if item.location_id <= 0 || item.location_id == cur_id {
+                break;
+            }
+            cur_id = item.location_id;
+            root_loc = Some(cur_id);
+        } else {
+            if root_loc.is_none() {
+                root_loc = Some(cur_id);
+            }
+            break;
+        }
+    }
+    (root_loc, enclosing_div_flag)
+}
+
+/// Verifies whether `char_id` holds query access to corporate items with `flag_num`.
+fn check_corp_container_query_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+    flag_num: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if corp_id <= 0 || is_npc_corp_id(ctx, corp_id) {
+        return Err(rpc_err(
+            "CorpRoleDenied",
+            "Cannot query corporate contract containers for an NPC corporation",
+        ));
+    }
+    if !snap.corporations.contains_key(&corp_id) {
+        return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
+    }
+    let resolved_loc = location_id.and_then(|loc| resolve_corp_container_context(snap, loc).0.or(Some(loc)));
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(corp_id, char_id, resolved_loc, session.corp_role, now_unix);
+    let allowed = if is_ceo || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR) {
+        true
+    } else if (116..=122).contains(&flag_num) {
+        let div_idx = (flag_num - 116) as usize;
+        eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx])
+    } else if flag_num == InventoryFlag::CorpDeliveries as i64 || flag_num == InventoryFlag::Deliveries as i64 {
+        eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY)
+    } else {
+        false
+    };
+    if !allowed {
+        return Err(rpc_err(
+            "CorpRoleDenied",
+            "Querying corporate container items requires hangar query or Director role",
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves authorized contract container contents, returning `Ok(None)` for unowned/unpopulated containers when `for_corp` is false.
+#[allow(clippy::too_many_arguments)]
+fn inspect_contract_container_items<'a>(
+    ctx: &ServerContext,
+    snap: &'a eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    container_id: i64,
+    location_hint: Option<i64>,
+    for_corp: bool,
+    req_flag_num: Option<i64>,
+    now_unix: u64,
+) -> Result<Option<Vec<&'a InventoryItemRecord>>, BridgeRpcError> {
+    let caller_corp = session
+        .corporation_id
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        .filter(|&id| id > 0);
+    let div_filter = req_flag_num.filter(|&f| is_corp_division_or_deliveries_flag(f));
+    if for_corp {
+        let corp_id = caller_corp.ok_or_else(|| {
+            rpc_err("CorpRoleDenied", "Cannot query corporate containers without a corporation")
+        })?;
+        if is_npc_corp_id(ctx, corp_id) {
+            return Err(rpc_err(
+                "CorpRoleDenied",
+                "Cannot query corporate contract containers for an NPC corporation",
+            ));
+        }
+        if !snap.corporations.contains_key(&corp_id) {
+            return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
+        }
+        if let Some(req_div) = div_filter {
+            check_corp_container_query_access(
+                ctx,
+                snap,
+                session,
+                corp_id,
+                char_id,
+                location_hint,
+                req_div,
+                now_unix,
+            )?;
+        }
+    }
+    if let Some(cont) = snap.items.get(&container_id) {
+        if cont.owner_id == char_id && !for_corp {
+            let items = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == container_id
+                        && (i.owner_id == char_id
+                            || caller_corp.is_some_and(|cid| {
+                                i.owner_id == cid && {
+                                    let (root_loc, enc_div) = resolve_corp_container_context(snap, i.item_id);
+                                    let eff_flag = if is_corp_division_or_deliveries_flag(i.flag as i64) {
+                                        i.flag as i64
+                                    } else {
+                                        enc_div.unwrap_or(i.flag as i64)
+                                    };
+                                    div_filter.is_none_or(|rf| rf == eff_flag)
+                                        && check_corp_container_query_access(
+                                            ctx,
+                                            snap,
+                                            session,
+                                            cid,
+                                            char_id,
+                                            root_loc.or(Some(i.location_id)),
+                                            eff_flag,
+                                            now_unix,
+                                        )
+                                        .is_ok()
+                                }
+                            }))
+                })
+                .collect();
+            return Ok(Some(items));
+        }
+        if caller_corp.is_some_and(|cid| cont.owner_id == cid) {
+            let (walked_loc, enclosing_div) = resolve_corp_container_context(snap, cont.item_id);
+            let root_loc = walked_loc.or(location_hint).or(Some(cont.location_id));
+            // Corporate offices (`type_id == 27`) hold multiple divisions, so each child authorizes via its own flag.
+            let cont_div = enclosing_div.filter(|_| cont.type_id != 27);
+            if let Some(cd) = cont_div {
+                check_corp_container_query_access(
+                    ctx,
+                    snap,
+                    session,
+                    cont.owner_id,
+                    char_id,
+                    root_loc,
+                    cd,
+                    now_unix,
+                )?;
+            }
+            let mut visible = Vec::new();
+            let mut has_corp_candidates = false;
+            let mut first_denied: Option<BridgeRpcError> = None;
+            for i in snap.items.values().filter(|i| i.location_id == container_id) {
+                if !for_corp && i.owner_id == char_id && i.owner_id != cont.owner_id {
+                    if div_filter.is_none() {
+                        visible.push(i);
+                    }
+                    continue;
+                }
+                if i.owner_id != cont.owner_id {
+                    continue;
+                }
+                let item_flag = if is_corp_division_or_deliveries_flag(i.flag as i64) {
+                    i.flag as i64
+                } else {
+                    cont_div.unwrap_or(i.flag as i64)
+                };
+                if div_filter.is_some_and(|rf| rf != item_flag) {
+                    continue;
+                }
+                has_corp_candidates = true;
+                if cont_div.is_some_and(|cd| cd == item_flag) {
+                    visible.push(i);
+                    continue;
+                }
+                match check_corp_container_query_access(
+                    ctx,
+                    snap,
+                    session,
+                    cont.owner_id,
+                    char_id,
+                    root_loc,
+                    item_flag,
+                    now_unix,
+                ) {
+                    Ok(()) => visible.push(i),
+                    Err(e) if first_denied.is_none() => first_denied = Some(e),
+                    Err(_) => {}
+                }
+            }
+            if !visible.is_empty() {
+                return Ok(Some(visible));
+            }
+            if let Some(err) = first_denied {
+                return Err(err);
+            }
+            if !has_corp_candidates && cont_div.is_none() {
+                let fallback_flag = div_filter.unwrap_or(cont.flag as i64);
+                check_corp_container_query_access(
+                    ctx,
+                    snap,
+                    session,
+                    cont.owner_id,
+                    char_id,
+                    root_loc,
+                    fallback_flag,
+                    now_unix,
+                )?;
+            }
+            return Ok(Some(Vec::new()));
+        }
+        if for_corp {
+            let corp_id = caller_corp.expect("checked for_corp above");
+            check_corp_container_query_access(
+                ctx,
+                snap,
+                session,
+                corp_id,
+                char_id,
+                location_hint,
+                req_flag_num.unwrap_or(InventoryFlag::None as i64),
+                now_unix,
+            )?;
+        }
+        return Ok(None);
+    }
+
+    let personal_items: Vec<&InventoryItemRecord> = if for_corp || div_filter.is_some() {
+        Vec::new()
+    } else {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == container_id && i.owner_id == char_id)
+            .collect()
+    };
+    let corp_items: Vec<(&InventoryItemRecord, Option<i64>, i64)> = snap
+        .items
+        .values()
+        .filter(|i| i.location_id == container_id && caller_corp.is_some_and(|cid| i.owner_id == cid))
+        .filter_map(|i| {
+            let (root_loc, enc_div) = resolve_corp_container_context(snap, i.item_id);
+            let eff_flag = if is_corp_division_or_deliveries_flag(i.flag as i64) {
+                i.flag as i64
+            } else {
+                enc_div.unwrap_or(i.flag as i64)
+            };
+            if div_filter.is_some_and(|rf| rf != eff_flag) {
+                None
+            } else {
+                Some((i, root_loc.or(location_hint).or(Some(i.location_id)), eff_flag))
+            }
+        })
+        .collect();
+    if personal_items.is_empty() && corp_items.is_empty() {
+        if is_npc_corp_id(ctx, container_id) || snap.corporations.contains_key(&container_id) {
+            return Err(rpc_err(
+                "CorpRoleDenied",
+                "Cannot query corporate container contents without corporation ownership and query role",
+            ));
+        }
+        if snap.characters.contains_key(&container_id) && container_id != char_id {
+            return Err(rpc_err(
+                "AccessDenied",
+                "Cannot query containers belonging to another character",
+            ));
+        }
+        if for_corp {
+            let corp_id = caller_corp.expect("checked for_corp above");
+            check_corp_container_query_access(
+                ctx,
+                snap,
+                session,
+                corp_id,
+                char_id,
+                location_hint,
+                req_flag_num.unwrap_or(InventoryFlag::None as i64),
+                now_unix,
+            )?;
+        }
+        return Ok(None);
+    }
+    let mut visible = personal_items;
+    if !corp_items.is_empty() {
+        let mut first_denied: Option<BridgeRpcError> = None;
+        for (item, root_loc, eff_flag) in corp_items {
+            match check_corp_container_query_access(
+                ctx,
+                snap,
+                session,
+                item.owner_id,
+                char_id,
+                root_loc,
+                eff_flag,
+                now_unix,
+            ) {
+                Ok(()) => visible.push(item),
+                Err(e) if first_denied.is_none() => first_denied = Some(e),
+                Err(_) => {}
+            }
+        }
+        if visible.is_empty() {
+            if let Some(err) = first_denied {
+                return Err(err);
+            }
+        }
+    }
+    Ok(Some(visible))
 }
 
 #[cfg(test)]

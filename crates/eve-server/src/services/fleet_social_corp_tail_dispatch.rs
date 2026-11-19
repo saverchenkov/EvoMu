@@ -20,19 +20,22 @@ pub fn handle_corp_gov_tail(
     char_id: i64,
     now_unix: u64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (has_director, has_comms) = ctx.db.with_snapshot(|snap| {
-        if !snap.corporations.contains_key(&corp_id) {
-            return (false, false);
+    let (has_director, has_personnel, has_comms) = ctx.db.with_snapshot(|snap| {
+        if corp_id <= 0
+            || (1_000_000..2_000_000).contains(&corp_id)
+            || ctx.sde.npc_corporations.contains_key(&corp_id)
+            || !snap.corporations.contains_key(&corp_id)
+        {
+            return (false, false, false);
         }
         let (is_ceo, eff_roles) =
             crate::services::social_corp_fleet::social_corp_projects::effective_corp_member_roles(
                 snap, corp_id, char_id, 0, now_unix,
             );
         let dir = is_ceo || (eff_roles & corp_roles::ROLE_DIRECTOR) != 0;
-        let comms = dir
-            || (eff_roles & (corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_CHAT_MANAGER))
-                != 0;
-        (dir, comms)
+        let personnel = dir || (eff_roles & corp_roles::ROLE_PERSONNEL_MANAGER) != 0;
+        let comms = personnel || (eff_roles & corp_roles::ROLE_CHAT_MANAGER) != 0;
+        (dir, personnel, comms)
     });
     let deny_role = |msg: &'static str| -> Option<Result<PyRep, BridgeRpcError>> {
         Some(Err(BridgeRpcError {
@@ -44,6 +47,11 @@ pub fn handle_corp_gov_tail(
 
     match (service, method) {
         ("corpRegistry", "GetPendingAutoKicks") => {
+            if !has_personnel {
+                return deny_role(
+                    "Viewing pending auto-kicks requires Personnel Manager or Director role",
+                );
+            }
             let mut pending: Vec<(i64, u64)> = ctx.db.with_snapshot(|snap| {
                 snap.corp_governance
                     .get(&corp_id)
@@ -135,6 +143,11 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "GetCorpWelcomeMail") => {
+            if !has_comms {
+                return deny_role(
+                    "Viewing corporation welcome mail requires Personnel Manager, Communications Officer, or Director role",
+                );
+            }
             let (enabled, subject, body) = ctx.db.with_snapshot(|snap| {
                 snap.corp_governance
                     .get(&corp_id)
@@ -347,28 +360,39 @@ pub fn handle_corp_gov_tail(
         }
 
         ("corpRegistry", "UpdateAttributes") | ("corpRegistry", "UpdateCorporationAbilities") => {
+            if corp_id <= 0
+                || (1_000_000..2_000_000).contains(&corp_id)
+                || ctx.sde.npc_corporations.contains_key(&corp_id)
+            {
+                return deny_role(
+                    "Cannot update corporation attributes for an NPC corporation",
+                );
+            }
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut skills_owner_id = char_id;
                 let (is_ceo, caller_role) =
                     snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
-                if let Some(corp) = snap.corporations.get(&corp_id) {
-                    if corp.ceo_id != 0
-                        && !is_ceo
-                        && !eve_db::corp_roles::has_role(
-                            caller_role,
-                            eve_db::corp_roles::ROLE_DIRECTOR,
-                        )
-                    {
-                        return Err(BridgeRpcError {
-                            code: "CorpRoleDenied".into(),
-                            message: "Updating corporation attributes requires CEO or Director role".into(),
-                            client_error: None,
-                        });
-                    }
-                    if corp.ceo_id > 0 && snap.skills.contains_key(&corp.ceo_id) {
-                        skills_owner_id = corp.ceo_id;
-                    }
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return Err(crate::services::account_services::err(
+                        "CorporationNotFound",
+                        format!("Corporation {corp_id} not found"),
+                    ));
+                };
+                if corp.ceo_id != 0
+                    && !is_ceo
+                    && !eve_db::corp_roles::has_role(
+                        caller_role,
+                        eve_db::corp_roles::ROLE_DIRECTOR,
+                    )
+                {
+                    return Err(crate::services::account_services::err(
+                        "CorpRoleDenied",
+                        "Updating corporation attributes requires CEO or Director role",
+                    ));
+                }
+                if corp.ceo_id > 0 && snap.skills.contains_key(&corp.ceo_id) {
+                    skills_owner_id = corp.ceo_id;
                 }
                 let member_limit = crate::domain::corp_governance::corp_member_limit_from_skills(
                     &ctx.sde,

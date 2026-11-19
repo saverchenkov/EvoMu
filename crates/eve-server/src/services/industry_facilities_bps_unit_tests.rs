@@ -924,6 +924,124 @@ fn get_blueprint_data_fails_closed_and_owner_omits_when_solar_system_unresolvabl
     assert!(by_type_err.message.contains("Cannot resolve solar system"));
 }
 
+#[test]
+fn get_blueprint_data_enforces_corp_bp_roles_and_rejects_npc_corp() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let st_id = 60_003_760;
+    let bp_type_id = *ctx.sde.blueprints.keys().min().expect("at least one blueprint in SDE");
+    let corp_id = 98_000_821;
+    let foreign_corp_id = 98_000_822;
+    let npc_corp_id = 1_000_009;
+    let ceo_id = 2_000_821;
+    let factory_id = 2_000_822;
+    let rent_fac_id = 2_000_823;
+    let rent_res_id = 2_000_824;
+    let station_mgr_id = 2_000_825;
+    let plain_id = 2_000_826;
+    let foreign_id = 2_000_827;
+    let corp_bp_id = 9_200_821;
+    let npc_bp_id = 9_200_822;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "BpRbacCorp".into();
+        corp.ticker = "BPRB".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([
+            ceo_id,
+            factory_id,
+            rent_fac_id,
+            rent_res_id,
+            station_mgr_id,
+            plain_id,
+        ]);
+        corp.member_roles.insert(factory_id, corp_roles::ROLE_FACTORY_MANAGER);
+        corp.member_roles.insert(rent_fac_id, corp_roles::ROLE_RENT_FACTORY_FACILITY);
+        corp.member_roles.insert(rent_res_id, corp_roles::ROLE_RENT_RESEARCH_FACILITY);
+        corp.member_roles.insert(station_mgr_id, corp_roles::ROLE_STATION_MANAGER);
+        snap.corporations.insert(corp_id, corp);
+
+        snap.items.insert(
+            corp_bp_id,
+            InventoryItemRecord {
+                item_id: corp_bp_id,
+                type_id: bp_type_id,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            npc_bp_id,
+            InventoryItemRecord {
+                item_id: npc_bp_id,
+                type_id: bp_type_id,
+                owner_id: npc_corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    for allowed_char in [ceo_id, factory_id, rent_fac_id, rent_res_id] {
+        let mut sess = char_session(allowed_char, st_id);
+        sess.corporation_id = Some(corp_id);
+        let rep = handle_industry_facilities_bps(
+            &ctx,
+            &mut sess,
+            "blueprintManager",
+            "GetBlueprintData",
+            &[PyRep::Integer(corp_bp_id)],
+            &kw,
+        )
+        .unwrap()
+        .expect("authorized corp blueprint query must succeed");
+        assert_eq!(rep.dict_get("itemID"), Some(&PyRep::Integer(corp_bp_id)));
+    }
+
+    for (denied_char, cid) in [
+        (plain_id, corp_id),
+        (station_mgr_id, corp_id),
+        (foreign_id, foreign_corp_id),
+    ] {
+        let mut sess = char_session(denied_char, st_id);
+        sess.corporation_id = Some(cid);
+        let err = handle_industry_facilities_bps(
+            &ctx,
+            &mut sess,
+            "blueprintManager",
+            "GetBlueprintData",
+            &[PyRep::Integer(corp_bp_id)],
+            &kw,
+        )
+        .unwrap()
+        .expect_err("member without CORP_BP_ROLES or foreign pilot must be denied");
+        assert_eq!(err.code, "CrpAccessDenied");
+    }
+
+    let mut npc_sess = char_session(plain_id, st_id);
+    npc_sess.corporation_id = Some(npc_corp_id);
+    let npc_err = handle_industry_facilities_bps(
+        &ctx,
+        &mut npc_sess,
+        "blueprintManager",
+        "GetBlueprintData",
+        &[PyRep::Integer(npc_bp_id)],
+        &kw,
+    )
+    .unwrap()
+    .expect_err("NPC corp blueprint must not be exposed as corp-owned");
+    assert_eq!(npc_err.code, "CrpAccessDenied");
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;

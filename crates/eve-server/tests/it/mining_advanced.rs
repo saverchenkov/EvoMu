@@ -119,10 +119,15 @@ async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
     let mut sess = create_auth_session(&ctx, 1301).await;
 
     let structure_id = 1_040_000_000_131_i64;
-    let corp_id = 1_000_170_i64;
+    let corp_id = 98_000_001_i64;
     let system_id = 30_000_142_u32;
 
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = corp_id;
+        }
         snap.structures.insert(
             structure_id,
             make_structure(structure_id, 35835, corp_id, system_id, "Jita IV Moon Drill", [100_000.0, 50_000.0, -200_000.0], 500),

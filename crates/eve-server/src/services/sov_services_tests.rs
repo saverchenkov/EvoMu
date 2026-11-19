@@ -1493,6 +1493,146 @@ async fn destroy_skyhooks_and_sov_lookups_ignore_destroyed_tombstones() {
     assert_eq!(after_skyhooks, PyRep::List(Vec::new()));
 }
 
+#[tokio::test]
+async fn get_my_corporation_skyhooks_enforces_station_manager_or_director_and_rejects_npc() {
+    let ctx = test_ctx();
+    let sys_id = 30_000_142;
+    let corp_id = 98_000_841;
+    let npc_corp_id = 1_000_009;
+    let ceo_id = 90_000_841;
+    let mgr_id = 90_000_842;
+    let dir_id = 90_000_843;
+    let plain_id = 90_000_844;
+    let npc_char_id = 90_000_845;
+    let skyhook_id = 1_090_000_841;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "SkyhookRbacCorp".into();
+        corp.ticker = "SHRB".into();
+        corp.ceo_id = ceo_id;
+        corp.members.extend([ceo_id, mgr_id, dir_id, plain_id]);
+        corp.member_roles
+            .insert(mgr_id, eve_db::corp_roles::ROLE_STATION_MANAGER);
+        corp.member_roles
+            .insert(dir_id, eve_db::corp_roles::ROLE_DIRECTOR);
+        snap.corporations.insert(corp_id, corp);
+
+        for (cid, coid) in [
+            (ceo_id, corp_id),
+            (mgr_id, corp_id),
+            (dir_id, corp_id),
+            (plain_id, corp_id),
+            (npc_char_id, npc_corp_id),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    solar_system_id: sys_id,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.structures.insert(
+            skyhook_id,
+            UpwellStructureRecord {
+                structure_id: skyhook_id,
+                type_id: TYPE_ORBITAL_SKYHOOK,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "RBAC Skyhook".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+    });
+
+    for (cid, label) in [(ceo_id, "ceo"), (mgr_id, "station_mgr"), (dir_id, "director")] {
+        let mut sess = sov_session(cid, corp_id, sys_id, None);
+        let PyRep::List(rows) = handle(&ctx, &mut sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{label} must be permitted: {e:?}")) else {
+                panic!("expected list from GetMyCorporationSkyhooks");
+            };
+        assert_eq!(rows.len(), 1, "{label} should see corporate skyhook");
+    }
+
+    let mut plain_sess = sov_session(plain_id, corp_id, sys_id, None);
+    let plain_err = handle(&ctx, &mut plain_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(plain_err.code, "CorpRoleDenied");
+
+    let mut npc_sess = sov_session(npc_char_id, npc_corp_id, sys_id, None);
+    let npc_err = handle(&ctx, &mut npc_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(npc_err.code, "CorpRoleDenied");
+
+    // Non-member spoofing corp_id / session.corp_role is denied when corp.members is populated.
+    let outsider_id = 90_000_846;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            outsider_id,
+            eve_db::CharacterRecord {
+                character_id: outsider_id,
+                corporation_id: corp_id,
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+    });
+    let mut outsider_sess = sov_session(outsider_id, corp_id, sys_id, None);
+    outsider_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        handle(&ctx, &mut outsider_sess, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+
+    // Uninserted player corp >= 98M enforces session.corp_role (plain denied, Station Manager/Director allowed).
+    let uninserted_corp = 98_099_841;
+    let uninserted_char = 90_000_847;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            uninserted_char,
+            eve_db::CharacterRecord {
+                character_id: uninserted_char,
+                corporation_id: uninserted_corp,
+                solar_system_id: sys_id,
+                ..Default::default()
+            },
+        );
+    });
+    let mut uninserted_plain = sov_session(uninserted_char, uninserted_corp, sys_id, None);
+    assert_eq!(
+        handle(&ctx, &mut uninserted_plain, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    let mut uninserted_mgr = sov_session(uninserted_char, uninserted_corp, sys_id, None);
+    uninserted_mgr.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    assert!(
+        handle(&ctx, &mut uninserted_mgr, "colonyResourcesMgr", "GetMyCorporationSkyhooks", &[], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+}
+
 #[test]
 fn resolve_sov_hub_id_prefers_sov_hubs_registered_live_hub_over_unregistered() {
     use eve_db::durable_domain_types::PersistedSovHubData;

@@ -937,3 +937,286 @@ async fn alliance_bulletins_labels_war_kick_and_invbroker_deliveries_edges() {
     sync_all_alliance_timers(&ctx);
     ctx.db.with_snapshot(|snap| assert!(!snap.alliances.contains_key(&aid)));
 }
+
+#[tokio::test]
+async fn get_alliance_applications_enforces_director_and_blocks_npc_and_cross_corp_leaks() {
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_700_000_000));
+    let ctx = ServerContext::new();
+    ctx.set_clock(clock.clone());
+    let exec_corp = 98_100_901;
+    let applicant_corp = 98_100_902;
+    let bystander_corp = 98_100_903;
+    let member_corp = 98_100_904;
+    let exec_char = 91_000_901;
+    let dir_char = 91_000_902;
+    let plain_char = 91_000_903;
+    let applicant_ceo = 91_000_904;
+    let bystander_ceo = 91_000_905;
+    let npc_char = 91_000_906;
+    let member_ceo = 91_000_907;
+    let npc_corp = 1_000_009;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (corp_id, ceo_id, name, ticker) in [
+            (exec_corp, exec_char, "ExecRbac", "EXRB"),
+            (applicant_corp, applicant_ceo, "AppRbac", "APRB"),
+            (bystander_corp, bystander_ceo, "ByRbac", "BYRB"),
+            (member_corp, member_ceo, "MemRbac", "MMRB"),
+        ] {
+            let mut corp = eve_db::CorporationRecord::default();
+            corp.corporation_id = corp_id;
+            corp.name = name.into();
+            corp.ticker = ticker.into();
+            corp.ceo_id = ceo_id;
+            corp.wallet_divisions = CorporationRecord::default_wallet_divisions(IskCents::from_isk(5_000_000_000));
+            corp.members.insert(ceo_id);
+            if corp_id == exec_corp {
+                corp.members.extend([dir_char, plain_char]);
+                corp.member_roles
+                    .insert(dir_char, eve_db::corp_roles::ROLE_DIRECTOR);
+            }
+            snap.corporations.insert(corp_id, corp);
+        }
+    });
+
+    let mut exec_sess = SessionState {
+        user_id: Some(exec_char as u64),
+        character_id: Some(exec_char),
+        corporation_id: Some(exec_corp),
+        solar_system_id: Some(30_000_142),
+        station_id: Some(60_003_760),
+        ..Default::default()
+    };
+    let created = call_social(
+        &ctx,
+        &mut exec_sess,
+        "corpRegistry",
+        "CreateAlliance",
+        vec![
+            PyRep::String("RBAC Alliance".into()),
+            PyRep::String("RBAL".into()),
+            PyRep::String("desc".into()),
+            PyRep::String("https://rbac.example".into()),
+        ],
+    )
+    .await
+    .unwrap();
+    let aid = kv(&created, "allianceID").as_i64().unwrap();
+    exec_sess.alliance_id = Some(aid);
+
+    let mut app_sess = SessionState {
+        user_id: Some(applicant_ceo as u64),
+        character_id: Some(applicant_ceo),
+        corporation_id: Some(applicant_corp),
+        solar_system_id: Some(30_000_142),
+        station_id: Some(60_003_760),
+        ..Default::default()
+    };
+    call_social(
+        &ctx,
+        &mut app_sess,
+        "corpRegistry",
+        "ApplyToJoinAlliance",
+        vec![PyRep::Integer(aid), PyRep::String("App text".into())],
+    )
+    .await
+    .unwrap();
+
+    // Add a non-executor member corp and verify it cannot see incoming applications of other corps.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(a) = snap.alliances.get_mut(&aid) {
+            a.member_corp_ids.insert(member_corp);
+        }
+        if let Some(c) = snap.corporations.get_mut(&member_corp) {
+            c.alliance_id = Some(aid);
+        }
+    });
+    let mut member_sess = SessionState {
+        user_id: Some(member_ceo as u64),
+        character_id: Some(member_ceo),
+        corporation_id: Some(member_corp),
+        alliance_id: Some(aid),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+    for svc in ["corpRegistry", "allianceRegistry"] {
+        let m_all = call_social(&ctx, &mut member_sess, svc, "GetAllianceApplications", vec![])
+            .await
+            .unwrap();
+        assert_eq!(rs_rows(&m_all).len(), 0);
+        let m_targeted = call_social(
+            &ctx,
+            &mut member_sess,
+            svc,
+            "GetAllianceApplications",
+            vec![PyRep::Integer(aid)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rs_rows(&m_targeted).len(), 0);
+    }
+
+    // Exec director & applicant CEO succeed on both corpRegistry and allianceRegistry.
+    let mut dir_sess = SessionState {
+        user_id: Some(dir_char as u64),
+        character_id: Some(dir_char),
+        corporation_id: Some(exec_corp),
+        alliance_id: Some(aid),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+    for svc in ["corpRegistry", "allianceRegistry"] {
+        let dir_rows = call_social(&ctx, &mut dir_sess, svc, "GetAllianceApplications", vec![])
+            .await
+            .unwrap();
+        assert_eq!(rs_rows(&dir_rows).len(), 1);
+        let app_rows = call_social(
+            &ctx,
+            &mut app_sess,
+            svc,
+            "GetAllianceApplications",
+            vec![PyRep::Integer(aid)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rs_rows(&app_rows).len(), 1);
+    }
+
+    // Seed a due Accepted timer on `aid`; an unauthorized bystander query must NOT trigger sync_alliance_timers.
+    let due_corp = 98_100_905;
+    super::with_alliance_war_state(&ctx, |st| {
+        if let Some(m) = st.alliances.get_mut(&aid) {
+            m.applications.push((
+                due_corp,
+                "Due pending".into(),
+                1_700_000_000,
+                "Accepted".into(),
+                Some(1_700_000_010),
+            ));
+        }
+    });
+    clock.advance_secs(20);
+
+    // Roleless member in executor corp, NPC corp pilot, and foreign bystander corp are denied.
+    let mut plain_sess = SessionState {
+        user_id: Some(plain_char as u64),
+        character_id: Some(plain_char),
+        corporation_id: Some(exec_corp),
+        alliance_id: Some(aid),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+    let mut npc_sess = SessionState {
+        user_id: Some(npc_char as u64),
+        character_id: Some(npc_char),
+        corporation_id: Some(npc_corp),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+    let mut bystander_sess = SessionState {
+        user_id: Some(bystander_ceo as u64),
+        character_id: Some(bystander_ceo),
+        corporation_id: Some(bystander_corp),
+        solar_system_id: Some(30_000_142),
+        ..Default::default()
+    };
+
+    for svc in ["corpRegistry", "allianceRegistry"] {
+        assert_eq!(
+            call_social(&ctx, &mut plain_sess, svc, "GetAllianceApplications", vec![])
+                .await
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied"
+        );
+        assert_eq!(
+            call_social(&ctx, &mut npc_sess, svc, "GetAllianceApplications", vec![])
+                .await
+                .unwrap_err()
+                .code,
+            "CorpRoleDenied"
+        );
+        assert_eq!(
+            call_social(
+                &ctx,
+                &mut bystander_sess,
+                svc,
+                "GetAllianceApplications",
+                vec![PyRep::Integer(aid)],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+        let bystander_unfiltered = call_social(&ctx, &mut bystander_sess, svc, "GetAllianceApplications", vec![])
+            .await
+            .unwrap();
+        assert_eq!(rs_rows(&bystander_unfiltered).len(), 0);
+        // Due timer must still be "Accepted" (not matured by unauthorized bystander queries).
+        let still_accepted = super::read_alliance_war_state(&ctx, |st| {
+            st.alliances
+                .get(&aid)
+                .is_some_and(|m| m.applications.iter().any(|app| app.0 == due_corp && app.3 == "Accepted"))
+        });
+        assert!(still_accepted, "unauthorized GetAllianceApplications must not sync alliance timers");
+        assert_eq!(
+            call_social(
+                &ctx,
+                &mut bystander_sess,
+                svc,
+                "GetAllianceApplications",
+                vec![PyRep::Integer(99_999_999)],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "AllianceNotFound"
+        );
+    }
+
+    // An alliance existing only in snap.alliances returns empty rowset for its executor (not AllianceNotFound),
+    // and denies unrelated directors with CrpAccessDenied.
+    let snap_only_aid = 99_900_999;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.alliances.insert(
+            snap_only_aid,
+            eve_db::AllianceRecord {
+                alliance_id: snap_only_aid,
+                name: "SnapOnly Alliance".into(),
+                short_name: "SNAP".into(),
+                executor_corp_id: bystander_corp,
+                member_corp_ids: HashSet::from([bystander_corp]),
+            },
+        );
+        if let Some(c) = snap.corporations.get_mut(&bystander_corp) {
+            c.alliance_id = Some(snap_only_aid);
+        }
+    });
+    bystander_sess.alliance_id = Some(snap_only_aid);
+    for svc in ["corpRegistry", "allianceRegistry"] {
+        let snap_rows = call_social(
+            &ctx,
+            &mut bystander_sess,
+            svc,
+            "GetAllianceApplications",
+            vec![PyRep::Integer(snap_only_aid)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rs_rows(&snap_rows).len(), 0);
+        assert_eq!(
+            call_social(
+                &ctx,
+                &mut app_sess,
+                svc,
+                "GetAllianceApplications",
+                vec![PyRep::Integer(snap_only_aid)],
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "CrpAccessDenied"
+        );
+    }
+}

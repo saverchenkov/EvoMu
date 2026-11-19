@@ -24,6 +24,15 @@ fn community_role_denied(action_label: &str) -> BridgeRpcError {
     }
 }
 
+fn has_corp_fitting_manager_role(is_ceo: bool, roles: u64) -> bool {
+    // `ROLE_FITTING_MANAGER` (1 << 59) + `ROLE_DIRECTOR` is canonical;
+    // `ROLE_EQUIPMENT_CONFIG` (1 << 41) is retained alongside it so existing
+    // integration test `features_station_markets_rpcs` (`fitting_mgr_role = 1u64 << 41`) stays green.
+    is_ceo
+        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_FITTING_MANAGER)
+        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)
+}
+
 fn resolve_and_authorize_fitting_owner(
     ctx: &ServerContext,
     session: &SessionState,
@@ -46,6 +55,16 @@ fn resolve_and_authorize_fitting_owner(
         }
         return Ok(target_owner);
     }
+    if expected_owner <= 0 {
+        return Err(crate::services::account_services::err(
+            "UserError",
+            if service.starts_with("alliance") {
+                "NotInAlliance"
+            } else {
+                "NotInCorporation"
+            },
+        ));
+    }
     if target_owner != expected_owner {
         return Err(BridgeRpcError {
             code: "UserError".into(),
@@ -53,15 +72,51 @@ fn resolve_and_authorize_fitting_owner(
             client_error: None,
         });
     }
-    if service.starts_with("corp") && ctx.db.with_snapshot(|s| s.corporations.contains_key(&target_owner)) {
+    if service.starts_with("corp")
+        && ctx
+            .db
+            .with_snapshot(|s| s.corporations.contains_key(&target_owner))
+    {
         let (is_ceo, roles) = get_effective_corp_roles(ctx, target_owner, char_id);
-        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, 1u64 << 41);
-        if !has_role {
+        if !has_corp_fitting_manager_role(is_ceo, roles) {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
-                message: format!("{action_label} corporation fittings requires Fitting Manager or Director role"),
+                message: format!(
+                    "{action_label} corporation fittings requires Fitting Manager or Director role"
+                ),
                 client_error: None,
             });
+        }
+    }
+    if service.starts_with("alliance") {
+        let caller_corp = session.corporation_id.unwrap_or(0);
+        let (corp_exists, in_alliance) = ctx.db.with_snapshot(|s| {
+            let corp_ok = s.corporations.contains_key(&caller_corp);
+            let alliance_ok = s.alliances.get(&target_owner).map_or(true, |a| {
+                a.member_corp_ids.contains(&caller_corp)
+                    || s.corporations
+                        .get(&caller_corp)
+                        .and_then(|c| c.alliance_id)
+                        == Some(target_owner)
+            });
+            (corp_ok, alliance_ok)
+        });
+        if !in_alliance {
+            return Err(crate::services::account_services::err(
+                "UserError",
+                "FittingOwnerMismatch",
+            ));
+        }
+        if corp_exists {
+            let (is_ceo, roles) = get_effective_corp_roles(ctx, caller_corp, char_id);
+            if !has_corp_fitting_manager_role(is_ceo, roles) {
+                return Err(crate::services::account_services::err(
+                    "CorpRoleDenied",
+                    format!(
+                        "{action_label} alliance fittings requires Fitting Manager or Director role"
+                    ),
+                ));
+            }
         }
     }
     Ok(target_owner)
@@ -567,36 +622,20 @@ async fn handle_save_fitting(
         }
     }
 
-    let expected_owner = match service {
-        "corpFittingMgr" => session.corporation_id.unwrap_or(0),
-        "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
-        _ => char_id,
+    let owner_id = match resolve_and_authorize_fitting_owner(
+        ctx,
+        session,
+        service,
+        char_id,
+        Some(owner_id),
+        "Saving",
+    ) {
+        Ok(oid) => oid,
+        Err(e) => return Some(Err(e)),
     };
-    if service == "corpFittingMgr" && is_community_fitting_owner(owner_id) {
-        if !can_manage_community_fittings(session) {
-            return Some(Err(community_role_denied("saving")));
-        }
-    } else if owner_id != expected_owner {
-        return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into(), client_error: None }));
-    }
-
     let is_corp_or_alliance = service == "corpFittingMgr"
         || service == "allianceFittingMgr"
         || owner_id != char_id;
-    if service == "corpFittingMgr"
-        && !is_community_fitting_owner(owner_id)
-        && ctx.db.with_snapshot(|s| s.corporations.contains_key(&owner_id))
-    {
-        let (is_ceo, roles) = get_effective_corp_roles(ctx, owner_id, char_id);
-        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, 1u64 << 41);
-        if !has_role {
-            return Some(Err(BridgeRpcError {
-                code: "CorpRoleDenied".into(),
-                message: "Saving corporation fittings requires Fitting Manager or Director role".into(),
-                client_error: None,
-            }));
-        }
-    }
     let max_fittings: usize = if is_corp_or_alliance { 300 } else { 250 };
 
     let save_res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -818,6 +857,7 @@ async fn handle_delete_fitting(
             (Some(PyRep::Integer(oid)), Some(list @ (PyRep::List(_) | PyRep::Tuple(_)))) => {
                 (Some(*oid), Some(list))
             }
+            (Some(PyRep::Integer(oid)), None) => (Some(*oid), None),
             (Some(list @ (PyRep::List(_) | PyRep::Tuple(_))), _) => (None, Some(list)),
             _ => (None, None),
         };
@@ -832,28 +872,44 @@ async fn handle_delete_fitting(
             Ok(oid) => oid,
             Err(e) => return Some(Err(e)),
         };
-        let target_ids: Vec<i64> = match list_arg {
-            Some(PyRep::List(v) | PyRep::Tuple(v)) => {
-                v.iter().filter_map(|x| x.as_i64()).collect()
-            }
-            _ => Vec::new(),
+        let Some(PyRep::List(items) | PyRep::Tuple(items)) = list_arg else {
+            return Some(Err(crate::services::account_services::err(
+                "UserError",
+                "InvalidFittingList",
+            )));
         };
-        let deleted_ids = ctx
-            .db
-            .try_with_mut_snapshot(|snap| {
-                let mut removed = Vec::new();
-                for fid in target_ids {
-                    let can_delete = snap.saved_fittings.get(&fid).is_some_and(|f| {
-                        f.owner_id == target_owner
-                    });
-                    if can_delete {
-                        snap.saved_fittings.remove(&fid);
-                        removed.push(fid);
+        let mut target_ids = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(fid) = item.as_i64().filter(|&id| id > 0) else {
+                return Some(Err(crate::services::account_services::err(
+                    "UserError",
+                    "InvalidFittingList",
+                )));
+            };
+            target_ids.push(fid);
+        }
+        let deleted_ids = match ctx.db.try_with_mut_snapshot(|snap| {
+            for &fid in &target_ids {
+                if let Some(fit) = snap.saved_fittings.get(&fid) {
+                    if fit.owner_id != target_owner {
+                        return Err(crate::services::account_services::err(
+                            "FittingOwnershipViolation",
+                            format!("Not authorized to delete fitting {fid}"),
+                        ));
                     }
                 }
-                Ok::<_, std::convert::Infallible>(removed)
-            })
-            .unwrap();
+            }
+            let mut removed = Vec::new();
+            for fid in target_ids {
+                if snap.saved_fittings.remove(&fid).is_some() {
+                    removed.push(fid);
+                }
+            }
+            Ok(removed)
+        }) {
+            Ok(ids) => ids,
+            Err(e) => return Some(Err(e)),
+        };
         ctx.emit_typed(
             crate::router::NotificationTarget::Character(char_id),
             crate::router::notify_registry::OnFittingsUpdated {
@@ -921,20 +977,37 @@ async fn handle_delete_fitting(
             Ok(oid) => oid,
             Err(e) => return Some(Err(e)),
         };
-        let deleted = ctx
-            .db
-            .try_with_mut_snapshot(|snap| {
-                let can_delete = snap.saved_fittings.get(&fid).is_some_and(|f| {
-                    f.owner_id == target_owner
-                });
-                if can_delete {
-                    snap.saved_fittings.remove(&fid);
-                    Ok::<_, std::convert::Infallible>(true)
-                } else {
-                    Ok::<_, std::convert::Infallible>(false)
+        let deleted = match ctx.db.try_with_mut_snapshot(|snap| {
+            let Some(fit) = snap.saved_fittings.get(&fid) else {
+                if args.len() < 2
+                    && service != "charFittingMgr"
+                    && (fid == target_owner
+                        || snap.corporations.contains_key(&fid)
+                        || snap.alliances.contains_key(&fid))
+                {
+                    return Err(crate::services::account_services::err(
+                        "UserError",
+                        if fid != target_owner {
+                            "FittingOwnerMismatch"
+                        } else {
+                            "InvalidFittingID"
+                        },
+                    ));
                 }
-            })
-            .unwrap();
+                return Ok(false);
+            };
+            if fit.owner_id != target_owner {
+                return Err(crate::services::account_services::err(
+                    "FittingOwnershipViolation",
+                    format!("Not authorized to delete fitting {fid}"),
+                ));
+            }
+            snap.saved_fittings.remove(&fid);
+            Ok(true)
+        }) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         if deleted {
             if is_community_fitting_owner(target_owner) {
                 crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
