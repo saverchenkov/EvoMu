@@ -1582,3 +1582,181 @@ async fn tick_sov_gameplay_and_mto_kill_clamp_export_before_overload_and_reconci
         .any(|u| u.ends_with("upgrade.api.HubUpgradesSimulatedNotice")));
 }
 
+#[tokio::test]
+async fn hacked_sov_hub_despawns_all_five_major_threat_detection_sites_and_gates() {
+    use crate::services::quasar_sov_hub::{all_upgrade_definitions, planet_yield_for_planet, system_yield};
+    use crate::services::sov_services::TYPE_ORBITAL_SKYHOOK;
+    use eve_db::durable_domain_types::PersistedSovHubData;
+
+    let ctx = test_ctx();
+    let now = ctx.now_unix();
+    let threat_iii_def = all_upgrade_definitions(&ctx.sde)
+        .into_iter()
+        .find(|d| {
+            ctx.sde.types.get(&d.type_id).is_some_and(|t| {
+                crate::services::sov_warzone_dynamic::sov_upgrade_site_specs(&t.name, -0.6).len()
+                    == 5
+            })
+        })
+        .expect("5-site Major Threat Detection Array III upgrade definition in SDE");
+    let threat_iii_tid = threat_iii_def.type_id;
+
+    let (sys_id, planets): (u32, Vec<i64>) = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= -0.45)
+        .find_map(|s| {
+            let y = system_yield(&ctx.sde, s.solar_system_id);
+            let mut tot_p: u64 = y.stars.iter().map(|(_, p)| *p).sum();
+            let mut tot_w: u64 = 0;
+            let mut pids = Vec::new();
+            for c in ctx.sde.celestials_in_system_slice(s.solar_system_id) {
+                if c.group_id == 7 {
+                    let (p, w) = planet_yield_for_planet(c.type_id, c.radius);
+                    tot_p += p;
+                    tot_w += w;
+                    pids.push(c.celestial_id);
+                }
+            }
+            (tot_p >= threat_iii_def.power_required
+                && tot_w >= threat_iii_def.workforce_required)
+                .then_some((s.solar_system_id, pids))
+        })
+        .expect("nullsec system with sufficient power and workforce for Major Threat Detection Array III");
+
+    let hub_id = 1_077_005_001_i64;
+    let corp_id = 98_777_055_i64;
+    let mut fuel = std::collections::BTreeMap::new();
+    if threat_iii_def.fuel_type > 0 {
+        fuel.insert(
+            threat_iii_def.fuel_type,
+            threat_iii_def.fuel_startup + threat_iii_def.fuel_per_hour * 10,
+        );
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states
+            .entry(sys_id)
+            .or_default()
+            .sov_alliance_id = Some(99_077_055);
+        for (idx, pid) in planets.iter().copied().enumerate() {
+            let sh_id = 1_077_006_000 + idx as i64;
+            snap.structures.insert(
+                sh_id,
+                UpwellStructureRecord {
+                    structure_id: sh_id,
+                    type_id: TYPE_ORBITAL_SKYHOOK,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("Skyhook {idx}"),
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    ..Default::default()
+                },
+            );
+            snap.sov_runtime.skyhook_planets.insert(sh_id, pid);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
+        snap.structures.insert(
+            hub_id,
+            UpwellStructureRecord {
+                structure_id: hub_id,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "5-Site Threat Hub".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                ..Default::default()
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            hub_id,
+            PersistedSovHubData {
+                hub_id,
+                fuel,
+                upgrades: vec![PersistedHubUpgrade {
+                    type_id: threat_iii_tid,
+                    online: true,
+                    low_power: false,
+                }],
+                last_updated_unix: now,
+                ..Default::default()
+            },
+        );
+    });
+
+    tick_sov_gameplay(&ctx, now).await;
+
+    let base_id = 1_940_000_000
+        + (hub_id.unsigned_abs() as i64 % 100_000) * 100
+        + i64::from(threat_iii_tid % 100) * 10;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for s_idx in 0..5_i64 {
+        let site_base_id = base_id + s_idx * 10;
+        assert!(
+            sys_handle.get_ball_snapshot(site_base_id).await.unwrap().is_some(),
+            "site {s_idx} gate/anchor ball {site_base_id} must be spawned before hack"
+        );
+        for off in 1..=5_i64 {
+            let npc_id = site_base_id + off;
+            assert!(
+                sys_handle.get_ball_snapshot(npc_id).await.unwrap().is_some(),
+                "site {s_idx} NPC ball {npc_id} must be spawned before hack"
+            );
+        }
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .sov_runtime
+            .sov_upgrade_combat_npcs
+            .contains(&(base_id + 45)));
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime.hacked_hubs.insert(hub_id, now + 3_600);
+    });
+    tick_sov_gameplay(&ctx, now + 1).await;
+
+    for s_idx in 0..5_i64 {
+        let site_base_id = base_id + s_idx * 10;
+        assert!(
+            sys_handle.get_ball_snapshot(site_base_id).await.unwrap().is_none(),
+            "site {s_idx} gate/anchor ball {site_base_id} must despawn on hub hack"
+        );
+        for off in 1..=5_i64 {
+            let npc_id = site_base_id + off;
+            assert!(
+                sys_handle.get_ball_snapshot(npc_id).await.unwrap().is_none(),
+                "site {s_idx} NPC ball {npc_id} (including +41..=+45) must despawn on hub hack"
+            );
+            assert!(
+                crate::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+                    !rt.npc_entities.contains_key(&npc_id)
+                }),
+                "site {s_idx} combat NPC entity {npc_id} must be removed"
+            );
+        }
+    }
+    ctx.db.with_snapshot(|snap| {
+        let prefix = format!("SOV-{hub_id}-");
+        assert!(
+            snap.cosmic_anomalies
+                .get(&sys_id)
+                .into_iter()
+                .flatten()
+                .all(|a| !a.anomaly_id.starts_with(&prefix)),
+            "hacked hub must remove all upgrade cosmic anomalies"
+        );
+        for s_idx in 0..5_i64 {
+            for off in 1..=5_i64 {
+                assert!(!snap
+                    .sov_runtime
+                    .sov_upgrade_combat_npcs
+                    .contains(&(base_id + s_idx * 10 + off)));
+            }
+        }
+    });
+}
+
+

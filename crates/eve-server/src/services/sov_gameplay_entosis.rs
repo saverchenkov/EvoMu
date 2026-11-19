@@ -788,7 +788,7 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         let just_hub_ids: Vec<i64> = hub_ids.iter().map(|&(hid, _)| hid).collect();
         clamp_and_reconcile_hubs_in_snap(snap, &ctx.sde, &pending, &just_hub_ids);
         let mut upg_spawns: Vec<(u32, i64, &'static str, Vec<u32>, [f64; 3], usize, Vec<i64>)> = Vec::new();
-        let mut upg_despawns: Vec<(u32, i64)> = Vec::new();
+        let mut upg_despawns: Vec<(u32, Vec<i64>)> = Vec::new();
         for (hid, hsys) in hub_ids {
             let hub_hacked = snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u);
             let upgrades = snap
@@ -864,10 +864,19 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
                         upg_spawns.push((hsys, site_base_id, arch, ores, pos, unit_cnt, combat_nids));
                     }
                 } else {
-                    for off in 0i64..40 {
-                        snap.sov_runtime.sov_upgrade_combat_npcs.remove(&(base_id + off));
+                    let mut despawn_ids = Vec::new();
+                    for (s_idx, (_arch, _site_name, _pos, _ores, unit_cnt)) in
+                        specs.into_iter().enumerate()
+                    {
+                        let site_base_id = base_id + (s_idx as i64) * 10;
+                        despawn_ids.push(site_base_id);
+                        for off in 1..=(unit_cnt.max(1) as i64) {
+                            let bid = site_base_id + off;
+                            snap.sov_runtime.sov_upgrade_combat_npcs.remove(&bid);
+                            despawn_ids.push(bid);
+                        }
                     }
-                    upg_despawns.push((hsys, base_id));
+                    upg_despawns.push((hsys, despawn_ids));
                 }
             }
             let prefix = format!("SOV-{hid}-");
@@ -990,10 +999,9 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
         let _ = sys_handle.remove_ball(bid).await;
     }
 
-    for (sys_id, base_id) in upg_despawns {
+    for (sys_id, despawn_ids) in upg_despawns {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        for off in 0i64..40 {
-            let bid = base_id + off;
+        for bid in despawn_ids {
             let _ = sys_handle.remove_ball(bid).await;
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 rt.npc_entities.remove(&bid);

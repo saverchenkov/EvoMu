@@ -385,7 +385,16 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
 
         call(&ctx, &mut sess_p1, "stationSvc", "Undock", &[]).await.expect("Undock P1");
         call(&ctx, &mut sess_p2, "stationSvc", "Undock", &[]).await.expect("Undock P2");
-        ctx.db.with_mut_snapshot(|snap| { snap.item_positions.insert(s2, trace_origin); });
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut cfg = eve_server::services::season_fsd::load_season_config(snap);
+            cfg.season_id = 1;
+            cfg.season_name = "Crimson Harvest".into();
+            cfg.start_time_ft = now_ft - 60 * 10_000_000;
+            cfg.end_time_ft = now_ft + 3_600 * 10_000_000;
+            snap.seasons_and_campaigns.season_configuration = Some(cfg);
+            snap.item_positions.insert(s2, trace_origin);
+        });
         let _ = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).set_ball_position(s2, glam::DVec3::from_array(trace_origin)).await;
 
         call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances");

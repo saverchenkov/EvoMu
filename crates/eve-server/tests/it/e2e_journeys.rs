@@ -164,6 +164,16 @@ async fn test_e2e_01_to_18_integration_journeys() {
     )
     .await
     .expect("MoveItem");
+    // E2E-04 & E2E-05: Undock -> Warp to Stargate 50001248 -> Stargate Jump to Perimeter (30000144) -> Jump Back -> Warp to Jita 4-4 -> Dock
+    let undock_res = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    assert_eq!(sess.station_id, None);
+    let PyRep::KeyVal(ukv) = undock_res else {
+        panic!("Expected Undock KeyVal");
+    };
+    let jita_bound = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_001).or_default().insert(
             28_164,
@@ -174,7 +184,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             },
         );
     });
-    let ov_res = ctx
+    let _ov_res = ctx
         .dispatch_rpc(
             &mut sess,
             "dogmaIM",
@@ -186,21 +196,22 @@ async fn test_e2e_01_to_18_integration_journeys() {
         )
         .await
         .expect("Overload");
-    let PyRep::KeyVal(ov_kv) = ov_res else {
-        panic!("Expected Overload KeyVal");
-    };
-    assert!(ov_kv.get("effectiveMaxVelocity").unwrap().as_f64().unwrap() > 800.0);
-
-    // E2E-04 & E2E-05: Undock -> Warp to Stargate 50001248 -> Stargate Jump to Perimeter (30000144) -> Jump Back -> Warp to Jita 4-4 -> Dock
-    let undock_res = ctx
-        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+    let act_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(100_000_003)],
+            &kw,
+            None,
+        )
         .await
-        .expect("Undock");
-    assert_eq!(sess.station_id, None);
-    let PyRep::KeyVal(ukv) = undock_res else {
-        panic!("Expected Undock KeyVal");
+        .expect("Activate pre-overloaded prop mod");
+    let PyRep::KeyVal(act_kv) = act_res else {
+        panic!("Expected Activate KeyVal");
     };
-    let jita_bound = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    assert!(act_kv.get("effectiveMaxVelocity").unwrap().as_f64().unwrap() > 800.0);
 
     ctx.dispatch_rpc(
         &mut sess,

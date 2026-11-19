@@ -1160,7 +1160,7 @@ async fn test_subcap_additive_remote_repairs_and_smartbomb_salvager_cycle_and_lo
     ctx.dispatch_rpc(&mut sess, "crimewatch", None, "SetSafetyLevel", &[PyRep::Integer(2)], &kw, None).await.unwrap();
     let _ = sess.drain_notifications();
     let sb_green_err = ctx
-        .dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(sb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(sb_id), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
         .await
         .expect_err("Smartbomb on Safety Green in Lowsec must fail");
     assert_eq!(sb_green_err.code, "CantDoInCurrentSafetyLevel");

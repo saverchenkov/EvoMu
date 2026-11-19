@@ -413,6 +413,9 @@ async fn run_overheat_fit(thermo_lvl: u8) -> Result<(f64, f64, f64, f64, f64, f6
         .await
         .expect("ShipOnlineModules");
     rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center), PyRep::None]).await?;
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(mod_center)])
+        .await
+        .expect("dogmaIM.Activate center");
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(mod_high), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1)])
         .await
         .expect("dogmaIM.Activate high");
