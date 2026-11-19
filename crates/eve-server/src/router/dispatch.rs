@@ -1149,7 +1149,7 @@ impl ServerContext {
         // structured EvePublicResponse STATUS_UNAUTHORIZED (401) rather than MachoNet exceptions;
         // empty/non-framed calls and notice/event RPCs remain hard-gated by require_auth.
         let is_framed_quasar_request = effective_service == "publicGatewaySvc"
-            && matches!(method, "SendRequest" | "CallQuasar" | "Send") // rpc-lint: allow verified publicGatewaySvc request methods
+            && matches!(method, "SendRequest" | "Send")
             && matches!(
                 args.iter().next().or_else(|| kwargs.get("request")),
                 Some(PyRep::Bytes(_) | PyRep::Buffer(_))
@@ -1401,7 +1401,7 @@ impl ServerContext {
                 return res;
             }
             let _ = Self::require_character(session)?;
-            if matches!(method, "SendRequest" | "PublishEvent" | "CallQuasar") {
+            if matches!(method, "SendRequest" | "PublishEvent") {
                 let domain = args
                     .first()
                     .and_then(|a| a.as_str())

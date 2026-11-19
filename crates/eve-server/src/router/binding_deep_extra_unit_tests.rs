@@ -394,7 +394,7 @@ fn session_transition_invalidation_and_macho_object_disconnect_notifications() {
 
     // 2) "dock" invalidates solar-system space bindings (keeper/posMgr/devIndexManager with
     //    solar-system object_id), while preserving same-system planetOrbitalRegistryBroker,
-    //    non-system keeper (1), b_pos_non_sys (500), and b_repair (matching active_dock_id = Some(st_id))!
+    //    non-system keeper b_keep_global (dungeon_id), b_pos_non_sys (500), and b_repair (matching active_dock_id = Some(st_id))!
     ctx.pending_notifications.write().unwrap().clear();
     ctx.invalidate_bound_objects_for_session_transition(char_id, sys_id, Some(st_id), "dock");
     for sys_bid in [b_bey, b_scan, b_keep_sys, b_pos_sys, b_dev_sys] {
