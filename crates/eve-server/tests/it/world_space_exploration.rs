@@ -733,20 +733,30 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     .await
     .expect("SelectCharacterID");
 
-    let corp_id = sess1.corporation_id.unwrap_or(98_000_001);
+    // SelectCharacterID populates NPC starter corp 1_000_170; move both pilots to player corp 98_000_001.
+    let corp_id = 98_000_001_i64;
+    sess1.corporation_id = Some(corp_id);
     sess1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char1) {
             ch.corporation_id = corp_id;
         }
+        if let Some(ch2) = snap.characters.get_mut(&char2) {
+            ch2.corporation_id = corp_id;
+        }
         let corp = snap.corporations.entry(corp_id).or_default();
+        corp.corporation_id = corp_id;
         corp.ceo_id = char1;
         corp.members.insert(char1);
+        corp.members.insert(char2);
+        corp.member_roles.insert(char1, eve_db::corp_roles::ROLE_DIRECTOR);
+        corp.member_roles.insert(char2, 0);
     });
 
     // 1. Non-director rejected for SetStructureReinforceDefault; director succeeds
     let mut non_dir_sess = sess1.clone();
     non_dir_sess.character_id = Some(char2);
+    non_dir_sess.corporation_id = Some(corp_id);
     non_dir_sess.corp_role = 0;
     let non_dir_err = rpc(
         &ctx,
@@ -757,7 +767,7 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     )
     .await
     .expect_err("Non-director SetStructureReinforceDefault must fail");
-    assert!(!non_dir_err.code.is_empty());
+    assert_eq!(non_dir_err.code, "CorpRoleDenied");
 
     rpc(
         &ctx,
@@ -774,14 +784,6 @@ async fn test_corp_member_audit_reinforce_default_and_fleet_handover_formations(
     assert_eq!(def_hr, PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0)]));
 
     // 2. Role change via corpRegistry.UpdateMember -> corpmgr.AuditMember(char2) returns history with target & issuer
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.members.insert(char2);
-        }
-        if let Some(ch2) = snap.characters.get_mut(&char2) {
-            ch2.corporation_id = corp_id;
-        }
-    });
     rpc(
         &ctx,
         &mut sess1,
