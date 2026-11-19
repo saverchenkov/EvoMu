@@ -2020,7 +2020,39 @@ async fn deactivate_repeating_cycle_after_action(
     module_id: i64,
     effect_name: &str,
 ) {
-    let _ = sys.remove_module_cycle(ship_id, module_id).await;
+    let _ = deactivate_repeating_cycle_after_action_with_policy(
+        ctx,
+        sys,
+        owner_char_id,
+        ship_id,
+        module_id,
+        effect_name,
+        false,
+        None,
+    )
+    .await;
+}
+
+/// Stops a repeating module cycle after an action completes, optionally suppressing duplicate
+/// `OnGodmaShipEffect(false)` notifications if the actor already removed the cycle. Returns the
+/// resolved SDE effect ID when `OnGodmaShipEffect(false)` was emitted.
+#[allow(clippy::too_many_arguments)]
+async fn deactivate_repeating_cycle_after_action_with_policy(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    owner_char_id: Option<i64>,
+    ship_id: i64,
+    module_id: i64,
+    effect_name: &str,
+    skip_notify_if_absent: bool,
+    module_type_id_opt: Option<u32>,
+) -> Option<i64> {
+    let removed_from_actor = sys
+        .remove_module_cycle(ship_id, module_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
     let _ = crate::services::notify_emitters_space_dungeons::flush_module_ewar_end(
         ctx,
         owner_char_id.unwrap_or(0),
@@ -2034,39 +2066,177 @@ async fn deactivate_repeating_cycle_after_action(
         snap.module_active_charges.remove(&module_id);
         crate::router::ServerContext::clear_persisted_module_overload(snap, ship_id, module_id);
     });
-    if let Some(cid) = owner_char_id {
-        ctx.invalidate_and_push_fit(ship_id);
-        let godma_effect = if effect_name.starts_with("superWeapon") {
-            let mod_type_id = ctx
-                .db
-                .with_snapshot(|snap| snap.items.get(&module_id).map(|i| i.type_id))
-                .unwrap_or(0);
-            let eff_id = crate::router::binding::effect_id_for_module_sde(
-                &ctx.sde,
-                mod_type_id,
-                Some(effect_name),
-            )
-            .unwrap_or(4489);
-            PyRep::Integer(eff_id)
-        } else {
-            PyRep::String(effect_name.to_string())
-        };
+    let cid = owner_char_id?;
+    ctx.invalidate_and_push_fit(ship_id);
+    if skip_notify_if_absent && !removed_from_actor {
+        return None;
+    }
+    let resolved_effect_id = module_type_id_opt.and_then(|mod_type_id| {
+        crate::router::binding::effect_id_for_module_sde(&ctx.sde, mod_type_id, Some(effect_name))
+    });
+    let godma_effect = if effect_name.starts_with("superWeapon") {
+        let mod_type_id = ctx
+            .db
+            .with_snapshot(|snap| snap.items.get(&module_id).map(|i| i.type_id))
+            .unwrap_or(0);
+        let eff_id = crate::router::binding::effect_id_for_module_sde(
+            &ctx.sde,
+            mod_type_id,
+            Some(effect_name),
+        )
+        .unwrap_or(4489);
+        PyRep::Integer(eff_id)
+    } else if let Some(eff_id) = resolved_effect_id.filter(|&id| id > 0) {
+        PyRep::Integer(eff_id)
+    } else {
+        PyRep::String(effect_name.to_string())
+    };
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(cid),
+        crate::router::notify_registry::OnGodmaShipEffect {
+            item_id: module_id,
+            effect: godma_effect,
+            start_or_time: PyRep::Bool(false),
+            start: None,
+            active: None,
+            environment: None,
+            start_time: None,
+            duration: None,
+            repeat: None,
+            error: None,
+            actual_stop_time: None,
+        },
+    );
+    Some(resolved_effect_id.unwrap_or(0))
+}
+
+fn emit_salvage_stop_special_fx(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    module_type_id: u32,
+    wreck_id: i64,
+    eff_id: i64,
+    effect_name: &str,
+) {
+    let Some((sfx_guid, is_offensive)) = crate::router::binding::special_fx_guid_for_module_sde(
+        &ctx.sde,
+        module_type_id,
+        eff_id,
+        Some(effect_name),
+    ) else {
+        return;
+    };
+    let now = ctx.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
+    let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+        ship_id,
+        module_id: Some(module_id),
+        module_type_id: Some(i64::from(module_type_id)),
+        target_id: (wreck_id > 0).then_some(wreck_id),
+        other_type_id: None,
+        guid: sfx_guid,
+        is_offensive,
+        start: 0,
+        active: 0,
+        duration: 0.0,
+        repeat: 0,
+        start_time: now,
+        time_from_start: 0.0,
+        graphic_info: None,
+    };
+    ctx.emit_typed(
+        crate::router::NotificationTarget::Character(char_id),
+        sfx_notif.clone(),
+    );
+    for (obs_cid, _obs_uid) in ctx.space_observer_chars_for_ship(ship_id, char_id) {
         ctx.emit_typed(
-            crate::router::NotificationTarget::Character(cid),
-            crate::router::notify_registry::OnGodmaShipEffect {
-                item_id: module_id,
-                effect: godma_effect,
-                start_or_time: PyRep::Bool(false),
-                start: None,
-                active: None,
-                environment: None,
-                start_time: None,
-                duration: None,
-                repeat: None,
-                error: None,
-                actual_stop_time: None,
-            },
+            crate::router::NotificationTarget::Character(obs_cid),
+            sfx_notif.clone(),
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_salvage_end_action(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    module_type_id: u32,
+    wreck_id: i64,
+    repeat: i32,
+    effect_name: String,
+    next_cycle_cap_deducted: bool,
+    deducted_cap_gj: f64,
+) {
+    let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle_for_module(
+        ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        wreck_id,
+        Some(module_type_id),
+        (repeat != 0).then_some(module_id),
+    )
+    .await;
+    if repeat == 0 {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.remove(&module_id);
+            snap.module_active_charges.remove(&module_id);
+        });
+        ctx.invalidate_and_push_fit(ship_id);
+        return;
+    }
+    let cycle_pre_removed = matches!(&res, Ok((_, true)));
+    let keep_repeating = matches!(
+        &res,
+        Ok((rep, _))
+            if rep.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(false)
+                && rep.dict_get("reason").and_then(|v| v.as_str()) == Some("CycleRollFailed")
+    );
+    if keep_repeating {
+        let dur_s = ctx
+            .sde
+            .types
+            .get(&module_type_id)
+            .and_then(|t| t.default_attributes.get(&73).copied())
+            .unwrap_or(10_000.0)
+            / 1000.0;
+        ctx.record_module_reactivation_delay(ship_id, module_id, dur_s);
+        return;
+    }
+    if let Some(eff_id) = deactivate_repeating_cycle_after_action_with_policy(
+        ctx,
+        sys,
+        Some(char_id),
+        ship_id,
+        module_id,
+        &effect_name,
+        !cycle_pre_removed,
+        Some(module_type_id),
+    )
+    .await
+    {
+        emit_salvage_stop_special_fx(
+            ctx,
+            char_id,
+            ship_id,
+            module_id,
+            module_type_id,
+            wreck_id,
+            eff_id,
+            &effect_name,
+        );
+    }
+    if next_cycle_cap_deducted && deducted_cap_gj > 0.0 {
+        if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+            let _ = sys
+                .set_capacitor(ship_id, (cs.capacitor + deducted_cap_gj).min(cs.max_capacitor))
+                .await;
+        }
     }
 }
 
@@ -2225,60 +2395,21 @@ pub(crate) async fn execute_pending_cycle_actions_list(
                 next_cycle_cap_deducted,
                 deducted_cap_gj,
             } => {
-                let res = crate::combat::drones_salvage_tractor::execute_wreck_salvage_cycle(
+                Box::pin(handle_salvage_end_action(
                     ctx,
+                    &sys,
                     sys_id,
                     char_id,
                     ship_id,
+                    module_id,
+                    module_type_id,
                     wreck_id,
-                    Some(module_type_id),
-                )
+                    repeat,
+                    effect_name,
+                    next_cycle_cap_deducted,
+                    deducted_cap_gj,
+                ))
                 .await;
-                if repeat == 0 {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        snap.module_active_states.remove(&module_id);
-                        snap.module_active_charges.remove(&module_id);
-                    });
-                    ctx.invalidate_and_push_fit(ship_id);
-                } else {
-                    let keep_repeating = matches!(
-                        &res,
-                        Ok(rep)
-                            if rep.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(false)
-                                && rep.dict_get("reason").and_then(|v| v.as_str())
-                                    == Some("CycleRollFailed")
-                    );
-                    if keep_repeating {
-                        let dur_s = ctx
-                            .sde
-                            .types
-                            .get(&module_type_id)
-                            .and_then(|t| t.default_attributes.get(&73).copied())
-                            .unwrap_or(10_000.0)
-                            / 1000.0;
-                        ctx.record_module_reactivation_delay(ship_id, module_id, dur_s);
-                    } else {
-                        deactivate_repeating_cycle_after_action(
-                            ctx,
-                            &sys,
-                            Some(char_id),
-                            ship_id,
-                            module_id,
-                            &effect_name,
-                        )
-                        .await;
-                        if next_cycle_cap_deducted && deducted_cap_gj > 0.0 {
-                            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                                let _ = sys
-                                    .set_capacitor(
-                                        ship_id,
-                                        (cs.capacitor + deducted_cap_gj).min(cs.max_capacitor),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                }
             }
             crate::system_actor::PendingCycleAction::LanceBeamFired {
                 attacker_char_id,
