@@ -127,6 +127,113 @@ pub fn format_industry_job_pyrep_at(
     format_industry_job_pyrep_with_system(j, meta, now_unix, unrebased_offset_secs, None)
 }
 
+/// Resolves a character's corporation ID from the authoritative DB snapshot before falling back
+/// to the session state.
+fn caller_corp_id_db_first(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+) -> i64 {
+    snap.characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .filter(|&id| id > 0)
+        .or(session.corporation_id)
+        .unwrap_or(0)
+}
+
+/// Returns `true` when `corp_id` cannot represent a player corporation (`<= 0` or an NPC corp).
+fn is_npc_corporation(ctx: &ServerContext, corp_id: i64) -> bool {
+    corp_id <= 0
+        || (1_000_000..2_000_000).contains(&corp_id)
+        || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+/// Returns `true` when `job`/`meta` represent a corporation-owned industry job.
+fn is_corp_industry_job(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    job: &IndustryJobRecord,
+    meta: &IndustryJobCostMeta,
+) -> bool {
+    meta.use_corp
+        || (meta.owner_id > 0
+            && meta.owner_id != job.installer_id
+            && (is_npc_corporation(ctx, meta.owner_id)
+                || snap.corporations.contains_key(&meta.owner_id)))
+}
+
+/// Verifies that `char_id` is a member of player corporation `target_corp_id` and holds CEO,
+/// `ROLE_DIRECTOR`, or `ROLE_FACTORY_MANAGER` to inspect its corporation industry jobs.
+#[allow(clippy::too_many_arguments)]
+fn verify_corp_industry_job_read_access(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    target_corp_id: i64,
+    now_unix: u64,
+    err_code: &str,
+    deny_message: impl FnOnce() -> String,
+) -> Result<(), BridgeRpcError> {
+    if is_npc_corporation(ctx, target_corp_id) {
+        return Err(crate::services::account_services::err(err_code, deny_message()));
+    }
+    if caller_corp_id_db_first(snap, session, char_id) != target_corp_id {
+        return Err(crate::services::account_services::err(err_code, deny_message()));
+    }
+    let Some(corp) = snap.corporations.get(&target_corp_id) else {
+        return Err(crate::services::account_services::err(err_code, deny_message()));
+    };
+    if !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return Err(crate::services::account_services::err(err_code, deny_message()));
+    }
+    let (is_ceo, eff_roles) =
+        snap.effective_corp_roles_at(target_corp_id, char_id, None, session.corp_role, now_unix);
+    let has_factory_access = is_ceo
+        || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
+    if !has_factory_access {
+        return Err(crate::services::account_services::err(err_code, deny_message()));
+    }
+    Ok(())
+}
+
+/// Computes a read-only effective job and pause-metadata view at `now_unix` without mutating
+/// snapshot state, projecting service-offline pauses and service-online resumptions.
+fn effective_industry_job_view(
+    snap: &eve_db::WorldStateSnapshot,
+    job: &IndustryJobRecord,
+    meta: &IndustryJobCostMeta,
+    now_unix: u64,
+) -> (IndustryJobRecord, IndustryJobCostMeta) {
+    let mut j_view = job.clone();
+    let mut meta_view = meta.clone();
+    let service_online =
+        is_structure_industry_service_online(snap, job.facility_id, job.activity_id);
+    if job.status == "Active" && !service_online && !meta.ready_before_offline {
+        let ready_at = job.start_unix.saturating_add(job.duration_seconds);
+        let offline_opt = resolve_facility_offline_moment_opt(snap, job.facility_id);
+        if !offline_opt.is_some_and(|m| ready_at <= m) {
+            j_view.status = "Paused".to_string();
+            if meta_view.paused_at_unix.is_none() {
+                meta_view.paused_at_unix =
+                    Some(offline_opt.unwrap_or(now_unix).max(job.start_unix));
+            }
+        }
+    } else if job.status == "Paused" && service_online {
+        let paused_at = meta_view.paused_at_unix.unwrap_or(now_unix);
+        let pause_delta = now_unix.saturating_sub(paused_at);
+        j_view.duration_seconds = j_view.duration_seconds.saturating_add(pause_delta);
+        j_view.status = "Active".to_string();
+        meta_view.paused_at_unix = None;
+    } else if job.status == "Paused" && !service_online && meta_view.paused_at_unix.is_none() {
+        let offline_moment =
+            resolve_facility_offline_moment_opt(snap, job.facility_id).unwrap_or(now_unix);
+        meta_view.paused_at_unix = Some(offline_moment.max(job.start_unix));
+    }
+    (j_view, meta_view)
+}
+
 fn format_industry_job_pyrep_with_system(
     j: &IndustryJobRecord,
     meta: &IndustryJobCostMeta,
@@ -973,9 +1080,7 @@ pub(crate) fn handle_industry_job_queries(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let now_unix = ctx.now_unix();
-            let counts = ctx.db.with_mut_snapshot(|snap| {
-                sync_industry_job_pause_states(snap, now_unix);
+            let counts = ctx.db.with_snapshot(|snap| {
                 let char_skills = snap.skills.get(&char_id);
                 let skill_lvl = |sid: TypeId| -> u8 {
                     char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
@@ -1030,23 +1135,34 @@ pub(crate) fn handle_industry_job_queries(
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
             let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                sync_industry_job_pause_states(snap, now_unix);
+            let res = ctx.db.with_snapshot(|snap| {
                 let Some(j) = snap.industry_jobs.get(&job_id) else {
-                    return Err(BridgeRpcError {
-                        code: "JobNotFound".into(),
-                        message: format!("Industry job {job_id} not found"),
-                        client_error: None,
-                    });
+                    return Err(crate::services::account_services::err(
+                        "JobNotFound",
+                        format!("Industry job {job_id} not found"),
+                    ));
                 };
                 let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
-                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if j.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
-                    return Err(BridgeRpcError {
-                        code: "JobOwnershipViolation".into(),
-                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
-                        client_error: None,
-                    });
+                if !session.has_gm_role() {
+                    if is_corp_industry_job(ctx, snap, j, &meta) {
+                        verify_corp_industry_job_read_access(
+                            ctx,
+                            snap,
+                            session,
+                            char_id,
+                            meta.owner_id,
+                            now_unix,
+                            "JobOwnershipViolation",
+                            || format!("Industry job {job_id} does not belong to character {char_id}"),
+                        )?;
+                    } else if j.installer_id != char_id
+                        || (meta.owner_id > 0 && meta.owner_id != char_id)
+                    {
+                        return Err(crate::services::account_services::err(
+                            "JobOwnershipViolation",
+                            format!("Industry job {job_id} does not belong to character {char_id}"),
+                        ));
+                    }
                 }
                 let Some(sys_id) = resolve_industry_job_solar_system_id(ctx, snap, j.facility_id) else {
                     let msg = format!(
@@ -1059,9 +1175,10 @@ pub(crate) fn handle_industry_job_queries(
                         eve_proto::ClientError::CustomInfo(msg),
                     ));
                 };
+                let (j_view, meta_view) = effective_industry_job_view(snap, j, &meta, now_unix);
                 Ok(format_industry_job_pyrep_with_system(
-                    j,
-                    &meta,
+                    &j_view,
+                    &meta_view,
                     Some(now_unix),
                     unrebased_offset_secs,
                     Some(sys_id),
@@ -1080,51 +1197,56 @@ pub(crate) fn handle_industry_job_queries(
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
                 .unwrap_or(char_id);
-            let caller_corp_id = session
-                .corporation_id
-                .or_else(|| {
-                    ctx.db
-                        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                })
-                .unwrap_or(0);
-            if req_owner_id != char_id && req_owner_id != caller_corp_id && !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "OwnerAccessDenied".into(),
-                    message: format!(
-                        "Character {char_id} is not authorized to query industry jobs for owner {req_owner_id}"
-                    ),
-                    client_error: None,
-                }));
-            }
             let now_unix = ctx.now_unix();
             let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
-            let jobs = ctx.db.with_mut_snapshot(|snap| {
-                sync_industry_job_pause_states(snap, now_unix);
-                snap.industry_jobs
+            let res = ctx.db.with_snapshot(|snap| {
+                if !session.has_gm_role() && req_owner_id != char_id {
+                    verify_corp_industry_job_read_access(
+                        ctx,
+                        snap,
+                        session,
+                        char_id,
+                        req_owner_id,
+                        now_unix,
+                        "OwnerAccessDenied",
+                        || {
+                            format!(
+                                "Character {char_id} is not authorized to query industry jobs for owner {req_owner_id}"
+                            )
+                        },
+                    )?;
+                }
+                let jobs = snap
+                    .industry_jobs
                     .values()
                     .filter(|j| {
                         let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
-                        if req_owner_id == char_id {
-                            j.installer_id == char_id
+                        if is_corp_industry_job(ctx, snap, j, &meta) {
+                            meta.owner_id == req_owner_id
+                        } else if meta.owner_id > 0 {
+                            meta.owner_id == req_owner_id && j.installer_id == req_owner_id
                         } else {
-                            meta.owner_id == req_owner_id || j.installer_id == req_owner_id
+                            j.installer_id == req_owner_id
                         }
                     })
                     .filter_map(|j| {
                         let sys_id =
                             resolve_industry_job_solar_system_id(ctx, snap, j.facility_id)?;
                         let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
+                        let (j_view, meta_view) =
+                            effective_industry_job_view(snap, j, &meta, now_unix);
                         Some(format_industry_job_pyrep_with_system(
-                            j,
-                            &meta,
+                            &j_view,
+                            &meta_view,
                             Some(now_unix),
                             unrebased_offset_secs,
                             Some(sys_id),
                         ))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                Ok(PyRep::List(jobs))
             });
-            Some(Ok(PyRep::List(jobs)))
+            Some(res)
         }
 
         ("industryMonitor", "ConnectJob") => {
