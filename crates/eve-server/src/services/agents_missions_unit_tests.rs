@@ -227,20 +227,19 @@ async fn get_agents_and_metadata_queries_cover_filters_and_branches() {
         .unwrap(),
         PyRep::Bool(false)
     );
-    assert_eq!(
-        handle(
-            &ctx,
-            &mut sess,
-            "agentMgr",
-            "GotoLocation",
-            &[],
-            &HashMap::new(),
-        )
-        .await
-        .unwrap()
-        .unwrap(),
-        PyRep::Bool(true)
-    );
+    // Docked GotoLocation must fail cleanly rather than succeeding as a no-op stub (#1367).
+    let goto_err = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "GotoLocation",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(goto_err.code, "ShipDocked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

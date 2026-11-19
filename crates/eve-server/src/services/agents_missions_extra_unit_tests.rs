@@ -275,8 +275,8 @@ async fn info_service_details_entry_point_and_simple_rpc_branches() {
     assert_eq!(ep.dict_get("solarSystemID"), Some(&PyRep::Integer(30_002_187)));
     assert_eq!(ep.dict_get("bookmarkID"), Some(&PyRep::Integer(777)));
     assert_eq!(call_agent_mgr(&ctx, &mut sess, "ShouldAlwaysAllowReplay", &[], &kw).await.unwrap(), PyRep::Bool(false));
-    assert_eq!(call_agent_mgr(&ctx, &mut sess, "WarpToAgentInSpace", &[], &kw).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(call_agent_mgr(&ctx, &mut sess, "WarpToLocation", &[], &kw).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(call_agent_mgr(&ctx, &mut sess, "WarpToAgentInSpace", &[], &kw).await.unwrap_err().code, "ShipDocked");
+    assert_eq!(call_agent_mgr(&ctx, &mut sess, "WarpToLocation", &[], &kw).await.unwrap_err().code, "ShipDocked");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
