@@ -245,13 +245,13 @@ def env_audit(root):
 
 
 def _acquire_cargo_test_slot(root):
-    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 10) kernel flock slots so up to 10 reviews and their
-    workspace test runs can execute simultaneously."""
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 6) kernel flock slots so up to 6 concurrent cargo test
+    runs execute simultaneously without exhausting swap while up to 10 LLM reviews proceed in parallel."""
     try:
         import fcntl
     except ImportError:
         return None
-    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "10")))
+    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "6")))
     mdir = rl.main_state_dir(root)
     waited = False
     while True:
