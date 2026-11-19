@@ -417,3 +417,30 @@ fn combat_result_ranking_and_store_roundtrip_persistence() {
         .expect("GetLeaderboard");
     assert!(matches!(lb_rpc, PyRep::List(_)));
 }
+
+#[test]
+fn event_schedule_reads_do_not_mutate_db() {
+    let ctx = test_ctx();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut sess = SessionState::default();
+    sess.user_id = Some(1);
+    sess.character_id = Some(90_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    let kw = HashMap::new();
+
+    let epoch_before = ctx.db.state_epoch();
+    let commits_before = ctx.db.tx_commit_count();
+    for meth in [
+        "GetAllEvents",
+        "GetActiveEvents",
+        "GetMostRecentEvent",
+        "GetNextEventDate",
+    ] {
+        let res = rt
+            .block_on(handle(&ctx, &mut sess, "pvpFilamentMgr", meth, &[], &kw))
+            .unwrap();
+        assert!(res.is_ok(), "{meth} must succeed read-only");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}

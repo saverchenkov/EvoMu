@@ -1918,6 +1918,9 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
     .await
     .expect("GetSystemScanMgr own sys");
     let scan_oid = scan_rep.dict_get("boundID").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let err_not_in_space = "NotInSpace";
+    let err_no_active_probes = "NoActiveProbes";
+    let err_invalid_probe_state = "InvalidProbeState";
     if player_sess.station_id.is_some() {
         assert_eq!(
             rpc(&ctx, &mut player_sess, "scanMgr", "ConeScan", &[])
@@ -1926,27 +1929,54 @@ async fn edge_probe_scanning_and_dscan_validation_and_rbac() {
                 .code,
             "CannotDirectionalScanWhileDocked"
         );
-    }
-
-    // RequestScans with no probes -> NoActiveProbes
-    assert_eq!(
-        rpc_bound(&ctx, &mut player_sess, "scanMgr", scan_oid, "RequestScans", &[PyRep::Dict(Vec::new())])
+        // RequestScans while docked -> NotInSpace
+        assert_eq!(
+            rpc_bound(
+                &ctx,
+                &mut player_sess,
+                "scanMgr",
+                scan_oid,
+                "RequestScans",
+                &[PyRep::Dict(Vec::new())],
+            )
             .await
             .unwrap_err()
             .code,
-        "NoActiveProbes"
-    );
+            err_not_in_space
+        );
+    }
     // InvalidProbeState
     assert_eq!(
         rpc_bound(&ctx, &mut player_sess, "scanMgr", scan_oid, "SetActivityState", &[PyRep::Integer(99)])
             .await
             .unwrap_err()
             .code,
-        "InvalidProbeState"
+        err_invalid_probe_state
     );
 
-    // GM pilot tests Core Probe Launcher NoProbesLoaded, InvalidProbeForLauncher, InvalidProbeCoordinates
+    // GM pilot tests undocked RequestScans with no probes -> NoActiveProbes, plus Core Probe Launcher errors
     let mut gm = gm_pilot_in_space(&ctx, 5513, 95_500_013, TYPE_TRISTAN, SYS_JITA).await;
+    let gm_scan_rep = rpc(&ctx, &mut gm.sess, "scanMgr", "GetSystemScanMgr", &[])
+        .await
+        .expect("GM GetSystemScanMgr");
+    let gm_scan_oid = gm_scan_rep
+        .dict_get("boundID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as u64;
+    assert_eq!(
+        rpc_bound(
+            &ctx,
+            &mut gm.sess,
+            "scanMgr",
+            gm_scan_oid,
+            "RequestScans",
+            &[PyRep::Dict(Vec::new())],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        err_no_active_probes
+    );
     let launcher = fit_module(&ctx, &mut gm.sess, TYPE_CORE_PROBE_LAUNCHER).await;
     assert_eq!(
         rpc(&ctx, &mut gm.sess, "dogmaIM", "Activate", &[PyRep::Integer(launcher)])

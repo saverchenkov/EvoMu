@@ -190,8 +190,11 @@ pub fn on_logout(ctx: &ServerContext, uid: u64) {
     });
 }
 
-/// Reads the recorded Omega subscription expiry timestamp for `uid` from `snap`, if any.
-pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64) -> Option<u64> {
+/// Returns `(admin_expiry, merged_effective_expiry)` for `uid` without mutating `snap`.
+fn subscription_expiry_parts(
+    snap: &eve_db::WorldStateSnapshot,
+    uid: u64,
+) -> (Option<u64>, Option<u64>) {
     let admin_exp = load_store(snap).subscription_expiry.get(&uid).copied();
     let quasar_exp = snap
         .owner_notes
@@ -201,12 +204,18 @@ pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64)
                 .ok()
         })
         .and_then(|st| st.omega_subscriptions.get(&uid).copied());
-    match (admin_exp, quasar_exp) {
+    let merged = match (admin_exp, quasar_exp) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         (None, None) => None,
-    }
+    };
+    (admin_exp, merged)
+}
+
+/// Reads the recorded Omega subscription expiry timestamp for `uid` from `snap`, if any.
+pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64) -> Option<u64> {
+    subscription_expiry_parts(snap, uid).1
 }
 
 /// Applies the stored Omega expiry to every character on the account: Omega (2) while the
@@ -214,39 +223,38 @@ pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64)
 /// their characters' current clone grade. Returns `(grade, expiry_unix)`.
 pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
     let now = ctx.now_unix();
-    let cids_to_catch_up: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        let lapsed = subscription_expiry_for_user(snap, uid).is_some_and(|until| until <= now);
-        if lapsed {
-            snap.characters
-                .values()
-                .filter(|c| c.user_id == uid && c.clone_grade >= 2)
-                .map(|c| c.character_id)
-                .collect()
-        } else {
-            Vec::new()
+    let (cids_to_catch_up, needs_mut, read_only_result) = ctx.db.with_snapshot(|snap| {
+        let (admin_exp, exp) = subscription_expiry_parts(snap, uid);
+        let exp_changed = exp.is_some() && exp != admin_exp;
+        let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
+        let lapsed = exp.is_some_and(|until| until <= now);
+        let mut catch_up = Vec::new();
+        let mut grade_changed = false;
+        let mut first_grade = None;
+        for ch in snap.characters.values().filter(|c| c.user_id == uid) {
+            first_grade.get_or_insert(ch.clone_grade);
+            if lapsed && ch.clone_grade >= 2 {
+                catch_up.push(ch.character_id);
+            }
+            if target.is_some_and(|g| ch.clone_grade != g) {
+                grade_changed = true;
+            }
         }
+        (
+            catch_up,
+            exp_changed || grade_changed,
+            (target.or(first_grade).unwrap_or(1), exp.unwrap_or(0)),
+        )
     });
+    if !needs_mut {
+        return read_only_result;
+    }
     for cid in cids_to_catch_up {
         crate::services::character_skills::catch_up_skill_queue(ctx, cid);
     }
     let (res_grade, res_exp, changed_grades, exp_changed) = with_store(ctx, |snap, store| {
         let admin_exp = store.subscription_expiry.get(&uid).copied();
-        let quasar_exp = snap
-            .owner_notes
-            .get(&-8_500_000_000_000_i64)
-            .and_then(|n| {
-                serde_json::from_str::<crate::services::quasar_auth_user::QuasarIdentityStore>(
-                    &n.note,
-                )
-                .ok()
-            })
-            .and_then(|st| st.omega_subscriptions.get(&uid).copied());
-        let exp = match (admin_exp, quasar_exp) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
+        let (_, exp) = subscription_expiry_parts(snap, uid);
         let exp_changed = exp.is_some() && exp != admin_exp;
         if let Some(u) = exp {
             store.subscription_expiry.insert(uid, u);
@@ -954,11 +962,27 @@ fn handle_inner(
         }
         ("userSvc", "GetCreateDate") => {
             let uid = ServerContext::require_auth(session)?;
-            let dt = with_store(ctx, |_, store| {
-                *store
+            // Stable fallback timestamp (> 130_000_000_000_000_000 FILETIME) so read-only calls
+            // without a prior login/create timestamp never mutate the store or DB.
+            const FALLBACK_CREATE_DATE_FILETIME: i64 =
+                (1_700_000_000_i64 + 11_644_473_600) * 10_000_000;
+            let dt = ctx.db.with_snapshot(|snap| {
+                load_store(snap)
                     .account_create_date
-                    .entry(uid)
-                    .or_insert_with(|| ctx.now_blueos_filetime_ticks())
+                    .get(&uid)
+                    .copied()
+                    .or_else(|| {
+                        snap.characters
+                            .values()
+                            .filter(|c| c.user_id == uid && c.create_date_unix > 0)
+                            .map(|c| {
+                                (c.create_date_unix as i64)
+                                    .saturating_add(11_644_473_600)
+                                    .saturating_mul(10_000_000)
+                            })
+                            .min()
+                    })
+                    .unwrap_or(FALLBACK_CREATE_DATE_FILETIME)
             });
             Ok(Some(PyRep::Integer(dt)))
         }

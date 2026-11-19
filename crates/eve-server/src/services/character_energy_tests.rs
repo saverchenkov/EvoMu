@@ -126,3 +126,34 @@ fn energy_state_default_keyval_regen_consume_and_rpc() {
         Some(&PyRep::Integer(54))
     );
 }
+
+#[test]
+fn get_my_energy_state_rpc_is_read_pure() {
+    let ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let uninit_cid = 90_099_001_i64;
+    let mut sess = auth_session(1, uninit_cid, 98_000_001, 30_000_142);
+
+    let epoch_before = ctx.db.state_epoch();
+    let commits_before = ctx.db.tx_commit_count();
+    let res = handle(&ctx, &mut sess, "characterEnergyMgr", "GetMyEnergyState", &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        res.dict_get("currentEnergy"),
+        Some(&PyRep::Integer(DEFAULT_MAX_ENERGY))
+    );
+    assert!(
+        !ctx.cluster_misc_state
+            .lock()
+            .unwrap()
+            .char_energy
+            .contains_key(&uninit_cid),
+        "read path must not insert default energy into cluster_misc_state"
+    );
+    assert!(ctx.drain_notifications_for_char(uninit_cid).is_empty());
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}

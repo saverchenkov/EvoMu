@@ -677,7 +677,7 @@ pub(crate) fn resolve_special_site_string_instance_id(
     }
     let sys_id: u32 = parts[1].parse().ok()?;
     let idx: usize = parts[2].parse().ok()?;
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| match parts[0] {
+    crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| match parts[0] {
         "HF" => reg
             .homefront_sites
             .get(&sys_id)
@@ -692,7 +692,7 @@ pub(crate) fn resolve_special_site_string_instance_id(
             .drifter_hives
             .values()
             .find(|h| h.site_id == site_str || h.solar_system_id == sys_id)
-            .map(|h| h.solar_system_id as i64),
+            .map(|h| i64::from(h.solar_system_id)),
         _ => None,
     })
 }
@@ -700,12 +700,14 @@ pub(crate) fn resolve_special_site_string_instance_id(
 /// Returns `true` when `instance_id` identifies a registered special PvE site
 /// (Drifter Hive, Homefront Operation, or Triglavian Minor Victory site).
 pub(crate) fn is_known_special_site_instance_id(ctx: &ServerContext, instance_id: i64) -> bool {
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.drifter_hives.contains_key(&(instance_id as u32))
+    crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        u32::try_from(instance_id)
+            .ok()
+            .is_some_and(|sys_id| reg.drifter_hives.contains_key(&sys_id))
             || reg
                 .drifter_hives
                 .values()
-                .any(|h| (h.solar_system_id as i64) == instance_id)
+                .any(|h| i64::from(h.solar_system_id) == instance_id)
             || reg
                 .homefront_sites
                 .values()

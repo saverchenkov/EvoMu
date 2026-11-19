@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::pve_special_sites::{with_pve_special_reg, with_pve_special_reg_db, PveSpecialSitesRegistry};
+use crate::services::pve_special_sites::{
+    read_pve_special_reg, with_pve_special_reg, with_pve_special_reg_db, PveSpecialSitesRegistry,
+};
 use crate::system_actor::SystemRegistry;
 use eve_db::{IskCents, WalletJournalEntry, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -933,7 +935,7 @@ pub async fn process_incursion_site_completion_and_payout(
     site_id: &str,
     candidate_pilots: Option<&[CharacterId]>,
 ) -> Result<IncursionCompletionResult, BridgeRpcError> {
-    let res = process_incursion_site_completion_and_payout_core(
+    let res = Box::pin(process_incursion_site_completion_and_payout_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
@@ -942,7 +944,7 @@ pub async fn process_incursion_site_completion_and_payout(
         site_sys,
         site_id,
         candidate_pilots,
-    )
+    ))
     .await;
     if let Ok(r) = &res {
         notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, site_sys, r);
@@ -962,7 +964,7 @@ pub async fn check_and_complete_incursion_wave_server_side_core(
     let killer_fleet_id = killer_char_id.and_then(|cid| {
         db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.fleet_id))
     });
-    process_incursion_site_completion_and_payout_core(
+    Box::pin(process_incursion_site_completion_and_payout_core(
         systems,
         db,
         sde,
@@ -971,7 +973,7 @@ pub async fn check_and_complete_incursion_wave_server_side_core(
         solar_system_id,
         site_id,
         None,
-    )
+    ))
     .await
 }
 
@@ -1030,6 +1032,25 @@ pub fn mark_incursion_boss_destroyed(
 }
 
 pub async fn on_incursion_boss_destroyed_core(
+    systems: &Arc<SystemRegistry>,
+    db: &Arc<WorldRepository>,
+    sde: &Arc<SdeRegistry>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: Option<CharacterId>,
+) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
+    Box::pin(on_incursion_boss_destroyed_core_inner(
+        systems,
+        db,
+        sde,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    ))
+    .await
+}
+
+async fn on_incursion_boss_destroyed_core_inner(
     systems: &Arc<SystemRegistry>,
     db: &Arc<WorldRepository>,
     sde: &Arc<SdeRegistry>,
@@ -1141,25 +1162,25 @@ pub async fn on_incursion_boss_destroyed_core(
         )));
     }
     if is_escort {
-        crate::services::pve_incursion_lifecycle::advance_incursion_wave_on_escort_kill(
+        Box::pin(crate::services::pve_incursion_lifecycle::advance_incursion_wave_on_escort_kill(
             systems,
             db,
             sde,
             solar_system_id,
             &site_id,
-        )
+        ))
         .await;
         return None;
     }
     Some(
-        check_and_complete_incursion_wave_server_side_core(
+        Box::pin(check_and_complete_incursion_wave_server_side_core(
             systems,
             db,
             sde,
             solar_system_id,
             &site_id,
             completion_killer_opt.or(killer_char_id),
-        )
+        ))
         .await,
     )
 }
@@ -1221,7 +1242,7 @@ fn handle_get_incursion_lp_log(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let logs_py = with_pve_special_reg(ctx, |reg| {
+    let logs_py = read_pve_special_reg(ctx, |reg| {
         reg.incursion_lp_logs
             .get(&char_id)
             .map(|entries| {
@@ -1244,12 +1265,45 @@ fn handle_update_incursion_lp_log(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let synced_rows = with_pve_special_reg(ctx, |reg| {
-        crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
-            reg, char_id, args, now_ft,
-        )
+    let (site_filter, cid_filter) = match args {
+        [first, ..] => (
+            first.as_str().map(str::to_string),
+            first.as_i64().and_then(|v| u32::try_from(v).ok()),
+        ),
+        [] => (None, None),
+    };
+    let (needs_ts_backfill, readonly_rows) = read_pve_special_reg(ctx, |reg| {
+        let Some(entries) = reg.incursion_lp_logs.get(&char_id) else {
+            return (false, Vec::new());
+        };
+        if entries.iter().any(|e| e.timestamp_filetime <= 0) {
+            return (true, Vec::new());
+        }
+        let rows = entries
+            .iter()
+            .filter(|e| {
+                if let Some(ref sf) = site_filter {
+                    e.site_id == *sf
+                } else if let Some(cf) = cid_filter {
+                    e.constellation_id == cf
+                } else {
+                    true
+                }
+            })
+            .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
+            .collect::<Vec<_>>();
+        (false, rows)
     });
+    let synced_rows = if needs_ts_backfill {
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        with_pve_special_reg(ctx, |reg| {
+            crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
+                reg, char_id, args, now_ft,
+            )
+        })
+    } else {
+        readonly_rows
+    };
     if synced_rows.is_empty() {
         Some(Ok(PyRep::None))
     } else {

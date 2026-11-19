@@ -6,10 +6,11 @@
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::space_destiny::{
     compute_wormhole_stages_with_sde, derive_wormhole_buckets, ensure_system_signatures_and_anomalies,
-    system_wormhole_profile, wormhole_item_id_for_signature, AU_IN_METERS,
+    pochven_wormhole_ball_position, wormhole_item_id_for_signature, AU_IN_METERS,
 };
+use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag};
-use eve_destiny::Ball;
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -24,6 +25,187 @@ fn resolve_caller_solar_system(ctx: &ServerContext, session: &SessionState, char
         .solar_system_id
         .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
         .unwrap_or(0)
+}
+
+fn probe_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    let msg = message.into();
+    BridgeRpcError::with_client_error(
+        code,
+        msg.clone(),
+        eve_proto::ClientError::CustomInfo(msg),
+    )
+}
+
+fn require_undocked_probe_space(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<(i64, u32), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
+    }
+    if session.solar_system_id.is_none()
+        && ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .is_some_and(|c| c.station_id.is_some() || c.structure_id.is_some())
+        })
+    {
+        return Err(probe_rpc_err("NotInSpace", "Cannot scan probes while docked"));
+    }
+    let sys_id = resolve_caller_solar_system(ctx, session, char_id);
+    if sys_id == 0 {
+        return Err(probe_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    }
+    Ok((char_id, sys_id))
+}
+
+fn is_signature_active(sig: &CosmicSignatureRecord, now_unix: u64) -> bool {
+    !sig.collapsed
+        && (sig.lifetime_seconds == 0
+            || now_unix < sig.created_unix.saturating_add(sig.lifetime_seconds))
+}
+
+fn is_anomaly_active(anom: &CosmicAnomalyRecord, now_unix: u64) -> bool {
+    !anom.cleared
+        && (anom.lifetime_seconds == 0
+            || now_unix < anom.created_unix.saturating_add(anom.lifetime_seconds))
+}
+
+/// Reads cached cosmic signatures & anomalies purely from snapshot when native sites are
+/// already seeded and unexpired (`None` indicates seeding or expiry cleanup is needed).
+fn read_system_signatures_and_anomalies_ready(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    now_unix: u64,
+) -> Option<(Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>)> {
+    ctx.db.with_snapshot(|snap| {
+        let sigs = snap.cosmic_signatures.get(&sys_id)?;
+        let has_native_sigs = sigs.iter().any(|s| {
+            !s.signature_id.starts_with("K162-") && !s.signature_id.starts_with("DNG-")
+        });
+        if !has_native_sigs {
+            return None;
+        }
+        let any_sig_expired = sigs.iter().any(|s| {
+            !s.collapsed
+                && s.lifetime_seconds > 0
+                && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
+        });
+        if any_sig_expired {
+            return None;
+        }
+        let anoms = snap.cosmic_anomalies.get(&sys_id)?;
+        let any_anom_expired = anoms.iter().any(|a| {
+            !a.cleared
+                && a.lifetime_seconds > 0
+                && now_unix >= a.created_unix.saturating_add(a.lifetime_seconds)
+        });
+        if any_anom_expired {
+            return None;
+        }
+        Some((sigs.clone(), anoms.clone()))
+    })
+}
+
+/// Materializes missing Ballpark wormhole balls for existing active wormhole
+/// signatures without mutating `EveDb`.
+async fn sync_existing_wormhole_balls(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    sigs: &[CosmicSignatureRecord],
+    now_unix: u64,
+) {
+    let has_active_wh = sigs
+        .iter()
+        .any(|s| s.sig_group == "Wormhole" && is_signature_active(s, now_unix));
+    if !has_active_wh {
+        return;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for sig in sigs {
+        if sig.sig_group == "Wormhole" && is_signature_active(sig, now_unix) {
+            let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+            if sys_handle
+                .get_ball_snapshot(wh_item_id)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let ball_pos = pochven_wormhole_ball_position(&ctx.sde, sig);
+                let _ = sys_handle
+                    .spawn_ball(Ball {
+                        id: wh_item_id,
+                        type_id: sig.wormhole_type_id.unwrap_or(26272),
+                        position: ball_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: sig.remaining_mass_kg.max(1.0),
+                        radius: 1500.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    })
+                    .await;
+            }
+            let (_, wh_size, _, wh_age, _) =
+                compute_wormhole_stages_with_sde(sig, now_unix, Some(&ctx.sde));
+            let _ = sys_handle
+                .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
+                .await;
+        }
+    }
+}
+
+async fn load_system_signatures_and_anomalies(
+    ctx: &ServerContext,
+    session: &SessionState,
+    sys_id: SolarSystemId,
+    now_unix: u64,
+) -> (Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>) {
+    if let Some((sigs, anoms)) = read_system_signatures_and_anomalies_ready(ctx, sys_id, now_unix) {
+        sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
+        return (sigs, anoms);
+    }
+    // Docked or shipless pilots may inspect readouts, so avoid mutating DB if unseeded.
+    if session.station_id.is_some()
+        || session.structure_id.is_some()
+        || session.ship_id.is_none()
+    {
+        let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
+            let mut sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
+            sigs.retain(|s| is_signature_active(s, now_unix));
+            let mut anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
+                let wh_class = system_wormhole_profile_sde(&ctx.sde, sys_id).0;
+                if wh_class == 0 {
+                    vec![CosmicAnomalyRecord {
+                        anomaly_id: format!("ANO-{}", 100 + (sys_id % 900)),
+                        solar_system_id: sys_id,
+                        name: "Dense Veldspar Deposit".into(),
+                        anomaly_type: "Ore".into(),
+                        position: [4.0 * AU_IN_METERS, 3.0 * AU_IN_METERS, -2.0 * AU_IN_METERS],
+                        signal_strength: 1.0,
+                        ore_types: vec![1230, 1228],
+                        remaining_volume: 50_000.0,
+                        created_unix: now_unix,
+                        lifetime_seconds: 86_400,
+                        cleared: false,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            });
+            anoms.retain(|a| is_anomaly_active(a, now_unix));
+            (sigs, anoms)
+        });
+        sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
+        return (sigs, anoms);
+    }
+    ensure_system_signatures_and_anomalies(ctx, sys_id).await
 }
 
 // parity: feat:scanning.probe-target-classes, feat:scanning.probe-range-deviation
@@ -481,42 +663,24 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
     // parity: feat:scanning.probe-launch, feat:scanning.probe-recall, feat:scanning.probe-scan-math
     // parity: feat:scanning.probe-range-deviation, feat:scanning.probe-target-classes, feat:scanning.signature-reveal-thresholds, feat:scanning.signature-strength-levels
     // parity: rpc:scanMgr.GetSystemScanMgr
-    let mut mutated = false;
+    let mut persist_runtime = false;
     let res = match (service, method) {
         ("scanMgr", "GetSystemScanMgr") => handle_get_system_scan_mgr(ctx, session, service, args).await,
         ("scanMgr", "GetAnomalies") => handle_get_anomalies(ctx, session, bound_entry).await,
-        ("scanMgr", "RequestScans") => {
-            mutated = true;
-            handle_request_scans(ctx, session, bound_entry, args, kwargs).await
-        }
-        ("scanMgr", "RecoverProbes") => {
-            mutated = true;
-            handle_recover_probes(ctx, session, bound_entry, args).await
-        }
-        ("scanMgr", "ReconnectToLostProbes") => {
-            mutated = true;
-            handle_reconnect_probes(ctx, session, bound_entry).await
-        }
-        ("scanMgr", "DestroyProbe") => {
-            mutated = true;
-            handle_destroy_probe(ctx, session, bound_entry, args).await
-        }
+        ("scanMgr", "RequestScans") => handle_request_scans(ctx, session, bound_entry, args, kwargs).await,
+        ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
+        ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
+        ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
         ("scanMgr", "GetFullState") => handle_get_full_state(ctx, session, bound_entry).await,
-        ("scanMgr", "QAOverrideProbeExpiry") => {
-            mutated = true;
-            handle_qa_override_probe_expiry(ctx, session, args)
-        }
+        ("scanMgr", "QAOverrideProbeExpiry") => handle_qa_override_probe_expiry(ctx, session, args),
         ("scanMgr", "QAScanSites") => {
-            mutated = true;
+            persist_runtime = true;
             handle_qa_scan_sites(ctx, session, bound_entry).await
         }
-        ("scanMgr", "SetActivityState") => {
-            mutated = true;
-            handle_set_activity_state(ctx, session, bound_entry, args)
-        }
+        ("scanMgr", "SetActivityState") => handle_set_activity_state(ctx, session, bound_entry, args),
         _ => None,
     };
-    if mutated && matches!(res, Some(Ok(_))) {
+    if persist_runtime && matches!(res, Some(Ok(_))) {
         ctx.persist_server_runtime_to_db();
     }
     res
@@ -551,7 +715,10 @@ async fn handle_get_full_state(
     } else {
         caller_sys
     };
-    let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let now_unix = ctx.now_unix();
+    let (sigs, mut anomalies) =
+        load_system_signatures_and_anomalies(ctx, session, sys_id, now_unix).await;
+    anomalies.retain(|a| is_anomaly_active(a, now_unix));
     let anom_ids: std::collections::HashSet<String> =
         anomalies.iter().map(|a| a.anomaly_id.clone()).collect();
     let anom_id_refs: std::collections::HashSet<&str> =
@@ -566,10 +733,11 @@ async fn handle_get_full_state(
     let sig_entries: Vec<(PyRep, PyRep)> = sigs
         .into_iter()
         .filter(|s| {
-            !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
-                s,
-                &anom_id_refs,
-            )
+            is_signature_active(s, now_unix)
+                && !crate::services::fleet_social::fleet_social_scanning::is_anomaly_colliding_signature(
+                    s,
+                    &anom_id_refs,
+                )
         })
         .map(|mut s| {
             let eff_strength = if is_gm {
@@ -842,12 +1010,14 @@ async fn handle_get_system_scan_mgr(
     let now_unix = ctx.now_unix();
     let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     prune_stale_pending_scans_for_char(ctx, char_id, session.session_id, None);
-    let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let (sigs, anomalies) =
+        load_system_signatures_and_anomalies(ctx, session, sys_id, ctx.now_unix()).await;
     let bound_id = match ctx.bind_object(session, service, sys_id as i64) {
         Ok(b) => b,
         Err(e) => return Some(Err(e)),
     };
-    let (wh_class, is_thera, is_shattered, env_effect) = system_wormhole_profile(sys_id);
+    let (wh_class, is_thera, is_shattered, env_effect) =
+        system_wormhole_profile_sde(&ctx.sde, sys_id);
 
     let anom_ids: std::collections::HashSet<&str> =
         anomalies.iter().map(|a| a.anomaly_id.as_str()).collect();
@@ -952,7 +1122,7 @@ async fn handle_get_anomalies(
     }
     let sys_id = caller_sys;
     let now_unix = ctx.now_unix();
-    let (_, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    let (_, anomalies) = load_system_signatures_and_anomalies(ctx, session, sys_id, now_unix).await;
     Some(Ok(PyRep::List(format_anomalies(anomalies, now_unix))))
 }
 
@@ -963,13 +1133,19 @@ async fn handle_request_scans(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     let has_any_tracked_probes = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
-        map.values().any(|p| p.owner_char_id == char_id)
+        map.values().any(|p| p.owner_char_id == char_id && p.state >= 0)
     });
+    if !has_any_tracked_probes && session.ship_id.is_none() {
+        return Some(Err(probe_rpc_err(
+            "NoActiveShip",
+            "Session has no active ship",
+        )));
+    }
     if !has_any_tracked_probes
         && bound_entry.is_none()
         && (args.is_empty() || matches!(args.first(), Some(PyRep::Real(_))))
@@ -978,21 +1154,29 @@ async fn handle_request_scans(
         return None;
     }
 
-    let caller_sys = resolve_caller_solar_system(ctx, session, char_id);
     if let Some(b) = bound_entry {
-        if (b.object_id as u32) != caller_sys && !session.has_gm_role() {
-            return Some(Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Cannot request probe scans for a remote solar system".into(),
-                client_error: None,
-            }));
+        if u32::try_from(b.object_id).ok() != Some(caller_sys) && !session.has_gm_role() {
+            return Some(Err(probe_rpc_err(
+                "AccessDenied",
+                "Cannot request probe scans for a remote solar system",
+            )));
         }
     }
     let sys_id = caller_sys;
-    let _ = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let now_unix = ctx.now_unix();
-    let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if has_any_tracked_probes {
+        let _ = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
+    }
+    let has_active_in_sys = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
+        map.values()
+            .any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
+    });
+    if !has_active_in_sys {
+        return Some(Err(probe_rpc_err(
+            "NoActiveProbes",
+            "No active scanner probes in space",
+        )));
+    }
 
     let override_range_step = args
         .get(1)
@@ -1142,6 +1326,7 @@ async fn handle_request_scans(
     if invalid_coords {
         return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
     }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
 
     let scan_ship_id_for_move = session.ship_id.or_else(|| {
         ctx.active_scanner_probes.read().ok().and_then(|m| {
@@ -1245,11 +1430,15 @@ async fn handle_request_scans(
     if active_probes.is_empty() {
         return Some(Err(BridgeRpcError { code: "NoActiveProbes".into(), message: "No active scanner probes in space".into(), client_error: None }));
     }
+    if read_system_signatures_and_anomalies_ready(ctx, sys_id, now_unix).is_none() {
+        let _ = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+    }
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let inhibitor_positions = crate::services::space_destiny::space_cyno_filaments::active_scan_inhibitor_positions(ctx, sys_id, &balls);
     let caller_ship_id = session.ship_id.or_else(|| active_probes.first().map(|p| p.ship_id));
     if let Some(cb) = caller_ship_id.and_then(|csid| balls.iter().find(|b| b.id == csid)) {
         if inhibitor_positions.iter().any(|pos| cb.position.distance(*pos) <= 30_000.0) {
+            sync_scanner_probes_to_db(ctx);
             return Some(Ok(PyRep::List(Vec::new())));
         }
     }
@@ -1556,6 +1745,7 @@ async fn handle_request_scans(
         if let Some(sid) = session.ship_id {
             if let Some(cpos) = sys_handle.get_ball_position_sync(sid) {
                 if crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, cpos) {
+                    sync_scanner_probes_to_db(ctx);
                     return Some(Ok(PyRep::List(Vec::new())));
                 }
             }
@@ -1754,6 +1944,7 @@ async fn handle_request_scans(
         ctx_rec
     });
     record_active_probe_scan_context(ctx, char_id, scan_ctx);
+    ctx.persist_server_runtime_to_db();
     Some(Ok(PyRep::List(rows)))
 }
 
@@ -1763,11 +1954,14 @@ async fn handle_recover_probes(
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
+    let sys_id = bound_entry
+        .and_then(|b| u32::try_from(b.object_id).ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(caller_sys);
 
     let mut target_probe_ids: Vec<i64> = Vec::new();
     if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
@@ -2027,12 +2221,12 @@ fn emit_probe_registered(ctx: &ServerContext, char_id: i64, probe_id: i64, probe
 }
 
 async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     // Unbound or synthetic `object_id <= 0` calls fall back to the caller's active solar system.
     let sys_id = bound_entry
         .and_then(|b| u32::try_from(b.object_id).ok())
         .filter(|&id| id > 0)
-        .unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
+        .unwrap_or(caller_sys);
     let now_unix = ctx.now_unix();
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
     let ship_id = session.ship_id.unwrap_or(0);
@@ -2107,32 +2301,35 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
 }
 
 async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>, args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-    let sys_id = bound_entry.map(|b| b.object_id as u32).unwrap_or_else(|| resolve_caller_solar_system(ctx, session, char_id));
+    let (char_id, caller_sys) = match require_undocked_probe_space(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let sys_id = bound_entry
+        .and_then(|b| u32::try_from(b.object_id).ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(caller_sys);
     let target_pid = args.first().and_then(|a| a.as_i64());
     let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
         let ids: Vec<i64> = map.values().filter(|p| p.owner_char_id == char_id && p.state >= 0 && (target_pid.is_none() || target_pid == Some(p.probe_id))).map(|p| p.probe_id).collect();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
     } else { Vec::new() };
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    for p in &destroyed_probes {
-        let _ = sys_handle.remove_ball(p.probe_id).await;
-        let _ = ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnRemoveProbe { probe_id: p.probe_id },
-        );
-    }
     if !destroyed_probes.is_empty() {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for p in &destroyed_probes {
+            let _ = sys_handle.remove_ball(p.probe_id).await;
+            let _ = ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnRemoveProbe { probe_id: p.probe_id },
+            );
+        }
         let destroyed_ids: Vec<i64> = destroyed_probes.iter().map(|p| p.probe_id).collect();
         prune_probe_ids_from_pending_scans(ctx, char_id, &destroyed_ids);
         sync_scanner_probes_to_db(ctx);
-    }
-    let any_left = ctx.active_scanner_probes.read().ok().is_some_and(|m| m.values().any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0));
-    if !destroyed_probes.is_empty() && !any_left {
-        let _ = ctx.emit_typed(
-            crate::router::NotificationTarget::Character(char_id),
-            crate::router::notify_registry::OnScannerInfoRemoved {},
-        );
+        let any_left = ctx.active_scanner_probes.read().ok().is_some_and(|m| m.values().any(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0));
+        if !any_left {
+            let _ = ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnScannerInfoRemoved {},
+            );
+        }
     }
     Some(Ok(PyRep::keyval([
         ("destroyedProbeID", destroyed_probes.first().map(|p| PyRep::Integer(p.probe_id)).unwrap_or(PyRep::None)),
@@ -2635,8 +2832,8 @@ pub(crate) fn sync_scanner_probes_to_db(ctx: &ServerContext) {
                     .collect();
             }
         });
+        ctx.persist_server_runtime_to_db();
     }
-    ctx.persist_server_runtime_to_db();
 }
 
 #[cfg(test)]

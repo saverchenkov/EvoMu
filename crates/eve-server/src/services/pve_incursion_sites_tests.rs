@@ -469,6 +469,51 @@ async fn test_incursion_site_completion_scaling_and_mothership_finale() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incursion_lp_log_reads_and_noop_updates_do_not_mutate_db() {
+    let ctx = build_test_ctx();
+    let cid = 92_000_099_i64;
+    let kw = HashMap::new();
+
+    let mut unauth = eve_machonet::SessionState::new(1);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    assert!(
+        handle_incursion_rpc(&ctx, &mut unauth, "incursion", "GetIncursionLPLog", &[], &kw)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        handle_incursion_rpc(&ctx, &mut unauth, "incursion", "UpdateIncursionLPLog", &[], &kw)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    let mut sess = eve_machonet::SessionState::new(2);
+    sess.user_id = Some(99);
+    sess.character_id = Some(cid);
+    assert_eq!(
+        handle_incursion_rpc(&ctx, &mut sess, "incursion", "GetIncursionLPLog", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::List(Vec::new())
+    );
+    assert_eq!(
+        handle_incursion_rpc(&ctx, &mut sess, "incursion", "UpdateIncursionLPLog", &[], &kw)
+            .await
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+}
+
 #[cfg(test)]
 #[path = "pve_incursion_sites_extra_unit_tests.rs"]
 mod pve_incursion_sites_extra_unit_tests;

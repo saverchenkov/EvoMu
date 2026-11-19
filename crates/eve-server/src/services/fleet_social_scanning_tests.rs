@@ -18,6 +18,7 @@ async fn signal_tracker_signatures_and_request_scans() {
     let char_id = 100_000_001;
     let sys_id = 30_000_142;
     let mut session = make_session(char_id, sys_id);
+    session.ship_id = Some(500_000_001);
     let kw = HashMap::new();
     let svc = "scanMgr";
 
@@ -870,4 +871,209 @@ async fn signal_tracker_delta_and_get_signatures_exclude_anomaly_colliding_signa
     assert!(!row_ids.contains(&"DNG-1347-1897095014"));
     assert!(!row_ids.contains(&"ICE-BELT-1"));
     assert!(!row_ids.contains(&"SOV-ORE-1"));
+}
+
+#[tokio::test]
+async fn scanning_and_wormhole_read_purity_and_docked_dscan_guard() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 100_000_099_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let err_dscan_docked = "CannotDirectionalScanWhileDocked";
+
+    let mut docked = make_session(char_id, sys_id);
+    docked.station_id = Some(60_003_760);
+    docked.ship_id = Some(200_000_099);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    for meth in ["ConeScan", "DirectionalScan"] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut docked, "scanMgr", meth, &[], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, err_dscan_docked);
+    }
+    for wh_arg in [PyRep::String("NO-SUCH-WH".into()), PyRep::Integer(40_000_999)] {
+        let err = handle_scanning_and_wormholes(&ctx, &mut docked, "wormholeMgr", "GetWormholePolarization", &[wh_arg], &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "WormholeNotFound");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Pre-seeded wormhole polarization lookup is strictly read-pure
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.entry(sys_id).or_default().push(eve_db::CosmicSignatureRecord {
+            signature_id: "WST-PURE-1".into(),
+            solar_system_id: sys_id,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole".into(),
+            signal_strength: 1.0,
+            position: [0.0; 3],
+            wormhole_type_id: Some(30_001),
+            destination_system_id: Some(31_000_005),
+            created_unix: 1_700_000_000,
+            lifetime_seconds: 86_400,
+            max_mass_kg: 2.0e9,
+            remaining_mass_kg: 2.0e9,
+            max_jump_mass_kg: 3.0e8,
+            collapsed: false,
+        });
+    });
+    let e1 = ctx.db.state_epoch();
+    let c1 = ctx.db.tx_commit_count();
+    let pol = handle_scanning_and_wormholes(
+        &ctx,
+        &mut docked,
+        "wormholeMgr",
+        "GetWormholePolarization",
+        &[PyRep::String("WST-PURE-1".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(pol, PyRep::None);
+    assert_eq!(ctx.db.state_epoch(), e1);
+    assert_eq!(ctx.db.tx_commit_count(), c1);
+
+    // Repeat GetSignatures and repeat SignalTrackerRegister do not mutate DB
+    let mut sess = make_session(char_id, sys_id);
+    assert!(handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[], &kw).await.unwrap().is_ok());
+    let e2 = ctx.db.state_epoch();
+    let c2 = ctx.db.tx_commit_count();
+    assert!(handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "GetSignatures", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[], &kw).await.unwrap().is_ok());
+    assert_eq!(ctx.db.state_epoch(), e2);
+    assert_eq!(ctx.db.tx_commit_count(), c2);
+
+    // Undocked without ship -> NoActiveShip for D-scan
+    let dscan_err = handle_scanning_and_wormholes(&ctx, &mut sess, "scanMgr", "DirectionalScan", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(dscan_err.code, "NoActiveShip");
+}
+
+#[tokio::test]
+async fn scan_mgr_launch_probes_request_scans_and_dispatch_cone_scan_guards() {
+    let err_not_in_space = "NotInSpace";
+    let err_no_solar_system = "NoSolarSystem";
+    let err_no_active_ship = "NoActiveShip";
+    let err_docked_dscan = "CannotDirectionalScanWhileDocked";
+    let svc_scan_mgr = "scanMgr";
+    let m_launch_probes = "LaunchProbes";
+    let m_cone_scan = "ConeScan";
+    let m_request_scans = "RequestScans";
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 100_000_099;
+    let sys_id = 30_000_142;
+    let kw = HashMap::new();
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // LaunchProbes while docked -> NotInSpace, zero probe or DB mutations
+    let mut docked = make_session(char_id, sys_id);
+    docked.station_id = Some(60_003_760);
+    docked.ship_id = Some(500_000_099);
+    let err = handle_scanning_and_wormholes(
+        &ctx,
+        &mut docked,
+        svc_scan_mgr,
+        m_launch_probes,
+        &[PyRep::Integer(4)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, err_not_in_space);
+
+    // LaunchProbes without solar system -> NoSolarSystem
+    let mut no_sys = make_session(char_id, sys_id);
+    no_sys.solar_system_id = None;
+    no_sys.ship_id = Some(500_000_099);
+    let err = handle_scanning_and_wormholes(
+        &ctx,
+        &mut no_sys,
+        svc_scan_mgr,
+        m_launch_probes,
+        &[PyRep::Integer(4)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, err_no_solar_system);
+
+    // LaunchProbes undocked without ship -> NoActiveShip
+    let mut shipless = make_session(char_id, sys_id);
+    shipless.ship_id = None;
+    let err = handle_scanning_and_wormholes(
+        &ctx,
+        &mut shipless,
+        svc_scan_mgr,
+        m_launch_probes,
+        &[PyRep::Integer(4)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, err_no_active_ship);
+    assert!(ctx.social_extras.lock().unwrap().active_probes.get(&char_id).is_none());
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Real dispatch_rpc unbound ConeScan: docked -> CannotDirectionalScanWhileDocked; shipless -> NoActiveShip (0 DB mutations).
+    let cone_args = [PyRep::Real(360.0), PyRep::Real(14.4 * 149_597_870_700.0)];
+    let e1 = ctx.db.state_epoch();
+    let c1 = ctx.db.tx_commit_count();
+    let err = ctx
+        .dispatch_rpc(&mut docked, svc_scan_mgr, None, m_cone_scan, &cone_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_docked_dscan);
+
+    let err = ctx
+        .dispatch_rpc(&mut shipless, svc_scan_mgr, None, m_cone_scan, &cone_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_no_active_ship);
+    assert_eq!(ctx.db.state_epoch(), e1);
+    assert_eq!(ctx.db.tx_commit_count(), c1);
+
+    // Real dispatch_rpc unbound RequestScans: docked -> NotInSpace; shipless -> NoActiveShip.
+    // Note: `services::mining_sites::handle` in `crates/eve-server/src/router/dispatch.rs`
+    // intercepts RequestScans ahead of space_probe_scanning to call seed_system_mining_sites_from_sde once per system;
+    // verify repeat docked & shipless calls stay read-pure afterward.
+    let scan_args = [PyRep::Real(4.0 * 149_597_870_700.0), PyRep::Real(40.0)];
+    let err = ctx
+        .dispatch_rpc(&mut docked, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_not_in_space);
+
+    let e2 = ctx.db.state_epoch();
+    let c2 = ctx.db.tx_commit_count();
+    let err = ctx
+        .dispatch_rpc(&mut docked, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_not_in_space);
+
+    let err = ctx
+        .dispatch_rpc(&mut shipless, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, err_no_active_ship);
+
+    assert_eq!(ctx.db.state_epoch(), e2);
+    assert_eq!(ctx.db.tx_commit_count(), c2);
 }

@@ -412,21 +412,11 @@ fn with_pvp_store_events<R, F>(ctx: &ServerContext, f: F) -> R
 where
     F: FnOnce(&PvpFilamentStore) -> R,
 {
-    let needs_seed = ctx.db.with_snapshot(|snap| {
-        let store = load_pvp_store(snap);
-        !store.seeded_default_events && store.events.is_empty()
-    });
-    if needs_seed {
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut store = load_pvp_store(snap);
-            ensure_events_from_sde(&ctx.sde, &mut store);
-            save_pvp_store(snap, &store);
-        });
+    let mut store = ctx.db.with_snapshot(load_pvp_store);
+    if !store.seeded_default_events && store.events.is_empty() {
+        ensure_events_from_sde(&ctx.sde, &mut store);
     }
-    ctx.db.with_snapshot(|snap| {
-        let store = load_pvp_store(snap);
-        f(&store)
-    })
+    f(&store)
 }
 
 pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
