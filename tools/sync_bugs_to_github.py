@@ -666,6 +666,9 @@ def _is_gateway_failure_bundle(bundle: Dict[str, Any]) -> bool:
         str(manual.get(k) or "") for k in ("title", "description")
     )
     combined = "\n".join(part for part in (trace, stack_key, manual_text) if part)
+    # Strip playtester's catch-all 'quasar-macho' / 'Protocol/Quasar' labels so pure MachoNet
+    # errors (e.g. beyonce.CmdStargateJump) aren't misclassified as zero_gateway_requests.
+    combined = re.sub(r"\b(?:quasar-macho|protocol/quasar)\b", "macho", combined, flags=re.IGNORECASE)
     if combined:
         if re.search(r"ServerException\b|GenericInternalServerError\b|CampaignRequestError\b", combined):
             return True

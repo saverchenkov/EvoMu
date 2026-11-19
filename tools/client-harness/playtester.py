@@ -5683,24 +5683,29 @@ class PlaytesterBugOracle:
             ]
             if fr_quasar_errs or non_benign_macho_excs:
                 sample = (fr_quasar_errs + non_benign_macho_excs)[0]
+                is_quasar_err = bool(fr_quasar_errs) or (
+                    isinstance(sample, dict) and str(sample.get("kind") or "").lower() == "quasar"
+                )
+                label_prefix = "Quasar error" if is_quasar_err else "MachoNet error"
+                subsystem = "quasar" if is_quasar_err else "macho"
                 act_t = decision.get("action", {}).get("type")
                 if isinstance(sample, dict):
                     svc = str(sample.get("service") or "").strip()
                     meth = str(sample.get("method") or "").strip()
                     svc_meth = f"{svc}.{meth}" if (svc and meth) else (svc or meth or str(sample.get("type") or "unknown"))
                     err_s = str(sample.get("error") or sample.get("message") or sample).strip()
-                    title_s = f"[Playtester] Protocol/Quasar error on {act_t} ({svc_meth}): {err_s[:80]}"
+                    title_s = f"[Playtester] {label_prefix} on {act_t} ({svc_meth}): {err_s[:80]}"
                     act_err_s = f"{svc_meth}: {err_s}"
                 else:
                     err_s = str(sample).strip()
-                    title_s = f"[Playtester] Protocol/Quasar error on {act_t}: {err_s[:90]}"
+                    title_s = f"[Playtester] {label_prefix} on {act_t}: {err_s[:90]}"
                     act_err_s = err_s
                 incidents.append(
                     {
                         "kind": "protocol_error",
                         "title": title_s,
                         "severity": "high",
-                        "subsystem": "quasar-macho",
+                        "subsystem": subsystem,
                         "summary": json.dumps(sample),
                         "traceback": new_tb,
                         "action_error": act_err_s,

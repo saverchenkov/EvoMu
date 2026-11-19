@@ -1003,6 +1003,38 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         )
         self.assertIsNone(sync_mod.classify_environment_fault(reached_bundle))
 
+    def test_gh1426_macho_protocol_report_is_not_classified_as_zero_gateway_requests(self) -> None:
+        macho_bundle = _make_crash_bundle(
+            stack_hash=8589232799888905572,
+            trace="",
+            flight_recorder=[
+                {
+                    "kind": "macho",
+                    "service": "beyonce",
+                    "method": "CmdStargateJump",
+                    "status": "ERR",
+                    "error": "UserError('CustomInfo', {'info': (101, u'UI/GateIcons/GateClosed')})",
+                }
+            ],
+            extra={
+                "report_source": "f12_manual",
+                "stack_key": "playtester:quasar-macho:protocol_error",
+                "server_request_count": 113,
+                "gateway_request_count": 0,
+                "manual_report": {
+                    "category_id": "quasar-macho",
+                    "category_name": "protocol_error",
+                    "title": "Protocol/Quasar error on jump_gate (beyonce.CmdStargateJump): UserError('CustomInfo', {'info': (101, u'UI/GateIcons/GateClosed')})",
+                    "description": '{"status": "ERR", "kind": "macho", "service": "beyonce", "method": "CmdStargateJump"}',
+                },
+            },
+        )
+        self.assertFalse(sync_mod._is_gateway_failure_bundle(macho_bundle))
+        self.assertIsNone(sync_mod.classify_environment_fault(macho_bundle))
+        title, labels = sync_mod.build_issue_title_and_labels(macho_bundle)
+        self.assertNotIn("environment", labels)
+        self.assertNotIn("[Environment]", title)
+
 
 if __name__ == "__main__":
     unittest.main()
