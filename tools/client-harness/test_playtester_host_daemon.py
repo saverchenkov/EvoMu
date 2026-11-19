@@ -1517,6 +1517,26 @@ class TestSpeedupOptimizations(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertIn("expect_window_open", msg2)
 
+        in_space_snap = {
+            "session": {"solarsystemid2": 30000142, "stationid": None},
+            "space": {"in_space": True},
+            "ui": {"open_windows": [], "modals": []},
+        }
+        ok3, msg3 = playtester._evaluate_step_assertions(
+            {"expect_session_field": "{'in_space': True}"},
+            {"state_diff": {}},
+            in_space_snap,
+        )
+        self.assertTrue(ok3, msg3)
+
+        ok4, msg4 = playtester._evaluate_step_assertions(
+            {"expect_session_field": "in_space == False"},
+            {"state_diff": {}},
+            in_space_snap,
+        )
+        self.assertFalse(ok4)
+        self.assertIn("expect_session_field", msg4)
+
     def test_agy_stream_worker_pool_turn_and_429_invalidation(self):
         import os
 
