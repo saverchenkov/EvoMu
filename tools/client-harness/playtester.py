@@ -4602,24 +4602,72 @@ def _evaluate_step_assertions(
 
     want_sess = assertions.get("expect_session_field")
     if want_sess:
-        expr = str(want_sess).strip()
         sess = state.get("session") or {}
-        if "!=" in expr:
+        space = state.get("space") or {}
+
+        def _lookup_session_or_space(key: str) -> Any:
+            k_clean = key.strip().strip("'\"")
+            if k_clean.startswith("session."):
+                return sess.get(k_clean.split(".", 1)[1])
+            if k_clean.startswith("space."):
+                return space.get(k_clean.split(".", 1)[1])
+            if k_clean in sess:
+                return sess.get(k_clean)
+            if k_clean in space:
+                return space.get(k_clean)
+            if k_clean == "in_space":
+                return bool(sess.get("solarsystemid2") and not sess.get("stationid"))
+            if k_clean in state:
+                return state.get(k_clean)
+            return None
+
+        def _matches_expected(actual: Any, expected: Any) -> bool:
+            if expected is None or str(expected).strip().lower() == "none":
+                return actual is None
+            if isinstance(expected, bool):
+                return bool(actual) is expected if actual is not None else False
+            exp_s = str(expected).strip()
+            if exp_s.lower() in ("true", "false") and isinstance(actual, bool):
+                return actual is (exp_s.lower() == "true")
+            return str(actual) == exp_s
+
+        parsed_dict: Optional[Dict[str, Any]] = None
+        if isinstance(want_sess, dict):
+            parsed_dict = want_sess
+        else:
+            expr = str(want_sess).strip()
+            if expr.startswith("{") and expr.endswith("}"):
+                import ast
+
+                try:
+                    cand = ast.literal_eval(expr)
+                    if isinstance(cand, dict):
+                        parsed_dict = cand
+                except (SyntaxError, ValueError):
+                    parsed_dict = None
+
+        if parsed_dict is not None:
+            for k, expected in parsed_dict.items():
+                actual = _lookup_session_or_space(str(k))
+                if not _matches_expected(actual, expected):
+                    return False, f"assertion expect_session_field={want_sess!r} failed (field={k!r}, actual={actual!r})"
+        elif "!=" in str(want_sess):
+            expr = str(want_sess).strip()
             k, v = [p.strip() for p in expr.split("!=", 1)]
-            actual = sess.get(k)
-            if (v.lower() == "none" and actual is None) or str(actual) == v:
+            actual = _lookup_session_or_space(k)
+            if _matches_expected(actual, v):
                 return False, f"assertion expect_session_field={expr!r} failed (actual={actual!r})"
-        elif "==" in expr:
+        elif "==" in str(want_sess):
+            expr = str(want_sess).strip()
             k, v = [p.strip() for p in expr.split("==", 1)]
-            actual = sess.get(k)
-            expected_none = v.lower() == "none"
-            if expected_none and actual is not None:
-                return False, f"assertion expect_session_field={expr!r} failed (actual={actual!r})"
-            if not expected_none and str(actual) != v:
+            actual = _lookup_session_or_space(k)
+            if not _matches_expected(actual, v):
                 return False, f"assertion expect_session_field={expr!r} failed (actual={actual!r})"
         else:
-            if not sess.get(expr):
-                return False, f"assertion expect_session_field={expr!r} failed (actual={sess.get(expr)!r})"
+            expr = str(want_sess).strip()
+            actual = _lookup_session_or_space(expr)
+            if not actual:
+                return False, f"assertion expect_session_field={expr!r} failed (actual={actual!r})"
 
     return True, ""
 
