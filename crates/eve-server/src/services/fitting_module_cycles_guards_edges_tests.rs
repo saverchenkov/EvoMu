@@ -4,10 +4,14 @@
 //! and `fallback_fitted_weapon_module`.
 
 use super::*;
+use crate::services::combat_crimewatch::SafetyLevel;
+use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
 use eve_db::clock::VirtualServerClock;
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
-use eve_destiny::{Ball, CombatState, MovementMode, WarpPhase};
-use eve_sde::{InvType, SdeRegistry};
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord, WorldRepository};
+use eve_destiny::{Ball, CombatState, MovementMode, TargetLock, WarpPhase};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::{attr_ids, InvType, SdeRegistry};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -512,342 +516,294 @@ async fn fmc_spawn_target_ball(
         .expect("spawn ball");
 }
 
-#[tokio::test]
-async fn w4_mutant_killers_handle_module_cycles_turrets_missiles_cap_crystals_and_guards() {
-    use crate::services::combat_crimewatch::SafetyLevel;
-    use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
-    use eve_db::UpwellStructureRecord;
-    use eve_destiny::TargetLock;
-    use eve_machonet::SessionState;
-    use eve_proto::PyRep;
-    use eve_sde::attr_ids;
+const FMC_CHAR_ID: i64 = 97_100_001;
+const FMC_TARGET_CHAR: i64 = 97_100_002;
+const FMC_CORP_ID: i64 = 98_000_001;
+const FMC_SYS_ID: u32 = 30_000_142;
+const FMC_SHIP_ID: i64 = 1_000_800_001;
+const FMC_TARGET_SHIP: i64 = 1_000_800_002;
+const FMC_TARGET_CONT: i64 = 1_000_800_003;
+const FMC_TARGET_DEPOT: i64 = 1_000_800_004;
+const FMC_MOON_TARGET: i64 = 1_000_800_005;
+const FMC_STRUCT_ID: i64 = 1_000_800_090;
 
-    const T_HULL: u32 = 998_100;
-    const T_CAP_BOOSTER: u32 = 998_101;
-    const T_CAP_CHARGE: u32 = 998_102;
-    const T_TURRET: u32 = 998_103;
-    const T_AMMO: u32 = 998_104;
-    const T_MISSILE_LNCH: u32 = 998_105;
-    const T_MISSILE: u32 = 998_106;
-    const T_VORTON: u32 = 998_107;
-    const T_VORTON_AMMO: u32 = 998_108;
-    const T_SURVEY_BY_ATTR: u32 = 998_109;
-    const T_PLAIN_NO_ATTR197: u32 = 998_110;
-    const T_CONTAINER_340: u32 = 998_111;
-    const T_DEPOT_1328: u32 = 998_112;
-    const T_SURVEY_PROBE_LNCH: u32 = 998_113;
-    const T_SURVEY_PROBE: u32 = 998_114;
-    const T_CRYSTAL: u32 = 998_115;
+const FMC_MOD_CAP: i64 = 1_000_800_010;
+const FMC_CAP_CHARGE: i64 = 1_000_800_011;
+const FMC_MOD_TUR1: i64 = 1_000_800_012;
+const FMC_AMMO1: i64 = 1_000_800_013;
+const FMC_MOD_TUR2: i64 = 1_000_800_014;
+const FMC_AMMO2: i64 = 1_000_800_015;
+const FMC_MOD_MISSILE: i64 = 1_000_800_016;
+const FMC_MISSILE_CHARGE: i64 = 1_000_800_017;
+const FMC_MOD_VORTON: i64 = 1_000_800_018;
+const FMC_VORTON_AMMO: i64 = 1_000_800_019;
+const FMC_MOD_SURVEY_ATTR: i64 = 1_000_800_020;
+const FMC_MOD_PLAIN: i64 = 1_000_800_021;
+const FMC_MOD_PROBE_LNCH: i64 = 1_000_800_022;
+const FMC_PROBE_CHARGE: i64 = 1_000_800_023;
+const FMC_MOD_CRYSTAL: i64 = 1_000_800_024;
+const FMC_CRYSTAL_CHARGE: i64 = 1_000_800_025;
+const FMC_STRUCT_MOD: i64 = 1_000_800_091;
 
-    let mut sde = (*shared_sde()).clone();
-    sde.types.insert(
-        T_HULL,
-        fmc_custom_type(
-            &sde,
-            T_HULL,
-            25,
-            6,
-            50_000.0,
-            500.0,
-            "Multi-Fit Test Hull",
-            &[
-                (attr_ids::HI_SLOTS, 8.0),
-                (attr_ids::MED_SLOTS, 6.0),
-                (attr_ids::LOW_SLOTS, 4.0),
-                (attr_ids::TURRET_SLOTS_LEFT, 8.0),
-                (attr_ids::LAUNCHER_SLOTS_LEFT, 8.0),
-                (attr_ids::CPU_OUTPUT, 50_000.0),
-                (attr_ids::POWER_OUTPUT, 500_000.0),
-                (attr_ids::CAPACITOR_CAPACITY, 5_000.0),
-                (attr_ids::MAX_LOCKED_TARGETS, 8.0),
-                (attr_ids::MAX_TARGET_RANGE, 150_000.0),
-                (attr_ids::SCAN_RESOLUTION, 1_000.0),
-                (attr_ids::SIGNATURE_RADIUS, 40.0),
-            ],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_CAP_BOOSTER,
-        fmc_custom_type(
-            &sde,
-            T_CAP_BOOSTER,
-            76,
-            7,
-            5.0,
-            50.0,
-            "Small Capacitor Booster II",
-            &[(attr_ids::SPEED, 2_000.0)],
-            &[13, 16],
-        ),
-    );
-    sde.types.insert(
-        T_CAP_CHARGE,
-        fmc_custom_type(
-            &sde,
-            T_CAP_CHARGE,
-            87,
-            8,
-            5.0,
-            0.0,
-            "Cap Booster 400",
-            &[(67, 400.0)],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_TURRET,
-        fmc_custom_type(
-            &sde,
-            T_TURRET,
-            53,
-            7,
-            5.0,
-            20.0,
-            "Dual Light Pulse Laser II",
-            &[
-                (attr_ids::SPEED, 2_000.0),
-                (attr_ids::DAMAGE_MULTIPLIER, 2.0),
-                (attr_ids::MAX_RANGE, 30_000.0),
-                (attr_ids::FALLOFF, 10_000.0),
-                (attr_ids::TRACKING_SPEED, 1.0),
-                (6, 1.0),
-            ],
-            &[12, 16],
-        ),
-    );
-    sde.types.insert(
-        T_AMMO,
-        fmc_custom_type(
-            &sde,
-            T_AMMO,
-            85,
-            8,
-            0.1,
-            0.0,
-            "Synthetic Hybrid Charge",
-            &[
-                (attr_ids::EM_DAMAGE, 10.0),
-                (attr_ids::THERMAL_DAMAGE, 20.0),
-                (attr_ids::KINETIC_DAMAGE, 30.0),
-                (attr_ids::EXPLOSIVE_DAMAGE, 40.0),
-            ],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_CRYSTAL,
-        fmc_custom_type(
-            &sde,
-            T_CRYSTAL,
-            86,
-            8,
-            0.1,
-            0.0,
-            "Volatile Crystal",
-            &[(attr_ids::EM_DAMAGE, 50.0), (784, 0.25), (783, 100.0)],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_MISSILE_LNCH,
-        fmc_custom_type(
-            &sde,
-            T_MISSILE_LNCH,
-            507,
-            7,
-            5.0,
-            20.0,
-            "Light Missile Launcher II",
-            &[(attr_ids::SPEED, 2_000.0), (6, 0.0)],
-            &[12, 16],
-        ),
-    );
-    sde.types.insert(
-        T_MISSILE,
-        fmc_custom_type(
-            &sde,
-            T_MISSILE,
-            384,
-            8,
-            0.1,
-            0.0,
-            "Mjolnir Light Missile",
-            &[
-                (attr_ids::EM_DAMAGE, 60.0),
-                (attr_ids::THERMAL_DAMAGE, 20.0),
-                (attr_ids::KINETIC_DAMAGE, 10.0),
-                (attr_ids::EXPLOSIVE_DAMAGE, 10.0),
-                (attr_ids::MAX_VELOCITY, 4_000.0),
-                (2811, 5_000.0),
-                (653, 50.0),
-                (654, 100.0),
-            ],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_VORTON,
-        fmc_custom_type(
-            &sde,
-            T_VORTON,
-            4060,
-            7,
-            5.0,
-            20.0,
-            "Small Vorton Projector II",
-            &[
-                (attr_ids::SPEED, 2_000.0),
-                (attr_ids::DAMAGE_MULTIPLIER, 2.0),
-                (attr_ids::MAX_RANGE, 35_000.0),
-                (attr_ids::FALLOFF, 5_000.0),
-                (6, 1.0),
-                (604, 85.0),
-            ],
-            &[12, 16],
-        ),
-    );
-    sde.types.insert(
-        T_VORTON_AMMO,
-        fmc_custom_type(
-            &sde,
-            T_VORTON_AMMO,
-            85,
-            8,
-            0.1,
-            0.0,
-            "ElectroPunch Ultra S",
-            &[(attr_ids::EM_DAMAGE, 50.0), (attr_ids::KINETIC_DAMAGE, 50.0)],
-            &[],
-        ),
-    );
-    sde.types.insert(
-        T_SURVEY_BY_ATTR,
-        fmc_custom_type(
-            &sde,
-            T_SURVEY_BY_ATTR,
-            999,
-            7,
-            5.0,
-            0.0,
-            "Synthetic Cargo Scanner with Survey Attr",
-            &[(attr_ids::DURATION, 3_000.0), (197, 25_000.0)],
-            &[13],
-        ),
-    );
-    sde.types.insert(
-        T_PLAIN_NO_ATTR197,
-        fmc_custom_type(
-            &sde,
-            T_PLAIN_NO_ATTR197,
-            999,
-            7,
-            5.0,
-            0.0,
-            "Plain Group 48 Module",
-            &[(attr_ids::DURATION, 3_000.0)],
-            &[13],
-        ),
-    );
-    sde.types.insert(
-        T_CONTAINER_340,
-        fmc_custom_type(&sde, T_CONTAINER_340, 340, 2, 100.0, 0.0, "Secure Container", &[], &[]),
-    );
-    sde.types.insert(
-        T_DEPOT_1328,
-        fmc_custom_type(&sde, T_DEPOT_1328, 1328, 22, 100.0, 0.0, "Mobile Depot", &[], &[]),
-    );
-    sde.types.insert(
-        T_SURVEY_PROBE_LNCH,
-        fmc_custom_type(
-            &sde,
-            T_SURVEY_PROBE_LNCH,
-            1226,
-            7,
-            5.0,
-            2.0,
-            "Survey Probe Launcher I",
-            &[(attr_ids::DURATION, 10_000.0)],
-            &[12],
-        ),
-    );
-    sde.types.insert(
-        T_SURVEY_PROBE,
-        fmc_custom_type(
-            &sde,
-            T_SURVEY_PROBE,
-            492,
-            8,
-            0.2,
-            0.0,
-            "Quest Survey Probe I",
-            &[(2697, 100_000_000.0)],
-            &[],
-        ),
-    );
+const T_HULL: u32 = 998_100;
+const T_CAP_BOOSTER: u32 = 998_101;
+const T_CAP_CHARGE: u32 = 998_102;
+const T_TURRET: u32 = 998_103;
+const T_AMMO: u32 = 998_104;
+const T_MISSILE_LNCH: u32 = 998_105;
+const T_MISSILE: u32 = 998_106;
+const T_VORTON: u32 = 998_107;
+const T_VORTON_AMMO: u32 = 998_108;
+const T_SURVEY_BY_ATTR: u32 = 998_109;
+const T_PLAIN_NO_ATTR197: u32 = 998_110;
+const T_CONTAINER_340: u32 = 998_111;
+const T_DEPOT_1328: u32 = 998_112;
+const T_SURVEY_PROBE_LNCH: u32 = 998_113;
+const T_SURVEY_PROBE: u32 = 998_114;
+const T_CRYSTAL: u32 = 998_115;
 
+#[inline(never)]
+fn fmc_custom_sde() -> Arc<SdeRegistry> {
+    static CUSTOM_SDE: OnceLock<Arc<SdeRegistry>> = OnceLock::new();
+    Arc::clone(CUSTOM_SDE.get_or_init(|| {
+        let mut sde = (*shared_sde()).clone();
+        let custom_types: &[(u32, u32, u32, f64, f64, &str, &[(u16, f64)], &[u16])] = &[
+            (
+                T_HULL,
+                25,
+                6,
+                50_000.0,
+                500.0,
+                "Multi-Fit Test Hull",
+                &[
+                    (attr_ids::HI_SLOTS, 8.0),
+                    (attr_ids::MED_SLOTS, 6.0),
+                    (attr_ids::LOW_SLOTS, 4.0),
+                    (attr_ids::TURRET_SLOTS_LEFT, 8.0),
+                    (attr_ids::LAUNCHER_SLOTS_LEFT, 8.0),
+                    (attr_ids::CPU_OUTPUT, 50_000.0),
+                    (attr_ids::POWER_OUTPUT, 500_000.0),
+                    (attr_ids::CAPACITOR_CAPACITY, 5_000.0),
+                    (attr_ids::MAX_LOCKED_TARGETS, 8.0),
+                    (attr_ids::MAX_TARGET_RANGE, 150_000.0),
+                    (attr_ids::SCAN_RESOLUTION, 1_000.0),
+                    (attr_ids::SIGNATURE_RADIUS, 40.0),
+                ],
+                &[],
+            ),
+            (
+                T_CAP_BOOSTER,
+                76,
+                7,
+                5.0,
+                50.0,
+                "Small Capacitor Booster II",
+                &[(attr_ids::SPEED, 2_000.0)],
+                &[13, 16],
+            ),
+            (T_CAP_CHARGE, 87, 8, 5.0, 0.0, "Cap Booster 400", &[(67, 400.0)], &[]),
+            (
+                T_TURRET,
+                53,
+                7,
+                5.0,
+                20.0,
+                "Dual Light Pulse Laser II",
+                &[
+                    (attr_ids::SPEED, 2_000.0),
+                    (attr_ids::DAMAGE_MULTIPLIER, 2.0),
+                    (attr_ids::MAX_RANGE, 30_000.0),
+                    (attr_ids::FALLOFF, 10_000.0),
+                    (attr_ids::TRACKING_SPEED, 1.0),
+                    (6, 1.0),
+                ],
+                &[12, 16],
+            ),
+            (
+                T_AMMO,
+                85,
+                8,
+                0.1,
+                0.0,
+                "Synthetic Hybrid Charge",
+                &[
+                    (attr_ids::EM_DAMAGE, 10.0),
+                    (attr_ids::THERMAL_DAMAGE, 20.0),
+                    (attr_ids::KINETIC_DAMAGE, 30.0),
+                    (attr_ids::EXPLOSIVE_DAMAGE, 40.0),
+                ],
+                &[],
+            ),
+            (
+                T_CRYSTAL,
+                86,
+                8,
+                0.1,
+                0.0,
+                "Volatile Crystal",
+                &[(attr_ids::EM_DAMAGE, 50.0), (784, 0.25), (783, 100.0)],
+                &[],
+            ),
+            (
+                T_MISSILE_LNCH,
+                507,
+                7,
+                5.0,
+                20.0,
+                "Light Missile Launcher II",
+                &[(attr_ids::SPEED, 2_000.0), (6, 0.0)],
+                &[12, 16],
+            ),
+            (
+                T_MISSILE,
+                384,
+                8,
+                0.1,
+                0.0,
+                "Mjolnir Light Missile",
+                &[
+                    (attr_ids::EM_DAMAGE, 60.0),
+                    (attr_ids::THERMAL_DAMAGE, 20.0),
+                    (attr_ids::KINETIC_DAMAGE, 10.0),
+                    (attr_ids::EXPLOSIVE_DAMAGE, 10.0),
+                    (attr_ids::MAX_VELOCITY, 4_000.0),
+                    (2811, 5_000.0),
+                    (653, 50.0),
+                    (654, 100.0),
+                ],
+                &[],
+            ),
+            (
+                T_VORTON,
+                4060,
+                7,
+                5.0,
+                20.0,
+                "Small Vorton Projector II",
+                &[
+                    (attr_ids::SPEED, 2_000.0),
+                    (attr_ids::DAMAGE_MULTIPLIER, 2.0),
+                    (attr_ids::MAX_RANGE, 35_000.0),
+                    (attr_ids::FALLOFF, 5_000.0),
+                    (6, 1.0),
+                    (604, 85.0),
+                ],
+                &[12, 16],
+            ),
+            (
+                T_VORTON_AMMO,
+                85,
+                8,
+                0.1,
+                0.0,
+                "ElectroPunch Ultra S",
+                &[(attr_ids::EM_DAMAGE, 50.0), (attr_ids::KINETIC_DAMAGE, 50.0)],
+                &[],
+            ),
+            (
+                T_SURVEY_BY_ATTR,
+                999,
+                7,
+                5.0,
+                0.0,
+                "Synthetic Cargo Scanner with Survey Attr",
+                &[(attr_ids::DURATION, 3_000.0), (197, 25_000.0)],
+                &[13],
+            ),
+            (
+                T_PLAIN_NO_ATTR197,
+                999,
+                7,
+                5.0,
+                0.0,
+                "Plain Group 48 Module",
+                &[(attr_ids::DURATION, 3_000.0)],
+                &[13],
+            ),
+            (T_CONTAINER_340, 340, 2, 100.0, 0.0, "Secure Container", &[], &[]),
+            (T_DEPOT_1328, 1328, 22, 100.0, 0.0, "Mobile Depot", &[], &[]),
+            (
+                T_SURVEY_PROBE_LNCH,
+                1226,
+                7,
+                5.0,
+                2.0,
+                "Survey Probe Launcher I",
+                &[(attr_ids::DURATION, 10_000.0)],
+                &[12],
+            ),
+            (
+                T_SURVEY_PROBE,
+                492,
+                8,
+                0.2,
+                0.0,
+                "Quest Survey Probe I",
+                &[(2697, 100_000_000.0)],
+                &[],
+            ),
+        ];
+        for &(type_id, group_id, category_id, volume, capacity, name, attrs, effects) in custom_types
+        {
+            let custom = fmc_custom_type(
+                &sde,
+                type_id,
+                group_id,
+                category_id,
+                volume,
+                capacity,
+                name,
+                attrs,
+                effects,
+            );
+            sde.types.insert(type_id, custom);
+        }
+        Arc::new(sde)
+    }))
+}
+
+#[inline(never)]
+fn fmc_build_seeded_ctx() -> ServerContext {
     let db = Arc::new(WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db)
+    let ctx = ServerContext::with_sde_and_repository(fmc_custom_sde(), db)
         .with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_100_000)));
 
-    let char_id = 97_100_001i64;
-    let target_char = 97_100_002i64;
-    let sys_id = 30_000_142u32;
-    let ship_id = 1_000_800_001i64;
-    let target_ship = 1_000_800_002i64;
-    let target_cont = 1_000_800_003i64;
-    let target_depot = 1_000_800_004i64;
-    let moon_target = 1_000_800_005i64;
-    let struct_id = 1_000_800_090i64;
+    fmc_ensure_char(&ctx, FMC_CHAR_ID, FMC_CORP_ID, FMC_SYS_ID, FMC_SHIP_ID);
+    fmc_ensure_char(&ctx, FMC_TARGET_CHAR, 98_000_002, FMC_SYS_ID, FMC_TARGET_SHIP);
 
-    let mod_cap = 1_000_800_010i64;
-    let cap_charge = 1_000_800_011i64;
-    let mod_tur1 = 1_000_800_012i64;
-    let ammo1 = 1_000_800_013i64;
-    let mod_tur2 = 1_000_800_014i64;
-    let ammo2 = 1_000_800_015i64;
-    let mod_missile = 1_000_800_016i64;
-    let missile_charge = 1_000_800_017i64;
-    let mod_vorton = 1_000_800_018i64;
-    let vorton_ammo = 1_000_800_019i64;
-    let mod_survey_attr = 1_000_800_020i64;
-    let mod_plain = 1_000_800_021i64;
-    let mod_probe_lnch = 1_000_800_022i64;
-    let probe_charge = 1_000_800_023i64;
-    let mod_crystal = 1_000_800_024i64;
-    let crystal_charge = 1_000_800_025i64;
-    let struct_mod = 1_000_800_091i64;
-
-    fmc_ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
-    fmc_ensure_char(&ctx, target_char, 98_000_002, sys_id, target_ship);
-    fmc_insert_item(&ctx, ship_id, T_HULL, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    fmc_insert_item(&ctx, target_ship, 587, target_char, sys_id as i64, InventoryFlag::None, 1, true);
-    fmc_insert_item(&ctx, mod_cap, T_CAP_BOOSTER, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
-    fmc_insert_item(&ctx, mod_tur1, T_TURRET, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
-    fmc_insert_item(&ctx, ammo1, T_AMMO, char_id, ship_id, InventoryFlag::HiSlot0, 20, false);
-    fmc_insert_item(&ctx, mod_tur2, T_TURRET, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
-    fmc_insert_item(&ctx, ammo2, T_AMMO, char_id, ship_id, InventoryFlag::HiSlot1, 20, false);
-    fmc_insert_item(&ctx, mod_missile, T_MISSILE_LNCH, char_id, ship_id, InventoryFlag::HiSlot2, 1, true);
-    fmc_insert_item(&ctx, missile_charge, T_MISSILE, char_id, ship_id, InventoryFlag::HiSlot2, 20, false);
-    fmc_insert_item(&ctx, mod_vorton, T_VORTON, char_id, ship_id, InventoryFlag::HiSlot3, 1, true);
-    fmc_insert_item(&ctx, vorton_ammo, T_VORTON_AMMO, char_id, ship_id, InventoryFlag::HiSlot3, 20, false);
-    fmc_insert_item(&ctx, mod_probe_lnch, T_SURVEY_PROBE_LNCH, char_id, ship_id, InventoryFlag::HiSlot4, 1, true);
-    fmc_insert_item(&ctx, probe_charge, T_SURVEY_PROBE, char_id, ship_id, InventoryFlag::HiSlot4, 5, false);
-    fmc_insert_item(&ctx, mod_crystal, T_TURRET, char_id, ship_id, InventoryFlag::HiSlot5, 1, true);
-    fmc_insert_item(&ctx, crystal_charge, T_CRYSTAL, char_id, ship_id, InventoryFlag::HiSlot5, 1, true);
-    fmc_insert_item(&ctx, mod_survey_attr, T_SURVEY_BY_ATTR, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
-    fmc_insert_item(&ctx, mod_plain, T_PLAIN_NO_ATTR197, char_id, ship_id, InventoryFlag::MedSlot2, 1, true);
-    fmc_insert_item(&ctx, struct_mod, T_TURRET, char_id, struct_id, InventoryFlag::HiSlot0, 1, true);
+    let items: &[(i64, u32, i64, i64, InventoryFlag, i32, bool)] = &[
+        (FMC_SHIP_ID, T_HULL, FMC_CHAR_ID, FMC_SYS_ID as i64, InventoryFlag::None, 1, true),
+        (FMC_TARGET_SHIP, 587, FMC_TARGET_CHAR, FMC_SYS_ID as i64, InventoryFlag::None, 1, true),
+        (FMC_MOD_CAP, T_CAP_BOOSTER, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::MedSlot0, 1, true),
+        (FMC_MOD_TUR1, T_TURRET, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot0, 1, true),
+        (FMC_AMMO1, T_AMMO, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot0, 20, false),
+        (FMC_MOD_TUR2, T_TURRET, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot1, 1, true),
+        (FMC_AMMO2, T_AMMO, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot1, 20, false),
+        (FMC_MOD_MISSILE, T_MISSILE_LNCH, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot2, 1, true),
+        (FMC_MISSILE_CHARGE, T_MISSILE, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot2, 20, false),
+        (FMC_MOD_VORTON, T_VORTON, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot3, 1, true),
+        (FMC_VORTON_AMMO, T_VORTON_AMMO, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot3, 20, false),
+        (FMC_MOD_PROBE_LNCH, T_SURVEY_PROBE_LNCH, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot4, 1, true),
+        (FMC_PROBE_CHARGE, T_SURVEY_PROBE, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot4, 5, false),
+        (FMC_MOD_CRYSTAL, T_TURRET, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot5, 1, true),
+        (FMC_CRYSTAL_CHARGE, T_CRYSTAL, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::HiSlot5, 1, true),
+        (FMC_MOD_SURVEY_ATTR, T_SURVEY_BY_ATTR, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::MedSlot1, 1, true),
+        (FMC_MOD_PLAIN, T_PLAIN_NO_ATTR197, FMC_CHAR_ID, FMC_SHIP_ID, InventoryFlag::MedSlot2, 1, true),
+        (FMC_STRUCT_MOD, T_TURRET, FMC_CHAR_ID, FMC_STRUCT_ID, InventoryFlag::HiSlot0, 1, true),
+    ];
+    for &(item_id, type_id, owner_id, location_id, flag, quantity, singleton) in items {
+        fmc_insert_item(&ctx, item_id, type_id, owner_id, location_id, flag, quantity, singleton);
+    }
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
-            struct_id,
+            FMC_STRUCT_ID,
             UpwellStructureRecord {
-                structure_id: struct_id,
+                structure_id: FMC_STRUCT_ID,
                 type_id: 35832,
-                owner_corp_id: 98_000_001,
-                solar_system_id: sys_id,
+                owner_corp_id: FMC_CORP_ID,
+                solar_system_id: FMC_SYS_ID,
                 name: "Struct".into(),
                 position: [0.0; 3],
                 state: "ShieldVulnerable".into(),
@@ -864,270 +820,347 @@ async fn w4_mutant_killers_handle_module_cycles_turrets_missiles_cap_crystals_an
         );
     });
 
-    fmc_spawn_target_ball(&ctx, sys_id, ship_id, T_HULL, 25, 6, char_id, DVec3::ZERO, 100.0, 5_000.0).await;
-    fmc_spawn_target_ball(
-        &ctx,
-        sys_id,
-        target_ship,
-        587,
-        25,
-        6,
-        target_char,
-        DVec3::new(15_000.0, 0.0, 0.0),
-        1_000.0,
-        10_000.0,
-    )
-    .await;
-    fmc_spawn_target_ball(
-        &ctx,
-        sys_id,
-        target_cont,
-        T_CONTAINER_340,
-        340,
-        2,
-        target_char,
-        DVec3::new(12_000.0, 0.0, 0.0),
-        0.0,
-        5_000.0,
-    )
-    .await;
-    fmc_spawn_target_ball(
-        &ctx,
-        sys_id,
-        target_depot,
-        T_DEPOT_1328,
-        1328,
-        22,
-        target_char,
-        DVec3::new(13_000.0, 0.0, 0.0),
-        0.0,
-        5_000.0,
-    )
-    .await;
-    fmc_spawn_target_ball(
-        &ctx,
-        sys_id,
-        moon_target,
-        587,
-        25,
-        6,
-        0,
-        DVec3::new(300_000.0, 0.0, 0.0),
-        0.0,
-        5_000.0,
-    )
-    .await;
-
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    for tid in [target_ship, target_cont, target_depot] {
-        sys.add_target_lock(
-            ship_id,
-            TargetLock {
-                target_id: tid,
-                lock_time_ms: 100.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: Some(100_000.0),
-            },
-        )
-        .await
-        .unwrap();
-    }
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+        rt.safety_levels.insert(FMC_CHAR_ID, SafetyLevel::Red);
     });
 
-    let kw = HashMap::new();
-    let mut sess = SessionState {
-        user_id: Some(char_id as u64),
-        character_id: Some(char_id),
-        corporation_id: Some(98_000_001),
-        solar_system_id: Some(sys_id),
-        ship_id: Some(ship_id),
-        ..Default::default()
-    };
+    ctx
+}
+
+struct FmcModuleCyclesHarness {
+    ctx: ServerContext,
+    sys: crate::system_actor::SystemHandle,
+    sess: SessionState,
+    kw: HashMap<String, PyRep>,
+}
+
+impl FmcModuleCyclesHarness {
+    #[inline(never)]
+    async fn setup() -> Self {
+        // Box setup and step sub-futures so debug builds keep each test coroutine well below 2 MiB (#1376).
+        Box::pin(async {
+            let ctx = fmc_build_seeded_ctx();
+            let balls = [
+                (FMC_SHIP_ID, T_HULL, 25, 6, FMC_CHAR_ID, DVec3::ZERO, 100.0, 5_000.0),
+                (
+                    FMC_TARGET_SHIP,
+                    587,
+                    25,
+                    6,
+                    FMC_TARGET_CHAR,
+                    DVec3::new(15_000.0, 0.0, 0.0),
+                    1_000.0,
+                    10_000.0,
+                ),
+                (
+                    FMC_TARGET_CONT,
+                    T_CONTAINER_340,
+                    340,
+                    2,
+                    FMC_TARGET_CHAR,
+                    DVec3::new(12_000.0, 0.0, 0.0),
+                    0.0,
+                    5_000.0,
+                ),
+                (
+                    FMC_TARGET_DEPOT,
+                    T_DEPOT_1328,
+                    1328,
+                    22,
+                    FMC_TARGET_CHAR,
+                    DVec3::new(13_000.0, 0.0, 0.0),
+                    0.0,
+                    5_000.0,
+                ),
+                (
+                    FMC_MOON_TARGET,
+                    587,
+                    25,
+                    6,
+                    0,
+                    DVec3::new(300_000.0, 0.0, 0.0),
+                    0.0,
+                    5_000.0,
+                ),
+            ];
+            for (ball_id, type_id, group_id, category_id, owner_id, pos, cap, shield) in balls {
+                fmc_spawn_target_ball(
+                    &ctx,
+                    FMC_SYS_ID,
+                    ball_id,
+                    type_id,
+                    group_id,
+                    category_id,
+                    owner_id,
+                    pos,
+                    cap,
+                    shield,
+                )
+                .await;
+            }
+
+            let sys = ctx.systems.get_or_spawn(FMC_SYS_ID);
+            for tid in [FMC_TARGET_SHIP, FMC_TARGET_CONT, FMC_TARGET_DEPOT] {
+                sys.add_target_lock(
+                    FMC_SHIP_ID,
+                    TargetLock {
+                        target_id: tid,
+                        lock_time_ms: 100.0,
+                        remaining_lock_ms: 0.0,
+                        locked: true,
+                        max_range_m: Some(100_000.0),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+
+            let sess = SessionState {
+                user_id: Some(FMC_CHAR_ID as u64),
+                character_id: Some(FMC_CHAR_ID),
+                corporation_id: Some(FMC_CORP_ID),
+                solar_system_id: Some(FMC_SYS_ID),
+                ship_id: Some(FMC_SHIP_ID),
+                ..Default::default()
+            };
+            Self {
+                ctx,
+                sys,
+                sess,
+                kw: HashMap::new(),
+            }
+        })
+        .await
+    }
+
+    #[inline(never)]
+    async fn call_cycles(
+        &mut self,
+        service: &str,
+        method: &str,
+        args: &[PyRep],
+    ) -> Option<Result<PyRep, BridgeRpcError>> {
+        handle_module_cycles(&self.ctx, &mut self.sess, None, service, method, args, &self.kw).await
+    }
+
+    #[inline(never)]
+    async fn step_secs(&self, ticks: usize) {
+        Box::pin(async move {
+            for _ in 0..ticks {
+                let _ = self.sys.step_manual(1.0).await;
+            }
+        })
+        .await;
+    }
+
+    #[inline(never)]
+    async fn combat_state(&self, ball_id: i64) -> CombatState {
+        Box::pin(async move { self.sys.get_combat_state(ball_id).await.unwrap().unwrap() }).await
+    }
+}
+
+#[tokio::test]
+async fn handle_module_cycles_dispatch_boundaries_and_structure_overload_guard() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 1. Dispatch boundary (`L23-24`) and structure overload (`L60`)
-    assert!(handle_module_cycles(&ctx, &mut sess, None, "nonexistent_svc", "Activate", &[PyRep::Integer(mod_cap)], &kw)
+    assert!(h
+        .call_cycles("nonexistent_svc", "Activate", &[PyRep::Integer(FMC_MOD_CAP)])
         .await
         .is_none());
-    assert!(handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "unhandled_op", &[PyRep::Integer(mod_cap)], &kw)
+    assert!(h
+        .call_cycles("dogmaIM", "unhandled_op", &[PyRep::Integer(FMC_MOD_CAP)])
         .await
         .is_none());
-    sess.ship_id = Some(struct_id);
+    h.sess.ship_id = Some(FMC_STRUCT_ID);
     assert_eq!(
-        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Overload", &[PyRep::Integer(struct_mod)], &kw)
+        h.call_cycles("dogmaIM", "Overload", &[PyRep::Integer(FMC_STRUCT_MOD)])
             .await
             .unwrap()
             .unwrap_err()
             .code,
         "CannotOverloadStructureModule"
     );
-    sess.ship_id = Some(ship_id);
+    h.sess.ship_id = Some(FMC_SHIP_ID);
+}
+
+#[tokio::test]
+async fn handle_module_cycles_cap_booster_missing_charge_and_injection() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 2. Cap Booster (`group 76`, `L957`): missing charge error, then charge attr 67 = 400.0 injection
     assert_eq!(
-        handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_cap)], &kw)
+        h.call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_CAP)])
             .await
             .unwrap()
             .unwrap_err()
             .code,
         "NoChargesLoaded"
     );
-    fmc_insert_item(&ctx, cap_charge, T_CAP_CHARGE, char_id, ship_id, InventoryFlag::MedSlot0, 3, false);
-    let _ = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(mod_cap)], &kw)
+    fmc_insert_item(
+        &h.ctx,
+        FMC_CAP_CHARGE,
+        T_CAP_CHARGE,
+        FMC_CHAR_ID,
+        FMC_SHIP_ID,
+        InventoryFlag::MedSlot0,
+        3,
+        false,
+    );
+    let _ = h
+        .call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_CAP)])
         .await
         .unwrap()
         .expect("cap booster activate");
-    for _ in 0..3 {
-        let _ = sys.step_manual(1.0).await;
-    }
-    let cap_after = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    h.step_secs(3).await;
+    let cap_after = h.combat_state(FMC_SHIP_ID).await.capacitor;
     assert!(
         cap_after >= 490.0,
         "expected Cap Booster 400 injection from 100.0 cap, got {cap_after}"
     );
-    let _ = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Deactivate", &[PyRep::Integer(mod_cap)], &kw).await;
+    let _ = h
+        .call_cycles("dogmaIM", "Deactivate", &[PyRep::Integer(FMC_MOD_CAP)])
+        .await;
+}
+
+#[tokio::test]
+async fn handle_module_cycles_survey_probe_launcher_while_following() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 3. Survey Probe Launcher in `MovementMode::Follow` (`L571, L577`)
     {
-        let mut bp = sys.ballpark.write().unwrap();
-        bp.balls.get_mut(&ship_id).unwrap().mode = MovementMode::Follow {
-            target_id: moon_target,
+        let mut bp = h.sys.ballpark.write().unwrap();
+        bp.balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Follow {
+            target_id: FMC_MOON_TARGET,
             range: 1_000.0,
         };
     }
-    let probe_rep = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_probe_lnch)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("survey probe launch while following");
-    assert_eq!(probe_rep.dict_get("launcherID").and_then(|v| v.as_i64()), Some(mod_probe_lnch));
-    sys.ballpark.write().unwrap().balls.get_mut(&ship_id).unwrap().mode = MovementMode::Stop;
+    let probe_rep = h
+        .call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_PROBE_LNCH)])
+        .await
+        .unwrap()
+        .expect("survey probe launch while following");
+    assert_eq!(
+        probe_rep.dict_get("launcherID").and_then(|v| v.as_i64()),
+        Some(FMC_MOD_PROBE_LNCH)
+    );
+    h.sys.ballpark.write().unwrap().balls.get_mut(&FMC_SHIP_ID).unwrap().mode = MovementMode::Stop;
+}
+
+#[tokio::test]
+async fn handle_module_cycles_survey_scanner_attr197_vs_plain_module() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 4. Survey scanner branch via attr 197 on group 48 (`L1654`: `group_id == 49 || attr 197 > 0`)
-    let surv_rep = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_survey_attr)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("attr 197 survey scanner");
+    let surv_rep = h
+        .call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_SURVEY_ATTR)])
+        .await
+        .unwrap()
+        .expect("attr 197 survey scanner");
     assert!(surv_rep.dict_get("asteroids").is_some());
-    let plain_rep = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_plain)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("plain group 48 without attr 197");
+    let plain_rep = h
+        .call_cycles("dogmaIM", "Activate", &[PyRep::Integer(FMC_MOD_PLAIN)])
+        .await
+        .unwrap()
+        .expect("plain group 48 without attr 197");
     assert!(plain_rep.dict_get("asteroids").is_none());
+}
+
+#[tokio::test]
+async fn handle_module_cycles_vorton_projector_on_container_and_deployable() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
     // 5. Vorton (`group 4060`, `L246`) on container (340) and deployable (1328)
-    for tgt in [target_cont, target_depot] {
-        let v_rep = handle_module_cycles(
-            &ctx,
-            &mut sess,
-            None,
+    for tgt in [FMC_TARGET_CONT, FMC_TARGET_DEPOT] {
+        let v_rep = h
+            .call_cycles(
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(FMC_MOD_VORTON), PyRep::Integer(tgt)],
+            )
+            .await
+            .unwrap()
+            .expect("vorton special target");
+        assert_eq!(v_rep.dict_get("targetID"), Some(&PyRep::Integer(tgt)));
+        assert!(v_rep.dict_get("appliedDamage").is_some());
+        h.step_secs(3).await;
+        let _ = h
+            .call_cycles("dogmaIM", "Deactivate", &[PyRep::Integer(FMC_MOD_VORTON)])
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn handle_module_cycles_linked_turret_bank_deals_damage() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
+
+    // 6a. Linked turret bank (2 guns)
+    h.ctx.db.with_mut_snapshot(|snap| {
+        snap.weapon_banks.insert(
+            FMC_SHIP_ID,
+            HashMap::from([(FMC_MOD_TUR1, vec![FMC_MOD_TUR1, FMC_MOD_TUR2])]),
+        );
+    });
+    let shield_before = h.combat_state(FMC_TARGET_SHIP).await.shield_hp;
+    let tur_rep = h
+        .call_cycles(
             "dogmaIM",
             "Activate",
-            &[PyRep::Integer(mod_vorton), PyRep::Integer(tgt)],
-            &kw,
+            &[PyRep::Integer(FMC_MOD_TUR1), PyRep::Integer(FMC_TARGET_SHIP)],
         )
         .await
         .unwrap()
-        .expect("vorton special target");
-        assert_eq!(v_rep.dict_get("targetID"), Some(&PyRep::Integer(tgt)));
-        assert!(v_rep.dict_get("appliedDamage").is_some());
-        for _ in 0..3 {
-            let _ = sys.step_manual(1.0).await;
-        }
-        let _ = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Deactivate", &[PyRep::Integer(mod_vorton)], &kw).await;
-    }
-
-    // 6. Linked turret bank (2 guns) + crystal volatility + missile launcher damage execution
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.weapon_banks
-            .insert(ship_id, HashMap::from([(mod_tur1, vec![mod_tur1, mod_tur2])]));
-    });
-    let shield_before = sys.get_combat_state(target_ship).await.unwrap().unwrap().shield_hp;
-    let tur_rep = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_tur1), PyRep::Integer(target_ship)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("linked turret bank");
+        .expect("linked turret bank");
     assert_eq!(tur_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(2.0));
-    for _ in 0..3 {
-        let _ = sys.step_manual(1.0).await;
-    }
-    let shield_after_tur = sys.get_combat_state(target_ship).await.unwrap().unwrap().shield_hp;
+    h.step_secs(3).await;
+    let shield_after_tur = h.combat_state(FMC_TARGET_SHIP).await.shield_hp;
     assert!(
         shield_after_tur < shield_before,
         "expected turret cycle to deal damage (before={shield_before}, after={shield_after_tur})"
     );
-    let _ = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Deactivate", &[PyRep::Integer(mod_tur1)], &kw).await;
+    let _ = h
+        .call_cycles("dogmaIM", "Deactivate", &[PyRep::Integer(FMC_MOD_TUR1)])
+        .await;
+}
 
-    // Volatile crystal gun
-    let _ = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_crystal), PyRep::Integer(target_ship)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("crystal turret");
-    for _ in 0..3 {
-        let _ = sys.step_manual(1.0).await;
-    }
-    let _ = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Deactivate", &[PyRep::Integer(mod_crystal)], &kw).await;
+#[tokio::test]
+async fn handle_module_cycles_volatile_crystal_turret_cycle() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
 
-    // Missile launcher (group 507)
-    let shield_before_mis = sys.get_combat_state(target_ship).await.unwrap().unwrap().shield_hp;
-    let mis_rep = handle_module_cycles(
-        &ctx,
-        &mut sess,
-        None,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(mod_missile), PyRep::Integer(target_ship)],
-        &kw,
-    )
-    .await
-    .unwrap()
-    .expect("missile launcher");
+    // 6b. Volatile crystal gun
+    let _ = h
+        .call_cycles(
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(FMC_MOD_CRYSTAL), PyRep::Integer(FMC_TARGET_SHIP)],
+        )
+        .await
+        .unwrap()
+        .expect("crystal turret");
+    h.step_secs(3).await;
+    let _ = h
+        .call_cycles("dogmaIM", "Deactivate", &[PyRep::Integer(FMC_MOD_CRYSTAL)])
+        .await;
+}
+
+#[tokio::test]
+async fn handle_module_cycles_missile_launcher_cycle() {
+    let mut h = FmcModuleCyclesHarness::setup().await;
+
+    // 6c. Missile launcher (group 507)
+    let shield_before_mis = h.combat_state(FMC_TARGET_SHIP).await.shield_hp;
+    let mis_rep = h
+        .call_cycles(
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(FMC_MOD_MISSILE), PyRep::Integer(FMC_TARGET_SHIP)],
+        )
+        .await
+        .unwrap()
+        .expect("missile launcher");
     assert_eq!(mis_rep.dict_get("duration").and_then(|v| v.as_f64()), Some(2.0));
-    for _ in 0..4 {
-        let _ = sys.step_manual(1.0).await;
-    }
-    let shield_after_mis = sys.get_combat_state(target_ship).await.unwrap().unwrap().shield_hp;
+    h.step_secs(4).await;
+    let shield_after_mis = h.combat_state(FMC_TARGET_SHIP).await.shield_hp;
     assert!(
         shield_after_mis <= shield_before_mis,
         "expected missile cycle completion without error"
