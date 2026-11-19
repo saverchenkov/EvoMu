@@ -43,6 +43,7 @@ fn check_starbase_corp_role(
     char_id: i64,
     corp_id: i64,
     role_mask: u64,
+    now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() {
         return Ok(());
@@ -54,13 +55,13 @@ fn check_starbase_corp_role(
         ));
     }
     let (is_ceo, eff_roles) =
-        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, 0);
+        snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
     if is_ceo || (eff_roles & role_mask) != 0 {
         Ok(())
     } else {
         Err(rpc_err(
             "RoleNotAuthorized",
-            "Starbase operations require Director or Starbase Operator role",
+            "Starbase operations require Director or Starbase role",
         ))
     }
 }
@@ -71,6 +72,7 @@ fn check_starbase_auth_with_mask(
     char_id: i64,
     structure_id: i64,
     role_mask: u64,
+    now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
@@ -82,7 +84,7 @@ fn check_starbase_auth_with_mask(
         return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
     }
     if owner_corp == char_id { return Ok(()); }
-    check_starbase_corp_role(snap, session, char_id, char_corp, role_mask)
+    check_starbase_corp_role(snap, session, char_id, char_corp, role_mask, now_unix)
 }
 
 fn check_starbase_auth(
@@ -90,13 +92,37 @@ fn check_starbase_auth(
     session: &SessionState,
     char_id: i64,
     structure_id: i64,
+    now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     check_starbase_auth_with_mask(
         snap,
         session,
         char_id,
         structure_id,
-        (1 << 0) | (1 << 24) | (1 << 25) | (1 << 40),
+        eve_db::corp_roles::ROLE_DIRECTOR
+            | eve_db::corp_roles::ROLE_STARBASE_CONFIG
+            | eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN,
+        now_unix,
+    )
+}
+
+fn check_starbase_fuel_auth(
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    structure_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    check_starbase_auth_with_mask(
+        snap,
+        session,
+        char_id,
+        structure_id,
+        eve_db::corp_roles::ROLE_DIRECTOR
+            | eve_db::corp_roles::ROLE_STARBASE_CONFIG
+            | eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN
+            | eve_db::corp_roles::ROLE_STARBASE_CARETAKER,
+        now_unix,
     )
 }
 
@@ -105,13 +131,15 @@ fn check_starbase_defense_auth(
     session: &SessionState,
     char_id: i64,
     structure_id: i64,
+    now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     check_starbase_auth_with_mask(
         snap,
         session,
         char_id,
         structure_id,
-        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+        eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN,
+        now_unix,
     )
 }
 
@@ -330,8 +358,9 @@ fn handle_run_moon_process_cycle_for_tower(
         .unwrap_or(100.0)
         .max(1.0) as i32;
 
+    let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-        check_starbase_auth(snap, session, char_id, tower_id)?;
+        check_starbase_auth(snap, session, char_id, tower_id, now_unix)?;
         let (factor, sys_id, raw_tower_type_id) =
             compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id);
         let tower_type_id = if ctx
@@ -872,8 +901,9 @@ pub fn handle(
                     }
                 }
             }
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_defense_auth(snap, session, char_id, item_id)?;
+                check_starbase_defense_auth(snap, session, char_id, item_id, now_unix)?;
                 snap.starbase_settings.entry(item_id).or_default().active_controller_id = Some(char_id);
                 Ok(())
             });
@@ -898,8 +928,9 @@ pub fn handle(
                     "Cannot relinquish structure control while cloaked",
                 )));
             }
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_defense_auth(snap, session, char_id, item_id)?;
+                check_starbase_defense_auth(snap, session, char_id, item_id, now_unix)?;
                 if let Some(st) = snap.starbase_settings.get_mut(&item_id) {
                     if st.active_controller_id == Some(char_id) { st.active_controller_id = None; }
                 }
@@ -929,8 +960,9 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let settings = snap.starbase_settings.get(&item_id);
                 let (anchor, unanchor, online, offline) = if let Some(s) = settings {
                     (
@@ -1004,8 +1036,9 @@ pub fn handle(
                     (fa, fu, fon, foff)
                 }
             };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let entry = snap.starbase_settings.entry(item_id).or_default();
                 entry.anchor = flag_anchor;
                 entry.unanchor = flag_unanchor;
@@ -1020,8 +1053,9 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let (send_fuel, show_cal) = snap
                     .starbase_settings
                     .get(&item_id)
@@ -1044,8 +1078,9 @@ pub fn handle(
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let show_calendar = match rpc.opt_bool(1, "showInCalendar") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
             let send_fuel = match rpc.opt_bool(2, "sendFuelNotifications") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let s = snap.starbase_settings.entry(item_id).or_default();
                 s.notify_fuel = send_fuel;
                 s.notify_calendar = show_calendar;
@@ -1058,8 +1093,9 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let (standing, status, status_drop, corp_war, standing_owner_id) = if let Some(s) = snap.starbase_settings.get(&item_id) {
                     (
                         s.attack_standing_threshold.unwrap_or(0.0),
@@ -1108,8 +1144,9 @@ pub fn handle(
             let corp_war = match rpc.opt_bool(4, "corpWar") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
             let use_alliance = match rpc.opt_bool(5, "useAlliance") { Ok(v) => v.unwrap_or(false), Err(e) => return Some(Err(e)) };
 
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let entry = snap.starbase_settings.entry(item_id).or_default();
                 entry.use_alliance_standings = use_alliance;
                 entry.attack_if_other_security_status_dropping = status_drop;
@@ -1140,8 +1177,9 @@ pub fn handle(
             let allow_corp = match rpc.opt_bool(2, "allowCorp") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
             let allow_alliance = match rpc.opt_bool(3, "allowAlliance") { Ok(v) => v.unwrap_or(true), Err(e) => return Some(Err(e)) };
 
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, item_id)?;
+                check_starbase_auth(snap, session, char_id, item_id, now_unix)?;
                 let st = snap.starbase_settings.entry(item_id).or_default();
                 if let Some(pw) = new_password {
                     st.password = Some(pw);
@@ -1157,8 +1195,9 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, tower_id)?;
+                check_starbase_fuel_auth(snap, session, char_id, tower_id, now_unix)?;
                 let factor = compute_starbase_consumption_factor(ctx, snap, session, char_id, tower_id).0;
                 Ok(PyRep::Real(factor))
             });
@@ -1169,10 +1208,9 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rpc = RpcArgs::new(args, kwargs);
             let item_id = match rpc.req_positive_i64(0, "itemID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
-                if snap.structures.contains_key(&item_id) || snap.items.contains_key(&item_id) {
-                    check_starbase_auth(snap, session, char_id, item_id)?;
-                }
+                check_starbase_fuel_auth(snap, session, char_id, item_id, now_unix)?;
                 Ok(PyRep::Real(compute_silo_capacity(ctx, snap, item_id)))
             });
             Some(res)
@@ -1183,8 +1221,9 @@ pub fn handle(
             let rpc = RpcArgs::new(args, kwargs);
             let tower_id = match rpc.req_positive_i64(0, "towerID") { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_ids = match rpc.req_id_or_id_list(1, "targetIDs") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, tower_id)?;
+                check_starbase_auth(snap, session, char_id, tower_id, now_unix)?;
                 let tower_corp = snap.structures.get(&tower_id).map(|s| s.owner_corp_id).unwrap_or(0);
                 let st = snap.starbase_settings.entry(tower_id).or_default();
                 for tid in &target_ids {
@@ -1227,6 +1266,7 @@ pub fn handle(
             if !is_valid_moon_mat {
                 return Some(Err(rpc_err("InvalidProvisionType", format!("Type {provision_type} is not a valid moon material (group 427)"))));
             }
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let target = if snap.structures.contains_key(&item_id) {
                     item_id
@@ -1239,7 +1279,7 @@ pub fn handle(
                 } else {
                     return Err(rpc_err("InvalidTarget", format!("Target {item_id} not found")));
                 };
-                check_starbase_auth(snap, session, char_id, target)?;
+                check_starbase_auth(snap, session, char_id, target, now_unix)?;
                 snap.orbital_provision_types.insert(item_id, provision_type as i64);
                 Ok(())
             });

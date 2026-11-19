@@ -928,10 +928,14 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
     let corp_b = 98_900_002_i64;
     let director_id = 90_900_001_i64;
     let roleless_id = 90_900_002_i64;
-    let config_only_id = 90_900_003_i64;
+    let hangar_query_id = 90_900_003_i64;
+    let config_only_id = 90_900_005_i64;
+    let caretaker_id = 90_900_006_i64;
+    let tactician_id = 90_900_007_i64;
     let outsider_id = 90_900_004_i64;
     let tower_id = 888_900_001_i64;
     let ship_id = 777_900_001_i64;
+    let role_hangar_q5 = eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[4];
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -956,14 +960,20 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
             corp.member_roles = HashMap::from([
                 (director_id, eve_db::corp_roles::ROLE_DIRECTOR),
                 (roleless_id, 0),
-                (config_only_id, 1_u64 << 24),
+                (hangar_query_id, role_hangar_q5),
+                (config_only_id, eve_db::corp_roles::ROLE_STARBASE_CONFIG),
+                (caretaker_id, eve_db::corp_roles::ROLE_STARBASE_CARETAKER),
+                (tactician_id, eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN),
             ]);
             corp
         });
         for (cid, corp) in [
             (director_id, corp_a),
             (roleless_id, corp_a),
+            (hangar_query_id, corp_a),
             (config_only_id, corp_a),
+            (caretaker_id, corp_a),
+            (tactician_id, corp_a),
             (outsider_id, corp_b),
         ] {
             let mut c = eve_db::CharacterRecord::default();
@@ -979,13 +989,19 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
     dir_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let mut roleless_sess = char_session(roleless_id, corp_a);
     roleless_sess.corp_role = 0;
+    let mut hangar_sess = char_session(hangar_query_id, corp_a);
+    hangar_sess.corp_role = role_hangar_q5;
     let mut config_sess = char_session(config_only_id, corp_a);
-    config_sess.corp_role = 1_u64 << 24;
+    config_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+    let mut caretaker_sess = char_session(caretaker_id, corp_a);
+    caretaker_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_CARETAKER;
+    let mut tactician_sess = char_session(tactician_id, corp_a);
+    tactician_sess.corp_role = eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN;
     let mut outsider_sess = char_session(outsider_id, corp_b);
     outsider_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let kw = HashMap::new();
 
-    // Outsider director sees only corp_b (no corp_a towers); roleless corp_a member is rejected on config/query endpoints below.
+    // Outsider director sees only corp_b (no corp_a towers); roleless and read-only hangar-query corp members are rejected.
     assert_eq!(
         handle(&ctx, &mut outsider_sess, "posMgr", "GetControlTowers", &[], &kw)
             .unwrap()
@@ -993,10 +1009,11 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
         PyRep::List(Vec::new())
     );
 
-    // Outsider & roleless corp member are rejected across all posMgr config/query endpoints.
+    // Outsider, roleless, & ROLE_HANGAR_CAN_QUERY[4] (1<<24) corp members are rejected across all posMgr endpoints.
     for (label, s, expected_err) in [
         ("outsider", &mut outsider_sess, "NotStarbaseOwner"),
         ("roleless", &mut roleless_sess, "RoleNotAuthorized"),
+        ("hangar_query_1_24", &mut hangar_sess, "RoleNotAuthorized"),
     ] {
         for method in [
             "GetStarbasePermissions",
@@ -1004,6 +1021,7 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
             "GetTowerSentrySettings",
             "GetConsumptionFactor",
             "GetSiloCapacityByItemID",
+            "AssumeStructureControl",
             "RelinquishStructureControl",
         ] {
             assert_eq!(
@@ -1017,9 +1035,24 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
         }
     }
 
-    // Config-only role (1<<24) can read queries, but CANNOT assume/relinquish gunnery control.
+    // ROLE_STARBASE_CARETAKER authorizes fuel/silo queries, NOT config or gunnery control.
+    assert!(handle(&ctx, &mut caretaker_sess, "posMgr", "GetConsumptionFactor", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    assert!(handle(&ctx, &mut caretaker_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    for method in ["GetStarbasePermissions", "AssumeStructureControl", "RelinquishStructureControl"] {
+        assert_eq!(
+            handle(&ctx, &mut caretaker_sess, "posMgr", method, &[PyRep::Integer(tower_id)], &kw)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "RoleNotAuthorized",
+            "caretaker {method}"
+        );
+    }
+
+    // ROLE_STARBASE_CONFIG (1<<53) authorizes config/query endpoints, NOT gunnery control.
     assert!(handle(&ctx, &mut config_sess, "posMgr", "GetControlTowers", &[], &kw).unwrap().is_ok());
     assert!(handle(&ctx, &mut config_sess, "posMgr", "GetStarbasePermissions", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    assert!(handle(&ctx, &mut config_sess, "posMgr", "SetStarbasePermissions", &[PyRep::Integer(tower_id), PyRep::String("corp".into())], &kw).unwrap().is_ok());
     assert_eq!(
         handle(&ctx, &mut config_sess, "posMgr", "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw)
             .unwrap()
@@ -1034,6 +1067,10 @@ async fn pos_mgr_enforces_corp_roles_and_rejects_cloaked_structure_control() {
             .code,
         "RoleNotAuthorized"
     );
+
+    // ROLE_INFRASTRUCTURE_TACTICIAN (1<<57) authorizes AssumeStructureControl and RelinquishStructureControl.
+    assert!(handle(&ctx, &mut tactician_sess, "posMgr", "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
+    assert!(handle(&ctx, &mut tactician_sess, "posMgr", "RelinquishStructureControl", &[PyRep::Integer(tower_id)], &kw).unwrap().is_ok());
 
     // Cloaked director cannot Assume/Relinquish/RunMoonProcessCycleforTower.
     let sys = ctx.systems.get_or_spawn(sys_id);

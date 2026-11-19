@@ -280,7 +280,7 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
     let mut ctx = test_ctx();
     let (sys_id, char_id, corp_a, corp_b) = (30_000_142, 90_000_001, 98_000_001, 98_000_002);
     let (ship_id, struct_id, siphon_id) = (1_040_000_001, 1_040_000_050, 1_040_000_060);
-    clone_type_with(&mut ctx.sde, 34, 991_999, 1250, 22, 50.0, 1_200.0, &[]);
+    clone_type_with(&mut ctx.sde, 34, 991_999, 1247, 22, 50.0, 1_200.0, &[]);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
@@ -324,6 +324,7 @@ async fn bookmarks_self_destruct_corp_transfer_turbo_dock_and_telemetry() {
 
     let handle_sys = ctx.systems.get_or_spawn(sys_id);
     let _ = handle_sys.spawn_ball_with_combat(make_ball(ship_id, 606, DVec3::ZERO), CombatState { capacitor: 500.0, max_capacitor: 500.0, ..Default::default() }).await;
+    let _ = handle_sys.spawn_ball(make_ball(siphon_id, 991_999, DVec3::new(5_000.0, 0.0, 0.0))).await;
 
     let mut sess = make_session(char_id, corp_a, Some(sys_id), Some(ship_id), service_roles::ROLE_PLAYER_DEFAULT);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;

@@ -341,7 +341,13 @@ async fn test_mobile_siphon_steals_material_from_pos_within_range() {
     let cap2 = rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_near_id)])
         .await.unwrap().as_f64().unwrap_or(0.0);
     assert!(cap2 > cap1);
-    assert_eq!(rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_far_id)]).await.unwrap().as_f64(), Some(0.0));
+    assert_eq!(
+        rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_far_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "ItemNotInSpace"
+    );
     assert_eq!(rpc(&ctx, &mut sess_near, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(unanchored_siphon_id)]).await.unwrap().as_f64(), Some(0.0));
 
     let ctx_reloaded = reload_ctx(&db_path, Arc::clone(&ctx.sde));

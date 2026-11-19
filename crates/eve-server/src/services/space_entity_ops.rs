@@ -682,7 +682,13 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let unit_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if let Err(e) = authorize_space_siphon_or_container(ctx, session, char_id, unit_id, false) {
+            if let Err(e) = authorize_space_siphon_or_container(
+                ctx,
+                session,
+                char_id,
+                unit_id,
+                SpaceInspectKind::Siphon,
+            ) {
                 return Some(Err(e));
             }
             let ratio_res = ctx.db.with_snapshot(|s| {
@@ -712,7 +718,13 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if let Err(e) = authorize_space_siphon_or_container(ctx, session, char_id, item_id, true) {
+            if let Err(e) = authorize_space_siphon_or_container(
+                ctx,
+                session,
+                char_id,
+                item_id,
+                SpaceInspectKind::Container,
+            ) {
                 return Some(Err(e));
             }
             let in_items = ctx.db.with_snapshot(|s| s.items.contains_key(&item_id));
@@ -1462,12 +1474,18 @@ fn resolve_item_solar_system_in_snap(
     None
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpaceInspectKind {
+    Siphon,
+    Container,
+}
+
 fn authorize_space_siphon_or_container(
     ctx: &ServerContext,
     session: &SessionState,
     _char_id: i64,
     target_id: i64,
-    allow_missing_item: bool,
+    kind: SpaceInspectKind,
 ) -> Result<(), BridgeRpcError> {
     if target_id <= 0 {
         return Err(rpc_err(
@@ -1480,27 +1498,24 @@ fn authorize_space_siphon_or_container(
     if is_gm {
         return Ok(());
     }
-    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-        if let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(sys_id) {
-            let view = sys_handle.view();
-            if view.is_ball_cloaked(ship_id) {
-                return Err(rpc_err(
-                    "ActionBlockedWhileCloaked",
-                    "Cannot inspect siphon or container while cloaked",
-                ));
-            }
-            if let (Some(ship_pos), Some(target_pos)) =
-                (view.ball_position(ship_id), view.ball_position(target_id))
-            {
-                if (ship_pos - target_pos).length() > 250_000.0 {
-                    return Err(rpc_err(
-                        "OutOfRange",
-                        format!("Target {target_id} is out of grid range"),
-                    ));
-                }
-            }
-        }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Caller must be in space to inspect a siphon or container",
+        ));
     }
+    let Some(caller_sys) = session.solar_system_id else {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Caller must be in a solar system",
+        ));
+    };
+    let Some(ship_id) = session.ship_id else {
+        return Err(rpc_err(
+            "NoActiveShip",
+            "Caller must have an active ship",
+        ));
+    };
     ctx.db.with_snapshot(|snap| {
         if snap.structures.contains_key(&target_id) {
             return Err(rpc_err(
@@ -1509,28 +1524,37 @@ fn authorize_space_siphon_or_container(
             ));
         }
         let Some(it) = snap.items.get(&target_id) else {
-            return if allow_missing_item {
-                Ok(())
-            } else {
-                Err(rpc_err(
+            return match kind {
+                SpaceInspectKind::Siphon => Err(rpc_err(
                     "ItemNotFound",
-                    format!("Target item {target_id} not found"),
-                ))
+                    format!("Siphon unit {target_id} not found"),
+                )),
+                SpaceInspectKind::Container => Err(rpc_err(
+                    "ContainerNotFound",
+                    format!("Container {target_id} not found"),
+                )),
             };
         };
-        let cat_id = ctx
-            .sde
-            .types
-            .get(&it.type_id)
-            .map(|t| t.category_id)
-            .unwrap_or(0);
-        if matches!(cat_id, 6 | 65) {
+        let type_rec = ctx.sde.types.get(&it.type_id);
+        let cat_id = type_rec.map(|t| t.category_id).unwrap_or(0);
+        let grp_id = type_rec.map(|t| t.group_id).unwrap_or(0);
+        let valid_target = !matches!(cat_id, 6 | 65)
+            && match kind {
+                SpaceInspectKind::Siphon => type_rec.is_some() && grp_id == 1247,
+                SpaceInspectKind::Container => {
+                    crate::services::fitting_containers_ships::is_container_group(
+                        grp_id,
+                        it.type_id,
+                    ) || grp_id == 186
+                }
+            };
+        if !valid_target {
             return Err(rpc_err(
                 "InvalidContainerTarget",
-                format!("Target {target_id} is not a container or siphon unit"),
+                format!("Target {target_id} is not a valid container or siphon unit"),
             ));
         }
-        if let Some(caller_sys) = session.solar_system_id {
+        if it.location_id != i64::from(caller_sys) {
             if let Some(item_sys) = resolve_item_solar_system_in_snap(ctx, snap, it.location_id) {
                 if item_sys != caller_sys {
                     return Err(rpc_err(
@@ -1539,9 +1563,45 @@ fn authorize_space_siphon_or_container(
                     ));
                 }
             }
+            return Err(rpc_err(
+                "ItemNotInSpace",
+                format!("Target {target_id} must be in space in caller solar system"),
+            ));
         }
         Ok(())
-    })
+    })?;
+    let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(caller_sys) else {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Solar system runtime is not active",
+        ));
+    };
+    let view = sys_handle.view();
+    if view.is_ball_cloaked(ship_id) {
+        return Err(rpc_err(
+            "ActionBlockedWhileCloaked",
+            "Cannot inspect siphon or container while cloaked",
+        ));
+    }
+    let Some(ship_pos) = view.ball_position(ship_id) else {
+        return Err(rpc_err(
+            "ShipNotInSpace",
+            "Caller ship is not spawned in space",
+        ));
+    };
+    let Some(target_pos) = view.ball_position(target_id) else {
+        return Err(rpc_err(
+            "TargetNotInSpace",
+            format!("Target {target_id} is not spawned in space"),
+        ));
+    };
+    if (ship_pos - target_pos).length() > 250_000.0 {
+        return Err(rpc_err(
+            "OutOfRange",
+            format!("Target {target_id} is out of grid range"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

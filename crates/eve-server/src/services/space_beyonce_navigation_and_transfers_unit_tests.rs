@@ -244,9 +244,13 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
     sess.corp_role = corp_roles::ROLE_DIRECTOR;
 
     let item_id = 960_001_i64;
+    let siphon_id = 960_011_i64;
+    let can_id = 960_012_i64;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.spawn_ball(make_ball(ship_id, 587, DVec3::ZERO)).await;
     let _ = sys_handle.spawn_ball(make_ball(item_id, 34, DVec3::new(100.0, 0.0, 0.0))).await;
+    let _ = sys_handle.spawn_ball(make_ball(siphon_id, 33_477, DVec3::new(120.0, 0.0, 0.0))).await;
+    let _ = sys_handle.spawn_ball(make_ball(can_id, 23, DVec3::new(150.0, 0.0, 0.0))).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
             target_corp,
@@ -257,20 +261,22 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
                 __corp.ceo_id = 90_000_002;
                 __corp },
         );
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id: 34,
-                owner_id: corp_id,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
+        for (iid, tid) in [(item_id, 34_u32), (siphon_id, 33_477), (can_id, 23)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: corp_id,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
     });
 
     assert_eq!(
@@ -301,6 +307,20 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
     assert_eq!(
         call_ops(&ctx, &mut sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(item_id)])
             .await
+            .unwrap_err()
+            .code,
+        "InvalidContainerTarget"
+    );
+    assert_eq!(
+        call_ops(&ctx, &mut sess, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidContainerTarget"
+    );
+    assert_eq!(
+        call_ops(&ctx, &mut sess, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)])
+            .await
             .unwrap(),
         PyRep::Real(0.0)
     );
@@ -314,11 +334,11 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
 
     with_mut_combat_runtime(&ctx, |rt| {
         rt.container_lifetimes.insert(
-            item_id,
+            can_id,
             ContainerLifetimeEntry {
-                item_id,
+                item_id: can_id,
                 solar_system_id: sys_id,
-                type_id: 34,
+                type_id: 23,
                 owner_id: corp_id,
                 created_unix: 1_700_000_000,
                 lifetime_secs: 7_200,
@@ -326,7 +346,7 @@ async fn beyonce_corp_asset_transfer_self_destruct_siphon_expiry_and_spawnpoint_
             },
         );
     });
-    let exp = call_ops(&ctx, &mut sess, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(item_id)])
+    let exp = call_ops(&ctx, &mut sess, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(can_id)])
         .await
         .unwrap();
     assert_eq!(exp.as_i64(), Some((1_700_007_200_i64 + 11_644_473_600_i64) * 10_000_000));

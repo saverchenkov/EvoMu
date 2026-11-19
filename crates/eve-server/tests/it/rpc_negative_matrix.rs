@@ -3821,7 +3821,7 @@ async fn rpc_negative_test_matrix_and_ratchet() {
         return;
     }
 
-    // Enforce shrinking ratchet: no new violations and no stale fixed entries vs committed baseline
+    // Enforce no-regression ratchet: reject newly unratcheted violations and log resolved baseline entries
     let new_violations: Vec<&MatrixViolation> =
         observed_violations.difference(&baseline_ratchet).collect();
     assert!(

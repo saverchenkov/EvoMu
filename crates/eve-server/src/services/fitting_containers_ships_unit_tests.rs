@@ -768,9 +768,25 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
         .find(|t| t.group_id == 448)
         .map(|t| t.type_id)
         .expect("SDE must contain group 448 ALSC");
+    let freight_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 649)
+        .map(|t| t.type_id)
+        .expect("SDE must contain group 649 Freight Container");
+    let sentry_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 449)
+        .map(|t| t.type_id)
+        .expect("SDE must contain group 449 Mobile Hybrid Sentry");
     let personal_alsc = 990_501_i64;
     let corp_alsc = 990_502_i64;
     let trit_id = 990_503_i64;
+    let freight_cont = 990_504_i64;
+    let sentry_id = 990_505_i64;
     let station_id = 60_003_760_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -778,6 +794,8 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
             (personal_alsc, alsc_type_id, owner_id),
             (corp_alsc, alsc_type_id, corp_id),
             (trit_id, 34, owner_id),
+            (freight_cont, freight_type_id, owner_id),
+            (sentry_id, sentry_type_id, owner_id),
         ] {
             snap.items.insert(
                 iid,
@@ -886,4 +904,36 @@ async fn alsc_config_log_and_password_check_reject_outsiders_non_containers_and_
     .await
     .unwrap()
     .is_ok());
+
+    // Group 649 (Freight Container) is accepted and group 449 (Mobile Hybrid Sentry) is rejected.
+    for method in ["ALSCConfigGet", "ALSCLogGet", "HasExistingPasswordSet"] {
+        assert!(
+            handle_containers_ships_and_fitting(
+                &ctx,
+                &mut owner_sess,
+                None,
+                "invbroker",
+                method,
+                &[PyRep::Integer(freight_cont)],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .is_ok(),
+            "{method} must accept group 649 freight container"
+        );
+        let sentry_err = handle_containers_ships_and_fitting(
+            &ctx,
+            &mut owner_sess,
+            None,
+            "invbroker",
+            method,
+            &[PyRep::Integer(sentry_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(sentry_err.code, alsc_denied, "{method} must reject group 449 sentry");
+    }
 }

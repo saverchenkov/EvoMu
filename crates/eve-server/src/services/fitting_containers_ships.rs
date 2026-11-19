@@ -2085,7 +2085,7 @@ pub(super) fn authorize_container_inspect(
         };
         let type_info = ctx.sde.types.get(&cont.type_id);
         let is_container = type_info.is_some_and(|t| {
-            matches!(t.group_id, 12 | 340 | 448 | 449) || (allow_ship && t.category_id == 6)
+            matches!(t.group_id, 12 | 340 | 448 | 649) || (allow_ship && t.category_id == 6)
         });
         if !is_container {
             return Err(rpc_err(
