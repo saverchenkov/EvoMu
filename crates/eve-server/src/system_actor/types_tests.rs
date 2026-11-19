@@ -620,6 +620,7 @@ fn system_view_from_ballpark_captures_kinematics_flags_damage_modules_and_grids(
     bp.sim_unix_secs = 1_700_000_123;
 
     let planet_id = 40_009_001_i64;
+    let far_static_id = 40_009_002_i64;
     bp.add_static_ball_with_meta(
         Ball {
             id: planet_id,
@@ -630,6 +631,26 @@ fn system_view_from_ballpark_captures_kinematics_flags_damage_modules_and_grids(
             inertia: 1.0,
             mass: 1e18,
             radius: 500_000.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Rigid,
+        },
+        SlimItemMeta {
+            group_id: 7,
+            category_id: 2,
+            owner_id: 1_000_125,
+            ..Default::default()
+        },
+    );
+    bp.add_static_ball_with_meta(
+        Ball {
+            id: far_static_id,
+            type_id: 11,
+            position: DVec3::new(500_000_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1e18,
+            radius: 100_000.0,
             speed_fraction: 0.0,
             mode: MovementMode::Rigid,
         },
@@ -904,6 +925,13 @@ fn system_view_from_ballpark_captures_kinematics_flags_damage_modules_and_grids(
     assert!(!view.is_ball_targeted(ship_a));
     assert_eq!(view.targeters_of(ship_b).collect::<Vec<_>>(), vec![ship_a]);
 
+    assert!(view.bubble_id_for_ball(planet_id).is_some());
+    assert_eq!(view.bubble_id_for_ball(planet_id), bp.bubble_id_for_ball(planet_id));
+    assert_eq!(view.bubble_id_for_ball(far_static_id), None);
+    assert_eq!(
+        view.bubble_id_for_ball(far_static_id),
+        bp.bubble_id_for_ball(far_static_id)
+    );
     assert_eq!(view.bubble_id_for_ball(ship_a), bp.bubble_id_for_ball(ship_a));
     let obs_gid = view.bubble_id_for_ball(ship_a).unwrap();
     assert!(view.grid_bubble(obs_gid).is_some());

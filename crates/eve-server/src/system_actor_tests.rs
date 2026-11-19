@@ -1128,3 +1128,111 @@ async fn system_view_updates_across_commands_steps_sync_mutators_and_lock_free_u
         Some(DVec3::new(12_345.0, 0.0, 0.0))
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_movement_mode_and_warp_defer_reply_until_system_view_published() {
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+    let ship_id: BallId = 810_000_101;
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_id, 587, DVec3::new(5_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 500.0,
+                shield_hp: 500.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: 90_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    for i in 0..25 {
+        let dir = if i % 2 == 0 { DVec3::X } else { DVec3::Y };
+        handle
+            .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: dir })
+            .await
+            .unwrap();
+        let view = handle.view();
+        assert!(
+            matches!(view.movement_mode(ship_id), Some(MovementMode::GotoDirection { direction }) if (*direction - dir).length() < 1e-12),
+            "iteration {i}: GotoDirection not immediately visible on SystemView after await"
+        );
+
+        handle
+            .set_movement_mode(ship_id, MovementMode::Stop)
+            .await
+            .unwrap();
+        assert!(
+            matches!(handle.view().movement_mode(ship_id), Some(MovementMode::Stop)),
+            "iteration {i}: Stop not immediately visible on SystemView after await"
+        );
+    }
+
+    let warp_dest = DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let warp_mode = MovementMode::new_warp(DVec3::new(5_000.0, 0.0, 0.0), warp_dest, 3.0);
+    handle
+        .set_warp_movement_mode(ship_id, warp_mode, WarpProvenance::PlayerOrFleetWarp)
+        .await
+        .unwrap();
+    assert!(matches!(
+        handle.view().movement_mode(ship_id),
+        Some(MovementMode::Warp { .. })
+    ));
+    assert!(handle.set_movement_mode(999_999_999, MovementMode::Stop).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_step_full_tick_refreshes_system_view_sim_elapsed_and_expired_bastion() {
+    let reg = SystemRegistry::new();
+    let handle = reg.get_or_spawn(30_000_142);
+    let ship_id: BallId = 810_000_201;
+    handle
+        .spawn_ball_with_meta(
+            make_actor_ball(ship_id, 28_659, DVec3::new(10_000.0, 0.0, 0.0)),
+            CombatState {
+                max_shield_hp: 1000.0,
+                shield_hp: 1000.0,
+                max_capacitor: 5000.0,
+                capacitor: 5000.0,
+                ..CombatState::default()
+            },
+            SlimItemMeta {
+                group_id: 900,
+                category_id: 6,
+                owner_id: 90_001,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    handle
+        .add_module_cycle(ActiveModuleCycle {
+            ship_id,
+            module_id: 96_001,
+            module_type_id: 33400,
+            effect_name: "bastion".to_string(),
+            duration_s: 1.0,
+            repeat: 0,
+            ..ActiveModuleCycle::default()
+        })
+        .await
+        .unwrap();
+    let before = handle.view();
+    assert!(before.has_active_module(ship_id));
+    assert!(before.has_active_bastion(ship_id));
+    assert!(before.sim_elapsed_secs.abs() < 1e-9);
+
+    let tick_after = handle.try_step_full_tick(1.5);
+    let after = handle.view();
+    assert_eq!(after.current_tick, tick_after);
+    assert!((after.sim_elapsed_secs - 1.5).abs() < 1e-9);
+    assert!(!after.has_active_bastion(ship_id));
+    assert!(!after.has_active_module(ship_id));
+}

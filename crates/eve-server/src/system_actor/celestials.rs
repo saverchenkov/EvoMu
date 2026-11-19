@@ -54,6 +54,7 @@ pub struct BallparkWriteGuard<'a> {
     guard: Option<InnerBallparkWriteGuard<'a>>,
     view_tx: &'a tokio::sync::watch::Sender<Arc<super::SystemView>>,
     tidi_factor_bits: &'a std::sync::atomic::AtomicU64,
+    actor_state: Option<&'a std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>>,
 }
 
 impl std::ops::Deref for BallparkWriteGuard<'_> {
@@ -100,7 +101,25 @@ impl Drop for BallparkWriteGuard<'_> {
         }
         let tidi = clamp_tidi_factor_bits(self.tidi_factor_bits);
         let prev = { self.view_tx.borrow().clone() };
-        let next = super::SystemView::from_ballpark(&guard, None, tidi, Some(prev.as_ref()));
+        let actor_st_arc = self
+            .actor_state
+            .and_then(|cell| cell.get())
+            .and_then(|weak| weak.upgrade())
+            .filter(|_| {
+                !eve_db::lock_rank::held_lock_ranks()
+                    .iter()
+                    .any(|&r| r >= RANK_ACTOR_STATE)
+            });
+        let actor_st_guard = actor_st_arc
+            .as_ref()
+            .and_then(|st_lock| st_lock.try_read().ok());
+        let next = super::SystemView::from_ballpark(
+            &guard,
+            actor_st_guard.as_deref(),
+            tidi,
+            Some(prev.as_ref()),
+        );
+        drop(actor_st_guard);
         // Release RANK_BALLPARK and pop its thread-local held rank before sending on the watch channel.
         drop(guard);
         let _ = self.view_tx.send(Arc::new(next));
@@ -113,6 +132,7 @@ pub struct BallparkHandle {
     inner: RankedRwLock<Ballpark, RANK_BALLPARK>,
     view_tx: Arc<tokio::sync::watch::Sender<Arc<super::SystemView>>>,
     tidi_factor_bits: Arc<std::sync::atomic::AtomicU64>,
+    actor_state: std::sync::OnceLock<std::sync::Weak<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>>,
 }
 
 impl std::ops::Deref for BallparkHandle {
@@ -134,7 +154,17 @@ impl BallparkHandle {
             inner: RankedRwLock::new(ballpark),
             view_tx,
             tidi_factor_bits,
+            actor_state: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attaches the owning system's `actor_state` lock so drop-time `SystemView` refreshes
+    /// capture `sim_elapsed_secs` and active-module flags when `actor_state` is rank-safe.
+    pub(crate) fn attach_actor_state(
+        &self,
+        actor_state: &Arc<RankedRwLock<super::SystemActorState, RANK_ACTOR_STATE>>,
+    ) {
+        let _ = self.actor_state.set(Arc::downgrade(actor_state));
     }
 
     fn wrap_guard<'a>(&'a self, inner: InnerBallparkWriteGuard<'a>) -> BallparkWriteGuard<'a> {
@@ -142,6 +172,7 @@ impl BallparkHandle {
             guard: Some(inner),
             view_tx: &self.view_tx,
             tidi_factor_bits: &self.tidi_factor_bits,
+            actor_state: Some(&self.actor_state),
         }
     }
 

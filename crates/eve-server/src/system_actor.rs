@@ -978,6 +978,7 @@ impl SystemRegistry {
         let ballpark_actor = ballpark_shared.clone();
         let actor_state_shared: Arc<RankedRwLock<SystemActorState, RANK_ACTOR_STATE>> =
             Arc::new(RankedRwLock::new(initial_actor_state));
+        ballpark_shared.attach_actor_state(&actor_state_shared);
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sim_elapsed_secs_bits = Arc::new(std::sync::atomic::AtomicU64::new(0.0_f64.to_bits()));
@@ -1534,13 +1535,12 @@ impl SystemRegistry {
                                 defer_reply(&mut deferred_replies, reply, known);
                             }
                             SystemCommand::SetMovementMode { ball_id, mode, reply } => {
-                                apply_set_movement_mode_command(
+                                let res = apply_set_movement_mode_command(
                                     solar_system_id,
                                     &mut ballpark,
                                     ball_id,
                                     mode,
                                     None,
-                                    reply,
                                     active_module_cycles,
                                     base_scramble_strengths,
                                     base_core_strengths,
@@ -1554,6 +1554,7 @@ impl SystemRegistry {
                                     warp_provenance,
                                     warp_tracking,
                                 );
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::SetWarpMovementMode {
                                 ball_id,
@@ -1561,13 +1562,12 @@ impl SystemRegistry {
                                 provenance,
                                 reply,
                             } => {
-                                apply_set_movement_mode_command(
+                                let res = apply_set_movement_mode_command(
                                     solar_system_id,
                                     &mut ballpark,
                                     ball_id,
                                     mode,
                                     Some(provenance),
-                                    reply,
                                     active_module_cycles,
                                     base_scramble_strengths,
                                     base_core_strengths,
@@ -1581,6 +1581,7 @@ impl SystemRegistry {
                                     warp_provenance,
                                     warp_tracking,
                                 );
+                                defer_reply(&mut deferred_replies, reply, res);
                             }
                             SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_scramble_strength(ball_id, strength) {
@@ -3426,7 +3427,6 @@ fn apply_set_movement_mode_command(
     ball_id: BallId,
     mode: eve_destiny::MovementMode,
     provenance: Option<WarpProvenance>,
-    reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &mut HashMap<BallId, i32>,
     base_core_strengths: &mut HashMap<BallId, i32>,
@@ -3443,10 +3443,9 @@ fn apply_set_movement_mode_command(
     ball_space_entry_epochs: &HashMap<BallId, u64>,
     warp_provenance: &mut HashMap<BallId, WarpProvenance>,
     warp_tracking: &SharedWarpTracking,
-) {
+) -> Result<u64, String> {
     if !ballpark.balls.contains_key(&ball_id) {
-        let _ = reply.send(Err(format!("Ball {ball_id} not in system {solar_system_id}")));
-        return;
+        return Err(format!("Ball {ball_id} not in system {solar_system_id}"));
     }
     let is_stop = matches!(mode, eve_destiny::MovementMode::Stop);
     let is_warp = matches!(mode, eve_destiny::MovementMode::Warp { .. });
@@ -3546,11 +3545,9 @@ fn apply_set_movement_mode_command(
                 celestials::clear_shared_warp_tracking(warp_tracking, ball_id, was_warping);
             }
             persist_ball_positions_in_db(ballpark, &[ball_id], db_opt, ball_space_entry_epochs);
-            let _ = reply.send(Ok(ballpark.current_tick));
+            Ok(ballpark.current_tick)
         }
-        Err(e) => {
-            let _ = reply.send(Err(e));
-        }
+        Err(e) => Err(e),
     }
 }
 

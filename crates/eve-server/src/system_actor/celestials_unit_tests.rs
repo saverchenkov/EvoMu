@@ -724,6 +724,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    dead.ballpark.attach_actor_state(&dead.actor_state);
 
     assert!(dead.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(dead.set_ball_max_velocity(1, 100.0).await.is_err());
@@ -927,6 +928,7 @@ async fn system_handle_sync_helpers_hooks_and_closed_channel_error_paths() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    drop_h.ballpark.attach_actor_state(&drop_h.actor_state);
     assert!(drop_h.spawn_ball(make_ball(1, 606, DVec3::ZERO)).await.is_err());
     assert!(drop_h.set_ball_max_velocity(1, 100.0).await.is_err());
     assert!(drop_h.spawn_ball_with_combat(make_ball(1, 606, DVec3::ZERO), CombatState::default()).await.is_err());
@@ -1416,6 +1418,7 @@ async fn system_handle_stopped_actor_returns_error_or_false_on_all_commands() {
         system_step_hook: Arc::new(eve_db::lock_rank::RankedRwLock::new(None)),
         post_unlock_actions: Arc::new(eve_db::lock_rank::RankedMutex::new(Vec::new())),
     };
+    handle.ballpark.attach_actor_state(&handle.actor_state);
 
     assert!(handle.spawn_ball(make_ball(1, 587, DVec3::ZERO)).await.is_err());
     assert!(handle.set_ball_max_velocity(1, 100.0).await.is_err());

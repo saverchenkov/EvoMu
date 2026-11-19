@@ -1562,8 +1562,16 @@ impl SystemView {
         self.targeters_of(target_id).next().is_some()
     }
 
+    /// Mirrors `Ballpark::bubble_id_for_ball`.
     pub fn bubble_id_for_ball(&self, ball_id: BallId) -> Option<u64> {
-        self.ball_grid_ids.get(&ball_id).copied()
+        if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
+            return Some(gid);
+        }
+        let ball = self.balls.get(&ball_id)?;
+        self.grids
+            .values()
+            .find(|g| g.contains(ball.position))
+            .map(|g| g.id)
     }
 
     pub fn grid_bubble(&self, grid_id: u64) -> Option<&GridBubble> {
