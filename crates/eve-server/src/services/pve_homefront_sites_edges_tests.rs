@@ -1449,4 +1449,386 @@ mod multi_role_edge_tests {
         assert_eq!(st_withdrawn.contributions[&char_entered].cargo_delivered, 0);
         assert!(!st_withdrawn.contributions.contains_key(&char_outsider));
     }
+
+    fn add_pilot_to_ctx(
+        ctx: &ServerContext,
+        char_id: i64,
+        user_id: u64,
+        ship_id: i64,
+        ship_type_id: TypeId,
+        sys_id: SolarSystemId,
+    ) -> SessionState {
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch = template_ch;
+            ch.character_id = char_id;
+            ch.user_id = user_id;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents::from_isk(500_000);
+            snap.characters.insert(char_id, ch);
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: ship_type_id,
+                    owner_id: char_id,
+                    location_id: char_id,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        let mut sess = SessionState::new(user_id);
+        sess.user_id = Some(user_id);
+        sess.character_id = Some(char_id);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(ship_id);
+        sess
+    }
+
+    #[tokio::test]
+    async fn homefront_raid_hauler_respawns_beyond_u8_max_never_collide_with_sibling_site_balls() {
+        use crate::services::pve_homefront_sites::{
+            on_homefront_entity_destroyed_core, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+        use std::collections::BTreeSet;
+
+        let sys_id = 30_000_142_u32;
+        let char_raid = 971_104_i64;
+        let ship_raid = 871_104_i64;
+        let char_sibling = 971_105_i64;
+        let ship_sibling = 871_105_i64;
+        let (ctx, sess_raid) = test_ctx_with_pilot(char_raid, ship_raid, 620, sys_id);
+        let sess_sibling = add_pilot_to_ctx(&ctx, char_sibling, 81, ship_sibling, 620, sys_id);
+
+        // Spawn Raid first and an adjacent Emergency Aid site immediately after so
+        // `sibling.instance_id == raid.instance_id + 1` (the exact 100-ID stride boundary).
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).expect("spawn Raid");
+        let sibling =
+            spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_238).expect("spawn sibling Aid");
+        assert_eq!(sibling.instance_id, raid.instance_id + 1);
+
+        spawn_ship_for_gate_test(
+            &ctx,
+            sys_id,
+            ship_raid,
+            620,
+            raid.site_position + DVec3::new(300.0, 0.0, 0.0),
+        )
+        .await;
+        spawn_ship_for_gate_test(
+            &ctx,
+            sys_id,
+            ship_sibling,
+            620,
+            sibling.site_position + DVec3::new(300.0, 0.0, 0.0),
+        )
+        .await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess_raid, raid.instance_id)
+            .await
+            .expect("enter Raid gate");
+        activate_homefront_acceleration_gate(&ctx, &sess_sibling, sibling.instance_id)
+            .await
+            .expect("enter sibling Emergency Aid gate");
+
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let sibling_state = get_homefront_runtime_state(&ctx, sibling.instance_id).unwrap();
+        let mut sibling_ball_ids = BTreeSet::new();
+        sibling_ball_ids.insert(sibling_state.beacon_ball_id);
+        sibling_ball_ids.insert(sibling_state.outer_gate_ball_id);
+        sibling_ball_ids.insert(sibling_state.dispatch_boss_ball_id);
+        sibling_ball_ids.extend(sibling_state.spawned_ball_ids.iter().copied());
+        if let HomefrontArchetypeProgress::EmergencyAid { protectee_ball_id, .. } =
+            sibling_state.progress
+        {
+            sibling_ball_ids.insert(protectee_ball_id);
+        }
+        assert!(sibling_ball_ids.len() >= 4, "sibling site must own outer + pocket balls");
+        for &bid in &sibling_ball_ids {
+            assert!(
+                sys_h.get_ball_snapshot(bid).await.unwrap().is_some(),
+                "sibling ball {bid} must exist in space before Raid respawns"
+            );
+        }
+
+        let mut seen_hauler_ids = BTreeSet::new();
+        let mut current_hid = match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress
+        {
+            HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                active_hauler_ball_id.expect("initial Raid hauler spawned")
+            }
+            other => panic!("expected Raid progress, got {other:?}"),
+        };
+        assert!(seen_hauler_ids.insert(current_hid));
+        assert!(!sibling_ball_ids.contains(&current_hid));
+        assert!(sys_h.get_ball_snapshot(current_hid).await.unwrap().is_some());
+
+        // 1. Exercise `advance_next_raid_hauler` through live escape ticks (270s < 600s sibling timer).
+        for _ in 0..3 {
+            let prev_hid = current_hid;
+            ctx.advance_secs(90);
+            tick_homefront_operations_sync(&ctx);
+            let next_hid = match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress
+            {
+                HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                    active_hauler_ball_id.expect("tick escape must respawn hauler")
+                }
+                other => panic!("expected Raid progress, got {other:?}"),
+            };
+            assert!(
+                seen_hauler_ids.insert(next_hid),
+                "tick escape hauler ID {next_hid} must not duplicate prior hauler IDs"
+            );
+            assert!(
+                !sibling_ball_ids.contains(&next_hid),
+                "tick escape hauler ID {next_hid} collided with sibling site balls"
+            );
+            assert!(sys_h.get_ball_snapshot(prev_hid).await.unwrap().is_none());
+            assert!(sys_h.get_ball_snapshot(next_hid).await.unwrap().is_some());
+            current_hid = next_hid;
+        }
+
+        // 2. Drive 254 untackled kills via `on_homefront_entity_destroyed_core`, crossing both
+        //    the `haulers_spawned == 70` stride boundary and `u8::MAX == 255` saturation.
+        for step in 0..254_usize {
+            let handled = on_homefront_entity_destroyed_core(
+                &ctx.systems,
+                &ctx.db,
+                &ctx.sde,
+                sys_id,
+                current_hid,
+                Some(char_raid),
+            )
+            .await;
+            assert!(handled.is_some(), "untackled kill step {step} must be handled");
+            let next_hid = ctx.db.with_snapshot(|snap| {
+                let rec = &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id];
+                match &rec.progress {
+                    HomefrontProgressRecord::Raid { active_hauler_ball_id, .. } => {
+                        active_hauler_ball_id.expect("untackled kill must respawn hauler")
+                    }
+                    other => panic!("expected Raid progress, got {other:?}"),
+                }
+            });
+            assert!(
+                seen_hauler_ids.insert(next_hid),
+                "untackled kill step {step} duplicated hauler ID {next_hid}"
+            );
+            assert!(
+                !sibling_ball_ids.contains(&next_hid),
+                "untackled kill step {step} hauler ID {next_hid} collided with sibling site balls"
+            );
+            current_hid = next_hid;
+        }
+
+        // Confirm `haulers_spawned` has saturated at `u8::MAX`, then trigger one more tick escape
+        // to verify tick respawn still allocates a brand-new ID and removes only the previous hauler.
+        match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress {
+            HomefrontArchetypeProgress::Raid { haulers_spawned, .. } => {
+                assert_eq!(haulers_spawned, u8::MAX);
+            }
+            other => panic!("expected Raid progress, got {other:?}"),
+        }
+        assert!(sys_h.get_ball_snapshot(current_hid).await.unwrap().is_some());
+        let pre_sat_tick_hid = current_hid;
+        ctx.advance_secs(90);
+        tick_homefront_operations_sync(&ctx);
+        let post_sat_tick_hid =
+            match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress {
+                HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                    active_hauler_ball_id.expect("post-saturation tick escape must respawn hauler")
+                }
+                other => panic!("expected Raid progress, got {other:?}"),
+            };
+        assert!(
+            seen_hauler_ids.insert(post_sat_tick_hid),
+            "post-saturation tick hauler ID {post_sat_tick_hid} must remain unique"
+        );
+        assert!(!sibling_ball_ids.contains(&post_sat_tick_hid));
+        assert!(sys_h.get_ball_snapshot(pre_sat_tick_hid).await.unwrap().is_none());
+        assert!(sys_h.get_ball_snapshot(post_sat_tick_hid).await.unwrap().is_some());
+
+        // 3. Exercise `raid_tackle_and_destroy_hauler` (both untackled escapes and tackled kills)
+        //    while `haulers_spawned == u8::MAX`.
+        for step in 0..5_usize {
+            let err =
+                raid_tackle_and_destroy_hauler(&ctx, &sess_raid, raid.instance_id, false, 0.0)
+                    .expect_err("untackled hauler must escape");
+            assert_eq!(err.code, "TargetEscaped");
+            let next_hid = match get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().progress
+            {
+                HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                    active_hauler_ball_id.expect("RPC escape must spawn replacement hauler")
+                }
+                other => panic!("expected Raid progress, got {other:?}"),
+            };
+            assert!(
+                seen_hauler_ids.insert(next_hid),
+                "RPC untackled step {step} duplicated hauler ID {next_hid}"
+            );
+            assert!(!sibling_ball_ids.contains(&next_hid));
+        }
+        for step in 0..2_usize {
+            let st =
+                raid_tackle_and_destroy_hauler(&ctx, &sess_raid, raid.instance_id, true, 3_000.0)
+                    .expect("tackled hauler destroy succeeds");
+            let next_hid = match st.progress {
+                HomefrontArchetypeProgress::Raid { active_hauler_ball_id, .. } => {
+                    active_hauler_ball_id.expect("tackled kill before quota must respawn hauler")
+                }
+                other => panic!("expected Raid progress, got {other:?}"),
+            };
+            assert!(
+                seen_hauler_ids.insert(next_hid),
+                "RPC tackled step {step} duplicated hauler ID {next_hid}"
+            );
+            assert!(!sibling_ball_ids.contains(&next_hid));
+        }
+
+        assert_eq!(seen_hauler_ids.len(), 266);
+
+        // Every sibling outer beacon, gate, boss, escort, and protectee ball must remain intact.
+        for &bid in &sibling_ball_ids {
+            assert!(
+                sys_h.get_ball_snapshot(bid).await.unwrap().is_some(),
+                "sibling ball {bid} was unexpectedly despawned after 260+ Raid hauler respawns"
+            );
+        }
+        let sibling_final = get_homefront_runtime_state(&ctx, sibling.instance_id).unwrap();
+        assert!(!sibling_final.completed && !sibling_final.failed);
+    }
+
+    #[tokio::test]
+    async fn homefront_raid_cross_pilot_depot_withdrawal_preserves_withdrawing_pilots_credit() {
+        use crate::services::pve_homefront_sites::{
+            on_homefront_inventory_event_sync, on_homefront_item_moved_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let sys_id = 30_000_142_u32;
+        let char_a = 971_106_i64;
+        let ship_a = 871_106_i64;
+        let char_b = 971_107_i64;
+        let ship_b = 871_107_i64;
+        let (ctx, sess_a) = test_ctx_with_pilot(char_a, ship_a, 649, sys_id);
+        let sess_b = add_pilot_to_ctx(&ctx, char_b, 82, ship_b, 649, sys_id);
+
+        let raid = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_347).expect("spawn Raid");
+        spawn_ship_for_gate_test(
+            &ctx,
+            sys_id,
+            ship_a,
+            649,
+            raid.site_position + DVec3::new(300.0, 0.0, 0.0),
+        )
+        .await;
+        spawn_ship_for_gate_test(
+            &ctx,
+            sys_id,
+            ship_b,
+            649,
+            raid.site_position + DVec3::new(350.0, 0.0, 0.0),
+        )
+        .await;
+
+        activate_homefront_acceleration_gate(&ctx, &sess_a, raid.instance_id)
+            .await
+            .expect("Pilot A enters Raid gate");
+        activate_homefront_acceleration_gate(&ctx, &sess_b, raid.instance_id)
+            .await
+            .expect("Pilot B enters Raid gate");
+
+        let (depot_id, loot_tid) = ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&raid.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::Raid { delivery_depot_ball_id, .. } => (
+                    *delivery_depot_ball_id,
+                    rec.blueprint.loot_commodity_type_id.unwrap_or(77_473),
+                ),
+                other => panic!("expected Raid, got {other:?}"),
+            }
+        });
+
+        // Pilot A deposits a crate owned by Pilot A.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                9_710_101,
+                InventoryItemRecord {
+                    item_id: 9_710_101,
+                    type_id: loot_tid,
+                    owner_id: char_a,
+                    location_id: depot_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        on_homefront_item_moved_sync(&ctx, char_a, depot_id, loot_tid, 1);
+
+        // Pilot B deposits a crate owned by Pilot B.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                9_710_102,
+                InventoryItemRecord {
+                    item_id: 9_710_102,
+                    type_id: loot_tid,
+                    owner_id: char_b,
+                    location_id: depot_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        on_homefront_item_moved_sync(&ctx, char_b, depot_id, loot_tid, 1);
+
+        let st_both = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_both.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 2, .. }
+        ));
+        assert_eq!(st_both.contributions[&char_a].cargo_delivered, 1);
+        assert_eq!(st_both.contributions[&char_b].cargo_delivered, 1);
+
+        // Pilot B withdraws Pilot A's crate from the depot: Pilot B still owns their crate in the
+        // depot so Pilot B's credit must be preserved while Pilot A's credit is decremented.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&9_710_101);
+        });
+        on_homefront_inventory_event_sync(&ctx, char_b, Some(sys_id), depot_id, loot_tid);
+
+        let st_after_cross = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_after_cross.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 1, .. }
+        ));
+        assert_eq!(
+            st_after_cross.contributions[&char_a].cargo_delivered, 0,
+            "Pilot A's credit must be decremented when Pilot A's crate is withdrawn"
+        );
+        assert_eq!(
+            st_after_cross.contributions[&char_b].cargo_delivered, 1,
+            "Pilot B's own delivered credit must be preserved when withdrawing Pilot A's crate"
+        );
+
+        // When Pilot B subsequently withdraws their own crate, Pilot B's credit decrements to 0.
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&9_710_102);
+        });
+        on_homefront_inventory_event_sync(&ctx, char_b, Some(sys_id), depot_id, loot_tid);
+
+        let st_empty = get_homefront_runtime_state(&ctx, raid.instance_id).unwrap();
+        assert!(matches!(
+            st_empty.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 0, .. }
+        ));
+        assert_eq!(st_empty.contributions[&char_a].cargo_delivered, 0);
+        assert_eq!(st_empty.contributions[&char_b].cargo_delivered, 0);
+    }
 }

@@ -693,7 +693,9 @@ fn initial_progress_record(
             haulers_spawned: 1,
             haulers_destroyed: 0,
             haulers_escaped: 0,
-            active_hauler_ball_id: Some(base_obj + 10),
+            // Allocate initial and replacement Raid hauler ball IDs monotonically from
+            // `snap.next_entity_id` so hauler waves never collide with sibling site strides.
+            active_hauler_ball_id: Some(alloc_id()),
             active_hauler_tackled: false,
             active_hauler_escape_at_sec: 0,
             freighter_ball_id: base_obj + 11,
@@ -2623,6 +2625,7 @@ pub fn raid_tackle_and_destroy_hauler(
 ) -> Result<HomefrontRuntimeState, BridgeRpcError> {
     validate_finite_non_negative("damage_dealt", damage_dealt)?;
     with_verified_active_pilot(ctx, session, instance_id, |snap, char_id, _| {
+        let next_entity_id = &mut snap.next_entity_id;
         let rec = snap
             .dungeon_runtime
             .homefront_runtimes
@@ -2643,8 +2646,11 @@ pub fn raid_tackle_and_destroy_hauler(
                     *haulers_escaped = haulers_escaped.saturating_add(1);
                     *active_hauler_tackled = false;
                     *haulers_spawned = haulers_spawned.saturating_add(1);
-                    *active_hauler_ball_id =
-                        Some(1_897_800_000 + instance_id * 100 + 30 + i64::from(*haulers_spawned));
+                    // Allocate replacement Raid hauler ball IDs monotonically from `next_entity_id`
+                    // so repeated escapes never overflow a fixed per-site stride into sibling site
+                    // balls or duplicate an ID once `haulers_spawned` saturates at `u8::MAX`.
+                    *next_entity_id += 1;
+                    *active_hauler_ball_id = Some(*next_entity_id);
                     return Err(hf_err(
                         "TargetEscaped",
                         "Untackled Raid industrial hauler warped out without dropping cargo",
@@ -2655,8 +2661,8 @@ pub fn raid_tackle_and_destroy_hauler(
                 *cargo_dropped = cargo_dropped.saturating_add(1);
                 if *haulers_destroyed < *required_deliveries {
                     *haulers_spawned = haulers_spawned.saturating_add(1);
-                    *active_hauler_ball_id =
-                        Some(1_897_800_000 + instance_id * 100 + 30 + i64::from(*haulers_spawned));
+                    *next_entity_id += 1;
+                    *active_hauler_ball_id = Some(*next_entity_id);
                     *active_hauler_tackled = false;
                 } else {
                     *active_hauler_ball_id = None;
@@ -4144,7 +4150,7 @@ fn raid_hauler_ball(id: i64, type_id: TypeId, position: DVec3) -> Ball {
 }
 
 fn advance_next_raid_hauler(
-    inst_id: i64,
+    next_entity_id: &mut i64,
     now: u64,
     hauler_tid: TypeId,
     pocket_pos: DVec3,
@@ -4159,7 +4165,10 @@ fn advance_next_raid_hauler(
     *active_hauler_tackled = false;
     if haulers_destroyed < required_deliveries {
         *haulers_spawned = haulers_spawned.saturating_add(1);
-        let hid = 1_897_800_000 + inst_id * 100 + 30 + i64::from(*haulers_spawned);
+        // Allocate each replacement Raid hauler from the snapshot entity counter so repeated
+        // escapes/kills never collide with adjacent Homefront site balls or saturate at `u8::MAX`.
+        *next_entity_id += 1;
+        let hid = *next_entity_id;
         *active_hauler_ball_id = Some(hid);
         *active_hauler_escape_at_sec = now.saturating_add(90);
         spawned_ball_ids.push(hid);
@@ -4231,6 +4240,7 @@ pub async fn on_homefront_entity_destroyed_core(
                 .as_ref()
                 .and_then(|h| h.get_ball_position_sync(ball_id));
 
+            let next_entity_id = &mut snap.next_entity_id;
             let rec = snap
                 .dungeon_runtime
                 .homefront_runtimes
@@ -4281,7 +4291,7 @@ pub async fn on_homefront_entity_destroyed_core(
                     if !*active_hauler_tackled && !was_scrambled {
                         *haulers_escaped = haulers_escaped.saturating_add(1);
                         if let Some((hauler_id, h_tid, hauler_pos)) = advance_next_raid_hauler(
-                            inst_id,
+                            next_entity_id,
                             now,
                             hauler_tid,
                             pocket_pos,
@@ -4308,7 +4318,7 @@ pub async fn on_homefront_entity_destroyed_core(
                         add_crate_to_snap = Some((extra_id, crate_pos.to_array()));
 
                         let next_hauler = advance_next_raid_hauler(
-                            inst_id,
+                            next_entity_id,
                             now,
                             hauler_tid,
                             pocket_pos,
@@ -4989,10 +4999,16 @@ fn reconcile_raid_depot_in_snap(
                 } else if delivered_in_depot < *cargo_delivered {
                     let mut remaining_to_deduct = u32::from(*cargo_delivered - delivered_in_depot);
                     *cargo_delivered = delivered_in_depot;
+                    // Deduct from the withdrawing pilot first only when their credited deliveries
+                    // exceed crates they still own in the depot, so withdrawing another pilot's
+                    // crate preserves the withdrawing pilot's own delivery credit.
                     if let Some(c) = rec.contributions.get_mut(&char_id) {
-                        let sub = c.cargo_delivered.min(remaining_to_deduct);
-                        c.cargo_delivered -= sub;
-                        remaining_to_deduct -= sub;
+                        let held = per_owner.get(&char_id).copied().unwrap_or(0);
+                        if c.cargo_delivered > held {
+                            let sub = (c.cargo_delivered - held).min(remaining_to_deduct);
+                            c.cargo_delivered -= sub;
+                            remaining_to_deduct -= sub;
+                        }
                     }
                     if remaining_to_deduct > 0 {
                         // Reconcile unentered or cross-pilot withdrawals against crates left in depot.
@@ -5006,6 +5022,12 @@ fn reconcile_raid_depot_in_snap(
                                 c.cargo_delivered -= sub;
                                 remaining_to_deduct -= sub;
                             }
+                        }
+                    }
+                    // Fallback for mixed-owner stacks where credited totals are not owner-matched.
+                    if remaining_to_deduct > 0 {
+                        if let Some(c) = rec.contributions.get_mut(&char_id) {
+                            c.cargo_delivered = c.cargo_delivered.saturating_sub(remaining_to_deduct);
                         }
                     }
                 }
@@ -5396,6 +5418,7 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
         let mut traffic_failed = false;
         let mut traffic_escaped_balls: Vec<i64> = Vec::new();
         let (sys_id, hostile_faction_id) = {
+            let next_entity_id = &mut snap.next_entity_id;
             let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) else {
                 return Ok(fx);
             };
@@ -5489,7 +5512,7 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                         *haulers_escaped = haulers_escaped.saturating_add(1);
                         rec.spawned_ball_ids.retain(|&id| id != old_hid);
                         if let Some((new_hid, h_tid, h_pos)) = advance_next_raid_hauler(
-                            inst_id,
+                            next_entity_id,
                             now,
                             hauler_tid,
                             pocket_pos,
