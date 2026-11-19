@@ -886,6 +886,22 @@ async fn test_asset_list_asset_safety_wraps_and_item_locking() {
         "feat:inventory.item-locking",
     ]);
     let ctx = new_ctx();
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = 98_900_001_i64;
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Safety Ledger Corp".into();
+        corp.ticker = "SLGR".into();
+        corp.ceo_id = C1;
+        corp.members.insert(C1);
+        corp.member_roles
+            .insert(C1, eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&C1) {
+            ch.corporation_id = corp_id;
+        }
+    });
     let mut s1 = pilot(&ctx, C1, 6115).await;
 
     // 1. Asset list across stations and Upwell structure.

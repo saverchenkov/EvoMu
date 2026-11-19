@@ -883,9 +883,40 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(926);
+    let char_id = 90_000_001;
+    let seeded_corp_id = 98_926_001_i64;
+    let seeded_alliance_id = 99_926_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = seeded_corp_id;
+        corp.name = "Progression Fitting Corp".into();
+        corp.ticker = "PFIT".into();
+        corp.ceo_id = char_id;
+        corp.alliance_id = Some(seeded_alliance_id);
+        corp.members.insert(char_id);
+        corp.member_roles.insert(
+            char_id,
+            eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FITTING_MANAGER,
+        );
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(seeded_corp_id, corp);
+        snap.alliances.insert(
+            seeded_alliance_id,
+            eve_db::AllianceRecord {
+                alliance_id: seeded_alliance_id,
+                name: "Progression Fitting Alliance".into(),
+                short_name: "PFAL".into(),
+                executor_corp_id: seeded_corp_id,
+                member_corp_ids: std::collections::HashSet::from([seeded_corp_id]),
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = seeded_corp_id;
+            ch.alliance_id = Some(seeded_alliance_id);
+        }
+    });
 
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    let char_id = 90_000_001;
     ctx.dispatch_rpc(
         &mut sess,
         "charUnboundMgr",
@@ -1014,7 +1045,8 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     assert_eq!(char_fits_map.len(), 3);
 
     // Corporate fitting save & retrieve via corpFittingMgr
-    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    let corp_id = sess.corporation_id.expect("seeded player corporation");
+    assert_eq!(corp_id, seeded_corp_id);
     let corp_fid = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1071,8 +1103,8 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
     .expect("corpFittingMgr.DeleteFitting");
 
     // Alliance fitting save, list & delete via allianceFittingMgr + 300 corp/alliance fitting limit
-    let alliance_id = 99_000_001i64;
-    sess.alliance_id = Some(alliance_id);
+    let alliance_id = sess.alliance_id.expect("seeded player alliance");
+    assert_eq!(alliance_id, seeded_alliance_id);
     let alliance_fid = ctx
         .dispatch_rpc(
             &mut sess,

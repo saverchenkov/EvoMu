@@ -872,3 +872,103 @@ async fn get_items_in_safety_for_corp_enforces_accountant_or_director() {
         "CorpRoleDenied"
     );
 }
+
+#[tokio::test]
+async fn get_items_in_safety_for_corp_rejects_npc_corp_and_omitted_members() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let corp_id = 98_000_859_i64;
+    let ceo_id = 90_000_859_i64;
+    let omitted_id = 90_000_860_i64;
+    let npc_char_id = 90_000_861_i64;
+    let npc_corp_id = 1_000_009_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "Safety Member Guard Corp".into();
+        corp.ticker = "SMGC".into();
+        corp.ceo_id = ceo_id;
+        corp.members.insert(ceo_id);
+        corp.member_roles
+            .insert(omitted_id, eve_db::corp_roles::ROLE_ACCOUNTANT);
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        snap.characters.insert(
+            omitted_id,
+            eve_db::CharacterRecord {
+                character_id: omitted_id,
+                corporation_id: corp_id,
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            npc_char_id,
+            eve_db::CharacterRecord {
+                character_id: npc_char_id,
+                corporation_id: npc_corp_id,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Non-GM pilot in an NPC corp or unseeded < 98M corp is denied even with ROLE_ACCOUNTANT.
+    for cid in [npc_corp_id, 500_001_i64] {
+        let mut sess = make_session(90_000_862, cid, None, service_roles::ROLE_PLAYER);
+        sess.corp_role = u64::MAX;
+        assert_eq!(
+            handle(
+                &ctx,
+                &mut sess,
+                "structureAssetSafety",
+                "GetItemsInSafetyForCorp",
+                &[],
+                &kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "CorpRoleDenied"
+        );
+    }
+
+    // Pilot omitted from non-empty corp.members is denied even with ROLE_ACCOUNTANT in session & DB.
+    let mut omitted_sess = make_session(omitted_id, corp_id, None, service_roles::ROLE_PLAYER);
+    omitted_sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut omitted_sess,
+            "structureAssetSafety",
+            "GetItemsInSafetyForCorp",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Stale session.corporation_id pointing to a player corp cannot bypass DB NPC corp membership.
+    let mut stale_sess = make_session(npc_char_id, corp_id, None, service_roles::ROLE_PLAYER);
+    stale_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut stale_sess,
+            "structureAssetSafety",
+            "GetItemsInSafetyForCorp",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+}

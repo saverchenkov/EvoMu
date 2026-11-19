@@ -1042,6 +1042,166 @@ fn get_blueprint_data_enforces_corp_bp_roles_and_rejects_npc_corp() {
     assert_eq!(npc_err.code, "CrpAccessDenied");
 }
 
+#[test]
+fn corp_blueprints_and_taxes_use_db_first_corp_and_enforce_corp_members() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let st_id = 60_003_760_i64;
+    let struct_id = 1_040_999_821_i64;
+    let bp_type_id = *ctx.sde.blueprints.keys().min().expect("blueprint in SDE");
+    let corp_id = 98_900_821_i64;
+    let other_corp_id = 98_900_822_i64;
+    let ceo_id = 2_900_821_i64;
+    let omitted_id = 2_900_822_i64;
+    let stale_id = 2_900_823_i64;
+    let corp_bp_id = 9_900_821_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.name = "BpGuardCorp".into();
+        corp.ticker = "BPGD".into();
+        corp.ceo_id = ceo_id;
+        corp.members = std::collections::HashSet::from([ceo_id]);
+        corp.member_roles.insert(
+            omitted_id,
+            corp_roles::ROLE_DIRECTOR
+                | corp_roles::ROLE_FACTORY_MANAGER
+                | corp_roles::ROLE_STATION_MANAGER,
+        );
+        corp.ensure_wallet_divisions();
+        snap.corporations.insert(corp_id, corp);
+
+        snap.characters.insert(
+            omitted_id,
+            eve_db::CharacterRecord {
+                character_id: omitted_id,
+                corporation_id: corp_id,
+                ..Default::default()
+            },
+        );
+        snap.characters.insert(
+            stale_id,
+            eve_db::CharacterRecord {
+                character_id: stale_id,
+                corporation_id: other_corp_id,
+                ..Default::default()
+            },
+        );
+
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: 30_000_142,
+                name: "Tax Guard Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                ..Default::default()
+            },
+        );
+
+        snap.items.insert(
+            corp_bp_id,
+            InventoryItemRecord {
+                item_id: corp_bp_id,
+                type_id: bp_type_id,
+                owner_id: corp_id,
+                location_id: st_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Stale session.corporation_id pointing to corp_id cannot bypass DB other_corp_id.
+    let mut stale_sess = char_session(stale_id, st_id);
+    stale_sess.corporation_id = Some(corp_id);
+    stale_sess.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_FACTORY_MANAGER;
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut stale_sess,
+            "blueprintManager",
+            "GetBlueprintData",
+            &[PyRep::Integer(corp_bp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut stale_sess,
+            "blueprintManager",
+            "GetBlueprintDataByOwner",
+            &[PyRep::Integer(corp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OwnerAccessDenied"
+    );
+
+    // Character omitted from non-empty corp.members is denied blueprint & structure tax operations even with DB/session roles.
+    let mut omitted_sess = char_session(omitted_id, st_id);
+    omitted_sess.corporation_id = Some(corp_id);
+    omitted_sess.corp_role = u64::MAX;
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut omitted_sess,
+            "blueprintManager",
+            "GetBlueprintData",
+            &[PyRep::Integer(corp_bp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CrpAccessDenied"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut omitted_sess,
+            "blueprintManager",
+            "GetBlueprintDataByOwner",
+            &[PyRep::Integer(corp_id)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "OwnerAccessDenied"
+    );
+    assert_eq!(
+        handle_industry_facilities_bps(
+            &ctx,
+            &mut omitted_sess,
+            "facilityManager",
+            "SetFacilityTaxes",
+            &[PyRep::Integer(struct_id), PyRep::Real(2.5)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;

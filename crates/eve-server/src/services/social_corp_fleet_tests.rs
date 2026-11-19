@@ -1220,3 +1220,103 @@ async fn get_alliance_applications_enforces_director_and_blocks_npc_and_cross_co
         );
     }
 }
+
+#[tokio::test]
+async fn require_director_and_executor_use_db_first_and_enforce_corp_members() {
+    let (ctx, _clock, mut exec, _memb, _) = setup_alliance_sandbox();
+    let created = call_social(
+        &ctx,
+        &mut exec,
+        "allianceRegistry",
+        "CreateAlliance",
+        vec![PyRep::String("DB Guard Alliance".into()), PyRep::String("DBGA".into())],
+    )
+    .await
+    .unwrap();
+    let aid = created.dict_get("allianceID").unwrap().as_i64().unwrap();
+    exec.alliance_id = Some(aid);
+
+    let exec_corp = 98_100_001_i64;
+    let omitted_char = 91_000_099_i64;
+    let npc_char = 91_000_100_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            omitted_char,
+            eve_db::CharacterRecord {
+                character_id: omitted_char,
+                corporation_id: exec_corp,
+                alliance_id: Some(aid),
+                ..Default::default()
+            },
+        );
+        if let Some(corp) = snap.corporations.get_mut(&exec_corp) {
+            corp.member_roles
+                .insert(omitted_char, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+        snap.characters.insert(
+            npc_char,
+            eve_db::CharacterRecord {
+                character_id: npc_char,
+                corporation_id: 1_000_009,
+                alliance_id: None,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Omitted from non-empty corp.members is denied director & executor RPCs even with ROLE_DIRECTOR.
+    let mut omitted_sess = SessionState::new(91_099);
+    omitted_sess.user_id = Some(99);
+    omitted_sess.character_id = Some(omitted_char);
+    omitted_sess.corporation_id = Some(exec_corp);
+    omitted_sess.alliance_id = Some(aid);
+    omitted_sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    assert_eq!(
+        call_social(&ctx, &mut omitted_sess, "allianceRegistry", "GetAllianceApplications", vec![])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_social(
+            &ctx,
+            &mut omitted_sess,
+            "allianceRegistry",
+            "CreateLabel",
+            vec![PyRep::String("Denied".into()), PyRep::Integer(1)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CorpRoleDenied"
+    );
+
+    // Stale session corporation_id / alliance_id cannot spoof executor or director status over DB character.
+    let mut stale_sess = SessionState::new(91_100);
+    stale_sess.user_id = Some(100);
+    stale_sess.character_id = Some(npc_char);
+    stale_sess.corporation_id = Some(exec_corp);
+    stale_sess.alliance_id = Some(aid);
+    stale_sess.corp_role = u64::MAX;
+    assert_eq!(
+        call_social(&ctx, &mut stale_sess, "allianceRegistry", "GetAllianceApplications", vec![])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        call_social(
+            &ctx,
+            &mut stale_sess,
+            "allianceRegistry",
+            "CreateLabel",
+            vec![PyRep::String("Denied".into()), PyRep::Integer(1)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "NotInAlliance"
+    );
+}

@@ -1802,12 +1802,27 @@ pub fn handle(
         }
         ("contractProxy", "GetNumItemsInContainers") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs")) {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|v| v.as_i64()).collect(),
-                Some(PyRep::Integer(id)) => vec![*id],
-                _ => Vec::new(),
+            let cid_arg = args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs"));
+            let cids: Vec<i64> = match cid_arg {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    let mut parsed = Vec::with_capacity(items.len());
+                    for item in items {
+                        match item.as_i64() {
+                            Some(cid) if cid > 0 => parsed.push(cid),
+                            _ => {
+                                return Some(Err(rpc_err(
+                                    "InvalidContainer",
+                                    "containerID must be positive integer",
+                                )));
+                            }
+                        }
+                    }
+                    parsed
+                }
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                _ => return Some(Err(rpc_err("InvalidContainer", "containerID must be positive"))),
             };
-            if cids.is_empty() || cids.iter().any(|&cid| cid <= 0) {
+            if cids.is_empty() {
                 return Some(Err(rpc_err("InvalidContainer", "containerID must be positive")));
             }
             let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
@@ -1916,8 +1931,14 @@ fn check_corp_container_query_access(
             "Cannot query corporate contract containers for an NPC corporation",
         ));
     }
-    if !snap.corporations.contains_key(&corp_id) {
+    let Some(corp) = snap.corporations.get(&corp_id) else {
         return Err(rpc_err("CorporationNotFound", format!("Corporation {corp_id} not found")));
+    };
+    if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+        return Err(rpc_err(
+            "CorpRoleDenied",
+            "Inspecting corporation containers requires membership in the corporation",
+        ));
     }
     let resolved_loc = location_id.and_then(|loc| resolve_corp_container_context(snap, loc).0.or(Some(loc)));
     let (is_ceo, eff_roles) =
@@ -1954,9 +1975,11 @@ fn inspect_contract_container_items<'a>(
     req_flag_num: Option<i64>,
     now_unix: u64,
 ) -> Result<Option<Vec<&'a InventoryItemRecord>>, BridgeRpcError> {
-    let caller_corp = session
-        .corporation_id
-        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+    let caller_corp = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
         .filter(|&id| id > 0);
     let div_filter = req_flag_num.filter(|&f| is_corp_division_or_deliveries_flag(f));
     if for_corp {

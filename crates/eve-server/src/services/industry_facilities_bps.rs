@@ -1021,7 +1021,7 @@ pub fn handle_industry_facilities_bps(
             let (bp_type_id, bp_item_opt) = match ctx.db.with_snapshot(|snap| -> Result<(TypeId, Option<eve_db::InventoryItemRecord>), BridgeRpcError> {
                 if let Some(it) = snap.items.get(&raw_id) {
                     if ctx.sde.blueprints.contains_key(&it.type_id) {
-                        let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                         let mut root_loc = it.location_id;
                         for _ in 0..8 {
                             if let Some(parent) = snap.items.get(&root_loc) {
@@ -1377,33 +1377,35 @@ pub fn handle_industry_facilities_bps(
                 }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                 if corp_id > 0 && (owner_filter.is_none() || owner_filter == Some(corp_id)) {
-                    if snap.corporations.contains_key(&corp_id) {
-                        let (is_ceo, roles) = snap.effective_corp_roles_at(
-                            corp_id,
-                            char_id,
-                            Some(fid),
-                            session.corp_role,
-                            ctx.now_unix(),
-                        );
-                        let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
-                        for d in 0..7u8 {
-                            let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
-                            if full || (roles & div_mask) != 0 {
-                                let flag = 115 + i64::from(d);
-                                out.push(
-                                    FacilityLocationRep {
-                                        item_id: fid,
-                                        facility_id: fid,
-                                        type_id,
-                                        owner_id: corp_id,
-                                        flag_id: flag,
-                                        solar_system_id: i64::from(sys_id),
-                                        region_id: reg,
-                                        can_view: true,
-                                        can_take: true,
-                                    }
-                                    .into_client_rep(),
-                                );
+                    if let Some(corp) = snap.corporations.get(&corp_id) {
+                        if corp.ceo_id == char_id || corp.members.is_empty() || corp.members.contains(&char_id) {
+                            let (is_ceo, roles) = snap.effective_corp_roles_at(
+                                corp_id,
+                                char_id,
+                                Some(fid),
+                                session.corp_role,
+                                ctx.now_unix(),
+                            );
+                            let full = is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
+                            for d in 0..7u8 {
+                                let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
+                                if full || (roles & div_mask) != 0 {
+                                    let flag = 115 + i64::from(d);
+                                    out.push(
+                                        FacilityLocationRep {
+                                            item_id: fid,
+                                            facility_id: fid,
+                                            type_id,
+                                            owner_id: corp_id,
+                                            flag_id: flag,
+                                            solar_system_id: i64::from(sys_id),
+                                            region_id: reg,
+                                            can_view: true,
+                                            can_take: true,
+                                        }
+                                        .into_client_rep(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1662,6 +1664,20 @@ pub fn handle_industry_facilities_bps(
                             client_error: None,
                         });
                     }
+                    if let Some(corp) = snap.corporations.get(&owner_corp_id) {
+                        if corp.ceo_id != char_id
+                            && !corp.members.is_empty()
+                            && !corp.members.contains(&char_id)
+                        {
+                            return Err(BridgeRpcError {
+                                code: "CorpRoleDenied".into(),
+                                message: format!(
+                                    "Character {char_id} is not a member of corporation {owner_corp_id}"
+                                ),
+                                client_error: None,
+                            });
+                        }
+                    }
                     let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
                         | eve_db::corp_roles::ROLE_STATION_MANAGER;
                     let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
@@ -1836,9 +1852,11 @@ fn caller_has_corp_blueprint_access(
     if session.has_gm_role() {
         return true;
     }
-    let caller_corp_id = session
-        .corporation_id
-        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
+    let caller_corp_id = snap
+        .characters
+        .get(&char_id)
+        .map(|c| c.corporation_id)
+        .or(session.corporation_id)
         .unwrap_or(0);
     if corp_id <= 0
         || corp_id != caller_corp_id
@@ -1846,6 +1864,11 @@ fn caller_has_corp_blueprint_access(
         || ctx.sde.npc_corporations.contains_key(&corp_id)
     {
         return false;
+    }
+    if let Some(corp) = snap.corporations.get(&corp_id) {
+        if corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id) {
+            return false;
+        }
     }
     let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
         corp_id,

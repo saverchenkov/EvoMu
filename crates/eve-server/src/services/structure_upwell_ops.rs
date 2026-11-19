@@ -623,7 +623,19 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
                 .map(|c| c.corporation_id)
                 .or(session.corporation_id)
                 .unwrap_or(0);
+            if owner_id <= 0
+                || (1_000_000..2_000_000).contains(&owner_id)
+                || ctx.sde.npc_corporations.contains_key(&owner_id)
+            {
+                return Err(err(
+                    "CorpRoleDenied",
+                    "Viewing corporate asset safety requires a player corporation",
+                ));
+            }
             if let Some(corp) = snap.corporations.get(&owner_id) {
+                let excluded_member = corp.ceo_id != char_id
+                    && !corp.members.is_empty()
+                    && !corp.members.contains(&char_id);
                 let (is_ceo, eff_roles) = snap.effective_corp_roles_at(
                     owner_id,
                     char_id,
@@ -631,20 +643,21 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
                     session.corp_role,
                     now_unix,
                 );
-                if corp.ceo_id != char_id
-                    && !is_ceo
-                    && !eve_db::corp_roles::has_role(
-                        eff_roles,
-                        eve_db::corp_roles::ROLE_ACCOUNTANT,
-                    )
+                if excluded_member
+                    || (corp.ceo_id != char_id
+                        && !is_ceo
+                        && !eve_db::corp_roles::has_role(
+                            eff_roles,
+                            eve_db::corp_roles::ROLE_ACCOUNTANT,
+                        ))
                 {
                     return Err(err(
                         "CorpRoleDenied",
                         "Viewing corporate asset safety requires Accountant or Director role",
                     ));
                 }
-            } else if owner_id >= 98_000_000
-                && !eve_db::corp_roles::has_role(
+            } else if owner_id < 98_000_000
+                || !eve_db::corp_roles::has_role(
                     session.corp_role,
                     eve_db::corp_roles::ROLE_ACCOUNTANT,
                 )

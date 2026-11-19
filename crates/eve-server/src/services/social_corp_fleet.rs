@@ -46,32 +46,77 @@ fn label_mask_from_ids(ids: &[i64]) -> u64 {
     ids.iter().fold(0u64, |acc, &id| acc | (id as u64))
 }
 
+fn is_excluded_corp_member(corp: &eve_db::CorporationRecord, char_id: i64) -> bool {
+    corp.ceo_id != char_id && !corp.members.is_empty() && !corp.members.contains(&char_id)
+}
+
 fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let corp_id = session.corporation_id.unwrap_or(0);
     let now_unix = ctx.now_unix();
-    let ok = ctx.db.with_snapshot(|snap| {
+    let corp_id = ctx.db.with_snapshot(|snap| {
+        let corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
         if corp_id <= 0
             || (1_000_000..2_000_000).contains(&corp_id)
             || ctx.sde.npc_corporations.contains_key(&corp_id)
-            || !snap.corporations.contains_key(&corp_id)
         {
-            return false;
+            return None;
+        }
+        let corp = snap.corporations.get(&corp_id)?;
+        if is_excluded_corp_member(corp, char_id) {
+            return None;
         }
         let (is_ceo, roles) =
             snap.effective_corp_roles_at(corp_id, char_id, None, session.corp_role, now_unix);
-        is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)
+        (is_ceo || corp_roles::has_role(roles, corp_roles::ROLE_DIRECTOR)).then_some(corp_id)
     });
-    if !ok {
-        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into(), client_error: None });
-    }
-    Ok(corp_id)
+    corp_id.ok_or_else(|| BridgeRpcError {
+        code: "CorpRoleDenied".into(),
+        message: "Director or CEO role is required".into(),
+        client_error: None,
+    })
 }
 
 /// Returns the caller's alliance ID when the caller's corporation is that alliance's executor and caller is CEO/Director.
 fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
-    let aid = session.alliance_id.unwrap_or(0);
-    let caller_corp = session.corporation_id.unwrap_or(0);
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (caller_corp, aid) = ctx.db.with_snapshot(|snap| {
+        let caller_corp = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        let corp_opt = snap.corporations.get(&caller_corp);
+        let aid = corp_opt
+            .and_then(|c| c.alliance_id)
+            .or_else(|| {
+                if corp_opt.is_none() {
+                    snap.characters.get(&char_id).and_then(|c| c.alliance_id)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                snap.alliances
+                    .values()
+                    .find(|a| a.member_corp_ids.contains(&caller_corp))
+                    .map(|a| a.alliance_id)
+            })
+            .or_else(|| {
+                if corp_opt.is_none() && !snap.characters.contains_key(&char_id) {
+                    session.alliance_id
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        (caller_corp, aid)
+    });
     let exec = ctx.db.with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id));
     match exec {
         Some(e) if e == caller_corp => {
