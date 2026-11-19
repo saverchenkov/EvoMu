@@ -238,6 +238,47 @@ fn hf_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+/// Updates `is_tethered` on a Suspicious Signal relay via the `SystemHandle` actor API.
+fn set_homefront_relay_tethered(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    relay_id: i64,
+    tethered: bool,
+) {
+    if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+        let _ = sys_h.try_update_combat_state(relay_id, |cs| {
+            cs.is_tethered = tethered;
+        });
+    }
+}
+
+/// Applies direct shield/armor/structure damage to a Homefront space entity via `SystemHandle`
+/// and removes its ball if structure HP reaches zero.
+fn apply_homefront_direct_damage_in_space(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    target_id: i64,
+    dmg: f64,
+) {
+    if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+        let mut destroyed = false;
+        sys_h.try_update_combat_state(target_id, |cs| {
+            let mut rem = dmg;
+            let ds = rem.min(cs.shield_hp);
+            cs.shield_hp -= ds;
+            rem -= ds;
+            let da = rem.min(cs.armor_hp);
+            cs.armor_hp -= da;
+            rem -= da;
+            cs.structure_hp = (cs.structure_hp - rem).max(0.0);
+            destroyed = cs.structure_hp <= 0.0;
+        });
+        if destroyed {
+            sys_h.try_remove_destroyed_ball(target_id);
+        }
+    }
+}
+
 fn validate_finite_non_negative(name: &str, val: f64) -> Result<(), BridgeRpcError> {
     if !val.is_finite() || val < 0.0 {
         return Err(hf_err(
@@ -2189,11 +2230,11 @@ pub async fn activate_homefront_gate_by_ball_id(
     let instance_id = inst_id_opt?;
     let ship_id = match session.ship_id {
         Some(sid) => sid,
-        None => return Some(Err(BridgeRpcError::user_error("NoActiveShip"))),
+        None => return Some(Err(hf_err("NoActiveShip", "Pilot has no active ship"))),
     };
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     if sys_h.get_ball_snapshot(ship_id).await.ok().flatten().is_none() {
-        return Some(Err(BridgeRpcError::user_error("ShipNotInSpace")));
+        return Some(Err(hf_err("ShipNotInSpace", "Active ship is not in space")));
     }
     Some(
         activate_homefront_acceleration_gate(ctx, session, instance_id)
@@ -3045,13 +3086,7 @@ pub fn suspicious_signal_hack_array(
     })?;
 
     if let Some((sys_id, relay_id)) = clear_relay_tether {
-        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&relay_id) {
-                    cs.is_tethered = false;
-                }
-            }
-        }
+        set_homefront_relay_tethered(ctx, sys_id, relay_id, false);
     }
     Ok(out)
 }
@@ -3111,13 +3146,7 @@ pub fn suspicious_signal_attack_relay(
     })?;
 
     if let Some((sys_id, relay_id)) = retether_relay {
-        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&relay_id) {
-                    cs.is_tethered = true;
-                }
-            }
-        }
+        set_homefront_relay_tethered(ctx, sys_id, relay_id, true);
     }
     Ok(out)
 }
@@ -5343,61 +5372,18 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
         );
     }
     if let Some((sys_id, relay_id)) = fx.retether_relay {
-        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&relay_id) {
-                    cs.is_tethered = true;
-                }
-            }
-        }
+        set_homefront_relay_tethered(ctx, sys_id, relay_id, true);
     }
     if let Some((sys_id, base_id, dmg)) = fx.dread_siege_dmg {
+        apply_homefront_direct_damage_in_space(ctx, sys_id, base_id, dmg);
         if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            let mut destroyed = false;
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&base_id) {
-                    let mut rem = dmg;
-                    let ds = rem.min(cs.shield_hp);
-                    cs.shield_hp -= ds;
-                    rem -= ds;
-                    let da = rem.min(cs.armor_hp);
-                    cs.armor_hp -= da;
-                    rem -= da;
-                    cs.structure_hp = (cs.structure_hp - rem).max(0.0);
-                    destroyed = cs.structure_hp <= 0.0;
-                }
-                if let Some(d_cs) = bp
-                    .combat_states
-                    .get_mut(&(1_897_800_000 + inst_id * 100 + 13))
-                {
-                    d_cs.capacitor = 0.0;
-                }
-            }
-            if destroyed {
-                sys_h.try_remove_destroyed_ball(base_id);
-            }
+            let _ = sys_h.try_update_combat_state(1_897_800_000 + inst_id * 100 + 13, |d_cs| {
+                d_cs.capacitor = 0.0;
+            });
         }
     }
     if let Some((sys_id, target_id, dmg)) = fx.werpost_attack {
-        if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
-            let mut killed = false;
-            if let Ok(mut bp) = sys_h.ballpark.write() {
-                if let Some(cs) = bp.combat_states.get_mut(&target_id) {
-                    let mut rem = dmg;
-                    let ds = rem.min(cs.shield_hp);
-                    cs.shield_hp -= ds;
-                    rem -= ds;
-                    let da = rem.min(cs.armor_hp);
-                    cs.armor_hp -= da;
-                    rem -= da;
-                    cs.structure_hp = (cs.structure_hp - rem).max(0.0);
-                    killed = cs.structure_hp <= 0.0;
-                }
-            }
-            if killed {
-                sys_h.try_remove_destroyed_ball(target_id);
-            }
-        }
+        apply_homefront_direct_damage_in_space(ctx, sys_id, target_id, dmg);
     }
     if let Some(next_w) = fx.spawn_aar_wave {
         spawn_next_aar_wave_in_space(ctx, inst_id, next_w);
