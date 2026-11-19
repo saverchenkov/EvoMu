@@ -418,6 +418,46 @@ fn is_v24_epic_arc_id(arc_id: u32) -> bool {
     )
 }
 
+/// Resolves the V24 `epic_arc_id` and display name for mission briefing text without altering
+/// `resolve_epic_arc_id_for_agent`'s legacy `1..=7` state IDs.
+pub(crate) fn resolve_v24_epic_arc_for_mission(
+    ctx: &ServerContext,
+    agent_id: i64,
+    mission_id: u32,
+) -> (u32, Option<String>) {
+    if let Some((v24_arc_id, _)) = epic_arc_mission_spec(mission_id) {
+        let name = ctx
+            .sde
+            .epic_arcs
+            .get(&v24_arc_id)
+            .map(|ea| ea.name.as_str())
+            .filter(|n| !n.is_empty())
+            .map(String::from);
+        return (v24_arc_id, name);
+    }
+    let (legacy_arc_id, faction_id) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+    if let Some(ea) = u32::try_from(faction_id).ok().and_then(|fid| {
+        ctx.sde
+            .epic_arcs
+            .values()
+            .filter(|ea| !ea.name.is_empty() && ea.faction_id == Some(fid))
+            .min_by_key(|ea| ea.epic_arc_id)
+    }) {
+        return (ea.epic_arc_id, Some(ea.name.clone()));
+    }
+    if let Some(name) = ctx
+        .sde
+        .epic_arcs
+        .get(&legacy_arc_id)
+        .map(|ea| ea.name.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+    {
+        return (legacy_arc_id, Some(name));
+    }
+    (legacy_arc_id, None)
+}
+
 /// Coalesces legacy faction-mapped `epic_arc_id` rows (`1..=7`) written during mission
 /// completion onto the V24 `epicArcID` whenever `completed_missions` holds V24 mission IDs.
 fn resolve_entry_epic_arc_id(entry: &EpicArcStateEntry) -> u32 {
@@ -454,7 +494,7 @@ fn active_mission_matches_arc(
         && resolve_epic_arc_id_for_agent(ctx, mission.agent_id).0 == entry_arc_id
 }
 
-fn unix_to_filetime_rep(ts_unix: u64) -> PyRep {
+pub(crate) fn unix_to_filetime_rep(ts_unix: u64) -> PyRep {
     let clamped = i64::try_from(ts_unix).unwrap_or(i64::MAX);
     let filetime = clamped
         .saturating_add(11_644_473_600)
@@ -2446,4 +2486,8 @@ mod agents_standings_arcs_tests;
 #[cfg(test)]
 #[path = "agents_standings_arcs_edges_tests.rs"]
 mod agents_standings_arcs_edges_tests;
+
+#[cfg(test)]
+#[path = "agents_standings_arcs_unit_tests.rs"]
+mod agents_standings_arcs_unit_tests;
 
