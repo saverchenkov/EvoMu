@@ -132,11 +132,38 @@ fn homefront_archetypes_ship_restrictions_and_role_cap_payouts() {
     assert!(!p12.payouts[10].eligible && p12.payouts[10].isk == 0 && p12.payouts[10].lp == 0);
     assert!(!p12.payouts[11].eligible && p12.payouts[11].isk == 0);
 
-    // Combat helper preserves capped fleet pool
-    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 15_000_000);
+    // Non-finite inputs must be rejected (zero payout), and entry_sequence breaks ties rather than character_id
+    let seq_contribs = vec![
+        HomefrontParticipantContribution {
+            character_id: 900_999,
+            entry_sequence: 1,
+            damage_dealt: 2_500.0,
+            ..Default::default()
+        },
+        HomefrontParticipantContribution {
+            character_id: 1,
+            entry_sequence: 2,
+            damage_dealt: 2_500.0,
+            ..Default::default()
+        },
+        HomefrontParticipantContribution {
+            character_id: 2,
+            entry_sequence: 3,
+            damage_dealt: f64::NAN,
+            ..Default::default()
+        },
+    ];
+    let p_seq = compute_homefront_fleet_payouts(12_000_000, 50, 1, &seq_contribs);
+    assert_eq!(p_seq.eligible_pilot_count, 2);
+    assert!(p_seq.payouts[0].character_id == 900_999 && p_seq.payouts[0].eligible);
+    assert!(p_seq.payouts[1].character_id == 1 && p_seq.payouts[1].eligible);
+    assert!(!p_seq.payouts[2].eligible && p_seq.payouts[2].isk == 0);
+
+    // Combat helper preserves (4/5)^(opt-n) under-optimal scaling & 2*opt ceiling
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 6_144_000);
     assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 5), 15_000_000);
     assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 10), 7_500_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 15), 5_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 15), 0);
 }
 
 #[test]

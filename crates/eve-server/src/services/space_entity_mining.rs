@@ -764,6 +764,21 @@ pub(crate) async fn handle_mine(
         pos_opt
     });
 
+    if extraction.mined_units > 0 || extraction.wasted_units > 0 {
+        crate::services::pve_homefront_sites::on_homefront_ore_mined(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            asteroid_id,
+            extraction.ore_type_id,
+            extraction.mined_units,
+            extraction.wasted_units,
+            extraction.remaining_units,
+        )
+        .await;
+    }
+
     if extraction.mined_units > 0 {
         let ast_pos_arr = ast_pos_opt.map(|p| [p.x, p.y, p.z]);
         crate::services::space_mining_harvest::deposit_mined_ore_for_asteroid_and_record_ledger_with_waste(

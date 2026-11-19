@@ -494,26 +494,21 @@ pub fn resolve_sde_homefront_templates_for_system(
         return all;
     }
     let sov = resolve_homefront_sovereign_faction(sde, sys_id);
-    let regional_five_pilot: Vec<SdeHomefrontTemplate> = all
+    let regional_templates: Vec<SdeHomefrontTemplate> = all
         .iter()
-        .filter(|t| {
-            let arch = HomefrontArchetype::from_dungeon(t.dungeon_id, &t.dungeon_name);
-            if arch.optimal_fleet_size() != 5 {
-                return false;
-            }
-            match t.dungeon_id {
-                10_346 => true, // Abyssal Artifact Recovery spawns across all empires
-                10_238 | 10_309 | 10_312 | 10_320 | 10_347 => sov == 500_003,
-                10_373 | 10_367 | 10_387 | 10_381 | 10_377 => sov == 500_001,
-                10_376 | 10_369 | 10_388 | 10_383 | 10_378 => sov == 500_004,
-                10_380 | 10_368 | 10_389 | 10_384 | 10_379 => sov == 500_002,
-                _ => false,
-            }
+        .filter(|t| match t.dungeon_id {
+            // Abyssal Artifact Recovery + Equinox 3-pilot ops spawn across all four empires
+            10_346 | 10_705 | 10_713 | 10_714 => true,
+            10_238 | 10_309 | 10_312 | 10_320 | 10_347 => sov == 500_003,
+            10_373 | 10_367 | 10_387 | 10_381 | 10_377 => sov == 500_001,
+            10_376 | 10_369 | 10_388 | 10_383 | 10_378 => sov == 500_004,
+            10_380 | 10_368 | 10_389 | 10_384 | 10_379 => sov == 500_002,
+            _ => false,
         })
         .cloned()
         .collect();
-    if regional_five_pilot.len() >= 2 {
-        regional_five_pilot
+    if regional_templates.len() >= 2 {
+        regional_templates
     } else {
         all
     }
@@ -928,9 +923,9 @@ pub fn resolve_homefront_archetype_blueprint(
             false,
             None,
             vec![77_647, 77_620],
-            vec![77_149],
-            vec![77_099],
-            vec![],
+            vec![83_590, 77_149],
+            vec![81_438, 77_099],
+            vec![81_352],
             vec![77_575, 77_592, 77_658],
             [0.05, 0.55, 0.05, 0.35],
             "ECM",
@@ -941,7 +936,7 @@ pub fn resolve_homefront_archetype_blueprint(
             None,
             vec![77_656, 77_652],
             vec![77_149],
-            vec![77_121],
+            vec![81_402, 77_121],
             vec![],
             vec![77_563, 77_621, 77_649, 77_698],
             [0.45, 0.45, 0.05, 0.05],
@@ -954,7 +949,7 @@ pub fn resolve_homefront_archetype_blueprint(
             vec![77_567, 77_636],
             vec![77_149],
             vec![77_304],
-            vec![77_946, 77_947, 77_948, 77_949],
+            vec![81_383, 77_946, 77_947, 77_948, 77_949],
             vec![77_567, 77_636, 77_650],
             [0.45, 0.30, 0.20, 0.05],
             "Stasis Webifier / Combat Drones",
@@ -993,6 +988,7 @@ pub fn resolve_homefront_archetype_blueprint(
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HomefrontParticipantContribution {
     pub character_id: i64,
+    pub entry_sequence: u64,
     pub damage_dealt: f64,
     pub repair_hp: f64,
     pub cap_transferred: f64,
@@ -1003,11 +999,11 @@ pub struct HomefrontParticipantContribution {
 }
 
 impl HomefrontParticipantContribution {
-    /// Canonical EVE threshold: >= 1,000 damage/rep/cap OR active role objective interaction.
+    /// Canonical EVE threshold: >= 1,000 finite damage/rep/cap OR active role objective interaction.
     pub fn qualifies(&self) -> bool {
-        self.damage_dealt >= 1_000.0
-            || self.repair_hp >= 1_000.0
-            || self.cap_transferred >= 1_000.0
+        (self.damage_dealt.is_finite() && self.damage_dealt >= 1_000.0)
+            || (self.repair_hp.is_finite() && self.repair_hp >= 1_000.0)
+            || (self.cap_transferred.is_finite() && self.cap_transferred >= 1_000.0)
             || self.ore_mined_units > 0
             || self.cargo_delivered > 0
             || self.arrays_hacked > 0
@@ -1020,6 +1016,7 @@ pub struct HomefrontPilotPayout {
     pub character_id: i64,
     pub eligible: bool,
     pub isk: i64,
+    pub isk_cents: IskCents,
     pub lp: i64,
     pub standing_delta: f64,
 }
@@ -1030,13 +1027,63 @@ pub struct HomefrontFleetPayoutSummary {
     pub max_payout_pilots: usize,
     pub eligible_pilot_count: usize,
     pub total_fleet_isk: i64,
+    pub total_fleet_isk_cents: IskCents,
     pub total_fleet_lp: i64,
     pub payouts: Vec<HomefrontPilotPayout>,
 }
 
+/// Fixed-point integer `IskCents` payout scaling for Homefront Operations (`HF-07`, `HF-08`):
+/// - `1 <= n < opt`: attenuates below optimal fleet size using `4^(opt - n) / 5^(opt - n)`.
+/// - `n == opt`: full `1.0x` base payout.
+/// - `opt < n <= 2*opt`: integer floor `(base_cents * opt) / n` so total fleet payout NEVER exceeds
+///   `opt * base` (no +1/+2 ISK rounding overflow).
+/// - `n == 0 || n > 2*opt`: zero payout.
+pub fn scale_homefront_reward_cents(
+    base_cents: IskCents,
+    optimal_fleet_size: usize,
+    qualified_count: usize,
+) -> IskCents {
+    let opt = optimal_fleet_size.max(1);
+    let max_recipients = opt.saturating_mul(2);
+    if qualified_count == 0 || qualified_count > max_recipients || base_cents.raw_cents() <= 0 {
+        return IskCents::ZERO;
+    }
+    // DERIVED: integer under-optimal attenuation `(4/5)^(opt - n)` and floored `base * opt / n` dilution.
+    let raw_cents = i128::from(base_cents.raw_cents());
+    let scaled_cents = if qualified_count < opt {
+        let deficit = u32::try_from(opt - qualified_count).unwrap_or(10);
+        let num = 4_i128.checked_pow(deficit).unwrap_or(0);
+        let den = 5_i128.checked_pow(deficit).unwrap_or(1);
+        raw_cents.saturating_mul(num) / den
+    } else if qualified_count == opt {
+        raw_cents
+    } else {
+        raw_cents.saturating_mul(opt as i128) / (qualified_count as i128)
+    };
+    IskCents::from_raw_cents(scaled_cents.clamp(0, i64::MAX as i128) as i64)
+}
+
+fn scale_integer_pool_floor(base: i64, opt: usize, qualified_count: usize) -> i64 {
+    if qualified_count == 0 || base <= 0 {
+        return 0;
+    }
+    let b = i128::from(base);
+    let scaled = if qualified_count < opt {
+        let deficit = u32::try_from(opt - qualified_count).unwrap_or(10);
+        let num = 4_i128.checked_pow(deficit).unwrap_or(0);
+        let den = 5_i128.checked_pow(deficit).unwrap_or(1);
+        b.saturating_mul(num) / den
+    } else if qualified_count == opt {
+        b
+    } else {
+        b.saturating_mul(opt as i128) / (qualified_count as i128)
+    };
+    scaled.clamp(0, i64::MAX as i128) as i64
+}
+
 /// Computes canonical Homefront payout shares across all contributors under the 5-pilot (or 3-pilot)
-/// role cap: up to `optimal` eligible pilots earn 1.0x share; `(optimal+1)..=(2*optimal)` dilute
-/// proportionally keeping total fleet pool capped at `optimal * base`; `> 2*optimal` earn 0 ISK/LP/standing.
+/// role cap: recipients are ordered deterministically by arrival/contribution `entry_sequence`
+/// (with slice index fallback when `entry_sequence == 0`), avoiding lowest-`character_id` bias.
 pub fn compute_homefront_fleet_payouts(
     base_pilot_isk: i64,
     base_pilot_lp: i64,
@@ -1049,47 +1096,52 @@ pub fn compute_homefront_fleet_payouts(
     let base_lp = base_pilot_lp.max(0);
 
     let mut seen = HashSet::new();
-    let mut qualified_ids = Vec::new();
-    let mut all_unique_ids = Vec::new();
-    for entry in contributors {
+    let mut unique_entries: Vec<(usize, &HomefrontParticipantContribution)> = Vec::new();
+    for (idx, entry) in contributors.iter().enumerate() {
         if entry.character_id <= 0 || !seen.insert(entry.character_id) {
             continue;
         }
-        all_unique_ids.push(entry.character_id);
-        if entry.qualifies() {
-            qualified_ids.push(entry.character_id);
-        }
+        unique_entries.push((idx, entry));
     }
 
-    let capped_qualified_count = qualified_ids.len().min(max_recipients);
-    let (per_pilot_isk, per_pilot_lp) = if capped_qualified_count == 0 {
-        (0, 0)
-    } else if capped_qualified_count <= opt {
-        (base_isk, base_lp)
-    } else {
-        (
-            (((base_isk as f64) * (opt as f64)) / (capped_qualified_count as f64)).round() as i64,
-            (((base_lp as f64) * (opt as f64)) / (capped_qualified_count as f64)).round() as i64,
-        )
-    };
+    // Order by arrival/contribution sequence (explicit > 0 sequences first, ascending; 0 sequences keep slice order).
+    let mut ordered_qualified: Vec<(bool, u64, usize, i64)> = unique_entries
+        .iter()
+        .filter(|(_, e)| e.qualifies())
+        .map(|&(idx, e)| (e.entry_sequence == 0, e.entry_sequence, idx, e.character_id))
+        .collect();
+    ordered_qualified.sort_unstable();
 
-    let paid_set: HashSet<i64> = qualified_ids
+    let capped_qualified_count = ordered_qualified.len().min(max_recipients);
+    let per_pilot_isk_cents = scale_homefront_reward_cents(
+        IskCents::from_isk(base_isk),
+        opt,
+        capped_qualified_count,
+    );
+    let per_pilot_isk = per_pilot_isk_cents.raw_cents() / 100;
+    let per_pilot_lp = scale_integer_pool_floor(base_lp, opt, capped_qualified_count);
+
+    let paid_set: HashSet<i64> = ordered_qualified
         .into_iter()
         .take(max_recipients)
+        .map(|(_, _, _, cid)| cid)
         .collect();
 
-    let mut total_fleet_isk = 0_i64;
-    let mut total_fleet_lp = 0_i64;
-    let payouts = all_unique_ids
+    let mut total_fleet_cents_raw: i64 = 0;
+    let mut total_fleet_lp: i64 = 0;
+    let payouts = unique_entries
         .into_iter()
-        .map(|cid| {
+        .map(|(_, e)| {
+            let cid = e.character_id;
             if paid_set.contains(&cid) {
-                total_fleet_isk += per_pilot_isk;
-                total_fleet_lp += per_pilot_lp;
+                total_fleet_cents_raw = total_fleet_cents_raw
+                    .saturating_add(per_pilot_isk_cents.raw_cents());
+                total_fleet_lp = total_fleet_lp.saturating_add(per_pilot_lp);
                 HomefrontPilotPayout {
                     character_id: cid,
                     eligible: true,
                     isk: per_pilot_isk,
+                    isk_cents: per_pilot_isk_cents,
                     lp: per_pilot_lp,
                     standing_delta: 0.0,
                 }
@@ -1098,6 +1150,7 @@ pub fn compute_homefront_fleet_payouts(
                     character_id: cid,
                     eligible: false,
                     isk: 0,
+                    isk_cents: IskCents::ZERO,
                     lp: 0,
                     standing_delta: 0.0,
                 }
@@ -1105,32 +1158,32 @@ pub fn compute_homefront_fleet_payouts(
         })
         .collect();
 
+    let total_fleet_isk_cents = IskCents::from_raw_cents(total_fleet_cents_raw);
     HomefrontFleetPayoutSummary {
         optimal_fleet_size: opt,
         max_payout_pilots: max_recipients,
         eligible_pilot_count: capped_qualified_count,
-        total_fleet_isk,
+        total_fleet_isk: total_fleet_cents_raw / 100,
+        total_fleet_isk_cents,
         total_fleet_lp,
         payouts,
     }
 }
 
-/// Computes live space-combat Homefront payout per pilot: full payout (`1.0x`) for up to
-/// `optimal_fleet_size` pilots (`<= 5`), and proportional capped dilution `(optimal / fleet_count)`
-/// above optimal so total fleet ISK never multiplies linearly over the cap.
+/// Computes live space-combat Homefront payout per pilot using exact fixed-point `IskCents`
+/// scaling (`0.8^(opt-n)` under optimal, floored `base * opt / n` above optimal, and `0` above `2 * opt`).
 pub fn compute_homefront_combat_pilot_isk(
     base_pilot_isk: i64,
     optimal_fleet_size: usize,
     fleet_count: usize,
 ) -> i64 {
     let eff = fleet_count.max(1);
-    let opt = optimal_fleet_size.max(1);
-    let mult = if eff <= opt {
-        1.0
-    } else {
-        (opt as f64) / (eff as f64)
-    };
-    ((base_pilot_isk.max(0) as f64) * mult).round() as i64
+    let cents = scale_homefront_reward_cents(
+        IskCents::from_isk(base_pilot_isk.max(0)),
+        optimal_fleet_size,
+        eff,
+    );
+    cents.raw_cents() / 100
 }
 
 /// Seeds all 5 Drifter Hives from V24 SDE `sde.dungeons` (`5642, 5648..=5651`), localized names,

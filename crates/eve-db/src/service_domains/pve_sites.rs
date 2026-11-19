@@ -602,11 +602,266 @@ fn default_next_dungeon_instance_id() -> i64 {
     950_001
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HomefrontArchetypeKind {
+    #[default]
+    Raid,
+    EmergencyAid,
+    MetaliminalMeteoroid,
+    DreadAssault,
+    AbyssalArtifactRecovery,
+    SuspiciousSignal,
+    SalvageResearch,
+    StabilizeRift,
+    TrafficStop,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HomefrontShipPolicyKind {
+    #[default]
+    FivePilotStandard,
+    ThreePilotFrigateDestroyer,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HomefrontRoleKind {
+    #[default]
+    Dps,
+    Logistics,
+    Hauler,
+    Miner,
+    Hacker,
+    CapBattery,
+    Tackler,
+    Neutralizer,
+    Salvager,
+    CargoScanner,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomefrontBlueprintRecord {
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub archetype: HomefrontArchetypeKind,
+    pub difficulty: u32,
+    pub sovereign_faction_id: u32,
+    pub hostile_faction_id: u32,
+    pub grants_combat_standing: bool,
+    pub standings_faction_id: Option<u32>,
+    pub optimal_fleet_size: usize,
+    pub max_payout_pilots: usize,
+    pub is_exordium_system: bool,
+    pub base_pilot_isk: i64,
+    pub base_pilot_lp: i64,
+    pub abyssal_wave_payouts_isk: Vec<i64>,
+    pub time_limit_secs: u64,
+    pub total_stages: u8,
+    pub required_roles: Vec<HomefrontRoleKind>,
+    pub dispatch_commander_type_id: TypeId,
+    pub objective_structure_type_id: Option<TypeId>,
+    pub support_entity_type_id: Option<TypeId>,
+    pub loot_commodity_type_id: Option<TypeId>,
+    pub escort_wave_type_ids: Vec<TypeId>,
+    pub damage_profile: [f64; 4],
+    pub ewar_profile: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomefrontShipEligibilityRecord {
+    pub ship_type_id: TypeId,
+    pub ship_group_id: u32,
+    pub hull_class: String,
+    pub role_hints: Vec<HomefrontRoleKind>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomefrontContributionRecord {
+    pub character_id: i64,
+    pub entry_sequence: u64,
+    pub damage_dealt: f64,
+    pub repair_hp: f64,
+    pub cap_transferred: f64,
+    pub ore_mined_units: u32,
+    pub cargo_delivered: u32,
+    pub arrays_hacked: u32,
+    pub objective_actions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HomefrontProgressRecord {
+    Raid {
+        haulers_spawned: u8,
+        haulers_destroyed: u8,
+        haulers_escaped: u8,
+        active_hauler_ball_id: Option<i64>,
+        active_hauler_tackled: bool,
+        #[serde(default)]
+        active_hauler_escape_at_sec: u64,
+        #[serde(default)]
+        freighter_ball_id: i64,
+        #[serde(default)]
+        delivery_depot_ball_id: i64,
+        #[serde(default)]
+        dropped_crate_ball_ids: Vec<i64>,
+        cargo_dropped: u8,
+        cargo_delivered: u8,
+        required_deliveries: u8,
+    },
+    EmergencyAid {
+        protectee_ball_id: i64,
+        protectee_hp: f64,
+        protectee_max_hp: f64,
+        survival_elapsed_secs: u64,
+        required_survival_secs: u64,
+        waves_repelled: u8,
+    },
+    MetaliminalMeteoroid {
+        meteoroid_ball_id: i64,
+        mutanite_type_id: TypeId,
+        remaining_units: u32,
+        total_units: u32,
+        total_residue_units: u32,
+        ore_mined_by_fleet: u32,
+    },
+    DreadAssault {
+        dread_ball_id: i64,
+        base_ball_id: i64,
+        capacitor_gj: f64,
+        capacitor_target_gj: f64,
+        siege_cycles_completed: u8,
+        target_siege_cycles: u8,
+        in_siege_mode: bool,
+        siege_remaining_secs: u64,
+        enemy_base_hp: f64,
+        enemy_base_max_hp: f64,
+    },
+    AbyssalArtifactRecovery {
+        current_wave: u8,
+        total_waves: u8,
+        #[serde(default)]
+        rock_ball_ids: Vec<i64>,
+        #[serde(default)]
+        wave_hostile_ball_ids: Vec<i64>,
+        #[serde(default)]
+        weather_kind: u8,
+        #[serde(default)]
+        setup_remaining_secs: u64,
+        #[serde(default)]
+        wave_time_remaining_secs: u64,
+        #[serde(default)]
+        evacuation_active: bool,
+        #[serde(default)]
+        basileus_spawned: bool,
+        #[serde(default)]
+        cache_ball_id: Option<i64>,
+        mutanite_units_remaining: u32,
+        wave_hostiles_remaining: u8,
+        warp_bubble_active: bool,
+        caches_recovered: u32,
+        waves_paid: u8,
+        extraction_window_secs: u64,
+    },
+    SuspiciousSignal {
+        relay_ball_id: i64,
+        array_ball_ids: Vec<i64>,
+        arrays_hacked: [bool; 3],
+        vulnerability_window_secs: u64,
+        relay_hp: f64,
+        relay_max_hp: f64,
+    },
+    SalvageResearch {
+        #[serde(default)]
+        werpost_ball_id: i64,
+        #[serde(default)]
+        wreck_ball_ids: Vec<i64>,
+        wrecks_salvaged: u8,
+        total_wrecks: u8,
+        werpost_activated: bool,
+    },
+    StabilizeRift {
+        #[serde(default)]
+        array_ball_ids: Vec<i64>,
+        arrays_cap_pct: [f64; 5],
+        held_low_secs: u64,
+        required_hold_secs: u64,
+    },
+    TrafficStop {
+        #[serde(default)]
+        station_ball_id: i64,
+        #[serde(default)]
+        active_hauler_ball_ids: Vec<i64>,
+        #[serde(default)]
+        smuggler_ball_ids: Vec<i64>,
+        #[serde(default)]
+        civilian_ball_ids: Vec<i64>,
+        #[serde(default)]
+        scanned_hauler_ball_ids: Vec<i64>,
+        #[serde(default)]
+        survival_elapsed_secs: u64,
+        #[serde(default)]
+        required_survival_secs: u64,
+        smugglers_destroyed: u8,
+        required_smugglers: u8,
+        smugglers_escaped: u8,
+        civilians_harmed: u8,
+    },
+}
+
+impl Default for HomefrontProgressRecord {
+    fn default() -> Self {
+        Self::Raid {
+            haulers_spawned: 0,
+            haulers_destroyed: 0,
+            haulers_escaped: 0,
+            active_hauler_ball_id: None,
+            active_hauler_tackled: false,
+            active_hauler_escape_at_sec: 0,
+            freighter_ball_id: 0,
+            delivery_depot_ball_id: 0,
+            dropped_crate_ball_ids: Vec::new(),
+            cargo_dropped: 0,
+            cargo_delivered: 0,
+            required_deliveries: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomefrontRuntimeRecord {
+    pub blueprint: HomefrontBlueprintRecord,
+    pub solar_system_id: SolarSystemId,
+    pub instance_id: i64,
+    pub site_position: [f64; 3],
+    pub pocket_position: [f64; 3],
+    pub outer_beacon_ball_id: i64,
+    pub outer_gate_ball_id: i64,
+    pub dispatch_boss_ball_id: i64,
+    pub started: bool,
+    pub pocket_spawned: bool,
+    pub started_at_sec: u64,
+    pub expires_at_sec: u64,
+    pub last_tick_sec: u64,
+    pub completed: bool,
+    pub failed: bool,
+    pub failure_reason: Option<String>,
+    pub next_entry_sequence: u64,
+    pub spawned_ball_ids: Vec<i64>,
+    pub entered_pilots: BTreeMap<i64, HomefrontShipEligibilityRecord>,
+    pub contributions: BTreeMap<i64, HomefrontContributionRecord>,
+    pub progress: HomefrontProgressRecord,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DungeonRuntimeStore {
     #[serde(default)]
     pub instances: BTreeMap<i64, DungeonRuntimeInstance>,
+    #[serde(default)]
+    pub homefront_runtimes: BTreeMap<i64, HomefrontRuntimeRecord>,
     #[serde(default = "default_next_dungeon_instance_id")]
     pub next_instance_id: i64,
 }
@@ -615,6 +870,7 @@ impl Default for DungeonRuntimeStore {
     fn default() -> Self {
         Self {
             instances: BTreeMap::new(),
+            homefront_runtimes: BTreeMap::new(),
             next_instance_id: default_next_dungeon_instance_id(),
         }
     }

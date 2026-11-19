@@ -129,7 +129,8 @@ async fn homefront_npc_destroyed_covers_solo_fleet_filters_and_skip_cases() {
     let member_docked = 91_001_003;
     let member_offsys = 91_001_004;
     let member_struct = 91_001_005;
-    let killer_docked_in_fleet = 91_001_006;
+    let member_entered_then_docked = 91_001_006;
+    let fleet_wingman = 91_001_007;
 
     for cid in [
         killer_solo,
@@ -137,129 +138,271 @@ async fn homefront_npc_destroyed_covers_solo_fleet_filters_and_skip_cases() {
         member_docked,
         member_offsys,
         member_struct,
-        killer_docked_in_fleet,
+        member_entered_then_docked,
+        fleet_wingman,
     ] {
         seed_char(&ctx, cid, &format!("Pilot {cid}"), sys_id);
     }
 
     let fleet_id = 77_001;
     ctx.db.with_mut_snapshot(|snap| {
+        for (idx, &cid) in [
+            killer_solo,
+            fleet_leader,
+            member_docked,
+            member_offsys,
+            member_struct,
+            member_entered_then_docked,
+            fleet_wingman,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let sid = 1_090_001 + (idx as i64);
+            snap.characters.get_mut(&cid).unwrap().active_ship_id = sid;
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: i64::from(sys_id),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
         snap.characters.get_mut(&member_docked).unwrap().station_id = Some(60_003_760);
         snap.characters.get_mut(&member_offsys).unwrap().solar_system_id = 30_002_187;
         snap.characters.get_mut(&member_struct).unwrap().structure_id = Some(1_000_000_123);
-        snap.characters.get_mut(&killer_docked_in_fleet).unwrap().station_id = Some(60_003_760);
         for &cid in &[
             fleet_leader,
             member_docked,
             member_offsys,
             member_struct,
-            killer_docked_in_fleet,
+            member_entered_then_docked,
+            fleet_wingman,
         ] {
             snap.characters.get_mut(&cid).unwrap().fleet_id = Some(fleet_id);
         }
     });
 
-    with_pve_special_reg(&ctx, |reg: &mut PveSpecialSitesRegistry| {
-        reg.homefront_sites.insert(
-            sys_id,
-            vec![
-                HomefrontSiteRecord {
-                    instance_id: 1,
-                    dungeon_id: 10,
-                    dungeon_name: "HF Done".into(),
-                    solar_system_id: sys_id,
-                    optimal_fleet_size: 5,
-                    base_pilot_isk: 1_000_000,
-                    completed: true,
-                    reward_paid_isk: 1_000_000,
-                    boss_npc_ball_id: 88_001,
-                    boss_type_id: 1,
-                },
-                HomefrontSiteRecord {
-                    instance_id: 2,
-                    dungeon_id: 10,
-                    dungeon_name: "HF NoKiller".into(),
-                    solar_system_id: sys_id,
-                    optimal_fleet_size: 5,
-                    base_pilot_isk: 1_000_000,
-                    completed: false,
-                    reward_paid_isk: 0,
-                    boss_npc_ball_id: 88_002,
-                    boss_type_id: 1,
-                },
-                HomefrontSiteRecord {
-                    instance_id: 3,
-                    dungeon_id: 10,
-                    dungeon_name: "HF Solo".into(),
-                    solar_system_id: sys_id,
-                    optimal_fleet_size: 5,
-                    base_pilot_isk: 2_000_000,
-                    completed: false,
-                    reward_paid_isk: 0,
-                    boss_npc_ball_id: 88_003,
-                    boss_type_id: 1,
-                },
-                HomefrontSiteRecord {
-                    instance_id: 4,
-                    dungeon_id: 10,
-                    dungeon_name: "HF Fleet".into(),
-                    solar_system_id: sys_id,
-                    optimal_fleet_size: 2,
-                    base_pilot_isk: 3_000_000,
-                    completed: false,
-                    reward_paid_isk: 0,
-                    boss_npc_ball_id: 88_004,
-                    boss_type_id: 1,
-                },
-            ],
-        );
+    let make_sess = |cid: i64, sid: i64, s_sys: u32, st: Option<i64>, sr: Option<i64>| {
+        let mut s = eve_machonet::SessionState::new(cid as u64);
+        s.user_id = Some(cid);
+        s.character_id = Some(cid);
+        s.solar_system_id = Some(s_sys);
+        s.ship_id = Some(sid);
+        s.station_id = st;
+        s.structure_id = sr;
+        s
+    };
+
+    let relay_id_of = |st: &crate::services::pve_homefront_sites::HomefrontRuntimeState| match st
+        .progress
+    {
+        crate::services::pve_homefront_sites::HomefrontArchetypeProgress::SuspiciousSignal {
+            relay_ball_id,
+            ..
+        } => relay_ball_id,
+        ref other => panic!("expected SuspiciousSignal, got {other:?}"),
+    };
+
+    // 1. Already completed Homefront site -> skipped
+    let ss_done =
+        crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367)
+            .expect("spawn ss_done");
+    let relay_done = relay_id_of(&ss_done);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.dungeon_runtime
+            .homefront_runtimes
+            .get_mut(&ss_done.instance_id)
+            .unwrap()
+            .completed = true;
     });
+    assert!(on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        relay_done,
+        Some(killer_solo),
+    )
+    .await
+    .is_empty());
 
-    assert!(
-        on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, 88_001, Some(killer_solo))
-            .await
-            .is_empty()
-    );
-    assert!(
-        on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, 88_002, None)
-            .await
-            .is_empty()
-    );
+    // 2. Unentered site with no killer/contributors -> returns empty
+    let ss_empty =
+        crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367)
+            .expect("spawn ss_empty");
+    let relay_empty = relay_id_of(&ss_empty);
+    assert!(on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        relay_empty,
+        None,
+    )
+    .await
+    .is_empty());
 
+    // 3. Solo entered + arrays hacked -> settles solo pilot with (4/5)^(5-1) scaling
+    let ss_solo =
+        crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367)
+            .expect("spawn ss_solo");
+    let relay_solo = relay_id_of(&ss_solo);
+    let solo_sess = make_sess(killer_solo, 1_090_001, sys_id, None, None);
+    crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+        &ctx,
+        &solo_sess,
+        ss_solo.instance_id,
+    )
+    .await
+    .expect("solo enters gate");
+    ctx.db.with_mut_snapshot(|snap| {
+        let rec = snap
+            .dungeon_runtime
+            .homefront_runtimes
+            .get_mut(&ss_solo.instance_id)
+            .unwrap();
+        if let Some(c) = rec.contributions.get_mut(&killer_solo) {
+            c.damage_dealt = 2_000.0;
+        }
+        if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+            arrays_hacked,
+            vulnerability_window_secs,
+            ..
+        } = &mut rec.progress
+        {
+            *arrays_hacked = [true; 3];
+            *vulnerability_window_secs = 90;
+        }
+    });
+    let expected_solo = crate::services::pve_special_sites_ops::compute_homefront_combat_pilot_isk(
+        ss_solo.blueprint.base_pilot_isk,
+        ss_solo.blueprint.optimal_fleet_size,
+        1,
+    );
     let solo_changes = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_id,
-        88_003,
+        relay_solo,
         Some(killer_solo),
     )
     .await;
     assert_eq!(solo_changes.len(), 1);
     let solo_isk = ctx.db.with_snapshot(|s| s.characters[&killer_solo].balance.0);
-    assert_eq!(solo_isk, 2_000_000 * 100);
+    assert_eq!(solo_isk, expected_solo * 100);
 
+    // 4. Fleet: docked, off-system, and structure members rejected at gate;
+    //    member who entered then docked before completion is ALSO excluded from payout!
+    let ss_fleet =
+        crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_367)
+            .expect("spawn ss_fleet");
+    let relay_fleet = relay_id_of(&ss_fleet);
+    assert!(
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &make_sess(member_docked, 1_090_003, sys_id, Some(60_003_760), None),
+            ss_fleet.instance_id,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &make_sess(member_offsys, 1_090_004, 30_002_187, None, None),
+            ss_fleet.instance_id,
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &make_sess(member_struct, 1_090_005, sys_id, None, Some(1_000_000_123)),
+            ss_fleet.instance_id,
+        )
+        .await
+        .is_err()
+    );
+
+    for (cid, sid) in [
+        (fleet_leader, 1_090_002_i64),
+        (member_entered_then_docked, 1_090_006),
+        (fleet_wingman, 1_090_007),
+    ] {
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &make_sess(cid, sid, sys_id, None, None),
+            ss_fleet.instance_id,
+        )
+        .await
+        .expect("in-space fleet mate enters gate");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters
+            .get_mut(&member_entered_then_docked)
+            .unwrap()
+            .station_id = Some(60_003_760);
+        let rec = snap
+            .dungeon_runtime
+            .homefront_runtimes
+            .get_mut(&ss_fleet.instance_id)
+            .unwrap();
+        for cid in [fleet_leader, member_entered_then_docked, fleet_wingman] {
+            if let Some(c) = rec.contributions.get_mut(&cid) {
+                c.damage_dealt = 2_000.0;
+            }
+        }
+        if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+            arrays_hacked,
+            vulnerability_window_secs,
+            ..
+        } = &mut rec.progress
+        {
+            *arrays_hacked = [true; 3];
+            *vulnerability_window_secs = 90;
+        }
+    });
+
+    let expected_fleet_two =
+        crate::services::pve_special_sites_ops::compute_homefront_combat_pilot_isk(
+            ss_fleet.blueprint.base_pilot_isk,
+            ss_fleet.blueprint.optimal_fleet_size,
+            2,
+        );
     let fleet_changes = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,
         &ctx.sde,
         sys_id,
-        88_004,
-        Some(killer_docked_in_fleet),
+        relay_fleet,
+        Some(fleet_leader),
     )
     .await;
     assert_eq!(fleet_changes.len(), 2);
-    let (leader_isk, killer_isk, docked_isk, offsys_isk, struct_isk) = ctx.db.with_snapshot(|s| {
-        (
-            s.characters[&fleet_leader].balance.0,
-            s.characters[&killer_docked_in_fleet].balance.0,
-            s.characters[&member_docked].balance.0,
-            s.characters[&member_offsys].balance.0,
-            s.characters[&member_struct].balance.0,
-        )
-    });
-    assert_eq!(leader_isk, 3_000_000 * 100);
-    assert_eq!(killer_isk, 3_000_000 * 100);
+    let (leader_isk, wingman_isk, later_docked_isk, docked_isk, offsys_isk, struct_isk) =
+        ctx.db.with_snapshot(|s| {
+            (
+                s.characters[&fleet_leader].balance.0,
+                s.characters[&fleet_wingman].balance.0,
+                s.characters[&member_entered_then_docked].balance.0,
+                s.characters[&member_docked].balance.0,
+                s.characters[&member_offsys].balance.0,
+                s.characters[&member_struct].balance.0,
+            )
+        });
+    assert_eq!(leader_isk, expected_fleet_two * 100);
+    assert_eq!(wingman_isk, expected_fleet_two * 100);
+    assert_eq!(later_docked_isk, 0);
     assert_eq!(docked_isk, 0);
     assert_eq!(offsys_isk, 0);
     assert_eq!(struct_isk, 0);

@@ -2345,8 +2345,18 @@ pub(crate) fn record_cap_warfare_career(
         || target_id == source_ship_id
         || !gj_amount.is_finite()
         || gj_amount <= 0.0
-        || !is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, target_id, actor_char_id)
     {
+        return;
+    }
+    crate::services::pve_homefront_sites::on_homefront_cap_warfare_event_sync(
+        ctx,
+        actor_char_id,
+        None,
+        target_id,
+        gj_amount,
+        matches!(sub_kind, "cap_transfer" | "capacitor_transfer"),
+    );
+    if !is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, target_id, actor_char_id) {
         return;
     }
     let gj = gj_amount.round() as u64;
@@ -2363,10 +2373,17 @@ pub(crate) fn record_remote_repair_career(
     sub_kind: &str,
     hp_amount: f64,
 ) {
-    if !hp_amount.is_finite()
-        || hp_amount <= 0.0
-        || !is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, target_id, actor_char_id)
-    {
+    if !hp_amount.is_finite() || hp_amount <= 0.0 {
+        return;
+    }
+    crate::services::pve_homefront_sites::on_homefront_remote_repair_event_sync(
+        ctx,
+        actor_char_id,
+        None,
+        target_id,
+        hp_amount,
+    );
+    if !is_capsuleer_ship_ball_target(&ctx.db, &ctx.sde, target_id, actor_char_id) {
         return;
     }
     let hp = hp_amount.round() as u64;

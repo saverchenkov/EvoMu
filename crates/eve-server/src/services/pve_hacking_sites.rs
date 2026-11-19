@@ -270,23 +270,61 @@ pub async fn handle_pve_hacking(
                 return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into(), client_error: None }));
             }
 
-            let struct_info = ctx.db.with_snapshot(|s| {
-                let caller_corp = s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-                s.structures.get(&container_id).filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed").map(|st| (st.position, st.owner_corp_id, caller_corp))
-            });
+            let hf_hack = crate::services::pve_homefront_sites::is_homefront_hackable_structure(
+                ctx,
+                sys_id,
+                container_id,
+            );
+            let struct_info = if hf_hack.is_some() {
+                None
+            } else {
+                ctx.db.with_snapshot(|s| {
+                    let caller_corp = s.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+                    s.structures.get(&container_id).filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed").map(|st| (st.position, st.owner_corp_id, caller_corp))
+                })
+            };
             if let Some((_, owner_corp_id, caller_corp)) = struct_info {
                 if caller_corp != 0 && caller_corp == owner_corp_id {
                     return Some(Err(BridgeRpcError { code: "CannotHackOwnStructure".into(), message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into(), client_error: None }));
                 }
             }
             let struct_pos = struct_info.map(|(p, _, _)| p);
+            let hf_pos_opt = if hf_hack.is_some() {
+                let sys_h = ctx.systems.get_or_spawn(sys_id);
+                sys_h
+                    .get_ball_snapshot(container_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(_, b)| b.position.to_array())
+                    .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()))
+            } else {
+                None
+            };
+            let hacking_rpc_err = |code: &str, msg: &str| BridgeRpcError {
+                code: code.into(),
+                message: msg.into(),
+                client_error: None,
+            };
             let site_res = with_pve_exploration_reg(ctx, |reg| {
+                if let Some((hf_is_relic, _)) = hf_hack {
+                    if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
+                        return Err(hacking_rpc_err("HackingGameAlreadyInProgress", "Another pilot is already hacking this target"));
+                    }
+                    return Ok((
+                        format!("HOMEFRONT_{container_id}"),
+                        hf_is_relic,
+                        false,
+                        false,
+                        hf_pos_opt.unwrap_or([0.0, 0.0, 0.0]),
+                    ));
+                }
                 if let Some(st_pos) = struct_pos {
                     if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into(), client_error: None });
+                        return Err(hacking_rpc_err("HackingGameAlreadyFinished", "You have failed to hack this structure twice and are locked out"));
                     }
                     if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
-                        return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this target".into(), client_error: None });
+                        return Err(hacking_rpc_err("HackingGameAlreadyInProgress", "Another pilot is already hacking this target"));
                     }
                     return Ok((format!("STRUCTURE_{container_id}"), false, false, false, st_pos));
                 }
@@ -302,10 +340,10 @@ pub async fn handle_pve_hacking(
                         || reg.hacked_containers.contains(&(sys_id, container_id))
                         || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2)
                 {
-                    return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "Container has already been hacked or emptied".into(), client_error: None });
+                    return Err(hacking_rpc_err("HackingGameAlreadyFinished", "Container has already been hacked or emptied"));
                 }
                 if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
-                    return Err(BridgeRpcError { code: "HackingGameAlreadyInProgress".into(), message: "Another pilot is already hacking this container".into(), client_error: None });
+                    return Err(hacking_rpc_err("HackingGameAlreadyInProgress", "Another pilot is already hacking this container"));
                 }
                 Ok((s.site_id.clone(), s.site_category == "Relic", s.site_category == "Ghost", s.site_category == "SleeperCache", s.position))
             });
@@ -410,7 +448,7 @@ pub async fn handle_pve_hacking(
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(0.0);
-            let is_structure = site_id.starts_with("STRUCTURE_");
+            let is_structure = site_id.starts_with("STRUCTURE_") || site_id.starts_with("HOMEFRONT_");
             let site_tier_from_reg = if !is_structure {
                 with_pve_exploration_reg(ctx, |reg| {
                     reg.sites_by_system.get(&sys_id).and_then(|sites| {
@@ -419,11 +457,17 @@ pub async fn handle_pve_hacking(
                         })
                     })
                 })
+            } else if let Some((_, hf_diff)) = hf_hack {
+                Some((hf_diff.clamp(1, 5)) as u8)
             } else {
                 None
             };
             let min_difficulty: u8 = if is_structure || is_ghost || is_sleeper_cache {
-                4
+                if site_id.starts_with("HOMEFRONT_") {
+                    hf_hack.map(|(_, d)| (d.clamp(1, 5)) as u8).unwrap_or(2)
+                } else {
+                    4
+                }
             } else if (31_000_000..32_000_000).contains(&sys_id) || sys_sec <= 0.0 {
                 3
             } else if sys_sec < 0.45 || is_relic {
@@ -445,7 +489,9 @@ pub async fn handle_pve_hacking(
                 .unwrap_or(min_difficulty);
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
             let game = match with_pve_exploration_reg(ctx, |reg| -> Result<HackingGameSession, BridgeRpcError> {
-                if struct_pos.is_some() {
+                if site_id.starts_with("HOMEFRONT_") {
+                    // Already validated via is_homefront_hackable_structure above
+                } else if struct_pos.is_some() {
                     if reg.structure_char_failures.get(&(char_id, container_id)).copied().unwrap_or(0) >= 2 {
                         return Err(BridgeRpcError { code: "HackingGameAlreadyFinished".into(), message: "You have failed to hack this structure twice and are locked out".into(), client_error: None });
                     }
@@ -665,6 +711,7 @@ pub async fn handle_pve_hacking(
                     if !already_hacked
                         && !game.site_id.starts_with("STRUCTURE_")
                         && !game.site_id.starts_with("SHK-")
+                        && !game.site_id.starts_with("HOMEFRONT_")
                     {
                         let center = reg
                             .sites_by_system
@@ -700,14 +747,17 @@ pub async fn handle_pve_hacking(
                     }
                 }
 
-                let is_structure = game.site_id.starts_with("STRUCTURE_");
+                let is_structure =
+                    game.site_id.starts_with("STRUCTURE_") || game.site_id.starts_with("HOMEFRONT_");
                 let mut failed_twice = false;
                 if game.status == "Won" {
                     reg.self_repair_turns.remove(&(char_id, container_id));
                     if !is_structure { reg.hacked_containers.insert((game.solar_system_id, container_id)); }
                 } else if game.status == "Failed" {
                     reg.self_repair_turns.remove(&(char_id, container_id));
-                    if is_structure {
+                    if game.site_id.starts_with("HOMEFRONT_") {
+                        // Homefront arrays remain retryable cleanly if failed or if relay re-tethers
+                    } else if is_structure {
                         let fc = reg.structure_char_failures.entry((game.character_id, container_id)).or_insert(0);
                         *fc += 1;
                     } else {
@@ -744,7 +794,11 @@ pub async fn handle_pve_hacking(
             } else {
                 (0.0, Vec::new())
             };
-            let (can_exploded, can_explosion_dmg, damaged_ships, destroyed_loot_count) = if trigger_second_fail_explosion && !site_id.starts_with("STRUCTURE_") {
+            let (can_exploded, can_explosion_dmg, damaged_ships, destroyed_loot_count) =
+                if trigger_second_fail_explosion
+                    && !site_id.starts_with("STRUCTURE_")
+                    && !site_id.starts_with("HOMEFRONT_")
+                {
                 handle_second_hack_failure_explosion(ctx, sys_id, &site_id, container_id, is_relic).await
             } else {
                 (false, 0.0, Vec::new(), 0)
@@ -754,8 +808,17 @@ pub async fn handle_pve_hacking(
                 crate::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(
                     ctx, char_id, container_id,
                 );
+                if site_id.starts_with("HOMEFRONT_") {
+                    let _ = crate::services::pve_homefront_sites::on_homefront_structure_hacked(
+                        ctx,
+                        char_id,
+                        sys_id,
+                        container_id,
+                    )
+                    .await;
+                }
             }
-            if status == "Won" && !already_hacked {
+            if status == "Won" && !already_hacked && !site_id.starts_with("HOMEFRONT_") {
                 if site_id.starts_with("SHK-") {
                     crate::services::pve_special_sites_combat::on_seasonal_relay_hacked(
                         ctx,

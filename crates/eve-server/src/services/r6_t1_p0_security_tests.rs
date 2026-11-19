@@ -9,7 +9,9 @@ use crate::services::combat_crimewatch::combat_npcs_drones::handle_npcs_drones;
 use crate::services::combat_crimewatch::{with_mut_combat_runtime, DroneSpaceState, SafetyLevel};
 use crate::services::inventory_stacking::handle_stack_ops;
 use crate::services::pve_exploration::handle_pve_exploration;
-use crate::services::pve_special_sites::{with_pve_special_reg, HomefrontSiteRecord};
+use crate::services::pve_special_sites::{
+    with_pve_special_reg, HomefrontSiteRecord, TriglavianSiteRecord,
+};
 use crate::services::r6_t1_p0_helpers::{
     enforce_legacy_pvp_safety_and_concord, execute_lancer_beam_attack,
 };
@@ -578,15 +580,38 @@ async fn r6_t1_07_and_08_hacking_lockout_difficulty_and_keeper_on_grid_checks() 
             solar_system_id: sys_id, optimal_fleet_size: 5, base_pilot_isk: 1_000_000,
             completed: false, reward_paid_isk: 0, boss_npc_ball_id: 9_888_777_666, boss_type_id: 0,
         });
+        reg.triglavian_sites.entry(sys_id).or_default().push(TriglavianSiteRecord {
+            instance_id: 720_700,
+            dungeon_id: 900_002,
+            dungeon_name: "Test Triglavian Conduit".to_string(),
+            solar_system_id: sys_id,
+            faction_owner_id: 500_026,
+            base_isk: 1_000_000,
+            survey_db_drop: 1,
+            completed: false,
+            boss_npc_ball_id: 9_888_777_667,
+            boss_type_id: 0,
+            escort_ball_ids: Vec::new(),
+            escort_type_ids: Vec::new(),
+            beacon_ball_id: 0,
+        });
     });
 
-    let offgrid = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(710_700)], &kw).await.unwrap();
-    assert!(offgrid.is_err(), "off-grid caller (>100km) must not complete special site via keeper");
+    // Off-grid caller (>100km) must fail both Homefront and Triglavian keeper gate checks.
+    let hf_offgrid = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(710_700)], &kw).await.unwrap();
+    assert!(hf_offgrid.is_err(), "off-grid caller (>100km) must not complete Homefront site via keeper");
+    let trig_offgrid = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(720_700)], &kw).await.unwrap();
+    assert!(trig_offgrid.is_err(), "off-grid caller (>100km) must not complete special site via keeper");
 
+    // Moving on-grid still must NOT allow bypassing a Homefront gate/archetype objective,
+    // while an on-grid Triglavian site completes cleanly.
     let _ = sys.remove_ball(9_888_777_666).await;
+    let _ = sys.remove_ball(9_888_777_667).await;
     sys.try_set_ball_position(ship_id, DVec3::new(15_000.0, 0.0, 0.0));
-    let ongrid = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(710_700)], &kw).await.unwrap();
+    let hf_unentered = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(710_700)], &kw).await.unwrap();
+    assert_eq!(hf_unentered.as_ref().err().map(|e| e.code.as_str()), Some("GateNotEntered"), "Homefront keeper call without gate/objective must be rejected");
+    let ongrid = handle_pve_exploration(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(720_700)], &kw).await.unwrap();
     assert!(ongrid.is_ok(), "on-grid caller should complete special site via keeper: {ongrid:?}");
-    let done = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&sys_id].iter().any(|s| s.instance_id == 710_700 && s.completed));
+    let done = with_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&sys_id].iter().any(|s| s.instance_id == 720_700 && s.completed));
     assert!(done, "on-grid gate activation must mark special site completed");
 }

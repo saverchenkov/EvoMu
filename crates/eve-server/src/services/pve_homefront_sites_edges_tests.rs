@@ -175,17 +175,22 @@ fn homefront_rpc_auth_db_fallback_and_negative_system_errors() {
 mod multi_role_edge_tests {
     use super::*;
     use crate::services::pve_homefront_sites::{
-        activate_homefront_acceleration_gate, complete_homefront_operation_and_pay,
-        dread_assault_advance_siege, dread_assault_transfer_capacitor, emergency_aid_advance_defense,
-        metaliminal_mine_mutanite, raid_deliver_cargo_to_freighter,
+        activate_homefront_acceleration_gate, dread_assault_advance_siege,
+        dread_assault_transfer_capacitor, emergency_aid_advance_defense,
+        get_homefront_runtime_state, metaliminal_mine_mutanite, on_homefront_cap_warfare_event,
+        on_homefront_combat_damage_event, on_homefront_remote_repair_event,
+        on_homefront_warp_landed, raid_deliver_cargo_to_freighter,
         raid_tackle_and_destroy_hauler, record_homefront_combat_and_logistics,
-        spawn_homefront_site_for_dungeon, suspicious_signal_attack_relay,
+        salvage_research_process_wreck, spawn_homefront_site_for_dungeon,
+        stabilize_rift_neutralize_arrays, suspicious_signal_attack_relay,
         suspicious_signal_hack_array, traffic_stop_scan_and_intercept,
     };
     use crate::services::pve_special_sites_ops::resolve_homefront_archetype_blueprint;
     use eve_db::clock::VirtualServerClock;
-    use eve_db::{InventoryItemRecord, IskCents, WorldRepository};
+    use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
+    use eve_destiny::{Ball, MovementMode};
     use eve_sde::{SolarSystemId, TypeId};
+    use glam::DVec3;
     use std::sync::Arc;
 
     fn test_ctx_with_pilot(
@@ -229,6 +234,33 @@ mod multi_role_edge_tests {
         (ctx, sess)
     }
 
+    fn fit_module_in_ctx(
+        ctx: &ServerContext,
+        char_id: i64,
+        ship_id: i64,
+        mod_id: i64,
+        mod_type_id: TypeId,
+        flag: InventoryFlag,
+        online: bool,
+    ) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: mod_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mod_id, online);
+        });
+    }
+
     #[tokio::test]
     async fn homefront_runtime_rejects_invalid_gates_roles_and_timeouts() {
         let jita: SolarSystemId = 30_000_142;
@@ -246,7 +278,40 @@ mod multi_role_edge_tests {
 
         let raid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).unwrap();
 
-        // 2. Gate rejections: docked, wrong system, restricted ships (T2 Cerberus 11993, BC Drake 24698, Trig Vedmak 47270, Capsule 670)
+        // HF-05: Outer gate vs pocket separation + gate proximity enforcement (> 2500m rejected)
+        assert!(!raid.pocket_spawned, "pocket must NOT spawn at site creation");
+        assert!(raid.spawned_ball_ids.is_empty(), "no pocket balls before gate entry");
+        let sys_h = ctx.systems.get_or_spawn(jita);
+        assert!(sys_h.get_ball_snapshot(raid.outer_gate_ball_id).await.unwrap().is_some());
+        assert!(on_homefront_warp_landed(&ctx, 930_001, jita, raid.site_position).await);
+        assert!(!get_homefront_runtime_state(&ctx, raid.instance_id).unwrap().pocket_spawned);
+
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id: 830_001,
+                type_id: 621,
+                position: raid.site_position + DVec3::new(10_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+        assert_eq!(
+            activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id)
+                .await
+                .unwrap_err()
+                .code,
+            "OutsideGateActivationRange"
+        );
+        let _ = sys_h
+            .set_ball_position(830_001, raid.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
+
+        // 2. Gate rejections: docked, wrong system, restricted ships (T2 Cerberus 11993, BC Drake 24698, Trig Vedmak 47270, Capsule 670, Praxis 47466 / Rattlesnake)
         sess_caracal.station_id = Some(60_003_760);
         assert_eq!(
             activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id).await.unwrap_err().code,
@@ -280,6 +345,11 @@ mod multi_role_edge_tests {
 
         // 3. Raid edge failures: untackled hauler escapes; Caracal (<3500 m3) blocked from cargo delivery; incomplete objectives blocked
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, raid.instance_id).await.unwrap();
+        let ship_post_gate = sys_h.get_ball_snapshot(830_001).await.unwrap().unwrap().1.position;
+        assert!(
+            ship_post_gate.distance(raid.pocket_position) < 5_000.0,
+            "gate activation must relocate pilot into Homefront pocket"
+        );
         assert_eq!(
             raid_tackle_and_destroy_hauler(&ctx, &sess_caracal, raid.instance_id, false, 3_000.0)
                 .unwrap_err()
@@ -299,16 +369,52 @@ mod multi_role_edge_tests {
             "ObjectivesIncomplete"
         );
 
-        // 4. Metaliminal requires Miner I / mining hull
+        // 4. Metaliminal requires ONLINE Miner I / mining drone (offline module rejected)
         let met = spawn_homefront_site_for_dungeon(&ctx, jita, 10_312).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, met.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, met.instance_id).await.unwrap();
         assert_eq!(
             metaliminal_mine_mutanite(&ctx, &sess_caracal, met.instance_id, 100, 0).unwrap_err().code,
             "MiningModuleRequired"
         );
+        fit_module_in_ctx(&ctx, 930_001, 830_001, 830_001_01, 483, InventoryFlag::HiSlot0, false);
+        assert_eq!(
+            metaliminal_mine_mutanite(&ctx, &sess_caracal, met.instance_id, 100, 0).unwrap_err().code,
+            "MiningModuleRequired"
+        );
+
+        // 4b. Salvage Research rejects Salvager I with <20% bonus, missing/offline Salvager, or missing/offline Data Analyzer
+        let (ctx_sal, sess_sal) = test_ctx_with_pilot(930_010, 830_010, 16_236, jita);
+        let sal2 = spawn_homefront_site_for_dungeon(&ctx_sal, jita, 10_713).unwrap();
+        activate_homefront_acceleration_gate(&ctx_sal, &sess_sal, sal2.instance_id).await.unwrap();
+        assert_eq!(
+            salvage_research_process_wreck(&ctx_sal, &sess_sal, sal2.instance_id, 1, false).unwrap_err().code,
+            "SalvagerModuleRequired"
+        );
+        fit_module_in_ctx(&ctx_sal, 930_010, 830_010, 830_010_01, 25_861, InventoryFlag::HiSlot0, true);
+        assert_eq!(
+            salvage_research_process_wreck(&ctx_sal, &sess_sal, sal2.instance_id, 1, false).unwrap_err().code,
+            "InsufficientSalvageBonus"
+        );
+        ctx_sal.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(930_010).or_default().insert(
+                25_863,
+                eve_db::TrainedSkillRecord { type_id: 25_863, level: 4, skill_points: 45_255.0 },
+            );
+        });
+        fit_module_in_ctx(&ctx_sal, 930_010, 830_010, 830_010_02, 22_175, InventoryFlag::MedSlot0, false);
+        assert_eq!(
+            salvage_research_process_wreck(&ctx_sal, &sess_sal, sal2.instance_id, 1, true).unwrap_err().code,
+            "AnalyzerModuleOffline"
+        );
 
         // 5. Dread Assault rejects early Siege & cap transfer during Siege
         let dread = spawn_homefront_site_for_dungeon(&ctx, jita, 10_320).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, dread.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, dread.instance_id).await.unwrap();
         assert_eq!(
             dread_assault_advance_siege(&ctx, &sess_caracal, dread.instance_id, 30).unwrap_err().code,
@@ -320,8 +426,12 @@ mod multi_role_edge_tests {
             "DreadInSiegeMode"
         );
 
-        // 6. Suspicious Signal rejects attacking relay before all 3 arrays are hacked
+        // 6. Suspicious Signal rejects attacking relay before all 3 arrays are hacked (requires fitted online Data Analyzer)
+        fit_module_in_ctx(&ctx, 930_001, 830_001, 830_001_02, 22_175, InventoryFlag::MedSlot0, true);
         let sig = spawn_homefront_site_for_dungeon(&ctx, jita, 10_309).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, sig.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, sig.instance_id).await.unwrap();
         suspicious_signal_hack_array(&ctx, &sess_caracal, sig.instance_id, 0).unwrap();
         assert_eq!(
@@ -329,12 +439,19 @@ mod multi_role_edge_tests {
             "StructureInvulnerable"
         );
 
-        // 7. Failure states & timeout: Emergency Aid protectee death, Traffic Stop civilian collateral, time limit expiration
+        // 7. HF-06 Failure persistence across Err(OperationFailed): Emergency Aid protectee death & Traffic Stop collateral
         let aid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_238).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, aid.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, aid.instance_id).await.unwrap();
         assert_eq!(
-            emergency_aid_advance_defense(&ctx, &sess_caracal, aid.instance_id, 0.0, 50_000.0, 10).unwrap_err().code,
+            emergency_aid_advance_defense(&ctx, &sess_caracal, aid.instance_id, 0.0, 500_000.0, 10).unwrap_err().code,
             "OperationFailed"
+        );
+        assert!(
+            get_homefront_runtime_state(&ctx, aid.instance_id).unwrap().failed,
+            "HF-06: Emergency Aid failure MUST persist in DB after Err(OperationFailed)"
         );
         assert_eq!(
             emergency_aid_advance_defense(&ctx, &sess_caracal, aid.instance_id, 1_000.0, 0.0, 10).unwrap_err().code,
@@ -348,8 +465,29 @@ mod multi_role_edge_tests {
             traffic_stop_scan_and_intercept(&ctx3, &sess_frigate, traf.instance_id, 1, 3, 2_000.0).unwrap_err().code,
             "OperationFailed"
         );
+        assert!(
+            get_homefront_runtime_state(&ctx3, traf.instance_id).unwrap().failed,
+            "HF-06: Traffic Stop collateral failure MUST persist in DB after Err(OperationFailed)"
+        );
+
+        // HF-08: NaN / Inf / out-of-range floats rejected across runtime & live hooks
+        assert_eq!(
+            record_homefront_combat_and_logistics(&ctx, &sess_caracal, sig.instance_id, f64::NAN, 0.0).unwrap_err().code,
+            "InvalidArgument"
+        );
+        assert_eq!(
+            stabilize_rift_neutralize_arrays(&ctx3, &sess_frigate, traf.instance_id, [f64::INFINITY, 0.0, 0.0, 0.0, 0.0], 10).unwrap_err().code,
+            "InvalidArgument"
+        );
+        // Live event handlers silently sanitize NaN/negative inputs without mutating contributions
+        on_homefront_combat_damage_event(&ctx, 930_001, jita, 999_999, f64::NAN).await;
+        on_homefront_cap_warfare_event(&ctx, 930_001, jita, 999_999, f64::INFINITY, 0.0).await;
+        on_homefront_remote_repair_event(&ctx, 930_001, jita, 999_999, f64::NEG_INFINITY).await;
 
         let timed = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).unwrap();
+        let _ = sys_h
+            .set_ball_position(830_001, timed.site_position + DVec3::new(400.0, 0.0, 0.0))
+            .await;
         activate_homefront_acceleration_gate(&ctx, &sess_caracal, timed.instance_id).await.unwrap();
         ctx.advance_secs(timed.blueprint.time_limit_secs + 5);
         assert_eq!(

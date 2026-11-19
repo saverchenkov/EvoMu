@@ -433,25 +433,97 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
     }
     session.solar_system_id = Some(sys_id);
 
-    // Boss alive guard -> remove boss ball to complete
+    // Unentered gate guard (removing stale boss ball must NOT bypass gate/objectives)
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     ensure_special_sites_spawned(&ctx).await;
     let err = complete_special_dungeon_instance(&ctx, &mut session, 810_001, 1)
         .await
-        .expect_err("boss alive");
-    assert_eq!(err.code, "WaveNpcsRemaining");
+        .expect_err("gate not entered");
+    assert_eq!(err.code, "GateNotEntered");
 
     for bid in [1_910_001_i64, 1_910_002, 1_910_003] {
         let _ = sys_handle.remove_ball(bid).await;
     }
+    let err_still_locked = complete_special_dungeon_instance(&ctx, &mut session, 810_001, 1)
+        .await
+        .expect_err("boss removal cannot bypass Homefront gate");
+    assert_eq!(err_still_locked.code, "GateNotEntered");
 
-    // 1) eff_fleet_count (1) < optimal (4) -> mult = 0.25 -> 2,500,000 ISK
+    // Enter all 3 Homefront outer gates as an eligible frigate
+    for inst_id in [810_001_i64, 810_002, 810_003] {
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &session,
+            inst_id,
+        )
+        .await
+        .expect("enter homefront acceleration gate");
+    }
+
+    // Entered but objectives incomplete -> ObjectivesIncomplete
+    let err_obj = complete_special_dungeon_instance(&ctx, &mut session, 810_001, 1)
+        .await
+        .expect_err("objectives incomplete");
+    assert_eq!(err_obj.code, "ObjectivesIncomplete");
+
+    // Configure exact optimal_fleet_size / base_pilot_isk and fulfill archetype objectives
+    let wingman_id = 90_020_002_i64;
+    let wingman_ship_id = 1_010_000_999_i64;
+    let ship_tid = find_ship_type_id(&sde);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.fleet_id = Some(501);
+        }
+        if let Some(mut w) = snap.characters.get(&char_id).cloned() {
+            w.character_id = wingman_id;
+            w.active_ship_id = wingman_ship_id;
+            w.fleet_id = Some(501);
+            w.solar_system_id = sys_id;
+            w.station_id = None;
+            w.structure_id = None;
+            snap.characters.insert(wingman_id, w);
+        }
+        snap.items.insert(
+            wingman_ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: wingman_ship_id,
+                type_id: ship_tid,
+                owner_id: wingman_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (inst_id, opt_sz) in [(810_001_i64, 4_usize), (810_002, 1), (810_003, 1)] {
+            if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&inst_id) {
+                rec.blueprint.optimal_fleet_size = opt_sz;
+                rec.blueprint.base_pilot_isk = 10_000_000;
+                if let Some(c) = rec.contributions.get_mut(&char_id) {
+                    c.damage_dealt = 2_000.0;
+                    c.objective_units = 1;
+                }
+                if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::Raid {
+                    cargo_delivered,
+                    required_deliveries,
+                    ..
+                } = &mut rec.progress
+                {
+                    *cargo_delivered = *required_deliveries;
+                }
+            }
+        }
+    });
+
+    // 1) eff_fleet_count (1) < optimal (4) -> (4/5)^3 = 64/125 -> 5,120,000 ISK
     let res1 = complete_special_dungeon_instance(&ctx, &mut session, 810_001, 1)
         .await
         .expect("complete under-sized");
     assert_eq!(
         res1.dict_get("rewardPaidIsk").and_then(|v| v.as_i64()),
-        Some(2_500_000)
+        Some(5_120_000)
     );
 
     // Completing again -> SiteAlreadyCompleted
@@ -460,7 +532,7 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
         .expect_err("already completed");
     assert_eq!(err.code, "SiteAlreadyCompleted");
 
-    // 2) eff_fleet_count (1) == optimal (1) -> mult = 1.0 -> 10,000,000 ISK
+    // 2) eff_fleet_count (1) == optimal (1) -> 10,000,000 ISK
     let res2 = complete_special_dungeon_instance(&ctx, &mut session, 810_002, 0)
         .await
         .expect("complete optimal-sized");
@@ -469,19 +541,25 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
         Some(10_000_000)
     );
 
-    // 3) Put pilot in a 2-member fleet in same system so actual_fleet_count == 2 > optimal (1) -> mult = 0.75 -> 7,500,000 ISK
-    let wingman_id = 90_020_002_i64;
+    // 3) Wingman enters 810_003 and contributes -> actual_fleet_count == 2 > optimal (1), pool 1*10M / 2 = 5,000,000 ISK each
+    let mut wingman_sess = SessionState::new(102);
+    wingman_sess.user_id = Some(2);
+    wingman_sess.character_id = Some(wingman_id);
+    wingman_sess.solar_system_id = Some(sys_id);
+    wingman_sess.ship_id = Some(wingman_ship_id);
+    crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+        &ctx,
+        &wingman_sess,
+        810_003,
+    )
+    .await
+    .expect("wingman enters 810_003 gate");
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.fleet_id = Some(501);
-        }
-        if let Some(mut w) = snap.characters.get(&char_id).cloned() {
-            w.character_id = wingman_id;
-            w.fleet_id = Some(501);
-            w.solar_system_id = sys_id;
-            w.station_id = None;
-            w.structure_id = None;
-            snap.characters.insert(wingman_id, w);
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&810_003) {
+            if let Some(c) = rec.contributions.get_mut(&wingman_id) {
+                c.damage_dealt = 2_000.0;
+                c.objective_units = 1;
+            }
         }
     });
     let res3 = complete_special_dungeon_instance(&ctx, &mut session, 810_003, 0)
@@ -489,7 +567,7 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
         .expect("complete over-sized fleet");
     assert_eq!(
         res3.dict_get("rewardPaidIsk").and_then(|v| v.as_i64()),
-        Some(7_500_000)
+        Some(5_000_000)
     );
 }
 

@@ -789,6 +789,26 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
 
     let access_chance_pct =
         mod_access_bonus + extra_skill_bonus + rig_access_bonus + wreck_difficulty_bonus;
+    if let Err(err) = crate::services::pve_homefront_sites::validate_homefront_salvage_attempt(
+        ctx,
+        sys_id,
+        wreck_id,
+        mod_access_bonus,
+        extra_skill_bonus,
+        rig_access_bonus,
+    ) {
+        return Ok((
+            PyRep::keyval([
+                ("wreckID", PyRep::Integer(wreck_id)),
+                ("wreckTypeID", PyRep::Integer(wreck_type_id as i64)),
+                ("wreckDifficultyBonus", PyRep::Real(wreck_difficulty_bonus)),
+                ("accessChancePct", PyRep::Real(access_chance_pct)),
+                ("salvaged", PyRep::Bool(false)),
+                ("reason", PyRep::String(err.code)),
+            ]),
+            false,
+        ));
+    }
     if access_chance_pct <= 0.0 {
         return Ok((
             PyRep::keyval([
@@ -829,7 +849,7 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
     // (`sde_types` group 754/966 + `sde_blueprints` + `wrecks.static` + Dogma attribute `901`).
     let salvage_table = ctx.sde.salvage_materials_for_wreck(wreck_type_id, true);
 
-    let yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
+    let mut yielded_type_ids: Vec<u32> = salvage_table.iter().map(|&(t, _)| t).collect();
     let wreck_pos = wreck_ball_opt
         .as_ref()
         .map(|b| [b.position.x, b.position.y, b.position.z])
@@ -875,6 +895,14 @@ pub(crate) async fn execute_wreck_salvage_cycle_for_module(
         active_module_id_opt,
     )
     .await;
+
+    if let Some(hf_loot) = crate::services::pve_homefront_sites::on_homefront_wreck_salvaged(
+        ctx, char_id, ship_id, sys_id, wreck_id,
+    )
+    .await
+    {
+        yielded_type_ids.extend(hf_loot);
+    }
 
     Ok((
         PyRep::keyval([

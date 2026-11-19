@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use crate::services::pve_special_sites::{
-    ensure_special_sites_initialized, HomefrontSiteRecord, TriglavianSiteRecord,
+    ensure_special_sites_initialized, TriglavianSiteRecord,
 };
 use eve_db::clock::VirtualServerClock;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
@@ -94,23 +94,72 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
     let _ = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, 31_000_001, warden_bid, Some(90_060_001)).await;
     assert!(get_drifter_hive_for_system(&ctx, 31_000_001).unwrap().cleared);
 
-    // 2. Homefront boss kill distributes full optimal 5-pilot payout to all 5 fleet members
-    let hf_boss_bid: i64 = 9_910_001;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites.entry(sys_id).or_default().push(HomefrontSiteRecord {
-            instance_id: 991_001,
-            dungeon_id: 1,
-            dungeon_name: "Fleet Raid".into(),
-            solar_system_id: sys_id,
-            optimal_fleet_size: 5,
-            base_pilot_isk: 17_230_000,
-            completed: false,
-            reward_paid_isk: 0,
-            boss_npc_ball_id: hf_boss_bid,
-            boss_type_id: 48_090,
-        });
+    // 2. Homefront Suspicious Signal relay kill settles full 5-pilot optimal payout after 3 arrays hacked
+    let ss = crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(
+        &ctx,
+        sys_id,
+        10_367,
+    )
+    .expect("spawn Homefront Suspicious Signal");
+    let relay_bid = match ss.progress {
+        crate::services::pve_homefront_sites::HomefrontArchetypeProgress::SuspiciousSignal {
+            relay_ball_id,
+            ..
+        } => relay_ball_id,
+        ref other => panic!("expected SuspiciousSignal progress, got {other:?}"),
+    };
+    for idx in 1..=5i64 {
+        let mut sess = eve_machonet::SessionState::new(idx as u64);
+        sess.user_id = Some(idx);
+        sess.character_id = Some(90_060_000 + idx);
+        sess.solar_system_id = Some(sys_id);
+        sess.ship_id = Some(1_060_000_000 + idx);
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &sess,
+            ss.instance_id,
+        )
+        .await
+        .expect("fleet pilot enters Suspicious Signal gate");
+    }
+    // Premature relay kill before arrays hacked must NOT settle site.
+    assert!(on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        relay_bid,
+        Some(90_060_001),
+    )
+    .await
+    .is_empty());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&ss.instance_id) {
+            for c in rec.contributions.values_mut() {
+                c.damage_dealt = 2_000.0;
+                c.arrays_hacked = 1;
+            }
+            if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+                arrays_hacked,
+                vulnerability_window_secs,
+                ..
+            } = &mut rec.progress
+            {
+                *arrays_hacked = [true; 3];
+                *vulnerability_window_secs = 90;
+            }
+        }
     });
-    let hf_changes = on_special_site_npc_destroyed_core(&ctx.systems, &ctx.db, &ctx.sde, sys_id, hf_boss_bid, Some(90_060_001)).await;
+    let hf_changes = on_special_site_npc_destroyed_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        sys_id,
+        relay_bid,
+        Some(90_060_001),
+    )
+    .await;
     assert_eq!(hf_changes.len(), 5);
     notify_special_site_account_changes(&ctx.db, &ctx.pending_notifications, &ctx.notify_tx, &hf_changes);
     notify_special_site_account_changes(&ctx.db, &ctx.pending_notifications, &ctx.notify_tx, &[]);
@@ -237,21 +286,85 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
     .await
     .is_empty());
 
-    // 3. Homefront site: killer_char_id = None does NOT complete; solo killer excludes docked & remote fleet mates
-    let hf_bid = 9_930_001_i64;
-    with_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites.entry(sys_id).or_default().push(HomefrontSiteRecord {
-            instance_id: 993_001,
-            dungeon_id: 2,
-            dungeon_name: "Solo HF".into(),
-            solar_system_id: sys_id,
-            optimal_fleet_size: 1,
-            base_pilot_isk: 2_000_000,
-            completed: false,
-            reward_paid_isk: 0,
-            boss_npc_ball_id: hf_bid,
-            boss_type_id: 48_090,
-        });
+    // 3. Homefront Suspicious Signal: killer_char_id = None with no entered/contributing pilot
+    //    does NOT complete; docked & remote fleet mates cannot enter gate; solo killer settles cleanly.
+    let ss2 = crate::services::pve_homefront_sites::spawn_homefront_site_for_dungeon(
+        &ctx,
+        sys_id,
+        10_367,
+    )
+    .expect("spawn Homefront Suspicious Signal edge case");
+    let hf_bid = match ss2.progress {
+        crate::services::pve_homefront_sites::HomefrontArchetypeProgress::SuspiciousSignal {
+            relay_ball_id,
+            ..
+        } => relay_ball_id,
+        ref other => panic!("expected SuspiciousSignal progress, got {other:?}"),
+    };
+
+    // Docked & off-system fleet mates are blocked at the Homefront acceleration gate
+    let mut docked_sess = eve_machonet::SessionState::new(202);
+    docked_sess.user_id = Some(202);
+    docked_sess.character_id = Some(docked_cid);
+    docked_sess.solar_system_id = Some(sys_id);
+    docked_sess.station_id = Some(60_003_760);
+    assert_eq!(
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &docked_sess,
+            ss2.instance_id,
+        )
+        .await
+        .expect_err("docked fleet mate blocked")
+        .code,
+        "ShipDocked"
+    );
+
+    let mut remote_sess = eve_machonet::SessionState::new(203);
+    remote_sess.user_id = Some(203);
+    remote_sess.character_id = Some(remote_cid);
+    remote_sess.solar_system_id = Some(30_000_144);
+    remote_sess.ship_id = Some(1_060_103);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            1_060_103,
+            InventoryItemRecord {
+                item_id: 1_060_103,
+                type_id: 587,
+                owner_id: remote_cid,
+                location_id: 30_000_144,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+            &ctx,
+            &remote_sess,
+            ss2.instance_id,
+        )
+        .await
+        .expect_err("off-system fleet mate blocked")
+        .code,
+        "WrongSolarSystem"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&ss2.instance_id) {
+            if let eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+                arrays_hacked,
+                vulnerability_window_secs,
+                ..
+            } = &mut rec.progress
+            {
+                *arrays_hacked = [true; 3];
+                *vulnerability_window_secs = 90;
+            }
+        }
     });
     assert!(on_special_site_npc_destroyed_core(
         &ctx.systems,
@@ -263,6 +376,47 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
     )
     .await
     .is_empty());
+
+    // Enter solo pilot via temporary Rifter ship item, then restore active_ship_id = 0 for section 4
+    let temp_ship = 1_060_101_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&solo_cid).unwrap().active_ship_id = temp_ship;
+        snap.items.insert(
+            temp_ship,
+            InventoryItemRecord {
+                item_id: temp_ship,
+                type_id: 587,
+                owner_id: solo_cid,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut solo_sess = eve_machonet::SessionState::new(201);
+    solo_sess.user_id = Some(201);
+    solo_sess.character_id = Some(solo_cid);
+    solo_sess.solar_system_id = Some(sys_id);
+    solo_sess.ship_id = Some(temp_ship);
+    crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+        &ctx,
+        &solo_sess,
+        ss2.instance_id,
+    )
+    .await
+    .expect("solo pilot enters Suspicious Signal");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&solo_cid).unwrap().active_ship_id = 0;
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&ss2.instance_id) {
+            if let Some(c) = rec.contributions.get_mut(&solo_cid) {
+                c.damage_dealt = 2_000.0;
+            }
+        }
+    });
+
     let hf_paid = on_special_site_npc_destroyed_core(
         &ctx.systems,
         &ctx.db,

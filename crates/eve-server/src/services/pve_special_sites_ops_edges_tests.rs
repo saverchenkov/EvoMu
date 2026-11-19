@@ -135,11 +135,15 @@ fn homefront_wave_exordium_and_3_vs_5_pilot_cap_edge_cases() {
     assert!(!p3_over.payouts[6].eligible && p3_over.payouts[6].isk == 0);
     assert!(!p3_over.payouts[7].eligible && p3_over.payouts[7].isk == 0);
 
-    // Combat pilot ISK split edges + zero clamp
-    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 15_000_000);
+    let p3_solo = compute_homefront_fleet_payouts(12_000_000, 60, 3, &p3_contribs[..1]);
+    assert_eq!(p3_solo.payouts[0].isk, 7_680_000);
+
+    // Combat pilot ISK split edges + (4/5)^(opt-n) scaling + 2*opt cap
+    assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 0), 6_144_000);
     assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 5), 15_000_000);
     assert_eq!(compute_homefront_combat_pilot_isk(15_000_000, 5, 10), 7_500_000);
-    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 0, 4), 2_500_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 0, 2), 5_000_000);
+    assert_eq!(compute_homefront_combat_pilot_isk(10_000_000, 0, 4), 0);
 }
 
 #[test]

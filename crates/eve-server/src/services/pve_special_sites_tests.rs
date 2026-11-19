@@ -286,12 +286,31 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
 
     on_warp_to_homefront_site(&ctx, hs_sys, hf.instance_id).await;
     let sys_handle = ctx.systems.get_or_spawn(hs_sys);
-    assert!(sys_handle.get_ball_snapshot(hf.boss_npc_ball_id).await.ok().flatten().is_some());
+    let hf_rt = crate::services::pve_homefront_sites::get_homefront_runtime_record(&ctx, hf.instance_id)
+        .expect("persisted homefront runtime record after warp");
+    assert!(
+        sys_handle
+            .get_ball_snapshot(hf_rt.outer_gate_ball_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        "outer acceleration gate must spawn on warp arrival"
+    );
+    assert!(
+        sys_handle
+            .get_ball_snapshot(hf.boss_npc_ball_id)
+            .await
+            .ok()
+            .flatten()
+            .is_none(),
+        "HF-05: pocket entities must NOT spawn before gate activation"
+    );
 
-    let err_alive = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 0)
+    let err_unentered = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 0)
         .await
-        .expect_err("boss alive");
-    assert_eq!(err_alive.code, "WaveNpcsRemaining");
+        .expect_err("gate not entered");
+    assert_eq!(err_unentered.code, "GateNotEntered");
 
     session.station_id = Some(60_003_760);
     let err_docked = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 1)
@@ -307,8 +326,101 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     assert_eq!(err_wrong_sys.code, "NotInSiteSystem");
     session.solar_system_id = Some(hs_sys);
 
-    let _ = sys_handle.remove_ball(hf.boss_npc_ball_id).await;
-    let expected_payout = ((hf.base_pilot_isk as f64) * (1.0 / (hf.optimal_fleet_size as f64))).round() as i64;
+    crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
+        &ctx,
+        &session,
+        hf.instance_id,
+    )
+    .await
+    .expect("eligible frigate enters homefront gate");
+    let err_incomplete = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 1)
+        .await
+        .expect_err("objectives incomplete");
+    assert_eq!(err_incomplete.code, "ObjectivesIncomplete");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&hf.instance_id) {
+            if let Some(c) = rec.contributions.get_mut(&char_id) {
+                c.damage_dealt = 2_000.0;
+                c.objective_units = 1;
+            }
+            match &mut rec.progress {
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::Raid {
+                    cargo_delivered,
+                    required_deliveries,
+                    ..
+                } => *cargo_delivered = *required_deliveries,
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::EmergencyAid {
+                    protectee_hp,
+                    survival_elapsed_secs,
+                    required_survival_secs,
+                    ..
+                } => {
+                    *protectee_hp = 50_000.0;
+                    *survival_elapsed_secs = *required_survival_secs;
+                }
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::MetaliminalMeteoroid {
+                    remaining_units,
+                    ore_mined_by_fleet,
+                    total_units,
+                    ..
+                } => {
+                    *remaining_units = 0;
+                    *ore_mined_by_fleet = *total_units;
+                }
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::DreadAssault {
+                    siege_cycles_completed,
+                    target_siege_cycles,
+                    enemy_base_hp,
+                    ..
+                } => {
+                    *siege_cycles_completed = *target_siege_cycles;
+                    *enemy_base_hp = 0.0;
+                }
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    current_wave,
+                    total_waves,
+                    mutanite_units_remaining,
+                    warp_bubble_active,
+                    ..
+                } => {
+                    *current_wave = *total_waves;
+                    *mutanite_units_remaining = 0;
+                    *warp_bubble_active = false;
+                }
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::SuspiciousSignal {
+                    relay_hp,
+                    arrays_hacked,
+                    ..
+                } => {
+                    *arrays_hacked = [true; 3];
+                    *relay_hp = 0.0;
+                }
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::SalvageResearch {
+                    wrecks_salvaged,
+                    total_wrecks,
+                    ..
+                } => *wrecks_salvaged = *total_wrecks,
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::StabilizeRift {
+                    held_low_secs,
+                    required_hold_secs,
+                    ..
+                } => *held_low_secs = *required_hold_secs,
+                eve_db::service_domains::pve_sites::HomefrontProgressRecord::TrafficStop {
+                    smugglers_destroyed,
+                    required_smugglers,
+                    ..
+                } => *smugglers_destroyed = *required_smugglers,
+            }
+        }
+    });
+
+    let expected_payout =
+        crate::services::pve_special_sites_ops::compute_homefront_combat_pilot_isk(
+            hf.base_pilot_isk,
+            hf.optimal_fleet_size,
+            1,
+        );
     let _ = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 1)
         .await
         .expect("homefront completed");

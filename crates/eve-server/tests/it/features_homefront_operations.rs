@@ -671,7 +671,9 @@ async fn test_b42_zarzakh_and_ship_mechanics() {
 
 mod homefront_operations_it {
     use super::*;
+    use eve_db::service_domains::pve_sites::HomefrontProgressRecord;
     use eve_db::IskCents;
+    use eve_server::combat::drones_salvage_tractor::execute_wreck_salvage_cycle;
     use eve_server::services::pve_homefront_sites::{
         abyssal_clear_wave, activate_homefront_acceleration_gate,
         complete_homefront_operation_and_pay, dread_assault_advance_siege,
@@ -699,6 +701,11 @@ mod homefront_operations_it {
         });
     }
 
+    async fn position_ship_at(ctx: &ServerContext, sys_id: u32, ship_id: i64, pos: DVec3) {
+        let h = ctx.systems.get_or_spawn(sys_id);
+        let _ = h.set_ball_position(ship_id, pos).await;
+    }
+
     // parity: feat:pve.homefront-ops
     // parity: rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
     #[tokio::test]
@@ -708,17 +715,53 @@ mod homefront_operations_it {
         let kw = HashMap::new();
         let jita: u32 = 30_000_142;
 
-        // Seed 6 distinct pilots in Jita representing each canonical Homefront fleet role
+        // Seed 6 distinct pilots in Jita representing each canonical Homefront fleet role with real online modules
         let mut sessions = Vec::new();
-        let roster = [
-            (940_001_i64, 743_000_001_i64, 621_u32, None),      // Caracal (DPS/Logi Cruiser)
-            (940_002_i64, 743_000_002_i64, 16_236_u32, None),   // Coercer (Destroyer DPS)
-            (940_003_i64, 743_000_003_i64, 597_u32, Some(3586)),// Punisher + Small Remote Shield Booster I
-            (940_004_i64, 743_000_004_i64, 32_880_u32, None),   // Venture (Mining/Tackle Frigate)
-            (940_005_i64, 743_000_005_i64, 649_u32, None),      // Tayra (Caldari Hauler 7,300 m3 >= 3,500 m3)
-            (940_006_i64, 743_000_006_i64, 621_u32, Some(483)), // Caracal + fitted Miner I
+        let roster: &[(i64, i64, u32, &[(InventoryFlag, u32)])] = &[
+            (
+                940_001_i64,
+                743_000_001_i64,
+                621_u32,
+                &[(InventoryFlag::MedSlot0, 22_175)], // Caracal + Data Analyzer I (no mining laser)
+            ),
+            (
+                940_002_i64,
+                743_000_002_i64,
+                16_236_u32,
+                &[
+                    (InventoryFlag::HiSlot0, 25_861),  // Salvager I
+                    (InventoryFlag::HiSlot1, 533),     // Small Energy Neutralizer I
+                    (InventoryFlag::MedSlot0, 22_175), // Data Analyzer I
+                    (InventoryFlag::MedSlot1, 442),    // Cargo Scanner I
+                ],
+            ),
+            (
+                940_003_i64,
+                743_000_003_i64,
+                597_u32,
+                &[
+                    (InventoryFlag::HiSlot0, 3586), // Small Remote Shield Booster I
+                    (InventoryFlag::HiSlot1, 529),  // Small Remote Capacitor Transmitter I
+                ],
+            ),
+            (
+                940_004_i64,
+                743_000_004_i64,
+                32_880_u32,
+                &[
+                    (InventoryFlag::HiSlot0, 483),     // Miner I
+                    (InventoryFlag::MedSlot0, 22_175), // Data Analyzer I
+                ],
+            ),
+            (940_005_i64, 743_000_005_i64, 649_u32, &[]), // Tayra (7,300 m3 >= 3,500 m3)
+            (
+                940_006_i64,
+                743_000_006_i64,
+                621_u32,
+                &[(InventoryFlag::HiSlot0, 483)], // Caracal + fitted Miner I
+            ),
         ];
-        for (idx, &(cid, sid, stid, extra_mod)) in roster.iter().enumerate() {
+        for (idx, &(cid, sid, stid, mods)) in roster.iter().enumerate() {
             clone_demo_char_with_id(&ctx, cid, 94_000 + idx as u64, jita);
             let sess = setup_pilot_in_space(
                 &ctx,
@@ -730,20 +773,21 @@ mod homefront_operations_it {
                 DVec3::new((idx as f64) * 5_000.0, 1.0e9, 0.0),
             )
             .await;
-            if let Some(mod_tid) = extra_mod {
+            for (slot_idx, &(flag, mod_tid)) in mods.iter().enumerate() {
                 seed_item(
                     &ctx,
-                    743_100_000 + idx as i64,
+                    743_100_000 + (idx as i64) * 10 + slot_idx as i64,
                     mod_tid,
                     cid,
                     sid,
-                    InventoryFlag::HiSlot0,
+                    flag,
                     1,
                     true,
                 );
             }
             sessions.push(sess);
         }
+        grant_skills(&ctx, 940_002, &[(25_863, 5)]); // Salvaging V (>= 20% bonus with Salvager I)
 
         // Verify GetHomefrontSiteInstances RPC exposes Jita Homefront sites with canonical payouts
         let rpc_rep = ctx
@@ -760,8 +804,28 @@ mod homefront_operations_it {
             .expect("GetHomefrontSiteInstances RPC");
         assert!(matches!(rpc_rep, PyRep::Dict(ref d) if !d.is_empty()));
 
-        // Gate ship restriction verification: T2 Cerberus (11993), BC Drake (24698), BS Raven (638), Trig Vedmak (47270) rejected
+        // Gate distance enforcement (>2,500m rejected) + ship restrictions (Cerberus, Drake, Raven, Vedmak rejected)
         let raid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_347).expect("spawn Raid");
+        let raid_rt = get_homefront_runtime_state(&ctx, raid.instance_id).expect("Raid runtime");
+        assert!(
+            !raid_rt.pocket_spawned,
+            "Raid pocket entities must stay unspawned behind outer acceleration gate before entry"
+        );
+        position_ship_at(
+            &ctx,
+            jita,
+            743_000_001,
+            raid.site_position + DVec3::new(10_000.0, 0.0, 0.0),
+        )
+        .await;
+        assert_eq!(
+            activate_homefront_acceleration_gate(&ctx, &sessions[0], raid.instance_id)
+                .await
+                .expect_err("ship >2,500m from outer gate must fail range check")
+                .code,
+            "OutsideGateActivationRange"
+        );
+
         for (idx, bad_tid) in [11_993_u32, 24_698, 638, 47_270].iter().enumerate() {
             let cid = 940_100 + idx as i64;
             let sid = 743_200_000 + idx as i64;
@@ -773,7 +837,7 @@ mod homefront_operations_it {
                 sid,
                 *bad_tid,
                 jita,
-                DVec3::new(0.0, 2.0e9, 0.0),
+                raid.site_position + DVec3::new(350.0, 0.0, 0.0),
             )
             .await;
             assert_eq!(
@@ -785,8 +849,10 @@ mod homefront_operations_it {
             );
         }
 
-        // 1. Complete Raid (10347) via multi-role actions (tackle hauler, Caracal hold check, Squall delivery)
-        for s in &sessions[..5] {
+        // 1. Complete Raid (10347) via multi-role actions (tackle hauler, Caracal hold check, Tayra delivery)
+        for (idx, s) in sessions[..5].iter().enumerate() {
+            let sid = 743_000_001 + idx as i64;
+            position_ship_at(&ctx, jita, sid, raid.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
             activate_homefront_acceleration_gate(&ctx, s, raid.instance_id)
                 .await
                 .expect("5-pilot eligible ships pass Raid gate");
@@ -809,7 +875,7 @@ mod homefront_operations_it {
         );
         for _ in 0..4 {
             raid_deliver_cargo_to_freighter(&ctx, &sessions[4], raid.instance_id)
-                .expect("Squall >= 3500 m3 delivers Raid cargo");
+                .expect("Tayra >= 3500 m3 delivers Raid cargo");
         }
         record_homefront_combat_and_logistics(&ctx, &sessions[1], raid.instance_id, 2_000.0, 0.0).unwrap();
         record_homefront_combat_and_logistics(&ctx, &sessions[2], raid.instance_id, 0.0, 2_000.0).unwrap();
@@ -820,8 +886,9 @@ mod homefront_operations_it {
         assert_eq!(raid_pay.eligible_pilot_count, 5);
         assert_eq!(raid_pay.total_fleet_isk, 75_000_000);
 
-        // 2. Emergency Aid (10238): sustain protectee for 600s
+        // 2. Emergency Aid (10238): sustain protectee for 600s -> solo opt=5 payout (4/5)^4 * 15M = 6,144,000
         let aid = spawn_homefront_site_for_dungeon(&ctx, jita, 10_238).unwrap();
+        position_ship_at(&ctx, jita, 743_000_003, aid.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[2], aid.instance_id).await.unwrap();
         emergency_aid_advance_defense(&ctx, &sessions[2], aid.instance_id, 5_000.0, 4_000.0, 600).unwrap();
         assert_eq!(
@@ -829,14 +896,19 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            15_000_000
+            6_144_000
         );
 
-        // 3. Metaliminal Meteoroid (10312): unfitted Caracal rejected, Venture + Miner-fitted Caracal clear 5,000 units
+        // 3. Metaliminal Meteoroid (10312): unfitted Caracal rejected, Venture + Miner-fitted Caracal clear 5,000 units -> 2 * (4/5)^3 * 12M = 12,288,000
         let met = spawn_homefront_site_for_dungeon(&ctx, jita, 10_312).unwrap();
-        activate_homefront_acceleration_gate(&ctx, &sessions[0], met.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &sessions[3], met.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &sessions[5], met.instance_id).await.unwrap();
+        for (sid, sess) in [
+            (743_000_001_i64, &sessions[0]),
+            (743_000_004_i64, &sessions[3]),
+            (743_000_006_i64, &sessions[5]),
+        ] {
+            position_ship_at(&ctx, jita, sid, met.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
+            activate_homefront_acceleration_gate(&ctx, sess, met.instance_id).await.unwrap();
+        }
         assert_eq!(
             metaliminal_mine_mutanite(&ctx, &sessions[0], met.instance_id, 500, 0)
                 .expect_err("unfitted Caracal cannot mine Mutanite")
@@ -846,10 +918,11 @@ mod homefront_operations_it {
         metaliminal_mine_mutanite(&ctx, &sessions[3], met.instance_id, 3_000, 0).unwrap();
         metaliminal_mine_mutanite(&ctx, &sessions[5], met.instance_id, 2_000, 0).unwrap();
         let met_pay = complete_homefront_operation_and_pay(&ctx, &sessions[3], met.instance_id).await.unwrap();
-        assert_eq!(met_pay.total_fleet_isk, 24_000_000);
+        assert_eq!(met_pay.total_fleet_isk, 12_288_000);
 
-        // 4. Dread Assault (10320): 3 cycles x 30k GJ cap -> 90s Siege volleys -> HQ destroyed
+        // 4. Dread Assault (10320): 3 cycles x 30k GJ cap -> 90s Siege volleys -> HQ destroyed (solo opt=5 = 6,144,000)
         let dread = spawn_homefront_site_for_dungeon(&ctx, jita, 10_320).unwrap();
+        position_ship_at(&ctx, jita, 743_000_003, dread.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[2], dread.instance_id).await.unwrap();
         for _ in 0..3 {
             dread_assault_transfer_capacitor(&ctx, &sessions[2], dread.instance_id, 30_000.0, 0.0).unwrap();
@@ -860,11 +933,12 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            15_000_000
+            6_144_000
         );
 
-        // 5. Abyssal Artifact Recovery (10346): 9 waves + warp bubble control + 67.5M payout
+        // 5. Abyssal Artifact Recovery (10346): 9 waves + warp bubble control + solo (4/5)^4 * 67.5M = 27,648,000
         let aar = spawn_homefront_site_for_dungeon(&ctx, jita, 10_346).unwrap();
+        position_ship_at(&ctx, jita, 743_000_004, aar.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[3], aar.instance_id).await.unwrap();
         for _ in 1..=9 {
             abyssal_clear_wave(&ctx, &sessions[3], aar.instance_id, 30, 1_500.0, true).await.unwrap();
@@ -874,11 +948,12 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            67_500_000
+            27_648_000
         );
 
-        // 6. Suspicious Signal (10309): premature relay DPS blocked until 3 arrays hacked
+        // 6. Suspicious Signal (10309): premature relay DPS blocked until 3 arrays hacked (solo opt=5 = 6,144,000)
         let sig = spawn_homefront_site_for_dungeon(&ctx, jita, 10_309).unwrap();
+        position_ship_at(&ctx, jita, 743_000_001, sig.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[0], sig.instance_id).await.unwrap();
         assert_eq!(
             suspicious_signal_attack_relay(&ctx, &sessions[0], sig.instance_id, 350_000.0, 10)
@@ -896,10 +971,11 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            15_000_000
+            6_144_000
         );
 
-        // 7. Three-pilot gate restriction (rejects Caracal cruiser 621, Coercer Navy Issue 73789; accepts Coercer 16236)
+        // 7. Three-pilot gate restriction (rejects Caracal cruiser 621, Coercer Navy Issue 73789; accepts Coercer 16236) -> (4/5)^2 * 12M = 7,680,000
+        let sal = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).unwrap();
         clone_demo_char_with_id(&ctx, 940_200, 94_200, jita);
         let navy_dessy = setup_pilot_in_space(
             &ctx,
@@ -908,10 +984,10 @@ mod homefront_operations_it {
             743_300_001,
             73_789,
             jita,
-            DVec3::new(10_000.0, 1.0e9, 0.0),
+            sal.site_position + DVec3::new(350.0, 0.0, 0.0),
         )
         .await;
-        let sal = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).unwrap();
+        position_ship_at(&ctx, jita, 743_000_001, sal.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         assert_eq!(
             activate_homefront_acceleration_gate(&ctx, &sessions[0], sal.instance_id).await.unwrap_err().code,
             "ShipRestrictedByGate"
@@ -920,6 +996,7 @@ mod homefront_operations_it {
             activate_homefront_acceleration_gate(&ctx, &navy_dessy, sal.instance_id).await.unwrap_err().code,
             "ShipRestrictedByGate"
         );
+        position_ship_at(&ctx, jita, 743_000_002, sal.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[1], sal.instance_id).await.unwrap();
         salvage_research_process_wreck(&ctx, &sessions[1], sal.instance_id, 30, true).unwrap();
         assert_eq!(
@@ -927,10 +1004,11 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            12_000_000
+            7_680_000
         );
 
         let rift = spawn_homefront_site_for_dungeon(&ctx, jita, 10_714).unwrap();
+        position_ship_at(&ctx, jita, 743_000_002, rift.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[1], rift.instance_id).await.unwrap();
         stabilize_rift_neutralize_arrays(&ctx, &sessions[1], rift.instance_id, [0.95; 5], 60).unwrap();
         assert_eq!(
@@ -938,10 +1016,11 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            12_000_000
+            7_680_000
         );
 
         let traf = spawn_homefront_site_for_dungeon(&ctx, jita, 10_705).unwrap();
+        position_ship_at(&ctx, jita, 743_000_002, traf.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[1], traf.instance_id).await.unwrap();
         traffic_stop_scan_and_intercept(&ctx, &sessions[1], traf.instance_id, 6, 0, 6_000.0).unwrap();
         assert_eq!(
@@ -949,8 +1028,190 @@ mod homefront_operations_it {
                 .await
                 .unwrap()
                 .total_fleet_isk,
-            12_000_000
+            7_680_000
         );
+
+        // 8. Live RPC & space subsystem integration (beyonce gate, dogmaIM Mine, hackingMgr, Cargo Scanner, Salvager I >= 20%)
+        let met_live = spawn_homefront_site_for_dungeon(&ctx, jita, 10_312).unwrap();
+        let met_outer_gate = get_homefront_runtime_state(&ctx, met_live.instance_id).unwrap().outer_gate_ball_id;
+        position_ship_at(&ctx, jita, 743_000_004, met_live.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        ctx.dispatch_rpc(
+            &mut sessions[3],
+            "beyonce",
+            None,
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(met_outer_gate)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("live beyonce.ActivateAccelerationGate enters Metaliminal pocket");
+        let rock_id = match get_homefront_runtime_state(&ctx, met_live.instance_id).unwrap().progress {
+            HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+            other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+        };
+        ctx.dispatch_rpc(
+            &mut sessions[3],
+            "dogmaIM",
+            None,
+            "Mine",
+            &[PyRep::Integer(rock_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("live dogmaIM.Mine mines Mutanite");
+        assert!(matches!(
+            get_homefront_runtime_state(&ctx, met_live.instance_id).unwrap().progress,
+            HomefrontArchetypeProgress::MetaliminalMeteoroid {
+                ore_mined_by_fleet,
+                remaining_units,
+                ..
+            } if ore_mined_by_fleet > 0 && remaining_units < 5_000
+        ));
+
+        let jita_h = ctx.systems.get_or_spawn(jita);
+        let sal_live = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).unwrap();
+        let sal_gate = get_homefront_runtime_state(&ctx, sal_live.instance_id).unwrap().outer_gate_ball_id;
+        position_ship_at(&ctx, jita, 743_000_002, sal_live.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        ctx.dispatch_rpc(
+            &mut sessions[1],
+            "beyonce",
+            None,
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(sal_gate)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("enter Salvage Research via beyonce gate");
+        let (werpost_id, first_wreck_id) = ctx.db.with_snapshot(|snap| {
+            match &snap.dungeon_runtime.homefront_runtimes[&sal_live.instance_id].progress {
+                HomefrontProgressRecord::SalvageResearch {
+                    werpost_ball_id,
+                    wreck_ball_ids,
+                    ..
+                } => (*werpost_ball_id, wreck_ball_ids[0]),
+                other => panic!("expected SalvageResearch record, got {other:?}"),
+            }
+        });
+        let (_, wp_ball) = jita_h.get_ball_snapshot(werpost_id).await.unwrap().expect("Werpost ball");
+        position_ship_at(&ctx, jita, 743_000_002, wp_ball.position + DVec3::new(600.0, 0.0, 0.0)).await;
+        let hack_rep = ctx
+            .dispatch_rpc(
+                &mut sessions[1],
+                "hackingMgr",
+                None,
+                "StartNewGameInstance",
+                &[
+                    PyRep::Integer(werpost_id),
+                    PyRep::Integer(0),
+                    PyRep::Integer(1),
+                    PyRep::Integer(1),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect("hackingMgr.StartNewGameInstance succeeds on Homefront Werpost");
+        assert_eq!(hack_rep.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+
+        let (_, wr_ball) = jita_h.get_ball_snapshot(first_wreck_id).await.unwrap().expect("Wreck ball");
+        position_ship_at(&ctx, jita, 743_000_002, wr_ball.position + DVec3::new(600.0, 0.0, 0.0)).await;
+        let _ = jita_h
+            .add_target_lock(
+                743_000_002,
+                TargetLock {
+                    target_id: first_wreck_id,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await;
+        let mut salvaged_ok = false;
+        for _ in 0..50 {
+            let cyc = execute_wreck_salvage_cycle(
+                &ctx,
+                jita,
+                940_002,
+                743_000_002,
+                first_wreck_id,
+                Some(25_861),
+            )
+            .await
+            .expect("execute_wreck_salvage_cycle");
+            if cyc.dict_get("salvaged").and_then(|v| v.as_bool()) == Some(true) {
+                salvaged_ok = true;
+                break;
+            }
+        }
+        assert!(salvaged_ok, "Salvager I + Salvaging V must salvage Homefront wreck");
+        assert!(matches!(
+            get_homefront_runtime_state(&ctx, sal_live.instance_id).unwrap().progress,
+            HomefrontArchetypeProgress::SalvageResearch { wrecks_salvaged, .. } if wrecks_salvaged >= 1
+        ));
+
+        let traf_live = spawn_homefront_site_for_dungeon(&ctx, jita, 10_705).unwrap();
+        let traf_gate = get_homefront_runtime_state(&ctx, traf_live.instance_id).unwrap().outer_gate_ball_id;
+        position_ship_at(&ctx, jita, 743_000_002, traf_live.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        ctx.dispatch_rpc(
+            &mut sessions[1],
+            "beyonce",
+            None,
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(traf_gate)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("enter Traffic Stop via beyonce gate");
+        let smuggler_id = ctx.db.with_snapshot(|snap| {
+            match &snap.dungeon_runtime.homefront_runtimes[&traf_live.instance_id].progress {
+                HomefrontProgressRecord::TrafficStop { smuggler_ball_ids, .. } => smuggler_ball_ids[0],
+                other => panic!("expected TrafficStop record, got {other:?}"),
+            }
+        });
+        let (_, sm_ball) = jita_h.get_ball_snapshot(smuggler_id).await.unwrap().expect("Smuggler ball");
+        position_ship_at(&ctx, jita, 743_000_002, sm_ball.position + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        let _ = jita_h
+            .add_target_lock(
+                743_000_002,
+                TargetLock {
+                    target_id: smuggler_id,
+                    lock_time_ms: 0.0,
+                    remaining_lock_ms: 0.0,
+                    locked: true,
+                    max_range_m: Some(50_000.0),
+                },
+            )
+            .await;
+        let scanner_mod_id = 743_100_013_i64; // Coercer slot_idx=3 -> Cargo Scanner I (442)
+        let scan_res = ctx
+            .dispatch_rpc(
+                &mut sessions[1],
+                "dogmaIM",
+                None,
+                "Activate",
+                &[
+                    PyRep::Integer(scanner_mod_id),
+                    PyRep::String("cargoScan".into()),
+                    PyRep::Integer(smuggler_id),
+                ],
+                &kw,
+                None,
+            )
+            .await
+            .expect("live dogmaIM.Activate cargoScan on Traffic Stop smuggler");
+        assert!(scan_res.dict_get("totalScannedQuantity").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+        assert!(ctx.db.with_snapshot(|snap| {
+            matches!(
+                &snap.dungeon_runtime.homefront_runtimes[&traf_live.instance_id].progress,
+                HomefrontProgressRecord::TrafficStop { scanned_hauler_ball_ids, .. }
+                    if scanned_hauler_ball_ids.contains(&smuggler_id)
+            )
+        }));
 
         // Exordium halving sanity check against real SDE schools
         assert!(!is_homefront_exordium_system(&ctx.sde, jita));

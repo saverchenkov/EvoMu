@@ -462,6 +462,17 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
     sys_id: SolarSystemId,
     landed_pos: [f64; 3],
 ) {
+    if crate::services::pve_homefront_sites::on_homefront_warp_landed(
+        ctx,
+        char_id,
+        sys_id,
+        DVec3::from_array(landed_pos),
+    )
+    .await
+    {
+        return;
+    }
+
     // Check if landing in a DungeonRuntimeInstance room
     let runtime_entry = with_dungeon_runtime_store(ctx, |store| {
         store.instances.values().find_map(|inst| {
@@ -1278,9 +1289,58 @@ pub async fn on_dungeon_npc_killed_core(
 
 pub use crate::services::pve_dungeon_runtime_rpc::{
     check_dungeon_triggers, get_dungeon_instance_state, on_dungeon_approach,
-    on_dungeon_item_looted, spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
-    try_activate_dungeon_runtime_gate,
+    spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
 };
+
+/// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons (`HF-02`, `HF-05`).
+pub async fn try_activate_dungeon_runtime_gate(
+    ctx: &ServerContext,
+    session: &mut eve_machonet::SessionState,
+    sys_id: SolarSystemId,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if let [arg0, ..] = args {
+        if let Some(gate_id) = arg0.as_i64() {
+            if let Some(res) = crate::services::pve_homefront_sites::activate_homefront_gate_by_ball_id(
+                ctx, session, sys_id, gate_id,
+            )
+            .await
+            {
+                return Some(res);
+            }
+        }
+    }
+    crate::services::pve_dungeon_runtime_rpc::try_activate_dungeon_runtime_gate(
+        ctx, session, sys_id, args,
+    )
+    .await
+}
+
+/// Forwards space-container loot / Raid delivery events to Homefront Operations and standard dungeon triggers (`HF-02`).
+pub async fn on_dungeon_item_looted(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id_opt: Option<SolarSystemId>,
+    container_ball_id: i64,
+    item_type_id: eve_sde::TypeId,
+) {
+    crate::services::pve_homefront_sites::on_homefront_inventory_event(
+        ctx,
+        char_id,
+        sys_id_opt,
+        container_ball_id,
+        item_type_id,
+    )
+    .await;
+    crate::services::pve_dungeon_runtime_rpc::on_dungeon_item_looted(
+        ctx,
+        char_id,
+        sys_id_opt,
+        container_ball_id,
+        item_type_id,
+    )
+    .await;
+}
 
 #[cfg(test)]
 #[path = "pve_dungeon_runtime_tests.rs"]

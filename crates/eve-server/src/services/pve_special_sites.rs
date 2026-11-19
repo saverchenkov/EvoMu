@@ -155,6 +155,7 @@ pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
         }
     });
     crate::services::pve_crab_beacons::tick_all_crab_beacons(ctx);
+    crate::services::pve_homefront_sites::tick_homefront_operations_sync(ctx);
     if delta_sec > 0 {
         crate::services::pve_incursion_lifecycle::advance_incursion_lifecycles(ctx);
     }
@@ -523,16 +524,9 @@ async fn ensure_special_sites_spawned_for_systems(
         }
         let mut hf_list = Vec::new();
         for sites in reg.homefront_sites.values() {
-            for (idx, s) in sites.iter().enumerate() {
-                if !want_sys(s.solar_system_id) {
-                    continue;
-                }
-                if !s.completed {
-                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
-                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
-                    let pos = DVec3::new(offset_x, offset_y, 0.0);
-                    hf_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, pos));
+            for s in sites {
+                if want_sys(s.solar_system_id) && !s.completed {
+                    hf_list.push((s.solar_system_id, s.instance_id));
                 }
             }
         }
@@ -576,18 +570,14 @@ async fn ensure_special_sites_spawned_for_systems(
         (g_list, hf_list, t_list)
     });
 
-    // Per-ball "already spawned" tracking on the SystemRegistry (no sentinel ball in space):
-    // a ball is spawned the first time it is seen in this ballpark, and never re-spawned after
-    // being destroyed. Sites seeded later in any system are picked up on the next call.
-    for (sys_id, bid, tid, pos) in hf_to_spawn {
-        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
-            continue;
-        }
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-            let cs = ctx.build_type_combat_state(tid);
-            let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-        }
+    // Homefront Operations spawn ONLY their outer entry beacon + acceleration gate (`HF-05`);
+    // pocket NPCs and archetype objectives spawn upon gate activation.
+    for (sys_id, inst_id) in hf_to_spawn {
+        crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
+            ctx,
+            Some(sys_id),
+            Some(inst_id),
+        );
     }
     for (sys_id, bid, tid, pos) in general_to_spawn {
         if !ctx.systems.claim_special_site_ball(sys_id, bid) {
@@ -625,29 +615,11 @@ pub async fn on_warp_to_homefront_site(
     instance_id: i64,
 ) {
     ensure_special_sites_initialized(ctx);
-    let to_spawn = with_pve_special_reg(ctx, |reg| {
-        if let Some(sites) = reg.homefront_sites.get(&solar_system_id) {
-            if let Some((idx, s)) = sites.iter().enumerate().find(|(_, s)| s.instance_id == instance_id) {
-                if !s.completed {
-                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
-                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
-                    let pos = DVec3::new(offset_x, offset_y, 0.0);
-                    return Some((s.boss_npc_ball_id, boss_tid, pos));
-                }
-            }
-        }
-        None
-    });
-    if let Some((bid, tid, pos)) = to_spawn {
-        if ctx.systems.claim_special_site_ball(solar_system_id, bid) {
-            let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-                let cs = ctx.build_type_combat_state(tid);
-                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
-            }
-        }
-    }
+    crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
+        ctx,
+        Some(solar_system_id),
+        Some(instance_id),
+    );
 }
 
 
@@ -772,93 +744,31 @@ pub async fn complete_special_dungeon_instance(
     }
 
     // 2. Check Homefront Sites (710_001..710_002)
-    let hf_lookup = with_pve_special_reg(ctx, |reg| {
-        reg.homefront_sites.values().flatten().enumerate().find(|(_, s)| s.instance_id == instance_id).map(|(idx, s)| (idx, s.clone()))
-    });
-    if let Some((hf_idx, hf)) = hf_lookup {
-        if caller_sys != hf.solar_system_id {
-            return Err(rpc_err("NotInSiteSystem", format!("Must be in system {} to complete {}", hf.solar_system_id, hf.dungeon_name)));
-        }
-        if hf.completed {
-            return Err(rpc_err("SiteAlreadyCompleted", format!("Homefront site {} is already completed", hf.instance_id)));
-        }
-        if sys_handle.get_ball_snapshot(hf.boss_npc_ball_id).await.ok().flatten().is_some() {
-            return Err(rpc_err("WaveNpcsRemaining", format!("Homefront site wave NPC {} is still alive", hf.boss_npc_ball_id)));
-        }
-        let hf_pos = DVec3::new(
-            10_000.0 + ((hf.instance_id % 100) as f64) * 5_000.0 + (hf_idx as f64) * 2_500.0,
-            ((hf.instance_id % 10) as f64) * 1_000.0,
-            0.0,
-        );
-        crate::services::r6_t1_p0_helpers::verify_special_site_caller_on_grid(
-            ctx, session, &sys_handle, char_id, hf_pos, &hf.dungeon_name,
-        ).await?;
-        let actual_fleet_count = ctx.db.with_snapshot(|snap| {
-            let fleet_id = snap.characters.get(&char_id).and_then(|c| c.fleet_id);
-            if let Some(fid) = fleet_id {
-                snap.characters
-                    .values()
-                    .filter(|c| {
-                        c.fleet_id == Some(fid)
-                            && c.solar_system_id == caller_sys
-                            && c.station_id.is_none()
-                            && c.structure_id.is_none()
-                    })
-                    .count()
-                    .max(1)
-            } else {
-                1
-            }
-        });
-        let eff_fleet_count = if fleet_count == 0 {
-            actual_fleet_count
-        } else {
-            fleet_count.min(actual_fleet_count)
-        };
-        let mult = if eff_fleet_count == hf.optimal_fleet_size {
-            1.0
-        } else if eff_fleet_count < hf.optimal_fleet_size {
-            (eff_fleet_count as f64) / (hf.optimal_fleet_size as f64)
-        } else {
-            0.75
-        };
-        let reward_paid = ((hf.base_pilot_isk as f64) * mult).round() as i64;
-        with_pve_special_reg(ctx, |reg| {
-            if let Some(list) = reg.homefront_sites.get_mut(&hf.solar_system_id) {
-                if let Some(s) = list.iter_mut().find(|s| s.instance_id == instance_id) {
-                    s.completed = true;
-                    s.reward_paid_isk = reward_paid;
-                }
-            }
-        });
-        let mut new_bal_isk = 0.0;
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
-                let new_bal = ch.balance;
-                new_bal_isk = new_bal.to_wire_f64();
-                snap.append_journal(
-                    char_id,
-                    "CorporateRewardPayout",
-                    IskCents::from_isk(reward_paid),
-                    new_bal,
-                    format!("Homefront Operation Payout ({})", hf.dungeon_name),
+    // 2. Check Homefront Operations via real multi-role archetype completion (`HF-02`, `HF-03`).
+    if is_homefront_pve_completion_target(ctx, caller_sys, instance_id) {
+        let (payouts, summary) =
+            complete_homefront_from_special_dungeon(ctx, session, caller_sys, instance_id)?;
+        let reward_paid = payouts.first().map(|p| p.1).unwrap_or(0);
+        for (pid, _, new_bal) in &payouts {
+            let bal_isk = new_bal.to_wire_f64();
+            let _ = ctx.notify_account_change(*pid, "cash", *pid, bal_isk);
+            if *pid == char_id {
+                push_typed_session_notification(
+                    session,
+                    OnAccountChange {
+                        account_key: "cash".into(),
+                        owner_id: *pid,
+                        balance: bal_isk,
+                    },
                 );
             }
-        });
-        let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal_isk);
-        push_typed_session_notification(
-            session,
-            OnAccountChange {
-                account_key: "cash".into(),
-                owner_id: char_id,
-                balance: new_bal_isk,
-            },
-        );
+        }
         return Ok(PyRep::keyval([
-            ("instanceID", PyRep::Integer(hf.instance_id)),
+            ("instanceID", PyRep::Integer(instance_id)),
             ("completed", PyRep::Bool(true)),
             ("rewardPaidIsk", PyRep::Integer(reward_paid)),
+            ("totalFleetIsk", PyRep::Integer(summary.total_fleet_isk)),
+            ("archetype", PyRep::String(summary.archetype.key().into())),
         ]));
     }
 

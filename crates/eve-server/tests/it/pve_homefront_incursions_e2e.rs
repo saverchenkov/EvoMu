@@ -14,12 +14,14 @@ use eve_server::services::pve_special_sites::{
     read_pve_special_reg, with_pve_special_reg as with_incursion_reg,
 };
 use eve_server::services::pve_special_sites_combat::get_drifter_hive_for_system;
+use glam::DVec3;
 use crate::pve_e2e_common::{
     bfs_hops, bind_service, buy_fit_combat_ship_with_ammo, buy_item_at_station,
     create_player_pilot, drain_all_notifications, ensure_skills_for_types,
     fleet_engage_targets_parallel, fleet_warp_and_engage_ball, fly_stargates_to, fresh_player_ctx,
     fund_pilot_isk, jump_through_wormhole_to, kv_get, login_existing_player, move_ship_to_ball,
-    reload_ctx_from_sqlite, rpc_ok, rpc_res, undock_from_station, JITA_STATION, JITA_SYS,
+    reload_ctx_from_sqlite, rpc_err, rpc_ok, rpc_res, undock_from_station, wait_for_warp_end,
+    JITA_STATION, JITA_SYS,
 };
 
 fn dict_first_inner_id(rep: &PyRep) -> Option<i64> {
@@ -110,7 +112,8 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
 
     ensure_special_sites_spawned(&ctx).await;
 
-    // 1. Homefront Ops: query GetHomefrontSiteInstances, warp both fleet ships, clear boss & verify ISK split
+    // 1. Homefront Ops: query GetHomefrontSiteInstances, verify outer beacon+gate spawn without pocket NPCs (`HF-05`),
+    //    verify Marauder (`28659`) is rejected by gate (`ShipRestrictedByGate`), then clear Metaliminal Meteoroid via Venture + `Miner I`
     let hf_rep = rpc_ok(
         &ctx,
         &mut sess1,
@@ -144,38 +147,124 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
         fly_stargates_to(&ctx, &mut sess2, hf_sys),
     );
 
-    let bal1_before = ctx.db.get_character(cid1).map(|c| c.balance.raw_cents()).unwrap_or(0);
-    for _pass in 0..6 {
-        let hf_boss = read_pve_special_reg(&ctx, |reg| {
-            reg.homefront_sites[&hf_sys].iter().find(|s| s.instance_id == hf_inst_id).map(|s| s.boss_npc_ball_id).expect("homefront boss ball")
-        });
+    {
+        use eve_server::services::pve_homefront_sites::{
+            complete_homefront_operation_and_pay, get_homefront_runtime_state,
+            metaliminal_mine_mutanite, spawn_homefront_site_for_dungeon,
+            HomefrontArchetypeProgress,
+        };
+
+        let b_oid = bind_service(&ctx, &mut sess1, "beyonce", PyRep::Integer(i64::from(hf_sys))).await as u64;
+        ctx.dispatch_rpc(
+            &mut sess1,
+            "beyonce",
+            Some(b_oid),
+            "CmdWarpToStuff",
+            &[PyRep::String("dungeon".into()), PyRep::Integer(hf_inst_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("warp to Homefront outer beacon");
+        wait_for_warp_end(&ctx, hf_sys, ship1).await;
+
+        let hf_rt = get_homefront_runtime_state(&ctx, hf_inst_id).expect("Homefront runtime on warp");
+        assert!(
+            !hf_rt.pocket_spawned,
+            "Warping to Homefront dungeon must spawn only outer beacon+gate, NOT pocket entities"
+        );
         let hf_sys_h = ctx.systems.get_or_spawn(hf_sys);
-        if hf_sys_h.get_ball_snapshot(hf_boss).await.ok().flatten().is_none() {
-            break;
-        }
-        fleet_warp_and_engage_ball(
+        assert!(hf_sys_h.get_ball_snapshot(hf_rt.beacon_ball_id).await.ok().flatten().is_some());
+        assert!(hf_sys_h.get_ball_snapshot(hf_rt.outer_gate_ball_id).await.ok().flatten().is_some());
+
+        let _ = hf_sys_h
+            .set_ball_position(ship1, hf_rt.site_position + DVec3::new(350.0, 0.0, 0.0))
+            .await;
+        let marauder_err = rpc_err(
             &ctx,
-            &mut [(&mut sess1, ship1, &guns1), (&mut sess2, ship2, &guns2)],
-            hf_sys,
-            hf_boss,
-            "dungeon",
-            PyRep::Integer(hf_inst_id),
+            &mut sess1,
+            "beyonce",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(hf_rt.outer_gate_ball_id)],
         )
         .await;
-    }
-    let hf_completed = read_pve_special_reg(&ctx, |reg| {
-        reg.homefront_sites[&hf_sys]
-            .iter()
-            .find(|s| s.instance_id == hf_inst_id)
-            .is_some_and(|s| s.completed)
-    });
-    assert!(hf_completed, "destroying Homefront boss must complete site without manual bypass");
+        assert_eq!(
+            marauder_err.code, "ShipRestrictedByGate",
+            "Marauder T2 Battleship must be rejected at Homefront gate"
+        );
 
-    let bal1_after = ctx.db.get_character(cid1).map(|c| c.balance.raw_cents()).unwrap_or(0);
-    assert!(
-        bal1_after > bal1_before,
-        "Homefront site completion must pay fleet-scaled ISK share on grid"
-    );
+        let _ = eve_server::world_seeder::seed_full_market_catalog(&ctx.db, &ctx.sde);
+        let (mut hf_v_sess, hf_v_cid, hf_v_ship) = {
+            let (mut s, cid, _) =
+                create_player_pilot(&ctx, 52_009, "hf_venture_e2e", "Homefront Venture E2E", JITA_SYS).await;
+            fund_pilot_isk(&ctx, &mut s, 25).await;
+            let (ship, _) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 32_880, 0, 0, 0, 0).await;
+            ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[483]).await;
+            let miner_id = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 483, 1).await;
+            rpc_ok(
+                &ctx,
+                &mut s,
+                "invbroker",
+                "Add",
+                &[PyRep::Integer(miner_id), PyRep::Integer(ship), PyRep::Integer(27)],
+            )
+            .await;
+            undock_from_station(&ctx, &mut s, JITA_SYS).await;
+            (s, cid, ship)
+        };
+
+        let met_st = spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_312).expect("spawn Metaliminal");
+        let jita_h = ctx.systems.get_or_spawn(JITA_SYS);
+        let _ = jita_h
+            .set_ball_position(hf_v_ship, met_st.site_position + DVec3::new(350.0, 0.0, 0.0))
+            .await;
+        rpc_ok(
+            &ctx,
+            &mut hf_v_sess,
+            "beyonce",
+            "ActivateAccelerationGate",
+            &[PyRep::Integer(met_st.outer_gate_ball_id)],
+        )
+        .await;
+        let met_rt = get_homefront_runtime_state(&ctx, met_st.instance_id).expect("Metaliminal active");
+        assert!(met_rt.pocket_spawned, "Gate entry must spawn Metaliminal pocket entities");
+        let rock_id = match met_rt.progress {
+            HomefrontArchetypeProgress::MetaliminalMeteoroid { meteoroid_ball_id, .. } => meteoroid_ball_id,
+            other => panic!("expected MetaliminalMeteoroid, got {other:?}"),
+        };
+        rpc_ok(&ctx, &mut hf_v_sess, "dogmaIM", "Mine", &[PyRep::Integer(rock_id)],).await;
+        let rem_units = match get_homefront_runtime_state(&ctx, met_st.instance_id).unwrap().progress {
+            HomefrontArchetypeProgress::MetaliminalMeteoroid {
+                remaining_units,
+                ore_mined_by_fleet,
+                ..
+            } => {
+                assert!(ore_mined_by_fleet > 0, "dogmaIM.Mine must credit Mutanite mining progress");
+                remaining_units
+            }
+            other => panic!("expected MetaliminalMeteoroid progress, got {other:?}"),
+        };
+        let bal1_before = ctx.db.get_character(hf_v_cid).map(|c| c.balance.raw_cents()).unwrap_or(0);
+        if rem_units > 0 {
+            metaliminal_mine_mutanite(&ctx, &hf_v_sess, met_st.instance_id, rem_units, 0).unwrap();
+        }
+        let met_done = complete_homefront_operation_and_pay(&ctx, &hf_v_sess, met_st.instance_id)
+            .await
+            .expect("complete Metaliminal after mining all Mutanite");
+        assert_eq!(met_done.total_fleet_isk, 4_915_200);
+        let hf_completed = read_pve_special_reg(&ctx, |reg| {
+            reg.homefront_sites[&JITA_SYS]
+                .iter()
+                .any(|s| s.instance_id == met_st.instance_id && s.completed)
+        });
+        assert!(hf_completed, "completing Homefront objectives must complete site without boss bypass");
+        let bal1_after = ctx.db.get_character(hf_v_cid).map(|c| c.balance.raw_cents()).unwrap_or(0);
+        assert_eq!(
+            bal1_after - bal1_before,
+            eve_db::IskCents::from_isk(4_915_200).raw_cents(),
+            "Solo Venture on opt=5 Metaliminal must receive (4/5)^4 * 12M = 4,915,200 ISK"
+        );
+    }
 
     // 2. Triglavian Minor Victory System: query GetTriglavianSiteInstances and clear Triglavian wave + boss
     let (trig_sys, trig_inst_id, trig_boss, trig_escorts) = read_pve_special_reg(&ctx, |reg| {
@@ -693,21 +782,30 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
         undock_from_station(&ctx, &mut s, JITA_SYS).await;
         (s, cid, ship)
     };
-    let (mut ven_sess, ven_cid, _ven_ship) = {
+    let (mut ven_sess, ven_cid, ven_ship) = {
         let (mut s, cid, _) = create_player_pilot(&ctx, 52_311, "hf_venture_p", "Venture Miner", JITA_SYS).await;
         fund_pilot_isk(&ctx, &mut s, 25).await;
         let (ship, _) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 32_880, 0, 0, 0, 0).await;
+        ensure_skills_for_types(&ctx, &mut s, cid, JITA_STATION, &[483]).await;
+        let miner_id = buy_item_at_station(&ctx, &mut s, cid, JITA_STATION, 483, 1).await;
+        rpc_ok(
+            &ctx,
+            &mut s,
+            "invbroker",
+            "Add",
+            &[PyRep::Integer(miner_id), PyRep::Integer(ship), PyRep::Integer(27)],
+        )
+        .await;
         undock_from_station(&ctx, &mut s, JITA_SYS).await;
         (s, cid, ship)
     };
-    let (hac_sess, _hac_cid, _hac_ship) = {
+    let (hac_sess, _hac_cid, hac_ship) = {
         let (mut s, cid, _) = create_player_pilot(&ctx, 52_312, "hf_hac_p", "Cerberus Blocked", JITA_SYS).await;
         fund_pilot_isk(&ctx, &mut s, 40).await;
         let (ship, _) = buy_fit_combat_ship_with_ammo(&ctx, &mut s, cid, JITA_STATION, 11_993, 0, 0, 0, 0).await;
         undock_from_station(&ctx, &mut s, JITA_SYS).await;
         (s, cid, ship)
     };
-    let _ = sq_ship;
 
     // Form fleet of 7 pilots (exceeds canonical 5-pilot role cap)
     let fleet_rep = rpc_ok(
@@ -740,17 +838,23 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
     let _ = rpc_res(&ctx, &mut sq_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
     let _ = rpc_res(&ctx, &mut ven_sess, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)]).await;
 
-    // 1. Spawn Raid (10347) in Jita, verify acceleration gate rejects T2 HAC Cerberus (11993) and admits Moas + Tayra + Venture
+    // 1. Spawn Raid (10347) in Jita, move ships within outer gate range, verify Cerberus (11993) rejected and Moas + Tayra + Venture admitted
     let raid_st = spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_347).expect("spawn Raid E2E");
+    let jita_h = ctx.systems.get_or_spawn(JITA_SYS);
+    let gate_pos = raid_st.site_position + DVec3::new(350.0, 0.0, 0.0);
+    let _ = jita_h.set_ball_position(hac_ship, gate_pos).await;
     let gate_err = activate_homefront_acceleration_gate(&ctx, &hac_sess, raid_st.instance_id)
         .await
         .expect_err("Cerberus T2 HAC must fail Homefront gate");
     assert_eq!(gate_err.code, "ShipRestrictedByGate");
 
-    for (s, _, _, _) in &combat_fleet {
+    for (s, _, ship_id, _) in &combat_fleet {
+        let _ = jita_h.set_ball_position(*ship_id, gate_pos).await;
         activate_homefront_acceleration_gate(&ctx, s, raid_st.instance_id).await.unwrap();
     }
+    let _ = jita_h.set_ball_position(sq_ship, gate_pos).await;
     activate_homefront_acceleration_gate(&ctx, &sq_sess, raid_st.instance_id).await.unwrap();
+    let _ = jita_h.set_ball_position(ven_ship, gate_pos).await;
     activate_homefront_acceleration_gate(&ctx, &ven_sess, raid_st.instance_id).await.unwrap();
 
     // Combat pilots actually engage spawned Homefront escort NPC via turret fire before role settlement
@@ -770,7 +874,7 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
     )
     .await;
 
-    // Complete Raid multi-role objectives across all 7 contributors -> triggers 5-pilot cap dilution (75M / 7 = 10,714,286 ISK each)
+    // Complete Raid multi-role objectives across all 7 contributors -> integer IskCents floor dilution ((15M * 100 * 5) / 7 cents each)
     let bal_before: HashMap<i64, i64> = ctx.db.with_snapshot(|s| {
         combat_fleet
             .iter()
@@ -793,30 +897,34 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
         .expect("complete 7-pilot Raid");
     assert_eq!(summary.optimal_fleet_size, 5);
     assert_eq!(summary.eligible_pilot_count, 7);
-    let expected_each = ((15_000_000.0_f64 * 5.0) / 7.0).round() as i64;
-    assert_eq!(summary.total_fleet_isk, expected_each * 7);
+    let expected_cents = eve_db::IskCents::from_raw_cents((15_000_000_i64 * 100 * 5) / 7);
+    assert_eq!(summary.total_fleet_isk_cents.raw_cents(), expected_cents.raw_cents() * 7);
+    assert_eq!(summary.total_fleet_isk, (expected_cents.raw_cents() * 7) / 100);
     ctx.db.with_snapshot(|s| {
         for cid in bal_before.keys() {
             let delta_cents = s.characters[cid].balance.raw_cents() - bal_before[cid];
             assert_eq!(
                 delta_cents,
-                eve_db::IskCents::from_isk(expected_each).raw_cents(),
-                "pilot {cid} must receive diluted 5/7 share, not full unscaled 15M"
+                expected_cents.raw_cents(),
+                "pilot {cid} must receive floored diluted 5/7 share in IskCents"
             );
         }
     });
 
-    // 2. Spawn Metaliminal Meteoroid (10312) in Jita and verify Venture clears 5,000 units and gets single-pilot full 12M
+    // 2. Spawn Metaliminal Meteoroid (10312) in Jita and verify solo Venture clears 5,000 units for (4/5)^4 * 12M = 4,915,200 ISK
     let met_st = spawn_homefront_site_for_dungeon(&ctx, JITA_SYS, 10_312).expect("spawn Metaliminal E2E");
+    let _ = jita_h
+        .set_ball_position(ven_ship, met_st.site_position + DVec3::new(350.0, 0.0, 0.0))
+        .await;
     activate_homefront_acceleration_gate(&ctx, &ven_sess, met_st.instance_id).await.unwrap();
     let bal_ven_before = ctx.db.with_snapshot(|s| s.characters[&ven_cid].balance.raw_cents());
     metaliminal_mine_mutanite(&ctx, &ven_sess, met_st.instance_id, 5_000, 0).unwrap();
     let met_sum = complete_homefront_operation_and_pay(&ctx, &ven_sess, met_st.instance_id).await.unwrap();
-    assert_eq!(met_sum.total_fleet_isk, 12_000_000);
+    assert_eq!(met_sum.total_fleet_isk, 4_915_200);
     ctx.db.with_snapshot(|s| {
         assert_eq!(
             s.characters[&ven_cid].balance.raw_cents() - bal_ven_before,
-            eve_db::IskCents::from_isk(12_000_000).raw_cents()
+            eve_db::IskCents::from_isk(4_915_200).raw_cents()
         );
     });
     assert!(get_homefront_runtime_state(&ctx, met_st.instance_id).is_some_and(|st| st.completed));
@@ -828,7 +936,7 @@ async fn test_homefront_multi_role_ops_and_five_pilot_role_cap_e2e() {
             s.wallet_journal.iter().any(|j| {
                 j.character_id == sq_cid
                     && j.entry_type == "CorporateRewardPayout"
-                    && j.amount == eve_db::IskCents::from_isk(expected_each)
+                    && j.amount == expected_cents
             }),
             "Homefront CorporateRewardPayout journal entry must persist across SQLite reload"
         );

@@ -52,7 +52,7 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
         let sites = reg.homefront_sites.get(&hs_sys).expect("seeded homefront list");
         assert_eq!(sites.len(), 2);
         assert_ne!(sites[0].instance_id, sites[1].instance_id);
-        assert_eq!(sites[0].optimal_fleet_size, 5);
+        assert!(matches!(sites[0].optimal_fleet_size, 3 | 5));
     });
 
     with_pve_special_reg(&ctx, |reg| {
@@ -161,8 +161,51 @@ mod multi_role_unit_tests {
                     ..Default::default()
                 },
             );
+            let mut hi_idx = 0usize;
+            let mut med_idx = 0usize;
+            let hi_flags = [
+                eve_db::InventoryFlag::HiSlot0,
+                eve_db::InventoryFlag::HiSlot1,
+                eve_db::InventoryFlag::HiSlot2,
+                eve_db::InventoryFlag::HiSlot3,
+                eve_db::InventoryFlag::HiSlot4,
+                eve_db::InventoryFlag::HiSlot5,
+                eve_db::InventoryFlag::HiSlot6,
+                eve_db::InventoryFlag::HiSlot7,
+            ];
+            let med_flags = [
+                eve_db::InventoryFlag::MedSlot0,
+                eve_db::InventoryFlag::MedSlot1,
+                eve_db::InventoryFlag::MedSlot2,
+                eve_db::InventoryFlag::MedSlot3,
+                eve_db::InventoryFlag::MedSlot4,
+                eve_db::InventoryFlag::MedSlot5,
+                eve_db::InventoryFlag::MedSlot6,
+                eve_db::InventoryFlag::MedSlot7,
+            ];
+            let needs_salvage_skill = fitted_modules.contains(&25_861);
+            if needs_salvage_skill {
+                snap.skills.entry(char_id).or_default().insert(
+                    25_863,
+                    eve_db::TrainedSkillRecord {
+                        type_id: 25_863,
+                        level: 4,
+                        skill_points: 45_255.0,
+                    },
+                );
+            }
             for (idx, &mod_tid) in fitted_modules.iter().enumerate() {
                 let mid = ship_id * 100 + idx as i64 + 1;
+                let is_mid_slot = matches!(mod_tid, 22_175 | 22_586 | 442 | 440);
+                let flag = if is_mid_slot {
+                    let f = med_flags[med_idx.min(7)];
+                    med_idx += 1;
+                    f
+                } else {
+                    let f = hi_flags[hi_idx.min(7)];
+                    hi_idx += 1;
+                    f
+                };
                 snap.items.insert(
                     mid,
                     InventoryItemRecord {
@@ -170,6 +213,7 @@ mod multi_role_unit_tests {
                         type_id: mod_tid,
                         owner_id: char_id,
                         location_id: ship_id,
+                        flag,
                         quantity: 1,
                         singleton: true,
                         ..Default::default()
@@ -200,6 +244,22 @@ mod multi_role_unit_tests {
         sess
     }
 
+    async fn enter_hf_gate_at_site(
+        ctx: &ServerContext,
+        sess: &SessionState,
+        instance_id: i64,
+    ) -> Result<crate::services::pve_special_sites_ops::HomefrontShipEligibility, BridgeRpcError> {
+        if let Some(st) = get_homefront_runtime_state(ctx, instance_id) {
+            if let Some(sid) = sess.ship_id.filter(|&id| id > 0) {
+                let sys_h = ctx.systems.get_or_spawn(st.solar_system_id);
+                let _ = sys_h
+                    .set_ball_position(sid, st.site_position + DVec3::new(400.0, 0.0, 0.0))
+                    .await;
+            }
+        }
+        activate_homefront_acceleration_gate(ctx, sess, instance_id).await
+    }
+
     #[tokio::test]
     async fn homefront_multi_role_lifecycle_across_all_five_core_and_three_pilot_archetypes() {
         let ctx = fresh_homefront_ctx();
@@ -207,9 +267,9 @@ mod multi_role_unit_tests {
         assert!(!is_homefront_exordium_system(&ctx.sde, sys_id));
 
         let dps1 = seed_hf_pilot(&ctx, 7101, 910_001, 810_001, 621, sys_id, &[]).await; // Caracal
-        let dps2 = seed_hf_pilot(&ctx, 7102, 910_002, 810_002, 16_236, sys_id, &[]).await; // Coercer
-        let logi = seed_hf_pilot(&ctx, 7103, 910_003, 810_003, 597, sys_id, &[3586]).await; // Punisher logi
-        let venture = seed_hf_pilot(&ctx, 7104, 910_004, 810_004, 32_880, sys_id, &[]).await; // Venture
+        let dps2 = seed_hf_pilot(&ctx, 7102, 910_002, 810_002, 16_236, sys_id, &[25_861, 22_175, 533]).await; // Coercer: Salvager I + Data Analyzer I + Small Energy Neut
+        let logi = seed_hf_pilot(&ctx, 7103, 910_003, 810_003, 597, sys_id, &[3586, 529, 442]).await; // Punisher logi + Remote Cap + Cargo Scanner
+        let venture = seed_hf_pilot(&ctx, 7104, 910_004, 810_004, 32_880, sys_id, &[483, 22_175]).await; // Venture + Miner I + Data Analyzer I
         let tayra = seed_hf_pilot(&ctx, 7105, 910_005, 810_005, 649, sys_id, &[]).await; // Tayra hauler (7,300 m3 >= 3,500 m3)
         let pioneer_miner_cruiser =
             seed_hf_pilot(&ctx, 7106, 910_006, 810_006, 621, sys_id, &[483]).await; // Caracal + Miner I
@@ -219,7 +279,7 @@ mod multi_role_unit_tests {
         assert_eq!(raid_state.blueprint.archetype, HomefrontArchetype::Raid);
         assert_eq!(raid_state.blueprint.base_pilot_isk, 15_000_000);
         for s in [&dps1, &dps2, &logi, &venture, &tayra] {
-            activate_homefront_acceleration_gate(&ctx, s, raid_state.instance_id)
+            enter_hf_gate_at_site(&ctx, s, raid_state.instance_id)
                 .await
                 .expect("enter Raid gate");
         }
@@ -261,11 +321,11 @@ mod multi_role_unit_tests {
             }));
         });
 
-        // 2. Emergency Aid (10238): sustain protectee over 600s
+        // 2. Emergency Aid (10238): sustain protectee over 600s (n=2 -> (4/5)^3 * 15M = 7,680,000 each -> 15,360,000)
         let aid_state = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_238).expect("spawn Emergency Aid");
         assert_eq!(aid_state.blueprint.archetype, HomefrontArchetype::EmergencyAid);
-        activate_homefront_acceleration_gate(&ctx, &dps1, aid_state.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &logi, aid_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &dps1, aid_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &logi, aid_state.instance_id).await.unwrap();
         record_homefront_combat_and_logistics(&ctx, &dps1, aid_state.instance_id, 3_500.0, 0.0).unwrap();
         emergency_aid_advance_defense(&ctx, &logi, aid_state.instance_id, 8_000.0, 12_000.0, 300).unwrap();
         let aid_mid = emergency_aid_advance_defense(&ctx, &logi, aid_state.instance_id, 6_000.0, 4_000.0, 300).unwrap();
@@ -273,14 +333,14 @@ mod multi_role_unit_tests {
         let aid_pay = complete_homefront_operation_and_pay(&ctx, &dps1, aid_state.instance_id)
             .await
             .expect("complete Emergency Aid");
-        assert_eq!(aid_pay.total_fleet_isk, 30_000_000);
+        assert_eq!(aid_pay.total_fleet_isk, 15_360_000);
 
-        // 3. Metaliminal Meteoroid (10312): 5,000 units Mutanite (Venture + fitted Caracal) with residue
+        // 3. Metaliminal Meteoroid (10312): 5,000 units Mutanite (Venture + fitted Caracal) with residue (n=2 -> 6,144,000 * 2 = 12,288,000)
         let met_state = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_312).expect("spawn Metaliminal");
         assert_eq!(met_state.blueprint.archetype, HomefrontArchetype::MetaliminalMeteoroid);
         assert_eq!(met_state.blueprint.base_pilot_isk, 12_000_000);
-        activate_homefront_acceleration_gate(&ctx, &venture, met_state.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &pioneer_miner_cruiser, met_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &venture, met_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &pioneer_miner_cruiser, met_state.instance_id).await.unwrap();
         metaliminal_mine_mutanite(&ctx, &venture, met_state.instance_id, 2_500, 500).unwrap();
         let met_done = metaliminal_mine_mutanite(&ctx, &pioneer_miner_cruiser, met_state.instance_id, 2_000, 0).unwrap();
         assert!(matches!(
@@ -290,13 +350,13 @@ mod multi_role_unit_tests {
         let met_pay = complete_homefront_operation_and_pay(&ctx, &venture, met_state.instance_id)
             .await
             .expect("complete Metaliminal");
-        assert_eq!(met_pay.total_fleet_isk, 24_000_000);
+        assert_eq!(met_pay.total_fleet_isk, 12_288_000);
 
-        // 4. Dread Assault (10320): 3 cycles x 30,000 GJ cap -> 90s Siege volleys -> enemy HQ destroyed
+        // 4. Dread Assault (10320): 3 cycles x 30,000 GJ cap -> 90s Siege volleys -> enemy HQ destroyed (n=2 -> 15,360,000)
         let dread_state = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_320).expect("spawn Dread Assault");
         assert_eq!(dread_state.blueprint.archetype, HomefrontArchetype::DreadAssault);
-        activate_homefront_acceleration_gate(&ctx, &logi, dread_state.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &dps1, dread_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &logi, dread_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &dps1, dread_state.instance_id).await.unwrap();
         record_homefront_combat_and_logistics(&ctx, &dps1, dread_state.instance_id, 4_000.0, 0.0).unwrap();
         for cycle in 1..=3_u8 {
             dread_assault_transfer_capacitor(&ctx, &logi, dread_state.instance_id, 35_000.0, 5_000.0).unwrap();
@@ -308,12 +368,12 @@ mod multi_role_unit_tests {
         let dread_pay = complete_homefront_operation_and_pay(&ctx, &logi, dread_state.instance_id)
             .await
             .expect("complete Dread Assault");
-        assert_eq!(dread_pay.total_fleet_isk, 30_000_000);
+        assert_eq!(dread_pay.total_fleet_isk, 15_360_000);
 
-        // 5. Abyssal Artifact Recovery (10346): 9 waves + warp bubble disperse/respawn + 67.5M payout
+        // 5. Abyssal Artifact Recovery (10346): 9 waves + warp bubble disperse/respawn + (4/5)^3 scaling (n=2 -> 69,120,000)
         let aar_probe = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn Abyssal probe");
-        activate_homefront_acceleration_gate(&ctx, &venture, aar_probe.instance_id).await.unwrap();
-        let probe_bubble_id = 1_897_800_000 + aar_probe.instance_id * 10 + 9;
+        enter_hf_gate_at_site(&ctx, &venture, aar_probe.instance_id).await.unwrap();
+        let probe_bubble_id = 1_897_800_000 + aar_probe.instance_id * 100 + 9;
         assert!(
             sys_h.remove_warp_bubble(probe_bubble_id).await.unwrap(),
             "AAR gate entry must spawn a live WarpBubble in SystemHandle"
@@ -322,9 +382,9 @@ mod multi_role_unit_tests {
         let aar_state = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn Abyssal Artifact");
         assert_eq!(aar_state.blueprint.archetype, HomefrontArchetype::AbyssalArtifactRecovery);
         assert_eq!(aar_state.blueprint.base_pilot_isk, 67_500_000);
-        activate_homefront_acceleration_gate(&ctx, &venture, aar_state.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &dps1, aar_state.instance_id).await.unwrap();
-        let bubble_id = 1_897_800_000 + aar_state.instance_id * 10 + 9;
+        enter_hf_gate_at_site(&ctx, &venture, aar_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &dps1, aar_state.instance_id).await.unwrap();
+        let bubble_id = 1_897_800_000 + aar_state.instance_id * 100 + 9;
         for w in 1..=9_u8 {
             let mid = abyssal_clear_wave(&ctx, &venture, aar_state.instance_id, 30, 0.0, w % 2 == 1)
                 .await
@@ -348,17 +408,17 @@ mod multi_role_unit_tests {
         let aar_pay = complete_homefront_operation_and_pay(&ctx, &dps1, aar_state.instance_id)
             .await
             .expect("complete AAR");
-        assert_eq!(aar_pay.total_fleet_isk, 135_000_000);
+        assert_eq!(aar_pay.total_fleet_isk, 69_120_000);
         assert!(
             !sys_h.remove_warp_bubble(bubble_id).await.unwrap(),
             "AAR completion must already remove warp bubble from SystemHandle"
         );
 
-        // 6. Suspicious Signal (10309): hack 3 arrays then burn 350k relay HP inside vulnerability window
+        // 6. Suspicious Signal (10309): hack 3 arrays then burn 350k relay HP inside vulnerability window (n=2 -> 15,360,000)
         let sig_state = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_309).expect("spawn Suspicious Signal");
         assert_eq!(sig_state.blueprint.archetype, HomefrontArchetype::SuspiciousSignal);
-        activate_homefront_acceleration_gate(&ctx, &venture, sig_state.instance_id).await.unwrap();
-        activate_homefront_acceleration_gate(&ctx, &dps1, sig_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &venture, sig_state.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &dps1, sig_state.instance_id).await.unwrap();
         for idx in 0..3 {
             suspicious_signal_hack_array(&ctx, &venture, sig_state.instance_id, idx).unwrap();
         }
@@ -366,24 +426,36 @@ mod multi_role_unit_tests {
         let sig_pay = complete_homefront_operation_and_pay(&ctx, &dps1, sig_state.instance_id)
             .await
             .expect("complete Suspicious Signal");
-        assert_eq!(sig_pay.total_fleet_isk, 30_000_000);
+        assert_eq!(sig_pay.total_fleet_isk, 15_360_000);
 
         // 7-9. Three-pilot operations (10713 Salvage Research, 10714 Stabilize Rift, 10705 Traffic Stop)
+        // Solo (n=1 on opt=3): 12M * (4/5)^2 = 7,680,000
         let sal = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_713).unwrap();
         assert_eq!(sal.blueprint.optimal_fleet_size, 3);
-        activate_homefront_acceleration_gate(&ctx, &dps2, sal.instance_id).await.unwrap(); // Coercer T1 dessy
+        enter_hf_gate_at_site(&ctx, &dps2, sal.instance_id).await.unwrap(); // Coercer T1 dessy
         salvage_research_process_wreck(&ctx, &dps2, sal.instance_id, 30, true).unwrap();
-        assert_eq!(complete_homefront_operation_and_pay(&ctx, &dps2, sal.instance_id).await.unwrap().total_fleet_isk, 12_000_000);
+        assert_eq!(complete_homefront_operation_and_pay(&ctx, &dps2, sal.instance_id).await.unwrap().total_fleet_isk, 7_680_000);
 
         let rift = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_714).unwrap();
-        activate_homefront_acceleration_gate(&ctx, &dps2, rift.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &dps2, rift.instance_id).await.unwrap();
         stabilize_rift_neutralize_arrays(&ctx, &dps2, rift.instance_id, [0.9; 5], 60).unwrap();
-        assert_eq!(complete_homefront_operation_and_pay(&ctx, &dps2, rift.instance_id).await.unwrap().total_fleet_isk, 12_000_000);
+        assert_eq!(complete_homefront_operation_and_pay(&ctx, &dps2, rift.instance_id).await.unwrap().total_fleet_isk, 7_680_000);
 
         let traf = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_705).unwrap();
-        activate_homefront_acceleration_gate(&ctx, &logi, traf.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &logi, traf.instance_id).await.unwrap();
         traffic_stop_scan_and_intercept(&ctx, &logi, traf.instance_id, 6, 1, 6_000.0).unwrap();
-        assert_eq!(complete_homefront_operation_and_pay(&ctx, &logi, traf.instance_id).await.unwrap().total_fleet_isk, 12_000_000);
+        assert_eq!(complete_homefront_operation_and_pay(&ctx, &logi, traf.instance_id).await.unwrap().total_fleet_isk, 7_680_000);
+
+        // Optimal 3-pilot Traffic Stop (n=3 on opt=3) -> full 36,000,000 ISK pool
+        let traf3 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_705).unwrap();
+        for s in [&dps2, &logi, &venture] {
+            enter_hf_gate_at_site(&ctx, s, traf3.instance_id).await.unwrap();
+            record_homefront_combat_and_logistics(&ctx, s, traf3.instance_id, 2_000.0, 0.0).unwrap();
+        }
+        traffic_stop_scan_and_intercept(&ctx, &logi, traf3.instance_id, 6, 0, 2_000.0).unwrap();
+        let traf3_pay = complete_homefront_operation_and_pay(&ctx, &logi, traf3.instance_id).await.unwrap();
+        assert_eq!(traf3_pay.eligible_pilot_count, 3);
+        assert_eq!(traf3_pay.total_fleet_isk, 36_000_000);
     }
 
     #[tokio::test]
@@ -405,12 +477,12 @@ mod multi_role_unit_tests {
                 &[],
             )
             .await;
-            activate_homefront_acceleration_gate(&ctx, &s, raid.instance_id).await.unwrap();
+            enter_hf_gate_at_site(&ctx, &s, raid.instance_id).await.unwrap();
             contributors.push(s);
         }
         // Pilot 13 enters gate but remains idle (zero contribution -> leecher exclusion)
         let leecher = seed_hf_pilot(&ctx, 7299, 920_099, 820_099, 597, sys_id, &[]).await;
-        activate_homefront_acceleration_gate(&ctx, &leecher, raid.instance_id).await.unwrap();
+        enter_hf_gate_at_site(&ctx, &leecher, raid.instance_id).await.unwrap();
 
         for _ in 0..4 {
             raid_tackle_and_destroy_hauler(&ctx, &contributors[1], raid.instance_id, true, 3_000.0).unwrap();
@@ -420,9 +492,16 @@ mod multi_role_unit_tests {
             record_homefront_combat_and_logistics(&ctx, c, raid.instance_id, 1_500.0, 0.0).unwrap();
         }
 
-        let summary = complete_homefront_operation_and_pay(&ctx, &contributors[0], raid.instance_id)
-            .await
-            .expect("settle over-cap Raid");
+        // Concurrent completion calls (TOCTOU guard): only ONE succeeds, zero double-payout.
+        let (res_a, res_b) = tokio::join!(
+            complete_homefront_operation_and_pay(&ctx, &contributors[0], raid.instance_id),
+            complete_homefront_operation_and_pay(&ctx, &contributors[1], raid.instance_id),
+        );
+        let (summary, dup_err) = match (res_a, res_b) {
+            (Ok(s), Err(e)) | (Err(e), Ok(s)) => (s, e),
+            other => panic!("expected exactly one Ok and one Err on concurrent settlement, got {other:?}"),
+        };
+        assert_eq!(dup_err.code, "SiteAlreadyCompleted");
         assert_eq!(summary.optimal_fleet_size, 5);
         assert_eq!(summary.max_payout_pilots, 10);
         assert_eq!(summary.eligible_pilot_count, 10);
@@ -438,5 +517,71 @@ mod multi_role_unit_tests {
             .find(|p| p.character_id == 920_099)
             .unwrap();
         assert!(!leecher_payout.eligible && leecher_payout.isk == 0 && leecher_payout.lp == 0);
+    }
+
+    #[tokio::test]
+    async fn homefront_sqlite_reload_mid_operation_and_isolated_server_contexts() {
+        let sde = super::shared_sde();
+        let sys_id: SolarSystemId = 30_000_142;
+        let tmp_db = std::env::temp_dir().join(format!(
+            "evomu_hf_reload_{}_{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp_db);
+
+        let template_ch = WorldRepository::with_demo_seed()
+            .with_snapshot(|s| s.characters[&90_000_001].clone());
+        let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+        repo1.with_mut_snapshot(|snap| {
+            let mut ch = template_ch.clone();
+            ch.character_id = 90_000_001;
+            snap.characters.insert(90_000_001, ch);
+        });
+        let ctx1 = ServerContext::with_sde_and_repository(sde.clone(), repo1.clone());
+        ctx1.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_000)));
+
+        let tayra = seed_hf_pilot(&ctx1, 7501, 950_001, 850_001, 649, sys_id, &[]).await;
+        let raid = spawn_homefront_site_for_dungeon(&ctx1, sys_id, 10_347).unwrap();
+        enter_hf_gate_at_site(&ctx1, &tayra, raid.instance_id).await.unwrap();
+        for _ in 0..2 {
+            raid_tackle_and_destroy_hauler(&ctx1, &tayra, raid.instance_id, true, 3_000.0).unwrap();
+            raid_deliver_cargo_to_freighter(&ctx1, &tayra, raid.instance_id).unwrap();
+        }
+
+        // Completely separate ServerContext must NOT share any static OnceLock state (HF-01)
+        let isolated_ctx = fresh_homefront_ctx();
+        assert!(
+            get_homefront_runtime_state(&isolated_ctx, raid.instance_id).is_none(),
+            "unrelated ServerContext must not see ctx1 Homefront state"
+        );
+        drop(ctx1);
+        drop(repo1);
+
+        // Reopen SQLite into fresh ServerContext mid-operation and finish remaining 2 deliveries
+        let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+        let ctx2 = ServerContext::with_sde_and_repository(sde, repo2);
+        ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_400_120)));
+
+        let reloaded = get_homefront_runtime_state(&ctx2, raid.instance_id)
+            .expect("SQLite reload must preserve active HomefrontRuntimeRecord");
+        assert!(reloaded.started);
+        assert!(matches!(
+            reloaded.progress,
+            HomefrontArchetypeProgress::Raid { cargo_delivered: 2, required_deliveries: 4, .. }
+        ));
+        for _ in 0..2 {
+            raid_tackle_and_destroy_hauler(&ctx2, &tayra, raid.instance_id, true, 3_000.0).unwrap();
+            raid_deliver_cargo_to_freighter(&ctx2, &tayra, raid.instance_id).unwrap();
+        }
+        let settled = complete_homefront_operation_and_pay(&ctx2, &tayra, raid.instance_id)
+            .await
+            .expect("complete Raid after SQLite reload");
+        // (4/5)^4 * 15,000,000 = 6,144,000
+        assert_eq!(settled.total_fleet_isk, 6_144_000);
+        let _ = std::fs::remove_file(&tmp_db);
     }
 }
