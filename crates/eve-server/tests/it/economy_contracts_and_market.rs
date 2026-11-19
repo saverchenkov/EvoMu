@@ -823,6 +823,8 @@ pub(crate) mod hypernet_raffle_sizing_rng_expiry {
                 ch.name = "D6 Pilot".into();
                 ch.corporation_id = corp_id;
                 ch.solar_system_id = JITA_SYSTEM_ID;
+                ch.station_id = None;
+                ch.structure_id = None;
                 ch.active_ship_id = ship_id;
                 ch.balance = IskCents::from_isk(50_000_000);
                 snap.characters.insert(char_id, ch);

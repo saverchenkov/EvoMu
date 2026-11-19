@@ -1915,13 +1915,19 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     // Threat Detection sites carry their wiki site names (Haven, Sanctum, ...); match the upgrade's site signature.
     assert!(anoms.iter().any(|a| a.anomaly_type == "Combat" && a.anomaly_id.starts_with(&format!("SOV-{hub_a}-{}", UPGRADE_MAJOR_THREAT_DETECTION))));
     assert!(anoms.iter().any(|a| a.anomaly_type == "Ore" && a.name.contains("Prospecting Array")));
+    let upgrade_ball_id_min = 1_940_000_000 + (hub_a.unsigned_abs() as i64 % 100_000) * 100;
+    let hub_upgrade_ball_range = upgrade_ball_id_min..(upgrade_ball_id_min + 1_100);
     let sys_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
     assert!(
-        sys_balls.iter().any(|b| b.type_id == 1_230 || b.type_id == 1_228),
+        sys_balls
+            .iter()
+            .any(|b| hub_upgrade_ball_range.contains(&b.id) && (b.type_id == 1_230 || b.type_id == 1_228)),
         "Ore upgrade anomaly must spawn real mineable asteroid balls in space"
     );
     assert!(
-        sys_balls.iter().any(|b| b.type_id == 37_453),
+        sys_balls
+            .iter()
+            .any(|b| hub_upgrade_ball_range.contains(&b.id) && b.type_id == 37_453),
         "Combat upgrade anomaly must spawn real combat-capable NPC rat balls in space"
     );
 
@@ -1970,9 +1976,14 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     assert!(drain_notif_events(&ctx, PILOT).iter().any(|e| e == "OnSovHubHacked"));
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let hacked_balls = ctx.systems.get_or_spawn(null_sys).list_balls().await.unwrap();
+    let leftover_upgrade_balls: Vec<(i64, u32)> = hacked_balls
+        .iter()
+        .filter(|b| hub_upgrade_ball_range.contains(&b.id))
+        .map(|b| (b.id, b.type_id))
+        .collect();
     assert!(
-        !hacked_balls.iter().any(|b| matches!(b.type_id, 1_230 | 1_228 | 37_453)),
-        "hacking Sov Hub despawns upgrade-spawned asteroid and NPC balls from ballpark"
+        leftover_upgrade_balls.is_empty(),
+        "hacking Sov Hub despawns upgrade-spawned asteroid and NPC balls from ballpark, found {leftover_upgrade_balls:?}"
     );
     assert_eq!(
         rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_020), PyRep::String("Ansiblex".into())])

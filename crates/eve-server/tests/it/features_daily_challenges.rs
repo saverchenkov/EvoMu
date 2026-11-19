@@ -518,7 +518,34 @@ async fn query_journal_missions(
     let PyRep::List(missions) = &tup[0] else {
         panic!("Expected missions list");
     };
-    missions.iter().map(kv_map).collect()
+    missions
+        .iter()
+        .map(|entry| match entry {
+            PyRep::Tuple(t) if t.len() == 10 => {
+                let state_str = match t[0].as_i64() {
+                    Some(1) => "Offered",
+                    Some(2) => "Accepted",
+                    Some(3) => "Failed",
+                    Some(4) => "Completed",
+                    Some(5) => "Declined",
+                    Some(6) => "Quit",
+                    _ => "Unknown",
+                };
+                HashMap::from([
+                    ("missionState".into(), t[0].clone()),
+                    ("state".into(), PyRep::String(state_str.into())),
+                    ("importantMission".into(), t[1].clone()),
+                    ("bmHint".into(), t[2].clone()),
+                    ("title".into(), t[3].clone()),
+                    ("agentID".into(), t[4].clone()),
+                    ("expirationTime".into(), t[5].clone()),
+                    ("bookmarks".into(), t[6].clone()),
+                    ("missionID".into(), t[9].clone()),
+                ])
+            }
+            other => kv_map(other),
+        })
+        .collect()
 }
 
 async fn complete_live_courier(
@@ -796,25 +823,47 @@ async fn test_b36_storyline_offer_counter() {
     sess.character_id = Some(char_id);
     sess.ship_id = Some(ship_id);
 
-    let count_storyline_offers = |missions: &[HashMap<String, PyRep>]| -> Vec<(i64, i64, i64)> {
-        missions
-            .iter()
-            .filter(|m| {
-                m.get("state").and_then(|v| v.as_str()) == Some("Offered")
-                    && m.get("agentID")
-                        .and_then(|v| v.as_i64())
-                        .and_then(|aid| ctx.sde.agents.get(&aid))
-                        .is_some_and(|a| matches!(a.agent_type_id, 6 | 7))
-            })
-            .map(|m| {
-                (
-                    m["agentID"].as_i64().unwrap(),
-                    m["missionID"].as_i64().unwrap(),
-                    m.get("level").and_then(|v| v.as_i64()).unwrap_or(0),
+    async fn count_storyline_offers(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        missions: &[HashMap<String, PyRep>],
+    ) -> Vec<(i64, i64, i64)> {
+        let kw = HashMap::new();
+        let mut offers = Vec::new();
+        for m in missions {
+            if m.get("state").and_then(|v| v.as_str()) != Some("Offered") {
+                continue;
+            }
+            let Some(aid) = m.get("agentID").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            if !ctx
+                .sde
+                .agents
+                .get(&aid)
+                .is_some_and(|a| matches!(a.agent_type_id, 6 | 7))
+            {
+                continue;
+            }
+            let mid = m["missionID"].as_i64().unwrap();
+            let briefing = kv_map(
+                &ctx.dispatch_rpc(
+                    sess,
+                    "agentMgr",
+                    None,
+                    "GetMissionBriefingInfo",
+                    &[PyRep::Integer(aid), PyRep::Integer(mid)],
+                    &kw,
+                    None,
                 )
-            })
-            .collect()
-    };
+                .await
+                .expect("GetMissionBriefingInfo for storyline offer"),
+            );
+            let lvl = briefing.get("level").and_then(|v| v.as_i64()).unwrap_or(0);
+            offers.push((aid, mid, lvl));
+        }
+        offers
+    }
 
     // Negative RPC check: completing an unaccepted mission is refused
     assert!(ctx
@@ -827,7 +876,8 @@ async fn test_b36_storyline_offer_counter() {
     for _ in 0..16 {
         complete_live_courier(&ctx, &mut sess, char_id, ship_id, &interbus_agent).await;
     }
-    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(count_storyline_offers(&ctx, &mut sess, &j).await.is_empty());
 
     // 2. Real SDE FW militia agent (3019210, corp 1000182 Tribal Liberation Force): 16 live completions -> 0 storyline offers
     let fw_agent = ctx.sde.agents[&3_019_210].clone();
@@ -845,7 +895,8 @@ async fn test_b36_storyline_offer_counter() {
     for _ in 0..16 {
         complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, &fw_agent).await;
     }
-    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(count_storyline_offers(&ctx, &mut sess, &j).await.is_empty());
 
     // 2b. Tutorial (3), Data Center (5), COSMOS (8), and Career (12) agents:
     // 16 live completions across non-qualifying agent types -> 0 storyline offers and 0 tally!
@@ -945,7 +996,8 @@ async fn test_b36_storyline_offer_counter() {
             });
         }
     }
-    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(count_storyline_offers(&ctx, &mut sess, &j).await.is_empty());
     assert_eq!(ctx.db.with_snapshot(|s| s.mission_tally.get(&char_id).copied().unwrap_or(0)), 0);
 
     // 3. Separate (faction, level) counters: 15 L3 + 1 L1 Caldari high-sec missions -> 0 offers; 16th L3 -> triggers L3 Storyline!
@@ -955,10 +1007,12 @@ async fn test_b36_storyline_offer_counter() {
         complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
     }
     complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l1).await;
-    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(count_storyline_offers(&ctx, &mut sess, &j).await.is_empty());
 
     complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
-    let sl_offers_1 = count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await);
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    let sl_offers_1 = count_storyline_offers(&ctx, &mut sess, &j).await;
     assert_eq!(sl_offers_1.len(), 1);
     let (first_sl_aid, first_sl_mid, first_sl_lvl) = sl_offers_1[0];
     assert_eq!(first_sl_lvl, 3);
@@ -1023,7 +1077,8 @@ async fn test_b36_storyline_offer_counter() {
     for _ in 0..16 {
         complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
     }
-    let sl_offers_2 = count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await);
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    let sl_offers_2 = count_storyline_offers(&ctx, &mut sess, &j).await;
     assert_eq!(sl_offers_2.len(), 2);
     let second_sl_aid = sl_offers_2
         .iter()
@@ -1113,9 +1168,11 @@ async fn test_b36_storyline_offer_counter() {
     for _ in 0..12 {
         complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l1).await;
     }
-    assert!(!count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).iter().any(|&(_, _, lvl)| lvl == 1));
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(!count_storyline_offers(&ctx, &mut sess, &j).await.iter().any(|&(_, _, lvl)| lvl == 1));
     complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l1).await;
-    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).iter().any(|&(_, _, lvl)| lvl == 1));
+    let j = query_journal_missions(&ctx, &mut sess).await;
+    assert!(count_storyline_offers(&ctx, &mut sess, &j).await.iter().any(|&(_, _, lvl)| lvl == 1));
 }
 
 }

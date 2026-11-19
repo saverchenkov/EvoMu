@@ -94,6 +94,15 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .await
     .unwrap();
     ctx.dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(100_000_003), PyRep::Integer(100_000_001), PyRep::Integer(19)], &empty, None).await.unwrap();
+    ctx.dispatch_rpc(&mut session, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(100_000_001), PyRep::Real(1.0)], &empty, None).await.unwrap();
+
+    // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp to Stargate 50001249, Jump to Perimeter (30000144), & Travel to Low-Sec Tama (30002813)
+    let undock = ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None).await.unwrap();
+    let PyRep::KeyVal(ukv) = undock else {
+        panic!("Expected KeyVal");
+    };
+    let mut cur_b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_001).or_default().insert(
             28_164,
@@ -105,15 +114,6 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         );
     });
     ctx.dispatch_rpc(&mut session, "dogmaIM", None, "Overload", &[PyRep::Integer(100_000_003)], &empty, None).await.unwrap();
-    ctx.dispatch_rpc(&mut session, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(100_000_001), PyRep::Real(1.0)], &empty, None).await.unwrap();
-
-    // E2E-04 & E2E-05: Undock, Sub-Warp Flight, Intra-System Warp to Stargate 50001249, Jump to Perimeter (30000144), & Travel to Low-Sec Tama (30002813)
-    let undock = ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &empty, None).await.unwrap();
-    let PyRep::KeyVal(ukv) = undock else {
-        panic!("Expected KeyVal");
-    };
-    let mut cur_b_id = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
-    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
 
     // Travel Jita (30000142) -> Perimeter (30000144) -> Niyabainen (30000143) -> Tunttaras (30001379) -> Nourvukaiken (30001376) -> Tama (30002813)
     for (from_sys, gate_id, expected_to_sys) in [
