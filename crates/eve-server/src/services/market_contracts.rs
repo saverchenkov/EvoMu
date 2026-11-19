@@ -1750,9 +1750,23 @@ pub fn handle(
                 Ok(None) => match rpc.req_positive_i64(0, "containerID") { Ok(v) => v, Err(e) => return Some(Err(e)) },
                 Err(e) => return Some(Err(e)),
             };
+            let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
-                let Some(items) = inspect_contract_container_items(ctx, snap, session, char_id, container_id, now_unix)? else {
+                let Some(items) = inspect_contract_container_items(
+                    ctx,
+                    snap,
+                    session,
+                    char_id,
+                    container_id,
+                    location_hint,
+                    for_corp,
+                    req_flag_num,
+                    now_unix,
+                )? else {
                     return Ok(Vec::new());
                 };
                 Ok(items
@@ -1788,7 +1802,7 @@ pub fn handle(
         }
         ("contractProxy", "GetNumItemsInContainers") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
+            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()).or_else(|| _kwargs.get("containerIDs")) {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|v| v.as_i64()).collect(),
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
@@ -1796,11 +1810,25 @@ pub fn handle(
             if cids.is_empty() || cids.iter().any(|&cid| cid <= 0) {
                 return Some(Err(rpc_err("InvalidContainer", "containerID must be positive")));
             }
+            let (location_hint, for_corp, req_flag_num) = match parse_contract_container_query_opts(args, _kwargs) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let now_unix = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
                 let mut pairs = Vec::with_capacity(cids.len());
                 for cid in cids {
-                    if let Some(items) = inspect_contract_container_items(ctx, snap, session, char_id, cid, now_unix)? {
+                    if let Some(items) = inspect_contract_container_items(
+                        ctx,
+                        snap,
+                        session,
+                        char_id,
+                        cid,
+                        location_hint,
+                        for_corp,
+                        req_flag_num,
+                        now_unix,
+                    )? {
                         pairs.push((PyRep::Integer(cid), PyRep::Integer(items.len() as i64)));
                     }
                 }
@@ -1813,7 +1841,29 @@ pub fn handle(
     }
 }
 
-/// Verifies whether `char_id` holds query access to corporate items with `flag`.
+/// Extracts `(location_hint, for_corp, flag_num)` for `contractProxy` container queries.
+fn parse_contract_container_query_opts(
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<(Option<i64>, bool, Option<i64>), BridgeRpcError> {
+    let rpc = RpcArgs::new(args, kwargs);
+    let for_corp = rpc.opt_boolish(2, "forCorp")?.unwrap_or(false);
+    let flag_num = rpc.opt_i64(3, "flag")?;
+    let location_hint = if args.get(1).is_some() {
+        args.first().and_then(PyRep::as_i64).filter(|&v| v > 0)
+    } else if kwargs.contains_key("containerID") || kwargs.contains_key("containerIDs") {
+        rpc.opt_positive_i64(0, "locationID")?
+    } else {
+        None
+    };
+    Ok((location_hint, for_corp, flag_num))
+}
+
+fn is_npc_corp_id(ctx: &ServerContext, corp_id: i64) -> bool {
+    (1_000_000..2_000_000).contains(&corp_id) || ctx.sde.npc_corporations.contains_key(&corp_id)
+}
+
+/// Verifies whether `char_id` holds query access to corporate items with `flag_num`.
 fn check_corp_container_query_access(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -1821,13 +1871,10 @@ fn check_corp_container_query_access(
     corp_id: i64,
     char_id: i64,
     location_id: Option<i64>,
-    flag: InventoryFlag,
+    flag_num: i64,
     now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
-    if corp_id <= 0
-        || (1_000_000..2_000_000).contains(&corp_id)
-        || ctx.sde.npc_corporations.contains_key(&corp_id)
-    {
+    if corp_id <= 0 || is_npc_corp_id(ctx, corp_id) {
         return Err(rpc_err(
             "CorpRoleDenied",
             "Cannot query corporate contract containers for an NPC corporation",
@@ -1839,13 +1886,12 @@ fn check_corp_container_query_access(
     let resolved_loc = location_id.map(|loc| snap.items.get(&loc).map_or(loc, |parent| parent.location_id));
     let (is_ceo, eff_roles) =
         snap.effective_corp_roles_at(corp_id, char_id, resolved_loc, session.corp_role, now_unix);
-    let flag_num = flag as i64;
     let allowed = if is_ceo || eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DIRECTOR) {
         true
     } else if (116..=122).contains(&flag_num) {
         let div_idx = (flag_num - 116) as usize;
         eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[div_idx])
-    } else if matches!(flag, InventoryFlag::CorpDeliveries | InventoryFlag::Deliveries) {
+    } else if flag_num == InventoryFlag::CorpDeliveries as i64 || flag_num == InventoryFlag::Deliveries as i64 {
         eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY)
     } else {
         eve_db::corp_roles::has_role(eff_roles, eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY)
@@ -1862,19 +1908,38 @@ fn check_corp_container_query_access(
     Ok(())
 }
 
-/// Resolves authorized contract container contents, returning `Ok(None)` for foreign containers.
+/// Resolves authorized contract container contents, returning `Ok(None)` for unowned/unpopulated containers when `for_corp` is false.
+#[allow(clippy::too_many_arguments)]
 fn inspect_contract_container_items<'a>(
     ctx: &ServerContext,
     snap: &'a eve_db::WorldStateSnapshot,
     session: &SessionState,
     char_id: i64,
     container_id: i64,
+    location_hint: Option<i64>,
+    for_corp: bool,
+    req_flag_num: Option<i64>,
     now_unix: u64,
 ) -> Result<Option<Vec<&'a InventoryItemRecord>>, BridgeRpcError> {
     let caller_corp = session
         .corporation_id
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id))
         .filter(|&id| id > 0);
+    if for_corp {
+        let corp_id = caller_corp.ok_or_else(|| {
+            rpc_err("CorpRoleDenied", "Cannot query corporate containers without a corporation")
+        })?;
+        check_corp_container_query_access(
+            ctx,
+            snap,
+            session,
+            corp_id,
+            char_id,
+            location_hint,
+            req_flag_num.unwrap_or(InventoryFlag::None as i64),
+            now_unix,
+        )?;
+    }
     if let Some(cont) = snap.items.get(&container_id) {
         if cont.owner_id == char_id {
             let items = snap
@@ -1892,7 +1957,7 @@ fn inspect_contract_container_items<'a>(
                                         cid,
                                         char_id,
                                         Some(i.location_id),
-                                        i.flag,
+                                        i.flag as i64,
                                         now_unix,
                                     )
                                     .is_ok()
@@ -1909,7 +1974,7 @@ fn inspect_contract_container_items<'a>(
                 cont.owner_id,
                 char_id,
                 Some(cont.location_id),
-                cont.flag,
+                cont.flag as i64,
                 now_unix,
             )?;
             let items = snap
@@ -1933,10 +1998,19 @@ fn inspect_contract_container_items<'a>(
         .filter(|i| i.location_id == container_id && caller_corp.is_some_and(|cid| i.owner_id == cid))
         .collect();
     if personal_items.is_empty() && corp_items.is_empty() {
-        return Err(rpc_err(
-            "ContainerNotFound",
-            format!("Container {container_id} not found"),
-        ));
+        if is_npc_corp_id(ctx, container_id) || snap.corporations.contains_key(&container_id) {
+            return Err(rpc_err(
+                "CorpRoleDenied",
+                "Cannot query corporate container contents without corporation ownership and query role",
+            ));
+        }
+        if snap.characters.contains_key(&container_id) && container_id != char_id {
+            return Err(rpc_err(
+                "AccessDenied",
+                "Cannot query containers belonging to another character",
+            ));
+        }
+        return Ok(None);
     }
     let mut visible = personal_items;
     if !corp_items.is_empty() {
@@ -1949,7 +2023,7 @@ fn inspect_contract_container_items<'a>(
                 item.owner_id,
                 char_id,
                 Some(item.location_id),
-                item.flag,
+                item.flag as i64,
                 now_unix,
             ) {
                 Ok(()) => visible.push(item),

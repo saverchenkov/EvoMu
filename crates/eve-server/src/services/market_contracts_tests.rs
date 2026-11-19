@@ -473,6 +473,11 @@ fn startup_check_and_contract_container_rbac() {
         corp.member_roles
             .insert(q2_id, eve_db::corp_roles::ROLE_HANGAR_CAN_QUERY[1]);
         s.corporations.insert(corp_id, corp);
+        let mut q1_char = eve_db::CharacterRecord::default();
+        q1_char.character_id = q1_id;
+        q1_char.name = "QueryOne".into();
+        q1_char.corporation_id = corp_id;
+        s.characters.insert(q1_id, q1_char);
 
         s.items.insert(
             corp_cont_id,
@@ -519,20 +524,87 @@ fn startup_check_and_contract_container_rbac() {
     let mut sess_q1 = jita_session(q1_id, corp_id);
     let mut sess_npc = jita_session(plain_id, npc_corp_id);
 
-    // Missing container fails closed on both RPCs.
+    // Non-corp unpopulated sentinel/contract probe (client_contract_ratchet) returns empty shape.
     assert_eq!(
-        handle(&ctx, &mut sess_plain, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(99_888_777)], &kw)
-            .unwrap()
-            .unwrap_err()
-            .code,
-        "ContainerNotFound"
+        handle(
+            &ctx,
+            &mut sess_plain,
+            "contractProxy",
+            "GetItemsInContainer",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(1), PyRep::Bool(false), PyRep::Integer(4)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::List(vec![])
     );
     assert_eq!(
-        handle(&ctx, &mut sess_plain, "contractProxy", "GetNumItemsInContainers", &[PyRep::Integer(99_888_777)], &kw)
+        handle(
+            &ctx,
+            &mut sess_plain,
+            "contractProxy",
+            "GetNumItemsInContainers",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(1), PyRep::Bool(false), PyRep::Integer(4)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Dict(vec![])
+    );
+
+    // forCorp=true enforces division query role & non-NPC corp even on unpopulated container IDs.
+    let sag2 = InventoryFlag::CorpSAG2 as i64;
+    for s in [&mut sess_plain, &mut sess_q1, &mut sess_npc] {
+        assert_eq!(
+            handle(
+                &ctx,
+                s,
+                "contractProxy",
+                "GetItemsInContainer",
+                &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(99_888_777), PyRep::Bool(true), PyRep::Integer(sag2)],
+                &kw,
+            )
             .unwrap()
             .unwrap_err()
             .code,
-        "ContainerNotFound"
+            "CorpRoleDenied"
+        );
+    }
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess_q2,
+            "contractProxy",
+            "GetItemsInContainer",
+            &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(99_888_777), PyRep::Bool(true), PyRep::Integer(sag2)],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::List(vec![])
+    );
+
+    // Foreign character / corp / NPC corp IDs passed directly as containerID fail closed.
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(corp_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetNumItemsInContainers", &[PyRep::Integer(npc_corp_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess_plain, "contractProxy", "GetItemsInContainer", &[PyRep::Integer(q1_id)], &kw)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "AccessDenied"
     );
 
     // Roleless member & wrong-division member are denied CorpRoleDenied.
