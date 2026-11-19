@@ -1194,6 +1194,15 @@ fn session_owns_char_notifications(ctx: &ServerContext, session: &SessionState) 
     }
 }
 
+fn session_owns_charsel_transition(ctx: &ServerContext, session: &SessionState) -> bool {
+    session_owns_char_notifications(ctx, session)
+        && session.user_id.is_some_and(|uid| {
+            ctx.db
+                .get_online_session(uid)
+                .is_some_and(|os| os.session_id == session.session_id && os.character_id.is_none())
+        })
+}
+
 /// Executes a single `CallReq` through the exact production socket-loop path:
 /// `ctx.dispatch_rpc(..., Some("machoNet:26000"))`, session sync + `SessionChangeNotification` enrichment,
 /// `TickBroadcast`/direct `DoDestinyUpdate` synchronization, notification suppression & SDE normalization,
@@ -1988,23 +1997,23 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
             return Ok(());
         }
     }
-    // Guard against a late/stale SafeLogoff signal firing after a new character was already selected.
-    if let Some(uid) = session.user_id {
-        if let Some(os) = ctx.db.get_online_session(uid) {
-            if os.session_id == session.session_id && os.character_id.is_some() {
-                return Ok(());
-            }
-        }
+    // Guard against a late/stale SafeLogoffCharsel signal firing after a new character was
+    // already selected or after another session acquired or revoked the account's online lock.
+    if !session_owns_charsel_transition(ctx, session) {
+        return Ok(());
     }
 
-    let pending_notifs: Vec<_> = ctx
-        .drain_notifications_for_char(cid)
-        .into_iter()
-        .filter(|notif| notif.event != "OnSessionChanged")
-        .filter_map(|notif| {
-            build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args)
-        })
-        .collect();
+    let pending_notifs: Vec<_> = if session_owns_charsel_transition(ctx, session) {
+        ctx.drain_notifications_for_char(cid)
+            .into_iter()
+            .filter(|notif| notif.event != "OnSessionChanged")
+            .filter_map(|notif| {
+                build_typed_notification(ctx, notif.event, Some(&notif.id_type), notif.args)
+            })
+            .collect()
+    } else {
+        return Ok(());
+    };
     if !pending_notifs.is_empty() {
         emit_typed_notifications(
             ctx,
@@ -2015,6 +2024,9 @@ async fn handle_safe_logoff_to_charsel<W: AsyncWriteExt + Unpin>(
             pending_notifs,
         )
         .await?;
+    }
+    if !session_owns_charsel_transition(ctx, session) {
+        return Ok(());
     }
     ctx.clear_notifications_for_char(cid);
     let _ = session.drain_notifications();
@@ -2059,10 +2071,20 @@ async fn handle_session_closer_event<W: AsyncWriteExt + Unpin>(
     reason_code: String,
     reason: String,
 ) -> Result<bool> {
-    if reason_code == "SafeLogoff" {
+    if reason_code == "SafeLogoffCharsel" {
         handle_safe_logoff_to_charsel(ctx, session, wire, writer, &reason).await?;
         Ok(true)
     } else {
+        if reason_code == "SafeLogoff" {
+            let owned_by_other = session.user_id.is_some_and(|uid| {
+                ctx.db
+                    .get_online_session(uid)
+                    .is_some_and(|os| os.session_id != session.session_id)
+            });
+            if owned_by_other {
+                session.character_id = None;
+            }
+        }
         let closed = GPSTransportClosed::new(reason, reason_code);
         let _ = write_framed_pyrep(writer, &closed.to_pyrep()).await;
         Ok(false)
@@ -2653,15 +2675,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         {
                             break;
                         }
-                        let safe_logoff_charsel_pending = sent_safe_logoff
-                            && session.user_id.is_some_and(|uid| {
-                                matches!(
-                                    ctx.db.get_online_session(uid),
-                                    Some(os)
-                                        if os.session_id == session_id
-                                            && os.character_id.is_none()
-                                )
-                            });
+                        let safe_logoff_charsel_pending =
+                            sent_safe_logoff && session_owns_charsel_transition(&ctx, &session);
                         if safe_logoff_charsel_pending {
                             let mut safe_wire = SafeLogoffWireContext {
                                 client_id,
