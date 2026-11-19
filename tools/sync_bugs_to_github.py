@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import json
 import os
@@ -34,10 +35,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # GitHub enforces a hard 65,536-character maximum on issue and comment bodies.
 MAX_GITHUB_BODY_CHARS = 62_000
+_FNV1A_OFFSET = 0xCBF29CE484222325
+_FNV1A_PRIME = 0x100000001B3
 
 
 LABEL_SPECS: Dict[str, Tuple[str, str]] = {
     "bug": ("d73a4a", "Something isn't working"),
+    "environment": ("fbca04", "Client/server environment or configuration fault"),
     "client-crash": ("b60205", "Unhandled Python exception reported by EVE client"),
     "auto-reported": ("0e8a16", "Captured automatically via EvoMu in-band telemetry"),
     "player-reported": ("1d76db", "Submitted in-game via F12 Report a Bug"),
@@ -53,12 +57,113 @@ _TRANSPORT_WRAPPER_FILES = {
     "__init__.py",
 }
 
+_CLIENT_FRAME_WRAPPER_FILES = _TRANSPORT_WRAPPER_FILES | {
+    "evomu_site.py",
+    "evomu_playtester_hook.py",
+    "logmodule.py",
+    "log.py",
+    "bluepyimpl.py",
+}
+
+_SERVER_REQUEST_COUNT_KEYS = (
+    "server_requests",
+    "server_request_count",
+    "session_requests",
+    "session_request_count",
+    "requests_reached_server",
+    "server_requests_count",
+    "macho_requests",
+    "macho_request_count",
+)
+
+_GATEWAY_REQUEST_COUNT_KEYS = (
+    "gateway_requests",
+    "gateway_request_count",
+    "quasar_requests",
+    "quasar_request_count",
+    "public_gateway_requests",
+    "public_gateway_request_count",
+)
+
+_CLIENT_BUILD_KEYS = (
+    "client_build",
+    "boot_build",
+    "handshake_client_build",
+    "client_boot_build",
+)
+
+_SERVER_BUILD_KEYS = (
+    "server_build",
+    "expected_build",
+    "expected_client_build",
+    "server_boot_build",
+    "handshake_server_build",
+)
+
+_NOISE_LINE_PREFIXES = (
+    "EXCEPTION END",
+    "Reported from:",
+    "Stackhash:",
+    "Thread Locals:",
+    "Common path prefix",
+    "CALLSTACK:",
+    "Thrown at:",
+    "Traced at:",
+    "Caught at:",
+    "Formatted exception info:",
+)
+
+_FILE_LINE_RE = re.compile(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+([^\s)]+))?')
+_EVE_PRE_FRAME_RE = re.compile(r"^(?:<pre>)?([^\s(]+\.py[a-z]*)\((\d+)\)\s*([^\s]+)?")
+
+
+def _fnv1a_i64(signature: str) -> int:
+    """Computes a deterministic signed 64-bit FNV-1a hash matching Rust `i64` storage."""
+    h = _FNV1A_OFFSET
+    for b in signature.encode("utf-8", errors="replace"):
+        h ^= b
+        h = (h * _FNV1A_PRIME) & 0xFFFFFFFFFFFFFFFF
+    if h >= (1 << 63):
+        h -= 1 << 64
+    return h
+
+
+def _get_bundle_trace(bundle: Dict[str, Any]) -> str:
+    return str(bundle.get("trace") or bundle.get("traceback") or "")
+
+
+def _parse_logtraceback_args(line: str) -> str:
+    m = re.match(r"^log\.LogTraceback\s+args=(\(.*\))", line)
+    if not m:
+        return ""
+    raw_tuple = m.group(1)
+    # Trim trailing kwargs={} if present after closing paren.
+    kw_idx = raw_tuple.rfind("kwargs=")
+    if kw_idx != -1:
+        raw_tuple = raw_tuple[:kw_idx].strip()
+    try:
+        parsed = ast.literal_eval(raw_tuple)
+        if isinstance(parsed, tuple):
+            return " ".join(str(x) for x in parsed if x is not None).strip()
+        return str(parsed).strip()
+    except Exception:
+        return raw_tuple.strip("()'\" ,")
+
+
+def _pick_leaf_frame(frames: List[Tuple[str, str, Optional[str]]]) -> Tuple[str, str, Optional[str]]:
+    chosen = frames[-1]
+    for cand in reversed(frames):
+        if cand[0].lower() not in _CLIENT_FRAME_WRAPPER_FILES:
+            chosen = cand
+            break
+    return chosen
+
 
 def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
     """
-    Extracts (exception_class, error_msg, location) from either a standard Python traceback
-    or an EVE `alert.SendClientStackTraceAlert` formatted exception block (`Formatted exception info:`,
-    `Thrown at:`, `<pre>/path/file.py(123) func`, `EXCEPTION END`).
+    Extracts (exception_class, error_msg, location) from a Python traceback,
+    playtester log capture (`logmodule.LogException` / `log.LogTraceback`), or EVE
+    `alert.SendClientStackTraceAlert` formatted exception block.
     """
     lines = [line.strip() for line in trace.strip().splitlines() if line.strip()]
     if not lines:
@@ -66,27 +171,62 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
 
     exc_class = ""
     msg = ""
-    for line in lines:
+    for idx, line in enumerate(lines):
         if line.startswith("Formatted exception info:"):
             rest = line[len("Formatted exception info:") :].strip()
+            if not rest and idx + 1 < len(lines):
+                next_line = lines[idx + 1]
+                if not any(next_line.startswith(p) for p in _NOISE_LINE_PREFIXES):
+                    rest = next_line
             if ":" in rest:
                 exc_class, msg = rest.split(":", 1)
                 exc_class, msg = exc_class.strip(), msg.strip()
-            else:
+            elif rest:
                 exc_class = rest
             break
 
     if not exc_class:
-        trailing_noise_prefixes = (
-            "EXCEPTION END",
-            "Reported from:",
-            "Stackhash:",
-            "Thread Locals:",
-            "Common path prefix",
-        )
-        candidate_lines = [
-            l for l in lines if not any(l.startswith(p) for p in trailing_noise_prefixes)
-        ]
+        stacktrace_msg = ""
+        logtraceback_msg = ""
+        for line in lines:
+            m_st = re.match(r"^STACKTRACE\s+#\d+(?:.*?\s:\s*|[^:]*:\s*)(.+)$", line)
+            if m_st and not stacktrace_msg:
+                stacktrace_msg = m_st.group(1).strip()
+            if line.startswith("log.LogTraceback args=") and not logtraceback_msg:
+                logtraceback_msg = _parse_logtraceback_args(line)
+
+        if logtraceback_msg:
+            exc_class, msg = "LogTraceback", logtraceback_msg
+        elif stacktrace_msg:
+            exc_class, msg = "LogTraceback", stacktrace_msg
+
+    if not exc_class:
+        candidate_lines: List[str] = []
+        skip_next_code_line = False
+        for line in lines:
+            if _FILE_LINE_RE.search(line):
+                skip_next_code_line = True
+                continue
+            if _EVE_PRE_FRAME_RE.match(line):
+                skip_next_code_line = False
+                continue
+            if any(line.startswith(p) for p in _NOISE_LINE_PREFIXES) or line in ("None", "{", "}"):
+                skip_next_code_line = False
+                continue
+            if line.startswith("Traceback (most recent call last):") or line.startswith("logmodule.LogException Traceback"):
+                skip_next_code_line = False
+                continue
+            if line.startswith(("EXCEPTION #", "STACKTRACE #")):
+                skip_next_code_line = False
+                continue
+            if skip_next_code_line and ":" not in line and not re.match(
+                r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interrupt|Warning)\b", line
+            ):
+                skip_next_code_line = False
+                continue
+            skip_next_code_line = False
+            candidate_lines.append(line)
+
         last_line = candidate_lines[-1] if candidate_lines else lines[-1]
         if ":" in last_line:
             exc_class, msg = last_line.split(":", 1)
@@ -100,46 +240,276 @@ def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
         clean_stack_key = ""
     location = clean_stack_key or "unknown"
 
-    # Prefer frames under EVE's `Thrown at:` section when present.
+    # Collect EVE `<pre>/path/file.py(123) fn` or `Traced at:` frames cleanly.
     thrown_idx = next((i for i, l in enumerate(lines) if l.startswith("Thrown at:")), None)
-    search_lines = lines[thrown_idx + 1 :] if thrown_idx is not None else lines
+    traced_idx = next((i for i, l in enumerate(lines) if l.startswith("Traced at:")), None)
+    search_start = thrown_idx + 1 if thrown_idx is not None else (traced_idx + 1 if traced_idx is not None else 0)
+    search_lines = lines[search_start:]
 
     pre_frames: List[Tuple[str, str, Optional[str]]] = []
     for line in search_lines:
         if line.startswith(("Formatted exception info:", "Common path prefix", "EXCEPTION END")):
             break
-        m_pre = re.match(r"^<pre>([^\s(]+)\((\d+)\)\s*(\w+)?", line)
+        if line.startswith("Traced at:") and pre_frames:
+            break
+        m_pre = _EVE_PRE_FRAME_RE.match(line)
         if m_pre:
             filepath = os.path.basename(m_pre.group(1).replace("\\", "/"))
             pre_frames.append((filepath, m_pre.group(2), m_pre.group(3)))
 
     if pre_frames:
-        chosen = pre_frames[-1]
-        for cand in reversed(pre_frames):
-            if cand[0].lower() not in _TRANSPORT_WRAPPER_FILES:
-                chosen = cand
-                break
-        filepath, lineno, fn = chosen
+        filepath, lineno, fn = _pick_leaf_frame(pre_frames)
         location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
         return exc_class, msg, location
 
-    for line in reversed(lines[:-1]):
-        m = re.search(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+(\w+))?', line)
+    py_frames: List[Tuple[str, str, Optional[str]]] = []
+    for line in lines:
+        m = _FILE_LINE_RE.search(line)
         if m:
             filepath = os.path.basename(m.group(1).replace("\\", "/"))
-            lineno = m.group(2)
-            fn = m.group(3)
-            location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
-            break
+            py_frames.append((filepath, m.group(2), m.group(3)))
+
+    if py_frames:
+        filepath, lineno, fn = _pick_leaf_frame(py_frames)
+        location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
 
     return exc_class, msg, location
+
+
+def _iter_bundle_scopes(bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+    scopes: List[Dict[str, Any]] = [bundle]
+    for key in ("handshake", "session", "diagnostics", "telemetry", "manual_report"):
+        sub = bundle.get(key)
+        if isinstance(sub, dict):
+            scopes.append(sub)
+    return scopes
+
+
+def _coerce_request_count(val: Any) -> Optional[int]:
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str) and val.strip().isdigit():
+        return int(val.strip())
+    if isinstance(val, list):
+        return len(val)
+    return None
+
+
+def _first_present_count(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[int]:
+    for scope in scopes:
+        for key in keys:
+            if key in scope and scope[key] is not None:
+                count = _coerce_request_count(scope[key])
+                if count is not None:
+                    return count
+    return None
+
+
+def _first_present_scalar(scopes: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[str]:
+    for scope in scopes:
+        for key in keys:
+            val = scope.get(key)
+            if val is not None and not isinstance(val, bool):
+                s = str(val).strip()
+                if s:
+                    return s
+    return None
+
+
+def _extract_session_request_counts(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspects session request counts reaching the server and public gateway."""
+    scopes = _iter_bundle_scopes(bundle)
+    explicit_server = _first_present_count(scopes, _SERVER_REQUEST_COUNT_KEYS)
+    explicit_gateway = _first_present_count(scopes, _GATEWAY_REQUEST_COUNT_KEYS)
+
+    flight_recorder = bundle.get("flight_recorder") or []
+    logs_before = bundle.get("server_logs_before") or []
+    logs_after = bundle.get("server_logs_after") or []
+    all_logs = [str(ln) for ln in logs_before] + [str(ln) for ln in logs_after]
+
+    observed_server = len(flight_recorder) + len(all_logs)
+    observed_gateway = sum(
+        1
+        for call in flight_recorder
+        if isinstance(call, dict)
+        and (
+            "quasar" in str(call.get("service", "")).lower()
+            or "gateway" in str(call.get("service", "")).lower()
+            or "quasar" in str(call.get("method", "")).lower()
+        )
+    ) + sum(
+        1
+        for ln in all_logs
+        if re.search(r"eve_server::quasar_grpc|quasar_grpc::|/eve_public\.|gateway\.Requests", ln)
+        and "descriptor manifest" not in ln.lower()
+    )
+
+    server_requests = explicit_server if explicit_server is not None else observed_server
+    gateway_requests = explicit_gateway if explicit_gateway is not None else observed_gateway
+    return {
+        "server_requests": server_requests,
+        "gateway_requests": gateway_requests,
+        "server_requests_explicit": explicit_server is not None,
+        "gateway_requests_explicit": explicit_gateway is not None,
+    }
+
+
+def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Inspects client and server build numbers reported in handshake/session metadata or logs."""
+    scopes = _iter_bundle_scopes(bundle)
+    client_build = _first_present_scalar(scopes, _CLIENT_BUILD_KEYS)
+    server_build = _first_present_scalar(scopes, _SERVER_BUILD_KEYS)
+
+    explicit_mismatch = any(scope.get("build_mismatch") is True for scope in scopes)
+
+    logs_and_trace = (
+        [str(ln) for ln in (bundle.get("server_logs_before") or [])]
+        + [str(ln) for ln in (bundle.get("server_logs_after") or [])]
+        + [_get_bundle_trace(bundle)]
+    )
+    for text in logs_and_trace:
+        if not text:
+            continue
+        m_boot = re.search(r"Boot Build is (\d+)\s+but should be(?:\s+at least)?\s+(\d+)", text, re.IGNORECASE)
+        if m_boot:
+            client_build = client_build or m_boot.group(1)
+            server_build = server_build or m_boot.group(2)
+            explicit_mismatch = True
+        m_kv = re.search(
+            r"client_build\s*[=:]\s*([^\s,;]+).*?(?:server_build|expected_build)\s*[=:]\s*([^\s,;]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m_kv:
+            client_build = client_build or m_kv.group(1)
+            server_build = server_build or m_kv.group(2)
+        if re.search(r"Boot Build Mismatch|Handshake Failed.*Build Mismatch", text, re.IGNORECASE):
+            explicit_mismatch = True
+
+    norm_client = client_build.strip() if client_build else None
+    norm_server = server_build.strip() if server_build else None
+    mismatch = explicit_mismatch or (
+        norm_client is not None and norm_server is not None and norm_client != norm_server
+    )
+    return {
+        "client_build": norm_client,
+        "server_build": norm_server,
+        "mismatch": mismatch,
+    }
+
+
+def _is_gateway_failure_bundle(bundle: Dict[str, Any]) -> bool:
+    """Detects client failures talking to the public gateway / Quasar RPC layer."""
+    trace = _get_bundle_trace(bundle)
+    stack_key = str(bundle.get("stack_key") or "")
+    manual = bundle.get("manual_report") if isinstance(bundle.get("manual_report"), dict) else {}
+    manual_text = " ".join(
+        str(manual.get(k) or "") for k in ("title", "description")
+    )
+    combined = "\n".join(part for part in (trace, stack_key, manual_text) if part)
+    if not combined:
+        return False
+
+    if re.search(r"ServerException\b|GenericInternalServerError\b|CampaignRequestError\b", combined):
+        return True
+    if "Could not fetch owned ship cosmetic licenses" in combined:
+        return True
+    if "invalid character on request" in combined and ("dispatched" in combined or "quasar" in combined.lower()):
+        return True
+    if "Request timed out" in combined and re.search(r"InternalServerError|request_messenger|quasar|gateway|PLEX", combined, re.IGNORECASE):
+        return True
+    if re.search(r"(?:quasar|request_messenger)\.py|eve_public\.gateway", combined, re.IGNORECASE) and re.search(
+        r"Error|Exception|Timeout", combined
+    ):
+        return True
+    return False
 
 
 def is_manual_report(bundle: Dict[str, Any]) -> bool:
     return bundle.get("report_source") == "f12_manual" or isinstance(bundle.get("manual_report"), dict)
 
 
+def _is_client_python_manual(bundle: Dict[str, Any]) -> bool:
+    if not is_manual_report(bundle):
+        return False
+    manual = bundle.get("manual_report") or {}
+    cat = str(manual.get("category_id") or "").strip().lower()
+    subsys = str(bundle.get("subsystem") or "").strip().lower()
+    stack_key = str(bundle.get("stack_key") or "").strip().lower()
+    return cat == "client-python" or subsys == "client-python" or stack_key.startswith("playtester:client-python:")
+
+
+def _is_client_python_exception_bundle(bundle: Dict[str, Any]) -> bool:
+    trace = _get_bundle_trace(bundle).strip()
+    if not trace:
+        return False
+    if not is_manual_report(bundle):
+        return True
+    return _is_client_python_manual(bundle)
+
+
+def _normalize_exception_message(msg: str) -> str:
+    collapsed = " ".join(msg.split())
+    return re.sub(r"0x[0-9a-fA-F]+", "0xADDR", collapsed)
+
+
+def classify_environment_fault(bundle: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    """
+    Classifies environment/configuration faults that should collapse into one shared issue:
+      1. Client vs server build mismatch seen in handshake.
+      2. Zero requests of the reporting session reached the server.
+      3. Zero public-gateway / Quasar requests reached the server (#1096..#1118 style).
+    Returns `(fault_kind, fingerprint, human_summary)` or `None`.
+    """
+    build_info = _extract_build_info(bundle)
+    if build_info["mismatch"]:
+        c = build_info["client_build"] or "unknown"
+        s = build_info["server_build"] or "unknown"
+        return (
+            "build_mismatch",
+            f"env:build_mismatch:client={c}:server={s}",
+            f"Client/server build mismatch (client={c}, server={s})",
+        )
+
+    req_counts = _extract_session_request_counts(bundle)
+    trace = _get_bundle_trace(bundle).strip()
+    has_error_signal = (
+        req_counts["server_requests_explicit"]
+        or bool(trace)
+        or bundle.get("report_source") == "exception"
+        or _is_client_python_manual(bundle)
+    )
+    if req_counts["server_requests"] == 0 and has_error_signal:
+        return (
+            "zero_server_requests",
+            "env:zero_server_requests",
+            "Zero server requests reached server",
+        )
+
+    if req_counts["gateway_requests"] == 0 and _is_gateway_failure_bundle(bundle):
+        return (
+            "zero_gateway_requests",
+            "env:zero_gateway_requests",
+            "Zero gateway requests reached server (misconfigured gateway)",
+        )
+
+    return None
+
+
 def build_issue_title_and_labels(bundle: Dict[str, Any]) -> Tuple[str, List[str]]:
+    env_fault = classify_environment_fault(bundle)
+    if env_fault is not None:
+        _, _, summary = env_fault
+        title = f"[Environment] {summary}"
+        labels = ["bug", "environment"]
+        if len(title) > 100:
+            title = title[:97] + "..."
+        return title, labels
+
     if is_manual_report(bundle):
         manual = bundle.get("manual_report") or {}
         cat = (manual.get("category_id") or "Gameplay").strip()
@@ -147,7 +517,7 @@ def build_issue_title_and_labels(bundle: Dict[str, Any]) -> Tuple[str, List[str]
         title = f"[Bug Report][{cat}] {summary}"
         labels = ["bug", "player-reported"]
     else:
-        trace = bundle.get("trace", "")
+        trace = _get_bundle_trace(bundle)
         stack_key = bundle.get("stack_key", "")
         exc_class, msg, location = parse_traceback_summary(trace, stack_key)
         title = (
@@ -202,7 +572,7 @@ def _render_markdown_issue(
     compact_raw_json: bool = False,
     trim_sections: bool = False,
 ) -> str:
-    trace = bundle.get("trace", "").strip()
+    trace = _get_bundle_trace(bundle).strip()
     if trim_sections and len(trace) > 14_000:
         trace = (
             trace[:4_000]
@@ -246,11 +616,30 @@ def _render_markdown_issue(
             logs_after = logs_after[:40] + [f"# ... [{len(logs_after) - 40} trailing log lines omitted] ..."]
 
     manual = bundle.get("manual_report") if is_manual_report(bundle) else None
+    req_counts = _extract_session_request_counts(bundle)
+    build_info = _extract_build_info(bundle)
+    env_fault = classify_environment_fault(bundle)
 
     body_lines = [
         f"**Signature Hash:** `0x{unsigned_hash:016x}` (or `{stack_hash}`) | **Occurrences Captured:** `{occurrences}`",
         f"**Reported At:** `{timestamp}` | **Stack Key:** `{stack_key}`",
     ]
+    telemetry_parts = [
+        f"**Session Server Requests:** `{req_counts['server_requests']}`",
+        f"**Gateway Requests:** `{req_counts['gateway_requests']}`",
+    ]
+    if build_info["client_build"] is not None:
+        telemetry_parts.append(f"**Handshake Client Build:** `{build_info['client_build']}`")
+    if build_info["server_build"] is not None:
+        telemetry_parts.append(f"**Server Build:** `{build_info['server_build']}`")
+    body_lines.append(" | ".join(telemetry_parts))
+
+    if env_fault:
+        fault_kind, fault_fp, fault_summary = env_fault
+        body_lines.append(
+            f"**Environment Fault:** `{fault_kind}` (`{fault_fp}`) — {fault_summary}"
+        )
+
     if manual:
         report_key = manual.get("report_key") or "unknown"
         cat_name = manual.get("category_name") or manual.get("category_id") or "Gameplay"
@@ -436,18 +825,47 @@ def format_occurrence_comment(bundle: Dict[str, Any], total_occurrences: int) ->
     system_name = session.get("solar_system_name") or f"System #{session.get('solar_system_id', 'unknown')}"
     flight_recorder = bundle.get("flight_recorder", [])
     manual = bundle.get("manual_report") if is_manual_report(bundle) else None
+    trace = _get_bundle_trace(bundle).strip()
+    stack_key = str(bundle.get("stack_key") or "")
+    req_counts = _extract_session_request_counts(bundle)
+    build_info = _extract_build_info(bundle)
 
     lines = [
         f"### 🔁 New Incident Occurrence (#{total_occurrences})",
         f"- **Timestamp:** `{timestamp}`",
         f"- **Pilot:** `{char_name}` in `{system_name}`",
         f"- **Ship:** `{session.get('ship_type_name', 'Unknown')}`",
+        (
+            f"- **Session Telemetry:** server_requests=`{req_counts['server_requests']}`, "
+            f"gateway_requests=`{req_counts['gateway_requests']}`"
+        ),
     ]
+    if build_info["client_build"] is not None or build_info["server_build"] is not None:
+        lines.append(
+            f"- **Handshake Build:** client=`{build_info['client_build'] or 'unknown'}`, "
+            f"server=`{build_info['server_build'] or 'unknown'}`"
+        )
+    if trace:
+        exc_class, msg, location = parse_traceback_summary(trace, stack_key)
+        headline = f"{exc_class}: {msg[:100]}" if msg else f"{exc_class} in {location}"
+        lines.append(f"- **Exception / Location:** `{headline}` (`{location}`)")
+    elif stack_key:
+        lines.append(f"- **Stack Key:** `{stack_key}`")
+
     if manual:
         if manual.get("report_key"):
             lines.append(f"- **Report Key:** `{manual['report_key']}`")
         if manual.get("description"):
             lines.extend(["", manual["description"].strip()])
+
+    if trace:
+        capped_trace = trace if len(trace) <= 12_000 else trace[:12_000] + "\n# ... [traceback truncated] ..."
+        lines.extend([
+            "",
+            "```python",
+            capped_trace,
+            "```",
+        ])
 
     if flight_recorder:
         lines.extend([
@@ -553,29 +971,85 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
 def _effective_bundle_hash(bundle: Dict[str, Any]) -> int:
     stack_hash = int(bundle.get("stack_hash", 0))
     stack_key = str(bundle.get("stack_key", ""))
-    trace = str(bundle.get("trace", ""))
+    trace = _get_bundle_trace(bundle)
+
+    env_fault = classify_environment_fault(bundle)
+    if env_fault is not None:
+        _, fingerprint, _ = env_fault
+        h = _fnv1a_i64(fingerprint)
+        bundle["stack_hash"] = h
+        return h
+
+    if _is_client_python_exception_bundle(bundle):
+        exc_class, msg, location = parse_traceback_summary(trace, stack_key)
+        if exc_class != "UnknownException":
+            norm_msg = _normalize_exception_message(msg)
+            h = _fnv1a_i64(f"client-python-exc:{exc_class}:{location}:{norm_msg}")
+            bundle["stack_hash"] = h
+            return h
+
     if stack_hash == -1040548311 or "MollycoddledUthread" in stack_key:
         exc_class, msg, location = parse_traceback_summary(trace, stack_key)
-        sig = f"{stack_hash}:{location}:{exc_class}:{msg}"
-        h = 0xCBF29CE484222325
-        for b in sig.encode("utf-8", errors="replace"):
-            h ^= b
-            h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-        if h >= (1 << 63):
-            h -= 1 << 64
+        base_hash = -1040548311 if "MollycoddledUthread" in stack_key else stack_hash
+        h = _fnv1a_i64(f"{base_hash}:{location}:{exc_class}:{msg}")
         bundle["stack_hash"] = h
         return h
     return stack_hash
 
 
+def _post_issue_comment(
+    repo: str,
+    issue_number: int,
+    existing_state: str,
+    comment_body: str,
+    dry_run: bool = False,
+) -> bool:
+    """Posts an occurrence comment to an existing issue (reopening if closed)."""
+    if dry_run:
+        if existing_state == "CLOSED":
+            print(f"[dry-run] Would reopen closed issue #{issue_number}")
+        preview = comment_body if len(comment_body) <= 2000 else comment_body[:2000] + "..."
+        print(f"[dry-run] Would post comment to #{issue_number}:\n{preview}\n")
+        return True
+
+    if existing_state == "CLOSED":
+        try:
+            subprocess.run(
+                ["gh", "issue", "reopen", str(issue_number), "--repo", repo],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            print(f"[+] Reopened closed issue #{issue_number} due to new occurrence")
+        except subprocess.CalledProcessError as e:
+            print(f"[warn] Failed to reopen issue #{issue_number}: {e.stderr}", file=sys.stderr)
+
+    cmd = [
+        "gh", "issue", "comment",
+        str(issue_number),
+        "--repo", repo,
+    ]
+    try:
+        _run_gh_with_body_file(cmd, comment_body)
+        print(f"[+] Added incident occurrence comment to issue #{issue_number}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[error] Failed to comment on issue #{issue_number}: {e.stderr}", file=sys.stderr)
+        return False
+
+
 def create_or_update_issue(
     repo: str,
     bundle: Dict[str, Any],
-    occurrences: int,
-    ensured_labels: Set[str],
+    occurrences: int = 1,
+    ensured_labels: Optional[Set[str]] = None,
     dry_run: bool = False,
 ) -> Optional[int]:
     """Creates a new issue or comments on an existing one (reopening if closed)."""
+    if ensured_labels is None:
+        ensured_labels = set()
     stack_hash = _effective_bundle_hash(bundle)
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
@@ -586,38 +1060,9 @@ def create_or_update_issue(
         existing_number, existing_state = existing
         print(f"[*] Found existing issue #{existing_number} (state={existing_state}) for hash 0x{unsigned_hash:016x}")
         comment_body = format_occurrence_comment(bundle, occurrences)
-        if dry_run:
-            if existing_state == "CLOSED":
-                print(f"[dry-run] Would reopen closed issue #{existing_number}")
-            print(f"[dry-run] Would post comment to #{existing_number}:\n{comment_body[:300]}...\n")
+        if _post_issue_comment(repo, existing_number, existing_state, comment_body, dry_run=dry_run):
             return existing_number
-
-        if existing_state == "CLOSED":
-            try:
-                subprocess.run(
-                    ["gh", "issue", "reopen", str(existing_number), "--repo", repo],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    check=True,
-                )
-                print(f"[+] Reopened closed issue #{existing_number} due to new occurrence")
-            except subprocess.CalledProcessError as e:
-                print(f"[warn] Failed to reopen issue #{existing_number}: {e.stderr}", file=sys.stderr)
-
-        cmd = [
-            "gh", "issue", "comment",
-            str(existing_number),
-            "--repo", repo,
-        ]
-        try:
-            _run_gh_with_body_file(cmd, comment_body)
-            print(f"[+] Added incident occurrence comment to issue #{existing_number}")
-            return existing_number
-        except subprocess.CalledProcessError as e:
-            print(f"[error] Failed to comment on issue #{existing_number}: {e.stderr}", file=sys.stderr)
-            return None
+        return None
     else:
         issue_body = format_markdown_issue(bundle, occurrences)
         if dry_run:
@@ -688,7 +1133,35 @@ def archive_or_delete_attachments(
             print(f"[warn] Could not archive attachments '{src_dir}' to '{dest_dir}': {e}", file=sys.stderr)
 
 
-def main() -> int:
+def _select_primary_and_extras(
+    files: List[Tuple[str, Dict[str, Any]]],
+) -> Tuple[Tuple[str, Dict[str, Any]], List[Tuple[str, Dict[str, Any]]]]:
+    """Prefer auto-reported `[Client Crash]` over `[Bug Report][client-python]` as primary."""
+    primary_idx = 0
+    for idx, (_, b) in enumerate(files):
+        if not is_manual_report(b):
+            primary_idx = idx
+            break
+    primary = files[primary_idx]
+    extras = [item for idx, item in enumerate(files) if idx != primary_idx]
+    return primary, extras
+
+
+def _should_comment_extra_bundle(
+    primary_bundle: Dict[str, Any],
+    extra_bundle: Dict[str, Any],
+    env_fault: Optional[Tuple[str, str, str]],
+) -> bool:
+    if env_fault is not None:
+        return True
+    if is_manual_report(extra_bundle) != is_manual_report(primary_bundle):
+        return True
+    if _get_bundle_trace(extra_bundle).strip() != _get_bundle_trace(primary_bundle).strip():
+        return True
+    return False
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
@@ -702,7 +1175,7 @@ def main() -> int:
     parser.add_argument("--delete", action="store_true", help="Delete report files and attachments instead of archiving")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not os.path.exists(args.queue_dir):
         print(f"[*] Queue directory '{args.queue_dir}' does not exist or is empty. No bugs to report.")
@@ -720,7 +1193,7 @@ def main() -> int:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 bundle = json.load(f)
-            h = bundle.get("stack_hash", 0)
+            h = _effective_bundle_hash(bundle)
             groups.setdefault(h, []).append((filepath, bundle))
         except Exception as e:
             print(f"[warn] Skipping corrupt or unreadable file '{filepath}': {e}", file=sys.stderr)
@@ -733,16 +1206,29 @@ def main() -> int:
     for stack_hash, files in groups.items():
         total_occurrences = len(files)
         unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
-        _, latest_bundle = files[-1]
+        (_, primary_bundle), extra_files = _select_primary_and_extras(files)
+        env_fault = classify_environment_fault(primary_bundle)
         print(f"[*] Processing error group 0x{unsigned_hash:016x} ({total_occurrences} occurrence(s))...")
 
         issue_id = create_or_update_issue(
             args.repo,
-            latest_bundle,
+            primary_bundle,
             total_occurrences,
             ensured_labels=ensured_labels,
             dry_run=args.dry_run,
         )
+        if issue_id:
+            for occ_idx, (_, extra_bundle) in enumerate(extra_files, start=2):
+                if _should_comment_extra_bundle(primary_bundle, extra_bundle, env_fault):
+                    comment_body = format_occurrence_comment(extra_bundle, occ_idx)
+                    _post_issue_comment(
+                        args.repo,
+                        issue_id,
+                        "OPEN",
+                        comment_body,
+                        dry_run=args.dry_run,
+                    )
+
         if issue_id or args.dry_run:
             success_count += len(files)
             for path, file_bundle in files:
