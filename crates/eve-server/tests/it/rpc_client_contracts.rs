@@ -1554,8 +1554,8 @@ fn build_candidate_arg_sets(
     }
     if service == "invbroker" && method == "HasExistingPasswordSet" {
         return vec![
-            vec![PyRep::String("general".to_string())],
-            vec![PyRep::Integer(ALSC_CONTAINER_ID)],
+            vec![PyRep::Integer(1)],
+            vec![PyRep::Integer(2)],
         ];
     }
     let mut base = Vec::with_capacity(arity);

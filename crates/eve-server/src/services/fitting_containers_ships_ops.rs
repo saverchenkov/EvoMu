@@ -556,31 +556,13 @@ pub(crate) async fn handle_ext_tail(
             Some(Ok(PyRep::Real(total)))
         }
 
-        ("invbroker", "HasExistingPasswordSet") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let container_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .unwrap_or(0);
-            if let Err(e) = super::fitting_containers_ships::authorize_container_inspect(
-                ctx,
-                session,
-                char_id,
-                container_id,
-                true,
-                false,
-            ) {
-                return Some(Err(e));
-            }
-            let which = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let st = read_container_ship_state(ctx);
-            let has_pw = st.get_container_password(container_id, which).is_some();
-            Some(Ok(PyRep::Bool(has_pw)))
-        }
+        ("invbroker", "HasExistingPasswordSet") => Some(handle_has_existing_password_set(
+            ctx,
+            session,
+            bound_entry,
+            args,
+            kwargs,
+        )),
 
         ("invbroker", "ImportExportWithPlanet") => {
             Some(handle_import_export_with_planet(ctx, session, bound_entry, args, kwargs))
@@ -1514,6 +1496,71 @@ fn handle_import_export_with_planet(
         &[notify_loc_id],
     );
     Ok(PyRep::None)
+}
+
+fn handle_has_existing_password_set(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let caller_loc = session
+        .station_id
+        .or(session.structure_id)
+        .or_else(|| session.solar_system_id.map(i64::from));
+    let (arg0, arg1) = match args {
+        [a0, a1, ..] => (Some(a0), Some(a1)),
+        [a0] => (Some(a0), None),
+        [] => (None, None),
+    };
+    let explicit_container_arg = kwargs.contains_key("containerID")
+        || arg0.and_then(|a| a.as_i64()).is_some_and(|v| {
+            // Disambiguate bound 1-arg `HasExistingPasswordSet(which)` (including invalid slots
+            // like `3` or `99`) from explicit `(container_id, which)` or large entity-ID calls.
+            (args.len() >= 2 && v > 2) || v >= 1_000
+        });
+    let item_bound =
+        bound_entry.filter(|b| !explicit_container_arg && Some(b.object_id) != caller_loc);
+    let parse_which = |positional: Option<&PyRep>| -> i64 {
+        match positional {
+            Some(v) => v.as_i64().unwrap_or(0),
+            None => match kwargs.get("which") {
+                Some(kw_w) => kw_w.as_i64().unwrap_or(0),
+                None => 1,
+            },
+        }
+    };
+    let (container_id, which) = if let Some(b) = item_bound {
+        (b.object_id, parse_which(arg0))
+    } else {
+        let cid = kwargs
+            .get("containerID")
+            .and_then(|v| v.as_i64())
+            .or_else(|| arg0.and_then(|a| a.as_i64()))
+            .unwrap_or(0);
+        (cid, parse_which(arg1))
+    };
+    if !matches!(which, 1 | 2) {
+        return Err(BridgeRpcError {
+            code: "InvalidPasswordType".into(),
+            message: format!("Invalid container password slot {which}; expected 1 or 2"),
+            client_error: None,
+        });
+    }
+    super::fitting_containers_ships::authorize_container_inspect(
+        ctx,
+        session,
+        char_id,
+        container_id,
+        true,
+    )?;
+    let st = read_container_ship_state(ctx);
+    let has_pw = st
+        .get_container_password(container_id, which)
+        .is_some_and(|p| !p.is_empty());
+    Ok(PyRep::Bool(has_pw))
 }
 
 fn handle_retrieve_password(

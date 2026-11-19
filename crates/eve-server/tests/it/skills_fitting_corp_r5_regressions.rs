@@ -422,28 +422,60 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
     ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(alsc_id), PyRep::String("oldpass".into())], &kw, None)
         .await
         .expect("SetPassword oldpass");
-    ctx.dispatch_rpc(
-        &mut sess_target,
-        "invbroker",
-        None,
-        "ALSCLockItems",
-        &[PyRep::Integer(alsc_id), PyRep::List(vec![]), PyRep::String("oldpass".into())],
-        &kw,
-        None,
-    )
-    .await
-    .ok();
-    // Unlock container for target_id by taking with password="oldpass" or via SetPassword by target, then boss changes password
-    let mut kw_pw = HashMap::new();
-    kw_pw.insert("password".to_string(), PyRep::String("oldpass".into()));
-    let st_inv_t = ctx.bind_object(&sess_target, "invbroker", station_id).expect("bind station inv");
-    let _ = ctx.dispatch_rpc(&mut sess_target, "invbroker", Some(st_inv_t), "Add", &[PyRep::Integer(locked_trit), PyRep::Integer(station_id)], &kw_pw, None).await;
-    // Now boss changes password -> must invalidate target_id's unlocked_containers entry
+    // Personal ALSC (#1378 F-02): same-corp non-owner must be denied ALSCLogGet on boss_id's container.
+    let err_non_owner = ctx
+        .dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
+        .await
+        .expect_err("same-corp non-owner must be denied personal ALSCLogGet");
+    assert_eq!(err_non_owner.code, "ALSCAccessDenied");
     ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(alsc_id), PyRep::String("newpass".into()), PyRep::String("oldpass".into())], &kw, None)
         .await
-        .expect("SetPassword newpass");
-    let err_need_pw = ctx
+        .expect("SetPassword newpass on personal ALSC");
+    let err_non_owner_after = ctx
+        .dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id), PyRep::String("newpass".into())], &kw, None)
+        .await
+        .expect_err("same-corp non-owner must still be denied personal ALSCLogGet even with valid password");
+    assert_eq!(err_non_owner_after.code, "ALSCAccessDenied");
+
+    // #233: SetPassword invalidates another authorized operator's cached unlocked_containers entry on a corp ALSC.
+    let corp_alsc_id = 890_002_012_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            corp_alsc_id,
+            InventoryItemRecord {
+                item_id: corp_alsc_id,
+                type_id: 17366,
+                owner_id: corp_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    sess_boss.corp_role = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+    sess_target.corp_role = eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+    let err_dir_personal = ctx
         .dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(alsc_id)], &kw, None)
+        .await
+        .expect_err("corp EQUIPMENT_CONFIG role does not grant access to colleague's personal ALSC");
+    assert_eq!(err_dir_personal.code, "ALSCAccessDenied");
+    ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(corp_alsc_id), PyRep::String("oldpass".into())], &kw, None)
+        .await
+        .expect("SetPassword oldpass on corp ALSC");
+    ctx.dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(corp_alsc_id), PyRep::String("oldpass".into())], &kw, None)
+        .await
+        .expect("ROLE_EQUIPMENT_CONFIG unlocks corp ALSC audit log with oldpass");
+    ctx.dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(corp_alsc_id)], &kw, None)
+        .await
+        .expect("cached unlocked_containers allows passwordless ALSCLogGet before SetPassword");
+    ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(corp_alsc_id), PyRep::String("newpass".into()), PyRep::String("oldpass".into())], &kw, None)
+        .await
+        .expect("SetPassword newpass on corp ALSC");
+    let err_need_pw = ctx
+        .dispatch_rpc(&mut sess_target, "invbroker", None, "ALSCLogGet", &[PyRep::Integer(corp_alsc_id)], &kw, None)
         .await
         .expect_err("SetPassword must invalidate cached unlocked_containers session");
     assert_eq!(err_need_pw.code, "ALSCPasswordNeededToViewAuditLog");
