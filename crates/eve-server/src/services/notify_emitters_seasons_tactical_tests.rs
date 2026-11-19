@@ -366,6 +366,88 @@ fn check_and_emit_season_transitions_skips_repeat_writes_when_catalog_empty() {
     assert!(notifs.iter().any(|n| n.event == "OnSeasonStarted"));
 }
 
+#[test]
+fn issue_1348_season_lifecycle_notifications_clear_initialized_sessions() {
+    use crate::services::season_manager::{
+        mark_season_session_initialized, sweep_expired_online_challenges, CharacterChallenge,
+    };
+
+    let (ctx, char_id, clock) = make_online_ctx();
+    let sid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    let sess_id = ctx
+        .db
+        .get_online_session(sid)
+        .map(|s| s.session_id)
+        .expect("online session");
+    let now_ft = ctx.now_blueos_filetime_ticks();
+
+    // Seed expired challenge 297 so sweep_expired_online_challenges would fire if marker stayed set.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, char_id);
+        st.selected_season_id = 10;
+        st.challenges.insert(
+            297,
+            CharacterChallenge {
+                challenge_id: 297,
+                season_id: 10,
+                expiration_date: now_ft - 1_000_000,
+                max_progress: 1,
+                ..Default::default()
+            },
+        );
+        save_season_state_to_blobs(snap, char_id, &st);
+        snap.seasons_and_campaigns.seasons_catalog = BTreeMap::from([(
+            10,
+            SeasonConfig {
+                season_id: 10,
+                template_id: 10,
+                season_name: "Season 10".into(),
+                start_time_ft: now_ft - 10_000_000,
+                end_time_ft: now_ft + 600_000_000,
+                ..Default::default()
+            },
+        )]);
+    });
+
+    // 1. select_season(0) / select_season(None) clears initialized marker.
+    mark_season_session_initialized(&ctx, char_id, sess_id);
+    assert_eq!(
+        handle_select_season_clear_if_none_or_zero(&ctx, char_id, Some(&PyRep::Integer(0)))
+            .unwrap()
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+    sweep_expired_online_challenges(&ctx);
+    let notifs_zero = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_zero.iter().any(|n| n.event == "OnSeasonSelectionCleared"));
+    assert!(notifs_zero.iter().all(|n| n.event != "OnChallengeExpired"));
+
+    // 2. /season start clears initialized marker across all online sessions.
+    mark_season_session_initialized(&ctx, char_id, sess_id);
+    assert!(handle_season_slash(&ctx, char_id, "/season start 10 30").unwrap().is_ok());
+    sweep_expired_online_challenges(&ctx);
+    let notifs_start = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_start.iter().any(|n| n.event == "OnSeasonStarted"));
+    assert!(notifs_start.iter().all(|n| n.event != "OnChallengeExpired"));
+
+    // 3. /season end clears initialized marker and emits OnSeasonEnded without OnChallengeExpired.
+    mark_season_session_initialized(&ctx, char_id, sess_id);
+    assert!(handle_season_slash(&ctx, char_id, "/season end 10").unwrap().is_ok());
+    clock.advance_secs(1);
+    sweep_expired_online_challenges(&ctx);
+    let notifs_end = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_end.iter().any(|n| n.event == "OnSeasonEnded"));
+    assert!(notifs_end.iter().all(|n| n.event != "OnChallengeExpired"));
+
+    // 4. reconcile_seasons_on_fsd_reload clears initialized marker on OnSeasonsFsdDataChanged.
+    mark_season_session_initialized(&ctx, char_id, sess_id);
+    reconcile_seasons_on_fsd_reload(&ctx, char_id);
+    sweep_expired_online_challenges(&ctx);
+    let notifs_reload = ctx.drain_notifications_for_char(char_id);
+    assert!(notifs_reload.iter().any(|n| n.event == "OnSeasonsFsdDataChanged"));
+    assert!(notifs_reload.iter().all(|n| n.event != "OnChallengeExpired"));
+}
+
 #[cfg(test)]
 #[path = "notify_emitters_seasons_tactical_extra_unit_tests.rs"]
 mod notify_emitters_seasons_tactical_extra_unit_tests;
