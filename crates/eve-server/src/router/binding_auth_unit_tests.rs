@@ -1922,3 +1922,172 @@ async fn dispatch_rpc_invbroker_bound_handles_subobjects_end_to_end() {
         outsider_item_id
     ));
 }
+
+#[test]
+fn binding_auth_war_stat_ally_expiry_and_corp_vs_alliance_boundaries() {
+    use eve_db::{
+        clock::VirtualServerClock, AllianceRecord, CorporationRecord, PersistedNegKind,
+        PersistedWarNegotiation,
+    };
+    use std::sync::Arc;
+
+    let ctx = test_ctx();
+    let t0 = 1_700_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let agg_corp = 98_888_001_i64;
+    let def_corp = 98_888_002_i64;
+    let corp_ally = 98_888_010_i64;
+    let corp_ally_sibling = 98_888_011_i64;
+    let corp_ally_shared_alliance = 99_888_050_i64;
+    let ally_alliance = 99_888_010_i64;
+    let alliance_member_corp = 98_888_020_i64;
+    let agg_alliance = 99_888_001_i64;
+    let agg_alliance_member = 98_888_030_i64;
+
+    let war_corp_ally = 700_888_001_i64;
+    let war_alliance_ally = 700_888_002_i64;
+    let war_alliance_party = 700_888_003_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, all) in [
+            (agg_corp, Some(agg_alliance)),
+            (agg_alliance_member, Some(agg_alliance)),
+            (def_corp, None),
+            (corp_ally, Some(corp_ally_shared_alliance)),
+            (corp_ally_sibling, Some(corp_ally_shared_alliance)),
+            (alliance_member_corp, Some(ally_alliance)),
+        ] {
+            let mut c = CorporationRecord::default();
+            c.corporation_id = cid;
+            c.name = format!("Corp {cid}");
+            c.ticker = format!("C{}", cid % 100);
+            c.ceo_id = 90_000_002;
+            c.alliance_id = all;
+            snap.corporations.insert(cid, c);
+        }
+        snap.alliances.insert(
+            ally_alliance,
+            AllianceRecord {
+                alliance_id: ally_alliance,
+                name: "Ally Alliance".into(),
+                short_name: "ALYA".into(),
+                executor_corp_id: alliance_member_corp,
+                member_corp_ids: [alliance_member_corp].into_iter().collect(),
+            },
+        );
+        for (wid, agg, def) in [
+            (war_corp_ally, agg_corp, def_corp),
+            (war_alliance_ally, agg_corp, def_corp),
+            (war_alliance_party, agg_alliance, def_corp),
+        ] {
+            snap.wars.insert(
+                wid,
+                WarRecord {
+                    war_id: wid,
+                    aggressor_corp_id: agg,
+                    defender_corp_id: def,
+                    mutual: false,
+                    started_unix: t0,
+                    active: true,
+                },
+            );
+        }
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 91_001,
+            war_id: war_corp_ally,
+            kind: PersistedNegKind::Ally,
+            from_corp: corp_ally,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(t0),
+        });
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_corp_ally, corp_ally), t0 + 3_600);
+
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 91_002,
+            war_id: war_alliance_ally,
+            kind: PersistedNegKind::Ally,
+            from_corp: ally_alliance,
+            isk: Default::default(),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(t0),
+        });
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_alliance_ally, ally_alliance), t0 + 7_200);
+    });
+
+    let char_id = 90_000_002_i64;
+    let mut sess = SessionState {
+        session_id: 612,
+        user_id: Some(4),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_ally),
+        alliance_id: None,
+        ..Default::default()
+    };
+    let entry_corp_ally = make_entry("warStatisticMgr", war_corp_ally, char_id);
+    assert!(authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_corp_ally));
+    assert!(verify_service_binding_context(&ctx, &sess, &entry_corp_ally));
+
+    // Sibling corp in the same alliance as a corp-level ally must NOT bind.
+    sess.corporation_id = Some(corp_ally_sibling);
+    assert!(!authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_corp_ally));
+    assert!(!verify_service_binding_context(&ctx, &sess, &entry_corp_ally));
+
+    // Alliance-war aggressor member corp binds without session.alliance_id.
+    sess.corporation_id = Some(agg_alliance_member);
+    assert!(authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_alliance_party));
+
+    // Alliance-ID ally member corp binds without session.alliance_id, and explicit session.alliance_id without corp also binds.
+    let entry_alliance_ally = make_entry("warStatisticMgr", war_alliance_ally, char_id);
+    sess.corporation_id = Some(alliance_member_corp);
+    assert!(authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_alliance_ally));
+    assert!(verify_service_binding_context(&ctx, &sess, &entry_alliance_ally));
+
+    let alliance_only_sess = SessionState {
+        session_id: 613,
+        user_id: Some(5),
+        character_id: Some(90_888_777),
+        corporation_id: None,
+        alliance_id: Some(ally_alliance),
+        ..Default::default()
+    };
+    assert!(authorize_service_binding(
+        &ctx,
+        &alliance_only_sess,
+        90_888_777,
+        "warStatisticMgr",
+        war_alliance_ally
+    ));
+
+    // Boundary: t0 + 3599 (exp - 1) keeps corp_ally active; t0 + 3600 (== exp) deactivates it.
+    clock.advance_secs_and_read_offset(3_599);
+    sess.corporation_id = Some(corp_ally);
+    assert!(authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_corp_ally));
+    assert!(verify_service_binding_context(&ctx, &sess, &entry_corp_ally));
+
+    clock.advance_secs_and_read_offset(1);
+    assert!(!authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_corp_ally));
+    assert!(!verify_service_binding_context(&ctx, &sess, &entry_corp_ally));
+
+    // At t0 + 3600, alliance-ID ally (exp = t0 + 7200) is still active; at t0 + 7200 it expires too.
+    sess.corporation_id = Some(alliance_member_corp);
+    assert!(authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_alliance_ally));
+    clock.advance_secs_and_read_offset(3_600);
+    assert!(!authorize_service_binding(&ctx, &sess, char_id, "warStatisticMgr", war_alliance_ally));
+    assert!(!verify_service_binding_context(&ctx, &sess, &entry_alliance_ally));
+    assert!(!authorize_service_binding(
+        &ctx,
+        &alliance_only_sess,
+        90_888_777,
+        "warStatisticMgr",
+        war_alliance_ally
+    ));
+}

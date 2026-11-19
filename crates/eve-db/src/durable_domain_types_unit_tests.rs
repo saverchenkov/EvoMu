@@ -123,10 +123,20 @@ fn durable_domain_types_serde_defaults_and_roundtrips() {
     war_state
         .mutual_invites
         .insert((98_000_001, 98_000_002), 1_700_000_001);
+    war_state
+        .ally_expires_unix
+        .insert((10, 98_000_004), 1_700_200_000);
+    war_state
+        .ally_expires_unix
+        .insert((10, 98_000_003), 1_700_100_000);
     let war_json = serde_json::to_string(&war_state).expect("serialize PersistedWarState");
     let war_back: PersistedWarState =
         serde_json::from_str(&war_json).expect("deserialize PersistedWarState");
     assert_eq!(war_back, war_state);
+
+    let empty_war: PersistedWarState =
+        serde_json::from_str("{}").expect("empty PersistedWarState");
+    assert!(empty_war.ally_expires_unix.is_empty());
 
     let sov_hub = PersistedSovHubData {
         hub_id: 1_000_000_000_100,
@@ -471,4 +481,68 @@ fn empty_collections_negative_sorting_and_remaining_durable_domain_roundtrips() 
     let sov_cfg: AllianceSovConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(sov_cfg.current_prime_hour, 18);
     assert_eq!(sov_cfg.new_prime_hour, 18);
+}
+
+#[test]
+fn persisted_war_state_ally_expires_unix_sqlite_domain_rows_roundtrip() {
+    use crate::sqlite_store::corp_crimewatch_store::{
+        collect_corp_crimewatch_domain_row_diffs, load_corp_crimewatch_domain_rows,
+        sync_corp_crimewatch_domain_rows,
+    };
+    use crate::sqlite_store::domain_rows::{
+        apply_domain_row_changes, DomainRowChange, DOMAIN_WARFARE,
+    };
+    use crate::sqlite_store::{apply_migrations, LoadContext};
+    use crate::tx_engine::{ChangeSet, TxFaultPlan, TxSqlExecutor};
+    use crate::WorldStateSnapshot;
+    use rusqlite::Connection;
+
+    let mut conn = Connection::open_in_memory().expect("open_in_memory");
+    apply_migrations(&conn).expect("apply_migrations");
+
+    let before = WorldStateSnapshot::default();
+    let mut after = before.clone();
+    after
+        .war_state
+        .ally_expires_unix
+        .insert((7001, 98_000_003), 1_700_200_000);
+
+    let mut store_diffs = Vec::new();
+    collect_corp_crimewatch_domain_row_diffs(&before, &after, &mut store_diffs);
+    assert_eq!(store_diffs.len(), 1);
+    assert!(matches!(
+        &store_diffs[0],
+        DomainRowChange::Upsert { domain, key, .. }
+            if *domain == DOMAIN_WARFARE && key.starts_with("war_state.ally_expires_unix/")
+    ));
+
+    let changes = ChangeSet::diff(1, &before, &after);
+    assert_eq!(changes.domain_rows.len(), 1);
+    {
+        let sql_tx = conn.transaction().expect("begin tx");
+        let mut exec = TxSqlExecutor::new(&sql_tx, TxFaultPlan::None);
+        apply_domain_row_changes(&mut exec, &changes.domain_rows).expect("apply domain rows");
+        sql_tx.commit().expect("commit domain rows");
+    }
+
+    let mut loaded = WorldStateSnapshot::default();
+    load_corp_crimewatch_domain_rows(&conn, &mut loaded, &mut LoadContext::new(false))
+        .expect("load_corp_crimewatch_domain_rows");
+    assert_eq!(
+        loaded.war_state.ally_expires_unix.get(&(7001, 98_000_003)),
+        Some(&1_700_200_000)
+    );
+
+    let mut after_clear = after.clone();
+    after_clear.war_state.ally_expires_unix.remove(&(7001, 98_000_003));
+    {
+        let sql_tx = conn.transaction().expect("begin sync tx");
+        assert!(sync_corp_crimewatch_domain_rows(&sql_tx, &after_clear).expect("sync delete"));
+        assert!(!sync_corp_crimewatch_domain_rows(&sql_tx, &after_clear).expect("sync idempotent"));
+        sql_tx.commit().expect("commit sync");
+    }
+    let mut reloaded = WorldStateSnapshot::default();
+    load_corp_crimewatch_domain_rows(&conn, &mut reloaded, &mut LoadContext::new(false))
+        .expect("reload after remove");
+    assert!(reloaded.war_state.ally_expires_unix.is_empty());
 }

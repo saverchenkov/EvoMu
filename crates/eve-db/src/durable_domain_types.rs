@@ -493,6 +493,8 @@ pub struct PersistedWarState {
     pub blocked_mutual_invites: HashMap<i64, bool>,
     #[serde(default)]
     pub peace_treaties: Vec<PersistedPeaceTreaty>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub ally_expires_unix: HashMap<(i64, i64), u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

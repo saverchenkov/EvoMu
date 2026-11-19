@@ -627,6 +627,11 @@ fn authorize_war_stat_binding(
     char_id: i64,
     object_id: i64,
 ) -> bool {
+    use crate::services::social_corp_fleet::social_wars::social_wars_helpers::{
+        entity_matches_war_owner, is_ally_neg_active_at, is_war_participant_corp,
+        resolve_entity_alliance_id,
+    };
+
     if object_id <= 0 {
         return false;
     }
@@ -638,51 +643,28 @@ fn authorize_war_stat_binding(
         if session.has_gm_role() {
             return true;
         }
-        if session
-            .alliance_id
-            .filter(|&a| a > 0)
-            .is_some_and(|aid| aid == w.aggressor_corp_id || aid == w.defender_corp_id)
-        {
-            return true;
+        let session_alliance = session.alliance_id.filter(|&a| a > 0);
+        if let Some(aid) = session_alliance {
+            if aid == w.aggressor_corp_id
+                || aid == w.defender_corp_id
+                || resolve_entity_alliance_id(snap, w.aggressor_corp_id) == Some(aid)
+                || resolve_entity_alliance_id(snap, w.defender_corp_id) == Some(aid)
+                || snap.war_state.negotiations.iter().any(|n| {
+                    n.war_id == object_id
+                        && is_ally_neg_active_at(snap, n, now_unix)
+                        && entity_matches_war_owner(snap, 0, Some(aid), n.from_corp)
+                })
+            {
+                return true;
+            }
         }
-        let corp_id = session.corporation_id.or_else(|| {
+        let corp_id = session.corporation_id.filter(|&id| id > 0).or_else(|| {
             snap.characters
                 .get(&char_id)
                 .map(|c| c.corporation_id)
                 .filter(|&id| id > 0)
         });
-        let Some(my_corp) = corp_id else {
-            return false;
-        };
-        if my_corp == w.aggressor_corp_id || my_corp == w.defender_corp_id {
-            return true;
-        }
-        let corp_alliance = |cid: i64| -> Option<i64> {
-            snap.corporations
-                .get(&cid)
-                .and_then(|c| c.alliance_id)
-                .filter(|&a| a > 0)
-        };
-        let my_alliance = session
-            .alliance_id
-            .filter(|&a| a > 0)
-            .or_else(|| corp_alliance(my_corp));
-        if let Some(aid) = my_alliance {
-            if aid == w.aggressor_corp_id
-                || aid == w.defender_corp_id
-                || corp_alliance(w.aggressor_corp_id) == Some(aid)
-                || corp_alliance(w.defender_corp_id) == Some(aid)
-            {
-                return true;
-            }
-        }
-        snap.war_state.negotiations.iter().any(|n| {
-            n.war_id == object_id
-                && n.kind == eve_db::PersistedNegKind::Ally
-                && n.status == "Accepted"
-                && now_unix >= n.effective_unix.unwrap_or(0)
-                && (n.from_corp == my_corp || my_alliance.is_some_and(|aid| n.from_corp == aid))
-        })
+        corp_id.is_some_and(|my_corp| is_war_participant_corp(snap, object_id, my_corp, now_unix))
     })
 }
 

@@ -1044,3 +1044,707 @@ fn war_registry_gm_gates_and_war_stat_bind_enforced() {
         Some(("warStatisticMgr", war_id))
     );
 }
+
+#[test]
+fn war_helpers_resolve_entity_alliance_and_ally_expiry_boundaries() {
+    use super::social_wars_helpers::{
+        is_ally_neg_active_at, is_war_participant_corp, resolve_entity_alliance_id, same_alliance,
+    };
+    use eve_db::{
+        AllianceRecord, PersistedNegKind, PersistedWarNegotiation, WarRecord, WorldStateSnapshot,
+    };
+
+    let mut snap = WorldStateSnapshot::default();
+    let agg_corp = 98_910_001_i64;
+    let def_corp = 98_910_002_i64;
+    let corp_ally = 98_910_003_i64;
+    let corp_ally_sibling = 98_910_004_i64;
+    let no_all_corp = 98_910_005_i64;
+    let zero_all_corp = 98_910_006_i64;
+    let alliance_ally_member = 98_910_007_i64;
+
+    let agg_alliance = 99_910_001_i64;
+    let shared_corp_ally_alliance = 99_910_003_i64;
+    let ally_alliance = 99_910_007_i64;
+    let empty_alliance = 99_910_099_i64;
+
+    for (cid, all) in [
+        (agg_corp, Some(agg_alliance)),
+        (def_corp, None),
+        (corp_ally, Some(shared_corp_ally_alliance)),
+        (corp_ally_sibling, Some(shared_corp_ally_alliance)),
+        (no_all_corp, None),
+        (zero_all_corp, Some(0)),
+        (alliance_ally_member, Some(ally_alliance)),
+    ] {
+        let mut c = CorporationRecord::default();
+        c.corporation_id = cid;
+        c.name = format!("Corp {cid}");
+        c.ticker = format!("C{}", cid % 100);
+        c.ceo_id = 90_000_001;
+        c.alliance_id = all;
+        snap.corporations.insert(cid, c);
+    }
+    snap.alliances.insert(
+        empty_alliance,
+        AllianceRecord {
+            alliance_id: empty_alliance,
+            name: "Empty Alliance".into(),
+            short_name: "EMPA".into(),
+            executor_corp_id: 98_910_099,
+            member_corp_ids: Default::default(),
+        },
+    );
+
+    // resolve_entity_alliance_id across corp, explicit alliance, inferred alliance, non-positive & unknown IDs
+    assert_eq!(resolve_entity_alliance_id(&snap, 0), None);
+    assert_eq!(resolve_entity_alliance_id(&snap, -42), None);
+    assert_eq!(resolve_entity_alliance_id(&snap, no_all_corp), None);
+    assert_eq!(resolve_entity_alliance_id(&snap, zero_all_corp), None);
+    assert_eq!(resolve_entity_alliance_id(&snap, agg_corp), Some(agg_alliance));
+    assert_eq!(resolve_entity_alliance_id(&snap, agg_alliance), Some(agg_alliance));
+    assert_eq!(resolve_entity_alliance_id(&snap, empty_alliance), Some(empty_alliance));
+    assert_eq!(resolve_entity_alliance_id(&snap, 99_999_888), None);
+
+    // same_alliance covers corp-vs-corp, corp-vs-alliance, alliance-vs-corp, and alliance-vs-alliance
+    assert!(same_alliance(&snap, corp_ally, corp_ally_sibling));
+    assert!(same_alliance(&snap, agg_corp, agg_alliance));
+    assert!(same_alliance(&snap, agg_alliance, agg_corp));
+    assert!(same_alliance(&snap, agg_alliance, agg_alliance));
+    assert!(!same_alliance(&snap, agg_corp, ally_alliance));
+    assert!(!same_alliance(&snap, def_corp, no_all_corp));
+    assert!(!same_alliance(&snap, 99_999_888, 99_999_888));
+
+    let t0 = 1_700_000_000_u64;
+    let war_corp = 700_910_001_i64;
+    let war_alliance_agg = 700_910_002_i64;
+    snap.wars.insert(
+        war_corp,
+        WarRecord {
+            war_id: war_corp,
+            aggressor_corp_id: agg_corp,
+            defender_corp_id: def_corp,
+            mutual: false,
+            started_unix: t0,
+            active: true,
+        },
+    );
+    snap.wars.insert(
+        war_alliance_agg,
+        WarRecord {
+            war_id: war_alliance_agg,
+            aggressor_corp_id: agg_alliance,
+            defender_corp_id: def_corp,
+            mutual: false,
+            started_unix: t0,
+            active: true,
+        },
+    );
+    let corp_neg = PersistedWarNegotiation {
+        id: 1,
+        war_id: war_corp,
+        kind: PersistedNegKind::Ally,
+        from_corp: corp_ally,
+        isk: IskCents::ZERO,
+        message: "corp ally".into(),
+        status: "Accepted".into(),
+        effective_unix: Some(t0),
+    };
+    let alliance_neg = PersistedWarNegotiation {
+        id: 2,
+        war_id: war_corp,
+        kind: PersistedNegKind::Ally,
+        from_corp: ally_alliance,
+        isk: IskCents::ZERO,
+        message: "alliance ally".into(),
+        status: "Accepted".into(),
+        effective_unix: Some(t0 + 100),
+    };
+    snap.war_state.negotiations.push(corp_neg.clone());
+    snap.war_state.negotiations.push(alliance_neg.clone());
+    snap.war_state
+        .ally_expires_unix
+        .insert((war_corp, corp_ally), t0 + 500);
+    snap.war_state
+        .ally_expires_unix
+        .insert((war_corp, ally_alliance), t0 + 900);
+
+    // Effective start & expiry boundaries
+    assert!(is_ally_neg_active_at(&snap, &corp_neg, t0));
+    assert!(is_ally_neg_active_at(&snap, &corp_neg, t0 + 499));
+    assert!(!is_ally_neg_active_at(&snap, &corp_neg, t0 + 500));
+    assert!(!is_ally_neg_active_at(&snap, &alliance_neg, t0 + 99));
+    assert!(is_ally_neg_active_at(&snap, &alliance_neg, t0 + 100));
+    assert!(is_ally_neg_active_at(&snap, &alliance_neg, t0 + 899));
+    assert!(!is_ally_neg_active_at(&snap, &alliance_neg, t0 + 900));
+
+    // is_war_participant_corp respects corp ally isolation, alliance ally membership, expiry, and alliance war parties
+    assert!(is_war_participant_corp(&snap, war_corp, corp_ally, t0 + 499));
+    assert!(!is_war_participant_corp(&snap, war_corp, corp_ally, t0 + 500));
+    assert!(!is_war_participant_corp(&snap, war_corp, corp_ally_sibling, t0 + 100));
+    assert!(is_war_participant_corp(&snap, war_corp, alliance_ally_member, t0 + 100));
+    assert!(is_war_participant_corp(&snap, war_corp, alliance_ally_member, t0 + 899));
+    assert!(!is_war_participant_corp(&snap, war_corp, alliance_ally_member, t0 + 900));
+    assert!(is_war_participant_corp(&snap, war_alliance_agg, agg_corp, t0));
+}
+
+#[test]
+fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
+    use super::social_wars_helpers::is_war_participant_corp;
+    use eve_db::clock::VirtualServerClock;
+    use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, mut ally_sess, ally_corp, agg_hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let declared = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp), PyRep::Integer(agg_hq_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&declared, "warID").unwrap();
+
+    agg_sess.role = ROLE_GMH;
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMJoinDefender",
+            &[PyRep::Integer(war_id), PyRep::Integer(ally_corp)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // Seed a killmail for the active ally attacking the aggressor at t0.
+    let agg_char = agg_sess.character_id.unwrap();
+    let ally_char = ally_sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            81_001,
+            KillmailRecord {
+                kill_id: 81_001,
+                solar_system_id: 30_000_142,
+                victim_character_id: agg_char,
+                victim_corp_id: agg_corp,
+                attacker_character_id: ally_char,
+                attacker_corp_id: ally_corp,
+                ship_type_id: 587,
+                total_value_isk: 2_000_000.0,
+                killed_unix: t0,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Extend twice (+3_600s then +1_800s) -> effective_unix stays t0, ally_expires_unix becomes t0 + 5_400.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[
+                PyRep::Integer(war_id),
+                PyRep::Integer(ally_corp),
+                PyRep::Integer(3_600),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[
+                PyRep::Integer(war_id),
+                PyRep::Integer(ally_corp),
+                PyRep::Integer(1_800),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    ctx.db.with_snapshot(|snap| {
+        let neg = snap
+            .war_state
+            .negotiations
+            .iter()
+            .find(|n| n.war_id == war_id && n.from_corp == ally_corp && n.status == "Accepted")
+            .expect("accepted ally neg");
+        assert_eq!(neg.effective_unix, Some(t0));
+        assert_eq!(
+            snap.war_state.ally_expires_unix.get(&(war_id, ally_corp)),
+            Some(&(t0 + 5_400))
+        );
+        assert!(is_war_participant_corp(snap, war_id, ally_corp, t0));
+        let summary = war_kills_in_snap(&ctx, snap, war_id).expect("war_kills_in_snap");
+        assert_eq!(summary.ally_corp_ids, vec![ally_corp]);
+        assert_eq!(summary.kills.len(), 1);
+    });
+
+    // Immediately after GMExtendAllyContract, ally stays active across GetAllyRowsByWarID, GetBaseInfo, and warStatisticMgr.Bind.
+    let rows_active = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warRegistry",
+        "GetAllyRowsByWarID",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    match rows_active {
+        PyRep::Rowset { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], PyRep::Integer(ally_corp));
+            assert_eq!(rows[0][1], PyRep::Integer(t0 as i64));
+            assert_eq!(rows[0][3], PyRep::Bool(true));
+        }
+        other => panic!("expected Rowset, got {other:?}"),
+    }
+    let base_info = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warStatisticMgr",
+        "GetBaseInfo",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let allies_dict = base_info.dict_get("allies").expect("allies dict");
+    assert!(matches!(allies_dict, PyRep::Dict(entries) if entries.len() == 1));
+
+    ally_sess.role = ROLE_PLAYER_DEFAULT;
+    let bound_rep = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "warStatisticMgr",
+        "Bind",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(bound_rep.as_i64().unwrap() > 0);
+
+    // At exp - 1 (t0 + 5_399) ally is still active; at exp (t0 + 5_400) ally becomes inactive across all surfaces.
+    clock.advance_secs_and_read_offset(5_399);
+    assert!(ctx
+        .db
+        .with_snapshot(|snap| is_war_participant_corp(snap, war_id, ally_corp, ctx.now_unix())));
+    clock.advance_secs_and_read_offset(1);
+    let expired_at = ctx.now_unix();
+    assert_eq!(expired_at, t0 + 5_400);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.killmails.insert(
+            81_002,
+            KillmailRecord {
+                kill_id: 81_002,
+                solar_system_id: 30_000_142,
+                victim_character_id: agg_char,
+                victim_corp_id: agg_corp,
+                attacker_character_id: ally_char,
+                attacker_corp_id: ally_corp,
+                ship_type_id: 587,
+                total_value_isk: 3_000_000.0,
+                killed_unix: expired_at,
+                ..Default::default()
+            },
+        );
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_war_participant_corp(snap, war_id, ally_corp, expired_at));
+        let summary = war_kills_in_snap(&ctx, snap, war_id).expect("war_kills_in_snap expired");
+        assert!(summary.ally_corp_ids.is_empty());
+        // Pre-expiry kill 81_001 counts, post-expiry kill 81_002 does not.
+        assert_eq!(summary.kills.iter().map(|k| k.kill_id).collect::<Vec<_>>(), vec![81_001]);
+    });
+    let rows_expired = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warRegistry",
+        "GetAllyRowsByWarID",
+        &[PyRep::Integer(war_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    match rows_expired {
+        PyRep::Rowset { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][3], PyRep::Bool(false));
+        }
+        other => panic!("expected Rowset, got {other:?}"),
+    }
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut ally_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+
+    // Re-joining via GMJoinDefender clears stale ally_expires_unix and restores active status.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMJoinDefender",
+            &[PyRep::Integer(war_id), PyRep::Integer(ally_corp)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.war_state.ally_expires_unix.contains_key(&(war_id, ally_corp)));
+        assert!(is_war_participant_corp(snap, war_id, ally_corp, ctx.now_unix()));
+    });
+    assert!(
+        handle_wars(
+            &ctx,
+            &mut ally_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap()
+            > 0
+    );
+
+    // AcceptAllyNegotiation likewise clears stale ally_expires_unix on fresh acceptance.
+    let ally_corp_2 = 98_000_199_i64;
+    let ally_char_2 = 90_000_199_i64;
+    let mut ally_sess_2 = ally_sess.clone();
+    ally_sess_2.character_id = Some(ally_char_2);
+    ally_sess_2.corporation_id = Some(ally_corp_2);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&ally_char].clone();
+        ch.character_id = ally_char_2;
+        ch.user_id = 199;
+        ch.corporation_id = ally_corp_2;
+        snap.characters.insert(ally_char_2, ch);
+        let mut corp = snap.corporations[&ally_corp].clone();
+        corp.corporation_id = ally_corp_2;
+        corp.ceo_id = ally_char_2;
+        corp.members = [ally_char_2].into_iter().collect();
+        corp.member_roles = [(ally_char_2, u64::MAX)].into_iter().collect();
+        snap.corporations.insert(ally_corp_2, corp);
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_id, ally_corp_2), ctx.now_unix());
+    });
+    let offer = handle_wars(
+        &ctx,
+        &mut ally_sess_2,
+        "warsInfoMgr",
+        "CreateWarAllyOffer",
+        &[PyRep::Integer(war_id), PyRep::Real(0.0), PyRep::String("join".into())],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let offer_id = dict_i64(&offer, "negotiationID").unwrap();
+    let acc = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "AcceptAllyNegotiation",
+        &[PyRep::Integer(offer_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_i64(&acc, "allyID"), Some(ally_corp_2));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.war_state.ally_expires_unix.contains_key(&(war_id, ally_corp_2)));
+    });
+}
+
+#[test]
+fn war_gm_ally_corp_vs_alliance_cannot_ally_own_war_and_alliance_ally_stats_and_rollback() {
+    use super::social_wars_helpers::is_war_participant_corp;
+    use eve_db::{clock::VirtualServerClock, AllianceRecord, PersistedWarMeta};
+    use eve_machonet::service_roles::{ROLE_GMH, ROLE_PLAYER_DEFAULT};
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, _ally_sess, _ally_corp, _agg_hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let agg_alliance = 99_920_001_i64;
+    let def_alliance = 99_920_002_i64;
+    let ext_alliance = 99_920_003_i64;
+    let ext_member_corp = 98_920_003_i64;
+    let ext_member_char = 90_920_003_i64;
+    let war_corp_vs_corp = 700_920_001_i64;
+    let war_alliance_vs_corp = 700_920_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(agg_alliance);
+        snap.corporations.get_mut(&def_corp).unwrap().alliance_id = Some(def_alliance);
+        let mut ext_ch = snap.characters[&agg_sess.character_id.unwrap()].clone();
+        ext_ch.character_id = ext_member_char;
+        ext_ch.user_id = 920;
+        ext_ch.corporation_id = ext_member_corp;
+        snap.characters.insert(ext_member_char, ext_ch);
+        let mut ext_c = CorporationRecord::default();
+        ext_c.corporation_id = ext_member_corp;
+        ext_c.name = "Ext Member".into();
+        ext_c.ticker = "EXTM".into();
+        ext_c.ceo_id = ext_member_char;
+        ext_c.alliance_id = Some(ext_alliance);
+        snap.corporations.insert(ext_member_corp, ext_c);
+
+        snap.alliances.insert(
+            def_alliance,
+            AllianceRecord {
+                alliance_id: def_alliance,
+                name: "Def Alliance".into(),
+                short_name: "DEFA".into(),
+                executor_corp_id: def_corp,
+                member_corp_ids: [def_corp].into_iter().collect(),
+            },
+        );
+        snap.alliances.insert(
+            ext_alliance,
+            AllianceRecord {
+                alliance_id: ext_alliance,
+                name: "Ext Alliance".into(),
+                short_name: "EXTA".into(),
+                executor_corp_id: ext_member_corp,
+                member_corp_ids: [ext_member_corp].into_iter().collect(),
+            },
+        );
+        snap.wars.insert(
+            war_corp_vs_corp,
+            WarRecord {
+                war_id: war_corp_vs_corp,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: t0,
+                active: true,
+            },
+        );
+        snap.war_state
+            .wars
+            .insert(war_corp_vs_corp, PersistedWarMeta { open_for_allies: true, ..Default::default() });
+        snap.wars.insert(
+            war_alliance_vs_corp,
+            WarRecord {
+                war_id: war_alliance_vs_corp,
+                aggressor_corp_id: agg_alliance,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: t0,
+                active: true,
+            },
+        );
+    });
+
+    agg_sess.role = ROLE_GMH;
+    let snap_before_rejects = ctx.db.snapshot_tables();
+
+    // Corp-vs-alliance & alliance-vs-corp CannotAllyOwnWar rejections leave snapshot untouched.
+    let expected_own_war_err = "CannotAllyOwnWar";
+    for (method, wid, target) in [
+        ("GMJoinDefender", war_corp_vs_corp, agg_alliance),
+        ("GMJoinDefender", war_corp_vs_corp, def_alliance),
+        ("GMJoinDefender", war_alliance_vs_corp, agg_corp),
+        ("GMActivateDefender", war_corp_vs_corp, agg_alliance),
+    ] {
+        let err = handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            method,
+            &[PyRep::Integer(wid), PyRep::Integer(target)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, expected_own_war_err, "{method}({wid}, {target})");
+    }
+    // Non-matching ally & bad args on GM methods likewise leave snapshot unchanged.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Integer(ext_alliance), PyRep::Integer(600)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AllyNotFound"
+    );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMDeactivateDefender",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Integer(ext_alliance)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AllyNotFound"
+    );
+    assert_eq!(ctx.db.snapshot_tables(), snap_before_rejects);
+
+    // Direct try_with_mut_snapshot rollback guard matching handle_war_registry_gm_rpc:
+    let mut_tx_err = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        snap.war_state.next_negotiation_id += 99;
+        snap.war_state.ally_expires_unix.insert((war_corp_vs_corp, ext_alliance), t0 + 1);
+        Err(BridgeRpcError {
+            code: "SimulatedFailure".into(),
+            message: "rollback check".into(),
+            client_error: None,
+        })
+    });
+    assert_eq!(mut_tx_err.unwrap_err().code, "SimulatedFailure");
+    assert_eq!(ctx.db.snapshot_tables(), snap_before_rejects);
+
+    // Alliance-ID ally joins cleanly via GMJoinDefender and resolves kills + participation + binding + expiry.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMJoinDefender",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Integer(ext_alliance)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[PyRep::Integer(war_corp_vs_corp), PyRep::Integer(ext_alliance), PyRep::Integer(600)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    let agg_char = agg_sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let lm = snap.war_lifecycle_meta.get(&war_corp_vs_corp).expect("war lifecycle meta");
+        assert!(lm.allies.iter().any(|a| a.alliance_id == Some(ext_alliance) && a.corporation_id.is_none()));
+        snap.killmails.insert(
+            82_001,
+            KillmailRecord {
+                kill_id: 82_001,
+                solar_system_id: 30_000_142,
+                victim_character_id: agg_char,
+                victim_corp_id: agg_corp,
+                attacker_character_id: ext_member_char,
+                attacker_corp_id: ext_member_corp,
+                attacker_alliance_id: None,
+                ship_type_id: 587,
+                total_value_isk: 4_000_000.0,
+                killed_unix: t0 + 10,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(is_war_participant_corp(snap, war_corp_vs_corp, ext_member_corp, t0));
+        let summary = war_kills_in_snap(&ctx, snap, war_corp_vs_corp).expect("war_kills_in_snap");
+        assert_eq!(summary.ally_corp_ids, vec![ext_alliance]);
+        assert_eq!(summary.kills.len(), 1);
+    });
+
+    def_sess.role = ROLE_PLAYER_DEFAULT;
+    def_sess.character_id = Some(ext_member_char);
+    def_sess.corporation_id = Some(ext_member_corp);
+    def_sess.alliance_id = None;
+    assert!(
+        handle_wars(
+            &ctx,
+            &mut def_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_corp_vs_corp)],
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .as_i64()
+        .unwrap()
+            > 0
+    );
+
+    // Advance to expiry (t0 + 600): alliance member corp loses participation and warStatisticMgr.Bind access.
+    clock.advance_secs_and_read_offset(600);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_war_participant_corp(snap, war_corp_vs_corp, ext_member_corp, ctx.now_unix()));
+        assert!(war_kills_in_snap(&ctx, snap, war_corp_vs_corp)
+            .unwrap()
+            .ally_corp_ids
+            .is_empty());
+    });
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut def_sess,
+            "warStatisticMgr",
+            "Bind",
+            &[PyRep::Integer(war_corp_vs_corp)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "BindAuthorizationDenied"
+    );
+}

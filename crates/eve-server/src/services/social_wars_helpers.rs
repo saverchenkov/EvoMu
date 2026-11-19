@@ -4,8 +4,8 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
-    IskCents, PersistedNegKind as NegKind, PersistedWarMeta as WarMeta, UpwellStructureRecord,
-    WarRecord, WorldStateSnapshot,
+    IskCents, PersistedNegKind as NegKind, PersistedWarMeta as WarMeta, PersistedWarNegotiation,
+    UpwellStructureRecord, WarRecord, WorldStateSnapshot,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -88,19 +88,66 @@ pub(super) fn is_valid_war_hq(
         })
 }
 
-pub(super) fn same_alliance(snap: &WorldStateSnapshot, corp_a: i64, corp_b: i64) -> bool {
-    let aa = snap
-        .corporations
-        .get(&corp_a)
-        .and_then(|c| c.alliance_id)
-        .filter(|&a| a > 0);
-    aa.is_some()
-        && aa
-            == snap
-                .corporations
-                .get(&corp_b)
-                .and_then(|c| c.alliance_id)
-                .filter(|&a| a > 0)
+/// Resolves the positive alliance ID for a corporation (`CorporationRecord::alliance_id`)
+/// or a known alliance entity (`snap.alliances` or any member corporation's `alliance_id`).
+pub(crate) fn resolve_entity_alliance_id(
+    snap: &WorldStateSnapshot,
+    entity_id: i64,
+) -> Option<i64> {
+    if entity_id <= 0 {
+        return None;
+    }
+    if let Some(corp) = snap.corporations.get(&entity_id) {
+        return corp.alliance_id.filter(|&a| a > 0);
+    }
+    (snap.alliances.contains_key(&entity_id)
+        || snap
+            .corporations
+            .values()
+            .any(|c| c.alliance_id == Some(entity_id)))
+    .then_some(entity_id)
+}
+
+/// Returns `true` when accepted ally negotiation `n` is active at `at_unix`
+/// (`at_unix >= effective_unix` and not past any configured `ally_expires_unix`).
+pub(crate) fn is_ally_neg_active_at(
+    snap: &WorldStateSnapshot,
+    n: &PersistedWarNegotiation,
+    at_unix: u64,
+) -> bool {
+    n.kind == NegKind::Ally
+        && n.status == "Accepted"
+        && at_unix >= n.effective_unix.unwrap_or(0)
+        && snap
+            .war_state
+            .ally_expires_unix
+            .get(&(n.war_id, n.from_corp))
+            .is_none_or(|&exp| at_unix < exp)
+}
+
+/// Returns `true` if `entity_id` matches war owner/ally `owner_id` directly, or belongs to
+/// alliance `owner_id` (when `owner_id` is an alliance entity rather than a corporation).
+pub(crate) fn entity_matches_war_owner(
+    snap: &WorldStateSnapshot,
+    entity_id: i64,
+    entity_alliance_hint: Option<i64>,
+    owner_id: i64,
+) -> bool {
+    if owner_id <= 0 {
+        return false;
+    }
+    if entity_id == owner_id {
+        return true;
+    }
+    let resolved_alliance = entity_alliance_hint
+        .filter(|&a| a > 0)
+        .or_else(|| resolve_entity_alliance_id(snap, entity_id));
+    !snap.corporations.contains_key(&owner_id) && resolved_alliance == Some(owner_id)
+}
+
+pub(super) fn same_alliance(snap: &WorldStateSnapshot, entity_a: i64, entity_b: i64) -> bool {
+    let aa = resolve_entity_alliance_id(snap, entity_a);
+    aa.is_some() && aa == resolve_entity_alliance_id(snap, entity_b)
 }
 
 pub(super) fn already_at_war(snap: &WorldStateSnapshot, corp_a: i64, corp_b: i64) -> bool {
@@ -111,7 +158,7 @@ pub(super) fn already_at_war(snap: &WorldStateSnapshot, corp_a: i64, corp_b: i64
     })
 }
 
-pub(super) fn is_war_participant_corp(
+pub(crate) fn is_war_participant_corp(
     snap: &WorldStateSnapshot,
     war_id: i64,
     my_corp: i64,
@@ -130,10 +177,8 @@ pub(super) fn is_war_participant_corp(
     }
     snap.war_state.negotiations.iter().any(|n| {
         n.war_id == war_id
-            && n.kind == NegKind::Ally
-            && n.status == "Accepted"
-            && now_unix >= n.effective_unix.unwrap_or(0)
-            && n.from_corp == my_corp
+            && is_ally_neg_active_at(snap, n, now_unix)
+            && entity_matches_war_owner(snap, my_corp, None, n.from_corp)
     })
 }
 
