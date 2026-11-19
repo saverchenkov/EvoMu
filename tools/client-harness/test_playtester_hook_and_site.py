@@ -2516,6 +2516,48 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertEqual(len(captured_settle), 1)
         self.assertGreaterEqual(captured_settle[0]["min_settle_ms"], 250)
 
+    def test_click_xmpp_chat_channels_waits_for_async_tcp_join_settle(self):
+        hook = _load_hook_with_py2_stubs()
+        captured_settle = []
+
+        xmpp_wnd = types.SimpleNamespace(name="XmppChatChannels", parent=None)
+        row_entry = types.SimpleNamespace(name="entry_1", parent=xmpp_wnd)
+
+        class FakeJoinBtn:
+            name = "Button"
+            parent = row_entry
+            def OnClick(self):
+                pass
+
+        fake_uicore = types.SimpleNamespace(cmd=None, registry=None, layer=None, desktop=None)
+        fake_sm = mock.MagicMock()
+        with mock.patch.dict(sys.modules, {"uthread": None}), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook, "_get_uicore", return_value=fake_uicore), \
+             mock.patch.object(hook, "_find_widget", return_value=FakeJoinBtn()), \
+             mock.patch.object(hook, "_find_widget_at_xy", return_value=FakeJoinBtn()), \
+             mock.patch.object(hook, "_settle_after_action", side_effect=lambda *a, **kw: captured_settle.append(kw) or kw.get("min_settle_ms", 0)):
+            res_widget = hook._execute_action(
+                fake_sm,
+                {
+                    "type": "click_widget",
+                    "target": "main/l_main/XmppChatChannels/content/main/scroll/maincontainer/__clipper/__content/entry_1/Button",
+                    "wait_ms": 500,
+                },
+            )
+            res_xy = hook._execute_action(
+                fake_sm,
+                {"type": "click_xy", "x": 1085, "y": 388, "wait_ms": 0},
+            )
+        self.assertTrue(res_widget.get("ok"), res_widget)
+        self.assertTrue(res_xy.get("ok"), res_xy)
+        self.assertEqual(len(captured_settle), 2)
+        self.assertGreaterEqual(captured_settle[0]["min_settle_ms"], 350)
+        self.assertGreaterEqual(captured_settle[1]["min_settle_ms"], 350)
+
     def test_open_client_window_retries_on_window_blocked_from_opening(self):
         hook = _load_hook_with_py2_stubs()
         calls = []

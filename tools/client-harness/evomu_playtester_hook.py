@@ -5281,6 +5281,21 @@ def _settle_secondary_view_transition(
             prev_cnt = cnt
 
 
+def _has_ancestor_named(node, fragment_lower):
+    cur = node
+    seen = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        try:
+            nm = _safe_str(getattr(cur, "name", ""), 64).lower()
+            if fragment_lower in nm:
+                return True
+            cur = getattr(cur, "parent", None)
+        except Exception:
+            break
+    return False
+
+
 def _settle_after_action(sm, pre_flight_seq, pre_scatter_seq, min_settle_ms=0, max_ms=250):
     """Event-driven settle poll: waits briefly until in-flight RPCs drain and UI layer/scatters stabilize."""
     waited = 0
@@ -5417,6 +5432,7 @@ def _execute_action(sm, action):
     # Normalize schema action aliases to internal handlers
     atype = raw_atype
     target = raw_target
+    _clicked_node_ref = [None]
     if raw_atype in ("open_neocom", "open_window"):
         atype = "open_window"
         if not target and raw_cmd:
@@ -6080,6 +6096,7 @@ def _execute_action(sm, action):
                     result["ok"] = False
                     result["error"] = "widget %r not found in visible uicore layers" % (target,)
                 else:
+                    _clicked_node_ref[0] = node
                     result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
                     click_res = _invoke_widget_click(
                         node,
@@ -6126,6 +6143,7 @@ def _execute_action(sm, action):
                     result["ok"] = False
                     result["error"] = "no clickable widget found at (%d, %d)" % (x_val, y_val)
                 else:
+                    _clicked_node_ref[0] = node
                     result["matched_widget"] = "%s(%s)" % (node.__class__.__name__, _safe_str(getattr(node, "name", ""), 48))
                     click_res = _invoke_widget_click(
                         node,
@@ -7696,6 +7714,9 @@ def _execute_action(sm, action):
             _click_lbl = (_safe_str(result.get("matched_widget", ""), 64) + " " + target).lower()
             if any(k in _click_lbl for k in ("stackall", "splitstack", "reprocess", "board ship")):
                 _min_s = max(_min_s, 300)
+            if "xmppchatchannels" in _click_lbl or _has_ancestor_named(_clicked_node_ref[0], "xmppchatchannels"):
+                # XMPP channel Join/Create runs over TCP outside MachoNet; settle past OnEveMessage for OnChannelJoined.
+                _min_s = max(_min_s, 350)
         _max_s = min(max(int(wait_ms or 250), _min_s + 150, 150), 600)
         result["waited_ms"] = _settle_after_action(
             sm,
