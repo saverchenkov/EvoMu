@@ -2172,13 +2172,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     let mut ver = VersionExchange::default();
     ver.user_count = ctx.db.online_session_count().max(1);
     let server_boot_build = ver.build_version;
-    ctx.flight_recorder.record_handshake_builds(
-        session_id,
-        None,
-        None,
-        server_boot_build,
-        false,
-    );
     let mut handshake =
         MachoHandshakeStateMachine::new(ver, MACHO_PROXY_NODE_ID, session_id, client_id);
     let mut client_boot_build: Option<u32> = None;
@@ -2839,13 +2832,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 if !handshake.is_authenticated() {
                     if let Some(detected_build) = extract_handshake_client_build(&pyrep) {
                         client_boot_build = Some(detected_build);
-                        ctx.flight_recorder.record_handshake_builds(
-                            session_id,
-                            None,
-                            client_boot_build,
-                            server_boot_build,
-                            false,
-                        );
                     }
                     match handshake.step(&pyrep) {
                         Err(closed) => {
@@ -2876,13 +2862,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         Ok(HandshakeStepOutput::NeedsAuthentication(challenge)) => {
                             if challenge.boot_build > 0 {
                                 client_boot_build = Some(challenge.boot_build);
-                                ctx.flight_recorder.record_handshake_builds(
-                                    session_id,
-                                    None,
-                                    client_boot_build,
-                                    server_boot_build,
-                                    false,
-                                );
                             }
                             let now_unix = ctx.now_unix();
                             let username = challenge.user_name.as_deref().unwrap_or("");
@@ -3048,6 +3027,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             session.language_id = identity.language_id.clone();
                             session.address = identity.address.clone();
                             session.user_type = identity.user_type;
+                            ctx.flight_recorder.reset_user_telemetry(identity.user_id);
                             ctx.flight_recorder.record_handshake_builds(
                                 session_id,
                                 Some(identity.user_id),
@@ -3452,6 +3432,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
     reader_task.abort();
     ctx.flight_recorder.remove_wire_state(session_id);
+    ctx.flight_recorder.remove_session_telemetry(session_id);
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
     ctx.cleanup_disconnected_client_session(&mut session).await;

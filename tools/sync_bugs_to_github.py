@@ -122,7 +122,9 @@ _NOISE_LINE_PREFIXES = (
 )
 
 _FILE_LINE_RE = re.compile(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+([^\s)]+))?')
-_EVE_PRE_FRAME_RE = re.compile(r"^(?:<pre>)?(.+?\.py[a-z]*)\((\d+)\)\s*([^\s]+)?")
+_EVE_PRE_FRAME_RE = re.compile(
+    r"^(?:<pre>|(?![A-Za-z_][\w.]*:\s))(.+?\.py[a-z]*)\((\d+)\)\s*([^\s]+)?"
+)
 _LOG_TRACEBACK_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?LogTraceback\s+args=")
 _LOG_CALL_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?_?Log(?:Exception|Traceback)\s+args=")
 _CALLSTACK_SPLIT_RE = re.compile(r"(?m)^\s*CALLSTACK:\s*$")
@@ -541,19 +543,21 @@ def _extract_session_request_counts(bundle: Dict[str, Any]) -> Dict[str, Any]:
         and not _QUASAR_LOG_STARTUP_RE.search(ln)
     )
 
-    server_requests = explicit_server if explicit_server is not None else observed_server
-    gateway_requests = explicit_gateway if explicit_gateway is not None else observed_gateway
+    server_requests = max(explicit_server or 0, observed_server)
+    gateway_requests = max(explicit_gateway or 0, observed_gateway)
     reached_server = (
         server_requests > 0
         or observed_server > 0
         or _has_authenticated_session_evidence(bundle)
     )
+    reached_gateway = gateway_requests > 0 or observed_gateway > 0
     return {
         "server_requests": server_requests,
         "gateway_requests": gateway_requests,
         "server_requests_explicit": explicit_server is not None,
         "gateway_requests_explicit": explicit_gateway is not None,
         "reached_server": reached_server,
+        "reached_gateway": reached_gateway,
     }
 
 
@@ -565,7 +569,9 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
 
     explicit_mismatch = any(scope.get("build_mismatch") is True for scope in scopes)
     explicit_compatible = not explicit_mismatch and any(
-        scope.get("build_mismatch") is False for scope in scopes
+        scope.get("build_mismatch") is False
+        and _first_present_scalar([scope], _CLIENT_BUILD_KEYS) is not None
+        for scope in scopes
     )
 
     logs_and_trace = (
@@ -599,13 +605,12 @@ def _extract_build_info(bundle: Dict[str, Any]) -> Dict[str, Any]:
     )
     if explicit_mismatch:
         mismatch = True
+    elif builds_differ and norm_client.isdigit() and norm_server.isdigit():
+        mismatch = int(norm_client) < int(norm_server)
     elif explicit_compatible:
         mismatch = False
     elif builds_differ:
-        if norm_client.isdigit() and norm_server.isdigit():
-            mismatch = int(norm_client) < int(norm_server)
-        else:
-            mismatch = True
+        mismatch = True
     else:
         mismatch = False
     return {
@@ -721,7 +726,11 @@ def classify_environment_fault(bundle: Dict[str, Any]) -> Optional[Tuple[str, st
             "Zero server requests reached server",
         )
 
-    if req_counts["gateway_requests"] == 0 and _is_gateway_failure_bundle(bundle):
+    if (
+        req_counts["gateway_requests"] == 0
+        and not req_counts["reached_gateway"]
+        and _is_gateway_failure_bundle(bundle)
+    ):
         return (
             "zero_gateway_requests",
             "env:zero_gateway_requests",

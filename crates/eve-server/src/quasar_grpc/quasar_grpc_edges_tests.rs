@@ -735,3 +735,173 @@ async fn grpc_h2c_error_guards_compression_events_and_notices_edges() {
     }
 }
 
+#[tokio::test]
+async fn grpc_bf1344_03_gateway_telemetry_and_unauthenticated_warn_paths() {
+    use crate::log_ring_buffer::{LogRingBuffer, LogRingLayer};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let ring = Arc::new(LogRingBuffer::new(128));
+    let subscriber = tracing_subscriber::registry().with(LogRingLayer::new(Arc::clone(&ring)));
+    let _log_guard = tracing::subscriber::set_default(subscriber);
+
+    let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+        eve_db::WorldRepository::with_demo_seed(),
+    )));
+    let now_u = ctx.now_unix();
+    let online_sid = 77_001_u64;
+    ctx.db
+        .acquire_online_lock(1, online_sid, Some(90_000_001), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let accept_ctx = Arc::clone(&ctx);
+    let accept_task = tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            let c = Arc::clone(&accept_ctx);
+            tokio::spawn(async move {
+                let _ = handle_quasar_grpc_connection(sock, c).await;
+            });
+        }
+    });
+
+    let tcp = TcpStream::connect(addr).await.expect("connect");
+    let (mut client, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let dev_jwt = ctx
+        .db
+        .issue_gateway_dev_token(1, Some(90_000_001), "tranquility", now_u + 3600, now_u)
+        .unwrap();
+
+    // 1. Missing-auth rejection across Requests/Send, Notices/Consume, and Events/Publish logs WARN on all 3 paths without incrementing uid=1 counters.
+    for path in [
+        "/eve_public.gateway.Requests/Send",
+        "/eve_public.gateway.Notices/Consume",
+        "/eve_public.gateway.Events/Publish",
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1{path}"))
+            .header("content-type", "application/grpc")
+            .body(())
+            .unwrap();
+        let (rsp_fut, _send) = client.send_request(req, true).unwrap();
+        let rsp = rsp_fut.await.unwrap();
+        assert_eq!(rsp.headers().get("grpc-status").unwrap(), GRPC_STATUS_UNAUTHENTICATED);
+    }
+
+    // 2. Ping endpoints do not increment gateway_request_count.
+    for path in [
+        "/eve_public.gateway.Requests/Ping",
+        "/eve_public.gateway.Events/Ping",
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1{path}"))
+            .header("content-type", "application/grpc")
+            .body(())
+            .unwrap();
+        let (rsp_fut, mut send_body) = client.send_request(req, false).unwrap();
+        send_body
+            .send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), true)
+            .unwrap();
+        let mut body = rsp_fut.await.unwrap().into_body();
+        while let Some(_) = body.data().await {}
+        let trailers = body.trailers().await.unwrap().expect("trailers");
+        assert_eq!(trailers.get("grpc-status").unwrap(), GRPC_STATUS_OK);
+    }
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(online_sid, Some(1))
+            .gateway_request_count,
+        0
+    );
+
+    // 3. Authenticated Requests/Send (INVALID_ARGUMENT), Events/Publish (INVALID_ARGUMENT), and Notices/Consume (subscribe) each record & warn.
+    {
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/eve_public.gateway.Requests/Send")
+            .header("content-type", "application/grpc")
+            .header("authorization", format!("Bearer {dev_jwt}"))
+            .body(())
+            .unwrap();
+        let (rsp_fut, mut send_body) = client.send_request(req, false).unwrap();
+        let mut body = rsp_fut.await.unwrap().into_body();
+        send_body
+            .send_data(frame_grpc_message(&[0x0F, 0xFF, 0xFF]), true)
+            .unwrap();
+        while let Some(_) = body.data().await {}
+        let trailers = body.trailers().await.unwrap().expect("trailers");
+        assert_eq!(trailers.get("grpc-status").unwrap(), GRPC_STATUS_INVALID_ARGUMENT);
+    }
+    {
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/eve_public.gateway.Events/Publish")
+            .header("content-type", "application/grpc")
+            .header("authorization", format!("Bearer {dev_jwt}"))
+            .body(())
+            .unwrap();
+        let (rsp_fut, mut send_body) = client.send_request(req, false).unwrap();
+        let mut body = rsp_fut.await.unwrap().into_body();
+        send_body
+            .send_data(frame_grpc_message(&[0x0F, 0xFF]), true)
+            .unwrap();
+        while let Some(_) = body.data().await {}
+        let trailers = body.trailers().await.unwrap().expect("trailers");
+        assert_eq!(trailers.get("grpc-status").unwrap(), GRPC_STATUS_INVALID_ARGUMENT);
+    }
+    {
+        let req = Request::builder()
+            .method("POST")
+            .uri("http://127.0.0.1/eve_public.gateway.Notices/Consume")
+            .header("content-type", "application/grpc")
+            .header("authorization", format!("Bearer {dev_jwt}"))
+            .body(())
+            .unwrap();
+        let (rsp_fut, mut send_body) = client.send_request(req, false).unwrap();
+        send_body
+            .send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), true)
+            .unwrap();
+        let mut reader = GrpcFrameReader::new(rsp_fut.await.unwrap().into_body(), "identity".into());
+        assert!(reader.next_message().await.unwrap().is_none());
+    }
+
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(online_sid, Some(1))
+            .gateway_request_count,
+        3
+    );
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(0, Some(1))
+            .gateway_request_count,
+        3
+    );
+
+    let logs = ring.snapshot_recent(100);
+    for expected_path in [
+        "/eve_public.gateway.Requests/Send",
+        "/eve_public.gateway.Notices/Consume",
+        "/eve_public.gateway.Events/Publish",
+    ] {
+        assert!(
+            logs.iter().any(|l| {
+                l.contains("WARN")
+                    && l.contains("Quasar gRPC request returned UNAUTHENTICATED trailer")
+                    && l.contains(expected_path)
+            }),
+            "missing header UNAUTHENTICATED warn for {expected_path}: {logs:?}"
+        );
+    }
+    assert!(logs.iter().any(|l| l.contains("Quasar gRPC request returned INVALID_ARGUMENT trailer")));
+    assert!(logs.iter().any(|l| l.contains("Quasar gRPC event publish returned INVALID_ARGUMENT trailer")));
+    assert!(!logs.iter().any(|l| l.contains(&dev_jwt)), "JWT leaked to logs");
+    accept_task.abort();
+}
+

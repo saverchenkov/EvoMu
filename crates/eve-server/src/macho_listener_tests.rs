@@ -2226,3 +2226,130 @@ async fn test_1386_safe_logoff_pre_notification_online_lock_prevents_remove_ball
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bf1344_03_macho_handshake_telemetry_upgrade_and_disconnect_cleanup() {
+    use crate::log_ring_buffer::{LogRingBuffer, LogRingLayer};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // 1. Direct build extraction across VersionExchange, CryptoChallengePacket, and MachoPacket wrappers.
+    let stale_vx = VersionExchange {
+        build_version: 3_600_000,
+        ..VersionExchange::default()
+    };
+    assert_eq!(
+        extract_handshake_client_build(&stale_vx.to_pyrep()),
+        Some(3_600_000)
+    );
+    let ch = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    assert_eq!(extract_handshake_client_build(&ch.to_pyrep()), Some(ch.boot_build));
+
+    let ring = Arc::new(LogRingBuffer::new(128));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry().with(LogRingLayer::new(Arc::clone(&ring))),
+    );
+
+    let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+        eve_db::WorldRepository::with_demo_seed(),
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let accept_ctx = Arc::clone(&ctx);
+    let accept_dispatch = dispatch.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&accept_ctx);
+            let sub = accept_dispatch.clone();
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).with_subscriber(sub).await;
+            });
+        }
+    });
+
+    // 2. Stale client handshake is rejected with Boot Build Mismatch and emits WARN telemetry.
+    {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        write_framed_pyrep(&mut s, &stale_vx.to_pyrep())
+            .await
+            .unwrap();
+        let reply = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+        let closed = GPSTransportClosed::from_pyrep(&reply).expect("expected GPSTransportClosed");
+        assert!(
+            closed.reason.contains("Boot Build Mismatch")
+                || closed.reason_code.as_deref() == Some("HANDSHAKE_INCOMPATIBLEBUILD"),
+            "unexpected closure: {closed:?}"
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let warn_lines = ring.snapshot_recent(50);
+    assert!(
+        warn_lines.iter().any(|l| {
+            l.contains("WARN")
+                && l.contains("Rejected MachoNet client handshake: Boot Build Mismatch")
+                && l.contains("client_build=3600000")
+        }),
+        "expected Boot Build Mismatch WARN in {warn_lines:?}"
+    );
+
+    // 3. Seed prior mismatch & gateway count on user_id=1, plus pre-auth churn >512 sessions;
+    //    then authenticate cleanly and verify reset + non-eviction + disconnect cleanup.
+    ctx.flight_recorder.record_handshake_builds(
+        80_001,
+        Some(1),
+        Some(3_600_000),
+        eve_machonet::V24_BOOT_BUILD,
+        true,
+    );
+    ctx.flight_recorder.record_gateway_request(Some(80_001), Some(1));
+
+    let (sock, _client_id, uid) = connect_and_authenticate(addr, "demo", "demo-secret").await;
+    assert_eq!(uid, 1);
+    let active_sid = ctx
+        .db
+        .get_online_session(uid)
+        .expect("online session active")
+        .session_id;
+
+    // Simulate >512 pre-auth rejections AFTER active_sid authenticated; must NOT evict active_sid.
+    for junk_sid in 900_000..900_600 {
+        ctx.flight_recorder.record_handshake_builds(
+            junk_sid,
+            None,
+            Some(3_500_000),
+            eve_machonet::V24_BOOT_BUILD,
+            true,
+        );
+    }
+
+    let live_tele = ctx.flight_recorder.get_session_telemetry(active_sid, Some(uid));
+    assert_eq!(live_tele.gateway_request_count, 0);
+    let live_hs = live_tele.handshake.expect("active session handshake preserved");
+    assert_eq!(live_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(live_hs.build_mismatch, Some(false));
+
+    // User-keyed lookup (session_id=0) also reflects clean reset after upgrade.
+    let user_tele = ctx.flight_recorder.get_session_telemetry(0, Some(uid));
+    assert_eq!(user_tele.gateway_request_count, 0);
+    assert_eq!(
+        user_tele.handshake.as_ref().and_then(|h| h.build_mismatch),
+        Some(false)
+    );
+
+    // Drop client socket -> disconnect cleanup clears per-session telemetry maps.
+    drop(sock);
+    let mut cleaned = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let post = ctx.flight_recorder.get_session_telemetry(active_sid, None);
+        if post.handshake.is_none()
+            && post.server_request_count == 0
+            && post.gateway_request_count == 0
+        {
+            cleaned = true;
+            break;
+        }
+    }
+    assert!(cleaned, "disconnect did not clear session telemetry for {active_sid}");
+}

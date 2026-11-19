@@ -365,8 +365,8 @@ pub struct HandshakeBuildMetadata {
     pub client_boot_build: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_boot_build: Option<u32>,
-    #[serde(default)]
-    pub build_mismatch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_mismatch: Option<bool>,
 }
 
 /// Cumulative per-session RPC and handshake telemetry queried by bug-reporting bundles.
@@ -394,6 +394,7 @@ pub struct FlightRecorder {
     session_gateway_counts: RwLock<HashMap<u64, u64>>,
     user_gateway_counts: RwLock<HashMap<u64, u64>>,
     session_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
+    preauth_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
     user_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
 }
 
@@ -425,6 +426,7 @@ impl FlightRecorder {
             session_gateway_counts: RwLock::new(HashMap::new()),
             user_gateway_counts: RwLock::new(HashMap::new()),
             session_handshakes: RwLock::new(HashMap::new()),
+            preauth_handshakes: RwLock::new(HashMap::new()),
             user_handshakes: RwLock::new(HashMap::new()),
         }
     }
@@ -963,10 +965,40 @@ impl FlightRecorder {
                 entry.client_boot_build = Some(cb);
             }
             entry.server_boot_build = Some(server_boot_build);
-            let incompatible = entry
-                .client_boot_build
-                .is_some_and(|c| c < server_boot_build);
-            entry.build_mismatch = entry.build_mismatch || build_mismatch || incompatible;
+            // Recompute build_mismatch cleanly when a fresh client build arrives so upgraded reconnects clear prior flags.
+            entry.build_mismatch = if build_mismatch {
+                Some(true)
+            } else if let Some(cb) = client_boot_build.or(entry.client_boot_build) {
+                Some(cb < server_boot_build)
+            } else {
+                None
+            };
+        }
+    }
+
+    /// Clears stale per-user gateway & handshake telemetry upon fresh MachoNet authentication (`BF-1344-03`).
+    pub fn reset_user_telemetry(&self, user_id: u64) {
+        if user_id == 0 {
+            return;
+        }
+        if let Ok(mut lock) = self.user_gateway_counts.write() {
+            lock.remove(&user_id);
+        }
+        if let Ok(mut lock) = self.user_handshakes.write() {
+            lock.remove(&user_id);
+        }
+    }
+
+    /// Removes per-session telemetry maps on disconnect alongside `remove_wire_state` (`BF-1344-02`, `BF-1344-03`).
+    pub fn remove_session_telemetry(&self, session_id: u64) {
+        if let Ok(mut lock) = self.session_request_counts.write() {
+            lock.remove(&session_id);
+        }
+        if let Ok(mut lock) = self.session_gateway_counts.write() {
+            lock.remove(&session_id);
+        }
+        if let Ok(mut lock) = self.session_handshakes.write() {
+            lock.remove(&session_id);
         }
     }
 
@@ -989,16 +1021,30 @@ impl FlightRecorder {
         server_boot_build: u32,
         build_mismatch: bool,
     ) {
+        let uid_opt = user_id.filter(|&id| id > 0);
         if session_id > 0 {
-            Self::upsert_bounded_handshake(
-                &self.session_handshakes,
-                session_id,
-                client_boot_build,
-                server_boot_build,
-                build_mismatch,
-            );
+            if uid_opt.is_some() {
+                Self::upsert_bounded_handshake(
+                    &self.session_handshakes,
+                    session_id,
+                    client_boot_build,
+                    server_boot_build,
+                    build_mismatch,
+                );
+                if let Ok(mut preauth) = self.preauth_handshakes.write() {
+                    preauth.remove(&session_id);
+                }
+            } else {
+                Self::upsert_bounded_handshake(
+                    &self.preauth_handshakes,
+                    session_id,
+                    client_boot_build,
+                    server_boot_build,
+                    build_mismatch,
+                );
+            }
         }
-        if let Some(uid) = user_id.filter(|&id| id > 0) {
+        if let Some(uid) = uid_opt {
             let resolved_client = client_boot_build.or_else(|| {
                 if session_id > 0 {
                     self.session_handshakes
@@ -1031,41 +1077,42 @@ impl FlightRecorder {
             .ok()
             .and_then(|lock| lock.get(&session_id).copied())
             .unwrap_or(0);
-        let sess_gw = if session_id > 0 {
+        let gateway_request_count = if session_id > 0 {
             self.session_gateway_counts
                 .read()
                 .ok()
                 .and_then(|lock| lock.get(&session_id).copied())
                 .unwrap_or(0)
         } else {
-            0
+            user_id
+                .filter(|&uid| uid > 0)
+                .and_then(|uid| {
+                    self.user_gateway_counts
+                        .read()
+                        .ok()
+                        .and_then(|lock| lock.get(&uid).copied())
+                })
+                .unwrap_or(0)
         };
-        let user_gw = user_id
-            .filter(|&uid| uid > 0)
-            .and_then(|uid| {
-                self.user_gateway_counts
-                    .read()
-                    .ok()
-                    .and_then(|lock| lock.get(&uid).copied())
-            })
-            .unwrap_or(0);
-        let gateway_request_count = sess_gw.max(user_gw);
         let handshake = if session_id > 0 {
             self.session_handshakes
                 .read()
                 .ok()
                 .and_then(|lock| lock.get(&session_id).cloned())
+                .or_else(|| {
+                    self.preauth_handshakes
+                        .read()
+                        .ok()
+                        .and_then(|lock| lock.get(&session_id).cloned())
+                })
         } else {
-            None
-        }
-        .or_else(|| {
             user_id.filter(|&uid| uid > 0).and_then(|uid| {
                 self.user_handshakes
                     .read()
                     .ok()
                     .and_then(|lock| lock.get(&uid).cloned())
             })
-        });
+        };
 
         SessionRpcTelemetry {
             server_request_count,

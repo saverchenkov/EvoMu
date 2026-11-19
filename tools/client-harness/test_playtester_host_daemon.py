@@ -4160,6 +4160,208 @@ class TestBugOracleSessionTelemetryAndArgs(unittest.TestCase):
         self.assertEqual(default_args.scenarios, [])
         self.assertFalse(default_args.no_github_sync)
 
+    def test_oracle_flight_call_roundtrip_to_sync_bugs_and_unknown_build_omits_mismatch(self):
+        tools_dir = HARNESS_DIR.parent
+        if str(tools_dir) not in sys.path:
+            sys.path.insert(0, str(tools_dir))
+        import sync_bugs_to_github as sync_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            machonet_src = root / "crates" / "eve-machonet" / "src"
+            machonet_src.mkdir(parents=True)
+            (machonet_src / "lib.rs").write_text(
+                "pub const V24_BOOT_BUILD: u32 = 3_698_585;\n",
+                encoding="utf-8",
+            )
+            qdir = root / "queue"
+            sdir = root / "step_1"
+            qdir.mkdir()
+            sdir.mkdir()
+            shot = root / "shot.png"
+            shot.write_bytes(b"png")
+            tb = root / "tb.log"
+            tb.write_text("", encoding="utf-8")
+            srv = root / "srv.log"
+            srv.write_text("", encoding="utf-8")
+
+            mem = playtester.PlaytesterMemory(root, git_head="deadbeef")
+            oracle = playtester.PlaytesterBugOracle(root, qdir, mem, sync_github=False)
+            oracle.reset_log_offsets(tb, srv)
+
+            # Unknown client_boot_build must NOT emit `"build_mismatch": False` (GH1358-03).
+            snap_unknown = oracle._session_telemetry_payload()
+            self.assertEqual(snap_unknown["handshake"]["server_boot_build"], 3698585)
+            self.assertNotIn("build_mismatch", snap_unknown["handshake"])
+
+            # Round-trip unstatused transport error (`unseq_gateway_err`) through evaluate_step -> sync_bugs_to_github (GH1358-04).
+            unseq_gateway_err = {
+                "kind": "quasar",
+                "service": "publicGateway",
+                "method": "Send",
+                "error": "Connection refused",
+            }
+            oracle.record_session_flight_calls(
+                [
+                    {"seq": 1, "service": "account", "method": "GetEntry", "status": "OK"},
+                    unseq_gateway_err,
+                ]
+            )
+            with tb.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    'Traceback (most recent call last):\n  File "eve/client/quasar.py", line 12, in Send\nRuntimeError: quasar publicGateway Send Connection refused\n'
+                )
+            queued = oracle.evaluate_step(
+                step_num=1,
+                git_head="deadbeef",
+                decision={
+                    "action": {"type": "click"},
+                    "observation": "Public gateway unavailable",
+                    "bug_report": {"should_file": False},
+                },
+                exec_res={
+                    "action_ok": True,
+                    "flight_recorder": {
+                        "macho_calls": [unseq_gateway_err],
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                },
+                ui_snapshot={"session": {"charid": 2100000001}},
+                screenshot_path=shot,
+                burst_paths=[],
+                traceback_log=tb,
+                server_log=srv,
+                step_dir=sdir,
+            )
+            self.assertEqual(len(queued), 1)
+            bundle = json.loads(queued[0].read_text(encoding="utf-8"))
+            self.assertEqual(len(bundle["flight_recorder"]), 1)
+            fr0 = bundle["flight_recorder"][0]
+            self.assertEqual(fr0["kind"], "quasar")
+            self.assertEqual(fr0["error"], "Connection refused")
+            self.assertEqual(fr0["status"], "ERR(Connection refused)")
+            fault = sync_mod.classify_environment_fault(bundle)
+            self.assertIsNotNone(fault)
+            assert fault is not None
+            self.assertEqual(fault[0], "zero_gateway_requests")
+
+            # Also verify harvest_flight_recorder_anomalies preserves `kind` and `error` and `ERR(...)` status.
+            oracle.record_flight_recorder_anomalies(
+                [unseq_gateway_err] * 3,
+                step_num=2,
+                git_head="deadbeef",
+                session={"charid": 2100000001},
+            )
+            fr_bundles = list(qdir.glob("playtester_fr_*.json"))
+            self.assertEqual(len(fr_bundles), 1)
+            fr_bundle = json.loads(fr_bundles[0].read_text(encoding="utf-8"))
+            self.assertEqual(fr_bundle["flight_recorder"][0]["status"], "ERR(Connection refused)")
+            self.assertEqual(fr_bundle["flight_recorder"][0]["kind"], "quasar")
+            self.assertEqual(fr_bundle["flight_recorder"][0]["error"], "Connection refused")
+            fr_fault = sync_mod.classify_environment_fault(fr_bundle)
+            self.assertIsNotNone(fr_fault)
+            assert fr_fault is not None
+            self.assertEqual(fr_fault[0], "zero_gateway_requests")
+
+    def test_scenario_runner_accumulates_step_flight_recorder_calls(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "scen.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "t_scen_rpc_telemetry",
+                        "title": "Scenario RPC telemetry",
+                        "starting_state": {},
+                        "steps": [
+                            {
+                                "id": "step_1",
+                                "action": {"type": "wait", "wait_ms": 10},
+                                "checks": {"no_client_exception": False},
+                            },
+                            {
+                                "id": "step_2",
+                                "action": {"type": "wait", "wait_ms": 10},
+                                "checks": {"no_client_exception": False},
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = playtester.parse_args(["--scenario", str(scen_path), "--no-github-sync"])
+            args.runtime_dir = str(root / "runtime")
+            args.out_dir = str(root / "out")
+            runner = playtester.ScenarioRunner(args, scenario_paths=[scen_path], out_dir=root / "out")
+            runner.start_server = mock.MagicMock(return_value=True)
+            runner.stop_server = mock.MagicMock()
+
+            def _mock_start_client():
+                runner._last_boot_result = {
+                    "state": {"session": {"charid": 90000001}},
+                    "flight_recorder": {
+                        "macho_calls": [
+                            {"seq": 1, "service": "account", "method": "GetEntry", "status": "OK"},
+                        ]
+                    },
+                }
+                return True
+
+            runner.start_client = mock.MagicMock(side_effect=_mock_start_client)
+            captured_before_stop = {}
+
+            def _capture_stop():
+                captured_before_stop["calls"] = list(runner._session_flight_calls)
+                captured_before_stop["telemetry"] = runner.oracle._session_telemetry_payload()
+
+            runner.stop_client = mock.MagicMock(side_effect=_capture_stop)
+            runner._close_gm_bridge = mock.MagicMock()
+            runner._capture_failure_screenshot = mock.MagicMock(return_value=None)
+            runner._run_destiny_parity_check = mock.MagicMock(return_value=None)
+            step_results = iter(
+                [
+                    {
+                        "action_ok": True,
+                        "post_state": {"session": {"charid": 90000001}},
+                        "flight_recorder": {
+                            "macho_calls": [
+                                {"seq": 2, "service": "machoNet", "method": "GetTime", "status": "OK"}
+                            ]
+                        },
+                    },
+                    {
+                        "action_ok": True,
+                        "post_state": {"session": {"charid": 90000001}},
+                        "flight_recorder": {
+                            "macho_calls": [
+                                {"seq": 3, "service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}
+                            ]
+                        },
+                    },
+                ]
+            )
+
+            def _rpc_call(method, *_args, **_kwargs):
+                if method == "get_state":
+                    return {"state": {"session": {"charid": 90000001}}}
+                if method == "execute_action":
+                    return next(step_results)
+                return {}
+
+            rpc_mock = mock.MagicMock()
+            rpc_mock.call.side_effect = _rpc_call
+            runner.rpc = rpc_mock
+
+            scen = playtester.load_scenario_file(scen_path)
+            journey, _meta = runner.run_single_scenario(scen)
+            self.assertTrue(journey["passed"], journey.get("failure"))
+            self.assertEqual([c["seq"] for c in captured_before_stop["calls"]], [1, 2, 3])
+            snap = captured_before_stop["telemetry"]
+            self.assertEqual(snap["server_request_count"], 3)
+            self.assertEqual(snap["gateway_request_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

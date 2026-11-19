@@ -555,7 +555,7 @@ fn test_bundle_cumulative_rpc_and_handshake_telemetry() {
     let hs = bundle.handshake.as_ref().expect("handshake metadata populated");
     assert_eq!(hs.client_boot_build, Some(3_698_100));
     assert_eq!(hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
-    assert!(hs.build_mismatch);
+    assert_eq!(hs.build_mismatch, Some(true));
 
     let encoded = serde_json::to_string(&bundle).expect("serialize bundle");
     let decoded: BugIncidentBundle = serde_json::from_str(&encoded).expect("deserialize bundle");
@@ -603,14 +603,45 @@ fn test_bundle_telemetry_defaults_and_user_fallback() {
     let hs = snap.handshake.as_ref().expect("user-fallback handshake");
     assert_eq!(hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
     assert_eq!(hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
-    assert!(!hs.build_mismatch);
+    assert_eq!(hs.build_mismatch, Some(false));
 
-    // `resolve_bundle_handshake` supplies server build even when no handshake was recorded.
+    // When session_id > 0, stale prior user_gateway_counts must NOT leak across sessions,
+    // and upgrading the client build clears prior build_mismatch flags.
+    ctx.flight_recorder.record_handshake_builds(
+        900,
+        Some(123),
+        Some(3_600_000),
+        eve_machonet::V24_BOOT_BUILD,
+        true,
+    );
+    ctx.flight_recorder.record_gateway_request(Some(900), Some(123));
+    ctx.flight_recorder.reset_user_telemetry(123);
+    ctx.flight_recorder.record_handshake_builds(
+        901,
+        Some(123),
+        Some(eve_machonet::V24_BOOT_BUILD),
+        eve_machonet::V24_BOOT_BUILD,
+        false,
+    );
+    let mut upgraded_session = SessionState::new(901);
+    upgraded_session.user_id = Some(123);
+    let upgraded_snap = BugIncidentBundle::build_snapshot(&ctx, &upgraded_session, 0, "UI", "");
+    assert_eq!(upgraded_snap.gateway_request_count, 0);
+    let upgraded_hs = upgraded_snap.handshake.as_ref().expect("upgraded handshake");
+    assert_eq!(upgraded_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(upgraded_hs.build_mismatch, Some(false));
+
+    // Unknown client build omits `build_mismatch` in serialized JSON instead of claiming false compatibility.
     let mut bare_session = SessionState::new(999);
     bare_session.user_id = Some(555);
     let bare = BugIncidentBundle::build_snapshot(&ctx, &bare_session, 1, "UI", "");
     let bare_hs = bare.handshake.as_ref().expect("default server build");
     assert_eq!(bare_hs.client_boot_build, None);
     assert_eq!(bare_hs.server_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
-    assert!(!bare_hs.build_mismatch);
+    assert_eq!(bare_hs.build_mismatch, None);
+    let bare_json = serde_json::to_value(&bare).expect("serialize bare");
+    assert!(
+        bare_json["handshake"].get("build_mismatch").is_none(),
+        "unknown client build must omit build_mismatch instead of emitting false"
+    );
 }

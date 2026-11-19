@@ -619,6 +619,17 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
             ("RuntimeError", "warp failed", "shipui.pyj:312 in DoWarp"),
         )
 
+        # Exception line containing `<file>.py(N)` without `<pre>` must NOT be misclassified as a stack frame (GH1358-06).
+        trace_exc_with_py_ref = (
+            "Traceback (most recent call last):\n"
+            '  File "eve/client/script/ui/handler.py", line 17, in Invoke\n'
+            "RuntimeError: failed in /app/foo.py(42)\n"
+        )
+        self.assertEqual(
+            sync_mod.parse_traceback_summary(trace_exc_with_py_ref, ""),
+            ("RuntimeError", "failed in /app/foo.py(42)", "handler.py:17 in Invoke"),
+        )
+
     def test_bf1344_02_noisy_server_logs_ignored_and_session_evidence_prevents_zero_server_requests(self) -> None:
         tb = 'Traceback (most recent call last):\n  File "eve/client/ui/test.py", line 12, in Run\nRuntimeError: boom'
         noisy_pre_auth = _make_crash_bundle(
@@ -711,29 +722,62 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         self.assertEqual(fault[0], "build_mismatch")
         self.assertEqual(fault[1], "env:build_mismatch:client=3600000:server=3698585")
 
-    def test_bf1344_03_public_gateway_client_transport_error_and_startup_log_still_zero_gateway_requests(self) -> None:
-        bundle = _make_crash_bundle(
-            stack_hash=-8101,
-            trace="quasar_grpc channel failed: Connection refused",
-            flight_recorder=[
-                {"kind": "quasar", "service": "publicGateway", "method": "Send", "error": "Connection refused"},
-                {
-                    "kind": "quasar",
-                    "service": "publicGateway",
-                    "method": "Publish",
-                    "status": "ERR(status=500 Request timed out)",
-                },
-            ],
-            server_logs_before=["2026-11-19T12:00:00Z INFO eve_server::quasar_grpc: listening on 127.0.0.1:50051"],
+        # `handshake.build_mismatch: False` (especially when handshake lacks `client_boot_build`) must NOT mask numeric mismatch.
+        masked_unknown = _make_crash_bundle(
+            stack_hash=-8003,
+            trace=tb,
             extra={
-                "server_request_count": 10,
-                "gateway_request_count": 0,
+                "server_request_count": 5,
+                "handshake": {
+                    "server_boot_build": 3698585,
+                    "build_mismatch": False,
+                },
+                "manual_report": {"client_build": 3600000},
             },
         )
-        fault = sync_mod.classify_environment_fault(bundle)
-        self.assertIsNotNone(fault)
-        assert fault is not None
-        self.assertEqual(fault[0], "zero_gateway_requests")
+        fault_masked_unknown = sync_mod.classify_environment_fault(masked_unknown)
+        self.assertIsNotNone(fault_masked_unknown)
+        assert fault_masked_unknown is not None
+        self.assertEqual(fault_masked_unknown[0], "build_mismatch")
+
+        masked_numeric = _make_crash_bundle(
+            stack_hash=-8004,
+            trace=tb,
+            extra={
+                "server_request_count": 5,
+                "handshake": {
+                    "client_boot_build": 3600000,
+                    "server_boot_build": 3698585,
+                    "build_mismatch": False,
+                },
+            },
+        )
+        fault_masked_numeric = sync_mod.classify_environment_fault(masked_numeric)
+        self.assertIsNotNone(fault_masked_numeric)
+        assert fault_masked_numeric is not None
+        self.assertEqual(fault_masked_numeric[0], "build_mismatch")
+
+    def test_bf1344_03_public_gateway_client_transport_error_and_startup_log_still_zero_gateway_requests(self) -> None:
+        for gw_extra in ({}, {"gateway_request_count": 0}):
+            bundle = _make_crash_bundle(
+                stack_hash=-8101,
+                trace="quasar_grpc channel failed: Connection refused",
+                flight_recorder=[
+                    {"kind": "quasar", "service": "publicGateway", "method": "Send", "error": "Connection refused"},
+                    {
+                        "kind": "quasar",
+                        "service": "publicGateway",
+                        "method": "Publish",
+                        "status": "ERR(status=500 Request timed out)",
+                    },
+                ],
+                server_logs_before=["2026-11-19T12:00:00Z INFO eve_server::quasar_grpc: listening on 127.0.0.1:50051"],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            fault = sync_mod.classify_environment_fault(bundle)
+            self.assertIsNotNone(fault, f"expected zero_gateway_requests for gw_extra={gw_extra}")
+            assert fault is not None
+            self.assertEqual(fault[0], "zero_gateway_requests")
 
     def test_bf1344_03_server_reached_quasar_failure_not_collapsed_as_zero_gateway_requests(self) -> None:
         base_trace = "quasar gateway returned UNAUTHENTICATED for mission payload"
@@ -744,23 +788,30 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         )
         self.assertIsNone(sync_mod.classify_environment_fault(b_explicit))
 
-        b_flight_ok = _make_crash_bundle(
-            stack_hash=-8202,
-            trace=base_trace,
-            flight_recorder=[{"service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}],
-            extra={"server_request_count": 10},
-        )
-        self.assertIsNone(sync_mod.classify_environment_fault(b_flight_ok))
+        for gw_extra in ({}, {"gateway_request_count": 0}):
+            b_flight_ok = _make_crash_bundle(
+                stack_hash=-8202,
+                trace=base_trace,
+                flight_recorder=[{"service": "publicGatewaySvc", "method": "SendRequest", "status": "OK"}],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(b_flight_ok),
+                f"gateway_request_count={gw_extra} shadowed observed flight_recorder call",
+            )
 
-        b_srv_log = _make_crash_bundle(
-            stack_hash=-8203,
-            trace=base_trace,
-            server_logs_before=[
-                "2026-11-19T12:00:05Z WARN eve_server::quasar_grpc: /eve_public.gateway.Requests/Send -> UNAUTHENTICATED"
-            ],
-            extra={"server_request_count": 10},
-        )
-        self.assertIsNone(sync_mod.classify_environment_fault(b_srv_log))
+            b_srv_log = _make_crash_bundle(
+                stack_hash=-8203,
+                trace=base_trace,
+                server_logs_before=[
+                    "2026-11-19T12:00:05Z WARN eve_server::quasar_grpc: /eve_public.gateway.Requests/Send -> UNAUTHENTICATED"
+                ],
+                extra={"server_request_count": 10, **gw_extra},
+            )
+            self.assertIsNone(
+                sync_mod.classify_environment_fault(b_srv_log),
+                f"gateway_request_count={gw_extra} shadowed observed server log warning",
+            )
 
 
 if __name__ == "__main__":

@@ -186,6 +186,40 @@ struct VerifiedGatewayIdentity {
     bound_online_session_id: Option<u64>,
 }
 
+fn reject_unauthenticated_headers(
+    respond: &mut SendResponse<Bytes>,
+    peer_ip: Option<std::net::IpAddr>,
+    path: &str,
+) -> anyhow::Result<()> {
+    tracing::warn!(
+        peer_ip = ?peer_ip,
+        path = %path,
+        "Quasar gRPC request returned UNAUTHENTICATED trailer"
+    );
+    send_trailers_only(
+        respond,
+        GRPC_STATUS_UNAUTHENTICATED,
+        "Missing or invalid Quasar authorization token",
+    )
+}
+
+fn record_and_warn_stream_unauthenticated(
+    ctx: &ServerContext,
+    identity: &VerifiedGatewayIdentity,
+    path: &str,
+    reason: &str,
+) {
+    ctx.flight_recorder
+        .record_gateway_request(identity.bound_online_session_id, Some(identity.user_id));
+    tracing::warn!(
+        user_id = identity.user_id,
+        online_session_id = ?identity.bound_online_session_id,
+        path = %path,
+        reason = %reason,
+        "Quasar gRPC request returned UNAUTHENTICATED trailer"
+    );
+}
+
 async fn handle_grpc_stream(
     request: Request<RecvStream>,
     mut respond: SendResponse<Bytes>,
@@ -221,16 +255,7 @@ async fn handle_grpc_stream(
         }
         "/eve_public.gateway.Requests/Send" => {
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
-                tracing::warn!(
-                    peer_ip = ?peer_ip,
-                    path = "/eve_public.gateway.Requests/Send",
-                    "Quasar gRPC request returned UNAUTHENTICATED trailer"
-                );
-                return send_trailers_only(
-                    &mut respond,
-                    GRPC_STATUS_UNAUTHENTICATED,
-                    "Missing or invalid Quasar authorization token",
-                );
+                return reject_unauthenticated_headers(&mut respond, peer_ip, &path);
             };
             let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             let mut send = send_grpc_headers(&mut respond, false)?;
@@ -276,16 +301,7 @@ async fn handle_grpc_stream(
                 ) {
                     Ok(s) => s,
                     Err(reason) => {
-                        ctx.flight_recorder.record_gateway_request(
-                            identity.bound_online_session_id,
-                            Some(identity.user_id),
-                        );
-                        tracing::warn!(
-                            user_id = identity.user_id,
-                            online_session_id = ?identity.bound_online_session_id,
-                            reason = %reason,
-                            "Quasar gRPC request returned UNAUTHENTICATED trailer"
-                        );
+                        record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_UNAUTHENTICATED,
@@ -330,17 +346,14 @@ async fn handle_grpc_stream(
         }
         "/eve_public.gateway.Notices/Consume" => {
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
-                return send_trailers_only(
-                    &mut respond,
-                    GRPC_STATUS_UNAUTHENTICATED,
-                    "Missing or invalid Quasar authorization token",
-                );
+                return reject_unauthenticated_headers(&mut respond, peer_ip, &path);
             };
             let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             let mut session =
                 match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
                     Ok(s) => s,
                     Err(reason) => {
+                        record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                         return send_trailers_only(
                             &mut respond,
                             GRPC_STATUS_UNAUTHENTICATED,
@@ -348,6 +361,10 @@ async fn handle_grpc_stream(
                         );
                     }
                 };
+            ctx.flight_recorder.record_gateway_request(
+                identity.bound_online_session_id,
+                Some(identity.user_id),
+            );
             let now_unix = ctx.now_unix();
             let mut rx =
                 ctx.quasar_gateway
@@ -377,6 +394,7 @@ async fn handle_grpc_stream(
                             match build_session_for_identity(&ctx, grpc_session_id, &mut identity, None) {
                                 Ok(_) => send_grpc_trailers(&mut send, GRPC_STATUS_OK, None)?,
                                 Err(reason) => {
+                                    record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                                     send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?
                                 }
                             }
@@ -390,6 +408,7 @@ async fn handle_grpc_stream(
                                 }
                             }
                             Err(reason) => {
+                                record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                                 send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
                                 break;
                             }
@@ -412,6 +431,7 @@ async fn handle_grpc_stream(
                                         }
                                     }
                                     Err(reason) => {
+                                        record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                                         send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
                                         break;
                                     }
@@ -434,6 +454,7 @@ async fn handle_grpc_stream(
                                 }
                             }
                             Err(reason) => {
+                                record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                                 send_grpc_trailers(&mut send, GRPC_STATUS_UNAUTHENTICATED, Some(&reason))?;
                                 break;
                             }
@@ -448,11 +469,7 @@ async fn handle_grpc_stream(
         }
         "/eve_public.gateway.Events/Publish" => {
             let Some(mut identity) = authenticate_grpc_headers(&ctx, &headers, peer_ip) else {
-                return send_trailers_only(
-                    &mut respond,
-                    GRPC_STATUS_UNAUTHENTICATED,
-                    "Missing or invalid Quasar authorization token",
-                );
+                return reject_unauthenticated_headers(&mut respond, peer_ip, &path);
             };
             let grpc_session_id = NEXT_GRPC_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             let mut send = send_grpc_headers(&mut respond, false)?;
@@ -498,16 +515,7 @@ async fn handle_grpc_stream(
                 ) {
                     Ok(s) => s,
                     Err(reason) => {
-                        ctx.flight_recorder.record_gateway_request(
-                            identity.bound_online_session_id,
-                            Some(identity.user_id),
-                        );
-                        tracing::warn!(
-                            user_id = identity.user_id,
-                            online_session_id = ?identity.bound_online_session_id,
-                            reason = %reason,
-                            "Quasar gRPC event publish returned UNAUTHENTICATED trailer"
-                        );
+                        record_and_warn_stream_unauthenticated(&ctx, &identity, &path, &reason);
                         send_grpc_trailers(
                             &mut send,
                             GRPC_STATUS_UNAUTHENTICATED,

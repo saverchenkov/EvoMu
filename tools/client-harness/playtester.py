@@ -4854,6 +4854,30 @@ class PlaytesterBugOracle:
             if srv_quasar_hits > 0:
                 self._session_gateway_request_count += srv_quasar_hits
 
+    @staticmethod
+    def _serialize_flight_call(
+        mc: Dict[str, Any],
+        default_service: str = "-",
+        default_method: str = "-",
+    ) -> Dict[str, Any]:
+        raw_status = str(mc.get("status") or "").strip()
+        err_msg = str(mc.get("error") or "").strip()
+        if not raw_status:
+            raw_status = "ERR" if err_msg else "OK"
+        detail = mc.get("error") or mc.get("result") or ""
+        entry: Dict[str, Any] = {
+            "service": mc.get("service", default_service),
+            "method": mc.get("method", default_method),
+            "args_summary": mc.get("args", mc.get("args_summary", "()")),
+            "status": f"{raw_status}({detail})",
+            "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
+        }
+        if mc.get("kind"):
+            entry["kind"] = mc["kind"]
+        if err_msg:
+            entry["error"] = err_msg
+        return entry
+
     def _session_telemetry_payload(
         self, ui_snapshot: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -4878,8 +4902,6 @@ class PlaytesterBugOracle:
                 hs["build_mismatch"] = (
                     self._session_client_boot_build < self._session_server_boot_build
                 )
-            else:
-                hs["build_mismatch"] = False
             payload["handshake"] = hs
         if self._session_gateway_transport_error_count > 0:
             payload["telemetry"] = {
@@ -5942,18 +5964,11 @@ class PlaytesterBugOracle:
             clean_title = inc["title"].replace("[Playtester]", "").strip()
             sess_raw = ui_snapshot.get("session") or {}
             fr_raw = (exec_res.get("flight_recorder") or {}) if isinstance(exec_res, dict) else {}
-            fr_calls = []
-            for mc in fr_raw.get("macho_calls") or []:
-                if isinstance(mc, dict):
-                    fr_calls.append(
-                        {
-                            "service": mc.get("service", "-"),
-                            "method": mc.get("method", "-"),
-                            "args_summary": mc.get("args", "()"),
-                            "status": f"{mc.get('status', 'OK')}({mc.get('error') or mc.get('result') or ''})",
-                            "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
-                        }
-                    )
+            fr_calls = [
+                self._serialize_flight_call(mc)
+                for mc in fr_raw.get("macho_calls") or []
+                if isinstance(mc, dict)
+            ]
             telemetry_payload = self._session_telemetry_payload(ui_snapshot=ui_snapshot)
             manual_report: Dict[str, Any] = {
                 "report_key": f"playtester_step{step_num:04d}_{fingerprint}",
@@ -6220,13 +6235,11 @@ class PlaytesterBugOracle:
             fp_u64 = int(fingerprint, 16)
             fp_i64 = fp_u64 - (1 << 64) if fp_u64 >= (1 << 63) else fp_u64
             fr_calls = [
-                {
-                    "service": mc.get("service", anom["service"]),
-                    "method": mc.get("method", anom["method"]),
-                    "args_summary": mc.get("args", mc.get("args_summary", "()")),
-                    "status": f"{mc.get('status', 'OK')}({mc.get('error') or mc.get('result') or ''})",
-                    "duration_micros": int(float(mc.get("duration_ms", 0) or 0) * 1000),
-                }
+                self._serialize_flight_call(
+                    mc,
+                    default_service=anom["service"],
+                    default_method=anom["method"],
+                )
                 for mc in anom.get("sample_calls") or []
                 if isinstance(mc, dict)
             ]
@@ -10692,6 +10705,8 @@ class ScenarioRunner(PlaytesterRunner):
                         except Exception:
                             startup_calls = []
 
+                    if startup_calls:
+                        self._record_session_flight_calls(startup_calls)
                     pre_state = dict(boot_state)
                     recent_rpcs: List[str] = [_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)]
                     user_cfg, _, _, _ = self._scenario_auth_params()
@@ -10764,6 +10779,11 @@ class ScenarioRunner(PlaytesterRunner):
                                 )
 
                         elapsed_ms = round((time.time() - t_step) * 1000.0, 2)
+                        self._record_session_flight_calls(
+                            (exec_res.get("flight_recorder") or {}).get("macho_calls")
+                            if isinstance(exec_res, dict)
+                            else None
+                        )
                         rpcs_for_step = _collect_step_rpcs(exec_res)
                         if idx == 0 and startup_calls:
                             rpcs_for_step = sorted(set(rpcs_for_step) | {_format_rpc_name(c) for c in startup_calls if _format_rpc_name(c)})

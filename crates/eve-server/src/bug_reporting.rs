@@ -379,17 +379,18 @@ fn resolve_bundle_handshake(
             if hs.server_boot_build.is_none() {
                 hs.server_boot_build = Some(server_build);
             }
-            hs.build_mismatch = hs.build_mismatch
-                || hs
+            if hs.build_mismatch != Some(true) {
+                hs.build_mismatch = hs
                     .client_boot_build
                     .zip(hs.server_boot_build)
-                    .is_some_and(|(c, s)| c < s);
+                    .map(|(c, s)| c < s);
+            }
             Some(hs)
         }
         None => Some(HandshakeBuildMetadata {
             client_boot_build: fallback_client_build,
             server_boot_build: Some(server_build),
-            build_mismatch: fallback_client_build.is_some_and(|c| c < server_build),
+            build_mismatch: fallback_client_build.map(|c| c < server_build),
         }),
     }
 }
