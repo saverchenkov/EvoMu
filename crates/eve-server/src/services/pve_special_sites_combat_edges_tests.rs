@@ -256,6 +256,11 @@ async fn homefront_npc_destroyed_covers_solo_fleet_filters_and_skip_cases() {
             .expect("spawn ss_solo");
     let relay_solo = relay_id_of(&ss_solo);
     let solo_sess = make_sess(killer_solo, 1_090_001, sys_id, None, None);
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball(make_ball(1_090_001, 587, ss_solo.site_position + DVec3::new(400.0, 0.0, 0.0)))
+        .await;
     crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
         &ctx,
         &solo_sess,
@@ -339,6 +344,11 @@ async fn homefront_npc_destroyed_covers_solo_fleet_filters_and_skip_cases() {
         (member_entered_then_docked, 1_090_006),
         (fleet_wingman, 1_090_007),
     ] {
+        let _ = ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .spawn_ball(make_ball(sid, 587, ss_fleet.site_position + DVec3::new(400.0, 0.0, 0.0)))
+            .await;
         crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
             &ctx,
             &make_sess(cid, sid, sys_id, None, None),

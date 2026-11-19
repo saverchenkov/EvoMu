@@ -1292,7 +1292,7 @@ pub use crate::services::pve_dungeon_runtime_rpc::{
     spawn_dungeon_instance, spawn_sde_dungeon_runtime_instance,
 };
 
-/// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons (`HF-02`, `HF-05`).
+/// Dispatches Homefront Operations acceleration gates first, then falls back to SDE/runtime dungeons.
 pub async fn try_activate_dungeon_runtime_gate(
     ctx: &ServerContext,
     session: &mut eve_machonet::SessionState,
@@ -1316,7 +1316,7 @@ pub async fn try_activate_dungeon_runtime_gate(
     .await
 }
 
-/// Forwards space-container loot / Raid delivery events to Homefront Operations and standard dungeon triggers (`HF-02`).
+/// Forwards space-container loot / Raid delivery events to Homefront Operations and standard dungeon triggers.
 pub async fn on_dungeon_item_looted(
     ctx: &ServerContext,
     char_id: i64,

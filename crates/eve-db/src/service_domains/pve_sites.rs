@@ -762,6 +762,8 @@ pub enum HomefrontProgressRecord {
         warp_bubble_active: bool,
         caches_recovered: u32,
         waves_paid: u8,
+        #[serde(default)]
+        waves_paid_mask: u16,
         extraction_window_secs: u64,
     },
     SuspiciousSignal {

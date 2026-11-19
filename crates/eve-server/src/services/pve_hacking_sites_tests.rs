@@ -466,6 +466,20 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
 
     // 1. Salvage Research Werpost hacking via hackingMgr -> werpost_activated = true
     let sr = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_713).expect("spawn Salvage Research");
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: sr.site_position + DVec3::new(400.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
     activate_homefront_acceleration_gate(&ctx, &session, sr.instance_id)
         .await
         .expect("enter Salvage Research gate");

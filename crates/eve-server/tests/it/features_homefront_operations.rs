@@ -46,11 +46,26 @@ async fn setup_pilot_in_space(ctx: &ServerContext, conn_id: u64, char_id: i64, s
             ch.clone_grade = 1;
             ch.balance = IskCents::from_isk(500_000_000);
         }
+        if !s.accounts.values().any(|a| a.user_id == uid) {
+            let uname = format!("hf_it_user_{uid}");
+            s.accounts.insert(
+                uname.clone(),
+                eve_db::AccountRecord {
+                    user_id: uid,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                },
+            );
+        }
         s.items.insert(
             ship_id,
             InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: sys_id as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() },
         );
     });
+    let _ = ctx.db.acquire_online_lock(uid, conn_id, Some(char_id), true, ctx.now_unix());
     sess.user_id = Some(uid);
     sess.character_id = Some(char_id);
     sess.solar_system_id = Some(sys_id);
@@ -945,9 +960,35 @@ mod homefront_operations_it {
         let aar = spawn_homefront_site_for_dungeon(&ctx, jita, 10_346).unwrap();
         position_ship_at(&ctx, jita, 743_000_004, aar.site_position + DVec3::new(350.0, 0.0, 0.0)).await;
         activate_homefront_acceleration_gate(&ctx, &sessions[3], aar.instance_id).await.unwrap();
+        let aar_cid = sessions[3].character_id.unwrap();
+        let (aar_bal_before, aar_j_before) = ctx.db.with_snapshot(|snap| {
+            let j_cnt = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == aar_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            (snap.characters[&aar_cid].balance, j_cnt)
+        });
+        let _ = ctx.drain_notifications_for_char(aar_cid);
         for _ in 1..=9 {
             abyssal_clear_wave(&ctx, &sessions[3], aar.instance_id, 324, 1_500.0, true).await.unwrap();
         }
+        let (aar_bal_pre_settle, aar_j_pre_settle) = ctx.db.with_snapshot(|snap| {
+            let new_rows: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == aar_cid && j.entry_type == "CorporateRewardPayout")
+                .skip(aar_j_before)
+                .collect();
+            assert_eq!(new_rows.len(), 9, "9 per-wave AAR payouts must appear before settlement");
+            assert!(new_rows.iter().all(|j| j.amount > IskCents(0)));
+            (snap.characters[&aar_cid].balance, new_rows.len())
+        });
+        assert_eq!(
+            aar_bal_pre_settle,
+            aar_bal_before.checked_add(IskCents::from_isk(27_648_000)).unwrap()
+        );
+        assert!(ctx.drain_notifications_for_char(aar_cid).iter().any(|n| n.event == "OnAccountChange"));
         assert_eq!(
             complete_homefront_operation_and_pay(&ctx, &sessions[3], aar.instance_id)
                 .await
@@ -955,6 +996,16 @@ mod homefront_operations_it {
                 .total_fleet_isk,
             27_648_000
         );
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&aar_cid].balance, aar_bal_pre_settle);
+            let j_after = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == aar_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            assert_eq!(j_after, aar_j_before + aar_j_pre_settle);
+        });
+        assert!(!ctx.drain_notifications_for_char(aar_cid).iter().any(|n| n.event == "OnAccountChange"));
 
         // 6. Suspicious Signal (10309): premature relay DPS blocked until 3 arrays hacked (solo opt=5 = 6,144,000)
         let sig = spawn_homefront_site_for_dungeon(&ctx, jita, 10_309).unwrap();
@@ -1233,5 +1284,382 @@ mod homefront_operations_it {
             }
         }
         assert!(get_homefront_runtime_state(&ctx, raid.instance_id).is_some_and(|s| s.completed));
+    }
+
+    #[tokio::test]
+    async fn test_homefront_operations_live_rpc_mining_salvage_and_nonhub_seeding() {
+        use eve_server::services::pve_homefront_sites::{
+            tick_homefront_operations_sync, HOMEFRONT_SALVAGE_DATA_TYPE_ID,
+        };
+        use eve_server::services::pve_special_sites::{
+            ensure_special_sites_spawned_for_system, with_pve_special_reg,
+        };
+        use eve_server::services::pve_special_sites_combat::on_special_site_npc_destroyed_core;
+
+        fn count_nested_instances(rep: &PyRep, expected_sys: u32) -> usize {
+            let PyRep::Dict(outer) = rep else {
+                panic!("expected outer Dict, got {rep:?}");
+            };
+            let Some((_, inner)) = outer.iter().find(|(k, _)| k.as_i64() == Some(i64::from(expected_sys))) else {
+                return 0;
+            };
+            let PyRep::List(entries) = inner else {
+                panic!("expected List of dungeon KeyVals, got {inner:?}");
+            };
+            entries.len()
+        }
+
+        let ctx = ServerContext::new();
+        let kw = HashMap::new();
+        let jita = 30_000_142_u32;
+        let perim = 30_000_144_u32;
+
+        // 1. Non-hub Perimeter (30_000_144): cold GetHomefrontSiteInstances must remain strictly read-only (0 sites),
+        // then ensure_special_sites_spawned_for_system seeds sovereign Caldari Homefront sites.
+        let mut perim_sess = setup_pilot_in_space(&ctx, 893_100, 940_010, 743_200_010, 620, perim, DVec3::ZERO).await;
+        let cold_jita = ctx
+            .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(jita))], &kw, None)
+            .await
+            .expect("GetHomefrontSiteInstances Jita");
+        assert_eq!(count_nested_instances(&cold_jita, jita), 2);
+
+        let (hf_keys_before, rt_len_before, sim_clk_before) = (
+            with_pve_special_reg(&ctx, |reg| {
+                (
+                    reg.homefront_sites.keys().copied().collect::<Vec<_>>(),
+                    reg.sim_clock_sec,
+                )
+            }),
+            ctx.db.with_snapshot(|s| s.dungeon_runtime.homefront_runtimes.len()),
+            with_pve_special_reg(&ctx, |reg| reg.sim_clock_sec),
+        );
+        let cold_perim = ctx
+            .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(perim))], &kw, None)
+            .await
+            .expect("cold GetHomefrontSiteInstances Perimeter");
+        assert_eq!(count_nested_instances(&cold_perim, perim), 0);
+        let (hf_keys_after_cold, rt_len_after_cold, sim_clk_after_cold) = (
+            with_pve_special_reg(&ctx, |reg| {
+                (
+                    reg.homefront_sites.keys().copied().collect::<Vec<_>>(),
+                    reg.sim_clock_sec,
+                )
+            }),
+            ctx.db.with_snapshot(|s| s.dungeon_runtime.homefront_runtimes.len()),
+            with_pve_special_reg(&ctx, |reg| reg.sim_clock_sec),
+        );
+        assert_eq!(hf_keys_after_cold, hf_keys_before, "GetHomefrontSiteInstances must not seed non-hub systems");
+        assert_eq!(rt_len_after_cold, rt_len_before, "GetHomefrontSiteInstances must not create runtimes");
+        assert_eq!(sim_clk_after_cold, sim_clk_before, "GetHomefrontSiteInstances must not mutate registry clock");
+
+        ensure_special_sites_spawned_for_system(&ctx, perim).await;
+        let seeded_perim = ctx
+            .dispatch_rpc(&mut perim_sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(i64::from(perim))], &kw, None)
+            .await
+            .expect("warm GetHomefrontSiteInstances Perimeter after ensure_special_sites_spawned_for_system");
+        assert!(
+            count_nested_instances(&seeded_perim, perim) >= 1,
+            "ensure_special_sites_spawned_for_system must seed sovereign Homefront sites in Perimeter"
+        );
+
+        // 2. Live 9-wave dogmaIM.Mine AAR lifecycle + Wave 9 escort evacuation guard + Basileus/Cache + Wreck
+        let miner_cid = 940_011_i64;
+        let miner_ship = 743_200_011_i64;
+        let mut miner_sess = setup_pilot_in_space(&ctx, 893_101, miner_cid, miner_ship, 32_880, jita, DVec3::ZERO).await;
+        seed_item(&ctx, 743_300_001, 483, miner_cid, miner_ship, InventoryFlag::HiSlot0, 1, true);
+        grant_skills(&ctx, miner_cid, &[(3386, 5), (32_918, 5), (3410, 5), (3426, 5), (3413, 5)]);
+        ctx.invalidate_ship_fitting(miner_ship);
+
+        let aar = spawn_homefront_site_for_dungeon(&ctx, jita, 10_346).expect("spawn live AAR");
+        position_ship_at(&ctx, jita, miner_ship, aar.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        activate_homefront_acceleration_gate(&ctx, &miner_sess, aar.instance_id)
+            .await
+            .expect("Venture enters AAR gate");
+
+        let (bal_before, j_before) = ctx.db.with_snapshot(|snap| {
+            let j_cnt = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == miner_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            (snap.characters[&miner_cid].balance, j_cnt)
+        });
+        let _ = ctx.drain_notifications_for_char(miner_cid);
+        let jita_h = ctx.systems.get_or_spawn(jita);
+
+        for w in 1..=9_u8 {
+            // Clear mining hold & cargo between waves so Venture (5,000 m3 MiningHold) never stalls on CargoFull.
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.retain(|_, it| {
+                    !(it.location_id == miner_ship
+                        && matches!(it.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedOreHold))
+                });
+            });
+
+            let (rock_ids, hostiles) = ctx.db.with_snapshot(|snap| {
+                match &snap.dungeon_runtime.homefront_runtimes[&aar.instance_id].progress {
+                    HomefrontProgressRecord::AbyssalArtifactRecovery {
+                        current_wave,
+                        rock_ball_ids,
+                        wave_hostile_ball_ids,
+                        ..
+                    } => {
+                        assert_eq!(*current_wave, w, "expected AAR wave {w}");
+                        (rock_ball_ids.clone(), wave_hostile_ball_ids.clone())
+                    }
+                    other => panic!("expected AAR record, got {other:?}"),
+                }
+            });
+
+            for rid in rock_ids {
+                if let Some((_, rb)) = jita_h.get_ball_snapshot(rid).await.unwrap() {
+                    position_ship_at(&ctx, jita, miner_ship, rb.position + DVec3::new(250.0, 0.0, 0.0)).await;
+                }
+                for _ in 0..10 {
+                    let rem = ctx.db.with_snapshot(|snap| snap.asteroids.get(&rid).map_or(0, |a| a.quantity));
+                    if rem <= 0 {
+                        break;
+                    }
+                    let res = ctx
+                        .dispatch_rpc(
+                            &mut miner_sess,
+                            "dogmaIM",
+                            None,
+                            "Mine",
+                            &[PyRep::Integer(rid)],
+                            &kw,
+                            None,
+                        )
+                        .await;
+                    if res.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            // Confirm wave w paid live immediately upon finishing wave w's Mutanite
+            ctx.db.with_snapshot(|snap| {
+                match &snap.dungeon_runtime.homefront_runtimes[&aar.instance_id].progress {
+                    HomefrontProgressRecord::AbyssalArtifactRecovery {
+                        mutanite_units_remaining,
+                        warp_bubble_active,
+                        waves_paid_mask,
+                        ..
+                    } => {
+                        assert_eq!(*mutanite_units_remaining, 0);
+                        assert!(!*warp_bubble_active);
+                        assert_ne!(*waves_paid_mask & (1_u16 << (w - 1)), 0, "wave {w} must pay live");
+                    }
+                    other => panic!("expected AAR record, got {other:?}"),
+                }
+            });
+
+            if w == 1 {
+                // Drain 90s setup window and advance 1 tick so wave 2 spawns its rocks and escorts
+                ctx.advance_secs(90);
+                tick_homefront_operations_sync(&ctx);
+                ctx.advance_secs(1);
+                tick_homefront_operations_sync(&ctx);
+            } else {
+                for hid in hostiles {
+                    let _ = on_special_site_npc_destroyed_core(
+                        &ctx.systems,
+                        &ctx.db,
+                        &ctx.sde,
+                        jita,
+                        hid,
+                        Some(miner_cid),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Right after Wave 9 rocks + Wave 9 escort kills during evacuation_active && !basileus_spawned:
+        // site must NOT settle/despawn, and all 9 per-wave ISK payouts (27,648,000 ISK) are already in wallet!
+        ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aar.instance_id];
+            assert!(!rec.completed, "killing Wave 9 escorts during evacuation must NOT settle before Basileus/Cache");
+            assert!(matches!(
+                &rec.progress,
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    evacuation_active: true,
+                    basileus_spawned: false,
+                    waves_paid_mask: 0x01FF,
+                    ..
+                }
+            ));
+            let rows: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == miner_cid && j.entry_type == "CorporateRewardPayout")
+                .skip(j_before)
+                .collect();
+            assert_eq!(rows.len(), 9);
+            assert!(rows.iter().all(|j| j.amount > IskCents(0)));
+            assert_eq!(
+                snap.characters[&miner_cid].balance,
+                bal_before.checked_add(IskCents::from_isk(27_648_000)).unwrap()
+            );
+        });
+        assert!(ctx.drain_notifications_for_char(miner_cid).iter().any(|n| n.event == "OnAccountChange"));
+
+        // Advance 60s evacuation countdown -> spawns Basileus (77_702) + Abyssal Cache (77_727)
+        ctx.advance_secs(60);
+        tick_homefront_operations_sync(&ctx);
+        let cache_id = ctx.db.with_snapshot(|snap| {
+            match &snap.dungeon_runtime.homefront_runtimes[&aar.instance_id].progress {
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    basileus_spawned: true,
+                    cache_ball_id: Some(cid),
+                    ..
+                } => *cid,
+                other => panic!("expected Basileus + Cache spawned after 60s evacuation, got {other:?}"),
+            }
+        });
+        assert!(jita_h
+            .list_balls()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b.type_id == 77_702));
+        assert!(jita_h.get_ball_snapshot(cache_id).await.unwrap().is_some());
+
+        // Destroy Abyssal Artifact Cache -> drops Cache Wreck (84_467) into SystemHandle
+        let _ = on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            jita,
+            cache_id,
+            Some(miner_cid),
+        )
+        .await;
+        assert!(
+            jita_h
+                .list_balls()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|b| b.type_id == 84_467),
+            "destroying Abyssal Cache must spawn Cache Wreck (84_467)"
+        );
+        let aar_pay = complete_homefront_operation_and_pay(&ctx, &miner_sess, aar.instance_id)
+            .await
+            .expect("complete AAR");
+        assert_eq!(aar_pay.total_fleet_isk, 27_648_000);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.characters[&miner_cid].balance,
+                bal_before.checked_add(IskCents::from_isk(27_648_000)).unwrap()
+            );
+            let j_after = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == miner_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            assert_eq!(j_after, j_before + 9, "settlement must not double-pay ISK");
+        });
+        assert!(!ctx.drain_notifications_for_char(miner_cid).iter().any(|n| n.event == "OnAccountChange"));
+
+        // 3. Live Salvage Research (10_713) execute_wreck_salvage_cycle:
+        //    unentered pilot rejected, full cargo rejects with NotEnoughCargoSpace,
+        //    free cargo deposits HOMEFRONT_SALVAGE_DATA_TYPE_ID (81_352) + emits OnItemChange.
+        let salv_cid = 940_012_i64;
+        let salv_ship = 743_200_012_i64;
+        let unentered_cid = 940_013_i64;
+        let unentered_ship = 743_200_013_i64;
+        let salv_sess = setup_pilot_in_space(&ctx, 893_102, salv_cid, salv_ship, 16_236, jita, DVec3::ZERO).await;
+        let _unentered_sess = setup_pilot_in_space(&ctx, 893_103, unentered_cid, unentered_ship, 16_236, jita, DVec3::ZERO).await;
+        seed_item(&ctx, 743_300_002, 25_861, salv_cid, salv_ship, InventoryFlag::HiSlot0, 1, true);
+        seed_item(&ctx, 743_300_003, 25_861, unentered_cid, unentered_ship, InventoryFlag::HiSlot0, 1, true);
+        grant_skills(&ctx, salv_cid, &[(25_863, 5), (3426, 5), (3413, 5)]);
+        grant_skills(&ctx, unentered_cid, &[(25_863, 5), (3426, 5), (3413, 5)]);
+        ctx.invalidate_ship_fitting(salv_ship);
+        ctx.invalidate_ship_fitting(unentered_ship);
+
+        let sal = spawn_homefront_site_for_dungeon(&ctx, jita, 10_713).expect("spawn Salvage Research");
+        position_ship_at(&ctx, jita, salv_ship, sal.site_position + DVec3::new(300.0, 0.0, 0.0)).await;
+        activate_homefront_acceleration_gate(&ctx, &salv_sess, sal.instance_id)
+            .await
+            .expect("Coercer enters Salvage Research");
+        let wreck_0 = ctx.db.with_snapshot(|snap| {
+            match &snap.dungeon_runtime.homefront_runtimes[&sal.instance_id].progress {
+                HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. } => wreck_ball_ids[0],
+                other => panic!("expected SalvageResearch, got {other:?}"),
+            }
+        });
+        let (_, wr_ball) = jita_h.get_ball_snapshot(wreck_0).await.unwrap().expect("wreck ball");
+        position_ship_at(&ctx, jita, salv_ship, wr_ball.position + DVec3::new(500.0, 0.0, 0.0)).await;
+        position_ship_at(&ctx, jita, unentered_ship, wr_ball.position + DVec3::new(500.0, 0.0, 0.0)).await;
+        for (sid, cid_lock) in [(salv_ship, wreck_0), (unentered_ship, wreck_0)] {
+            let _ = jita_h
+                .add_target_lock(
+                    sid,
+                    TargetLock {
+                        target_id: cid_lock,
+                        lock_time_ms: 0.0,
+                        remaining_lock_ms: 0.0,
+                        locked: true,
+                        max_range_m: Some(50_000.0),
+                    },
+                )
+                .await;
+        }
+
+        // Unentered pilot rejected with GateNotEntered
+        let err_unentered = execute_wreck_salvage_cycle(&ctx, jita, unentered_cid, unentered_ship, wreck_0, Some(25_861))
+            .await
+            .expect_err("unentered pilot must fail GateNotEntered on Homefront wreck");
+        assert_eq!(err_unentered.code, "GateNotEntered");
+
+        // Fill entered Coercer cargo so capacity check fails with NotEnoughCargoSpace on successful salvage roll
+        seed_item(&ctx, 743_399_999, 34, salv_cid, salv_ship, InventoryFlag::Cargo, 500_000, false);
+        let mut hit_cap_err = false;
+        for _ in 0..80 {
+            match execute_wreck_salvage_cycle(&ctx, jita, salv_cid, salv_ship, wreck_0, Some(25_861)).await {
+                Err(e) if e.code == "NotEnoughCargoSpace" => {
+                    hit_cap_err = true;
+                    break;
+                }
+                Ok(v) if v.dict_get("salvaged").and_then(|b| b.as_bool()) != Some(true) => continue,
+                other => panic!("expected NotEnoughCargoSpace on full cargo, got {other:?}"),
+            }
+        }
+        assert!(hit_cap_err, "Salvage Research full cargo must fail closed with NotEnoughCargoSpace");
+        assert!(matches!(
+            get_homefront_runtime_state(&ctx, sal.instance_id).unwrap().progress,
+            HomefrontArchetypeProgress::SalvageResearch { wrecks_salvaged: 0, .. }
+        ));
+
+        // Clear cargo blocker -> salvage succeeds, deposits HOMEFRONT_SALVAGE_DATA_TYPE_ID (81_352) + OnItemChange
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&743_399_999);
+        });
+        let _ = ctx.drain_notifications_for_char(salv_cid);
+        let mut salv_ok = false;
+        for _ in 0..80 {
+            let cyc = execute_wreck_salvage_cycle(&ctx, jita, salv_cid, salv_ship, wreck_0, Some(25_861))
+                .await
+                .expect("execute_wreck_salvage_cycle with free cargo");
+            if cyc.dict_get("salvaged").and_then(|b| b.as_bool()) == Some(true) {
+                salv_ok = true;
+                break;
+            }
+        }
+        assert!(salv_ok, "Salvager I must salvage Homefront wreck with free cargo");
+        assert!(ctx.db.with_snapshot(|snap| {
+            snap.items.values().any(|it| {
+                it.location_id == salv_ship
+                    && it.flag == InventoryFlag::Cargo
+                    && it.type_id == HOMEFRONT_SALVAGE_DATA_TYPE_ID
+                    && it.quantity >= 1
+            })
+        }), "salvage must deposit HOMEFRONT_SALVAGE_DATA_TYPE_ID into ship cargo");
+        assert!(ctx.drain_notifications_for_char(salv_cid).iter().any(|n| n.event == "OnItemChange"));
+        assert!(matches!(
+            get_homefront_runtime_state(&ctx, sal.instance_id).unwrap().progress,
+            HomefrontArchetypeProgress::SalvageResearch { wrecks_salvaged: 1, .. }
+        ));
     }
 }

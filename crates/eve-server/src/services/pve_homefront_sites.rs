@@ -54,7 +54,7 @@ const HOMEFRONT_AAR_CACHE_TYPE_ID: TypeId = 77_727;
 const HOMEFRONT_AAR_CACHE_WRECK_TYPE_ID: TypeId = 84_467;
 const HOMEFRONT_SALVAGE_WRECK_TYPE_ID: TypeId = 81_438;
 const HOMEFRONT_SALVAGE_NPC_OWNER_ID: i64 = 1_000_125;
-const HOMEFRONT_SALVAGE_DATA_TYPE_ID: TypeId = 81_352;
+pub const HOMEFRONT_SALVAGE_DATA_TYPE_ID: TypeId = 81_352;
 const HOMEFRONT_SALVAGE_WERPOST_TYPE_ID: TypeId = 83_590;
 const HOMEFRONT_MIN_SALVAGE_BONUS_PCT: f64 = 20.0;
 const HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID: TypeId = 81_383;
@@ -458,8 +458,12 @@ fn static_hull_class(label: &str) -> &'static str {
         "Frigate" => "Frigate",
         "Mining Frigate" => "Mining Frigate",
         "Destroyer" => "Destroyer",
+        "Mining Destroyer" => "Mining Destroyer",
         "Basic T1 Cruiser" => "Basic T1 Cruiser",
+        "Tech 1 Cruiser" => "Tech 1 Cruiser",
         "Hauler" => "Hauler",
+        "Salvage Hauler" => "Salvage Hauler",
+        "Tech 1 Hauler" => "Tech 1 Hauler",
         _ => "AllowedHull",
     }
 }
@@ -739,6 +743,7 @@ fn initial_progress_record(
                 warp_bubble_active: true,
                 caches_recovered: 0,
                 waves_paid: 0,
+                waves_paid_mask: 0,
                 extraction_window_secs: 0,
             }
         }
@@ -1029,7 +1034,7 @@ pub fn spawn_homefront_outer_entry_sync(ctx: &ServerContext, rec: &HomefrontRunt
     }
 }
 
-/// Ensures outer beacon + acceleration gate (`HF-05`) exist in space for seeded Homefront sites,
+/// Ensures outer beacon + acceleration gate exist in space for seeded Homefront sites,
 /// without spawning pocket NPCs or objectives directly in space.
 pub fn ensure_homefront_outer_entries_sync(
     ctx: &ServerContext,
@@ -1082,7 +1087,7 @@ pub fn ensure_homefront_outer_entries_sync(
 }
 
 /// Spawns or activates a specific V24 SDE Homefront `dungeon_id` (`archetype_id == 70`) in `sys_id`
-/// for live space operations, spawning ONLY the outer beacon + acceleration gate (`HF-05`).
+/// for live space operations, spawning ONLY the outer beacon + acceleration gate.
 pub fn spawn_homefront_site_for_dungeon(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
@@ -2073,7 +2078,7 @@ fn spawn_pocket_entities_sync(ctx: &ServerContext, instance_id: i64) {
     });
 }
 
-/// Validates acceleration-gate ship restrictions (`HF-05`), proximity when in space, and movement
+/// Validates acceleration-gate ship restrictions, proximity in space, and movement
 /// guards; spawns the inner pocket behind the gate and admits the pilot.
 pub async fn activate_homefront_acceleration_gate(
     ctx: &ServerContext,
@@ -2088,16 +2093,22 @@ pub async fn activate_homefront_acceleration_gate(
         ));
     }
 
-    let (sys_id, ship_id, ship_type_id, gate_ball_id, pocket_pos, dungeon_id) =
+    let (sys_id, ship_id, ship_type_id, gate_ball_id, pocket_pos, dungeon_id, char_sys_opt) =
         ctx.db.with_snapshot(|snap| -> Result<_, BridgeRpcError> {
-            let sid = session.ship_id.or_else(|| {
-                snap.characters.get(&char_id).map(|c| c.active_ship_id)
-            }).ok_or_else(|| hf_err("NoActiveShip", "Pilot must be in an active ship"))?;
+            let sid = session
+                .ship_id
+                .or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id))
+                .ok_or_else(|| hf_err("NoActiveShip", "Pilot must be in an active ship"))?;
             let stid = snap
                 .items
                 .get(&sid)
                 .map(|i| i.type_id)
                 .ok_or_else(|| hf_err("NoActiveShip", "Active ship item not found"))?;
+            let char_sys = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.solar_system_id)
+                .filter(|&id| id > 0);
             let rec = snap
                 .dungeon_runtime
                 .homefront_runtimes
@@ -2115,10 +2126,14 @@ pub async fn activate_homefront_acceleration_gate(
                 rec.outer_gate_ball_id,
                 DVec3::from_array(rec.pocket_position),
                 rec.blueprint.dungeon_id,
+                char_sys,
             ))
         })?;
 
-    let sess_sys = session.solar_system_id.unwrap_or(sys_id);
+    let sess_sys = session
+        .solar_system_id
+        .or(char_sys_opt)
+        .ok_or_else(|| hf_err("NotInSpace", "Action requires an active solar system"))?;
     if sess_sys != sys_id {
         return Err(hf_err(
             "WrongSolarSystem",
@@ -2127,27 +2142,45 @@ pub async fn activate_homefront_acceleration_gate(
     }
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let ship_ball_opt = sys_h.get_ball_snapshot(ship_id).await.ok().flatten();
-    let gate_ball_opt = sys_h.get_ball_snapshot(gate_ball_id).await.ok().flatten();
-    if let (Some((_, sb)), Some((_, gb))) = (ship_ball_opt.as_ref(), gate_ball_opt.as_ref()) {
-        ctx.validate_ship_movement(
-            char_id,
-            ship_id,
-            MovementIntent::AccelerationGate {
-                sys_id,
-                kind: AccelerationGateKind::Dungeon,
-            },
-        )
-        .await?;
-        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-        if surface_dist > HOMEFRONT_GATE_ACTIVATION_RANGE_M {
-            return Err(hf_err(
-                "OutsideGateActivationRange",
-                format!(
-                    "Ship is {surface_dist:.1} m from Homefront acceleration gate {gate_ball_id} (must be <= {HOMEFRONT_GATE_ACTIVATION_RANGE_M:.0} m)"
-                ),
-            ));
-        }
+    let (_, sb) = sys_h
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            hf_err(
+                "ShipNotInSpace",
+                format!("Ship {ship_id} is not present in solar system {sys_id}"),
+            )
+        })?;
+    let (_, gb) = sys_h
+        .get_ball_snapshot(gate_ball_id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            hf_err(
+                "GateNotFound",
+                format!("Homefront acceleration gate {gate_ball_id} is not present in solar system {sys_id}"),
+            )
+        })?;
+    ctx.validate_ship_movement(
+        char_id,
+        ship_id,
+        MovementIntent::AccelerationGate {
+            sys_id,
+            kind: AccelerationGateKind::Dungeon,
+        },
+    )
+    .await?;
+    let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+    if surface_dist > HOMEFRONT_GATE_ACTIVATION_RANGE_M {
+        return Err(hf_err(
+            "OutsideGateActivationRange",
+            format!(
+                "Ship is {surface_dist:.1} m from Homefront acceleration gate {gate_ball_id} (must be <= {HOMEFRONT_GATE_ACTIVATION_RANGE_M:.0} m)"
+            ),
+        ));
     }
 
     let now = ctx.now_unix();
@@ -2193,22 +2226,20 @@ pub async fn activate_homefront_acceleration_gate(
 
     spawn_pocket_entities_sync(ctx, instance_id);
 
-    if ship_ball_opt.is_some() {
-        let idx_offset = (char_id.unsigned_abs() % 7) as f64 * 300.0;
-        let dest = pocket_pos + DVec3::new(idx_offset, HOMEFRONT_POCKET_LANDING_Y_M, 0.0);
-        let _ = sys_h.set_ball_position(ship_id, dest).await;
-        let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
-        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-            snap.item_positions.insert(ship_id, dest.to_array());
-            Ok(())
-        });
-        let _ = dungeon_id;
-    }
+    let idx_offset = (char_id.unsigned_abs() % 7) as f64 * 300.0;
+    let dest = pocket_pos + DVec3::new(idx_offset, HOMEFRONT_POCKET_LANDING_Y_M, 0.0);
+    let _ = sys_h.set_ball_position(ship_id, dest).await;
+    let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+        snap.item_positions.insert(ship_id, dest.to_array());
+        Ok(())
+    });
+    let _ = dungeon_id;
 
     Ok(elig)
 }
 
-/// Handles `beyonce.ActivateAccelerationGate(gateID)` when targeting a Homefront outer gate (`HF-05`).
+/// Handles `beyonce.ActivateAccelerationGate(gateID)` when targeting a Homefront outer gate.
 pub async fn activate_homefront_gate_by_ball_id(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -2388,7 +2419,7 @@ fn active_ship_id_for_pilot(snap: &WorldStateSnapshot, session: &SessionState, c
 }
 
 /// Validates pilot has a fitted ONLINE mining module (`HiSlot0..7`, `group_id 54|464|483`)
-/// OR a launched Mining Drone (`group_id == 101`) in space (`HF-06`).
+/// OR a launched Mining Drone (`group_id == 101`) in space.
 fn validate_pilot_mining_capability(
     ctx: &ServerContext,
     session: &SessionState,
@@ -2427,7 +2458,7 @@ fn validate_pilot_mining_capability(
     ))
 }
 
-/// Computes pilot's salvager module + Salvaging skill + salvage tackle rig bonus (`HF-06`, `HF-08`).
+/// Computes pilot's salvager module + Salvaging skill + salvage tackle rig bonus.
 fn validate_pilot_salvage_capability(
     ctx: &ServerContext,
     session: &SessionState,
@@ -2916,7 +2947,7 @@ fn aar_wave_duration_secs(wave: u8) -> u64 {
 }
 
 /// Abyssal Artifact Recovery wave progression: clears Mutanite (`12 x 27 = 324` units/wave); clears
-/// the warp bubble immediately when `mutanite_units_remaining == 0` regardless of hostiles (`HF-08`).
+/// the warp bubble immediately when `mutanite_units_remaining == 0` regardless of hostiles.
 pub async fn abyssal_clear_wave(
     ctx: &ServerContext,
     session: &SessionState,
@@ -2949,77 +2980,102 @@ pub async fn abyssal_clear_wave(
     let mut respawn_bubble = false;
     let mut sys_id_out = 0;
     let mut site_pos_out = DVec3::ZERO;
-    let state = ctx.db.try_with_mut_snapshot(
-        |snap| -> Result<Result<HomefrontRuntimeState, BridgeRpcError>, BridgeRpcError> {
-            match verify_active_pilot_and_timeout_in_snap(snap, &ctx.sde, char_id, instance_id, now) {
-                Ok(_) => {}
-                Err(e) => return Ok(e),
-            }
-            let rec = snap
-                .dungeon_runtime
-                .homefront_runtimes
-                .get_mut(&instance_id)
-                .ok_or_else(|| hf_err("HomefrontSiteNotFound", "Site missing"))?;
-            sys_id_out = rec.solar_system_id;
-            site_pos_out = DVec3::from_array(rec.pocket_position);
-            match &mut rec.progress {
-                HomefrontProgressRecord::AbyssalArtifactRecovery {
-                    current_wave,
-                    total_waves,
-                    mutanite_units_remaining,
-                    wave_hostiles_remaining,
-                    warp_bubble_active,
-                    caches_recovered,
-                    waves_paid,
-                    wave_time_remaining_secs,
-                    evacuation_active,
-                    extraction_window_secs,
-                    ..
-                } => {
-                    *mutanite_units_remaining = mutanite_units_remaining.saturating_sub(mined_units);
-                    if *mutanite_units_remaining == 0 && *warp_bubble_active {
-                        *warp_bubble_active = false;
-                        disperse_bubble = true;
-                    }
-                    if hostile_damage >= HOMEFRONT_MIN_SKILL_CONTRIBUTION {
-                        *wave_hostiles_remaining = 0;
-                    }
-                    if recover_cache {
-                        *caches_recovered += 1;
-                    }
-                    if *mutanite_units_remaining == 0 && *wave_hostiles_remaining == 0 {
-                        *waves_paid = (*waves_paid).max(*current_wave);
-                        if *current_wave < *total_waves {
-                            *current_wave += 1;
-                            *mutanite_units_remaining = (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32)
-                                * HOMEFRONT_AAR_UNITS_PER_ROCK;
-                            *wave_hostiles_remaining = 3 + *current_wave / 2;
-                            *wave_time_remaining_secs = aar_wave_duration_secs(*current_wave);
-                            *warp_bubble_active = true;
-                            respawn_bubble = true;
-                        } else {
-                            *evacuation_active = true;
-                            *extraction_window_secs = 60;
+    let (state, emitted_wave_payouts) = ctx.db.try_with_mut_snapshot(
+        |snap| -> Result<
+            Result<
+                (
+                    HomefrontRuntimeState,
+                    Option<Vec<(HomefrontPilotPayout, IskCents, Option<(i64, i64, i64)>)>>,
+                ),
+                BridgeRpcError,
+            >,
+            BridgeRpcError,
+        > {
+            let mut cleared_wave_opt: Option<u8> = None;
+            {
+                let rec = match verify_active_pilot_and_timeout_in_snap(
+                    snap,
+                    &ctx.sde,
+                    char_id,
+                    instance_id,
+                    now,
+                ) {
+                    Ok(rec) => rec,
+                    Err(Ok(timed_out_state)) => return Ok(Ok((timed_out_state, None))),
+                    Err(Err(e)) => return Ok(Err(e)),
+                };
+                sys_id_out = rec.solar_system_id;
+                site_pos_out = DVec3::from_array(rec.pocket_position);
+                let c = ensure_contribution(rec, char_id);
+                c.ore_mined_units += mined_units;
+                c.damage_dealt += hostile_damage;
+                if recover_cache {
+                    c.objective_actions += 1;
+                }
+                match &mut rec.progress {
+                    HomefrontProgressRecord::AbyssalArtifactRecovery {
+                        current_wave,
+                        total_waves,
+                        mutanite_units_remaining,
+                        wave_hostiles_remaining,
+                        warp_bubble_active,
+                        caches_recovered,
+                        wave_time_remaining_secs,
+                        evacuation_active,
+                        extraction_window_secs,
+                        ..
+                    } => {
+                        *mutanite_units_remaining =
+                            mutanite_units_remaining.saturating_sub(mined_units);
+                        if *mutanite_units_remaining == 0 && *warp_bubble_active {
+                            *warp_bubble_active = false;
+                            disperse_bubble = true;
+                        }
+                        if hostile_damage >= HOMEFRONT_MIN_SKILL_CONTRIBUTION {
+                            *wave_hostiles_remaining = 0;
+                        }
+                        if recover_cache {
+                            *caches_recovered += 1;
+                        }
+                        if *mutanite_units_remaining == 0 && *wave_hostiles_remaining == 0 {
+                            cleared_wave_opt = Some(*current_wave);
+                            if *current_wave < *total_waves {
+                                *current_wave += 1;
+                                *mutanite_units_remaining = (HOMEFRONT_AAR_ROCKS_PER_WAVE as u32)
+                                    * HOMEFRONT_AAR_UNITS_PER_ROCK;
+                                *wave_hostiles_remaining = 3 + *current_wave / 2;
+                                *wave_time_remaining_secs = aar_wave_duration_secs(*current_wave);
+                                *warp_bubble_active = true;
+                                respawn_bubble = true;
+                            } else {
+                                *evacuation_active = true;
+                                *extraction_window_secs = 60;
+                            }
                         }
                     }
-                }
-                _ => {
-                    return Ok(Err(hf_err(
-                        "InvalidArchetypeAction",
-                        "Abyssal wave progression applies only to Abyssal Artifact Recovery",
-                    )));
+                    _ => {
+                        return Ok(Err(hf_err(
+                            "InvalidArchetypeAction",
+                            "Abyssal wave progression applies only to Abyssal Artifact Recovery",
+                        )));
+                    }
                 }
             }
-            let c = ensure_contribution(rec, char_id);
-            c.ore_mined_units += mined_units;
-            c.damage_dealt += hostile_damage;
-            if recover_cache {
-                c.objective_actions += 1;
-            }
-            Ok(Ok(record_to_runtime_state(rec)))
+            let emitted = cleared_wave_opt
+                .and_then(|wave_num| pay_aar_wave_in_snap(snap, instance_id, wave_num));
+            let state_out = snap
+                .dungeon_runtime
+                .homefront_runtimes
+                .get(&instance_id)
+                .map(record_to_runtime_state)
+                .ok_or_else(|| hf_err("HomefrontSiteNotFound", "Site missing"))?;
+            Ok(Ok((state_out, emitted)))
         },
     )??;
 
+    if let Some(emitted) = emitted_wave_payouts {
+        emit_payout_notifications(ctx, &emitted);
+    }
     if sys_id_out > 0 {
         let sys_h = ctx.systems.get_or_spawn(sys_id_out);
         let bubble_id = 1_897_800_000 + instance_id.saturating_mul(100) + 9;
@@ -3035,7 +3091,7 @@ pub async fn abyssal_clear_wave(
     Ok(state)
 }
 
-/// Suspicious Signal array hack: requires fitted online Data Analyzer (`HF-06`) and sets a `90s`
+/// Suspicious Signal array hack: requires fitted online Data Analyzer and sets a `90s`
 /// vulnerability window when all 3 arrays are hacked (`is_tethered = false` in `Ballpark`).
 pub fn suspicious_signal_hack_array(
     ctx: &ServerContext,
@@ -3151,7 +3207,7 @@ pub fn suspicious_signal_attack_relay(
     Ok(out)
 }
 
-/// Salvage Research processing step: enforces online Salvager/Drone AND `>= 20%` combined access bonus (`HF-08`).
+/// Salvage Research processing step: enforces online Salvager/Drone AND `>= 20%` combined access bonus.
 pub fn salvage_research_process_wreck(
     ctx: &ServerContext,
     session: &SessionState,
@@ -3526,15 +3582,28 @@ fn settle_homefront_completion_atomic_db(
                 HomefrontProgressRecord::AbyssalArtifactRecovery {
                     total_waves,
                     waves_paid,
+                    waves_paid_mask,
                     ..
-                } if *waves_paid > 0 && !rec.blueprint.abyssal_wave_payouts_isk.is_empty() => {
+                } if (*waves_paid_mask != 0 || *waves_paid > 0)
+                    && !rec.blueprint.abyssal_wave_payouts_isk.is_empty() =>
+                {
                     let total_isk: i64 = rec.blueprint.abyssal_wave_payouts_isk.iter().sum();
-                    let paid_isk: i64 = rec
-                        .blueprint
-                        .abyssal_wave_payouts_isk
-                        .iter()
-                        .take(usize::from((*waves_paid).min(*total_waves)))
-                        .sum();
+                    let paid_isk: i64 = if *waves_paid_mask != 0 {
+                        rec.blueprint
+                            .abyssal_wave_payouts_isk
+                            .iter()
+                            .take(usize::from(*total_waves))
+                            .enumerate()
+                            .filter(|&(idx, _)| (*waves_paid_mask & (1_u16 << idx)) != 0)
+                            .map(|(_, &isk)| isk)
+                            .sum()
+                    } else {
+                        rec.blueprint
+                            .abyssal_wave_payouts_isk
+                            .iter()
+                            .take(usize::from((*waves_paid).min(*total_waves)))
+                            .sum()
+                    };
                     let rem = total_isk.saturating_sub(paid_isk);
                     (
                         usize::try_from(rem.max(0)).unwrap_or(0),
@@ -3607,63 +3676,93 @@ pub async fn complete_homefront_operation_and_pay(
     Ok(summary)
 }
 
+fn pay_aar_wave_in_snap(
+    snap: &mut WorldStateSnapshot,
+    instance_id: i64,
+    wave_num: u8,
+) -> Option<Vec<(HomefrontPilotPayout, IskCents, Option<(i64, i64, i64)>)>> {
+    if wave_num == 0 || u32::from(wave_num) > u16::BITS {
+        return None;
+    }
+    let rec = snap.dungeon_runtime.homefront_runtimes.get_mut(&instance_id)?;
+    if rec.completed || rec.failed {
+        return None;
+    }
+    let wave_idx = usize::from(wave_num - 1);
+    let wave_bit = 1_u16 << wave_idx;
+    let wave_base_isk = rec
+        .blueprint
+        .abyssal_wave_payouts_isk
+        .get(wave_idx)
+        .copied()
+        .unwrap_or(0);
+    if wave_base_isk <= 0 {
+        return None;
+    }
+    if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+        waves_paid_mask,
+        waves_paid,
+        ..
+    } = &rec.progress
+    {
+        if (*waves_paid_mask & wave_bit) != 0
+            || (*waves_paid_mask == 0 && *waves_paid >= wave_num)
+        {
+            return None;
+        }
+    } else {
+        return None;
+    }
+
+    let site_sys = rec.solar_system_id;
+    let contributors: Vec<HomefrontParticipantContribution> = rec
+        .contributions
+        .values()
+        .filter(|c| {
+            snap.characters.get(&c.character_id).is_none_or(|ch| {
+                ch.solar_system_id == site_sys
+                    && ch.station_id.is_none()
+                    && ch.structure_id.is_none()
+            })
+        })
+        .map(contrib_to_public)
+        .collect();
+    let summary = compute_homefront_fleet_payouts(
+        wave_base_isk,
+        0,
+        rec.blueprint.optimal_fleet_size,
+        &contributors,
+    );
+    if summary.eligible_pilot_count == 0 {
+        return None;
+    }
+    let dname = format!("{} Wave {}", rec.blueprint.dungeon_name, wave_num);
+    let issuer = i64::from(rec.blueprint.sovereign_faction_id);
+    if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+        waves_paid,
+        waves_paid_mask,
+        ..
+    } = &mut rec.progress
+    {
+        if *waves_paid_mask == 0 && *waves_paid > 0 {
+            *waves_paid_mask = 1_u16
+                .checked_shl(u32::from(*waves_paid))
+                .unwrap_or(0)
+                .wrapping_sub(1);
+        }
+        *waves_paid_mask |= wave_bit;
+        *waves_paid = waves_paid_mask.count_ones() as u8;
+    }
+    let emitted = credit_payouts_in_snap(snap, &dname, issuer, &summary, 1, 1);
+    Some(emitted)
+}
+
 fn pay_aar_wave_live_if_needed(ctx: &ServerContext, instance_id: i64, wave_num: u8) {
     let res = ctx.db.try_with_mut_snapshot(
         |snap| -> Result<
             Option<Vec<(HomefrontPilotPayout, IskCents, Option<(i64, i64, i64)>)>>,
             BridgeRpcError,
-        > {
-            let Some(rec) = snap.dungeon_runtime.homefront_runtimes.get_mut(&instance_id) else {
-                return Ok(None);
-            };
-            if rec.completed || rec.failed {
-                return Ok(None);
-            }
-            let wave_idx = usize::from(wave_num.saturating_sub(1));
-            let wave_base_isk = rec
-                .blueprint
-                .abyssal_wave_payouts_isk
-                .get(wave_idx)
-                .copied()
-                .unwrap_or(0);
-            if wave_base_isk <= 0 {
-                return Ok(None);
-            }
-            if let HomefrontProgressRecord::AbyssalArtifactRecovery { waves_paid, .. } =
-                &mut rec.progress
-            {
-                if *waves_paid >= wave_num {
-                    return Ok(None);
-                }
-                *waves_paid = wave_num;
-            } else {
-                return Ok(None);
-            }
-
-            let site_sys = rec.solar_system_id;
-            let contributors: Vec<HomefrontParticipantContribution> = rec
-                .contributions
-                .values()
-                .filter(|c| {
-                    snap.characters.get(&c.character_id).is_none_or(|ch| {
-                        ch.solar_system_id == site_sys
-                            && ch.station_id.is_none()
-                            && ch.structure_id.is_none()
-                    })
-                })
-                .map(contrib_to_public)
-                .collect();
-            let summary = compute_homefront_fleet_payouts(
-                wave_base_isk,
-                0,
-                rec.blueprint.optimal_fleet_size,
-                &contributors,
-            );
-            let dname = format!("{} Wave {}", rec.blueprint.dungeon_name, wave_num);
-            let issuer = i64::from(rec.blueprint.sovereign_faction_id);
-            let emitted = credit_payouts_in_snap(snap, &dname, issuer, &summary, 1, 1);
-            Ok(Some(emitted))
-        },
+        > { Ok(pay_aar_wave_in_snap(snap, instance_id, wave_num)) },
     );
     if let Ok(Some(emitted)) = res {
         emit_payout_notifications(ctx, &emitted);
@@ -3792,7 +3891,7 @@ fn spawn_next_aar_wave_in_space(ctx: &ServerContext, instance_id: i64, next_wave
     }
 }
 
-/// Hook for warping onto a Homefront Operations bookmark/anomaly: spawns ONLY outer entry (`HF-05`).
+/// Hook for warping onto a Homefront Operations bookmark/anomaly: spawns ONLY outer entry.
 pub async fn on_homefront_warp_landed(
     ctx: &ServerContext,
     _char_id: i64,
@@ -3858,7 +3957,7 @@ pub fn is_homefront_pve_completion_target(
     })
 }
 
-/// Replaces legacy single-boss shortcut completion in `complete_special_dungeon_instance` (`HF-02`, `HF-03`).
+/// Replaces legacy single-boss shortcut completion in `complete_special_dungeon_instance`.
 pub fn complete_homefront_from_special_dungeon(
     ctx: &ServerContext,
     session: &SessionState,
@@ -3897,7 +3996,7 @@ pub fn complete_homefront_from_special_dungeon(
     Ok((payouts, summary))
 }
 
-/// Synchronous weapon/drone/NPC damage tracking for Homefront NPCs and structures (`HF-02`, `HF-03`, `HF-08`).
+/// Synchronous weapon/drone/NPC damage tracking for Homefront NPCs and structures.
 pub fn on_homefront_combat_damage_event_sync(
     ctx: &ServerContext,
     attacker_char_opt: Option<i64>,
@@ -3913,10 +4012,11 @@ pub fn on_homefront_combat_damage_event_sync(
             if rec.completed || rec.failed || !rec.spawned_ball_ids.contains(&target_ball_id) {
                 continue;
             }
+            if attacker_char_opt.is_some_and(|cid| !rec.entered_pilots.contains_key(&cid)) {
+                continue;
+            }
             if let Some(cid) = attacker_char_opt {
-                if rec.entered_pilots.contains_key(&cid) {
-                    ensure_contribution(rec, cid).damage_dealt += damage_dealt;
-                }
+                ensure_contribution(rec, cid).damage_dealt += damage_dealt;
             }
             match &mut rec.progress {
                 HomefrontProgressRecord::EmergencyAid {
@@ -3953,7 +4053,7 @@ pub fn on_homefront_combat_damage_event_sync(
     });
 }
 
-/// Live weapon/drone damage tracking for Homefront NPCs and structures (`HF-02`, `HF-03`, `HF-08`).
+/// Live weapon/drone damage tracking for Homefront NPCs and structures.
 pub async fn on_homefront_combat_damage_event(
     ctx: &ServerContext,
     attacker_char_opt: Option<i64>,
@@ -3970,7 +4070,7 @@ pub async fn on_homefront_combat_damage_event(
     );
 }
 
-/// Live entity destruction handler called by `pve_special_sites_combat` (`HF-02`, `HF-03`, `HF-08`).
+/// Live entity destruction handler called by `pve_special_sites_combat`.
 /// Returns `None` if `ball_id` is not part of an active Homefront site, or `Some(account_changes)`
 /// (`(character_id, new_balance_isk)`) when handled so the caller emits `OnAccountChange`.
 pub async fn on_homefront_entity_destroyed_core(
@@ -4006,6 +4106,7 @@ pub async fn on_homefront_entity_destroyed_core(
                     r.solar_system_id == sys_id
                         && !r.completed
                         && !r.failed
+                        && killer_char_opt.is_none_or(|cid| r.entered_pilots.contains_key(&cid))
                         && (r.spawned_ball_ids.contains(&ball_id)
                             || r.dispatch_boss_ball_id == ball_id)
                 })
@@ -4147,11 +4248,14 @@ pub async fn on_homefront_entity_destroyed_core(
                     wave_hostile_ball_ids,
                     wave_hostiles_remaining,
                     mutanite_units_remaining,
+                    evacuation_active,
+                    basileus_spawned,
                     cache_ball_id,
                     caches_recovered,
                     ..
                 } => {
                     if *cache_ball_id == Some(ball_id) {
+                        *cache_ball_id = None;
                         *caches_recovered += 1;
                         let cpos = ball_pos.unwrap_or(pocket_pos);
                         post = PostKillAction::DropAarCacheWreck(extra_id, cpos);
@@ -4163,7 +4267,10 @@ pub async fn on_homefront_entity_destroyed_core(
                             && *current_wave < *total_waves
                         {
                             post = PostKillAction::SpawnNextAarWave(inst_id, *current_wave + 1);
-                        } else if runtime_record_objective_complete(rec) {
+                        } else if (!*evacuation_active
+                            || (*basileus_spawned && cache_ball_id.is_none()))
+                            && runtime_record_objective_complete(rec)
+                        {
                             post = PostKillAction::SettleComplete(inst_id);
                         }
                     }
@@ -4325,7 +4432,7 @@ pub async fn on_homefront_entity_destroyed_core(
     Some(account_changes)
 }
 
-/// Live ore extraction hook called by `space_entity_mining` after extracting Mutanite (`HF-02`, `HF-08`).
+/// Live ore extraction hook called by `space_entity_mining` after extracting Mutanite.
 pub async fn on_homefront_ore_mined(
     ctx: &ServerContext,
     char_id: i64,
@@ -4343,7 +4450,12 @@ pub async fn on_homefront_ore_mined(
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         let mut matched_id = None;
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.solar_system_id != sys_id || rec.completed || rec.failed {
+            if rec.solar_system_id != sys_id
+                || !rec.started
+                || rec.completed
+                || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
+            {
                 continue;
             }
             match &mut rec.progress {
@@ -4402,7 +4514,6 @@ pub async fn on_homefront_ore_mined(
                         if *current_wave >= *total_waves && !*evacuation_active {
                             *evacuation_active = true;
                             *extraction_window_secs = 60;
-                            settle_inst = Some(rec.instance_id);
                         }
                         wave_to_pay = Some((rec.instance_id, *current_wave, bubble_was));
                     }
@@ -4476,7 +4587,11 @@ pub async fn on_homefront_structure_hacked(
     let mut clear_relay: Option<(SolarSystemId, i64)> = None;
     let handled = ctx.db.try_with_mut_snapshot(|snap| -> Result<bool, BridgeRpcError> {
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.solar_system_id != sys_id || rec.completed || rec.failed {
+            if rec.solar_system_id != sys_id
+                || rec.completed
+                || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
+            {
                 continue;
             }
             match &mut rec.progress {
@@ -4528,29 +4643,44 @@ pub async fn on_homefront_structure_hacked(
     handled.unwrap_or(false)
 }
 
-/// Validates Salvage Research `>= 20%` combined salvager access bonus in `drones_salvage_tractor`.
+/// Validates Salvage Research gate entry and `>= 20%` combined salvager access bonus in `drones_salvage_tractor`.
 pub fn validate_homefront_salvage_attempt(
     ctx: &ServerContext,
+    char_id: i64,
     sys_id: SolarSystemId,
     wreck_id: i64,
     mod_bonus: f64,
     skill_bonus: f64,
     rig_bonus: f64,
 ) -> Result<bool, BridgeRpcError> {
-    let is_hf_wreck = ctx.db.with_snapshot(|snap| {
-        snap.dungeon_runtime.homefront_runtimes.values().any(|rec| {
-            rec.solar_system_id == sys_id
-                && !rec.completed
-                && !rec.failed
-                && matches!(
-                    &rec.progress,
-                    HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. }
-                        if wreck_ball_ids.contains(&wreck_id)
-                )
-        })
+    let match_state = ctx.db.with_snapshot(|snap| {
+        snap.dungeon_runtime
+            .homefront_runtimes
+            .values()
+            .find_map(|rec| {
+                if rec.solar_system_id == sys_id
+                    && !rec.completed
+                    && !rec.failed
+                    && matches!(
+                        &rec.progress,
+                        HomefrontProgressRecord::SalvageResearch { wreck_ball_ids, .. }
+                            if wreck_ball_ids.contains(&wreck_id)
+                    )
+                {
+                    Some(rec.entered_pilots.contains_key(&char_id))
+                } else {
+                    None
+                }
+            })
     });
-    if !is_hf_wreck {
+    let Some(pilot_entered) = match_state else {
         return Ok(false);
+    };
+    if !pilot_entered {
+        return Err(hf_err(
+            "GateNotEntered",
+            "Pilot has not entered the Homefront acceleration gate",
+        ));
     }
     let pilot_bonus = mod_bonus + skill_bonus + rig_bonus;
     if pilot_bonus < HOMEFRONT_MIN_SALVAGE_BONUS_PCT {
@@ -4564,63 +4694,55 @@ pub fn validate_homefront_salvage_attempt(
     Ok(true)
 }
 
-/// Live wreck salvage completion hook called by `drones_salvage_tractor`.
+/// Live wreck salvage completion hook called by `drones_salvage_tractor` (returns `true` if handled).
 pub async fn on_homefront_wreck_salvaged(
     ctx: &ServerContext,
     char_id: i64,
-    ship_id: i64,
     sys_id: SolarSystemId,
     wreck_id: i64,
-) -> Option<Vec<TypeId>> {
+) -> bool {
     let mut complete_inst = None;
-    let res = ctx.db.try_with_mut_snapshot(
-        |snap| -> Result<Option<Vec<TypeId>>, BridgeRpcError> {
-            for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-                if rec.solar_system_id != sys_id || rec.completed || rec.failed {
-                    continue;
-                }
-                if let HomefrontProgressRecord::SalvageResearch {
-                    wreck_ball_ids,
-                    wrecks_salvaged,
-                    total_wrecks,
-                    ..
-                } = &mut rec.progress
-                {
-                    if wreck_ball_ids.contains(&wreck_id) {
-                        wreck_ball_ids.retain(|&id| id != wreck_id);
-                        *wrecks_salvaged = wrecks_salvaged.saturating_add(1).min(*total_wrecks);
-                        ensure_contribution_fields(
-                            &mut rec.contributions,
-                            &mut rec.next_entry_sequence,
-                            char_id,
-                        )
-                        .objective_actions += 1;
-                        if *wrecks_salvaged >= *total_wrecks {
-                            complete_inst = Some(rec.instance_id);
-                        }
-                        return Ok(Some(vec![HOMEFRONT_SALVAGE_DATA_TYPE_ID]));
+    let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<bool, BridgeRpcError> {
+        for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
+            if rec.solar_system_id != sys_id
+                || rec.completed
+                || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
+            {
+                continue;
+            }
+            if let HomefrontProgressRecord::SalvageResearch {
+                wreck_ball_ids,
+                wrecks_salvaged,
+                total_wrecks,
+                ..
+            } = &mut rec.progress
+            {
+                if wreck_ball_ids.contains(&wreck_id) {
+                    wreck_ball_ids.retain(|&id| id != wreck_id);
+                    *wrecks_salvaged = wrecks_salvaged.saturating_add(1).min(*total_wrecks);
+                    ensure_contribution_fields(
+                        &mut rec.contributions,
+                        &mut rec.next_entry_sequence,
+                        char_id,
+                    )
+                    .objective_actions += 1;
+                    if *wrecks_salvaged >= *total_wrecks {
+                        complete_inst = Some(rec.instance_id);
                     }
+                    return Ok(true);
                 }
             }
-            Ok(None)
-        },
-    );
-    if matches!(&res, Ok(Some(_))) {
-        let _ = ctx.db.add_or_stack_item(
-            char_id,
-            ship_id,
-            InventoryFlag::Cargo,
-            HOMEFRONT_SALVAGE_DATA_TYPE_ID,
-            1,
-        );
-    }
+        }
+        Ok(false)
+    });
     if let Some(inst_id) = complete_inst {
         try_settle_completed_homefront_live(ctx, inst_id);
     }
-    res.ok().flatten()
+    res.unwrap_or(false)
 }
 
-/// Live Cargo Scanner hook called by `fitting_scanners_superweapons` (`HF-02`, `HF-08`).
+/// Live Cargo Scanner hook called by `fitting_scanners_superweapons`.
 pub async fn on_homefront_cargo_scanned(
     ctx: &ServerContext,
     char_id: i64,
@@ -4633,7 +4755,12 @@ pub async fn on_homefront_cargo_scanned(
         .any(|&(tid, qty)| tid as u32 == HOMEFRONT_TRAFFIC_CONTRABAND_TYPE_ID && qty > 0);
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.solar_system_id != sys_id || rec.completed || rec.failed {
+            if rec.solar_system_id != sys_id
+                || !rec.started
+                || rec.completed
+                || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
+            {
                 continue;
             }
             if let HomefrontProgressRecord::TrafficStop {
@@ -4656,12 +4783,12 @@ pub async fn on_homefront_cargo_scanned(
     });
 }
 
-/// Live item move hook called when cargo items are transferred into a Raid delivery depot (`HF-02`).
+/// Live item move hook called when cargo items are transferred into a Raid delivery depot.
 pub async fn on_homefront_item_moved(
     ctx: &ServerContext,
     char_id: i64,
     dest_id: i64,
-    _item_type_id: TypeId,
+    item_type_id: TypeId,
     quantity: u64,
 ) {
     if quantity == 0 {
@@ -4670,7 +4797,18 @@ pub async fn on_homefront_item_moved(
     let mut complete_inst = None;
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.completed || rec.failed {
+            if !rec.started
+                || rec.completed
+                || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
+            {
+                continue;
+            }
+            let loot_tid = rec
+                .blueprint
+                .loot_commodity_type_id
+                .unwrap_or(HOMEFRONT_RAID_CRATE_TYPE_ID);
+            if item_type_id != loot_tid {
                 continue;
             }
             if let HomefrontProgressRecord::Raid {
@@ -4704,8 +4842,7 @@ pub async fn on_homefront_item_moved(
 }
 
 /// Live inventory-movement hook invoked via `pve_dungeon_runtime::on_dungeon_item_looted` whenever a pilot
-/// transfers an item between space containers / ship cargo (`HF-02`: checks both depot deliveries in `snap.items`
-/// and direct container transfers).
+/// transfers an item between space containers / ship cargo (verifies depot deliveries in `snap.items`).
 pub async fn on_homefront_inventory_event(
     ctx: &ServerContext,
     char_id: i64,
@@ -4717,8 +4854,10 @@ pub async fn on_homefront_inventory_event(
     let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
         let mut depot_counts: Vec<(i64, u8)> = Vec::new();
         for rec in snap.dungeon_runtime.homefront_runtimes.values() {
-            if rec.completed
+            if !rec.started
+                || rec.completed
                 || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
                 || sys_id_opt.is_some_and(|sid| rec.solar_system_id != sid)
             {
                 continue;
@@ -4740,30 +4879,14 @@ pub async fn on_homefront_inventory_event(
                             it.location_id == *delivery_depot_ball_id
                                 && it.type_id == loot_tid
                                 && it.quantity > 0
+                                && rec.entered_pilots.contains_key(&it.owner_id)
                         })
                         .map(|it| i64::from(it.quantity))
                         .sum();
                     depot_counts.push((
                         rec.instance_id,
-                        u8::try_from(count.max(1)).unwrap_or(u8::MAX),
+                        u8::try_from(count.max(0)).unwrap_or(u8::MAX),
                     ));
-                } else {
-                    let count: i64 = snap
-                        .items
-                        .values()
-                        .filter(|it| {
-                            it.location_id == *delivery_depot_ball_id
-                                && it.type_id == loot_tid
-                                && it.quantity > 0
-                        })
-                        .map(|it| i64::from(it.quantity))
-                        .sum();
-                    if count > 0 {
-                        depot_counts.push((
-                            rec.instance_id,
-                            u8::try_from(count).unwrap_or(u8::MAX),
-                        ));
-                    }
                 }
             }
         }
@@ -4784,6 +4907,8 @@ pub async fn on_homefront_inventory_event(
                             char_id,
                         )
                         .cargo_delivered += u32::from(delta);
+                    } else if delivered_in_depot < *cargo_delivered {
+                        *cargo_delivered = delivered_in_depot;
                     }
                     if *cargo_delivered >= *required_deliveries {
                         complete_insts.push(inst_id);
@@ -4798,7 +4923,7 @@ pub async fn on_homefront_inventory_event(
     }
 }
 
-/// Synchronous capacitor transfer / energy neutralizer hook (`HF-02`: DreadAssault & StabilizeRift).
+/// Synchronous capacitor transfer / energy neutralizer hook (DreadAssault & StabilizeRift).
 pub fn on_homefront_cap_warfare_event_sync(
     ctx: &ServerContext,
     char_id: i64,
@@ -4814,8 +4939,10 @@ pub fn on_homefront_cap_warfare_event_sync(
         let resolved_sys_opt = sys_id_opt
             .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id));
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.completed
+            if !rec.started
+                || rec.completed
                 || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
                 || resolved_sys_opt.is_some_and(|sid| rec.solar_system_id != sid)
             {
                 continue;
@@ -4860,7 +4987,7 @@ pub fn on_homefront_cap_warfare_event_sync(
     });
 }
 
-/// Live capacitor transfer / energy neutralizer hook (`HF-02`: DreadAssault & StabilizeRift).
+/// Live capacitor transfer / energy neutralizer hook (DreadAssault & StabilizeRift).
 pub async fn on_homefront_cap_warfare_event(
     ctx: &ServerContext,
     char_id: i64,
@@ -4879,7 +5006,7 @@ pub async fn on_homefront_cap_warfare_event(
     );
 }
 
-/// Synchronous Remote Repair hook (`HF-02`: EmergencyAid protectee & DreadAssault Dreadnought).
+/// Synchronous Remote Repair hook (EmergencyAid protectee & DreadAssault Dreadnought).
 pub fn on_homefront_remote_repair_event_sync(
     ctx: &ServerContext,
     char_id: i64,
@@ -4894,8 +5021,10 @@ pub fn on_homefront_remote_repair_event_sync(
         let resolved_sys_opt = sys_id_opt
             .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id));
         for rec in snap.dungeon_runtime.homefront_runtimes.values_mut() {
-            if rec.completed
+            if !rec.started
+                || rec.completed
                 || rec.failed
+                || !rec.entered_pilots.contains_key(&char_id)
                 || resolved_sys_opt.is_some_and(|sid| rec.solar_system_id != sid)
             {
                 continue;
@@ -4924,7 +5053,7 @@ pub fn on_homefront_remote_repair_event_sync(
     });
 }
 
-/// Live Remote Repair hook (`HF-02`: EmergencyAid protectee & DreadAssault Dreadnought).
+/// Live Remote Repair hook (EmergencyAid protectee & DreadAssault Dreadnought).
 pub async fn on_homefront_remote_repair_event(
     ctx: &ServerContext,
     char_id: i64,
@@ -4935,7 +5064,7 @@ pub async fn on_homefront_remote_repair_event(
     on_homefront_remote_repair_event_sync(ctx, char_id, Some(sys_id), target_id, repaired_hp);
 }
 
-/// Synchronous 1 Hz / `advance_pve_special_clock` Homefront tick across all systems (`HF-02`, `HF-08`).
+/// Synchronous 1 Hz / `advance_pve_special_clock` Homefront tick across all systems.
 pub fn tick_homefront_operations_sync(ctx: &ServerContext) {
     let now = ctx.now_unix();
     let active_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
@@ -5074,17 +5203,17 @@ fn tick_single_homefront_instance_sync(ctx: &ServerContext, inst_id: i64, now: u
                         if it.location_id == *delivery_depot_ball_id
                             && it.type_id == loot_tid
                             && it.quantity > 0
+                            && rec.entered_pilots.contains_key(&it.owner_id)
                         {
                             total += i64::from(it.quantity);
-                            if owner_opt.is_none() && rec.entered_pilots.contains_key(&it.owner_id)
-                            {
+                            if owner_opt.is_none() {
                                 owner_opt = Some(it.owner_id);
                             }
                         }
                     }
                     Some((
                         u8::try_from(total.max(0)).unwrap_or(u8::MAX),
-                        owner_opt.or_else(|| rec.entered_pilots.keys().next().copied()),
+                        owner_opt,
                     ))
                 }
                 _ => None,
@@ -5526,7 +5655,6 @@ pub fn handle_get_homefront_site_instances(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_character(session)?;
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
 
     let sys_id = if let Some(arg0) = args.first().filter(|a| !matches!(a, PyRep::None)) {
         let raw = arg0.as_i64().ok_or_else(|| BridgeRpcError {
@@ -5558,10 +5686,7 @@ pub fn handle_get_homefront_site_instances(
             })?
     };
 
-    let reply = ctx.db.with_mut_snapshot(|snap| {
-        if snap.pve_special_sites.sim_clock_sec < ctx.now_unix() {
-            snap.pve_special_sites.sim_clock_sec = ctx.now_unix();
-        }
+    let reply = ctx.db.with_snapshot(|snap| {
         let mut entries: Vec<(u32, i64)> = Vec::new();
         if let Some(list) = snap.pve_special_sites.homefront_sites.get(&sys_id) {
             for s in list {

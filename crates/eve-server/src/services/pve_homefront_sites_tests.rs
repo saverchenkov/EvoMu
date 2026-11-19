@@ -30,13 +30,27 @@ fn homefront_seeding_security_filtering_and_rpc_queries() {
 
     let mut session = SessionState::new(501);
     session.user_id = Some(1);
-    session.character_id = Some(90_001);
-    session.solar_system_id = Some(hs_sys);
     session.character_id = Some(90_050_001);
     session.solar_system_id = Some(hs_sys);
 
+    // GetHomefrontSiteInstances must remain strictly read-only on an uninitialized snapshot.
+    let cold_res = handle_get_homefront_site_instances(&ctx, &session, &[])
+        .expect("cold highsec homefront query succeeds read-only");
+    let PyRep::Dict(ref cold_outer) = cold_res else {
+        panic!("expected cold outer Dict, got {cold_res:?}");
+    };
+    let (_, PyRep::List(ref cold_entries)) = cold_outer[0] else {
+        panic!("expected cold system list in outer dict, got {cold_outer:?}");
+    };
+    assert!(cold_entries.is_empty(), "cold GetHomefrontSiteInstances must not seed on read");
+    with_pve_special_reg(&ctx, |reg| {
+        assert!(!reg.initialized, "GetHomefrontSiteInstances must not initialize special-sites registry");
+        assert!(!reg.homefront_sites.contains_key(&hs_sys));
+    });
+
+    crate::services::pve_special_sites::ensure_special_sites_initialized(&ctx);
     let res = handle_get_homefront_site_instances(&ctx, &session, &[])
-        .expect("highsec homefront query succeeds");
+        .expect("highsec homefront query succeeds after initialization");
     let PyRep::Dict(ref outer) = res else {
         panic!("expected outer Dict, got {res:?}");
     };
@@ -140,6 +154,17 @@ mod multi_role_unit_tests {
         let template_ch = WorldRepository::with_demo_seed()
             .with_snapshot(|s| s.characters[&90_000_001].clone());
         ctx.db.with_mut_snapshot(|snap| {
+            let uname = format!("hf_pilot_{user_id}");
+            snap.accounts
+                .entry(uname.clone())
+                .or_insert_with(|| eve_db::AccountRecord {
+                    user_id,
+                    username: uname,
+                    password_token: String::new(),
+                    role: 0,
+                    banned_until_unix: None,
+                    ban_reason: None,
+                });
             let mut ch = template_ch;
             ch.character_id = char_id;
             ch.user_id = user_id;
@@ -226,19 +251,25 @@ mod multi_role_unit_tests {
         });
         let sys_h = ctx.systems.get_or_spawn(sys_id);
         let _ = sys_h
-            .spawn_ball(Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: DVec3::new(0.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 1_000_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            })
+            .spawn_ball_with_combat(
+                Ball {
+                    id: ship_id,
+                    type_id: ship_type_id,
+                    position: DVec3::new(0.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(ship_type_id),
+            )
             .await;
+        ctx.db
+            .acquire_online_lock(user_id, user_id, Some(char_id), false, ctx.now_unix())
+            .expect("register online session for homefront pilot");
         let mut sess = SessionState::new(user_id);
         sess.user_id = Some(user_id);
         sess.character_id = Some(char_id);
@@ -255,9 +286,25 @@ mod multi_role_unit_tests {
         if let Some(st) = get_homefront_runtime_state(ctx, instance_id) {
             if let Some(sid) = sess.ship_id.filter(|&id| id > 0) {
                 let sys_h = ctx.systems.get_or_spawn(st.solar_system_id);
-                let _ = sys_h
-                    .set_ball_position(sid, st.site_position + DVec3::new(400.0, 0.0, 0.0))
-                    .await;
+                let target_pos = st.site_position + DVec3::new(400.0, 0.0, 0.0);
+                if sys_h.get_ball_snapshot(sid).await.ok().flatten().is_none() {
+                    let _ = sys_h
+                        .spawn_ball(Ball {
+                            id: sid,
+                            type_id: 621,
+                            position: target_pos,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 300.0,
+                            inertia: 1.0,
+                            mass: 1_000_000.0,
+                            radius: 50.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        })
+                        .await;
+                } else {
+                    let _ = sys_h.set_ball_position(sid, target_pos).await;
+                }
             }
         }
         activate_homefront_acceleration_gate(ctx, sess, instance_id).await
@@ -387,6 +434,23 @@ mod multi_role_unit_tests {
         assert_eq!(aar_state.blueprint.base_pilot_isk, 67_500_000);
         enter_hf_gate_at_site(&ctx, &venture, aar_state.instance_id).await.unwrap();
         enter_hf_gate_at_site(&ctx, &dps1, aar_state.instance_id).await.unwrap();
+        let v_cid = venture.character_id.unwrap();
+        let d_cid = dps1.character_id.unwrap();
+        let (v_bal_before, v_j_before, d_bal_before, d_j_before) = ctx.db.with_snapshot(|snap| {
+            let vj = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == v_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            let dj = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == d_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            (snap.characters[&v_cid].balance, vj, snap.characters[&d_cid].balance, dj)
+        });
+        let _ = ctx.drain_notifications_for_char(v_cid);
+        let _ = ctx.drain_notifications_for_char(d_cid);
         let bubble_id = 1_897_800_000 + aar_state.instance_id * 100 + 9;
         for w in 1..=9_u8 {
             let mid = abyssal_clear_wave(&ctx, &venture, aar_state.instance_id, 324, 0.0, w % 2 == 1)
@@ -408,10 +472,60 @@ mod multi_role_unit_tests {
                 assert!(st.is_objective_complete());
             }
         }
+        // Per-wave AAR payouts must credit wallets, journal (9 non-zero rows), and OnAccountChange BEFORE settlement.
+        let (v_bal_pre_settle, v_j_pre_settle, d_bal_pre_settle, d_j_pre_settle) = ctx.db.with_snapshot(|snap| {
+            let vj: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == v_cid && j.entry_type == "CorporateRewardPayout")
+                .skip(v_j_before)
+                .collect();
+            let dj: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == d_cid && j.entry_type == "CorporateRewardPayout")
+                .skip(d_j_before)
+                .collect();
+            assert_eq!(vj.len(), 9, "Venture must receive 9 per-wave AAR payouts");
+            assert_eq!(dj.len(), 9, "DPS1 must receive 9 per-wave AAR payouts");
+            assert!(vj.iter().all(|j| j.amount > IskCents(0)), "no zero-ISK AAR journal entries");
+            assert!(dj.iter().all(|j| j.amount > IskCents(0)), "no zero-ISK AAR journal entries");
+            (snap.characters[&v_cid].balance, vj.len(), snap.characters[&d_cid].balance, dj.len())
+        });
+        assert_eq!(
+            v_bal_pre_settle,
+            v_bal_before.checked_add(IskCents::from_isk(34_560_000)).unwrap()
+        );
+        assert_eq!(
+            d_bal_pre_settle,
+            d_bal_before.checked_add(IskCents::from_isk(34_560_000)).unwrap()
+        );
+        assert!(ctx.drain_notifications_for_char(v_cid).iter().any(|n| n.event == "OnAccountChange"));
+        assert!(ctx.drain_notifications_for_char(d_cid).iter().any(|n| n.event == "OnAccountChange"));
+
         let aar_pay = complete_homefront_operation_and_pay(&ctx, &dps1, aar_state.instance_id)
             .await
             .expect("complete AAR");
         assert_eq!(aar_pay.total_fleet_isk, 69_120_000);
+        // Settlement must grant LP without double-paying already-paid AAR waves or emitting OnAccountChange again.
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&v_cid].balance, v_bal_pre_settle);
+            assert_eq!(snap.characters[&d_cid].balance, d_bal_pre_settle);
+            let vj_after = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == v_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            let dj_after = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == d_cid && j.entry_type == "CorporateRewardPayout")
+                .count();
+            assert_eq!(vj_after, v_j_before + v_j_pre_settle);
+            assert_eq!(dj_after, d_j_before + d_j_pre_settle);
+        });
+        assert!(!ctx.drain_notifications_for_char(v_cid).iter().any(|n| n.event == "OnAccountChange"));
+        assert!(!ctx.drain_notifications_for_char(d_cid).iter().any(|n| n.event == "OnAccountChange"));
         assert!(
             !sys_h.remove_warp_bubble(bubble_id).await.unwrap(),
             "AAR completion must already remove warp bubble from SystemHandle"
@@ -555,7 +669,7 @@ mod multi_role_unit_tests {
             raid_deliver_cargo_to_freighter(&ctx1, &tayra, raid.instance_id).unwrap();
         }
 
-        // Completely separate ServerContext must NOT share any static OnceLock state (HF-01)
+        // Completely separate ServerContext must NOT share any static OnceLock state
         let isolated_ctx = fresh_homefront_ctx();
         assert!(
             get_homefront_runtime_state(&isolated_ctx, raid.instance_id).is_none(),
@@ -586,5 +700,179 @@ mod multi_role_unit_tests {
         // (4/5)^4 * 15,000,000 = 6,144,000
         assert_eq!(settled.total_fleet_isk, 6_144_000);
         let _ = std::fs::remove_file(&tmp_db);
+    }
+
+    #[tokio::test]
+    async fn homefront_aar_skipped_wave_recovery_and_evacuation_window() {
+        use crate::services::pve_homefront_sites::{
+            get_homefront_runtime_state, tick_homefront_operations_sync,
+        };
+        use eve_db::HomefrontProgressRecord;
+
+        let ctx = fresh_homefront_ctx();
+        let sys_id = 30_000_142_u32;
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        let pilot = seed_hf_pilot(&ctx, 7601, 960_001, 860_001, 32_880, sys_id, &[483]).await;
+        let _ = sys_h.try_update_combat_state(860_001, |cs| {
+            cs.shield_hp = 5_000_000.0;
+            cs.max_shield_hp = 5_000_000.0;
+            cs.armor_hp = 5_000_000.0;
+            cs.max_armor_hp = 5_000_000.0;
+            cs.structure_hp = 5_000_000.0;
+            cs.max_structure_hp = 5_000_000.0;
+        });
+
+        // Part A: 60s AAR evacuation window counts down after setup_remaining_secs reaches 0,
+        // then spawns Basileus (77_702) and Abyssal Artifact Cache (77_727) into SystemHandle.
+        let aar1 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn AAR #1");
+        enter_hf_gate_at_site(&ctx, &pilot, aar1.instance_id)
+            .await
+            .expect("enter AAR #1");
+        ctx.advance_secs(90);
+        tick_homefront_operations_sync(&ctx);
+        for _ in 1..=9_u8 {
+            abyssal_clear_wave(&ctx, &pilot, aar1.instance_id, 324, 2_500.0, true)
+                .await
+                .expect("clear AAR wave");
+        }
+        ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aar1.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    evacuation_active,
+                    extraction_window_secs,
+                    basileus_spawned,
+                    waves_paid_mask,
+                    ..
+                } => {
+                    assert!(*evacuation_active);
+                    assert_eq!(*extraction_window_secs, 60);
+                    assert!(!*basileus_spawned);
+                    assert_eq!(*waves_paid_mask, 0x01FF);
+                }
+                other => panic!("expected AAR record, got {other:?}"),
+            }
+        });
+        ctx.advance_secs(30);
+        tick_homefront_operations_sync(&ctx);
+        assert!(matches!(
+            get_homefront_runtime_state(&ctx, aar1.instance_id).unwrap().progress,
+            HomefrontArchetypeProgress::AbyssalArtifactRecovery {
+                extraction_window_secs: 30,
+                ..
+            }
+        ));
+        ctx.advance_secs(30);
+        tick_homefront_operations_sync(&ctx);
+        let (basileus_id_opt, cache_id_opt) = ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aar1.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::AbyssalArtifactRecovery {
+                    basileus_spawned,
+                    cache_ball_id,
+                    extraction_window_secs,
+                    ..
+                } => {
+                    assert!(*basileus_spawned);
+                    assert_eq!(*extraction_window_secs, 0);
+                    (
+                        rec.spawned_ball_ids.first().copied(),
+                        *cache_ball_id,
+                    )
+                }
+                other => panic!("expected AAR record, got {other:?}"),
+            }
+        });
+        assert!(basileus_id_opt.is_some());
+        let cache_id = cache_id_opt.expect("Abyssal Cache ball ID must be recorded");
+        let cache_ball = sys_h
+            .get_ball_snapshot(cache_id)
+            .await
+            .unwrap()
+            .expect("Abyssal Cache ball must exist in SystemHandle")
+            .1;
+        assert_eq!(cache_ball.type_id, 77_727);
+        let has_basileus = {
+            let view = sys_h.view();
+            view.balls.values().any(|b| b.type_id == 77_702)
+        };
+        assert!(has_basileus, "Basileus (77_702) must spawn when extraction window expires");
+        let pay1 = complete_homefront_operation_and_pay(&ctx, &pilot, aar1.instance_id)
+            .await
+            .expect("complete AAR #1");
+        assert_eq!(pay1.total_fleet_isk, 27_648_000);
+
+        // Part B: Skipped wave 2 (bit 1 unset while bits 0,2..=8 are set => mask 0x01FD) recovers
+        // exact Wave 2 solo share (2,048,000 ISK) at settlement without double-paying paid waves.
+        let pilot2 = seed_hf_pilot(&ctx, 7602, 960_002, 860_002, 32_880, sys_id, &[483]).await;
+        let aar2 = spawn_homefront_site_for_dungeon(&ctx, sys_id, 10_346).expect("spawn AAR #2");
+        enter_hf_gate_at_site(&ctx, &pilot2, aar2.instance_id)
+            .await
+            .expect("enter AAR #2");
+        abyssal_clear_wave(&ctx, &pilot2, aar2.instance_id, 324, 2_500.0, true)
+            .await
+            .expect("wave 1 pays bit 0");
+        ctx.db.with_mut_snapshot(|snap| {
+            let rec = snap
+                .dungeon_runtime
+                .homefront_runtimes
+                .get_mut(&aar2.instance_id)
+                .unwrap();
+            if let HomefrontProgressRecord::AbyssalArtifactRecovery {
+                current_wave,
+                waves_paid,
+                ..
+            } = &mut rec.progress
+            {
+                *current_wave = 3;
+                *waves_paid = 2;
+            }
+        });
+        for _ in 3..=9_u8 {
+            abyssal_clear_wave(&ctx, &pilot2, aar2.instance_id, 324, 2_500.0, true)
+                .await
+                .expect("waves 3..9 pay bits 2..=8");
+        }
+        ctx.db.with_snapshot(|snap| {
+            let rec = &snap.dungeon_runtime.homefront_runtimes[&aar2.instance_id];
+            match &rec.progress {
+                HomefrontProgressRecord::AbyssalArtifactRecovery { waves_paid_mask, .. } => {
+                    assert_eq!(*waves_paid_mask, 0x01FD);
+                }
+                other => panic!("expected AAR record, got {other:?}"),
+            }
+            // Live payouts so far: 27,648,000 - 2,048,000 (Wave 2) = 25,600,000 across 8 rows.
+            assert_eq!(snap.characters[&960_002].balance, IskCents::from_isk(26_600_000));
+            let rows: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == 960_002 && j.entry_type == "CorporateRewardPayout")
+                .collect();
+            assert_eq!(rows.len(), 8);
+            assert!(rows.iter().all(|j| j.amount > IskCents(0)));
+        });
+        let _ = ctx.drain_notifications_for_char(960_002);
+        let pay2 = complete_homefront_operation_and_pay(&ctx, &pilot2, aar2.instance_id)
+            .await
+            .expect("complete AAR #2 recovering skipped wave 2");
+        assert_eq!(pay2.total_fleet_isk, 27_648_000);
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(
+                snap.characters[&960_002].balance,
+                IskCents::from_isk(28_648_000),
+                "settlement must pay exact skipped Wave 2 share (2,048,000 ISK)"
+            );
+            let rows: Vec<_> = snap
+                .wallet_journal
+                .iter()
+                .filter(|j| j.character_id == 960_002 && j.entry_type == "CorporateRewardPayout")
+                .collect();
+            assert_eq!(rows.len(), 9);
+            assert!(rows.iter().all(|j| j.amount > IskCents(0)));
+        });
+        assert!(ctx
+            .drain_notifications_for_char(960_002)
+            .iter()
+            .any(|n| n.event == "OnAccountChange"));
     }
 }

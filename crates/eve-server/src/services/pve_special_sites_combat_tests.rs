@@ -113,7 +113,17 @@ async fn special_site_npc_destruction_and_seasonal_sites() {
         sess.user_id = Some(idx as u64);
         sess.character_id = Some(90_060_000 + idx);
         sess.solar_system_id = Some(sys_id);
-        sess.ship_id = Some(1_060_000_000 + idx);
+        let sid = 1_060_000_000 + idx;
+        sess.ship_id = Some(sid);
+        let _ = ctx
+            .systems
+            .get_or_spawn(sys_id)
+            .spawn_ball(make_site_npc_ball(
+                sid,
+                587,
+                ss.site_position + DVec3::new(400.0, 0.0, 0.0),
+            ))
+            .await;
         crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
             &ctx,
             &sess,
@@ -379,6 +389,15 @@ async fn special_site_edge_cases_no_killer_edencom_overflow_and_seasonal_expiry(
 
     // Enter solo pilot via temporary Rifter ship item, then restore active_ship_id = 0 for section 4
     let temp_ship = 1_060_101_i64;
+    let _ = ctx
+        .systems
+        .get_or_spawn(sys_id)
+        .spawn_ball(make_site_npc_ball(
+            temp_ship,
+            587,
+            ss2.site_position + DVec3::new(400.0, 0.0, 0.0),
+        ))
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&solo_cid).unwrap().active_ship_id = temp_ship;
         snap.items.insert(

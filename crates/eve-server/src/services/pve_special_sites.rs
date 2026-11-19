@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::notify_registry::{
-    push_typed_session_notification, OnAccountChange, OnSolarsystemInterferenceChanged,
+    push_typed_session_notification, OnSolarsystemInterferenceChanged,
 };
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
@@ -489,6 +489,15 @@ async fn ensure_special_sites_spawned_for_systems(
     filter_sys: Option<SolarSystemId>,
 ) {
     ensure_special_sites_initialized(ctx);
+    if let Some(sys_id) = filter_sys {
+        if !crate::services::pve_special_sites_ops::is_homefront_exordium_system(&ctx.sde, sys_id) {
+            with_pve_special_reg(ctx, |reg| {
+                crate::services::pve_homefront_sites::ensure_homefront_sites_for_system_locked(
+                    ctx, reg, sys_id,
+                );
+            });
+        }
+    }
     let want_sys = |sid: SolarSystemId| filter_sys.is_none_or(|target| target == sid);
     let (general_to_spawn, hf_to_spawn, trig_to_spawn) = read_pve_special_reg(ctx, |reg| {
         let mut g_list = Vec::new();
@@ -570,7 +579,7 @@ async fn ensure_special_sites_spawned_for_systems(
         (g_list, hf_list, t_list)
     });
 
-    // Homefront Operations spawn ONLY their outer entry beacon + acceleration gate (`HF-05`);
+    // Homefront Operations spawn ONLY their outer entry beacon + acceleration gate;
     // pocket NPCs and archetype objectives spawn upon gate activation.
     for (sys_id, inst_id) in hf_to_spawn {
         crate::services::pve_homefront_sites::ensure_homefront_outer_entries_sync(
@@ -743,26 +752,11 @@ pub async fn complete_special_dungeon_instance(
         return Ok(kv);
     }
 
-    // 2. Check Homefront Sites (710_001..710_002)
-    // 2. Check Homefront Operations via real multi-role archetype completion (`HF-02`, `HF-03`).
+    // 2. Check Homefront Operations via real multi-role archetype completion.
     if is_homefront_pve_completion_target(ctx, caller_sys, instance_id) {
         let (payouts, summary) =
             complete_homefront_from_special_dungeon(ctx, session, caller_sys, instance_id)?;
         let reward_paid = payouts.first().map(|p| p.1).unwrap_or(0);
-        for (pid, _, new_bal) in &payouts {
-            let bal_isk = new_bal.to_wire_f64();
-            let _ = ctx.notify_account_change(*pid, "cash", *pid, bal_isk);
-            if *pid == char_id {
-                push_typed_session_notification(
-                    session,
-                    OnAccountChange {
-                        account_key: "cash".into(),
-                        owner_id: *pid,
-                        balance: bal_isk,
-                    },
-                );
-            }
-        }
         let arch_key = get_homefront_runtime_state(ctx, instance_id)
             .map(|s| s.blueprint.archetype.as_str())
             .unwrap_or("Unknown");
@@ -894,18 +888,7 @@ pub async fn handle_pve_special_sites(
     match (service, method) {
         // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
-            let res = handle_get_homefront_site_instances(ctx, session, args);
-            let queried_sys = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|raw| u32::try_from(raw).ok())
-                .or(session.solar_system_id);
-            if let (Some(target_sys), true) = (queried_sys, res.is_ok()) {
-                if session.solar_system_id == Some(target_sys) {
-                    ensure_special_sites_spawned_for_system(ctx, target_sys).await;
-                }
-            }
-            Some(res)
+            Some(handle_get_homefront_site_instances(ctx, session, args))
         }
 
         // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances

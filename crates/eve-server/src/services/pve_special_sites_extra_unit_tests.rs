@@ -450,7 +450,30 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
     assert_eq!(err_still_locked.code, "GateNotEntered");
 
     // Enter all 3 Homefront outer gates as an eligible frigate
+    let ship_tid_hf = ctx.db.with_snapshot(|s| s.items[&session.ship_id.unwrap()].type_id);
     for inst_id in [810_001_i64, 810_002, 810_003] {
+        if let Some(st) = crate::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, inst_id) {
+            let sid = session.ship_id.unwrap();
+            let pos = st.site_position + glam::DVec3::new(400.0, 0.0, 0.0);
+            if sys_handle.get_ball_snapshot(sid).await.ok().flatten().is_none() {
+                let _ = sys_handle
+                    .spawn_ball(eve_destiny::Ball {
+                        id: sid,
+                        type_id: ship_tid_hf,
+                        position: pos,
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 1.0,
+                        mass: 1_000_000.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    })
+                    .await;
+            } else {
+                let _ = sys_handle.set_ball_position(sid, pos).await;
+            }
+        }
         crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
             &ctx,
             &session,
@@ -547,6 +570,22 @@ async fn complete_special_dungeon_instance_homefront_fleet_scaling_and_error_gua
     wingman_sess.character_id = Some(wingman_id);
     wingman_sess.solar_system_id = Some(sys_id);
     wingman_sess.ship_id = Some(wingman_ship_id);
+    if let Some(st) = crate::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, 810_003) {
+        let _ = sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: wingman_ship_id,
+                type_id: ship_tid,
+                position: st.site_position + glam::DVec3::new(400.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    }
     crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
         &ctx,
         &wingman_sess,

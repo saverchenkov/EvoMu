@@ -1035,7 +1035,7 @@ pub struct HomefrontFleetPayoutSummary {
     pub payouts: Vec<HomefrontPilotPayout>,
 }
 
-/// Fixed-point integer `IskCents` payout scaling for Homefront Operations (`HF-07`, `HF-08`):
+/// Fixed-point integer `IskCents` payout scaling for Homefront Operations:
 /// - `1 <= n < opt`: attenuates below optimal fleet size using `4^(opt - n) / 5^(opt - n)`.
 /// - `n == opt`: full `1.0x` base payout.
 /// - `opt < n <= 2*opt`: integer floor `(base_cents * opt) / n` so total fleet payout NEVER exceeds

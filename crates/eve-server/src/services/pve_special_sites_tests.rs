@@ -95,8 +95,12 @@ fn make_ctx_and_pilot(sys_id: SolarSystemId, with_ship: bool) -> (ServerContext,
     });
     let ctx = ServerContext::with_sde_and_repository(sde, db);
     ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_775_000_000)));
+    let uid = ctx.db.with_snapshot(|s| s.characters[&char_id].user_id);
+    ctx.db
+        .acquire_online_lock(uid, 101, Some(char_id), false, ctx.now_unix())
+        .expect("register online session for special sites test");
     let mut session = SessionState::new(101);
-    session.user_id = Some(1);
+    session.user_id = Some(uid);
     session.character_id = Some(char_id);
     session.solar_system_id = Some(sys_id);
     session.ship_id = if with_ship { Some(ship_id) } else { None };
@@ -308,7 +312,7 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
             .ok()
             .flatten()
             .is_none(),
-        "HF-05: pocket entities must NOT spawn before gate activation"
+        "pocket entities must NOT spawn before gate activation"
     );
 
     let err_unentered = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 0)
@@ -329,6 +333,31 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
         .expect_err("wrong system blocked");
     assert_eq!(err_wrong_sys.code, "NotInSiteSystem");
     session.solar_system_id = Some(hs_sys);
+    let ship_id_hf = session.ship_id.unwrap();
+    let ship_tid_hf = ctx.db.with_snapshot(|s| s.items[&ship_id_hf].type_id);
+    let _ = ctx
+        .systems
+        .get_or_spawn(hs_sys)
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id_hf,
+            type_id: ship_tid_hf,
+            position: glam::DVec3::new(10_400.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    if let Some(st) = crate::services::pve_homefront_sites::get_homefront_runtime_state(&ctx, hf.instance_id) {
+        let _ = ctx
+            .systems
+            .get_or_spawn(hs_sys)
+            .set_ball_position(ship_id_hf, st.site_position + glam::DVec3::new(400.0, 0.0, 0.0))
+            .await;
+    }
 
     crate::services::pve_homefront_sites::activate_homefront_acceleration_gate(
         &ctx,
@@ -428,7 +457,12 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     let _ = complete_special_dungeon_instance(&ctx, &mut session, hf.instance_id, 1)
         .await
         .expect("homefront completed");
-    assert!(session.notifications.iter().any(|n| n.0 == "OnAccountChange"));
+    let account_notifs: Vec<_> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "OnAccountChange")
+        .collect();
+    assert_eq!(account_notifs.len(), 1);
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).unwrap();
         assert_eq!(ch.balance, IskCents::from_isk(1_000_000 + expected_payout));
@@ -464,6 +498,23 @@ async fn homefront_and_triglavian_site_workflows_and_errors() {
     .expect("seeded trig site");
 
     let trig_handle = ctx.systems.get_or_spawn(trig_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(ship_id_hf, [10_500.0, 0.0, 0.0]);
+    });
+    let _ = trig_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id_hf,
+            type_id: ship_tid_hf,
+            position: glam::DVec3::new(10_500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
     let _ = trig_handle.remove_ball(trig.boss_npc_ball_id).await;
     for &ebid in &trig.escort_ball_ids {
         let _ = trig_handle.remove_ball(ebid).await;

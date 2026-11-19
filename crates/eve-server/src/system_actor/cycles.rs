@@ -3615,7 +3615,7 @@ pub(crate) fn flush_pending_cycle_damage_notifications(
 mod cycles_tests;
 
 #[cfg(test)]
-mod r2_cap_transfer_tests {
+mod remote_cap_transfer_tests {
     use super::*;
     use eve_destiny::{Ball, Ballpark, CombatState, MovementMode};
     use eve_sde::SdeRegistry;

@@ -112,7 +112,7 @@ async fn test_homefront_drifter_triglavian_and_metaliminal_storms_e2e() {
 
     ensure_special_sites_spawned(&ctx).await;
 
-    // 1. Homefront Ops: query GetHomefrontSiteInstances, verify outer beacon+gate spawn without pocket NPCs (`HF-05`),
+    // 1. Homefront Ops: query GetHomefrontSiteInstances, verify outer beacon+gate spawn without pocket NPCs,
     //    verify Marauder (`28659`) is rejected by gate (`ShipRestrictedByGate`), then clear Metaliminal Meteoroid via Venture + `Miner I`
     let hf_rep = rpc_ok(
         &ctx,
