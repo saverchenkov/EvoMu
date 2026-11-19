@@ -346,3 +346,169 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
     // Suppress unused mut warning if ctx wasn't mutated directly
     let _ = &mut ctx;
 }
+
+#[test]
+fn legacy_colony_decayed_past_16_half_lives_stays_migrated_after_get_colony_and_ticks() {
+    use crate::services::account_services::account_services_tests::auth_session;
+    use crate::services::industry_pi::handle;
+    use crate::services::industry_pi::pi_helpers::tick_all_colonies_background;
+
+    let initial_unix = 1_700_000_000_u64;
+    let idle_secs = (20.0 * super::PI_DEPLETION_RECOVERY_HALF_LIFE_SECS) as u64;
+    let now_unix = initial_unix + idle_secs;
+    let planet_id = 40_009_082_i64;
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let res_tid = 2268_u32;
+
+    let ctx = make_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(now_unix),
+    ));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            13279,
+            eve_db::TrainedSkillRecord {
+                type_id: 13279,
+                level: 4,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+    let mut sess = auth_session(1, char_id, 1_000_170, sys_id);
+    let kw = HashMap::new();
+
+    let query_quality_and_sh0 = |sess: &mut eve_machonet::SessionState| -> (f64, f32) {
+        let info = handle(
+            &ctx,
+            sess,
+            "planetMgr",
+            "GetPlanetResourceInfo",
+            &[eve_proto::PyRep::Integer(planet_id)],
+            &kw,
+            None,
+        )
+        .expect("GetPlanetResourceInfo handled")
+        .expect("GetPlanetResourceInfo ok");
+        let eve_proto::PyRep::Dict(entries) = info else {
+            panic!("GetPlanetResourceInfo must return Dict");
+        };
+        let quality = entries
+            .iter()
+            .find_map(|(k, v)| (k.as_i64() == Some(i64::from(res_tid))).then(|| v.as_f64()).flatten())
+            .expect("planet resource info must include Aqueous Liquids (2268)");
+
+        let data_rep = handle(
+            &ctx,
+            sess,
+            "planetMgr",
+            "GetResourceData",
+            &[eve_proto::PyRep::keyval([
+                ("planetID", eve_proto::PyRep::Integer(planet_id)),
+                ("resourceTypeID", eve_proto::PyRep::Integer(i64::from(res_tid))),
+            ])],
+            &kw,
+            None,
+        )
+        .expect("GetResourceData handled")
+        .expect("GetResourceData ok");
+        let Some(eve_proto::PyRep::Bytes(sh_bytes)) = data_rep.dict_get("data") else {
+            panic!("GetResourceData must include SH bytes");
+        };
+        assert!(sh_bytes.len() >= 4);
+        let sh0 = f32::from_le_bytes([sh_bytes[0], sh_bytes[1], sh_bytes[2], sh_bytes[3]]);
+        (quality, sh0)
+    };
+
+    let (clean_qual, clean_sh0) = query_quality_and_sh0(&mut sess);
+    assert!(clean_qual > 0.0 && clean_sh0 > 0.0);
+
+    // Seed an unmigrated legacy colony whose stored extraction total decayed > 16 half-lives (< 1.0 eff).
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                owner_id: char_id,
+                planet_id,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 1,
+                extracted_commodities: HashMap::from([(res_tid, 80_000)]),
+                last_extracted_unix: initial_unix,
+            },
+        );
+    });
+
+    let (eff_before, _, depl_before) = ctx.db.with_snapshot(|snap| {
+        super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix)
+    });
+    assert!(eff_before < 1.0);
+    assert_eq!(depl_before.colony_pressure_last_unix, 0);
+
+    let (pre_qual, _pre_sh0) = query_quality_and_sh0(&mut sess);
+    assert!((pre_qual - clean_qual).abs() < 1e-3);
+
+    // Calling GetColony bumps `col.last_extracted_unix = now_unix`; migration timestamp must still be saved.
+    handle(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "GetColony",
+        &[eve_proto::PyRep::Integer(planet_id)],
+        &kw,
+        None,
+    )
+    .expect("GetColony handled")
+    .expect("GetColony ok");
+
+    ctx.db.with_snapshot(|snap| {
+        let depl = super::load_planet_depletion(snap, planet_id);
+        assert_eq!(depl.colony_pressure_last_unix, now_unix);
+        assert!(depl.colony_extraction_pressure.is_empty());
+        let col = &snap.planetary_colonies[&(char_id, planet_id)];
+        assert_eq!(col.last_extracted_unix, now_unix);
+        assert_eq!(col.extracted_commodities.get(&res_tid).copied(), Some(80_000));
+        let (eff_after, _, _) =
+            super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix);
+        assert_eq!(eff_after, 0.0);
+    });
+
+    let (after_qual, after_sh0) = query_quality_and_sh0(&mut sess);
+    assert!(
+        (after_qual - clean_qual).abs() < 1e-6,
+        "decayed legacy colony must keep ~0% depletion after GetColony: clean={clean_qual}, after={after_qual}"
+    );
+    assert!(
+        (after_sh0 - clean_sh0).abs() < 1e-4,
+        "SH survey data must not resurrect legacy depletion: clean={clean_sh0}, after={after_sh0}"
+    );
+
+    // Also verify `always_persist = false` background tick path marks decayed legacy planets migrated.
+    let ctx_bg = make_ctx();
+    ctx_bg.set_clock(std::sync::Arc::new(
+        eve_db::VirtualServerClock::with_fixed_base(now_unix),
+    ));
+    ctx_bg.db.with_mut_snapshot(|snap| {
+        snap.planetary_colonies.insert(
+            (char_id, planet_id),
+            PlanetaryColonyRecord {
+                owner_id: char_id,
+                planet_id,
+                solar_system_id: sys_id,
+                command_center_level: 1,
+                pins_count: 1,
+                extracted_commodities: HashMap::from([(res_tid, 80_000)]),
+                last_extracted_unix: initial_unix,
+            },
+        );
+    });
+    tick_all_colonies_background(&ctx_bg, now_unix);
+    ctx_bg.db.with_snapshot(|snap| {
+        let depl = super::load_planet_depletion(snap, planet_id);
+        assert_eq!(depl.colony_pressure_last_unix, now_unix);
+        assert!(depl.colony_extraction_pressure.is_empty());
+        let (eff_bg, _, _) =
+            super::global_colony_and_gm_depletion_at(snap, planet_id, res_tid, now_unix);
+        assert_eq!(eff_bg, 0.0);
+    });
+}

@@ -263,6 +263,160 @@ fn test_pi_colonies_user_update_network_queries_and_abandon() {
     assert_eq!(aband, PyRep::Bool(true));
 }
 
+#[test]
+fn install_program_depletes_prior_program_heads_instead_of_new_heads() {
+    use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
+    use crate::services::industry_pi::load_planet_depletion;
+    use crate::services::industry_pi::pi_helpers::load_pi_network;
+
+    let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_776_000_000));
+    let ctx = test_ctx();
+    ctx.set_clock(clock.clone());
+
+    let (char_id, ship_id, planet_id, sys_id) =
+        (90_000_001_i64, 100_000_001_i64, 40_009_080_i64, 30_000_142_u32);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            600_099,
+            eve_db::InventoryItemRecord {
+                item_id: 600_099,
+                type_id: 2254,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let sk = snap.skills.entry(char_id).or_default();
+        for tid in [2505_u32, 2495_u32] {
+            sk.insert(
+                tid,
+                eve_db::TrainedSkillRecord {
+                    type_id: tid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
+    });
+
+    let mut sess = auth_session(1, char_id, 1_000_170, sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    let kw = HashMap::new();
+
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[
+            PyRep::Integer(planet_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(101),
+                    PyRep::Integer(2254),
+                    PyRep::Real(0.10),
+                    PyRep::Real(0.10),
+                ]),
+                PyRep::Tuple(vec![
+                    PyRep::Integer(1),
+                    PyRep::Integer(102),
+                    PyRep::Integer(2848),
+                    PyRep::Real(0.12),
+                    PyRep::Real(0.12),
+                ]),
+            ]),
+        ],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork handled")
+    .expect("CC and ECU placement ok");
+
+    let ecu_pin_id = ctx.db.with_snapshot(|snap| {
+        load_pi_network(snap, char_id, planet_id, 0)
+            .pins
+            .into_iter()
+            .find(|p| p.type_id == 2848)
+            .expect("ECU pin must exist")
+            .pin_id
+    });
+
+    let install_cmd = |hlat: f64, hlon: f64| {
+        PyRep::Tuple(vec![
+            PyRep::Integer(10),
+            PyRep::Integer(ecu_pin_id),
+            PyRep::Integer(2268),
+            PyRep::Integer(900),
+            PyRep::Integer(1),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Real(hlat),
+                PyRep::Real(hlon),
+            ])]),
+            PyRep::Integer(86_400),
+        ])
+    };
+
+    // Install program #1 with head at (0.02, 0.02).
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[PyRep::Integer(planet_id), PyRep::List(vec![install_cmd(0.02, 0.02)])],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork handled")
+    .expect("initial InstallProgram ok");
+
+    // Advance clock 6 hours without running GetColony so InstallProgram #2 flushes prior elapsed cycles.
+    clock.advance_secs_and_read_offset(21_600);
+
+    // Replace program with moved head at (0.25, -0.15).
+    handle_pi_colonies(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "UserUpdateNetwork",
+        &[PyRep::Integer(planet_id), PyRep::List(vec![install_cmd(0.25, -0.15)])],
+        &kw,
+        None,
+    )
+    .expect("UserUpdateNetwork handled")
+    .expect("replacement InstallProgram ok");
+
+    ctx.db.with_snapshot(|snap| {
+        let depl = load_planet_depletion(snap, planet_id);
+        assert!(
+            depl.local_depletion.iter().any(|spot| {
+                spot.resource_type_id == 2268
+                    && (spot.latitude - 0.02).abs() < 1e-9
+                    && (spot.longitude - 0.02).abs() < 1e-9
+                    && spot.amount_depleted > 0.0
+            }),
+            "prior program depletion must record prior head coordinates (0.02, 0.02): {:?}",
+            depl.local_depletion
+        );
+        assert!(
+            !depl.local_depletion.iter().any(|spot| {
+                (spot.latitude - 0.25).abs() < 1e-6 && (spot.longitude + 0.15).abs() < 1e-6
+            }),
+            "new program head coordinates (0.25, -0.15) must not leak into prior program depletion: {:?}",
+            depl.local_depletion
+        );
+        let net = load_pi_network(snap, char_id, planet_id, 0);
+        let ecu = net.pins.iter().find(|p| p.pin_id == ecu_pin_id).unwrap();
+        assert_eq!(ecu.extractor_heads, vec![(1, 0.25, -0.15)]);
+    });
+}
+
 #[cfg(test)]
 #[path = "pi_colonies_extra_unit_tests.rs"]
 mod extra_unit_tests;

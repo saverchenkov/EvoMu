@@ -316,3 +316,154 @@ fn siege_and_bastion_ewar_immunity_requires_both_active_state_and_matching_effec
     let ctx_active = eng.evaluated_context(&sde);
     assert!((ctx_active.ship.get_attribute(2045, &sde) - 0.0).abs() < 1e-12);
 }
+
+#[test]
+fn activate_offline_and_unfit_clear_pending_overload_queue() {
+    let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
+    sde.types
+        .get_mut(&587)
+        .expect("Rifter must exist in SDE")
+        .default_attributes
+        .insert(2045, 100.0);
+
+    let active_eff_id = 9901_u16;
+    let overload_eff_id = 9902_u16;
+    sde.effects.insert(
+        active_eff_id,
+        eve_sde::DogmaEffectType {
+            effect_id: active_eff_id,
+            name: "syntheticActiveSpeedBoost".to_string(),
+            effect_category: 1,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: eve_sde::attr_ids::MAX_VELOCITY,
+                modifying_attribute_id: 9910,
+                operator: 6, // PostPercent
+                group_id: None,
+                skill_type_id: None,
+                effect_id: Some(active_eff_id),
+            }],
+            ..eve_sde::DogmaEffectType::default()
+        },
+    );
+    sde.effects.insert(
+        overload_eff_id,
+        eve_sde::DogmaEffectType {
+            effect_id: overload_eff_id,
+            name: "syntheticOverloadAttrBoost".to_string(),
+            effect_category: 5,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: 2045,
+                modifying_attribute_id: 9911,
+                operator: 6, // PostPercent
+                group_id: None,
+                skill_type_id: None,
+                effect_id: Some(overload_eff_id),
+            }],
+            ..eve_sde::DogmaEffectType::default()
+        },
+    );
+    sde.types.insert(
+        7099,
+        eve_sde::InvType {
+            type_id: 7099,
+            group_id: 46,
+            category_id: 7,
+            name: "Synthetic Overload Test Module".into(),
+            mass: 1_000.0,
+            volume: 5.0,
+            capacity: 0.0,
+            radius: 1.0,
+            base_price: 1_000.0,
+            published: true,
+            portion_size: 1,
+            market_group_id: None,
+            race_id: None,
+            faction_id: None,
+            variation_parent_type_id: None,
+            description_id: None,
+            icon_id: None,
+            graphic_id: None,
+            sound_id: None,
+            meta_group_id: None,
+            meta_level: None,
+            tech_level: None,
+            default_effect_id: Some(active_eff_id),
+            description: String::new(),
+            effect_ids: vec![16, 12, active_eff_id, overload_eff_id],
+            default_attributes: std::collections::HashMap::from([
+                (eve_sde::attr_ids::CPU, 5.0),
+                (eve_sde::attr_ids::POWER, 5.0),
+                (9910, 50.0),
+                (9911, 50.0),
+            ]),
+        },
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 587, &sde);
+    eng.fit_and_online_module(8001, 7099, 27, &sde).unwrap();
+    let base_vel = eng
+        .evaluated_context(&sde)
+        .ship
+        .get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &sde);
+    assert!((eng.evaluated_context(&sde).ship.get_attribute(2045, &sde) - 100.0).abs() < 1e-9);
+
+    let queue_pre_overload = |eng: &mut ShipFittingEngine| {
+        eng.modules.get_mut(&8001).unwrap().state = ModuleState::Overloaded;
+        eng.pending_overload_modules.insert(8001);
+        eng.recalculate_stats(&sde);
+        assert!(eng.pending_overload_modules.contains(&8001));
+    };
+
+    // Pre-overload suppresses both active and overload modifiers until activated.
+    queue_pre_overload(&mut eng);
+    let ctx_pending = eng.evaluated_context(&sde);
+    assert!((ctx_pending.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &sde) - base_vel).abs() < 1e-6);
+    assert!((ctx_pending.ship.get_attribute(2045, &sde) - 100.0).abs() < 1e-6);
+
+    // Failed activate (burned out) must preserve pending overload state.
+    let saved_dmg = eng.modules[&8001].damage_hp;
+    eng.modules.get_mut(&8001).unwrap().damage_hp = eng.modules[&8001].max_hp;
+    assert!(eng.activate_module(8001, true, &sde).is_err());
+    assert!(eng.pending_overload_modules.contains(&8001));
+    eng.modules.get_mut(&8001).unwrap().damage_hp = saved_dmg;
+
+    // Direct activate_module(overload=true) clears pending overload and applies both active + overload modifiers.
+    eng.activate_module(8001, true, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8001));
+    assert_eq!(eng.modules[&8001].state, ModuleState::Overloaded);
+    let ctx_overloaded = eng.evaluated_context(&sde);
+    assert!(
+        (ctx_overloaded.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &sde) - base_vel * 1.5).abs() < 1e-6
+    );
+    assert!((ctx_overloaded.ship.get_attribute(2045, &sde) - 150.0).abs() < 1e-6);
+
+    // Direct activate_module(overload=false) clears pending overload and activates without overload bonus.
+    queue_pre_overload(&mut eng);
+    eng.activate_module(8001, false, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8001));
+    assert_eq!(eng.modules[&8001].state, ModuleState::Active);
+    let ctx_active_only = eng.evaluated_context(&sde);
+    assert!(
+        (ctx_active_only.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &sde) - base_vel * 1.5).abs() < 1e-6
+    );
+    assert!((ctx_active_only.ship.get_attribute(2045, &sde) - 100.0).abs() < 1e-6);
+
+    // take_module_offline clears pending overload immediately.
+    queue_pre_overload(&mut eng);
+    eng.take_module_offline(8001, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8001));
+    assert_eq!(eng.modules[&8001].state, ModuleState::Offline);
+
+    // unfit_module clears pending overload cleanly even if item ID 8001 is later re-fitted.
+    eng.set_module_online_skip_skills(8001, &sde).unwrap();
+    queue_pre_overload(&mut eng);
+    eng.unfit_module(8001, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8001));
+
+    eng.fit_and_online_module(8001, 7099, 27, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8001));
+}
