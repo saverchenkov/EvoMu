@@ -18,10 +18,15 @@
 
 use crate::router::ServerContext;
 use crate::services::mining_sites::{
-    derive_system_site_position_from_sde, displayed_security, seed_system_mining_sites_from_sde,
+    derive_system_site_position_from_sde, displayed_security, resolve_gas_site, resolve_ore_site,
+    seed_system_mining_sites_from_sde, COSMIC_ORE_SITES, GAS_SITES,
 };
 use crate::services::pve_exploration::{
-    ensure_system_pve_sites_seeded, with_pve_exploration_reg,
+    anomaly_dungeons_for_system, ded_complex_for_rating, ensure_system_pve_sites_seeded,
+    pirate_faction_for_system, read_pve_exploration_reg, wormhole_class_for_system, PirateFaction,
+};
+use crate::services::pve_exploration_seeding::{
+    ghost_site_dungeon_for_system, sleeper_cache_dungeon_for_system,
 };
 use crate::services::pve_dungeon_editor::{
     ensure_dungeon_rooms_seeded, handle_gm_dungeon_editor_op,
@@ -38,6 +43,12 @@ pub const DUNGEON_ARCHETYPE_ICE_BELT: u32 = 28;
 
 /// `cosmic_anomalies.anomaly_type` used for seeded ice belts.
 pub const ICE_BELT_ANOMALY_TYPE: &str = "IceBelt";
+
+fn rpc_msg_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    let mut err = BridgeRpcError::user_error(code);
+    err.message = message.into();
+    err
+}
 
 /// Parses the security ceiling an ice type advertises in its SDE description
 /// ("Available in <color=…>0.4</color> security status solar systems or lower.").
@@ -253,7 +264,7 @@ fn registry_instances(
     sys_id: SolarSystemId,
     probe_required: bool,
 ) -> BTreeMap<u32, Vec<i64>> {
-    with_pve_exploration_reg(ctx, |reg| {
+    read_pve_exploration_reg(ctx, |reg| {
         let now = crate::services::pve_exploration::now_sec(reg);
         let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
@@ -268,6 +279,204 @@ fn registry_instances(
         }
         out
     })
+}
+
+/// Computes unseeded deterministic combat-anomaly `(dungeon_id, instance_id)` entries read-only
+/// so `custom_agency_provider.get_content_data` stays pure without mutating DB state.
+fn unseeded_agency_anomaly_instances(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> BTreeMap<u32, Vec<i64>> {
+    let cleared_ids: std::collections::HashSet<String> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&sys_id)
+            .into_iter()
+            .flatten()
+            .filter(|a| a.cleared)
+            .map(|a| a.anomaly_id.clone())
+            .collect()
+    });
+    let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    if ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .is_some_and(|s| s.region_id == 10_000_070)
+    {
+        let site_id = format!("PVE-POCHVEN-HIVE-{sys_id}");
+        if !cleared_ids.contains(&site_id) {
+            out.entry(9006).or_default().push(registry_instance_id(&site_id));
+        }
+        return out;
+    }
+    let true_sec = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.5);
+    for (idx, (did, _, _, _, _)) in anomaly_dungeons_for_system(&ctx.sde, sys_id, true_sec)
+        .into_iter()
+        .enumerate()
+    {
+        let site_id = format!("PVE-ANOM-{sys_id}-{}", idx + 1);
+        if !cleared_ids.contains(&site_id) {
+            out.entry(did).or_default().push(registry_instance_id(&site_id));
+        }
+    }
+    out
+}
+
+/// Resolves an already-populated content warp target read-only.
+/// Returns `(resolved_pos, unscanned_blocked, pve_seeded, mining_seeded)`.
+fn resolve_warp_target_readonly(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    target_iid: Option<i64>,
+    target_did: Option<u32>,
+) -> (Option<glam::DVec3>, bool, bool, bool) {
+    let mut unscanned_blocked = false;
+    let (mut resolved_pos, pve_seeded) = read_pve_exploration_reg(ctx, |reg| {
+        let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
+        let now = crate::services::pve_exploration::now_sec(reg);
+        for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
+            if s.cleared
+                || (s.lifetime_seconds > 0
+                    && now >= s.created_unix.saturating_add(s.lifetime_seconds))
+            {
+                continue;
+            }
+            let iid = registry_instance_id(&s.site_id);
+            if Some(iid) == target_iid || (target_iid.is_none() && Some(s.dungeon_id) == target_did) {
+                if s.probe_required
+                    && !is_site_scanned_by_character(ctx, char_id, sys_id, &s.site_id)
+                {
+                    unscanned_blocked = true;
+                    return (None, seeded);
+                }
+                return (Some(glam::DVec3::from_array(s.position)), seeded);
+            }
+        }
+        (None, seeded)
+    });
+    if unscanned_blocked {
+        return (None, true, pve_seeded, false);
+    }
+    let mut mining_seeded = false;
+    if resolved_pos.is_none() {
+        resolved_pos = ctx.db.with_snapshot(|snap| {
+            mining_seeded = snap
+                .cosmic_anomalies
+                .get(&sys_id)
+                .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+                || snap.cosmic_signatures.get(&sys_id).is_some_and(|list| {
+                    list.iter()
+                        .any(|s| matches!(s.sig_group.as_str(), "OreAnomaly" | "Ore" | "Gas"))
+                });
+            for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
+                if a.cleared {
+                    continue;
+                }
+                if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
+                    if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                        return Some(glam::DVec3::from_array(a.position));
+                    }
+                }
+            }
+            for s in snap.cosmic_signatures.get(&sys_id).into_iter().flatten() {
+                if s.collapsed {
+                    continue;
+                }
+                if let Some((did, iid)) = parse_dng_site_id(&s.signature_id) {
+                    if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
+                        if ctx.effective_signature_signal_strength(char_id, sys_id, s) < 1.0 {
+                            unscanned_blocked = true;
+                            return None;
+                        }
+                        return Some(glam::DVec3::from_array(s.position));
+                    }
+                }
+            }
+            None
+        });
+    }
+    (resolved_pos, unscanned_blocked, pve_seeded, mining_seeded)
+}
+
+/// Returns `(needs_pve_seed, needs_mining_seed)` if `(target_iid, target_did)` can match
+/// deterministic sites not yet materialized in `sys_id`.
+fn matching_unseeded_seed_needs(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    target_iid: Option<i64>,
+    target_did: Option<u32>,
+    pve_seeded: bool,
+    mining_seeded: bool,
+) -> (bool, bool) {
+    let mut need_pve = false;
+    if !pve_seeded {
+        for (did, iids) in unseeded_agency_anomaly_instances(ctx, sys_id) {
+            if target_iid.is_some_and(|iid| iids.contains(&iid))
+                || (target_iid.is_none() && target_did == Some(did))
+            {
+                need_pve = true;
+                break;
+            }
+        }
+        if !need_pve && target_iid.is_none() {
+            if let Some(did) = target_did {
+                let true_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.5);
+                let wh_c = wormhole_class_for_system(sys_id);
+                let ded_r = if true_sec >= 0.5 { 3 } else if true_sec > 0.0 { 5 } else { 10 };
+                let ded_did = ded_complex_for_rating(&ctx.sde, sys_id, ded_r).0;
+                let dsg_did = match pirate_faction_for_system(&ctx.sde, sys_id) {
+                    PirateFaction::Guristas => 98,
+                    PirateFaction::BloodRaiders => 106,
+                    PirateFaction::Sansha => 110,
+                    PirateFaction::Serpentis => 119,
+                    PirateFaction::AngelCartel => 59,
+                };
+                let guarded = wh_c.is_some() || true_sec <= 0.0;
+                let (gho_did, _) = ghost_site_dungeon_for_system(&ctx.sde, sys_id, true_sec, wh_c);
+                let (slc_did, _) = sleeper_cache_dungeon_for_system(&ctx.sde, true_sec, wh_c);
+                need_pve = [
+                    ded_did,
+                    dsg_did,
+                    if guarded { 3729 } else { 1133 },
+                    if guarded { 3722 } else { 1286 },
+                    gho_did,
+                    slc_did,
+                ]
+                .contains(&did);
+            }
+        }
+    }
+    let mut need_mining = false;
+    if !mining_seeded && target_iid.is_none() {
+        if let (Some(did), Some(sys)) = (target_did, ctx.sde.solar_systems.get(&sys_id)) {
+            let region = crate::services::mining_sites::region_name(&ctx.sde, sys_id);
+            need_mining = COSMIC_ORE_SITES
+                .iter()
+                .filter(|d| d.band.matches_system(sys))
+                .filter_map(|d| resolve_ore_site(&ctx.sde, d).ok())
+                .any(|s| s.dungeon_id == did)
+                || GAS_SITES
+                    .iter()
+                    .find(|d| {
+                        d.band.matches_system(sys)
+                            && region.is_some_and(|r| d.region_names.contains(&r))
+                    })
+                    .and_then(|d| resolve_gas_site(&ctx.sde, d).ok())
+                    .is_some_and(|s| s.dungeon_id == did);
+        }
+    }
+    (need_pve, need_mining)
 }
 
 // DERIVED: V24 client SDE `dungeons.fsdbinary` stores numeric `archetypeID` on each dungeon but does not
@@ -792,11 +1001,15 @@ pub async fn handle(
                 client_error: None,
             }));
         };
-        ensure_system_pve_sites_seeded(ctx, sys_id).await;
-        seed_system_mining_sites_from_sde(ctx, sys_id).await;
         let mut content_pieces = Vec::new();
         let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
-        let anomalies = registry_instances(ctx, sys_id, false);
+        let is_seeded = read_pve_exploration_reg(ctx, |reg| {
+            reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
+        });
+        let mut anomalies = registry_instances(ctx, sys_id, false);
+        if !is_seeded && anomalies.is_empty() {
+            anomalies = unseeded_agency_anomaly_instances(ctx, sys_id);
+        }
         for (did, instances) in anomalies {
             for iid in instances {
                 content_pieces.push(PyRep::keyval([
@@ -811,7 +1024,7 @@ pub async fn handle(
             }
         }
         // Only expose `probe_required` cosmic signatures that `char_id` has already scanned to 100% (`#520`).
-        let scanned_sigs: Vec<(u32, i64)> = with_pve_exploration_reg(ctx, |reg| {
+        let scanned_sigs: Vec<(u32, i64)> = read_pve_exploration_reg(ctx, |reg| {
             let now = crate::services::pve_exploration::now_sec(reg);
             reg.sites_by_system
                 .get(&sys_id)
@@ -889,32 +1102,8 @@ pub async fn handle(
             }
         };
 
-        ensure_system_pve_sites_seeded(ctx, sys_id).await;
-        seed_system_mining_sites_from_sde(ctx, sys_id).await;
-
-        let mut unscanned_blocked = false;
-        let mut resolved_pos: Option<glam::DVec3> = with_pve_exploration_reg(ctx, |reg| {
-            let now = crate::services::pve_exploration::now_sec(reg);
-            for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
-                if s.cleared
-                    || (s.lifetime_seconds > 0
-                        && now >= s.created_unix.saturating_add(s.lifetime_seconds))
-                {
-                    continue;
-                }
-                let iid = registry_instance_id(&s.site_id);
-                if Some(iid) == target_iid || (target_iid.is_none() && Some(s.dungeon_id) == target_did) {
-                    if s.probe_required
-                        && !is_site_scanned_by_character(ctx, char_id, sys_id, &s.site_id)
-                    {
-                        unscanned_blocked = true;
-                        return None;
-                    }
-                    return Some(glam::DVec3::from_array(s.position));
-                }
-            }
-            None
-        });
+        let (mut resolved_pos, unscanned_blocked, pve_seeded, mining_seeded) =
+            resolve_warp_target_readonly(ctx, char_id, sys_id, target_iid, target_did);
         if unscanned_blocked {
             return Some(Err(BridgeRpcError {
                 code: "SignatureNotScanned".into(),
@@ -924,40 +1113,49 @@ pub async fn handle(
         }
 
         if resolved_pos.is_none() {
-            resolved_pos = ctx.db.with_snapshot(|snap| {
-                for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
-                    if a.cleared {
-                        continue;
-                    }
-                    if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
-                        if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
-                            return Some(glam::DVec3::from_array(a.position));
-                        }
-                    }
+            let (need_pve, need_mining) = matching_unseeded_seed_needs(
+                ctx,
+                sys_id,
+                target_iid,
+                target_did,
+                pve_seeded,
+                mining_seeded,
+            );
+            if !need_pve && !need_mining {
+                return Some(Err(rpc_msg_err(
+                    "SiteNotFound",
+                    format!("Target content site ({target_iid:?}, {target_did:?}) not found in system {sys_id}"),
+                )));
+            }
+            let pre_handle = ctx.systems.get_or_spawn(sys_id);
+            match pre_handle.get_ball_snapshot(ship_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Some(Err(rpc_msg_err(
+                        "ShipNotInSpace",
+                        "Active ship is not spawned in Ballpark",
+                    )));
                 }
-                for s in snap.cosmic_signatures.get(&sys_id).into_iter().flatten() {
-                    if s.collapsed {
-                        continue;
-                    }
-                    if let Some((did, iid)) = parse_dng_site_id(&s.signature_id) {
-                        if Some(iid) == target_iid || (target_iid.is_none() && Some(did) == target_did) {
-                            if ctx.effective_signature_signal_strength(char_id, sys_id, s) < 1.0 {
-                                unscanned_blocked = true;
-                                return None;
-                            }
-                            return Some(glam::DVec3::from_array(s.position));
-                        }
-                    }
+                Err(e) => {
+                    return Some(Err(rpc_msg_err("DestinyCommandFailed", e)));
                 }
-                None
-            });
-            if unscanned_blocked {
+            }
+            if need_pve {
+                ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            }
+            if need_mining {
+                seed_system_mining_sites_from_sde(ctx, sys_id).await;
+            }
+            let (re_pos, re_unscanned, _, _) =
+                resolve_warp_target_readonly(ctx, char_id, sys_id, target_iid, target_did);
+            if re_unscanned {
                 return Some(Err(BridgeRpcError {
                     code: "SignatureNotScanned".into(),
                     message: "Cosmic signature must be probe-scanned to 100% before warping".into(),
                     client_error: None,
                 }));
             }
+            resolved_pos = re_pos;
         }
 
         let dest_pos = match resolved_pos {

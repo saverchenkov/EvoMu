@@ -221,3 +221,60 @@ async fn dungeon_cache_and_editor_metadata_rpc_handlers() {
     .unwrap_err();
     assert_eq!(err.code, "InsufficientRole");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_db() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(shared_sde(), db));
+    let mut sess = eve_machonet::SessionState::new(910);
+    sess.user_id = Some(91);
+    sess.character_id = Some(90_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    let kw = HashMap::new();
+    let (err_not_in_space, err_site_not_found, err_ship_not_in_space) =
+        ("NotInSpace", "SiteNotFound", "ShipNotInSpace");
+
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    let content = handle(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("get_content_data");
+    let PyRep::List(items) = content else {
+        panic!("expected content list");
+    };
+    assert!(!items.is_empty());
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // Docked, no-ship, missing-site, and unspawned-ship error paths on warp_to_content must not seed DB.
+    sess.station_id = Some(60_003_760);
+    assert_eq!(
+        handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[items[0].clone()], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        err_not_in_space
+    );
+    sess.station_id = None;
+    sess.ship_id = Some(777_000_001);
+    assert_eq!(
+        handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[PyRep::Integer(999_888_777)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        err_site_not_found
+    );
+    assert_eq!(
+        handle(&ctx, &mut sess, "custom_agency_provider", "warp_to_content", &[items[0].clone()], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        err_ship_not_in_space
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+}

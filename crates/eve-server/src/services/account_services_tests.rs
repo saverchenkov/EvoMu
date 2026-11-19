@@ -647,6 +647,54 @@ async fn async_logout_logoff_and_multilogin_blocker_paths() {
     assert_eq!(err.code, "UserBanned");
 }
 
+#[test]
+fn subscription_and_create_date_reads_do_not_mutate_db() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let kw = HashMap::new();
+    let mut sess = auth_session(1, 90_000_001, 98_000_001, 30_000_142);
+    let mut alpha_sess = auth_session(999, 90_000_999, 98_000_001, 30_000_142);
+
+    let epoch_before = ctx.db.state_epoch();
+    let commits_before = ctx.db.tx_commit_count();
+    let dt1 = handle_inner(&ctx, &mut alpha_sess, "userSvc", "GetCreateDate", &[], &kw)
+        .unwrap()
+        .unwrap();
+    let dt2 = handle_inner(&ctx, &mut alpha_sess, "userSvc", "GetCreateDate", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert_eq!(dt1, dt2);
+    assert!(dt1.as_i64().unwrap() > 130_000_000_000_000_000);
+    assert_eq!(
+        handle_inner(&ctx, &mut alpha_sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::None
+    );
+    assert_eq!(
+        handle_inner(&ctx, &mut alpha_sess, "subscriptionMgr", "GetCloneGrade", &[], &kw).unwrap(),
+        None
+    );
+
+    let omega_dt = handle_inner(&ctx, &mut sess, "userSvc", "GetCreateDate", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(omega_dt.as_i64().unwrap() > 130_000_000_000_000_000);
+    let expected_omega_ft = (1_800_000_000_i64 + 30 * 86_400 + 11_644_473_600) * 10_000_000;
+    assert_eq!(
+        handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetSubscriptionTime", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        PyRep::Integer(expected_omega_ft)
+    );
+    assert_eq!(
+        handle_inner(&ctx, &mut sess, "subscriptionMgr", "GetCloneGrade", &[], &kw).unwrap(),
+        None
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch_before);
+    assert_eq!(ctx.db.tx_commit_count(), commits_before);
+}
+
 #[cfg(test)]
 #[path = "account_services_extra_unit_tests.rs"]
 mod account_services_extra_unit_tests;

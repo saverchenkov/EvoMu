@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::pve_special_sites::{with_pve_special_reg, with_pve_special_reg_db, PveSpecialSitesRegistry};
+use crate::services::pve_special_sites::{
+    read_pve_special_reg, with_pve_special_reg, with_pve_special_reg_db, PveSpecialSitesRegistry,
+};
 use crate::system_actor::SystemRegistry;
 use eve_db::{IskCents, WalletJournalEntry, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -1221,7 +1223,7 @@ fn handle_get_incursion_lp_log(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let logs_py = with_pve_special_reg(ctx, |reg| {
+    let logs_py = read_pve_special_reg(ctx, |reg| {
         reg.incursion_lp_logs
             .get(&char_id)
             .map(|entries| {
@@ -1244,12 +1246,45 @@ fn handle_update_incursion_lp_log(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let synced_rows = with_pve_special_reg(ctx, |reg| {
-        crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
-            reg, char_id, args, now_ft,
-        )
+    let (site_filter, cid_filter) = match args {
+        [first, ..] => (
+            first.as_str().map(str::to_string),
+            first.as_i64().and_then(|v| u32::try_from(v).ok()),
+        ),
+        [] => (None, None),
+    };
+    let (needs_ts_backfill, readonly_rows) = read_pve_special_reg(ctx, |reg| {
+        let Some(entries) = reg.incursion_lp_logs.get(&char_id) else {
+            return (false, Vec::new());
+        };
+        if entries.iter().any(|e| e.timestamp_filetime <= 0) {
+            return (true, Vec::new());
+        }
+        let rows = entries
+            .iter()
+            .filter(|e| {
+                if let Some(ref sf) = site_filter {
+                    e.site_id == *sf
+                } else if let Some(cf) = cid_filter {
+                    e.constellation_id == cf
+                } else {
+                    true
+                }
+            })
+            .map(crate::services::pve_incursion_sites_ops::encode_incursion_lp_log_row)
+            .collect::<Vec<_>>();
+        (false, rows)
     });
+    let synced_rows = if needs_ts_backfill {
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        with_pve_special_reg(ctx, |reg| {
+            crate::services::pve_incursion_sites_ops::sync_incursion_lp_log_rows(
+                reg, char_id, args, now_ft,
+            )
+        })
+    } else {
+        readonly_rows
+    };
     if synced_rows.is_empty() {
         Some(Ok(PyRep::None))
     } else {

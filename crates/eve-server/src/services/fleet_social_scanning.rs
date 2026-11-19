@@ -11,6 +11,39 @@ use std::collections::HashMap;
 
 const AU_IN_METERS: f64 = 149_597_870_700.0;
 
+/// Reads cached cosmic signatures and anomaly IDs purely from snapshot when native signatures
+/// are already seeded and none have expired (`None` triggers one-shot seeding/expiry).
+fn read_system_signatures_ready(
+    ctx: &ServerContext,
+    sys_id: u32,
+    now_unix: u64,
+) -> Option<(Vec<CosmicSignatureRecord>, Vec<String>)> {
+    ctx.db.with_snapshot(|snap| {
+        let sigs = snap.cosmic_signatures.get(&sys_id)?;
+        let has_native = sigs.iter().any(|s| {
+            !s.signature_id.starts_with("K162-") && !s.signature_id.starts_with("DNG-")
+        });
+        if !has_native {
+            return None;
+        }
+        let any_expired = sigs.iter().any(|s| {
+            !s.collapsed
+                && s.lifetime_seconds > 0
+                && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds)
+        });
+        if any_expired {
+            return None;
+        }
+        let anom_ids = snap
+            .cosmic_anomalies
+            .get(&sys_id)
+            .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+            .unwrap_or_default();
+        let active = sigs.iter().filter(|s| !s.collapsed).cloned().collect();
+        Some((active, anom_ids))
+    })
+}
+
 pub(super) async fn handle_scanning_and_wormholes(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -33,8 +66,15 @@ pub(super) async fn handle_scanning_and_wormholes(
                 _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
             };
             let now_unix = ctx.now_unix();
-            crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let sigs = ensure_system_signatures(ctx, sys_id).await;
+            if !crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
+                reg.seeded_systems.get(&sys_id).copied().unwrap_or(false)
+            }) {
+                crate::services::pve_exploration::ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            }
+            let sigs = match read_system_signatures_ready(ctx, sys_id, now_unix) {
+                Some((ready_sigs, anom_ids)) if !anom_ids.is_empty() => ready_sigs,
+                _ => ensure_system_signatures(ctx, sys_id).await,
+            };
             let (anom_count, anom_rows, struct_rows, sig_count) = ctx.db.with_snapshot(|snap| {
                 let anom_ids: std::collections::HashSet<&str> = snap
                     .cosmic_anomalies
@@ -144,21 +184,77 @@ pub(super) async fn handle_scanning_and_wormholes(
                 .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
                 .unwrap_or(0);
             let now_unix = ctx.now_unix();
-            let _ = ensure_system_signatures(ctx, sys_id).await;
-            let (signatures, anom_ids_owned) = ctx.db.try_with_mut_snapshot(|snap| {
-                let anom_ids: Vec<String> = snap
-                    .cosmic_anomalies
-                    .get(&sys_id)
-                    .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
-                    .unwrap_or_default();
-                let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
-                sigs.retain(|sig| {
-                    !sig.collapsed
-                        && (sig.lifetime_seconds == 0
-                            || now_unix < sig.created_unix.saturating_add(sig.lifetime_seconds))
-                });
-                Ok::<_, BridgeRpcError>((sigs.clone(), anom_ids))
-            }).unwrap_or_default();
+            let (signatures, anom_ids_owned) =
+                if let Some((ready_sigs, ready_anoms)) = read_system_signatures_ready(ctx, sys_id, now_unix) {
+                    (ready_sigs, ready_anoms)
+                } else {
+                    let need_seed = ctx.db.with_snapshot(|snap| {
+                        snap.cosmic_signatures.get(&sys_id).is_none_or(|sigs| {
+                            !sigs.iter().any(|s| {
+                                !s.signature_id.starts_with("K162-")
+                                    && !s.signature_id.starts_with("DNG-")
+                            })
+                        })
+                    });
+                    if need_seed {
+                        let _ = ensure_system_signatures(ctx, sys_id).await;
+                    }
+                    let any_expired = ctx.db.with_snapshot(|snap| {
+                        snap.cosmic_signatures.get(&sys_id).is_some_and(|sigs| {
+                            sigs.iter().any(|sig| {
+                                sig.collapsed
+                                    || (sig.lifetime_seconds > 0
+                                        && now_unix
+                                            >= sig.created_unix.saturating_add(sig.lifetime_seconds))
+                            })
+                        })
+                    });
+                    if any_expired {
+                        ctx.db
+                            .try_with_mut_snapshot(|snap| {
+                                let anom_ids: Vec<String> = snap
+                                    .cosmic_anomalies
+                                    .get(&sys_id)
+                                    .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+                                    .unwrap_or_default();
+                                let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
+                                sigs.retain(|sig| {
+                                    !sig.collapsed
+                                        && (sig.lifetime_seconds == 0
+                                            || now_unix
+                                                < sig.created_unix.saturating_add(sig.lifetime_seconds))
+                                });
+                                Ok::<_, BridgeRpcError>((sigs.clone(), anom_ids))
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        ctx.db.with_snapshot(|snap| {
+                            let anom_ids: Vec<String> = snap
+                                .cosmic_anomalies
+                                .get(&sys_id)
+                                .map(|l| l.iter().map(|a| a.anomaly_id.clone()).collect())
+                                .unwrap_or_default();
+                            let sigs = snap
+                                .cosmic_signatures
+                                .get(&sys_id)
+                                .map(|l| {
+                                    l.iter()
+                                        .filter(|sig| {
+                                            !sig.collapsed
+                                                && (sig.lifetime_seconds == 0
+                                                    || now_unix
+                                                        < sig
+                                                            .created_unix
+                                                            .saturating_add(sig.lifetime_seconds))
+                                        })
+                                        .cloned()
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            (sigs, anom_ids)
+                        })
+                    }
+                };
             let anom_ids: std::collections::HashSet<&str> =
                 anom_ids_owned.iter().map(String::as_str).collect();
             let rows: Vec<Vec<PyRep>> = signatures
@@ -201,8 +297,10 @@ pub(super) async fn handle_scanning_and_wormholes(
                     client_error: None,
                 }));
             };
-            let _ = ensure_system_signatures(ctx, sys_id).await;
             let now_unix = ctx.now_unix();
+            if read_system_signatures_ready(ctx, sys_id, now_unix).is_none() {
+                let _ = ensure_system_signatures(ctx, sys_id).await;
+            }
             let (probe_positions_rep, scan_radius_meters, base_probe_strength) =
                 if let Some(PyRep::Real(r)) = args.first() {
                     let s = args.get(1).and_then(|a| a.as_f64()).unwrap_or(40.0);
@@ -406,6 +504,9 @@ pub(super) async fn handle_scanning_and_wormholes(
 
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError::user_error("CannotDirectionalScanWhileDocked")));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -415,6 +516,9 @@ pub(super) async fn handle_scanning_and_wormholes(
             };
             if sys_id == 30_100_000 || (32_000_000..=32_999_999).contains(&sys_id) {
                 return Some(Err(BridgeRpcError::from_user_key(eve_proto::UserErrorKey::CannotDscanInThisSystem)));
+            }
+            if session.ship_id.is_none() {
+                return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
             }
             let scan_angle = args
                 .first()
@@ -652,8 +756,8 @@ pub(super) async fn handle_scanning_and_wormholes(
             let arg_int_opt = args.first().and_then(|a| a.as_i64());
 
             // Match either a signature ID string (`WST-101` or `K162-WST-101`) or a wormhole ball ID (`>= 40_000_000`).
+            // Pure snapshot lookup: reading polarization must never seed or mutate DB state.
             if arg_str_opt.is_some() || arg_int_opt.is_some_and(|id| id >= 40_000_000) {
-                let _ = ensure_system_signatures(ctx, sys_id).await;
                 let wh_match = ctx.db.with_snapshot(|snap| {
                     if let Some(list) = snap.cosmic_signatures.get(&sys_id) {
                         if let Some(s) = list.iter().find(|s| {
@@ -997,6 +1101,22 @@ async fn ensure_system_signatures(ctx: &ServerContext, sys_id: u32) -> Vec<Cosmi
 }
 
 pub(crate) fn register_signal_tracker_subscriber(ctx: &ServerContext, sys_id: u32, char_id: i64) {
+    let already_registered = ctx.db.with_snapshot(|snap| {
+        let in_target = snap
+            .fleet_and_social_ops
+            .signal_tracker_subs
+            .get(&sys_id)
+            .is_some_and(|subs| subs.contains(&char_id));
+        let in_other = snap
+            .fleet_and_social_ops
+            .signal_tracker_subs
+            .iter()
+            .any(|(&s, subs)| s != sys_id && subs.contains(&char_id));
+        in_target && !in_other
+    });
+    if already_registered {
+        return;
+    }
     ctx.db.with_mut_snapshot(|snap| {
         for (&other_sys, subs) in snap.fleet_and_social_ops.signal_tracker_subs.iter_mut() {
             if other_sys != sys_id {

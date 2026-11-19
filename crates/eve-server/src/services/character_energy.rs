@@ -76,53 +76,83 @@ pub fn energy_to_keyval(state: &CharacterEnergyState) -> PyRep {
     ])
 }
 
+fn default_energy_state(now_ft: i64) -> CharacterEnergyState {
+    CharacterEnergyState {
+        current_energy: DEFAULT_MAX_ENERGY,
+        max_energy: DEFAULT_MAX_ENERGY,
+        last_update_time: now_ft,
+        recharge_rate: DEFAULT_RECHARGE_RATE,
+        energy_rem: 0.0,
+    }
+}
+
+/// Applies legacy max-energy migration and elapsed regeneration onto `entry` in place,
+/// returning `(changed, regenerated)`.
+fn compute_regenerated_energy(entry: &mut CharacterEnergyState, now_ft: i64) -> (bool, bool) {
+    let mut changed = false;
+    let mut regenerated = false;
+    if entry.max_energy == 5_000 && entry.current_energy == 5_000 {
+        entry.max_energy = DEFAULT_MAX_ENERGY;
+        entry.current_energy = DEFAULT_MAX_ENERGY;
+        entry.recharge_rate = DEFAULT_RECHARGE_RATE;
+        entry.energy_rem = 0.0;
+        changed = true;
+    }
+    if entry.current_energy >= entry.max_energy {
+        entry.last_update_time = now_ft;
+        entry.energy_rem = 0.0;
+    } else if entry.last_update_time > 0
+        && now_ft > entry.last_update_time
+        && entry.recharge_rate > 0.0
+    {
+        let elapsed_minutes = ((now_ft - entry.last_update_time) as f64) / 600_000_000.0;
+        let total_gain = entry.energy_rem + elapsed_minutes * entry.recharge_rate;
+        let gained = total_gain.floor() as i64;
+        if gained > 0 || elapsed_minutes >= 1.0 {
+            let prev = entry.current_energy;
+            entry.current_energy = (entry.current_energy + gained).min(entry.max_energy);
+            entry.energy_rem = if entry.current_energy >= entry.max_energy {
+                0.0
+            } else {
+                (total_gain - (gained as f64)).max(0.0)
+            };
+            entry.last_update_time = now_ft;
+            changed = true;
+            regenerated = entry.current_energy != prev;
+        }
+    } else if entry.last_update_time <= 0 {
+        entry.last_update_time = now_ft;
+    }
+    (changed, regenerated)
+}
+
+/// Reads and computes the character's current energy state without mutating state,
+/// persisting to DB, or emitting notifications.
+pub fn read_character_energy(ctx: &ServerContext, char_id: i64) -> CharacterEnergyState {
+    let now_ft = unix_to_filetime(ctx.now_unix());
+    let mut entry = {
+        let g = ctx.cluster_misc_state.lock().unwrap();
+        g.char_energy
+            .get(&char_id)
+            .cloned()
+            .unwrap_or_else(|| default_energy_state(now_ft))
+    };
+    let _ = compute_regenerated_energy(&mut entry, now_ft);
+    entry
+}
+
 /// Retrieves or initializes the character's energy state, applying real-time regeneration.
 pub fn get_character_energy(ctx: &ServerContext, char_id: i64) -> CharacterEnergyState {
     let now_ft = unix_to_filetime(ctx.now_unix());
     let (entry_clone, dirty, regenerated) = {
         let mut g = ctx.cluster_misc_state.lock().unwrap();
         let had_entry = g.char_energy.contains_key(&char_id);
-        let entry = g.char_energy.entry(char_id).or_insert_with(|| CharacterEnergyState {
-            current_energy: DEFAULT_MAX_ENERGY,
-            max_energy: DEFAULT_MAX_ENERGY,
-            last_update_time: now_ft,
-            recharge_rate: DEFAULT_RECHARGE_RATE,
-            energy_rem: 0.0,
-        });
-
-        let mut changed = !had_entry;
-        let mut regenerated = false;
-        if entry.max_energy == 5_000 && entry.current_energy == 5_000 {
-            entry.max_energy = DEFAULT_MAX_ENERGY;
-            entry.current_energy = DEFAULT_MAX_ENERGY;
-            entry.recharge_rate = DEFAULT_RECHARGE_RATE;
-            entry.energy_rem = 0.0;
-            changed = true;
-        }
-        if entry.current_energy >= entry.max_energy {
-            entry.last_update_time = now_ft;
-            entry.energy_rem = 0.0;
-        } else if entry.last_update_time > 0 && now_ft > entry.last_update_time && entry.recharge_rate > 0.0 {
-            let elapsed_minutes = ((now_ft - entry.last_update_time) as f64) / 600_000_000.0;
-            let total_gain = entry.energy_rem + elapsed_minutes * entry.recharge_rate;
-            let gained = total_gain.floor() as i64;
-            if gained > 0 || elapsed_minutes >= 1.0 {
-                let prev = entry.current_energy;
-                entry.current_energy = (entry.current_energy + gained).min(entry.max_energy);
-                entry.energy_rem = if entry.current_energy >= entry.max_energy {
-                    0.0
-                } else {
-                    (total_gain - (gained as f64)).max(0.0)
-                };
-                entry.last_update_time = now_ft;
-                changed = true;
-                regenerated = entry.current_energy != prev;
-            }
-        } else if entry.last_update_time <= 0 {
-            entry.last_update_time = now_ft;
-        }
-
-        (entry.clone(), changed, regenerated)
+        let entry = g
+            .char_energy
+            .entry(char_id)
+            .or_insert_with(|| default_energy_state(now_ft));
+        let (comp_changed, regenerated) = compute_regenerated_energy(entry, now_ft);
+        (entry.clone(), !had_entry || comp_changed, regenerated)
     };
 
     if dirty {
@@ -215,7 +245,7 @@ pub fn handle(
     match method {
         // parity: rpc:characterEnergyMgr.GetMyEnergyState
         "GetMyEnergyState" => {
-            let state = get_character_energy(ctx, char_id);
+            let state = read_character_energy(ctx, char_id);
             Some(Ok(energy_to_keyval(&state)))
         }
         _ => None,

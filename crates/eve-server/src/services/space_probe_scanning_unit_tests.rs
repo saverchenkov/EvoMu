@@ -910,3 +910,62 @@ async fn request_scans_evaluates_probe_strength_and_deviation_via_dogma_and_expe
     let (s_after, _) = extract_sig(&after_exp_rep);
     assert!((s_after - s_skilled).abs() < 1e-6, "Expired Expedition Burst must no longer apply ({s_after} vs {s_skilled})");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_scanning_read_purity_and_docked_guards() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let kw = HashMap::new();
+    let err_not_in_space = "NotInSpace";
+    let bound = BoundObjectEntry {
+        bound_id: 77,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: sess.character_id.unwrap_or(90_000_001),
+        service: "scanMgr".into(),
+        object_id: 30_000_142,
+        oid_str: "scanMgr:30000142".into(),
+        ref_id: 77,
+    };
+
+    let mut docked = sess.clone();
+    docked.station_id = Some(60_003_760);
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut docked, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut docked, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut docked, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
+    for meth in ["RequestScans", "RecoverProbes", "ReconnectToLostProbes", "DestroyProbe"] {
+        let err = handle_scan_and_wormhole_extras(&ctx, &mut docked, Some(&bound), "scanMgr", meth, &[], &kw)
+            .await
+            .expect("handled")
+            .expect_err("docked pilot cannot actuate probes");
+        assert_eq!(err.code, err_not_in_space, "{meth} while docked");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Undocked with 0 probes: NoActiveProbes / no-ops / unchanged sync do not seed or mutate DB
+    let req_err = handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "RequestScans", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(req_err.code, "NoActiveProbes");
+    for meth in ["RecoverProbes", "ReconnectToLostProbes", "DestroyProbe"] {
+        assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", meth, &[], &kw).await.unwrap().is_ok());
+    }
+    sync_scanner_probes_to_db(&ctx);
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // Undocked readout seeds once, then repeats are strictly read-pure
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
+    let e1 = ctx.db.state_epoch();
+    let c1 = ctx.db.tx_commit_count();
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetAnomalies", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, Some(&bound), "scanMgr", "GetFullState", &[], &kw).await.unwrap().is_ok());
+    assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
+    assert_eq!(ctx.db.state_epoch(), e1);
+    assert_eq!(ctx.db.tx_commit_count(), c1);
+}
