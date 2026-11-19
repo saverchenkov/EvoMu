@@ -231,13 +231,39 @@ async fn parity_shard_5_crimewatch_kill_rights_and_timers() {
     .await
     .expect("CancelSellKillRight");
 
-    // Re-board ships in low-sec Asabona and verify Sell + Buy transfers 2.5M ISK & persists in SQLite
-    ctx.db.with_mut_snapshot(|snap| {
-        for (cid, tid) in [
-            (CHAR_ALPHA_ATTACKER, SHIP_RIFTER),
-            (CHAR_BETA_VICTIM, SHIP_VELATOR),
-            (buyer_id, SHIP_VELATOR),
-        ] {
+    // Re-board ships cleanly from Jita station and transition killer + buyer into low-sec Asabona space
+    let prev_states: Vec<(i64, u32, i64, bool)> = ctx.db.with_snapshot(|snap| {
+        [CHAR_ALPHA_ATTACKER, CHAR_BETA_VICTIM, buyer_id]
+            .into_iter()
+            .map(|cid| {
+                let ch = &snap.characters[&cid];
+                let was_docked = ch.station_id.is_some() || ch.structure_id.is_some();
+                (cid, ch.solar_system_id, ch.active_ship_id, was_docked)
+            })
+            .collect()
+    });
+    for &(cid, old_sys, old_sid, _) in &prev_states {
+        if old_sid > 0 {
+            eve_server::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                &ctx, cid, old_sid,
+            );
+            if old_sys != 0 {
+                if let Some(old_handle) = ctx.systems.get_handle(old_sys) {
+                    let _ = old_handle.clear_target_locks(old_sid).await;
+                    let _ = old_handle.remove_ball(old_sid).await;
+                }
+            }
+        }
+    }
+    let victim_ch = ctx.db.with_mut_snapshot(|snap| {
+        let mut updated_victim = None;
+        for (&(cid, _, old_sid, was_docked), tid) in prev_states
+            .iter()
+            .zip([SHIP_RIFTER, SHIP_VELATOR, SHIP_VELATOR])
+        {
+            if !was_docked && old_sid > 0 {
+                eve_server::sp6_lifecycle::leave_space_in_snap(snap, old_sid, None, None, None);
+            }
             let sid = snap.next_entity_id + 1;
             snap.next_entity_id = sid + 1;
             snap.items.insert(
@@ -253,12 +279,38 @@ async fn parity_shard_5_crimewatch_kill_rights_and_timers() {
                     ..Default::default()
                 },
             );
-            let ch = snap.characters.get_mut(&cid).unwrap();
-            ch.active_ship_id = sid;
-            ch.solar_system_id = ASABONA_SYSTEM;
-            ch.station_id = None;
+            let ch =
+                eve_server::router::session_transition::apply_character_transition_in_snap(
+                    snap,
+                    &ctx.sde,
+                    cid,
+                    eve_server::router::session_transition::TransitionLocation::Station {
+                        solar_system_id: Some(JITA_SYSTEM),
+                        station_id: JITA_STATION,
+                    },
+                    Some(sid),
+                    false,
+                    false,
+                )
+                .expect("reboard ship in Jita station");
+            if cid == CHAR_BETA_VICTIM {
+                updated_victim = Some(ch);
+            }
         }
+        updated_victim.expect("victim character updated")
     });
+    eve_server::router::session_transition::apply_session_from_character(
+        &mut victim_sess,
+        &victim_ch,
+        Some(Some(victim_ch.active_ship_id)),
+        Some(&ctx.sde),
+    );
+    ctx.invalidate_bound_objects_for_session_transition(
+        CHAR_BETA_VICTIM,
+        JITA_SYSTEM,
+        Some(JITA_STATION),
+        "test_reboard_ship",
+    );
     let _ = undock_player_to_space(&ctx, &mut killer_sess, ASABONA_SYSTEM, DVec3::new(40_000.0, 0.0, 0.0)).await;
     let _ = undock_player_to_space(&ctx, &mut buyer_sess, ASABONA_SYSTEM, DVec3::new(42_000.0, 0.0, 0.0)).await;
 
@@ -304,7 +356,6 @@ async fn parity_shard_5_crimewatch_kill_rights_and_timers() {
 
     // 3. NPC combat timer (OnNpcTimerUpdate) & Zarzakh disapproval timers (OnDisapprovalTimerUpdate / OnSystemDisapprovalFlagUpdates)
     ctx.advance_secs(905);
-    let _ = rpc(&ctx, &mut buyer_sess, "stationSvc", "Undock", &[]).await;
     let gun_for_killer = ctx.db.with_mut_snapshot(|snap| {
         let ship_id = snap.characters[&CHAR_ALPHA_ATTACKER].active_ship_id;
         let gid = snap.next_entity_id + 1;
