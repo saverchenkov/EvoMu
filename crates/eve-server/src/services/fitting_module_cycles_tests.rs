@@ -3550,4 +3550,463 @@ async fn handle_module_cycles_overload_rejects_docked_and_preserves_invulnerabil
     );
 }
 
+#[tokio::test]
+async fn activate_online_cloak_targetless_weapon_and_deadspace_mwd_guards_zero_mutation() {
+    let turret_tid = 998_053_u32;
+    let sb_tid = 998_077_u32;
+    let ab_tid = 998_046_u32;
+    let mwd_tid = 998_146_u32;
+    let launcher_tid = 998_507_u32;
+    let std_missile_tid = 998_384_u32;
+    let fof_missile_tid = 998_395_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut turret = custom_inv_type(
+            sde,
+            turret_tid,
+            53,
+            7,
+            5.0,
+            0.0,
+            "Test Laser I",
+            &[(51, 2_000.0), (54, 10_000.0), (6, 10.0), (50, 1.0), (30, 1.0)],
+        );
+        turret.effect_ids = vec![10, 12, 16];
+        sde.types.insert(turret_tid, turret);
+
+        let mut sb = custom_inv_type(
+            sde,
+            sb_tid,
+            77,
+            7,
+            5.0,
+            0.0,
+            "Small Test Shield Booster I",
+            &[(6, 10.0), (73, 10_000.0), (50, 1.0), (30, 1.0)],
+        );
+        sb.effect_ids = vec![13, 16];
+        sde.types.insert(sb_tid, sb);
+
+        let mut ab = custom_inv_type(
+            sde,
+            ab_tid,
+            46,
+            7,
+            5.0,
+            0.0,
+            "1MN Test Afterburner I",
+            &[(6, 10.0), (73, 10_000.0), (20, 100.0), (50, 1.0), (30, 1.0)],
+        );
+        ab.effect_ids = vec![13, 16];
+        sde.types.insert(ab_tid, ab);
+
+        let mut mwd = custom_inv_type(
+            sde,
+            mwd_tid,
+            46,
+            7,
+            5.0,
+            0.0,
+            "5MN Test Microwarpdrive I",
+            &[(6, 10.0), (73, 10_000.0), (20, 100.0), (554, 500.0), (50, 1.0), (30, 1.0)],
+        );
+        mwd.effect_ids = vec![13, 16, 6730];
+        sde.types.insert(mwd_tid, mwd);
+
+        let mut launcher = custom_inv_type(
+            sde,
+            launcher_tid,
+            507,
+            7,
+            5.0,
+            50.0,
+            "Test Rocket Launcher I",
+            &[(51, 2_000.0), (50, 1.0), (30, 1.0)],
+        );
+        launcher.effect_ids = vec![12, 16, 101];
+        sde.types.insert(launcher_tid, launcher);
+
+        sde.types.insert(
+            std_missile_tid,
+            custom_inv_type(sde, std_missile_tid, 384, 8, 0.01, 0.0, "Test Standard Rocket", &[]),
+        );
+        sde.types.insert(
+            fof_missile_tid,
+            custom_inv_type(sde, fof_missile_tid, 395, 8, 0.01, 0.0, "Test FoF Light Missile", &[]),
+        );
+    });
+
+    let char_id = 97_990_001_i64;
+    let sys_id = 30_002_505_u32;
+    let ship_id = 1_097_990_001_i64;
+    let turret_id = 1_097_990_002_i64;
+    let ab_id = 1_097_990_003_i64;
+    let offline_sb_id = 1_097_990_004_i64;
+    let mwd_id = 1_097_990_005_i64;
+    let std_launcher_id = 1_097_990_006_i64;
+    let std_charge_id = 1_097_990_007_i64;
+    let fof_launcher_id = 1_097_990_008_i64;
+    let fof_charge_id = 1_097_990_009_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    insert_item(&ctx, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    insert_item(&ctx, turret_id, turret_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, std_launcher_id, launcher_tid, char_id, ship_id, InventoryFlag::HiSlot1, 1, true);
+    insert_item(&ctx, std_charge_id, std_missile_tid, char_id, ship_id, InventoryFlag::HiSlot1, 10, false);
+    insert_item(&ctx, fof_launcher_id, launcher_tid, char_id, ship_id, InventoryFlag::HiSlot2, 1, true);
+    insert_item(&ctx, fof_charge_id, fof_missile_tid, char_id, ship_id, InventoryFlag::HiSlot2, 10, false);
+    insert_item(&ctx, ab_id, ab_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, offline_sb_id, sb_tid, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
+    insert_item(&ctx, mwd_id, mwd_tid, char_id, ship_id, InventoryFlag::MedSlot2, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(turret_id, false);
+        snap.module_online_states.insert(offline_sb_id, false);
+        snap.module_online_states.insert(mwd_id, false);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 500.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+
+    // 1. Docked "online" brings offline module online and stays idempotent when already online.
+    let mut docked_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        station_id: Some(60_003_760),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let on_docked = handle_module_cycles(
+        &ctx,
+        &mut docked_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("docked online must succeed");
+    assert_eq!(on_docked.dict_get("online"), Some(&PyRep::Bool(true)));
+    let on_docked_again = handle_module_cycles(
+        &ctx,
+        &mut docked_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(turret_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("docked online on already-online module must succeed");
+    assert_eq!(on_docked_again.dict_get("online"), Some(&PyRep::Bool(true)));
+
+    // 2. Actively cloaked in space: both offline and already-online "online" calls reject with 0 mutation.
+    let mut cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    cs.is_cloaked = true;
+    cs.gate_cloak_remaining_ticks = 0;
+    sys.set_combat_state(ship_id, cs).await.unwrap();
+
+    let mut space_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    for (mod_id, was_offline) in [(offline_sb_id, true), (turret_id, false), (ab_id, false)] {
+        let err = handle_module_cycles(
+            &ctx,
+            &mut space_sess,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(mod_id), PyRep::String("online".into())],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("actively cloaked space Activate(..., \"online\") must reject");
+        assert_eq!(err.code, "CannotActivateCloaked");
+        assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+        ctx.db.with_snapshot(|snap| {
+            assert!(!snap.module_active_states.contains(&mod_id));
+            if was_offline {
+                assert_eq!(snap.module_online_states.get(&mod_id), Some(&false));
+            }
+        });
+    }
+    assert!((sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 500.0).abs() < 1e-6);
+
+    // 3. Uncloaked in space: offline "online" succeeds; targetless turrets/std-missiles reject cleanly; FoF exempt.
+    let mut cs_uncloaked = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    cs_uncloaked.is_cloaked = false;
+    cs_uncloaked.gate_cloak_remaining_ticks = 0;
+    sys.set_combat_state(ship_id, cs_uncloaked).await.unwrap();
+
+    let on_space = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(offline_sb_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked space offline Activate(..., \"online\") must succeed");
+    assert_eq!(on_space.dict_get("online"), Some(&PyRep::Bool(true)));
+
+    for effect_arg in [None, Some("online")] {
+        let mut args = vec![PyRep::Integer(turret_id)];
+        if let Some(eff) = effect_arg {
+            args.push(PyRep::String(eff.into()));
+        }
+        let err = handle_module_cycles(&ctx, &mut space_sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("targetless turret Activate must reject with TargetRequired");
+        assert_eq!(err.code, "TargetRequired");
+        assert!(!sys.has_module_cycle(ship_id, turret_id).await);
+        ctx.db.with_snapshot(|snap| assert!(!snap.module_active_states.contains(&turret_id)));
+    }
+    assert!((sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor - 500.0).abs() < 1e-6);
+
+    let std_err = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(std_launcher_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("targetless standard missile launcher must reject with TargetRequired");
+    assert_eq!(std_err.code, "TargetRequired");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items[&std_charge_id].quantity, 10);
+        assert!(!snap.module_active_states.contains(&std_launcher_id));
+    });
+
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert!(activation_requires_explicit_target(&ctx, ship_id, &fit.modules[&std_launcher_id], 507, true));
+    assert!(!activation_requires_explicit_target(&ctx, ship_id, &fit.modules[&fof_launcher_id], 507, true));
+    if let Some(Err(e)) = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(fof_launcher_id)],
+        &kw,
+    )
+    .await
+    {
+        assert_ne!(e.code, "TargetRequired", "FoF-loaded launcher must remain exempt from TargetRequired");
+    }
+
+    // 4. Uncloaked already-online AB activates cleanly; deadspace MWD with "online" rejects without mutation.
+    let ab_ok = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(ab_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked space online AB Activate(..., \"online\") keeps active cycle fallthrough");
+    assert_eq!(ab_ok.dict_get("active"), Some(&PyRep::Bool(true)));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(ab_id, false);
+        snap.module_online_states.insert(mwd_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 5. F-02 & F-03: While gate-cloaked, rejected calls (targetless turret, dungeon runtime
+    //    MicroWarpdriveDisallowedInDeadspace, dungeon editor ModuleNotAllowedInDeadspace) MUST NOT
+    //    consume gate cloak or undock invulnerability; valid activation breaks gate cloak on commit.
+    let mut gate_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    gate_cs.is_cloaked = true;
+    gate_cs.gate_cloak_remaining_ticks = 30;
+    gate_cs.undock_invulnerable_remaining_ticks = 15;
+    sys.set_combat_state(ship_id, gate_cs).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    for effect_arg in [None, Some("online")] {
+        let mut args = vec![PyRep::Integer(turret_id)];
+        if let Some(eff) = effect_arg {
+            args.push(PyRep::String(eff.into()));
+        }
+        let err = handle_module_cycles(&ctx, &mut space_sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("gate-cloaked targetless turret must reject with TargetRequired");
+        assert_eq!(err.code, "TargetRequired");
+        let after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(after.is_cloaked);
+        assert_eq!(after.gate_cloak_remaining_ticks, 30);
+        assert_eq!(after.undock_invulnerable_remaining_ticks, 15);
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(!notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+    }
+
+    let cap_before_rt_mwd = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(
+            998_101,
+            crate::services::pve_dungeon_runtime::DungeonRuntimeInstance {
+                instance_id: 998_101,
+                dungeon_id: 42,
+                dungeon_name: "Deadspace Runtime Test".into(),
+                category: "combat".into(),
+                archetype: "pirate".into(),
+                solar_system_id: sys_id,
+                owner_char_id: char_id,
+                base_position: [10_000.0, 0.0, 0.0],
+                disallow_mwd: true,
+                entry_gate_ball_id: None,
+                entry_gate_pos: None,
+                entry_gate_locked: false,
+                current_room_index: 1,
+                rooms: vec![crate::services::pve_dungeon_runtime::DungeonRuntimeRoom {
+                    room_index: 0,
+                    room_id: 1,
+                    room_name: "MWD Blocked Pocket".into(),
+                    position: [10_000.0, 0.0, 0.0],
+                    gate_destination_pos: [10_000.0, 0.0, 0.0],
+                    gated: false,
+                    disallow_mwd: Some(true),
+                    gate_ball_id: None,
+                    gate_locked: false,
+                    objects: Vec::new(),
+                    npc_groups: Vec::new(),
+                    triggers: Vec::new(),
+                    spawned: true,
+                    cleared: false,
+                }],
+                completed: false,
+                despawned: false,
+                active_objective_id: 1,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
+                created_unix: ctx.now_unix(),
+            },
+        );
+    });
+    for effect_arg in [None, Some("online")] {
+        let mut args = vec![PyRep::Integer(mwd_id)];
+        if let Some(eff) = effect_arg {
+            args.push(PyRep::String(eff.into()));
+        }
+        let rt_mwd_err = handle_module_cycles(&ctx, &mut space_sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("dungeon runtime disallow_mwd must reject with MicroWarpdriveDisallowedInDeadspace");
+        assert_eq!(rt_mwd_err.code, "MicroWarpdriveDisallowedInDeadspace");
+        assert!(!sys.has_module_cycle(ship_id, mwd_id).await);
+        ctx.db.with_snapshot(|snap| assert!(!snap.module_active_states.contains(&mwd_id)));
+        let after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!((after.capacitor - cap_before_rt_mwd).abs() < 1e-6);
+        assert!(after.is_cloaked);
+        assert_eq!(after.gate_cloak_remaining_ticks, 30);
+        assert_eq!(after.undock_invulnerable_remaining_ticks, 15);
+        let notifs = ctx.drain_notifications_for_char(char_id);
+        assert!(!notifs.iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+    }
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.clear();
+    });
+
+    crate::services::pve_dungeon_editor::with_dungeon_editor_store(&ctx, |ed| {
+        ed.dungeon_disallow_mwd.insert(1, true);
+        ed.active_editors.insert(
+            char_id,
+            crate::services::pve_dungeon_editor::GmActiveEditorState {
+                solar_system_id: Some(sys_id),
+                dungeon_id: Some(1),
+                room_id: None,
+                ..Default::default()
+            },
+        );
+    });
+    let cap_before_mwd = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
+    let mwd_err = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("deadspace MWD Activate(..., \"online\") must reject");
+    assert_eq!(mwd_err.code, "ModuleNotAllowedInDeadspace");
+    assert!(!sys.has_module_cycle(ship_id, mwd_id).await);
+    ctx.db.with_snapshot(|snap| assert!(!snap.module_active_states.contains(&mwd_id)));
+    let after_ed_mwd = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((after_ed_mwd.capacitor - cap_before_mwd).abs() < 1e-6);
+    assert!(after_ed_mwd.is_cloaked);
+    assert_eq!(after_ed_mwd.gate_cloak_remaining_ticks, 30);
+    assert_eq!(after_ed_mwd.undock_invulnerable_remaining_ticks, 15);
+    let _ = crate::services::pve_dungeon_editor::with_dungeon_editor_store(&ctx, |ed| {
+        ed.dungeon_disallow_mwd.clear();
+        ed.active_editors.clear();
+    });
+
+    let sb_ok = handle_module_cycles(
+        &ctx,
+        &mut space_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(offline_sb_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("valid gate-cloaked shield booster activation must succeed and break gate cloak");
+    assert_eq!(sb_ok.dict_get("active"), Some(&PyRep::Bool(true)));
+    let after_sb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!after_sb.is_cloaked);
+    assert_eq!(after_sb.gate_cloak_remaining_ticks, 0);
+    assert_eq!(after_sb.undock_invulnerable_remaining_ticks, 0);
+    let sb_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(sb_notifs.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert!(sb_notifs.iter().any(|n| n.event == "OnInvulnCancelled"));
+
+    // 6. P2: Stale DB module_active_states on a weapon with no actor cycle or reactivation delay
+    //    must still enforce TargetRequired cleanly rather than bypassing targeting.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(turret_id);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    for effect_arg in [None, Some("online")] {
+        let mut args = vec![PyRep::Integer(turret_id)];
+        if let Some(eff) = effect_arg {
+            args.push(PyRep::String(eff.into()));
+        }
+        let stale_err = handle_module_cycles(&ctx, &mut space_sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("stale DB module_active_states must not bypass TargetRequired for weapons");
+        assert_eq!(stale_err.code, "TargetRequired");
+        assert!(!sys.has_module_cycle(ship_id, turret_id).await);
+    }
+}
+
 

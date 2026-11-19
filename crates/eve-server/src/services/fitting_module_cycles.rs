@@ -336,15 +336,26 @@ async fn handle_module_cycles_inner(
                     .await,
                 );
             }
-            if effect_name != "online" && session.station_id.is_none() && session.structure_id.is_none() {
-                if let Err(e) = enforce_space_module_cloak_and_warp_guard(
-                    ctx, &sys, char_id, ship_id, mod_type,
+            let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
+            let pre_gate_cloak_and_invuln = if is_in_space {
+                if let Err(e) = check_space_module_cloak_and_warp_readonly(
+                    ctx, &sys, ship_id, mod_type,
                 )
                 .await
                 {
                     return Some(Err(e));
                 }
-            }
+                sys.get_combat_state(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cs| {
+                        cs.gate_cloak_remaining_ticks > 0
+                            && cs.undock_invulnerable_remaining_ticks > 0
+                    })
+            } else {
+                false
+            };
             let is_upwell_weapon_or_aoe = (target_id_opt.is_some_and(|tid| {
                 tid >= 1_000_000_000_000 || ctx.db.with_snapshot(|s| s.structures.contains_key(&tid) || s.sov_runtime.mercenary_dens.contains_key(&tid) || s.sov_runtime.mto_site_balls.contains_key(&tid) || (s.system_states.get(&sys_id).is_some_and(|st| st.sov_alliance_id.is_some()) && !s.characters.contains_key(&tid) && !s.characters.values().any(|c| c.active_ship_id == tid)))
             }) && is_weapon)
@@ -436,9 +447,8 @@ async fn handle_module_cycles_inner(
                 let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
                     return Some(Err(target_not_locked_rpc_error("Mining modules require a locked target asteroid")));
                 };
-                return Some(
-                    crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await,
-                );
+                let res = crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
             }
 
             if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
@@ -467,17 +477,19 @@ async fn handle_module_cycles_inner(
                 } else {
                     "ActivateSinglePointTargetedModule"
                 };
-                return Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt)).await);
+                let res = crate::router::box_fut(|| crate::services::tactical_modules::activate_superweapon_or_lance(ctx, char_id, ship_id, sys_id, module_id, sw_method, target_id_opt)).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
             }
             if mod_type.group_id == 1154 {
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-                return Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state)).await);
+                let res = crate::router::box_fut(|| crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state)).await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
             }
 
             if let Some(res) =
                 handle_cyno_generator_activation(ctx, &sys, char_id, ship_id, sys_id, module_id, mod_type).await
             {
-                return Some(res);
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
             }
 
             if sys_id == 30_100_000 {
@@ -491,6 +503,30 @@ async fn handle_module_cycles_inner(
                     && mod_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0
                 {
                     return Some(Err(BridgeRpcError::user_error("ModuleDisallowedInHazardSystem")));
+                }
+            }
+            if method == "Activate" && target_id_opt.is_none() {
+                let is_recorded_active = sys.has_module_cycle(ship_id, module_id).await
+                    || ctx.is_module_in_reactivation_delay(ship_id, module_id)
+                    || (!is_weapon
+                        && (m.state == eve_dogma::ModuleState::Active
+                            || ctx
+                                .db
+                                .with_snapshot(|s| s.module_active_states.contains(&module_id))));
+                if !is_recorded_active
+                    && activation_requires_explicit_target(
+                        ctx,
+                        ship_id,
+                        &m,
+                        mod_type.group_id,
+                        is_weapon,
+                    )
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetRequired".into(),
+                        message: "Target required for module activation".into(),
+                        client_error: None,
+                    }));
                 }
             }
 
@@ -507,22 +543,21 @@ async fn handle_module_cycles_inner(
                         .get_attribute(attr_ids::DURATION, &ctx.sde)
                         .max(mod_type.default_attributes.get(&73).copied().unwrap_or(60_000.0))
                         / 1000.0;
-                    return Some(
-                        crate::router::box_fut(|| activate_command_burst_module(
-                            ctx,
-                            &sys,
-                            char_id,
-                            ship_id,
-                            sys_id,
-                            module_id,
-                            mod_type,
-                            &mod_state,
-                            m.charge_type_id,
-                            duration_s,
-                            kwargs,
-                        ))
-                        .await,
-                    );
+                    let res = crate::router::box_fut(|| activate_command_burst_module(
+                        ctx,
+                        &sys,
+                        char_id,
+                        ship_id,
+                        sys_id,
+                        module_id,
+                        mod_type,
+                        &mod_state,
+                        m.charge_type_id,
+                        duration_s,
+                        kwargs,
+                    ))
+                    .await;
+                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
                 }
                 if let Some(res) = crate::router::box_fut(|| handle_scanner_analyzer_entosis_activation(
                     ctx,
@@ -536,41 +571,41 @@ async fn handle_module_cycles_inner(
                 ))
                 .await
                 {
-                    return Some(res);
+                    return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
                 }
             }
 
             if matches!(mod_type.group_id, 41 | 1697) {
                 if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
                     if ctx.db.with_snapshot(|s| s.sov_runtime.mercenary_dens.contains_key(&tid)) {
-                        return Some(
-                            crate::router::box_fut(|| helpers::try_handle_mercden_remote_shield_repair(
-                                ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &fit, method, tid,
-                            )).await.and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")))
-                        );
+                        let res = crate::router::box_fut(|| helpers::try_handle_mercden_remote_shield_repair(
+                            ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &fit, method, tid,
+                        ))
+                        .await
+                        .and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")));
+                        return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
                     }
                 }
             }
 
             // Scan Probe Launcher (`group_id == 481`, e.g., `Core Probe Launcher I` `17938`)
             if mod_type.group_id == 481 {
-                return Some(
-                    crate::router::box_fut(|| crate::services::space_destiny::activate_scan_probe_launcher(
-                        ctx,
-                        session,
-                        &sys,
-                        char_id,
-                        ship_id,
-                        sys_id,
-                        module_id,
-                        m.type_id,
-                        m.flag_id,
-                        effect_name.as_str(),
-                        target_id_opt,
-                        kwargs,
-                    ))
-                    .await,
-                );
+                let res = crate::router::box_fut(|| crate::services::space_destiny::activate_scan_probe_launcher(
+                    ctx,
+                    session,
+                    &sys,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    module_id,
+                    m.type_id,
+                    m.flag_id,
+                    effect_name.as_str(),
+                    target_id_opt,
+                    kwargs,
+                ))
+                .await;
+                return finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, res).await;
             }
 
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
@@ -608,6 +643,9 @@ async fn handle_module_cycles_inner(
                 ))
                 .await;
                 if res.is_ok() {
+                    if is_in_space {
+                        break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
+                    }
                     ctx.db.with_mut_snapshot(|s| {
                         s.module_active_states.remove(&module_id);
                     });
@@ -874,6 +912,10 @@ async fn handle_module_cycles_inner(
                     },
                 );
 
+                if is_in_space {
+                    break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
+                }
+
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("launcherID", PyRep::Integer(module_id)),
@@ -916,6 +958,9 @@ async fn handle_module_cycles_inner(
                                 )
                             })
                             .await;
+                            if is_in_space {
+                                break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
+                            }
                             return Some(Ok(rep));
                         }
                         Ok(false) => (false, false),
@@ -968,7 +1013,15 @@ async fn handle_module_cycles_inner(
                 if allow_smartbomb_retrigger && in_actor_cycle {
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 }
-                if matches!(mod_type.group_id, 1122 | 650 | 82) && target_id_opt.is_none() {
+                if target_id_opt.is_none()
+                    && activation_requires_explicit_target(
+                        ctx,
+                        ship_id,
+                        &m,
+                        mod_type.group_id,
+                        is_weapon,
+                    )
+                {
                     return Some(Err(BridgeRpcError {
                         code: "TargetRequired".into(),
                         message: "Target required for module activation".into(),
@@ -1023,6 +1076,9 @@ async fn handle_module_cycles_inner(
                         || (mod_type.group_id == 65
                             && sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|cs| cs.is_web_immune))
                     {
+                        if is_in_space {
+                            break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
+                        }
                         return Some(Ok(PyRep::keyval([
                             ("moduleID", PyRep::Integer(module_id)),
                             ("targetID", PyRep::Integer(target_id)),
@@ -1051,7 +1107,7 @@ async fn handle_module_cycles_inner(
                     || mod_type.name.contains("Micro Jump Field Generator");
                 let is_mwd_or_mjd = is_mwd || is_mjd;
 
-                if is_mwd && effect_name != "online" {
+                if is_mwd {
                     if let Err(e) = crate::services::pve_dungeon_runtime_rpc::check_deadspace_mwd_disallowed(ctx, &sys, sys_id, ship_id).await {
                         return Some(Err(e));
                     }
@@ -2013,6 +2069,20 @@ async fn handle_module_cycles_inner(
                     return Some(Err(e));
                 }
             };
+            if is_in_space {
+                let post_cycle_still_invuln = sys
+                    .get_combat_state(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
+                break_gate_cloak_on_space_action(ctx, &sys, char_id, ship_id).await;
+                if pre_gate_cloak_and_invuln && !post_cycle_still_invuln {
+                    crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+                        ctx, char_id, ship_id, false, true,
+                    );
+                }
+            }
             let m_params = [("typeID", m.type_id.to_string()), ("groupID", mod_type.group_id.to_string())];
             for ev in ["moduleActivate", "activateModule", "moduleActivated", "activateShipModule"] {
                 crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &m_params, 1);
@@ -2294,6 +2364,70 @@ fn finalize_target_combat_hooks<'a>(
             );
         }
     })
+}
+
+async fn finish_space_activation(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    is_in_space: bool,
+    char_id: i64,
+    ship_id: i64,
+    res: Result<PyRep, BridgeRpcError>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if is_in_space && res.is_ok() {
+        break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
+    }
+    Some(res)
+}
+
+/// Returns `true` when `dogmaIM.Activate` requires an explicit target (`TargetRequired`),
+/// preserving the FoF auto-targeting missile exception (`group_id 394..=396`).
+fn activation_requires_explicit_target(
+    ctx: &ServerContext,
+    ship_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_group_id: u32,
+    is_weapon: bool,
+) -> bool {
+    if matches!(mod_group_id, 1122 | 650 | 82) {
+        return true;
+    }
+    let is_missile_launcher = matches!(mod_group_id, 506..=511 | 524 | 771 | 1245 | 1674);
+    if !is_weapon && !is_missile_launcher {
+        return false;
+    }
+    if is_missile_launcher {
+        let fof_loaded = m.charge_type_id.is_some_and(|cid| {
+            ctx.sde
+                .types
+                .get(&cid)
+                .is_some_and(|ct| matches!(ct.group_id, 394..=396))
+        }) || ctx.db.with_snapshot(|snap| {
+            snap.module_active_charges
+                .get(&m.item_id)
+                .is_some_and(|&cid| {
+                    ctx.sde
+                        .types
+                        .get(&cid)
+                        .is_some_and(|ct| matches!(ct.group_id, 394..=396))
+                })
+                || snap.items.values().any(|i| {
+                    i.location_id == ship_id
+                        && (i.flag as u16) == m.flag_id
+                        && i.item_id != m.item_id
+                        && i.quantity > 0
+                        && ctx
+                            .sde
+                            .types
+                            .get(&i.type_id)
+                            .is_some_and(|ct| matches!(ct.group_id, 394..=396))
+                })
+        });
+        if fof_loaded {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

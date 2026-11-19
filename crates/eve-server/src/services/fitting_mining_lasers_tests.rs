@@ -521,3 +521,445 @@ async fn deactivate_active_armor_repairer_defers_removal_and_finishes_paid_cycle
     let hull_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((hull_after.structure_hp - 160.0).abs() < 1e-3, "got structure_hp={}", hull_after.structure_hp);
 }
+
+#[tokio::test]
+async fn deactivate_enforces_active_space_cloak_and_ownership_guards_without_mutation() {
+    use eve_destiny::{Ball, CombatState, MovementMode, SlimItemMeta};
+    use glam::DVec3;
+
+    let miner_tid = 994_201_u32;
+    let cloak_tid = 994_330_u32;
+    let turret_tid = 994_053_u32;
+    let mwd_tid = 994_046_u32;
+    let probe_tid = 994_481_u32;
+    let nullifier_tid = 994_417_u32;
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut miner = custom_inv_type(
+            sde,
+            miner_tid,
+            54,
+            7,
+            "Test Miner I",
+            &[(50, 1.0), (30, 1.0), (51, 60_000.0), (77, 100.0), (54, 10_000.0), (6, 5.0)],
+        );
+        miner.effect_ids = vec![12, 16, 67];
+        sde.types.insert(miner_tid, miner);
+
+        let mut cloak = custom_inv_type(
+            sde,
+            cloak_tid,
+            330,
+            7,
+            "Test Cloaking Device I",
+            &[(50, 1.0), (30, 1.0), (669, 5_000.0)],
+        );
+        cloak.effect_ids = vec![12, 16];
+        sde.types.insert(cloak_tid, cloak);
+
+        let mut turret = custom_inv_type(
+            sde,
+            turret_tid,
+            53,
+            7,
+            "Test Light Autocannon I",
+            &[(50, 1.0), (30, 1.0), (51, 2_000.0), (54, 10_000.0), (6, 5.0)],
+        );
+        turret.effect_ids = vec![10, 12, 16];
+        sde.types.insert(turret_tid, turret);
+
+        let mut mwd = custom_inv_type(
+            sde,
+            mwd_tid,
+            46,
+            7,
+            "5MN Test Microwarpdrive I",
+            &[(50, 1.0), (30, 1.0), (6, 10.0), (73, 10_000.0), (20, 100.0), (554, 500.0)],
+        );
+        mwd.effect_ids = vec![13, 16, 6730];
+        sde.types.insert(mwd_tid, mwd);
+
+        let mut probe = custom_inv_type(
+            sde,
+            probe_tid,
+            481,
+            7,
+            "Core Probe Launcher I",
+            &[(50, 1.0), (30, 1.0), (51, 5_000.0)],
+        );
+        probe.effect_ids = vec![12, 16];
+        sde.types.insert(probe_tid, probe);
+
+        let mut nullifier = custom_inv_type(
+            sde,
+            nullifier_tid,
+            4117,
+            7,
+            "Interdiction Nullifier I",
+            &[(50, 1.0), (30, 1.0), (73, 10_000.0)],
+        );
+        nullifier.effect_ids = vec![12, 16];
+        sde.types.insert(nullifier_tid, nullifier);
+
+        let mut hull = sde.types.get(&587).expect("seed type").clone();
+        hull.type_id = 994_587;
+        hull.default_attributes.insert(14, 5.0);
+        sde.types.insert(994_587, hull);
+    });
+
+    let char_id = 95_420_001_i64;
+    let sys_id = 30_002_505_u32;
+    let ship_id = 1_095_420_001_i64;
+    let miner_id = 1_095_420_002_i64;
+    let cloak_id = 1_095_420_003_i64;
+    let cargo_mod_id = 1_095_420_004_i64;
+    let idle_turret_id = 1_095_420_005_i64;
+    let mwd_id = 1_095_420_006_i64;
+    let probe_id = 1_095_420_007_i64;
+    let nullifier_id = 1_095_420_008_i64;
+    let ast_id = 1_095_420_010_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = char_id as u64;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+        snap.accounts.insert(
+            format!("user_{char_id}"),
+            eve_db::AccountRecord {
+                user_id: char_id as u64,
+                username: format!("user_{char_id}"),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 994_587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        for (iid, tid, flag) in [
+            (miner_id, miner_tid, InventoryFlag::HiSlot0),
+            (cloak_id, cloak_tid, InventoryFlag::HiSlot1),
+            (idle_turret_id, turret_tid, InventoryFlag::HiSlot2),
+            (probe_id, probe_tid, InventoryFlag::HiSlot3),
+            (nullifier_id, nullifier_tid, InventoryFlag::HiSlot4),
+            (mwd_id, mwd_tid, InventoryFlag::MedSlot0),
+            (cargo_mod_id, miner_tid, InventoryFlag::Cargo),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.asteroids.insert(
+            ast_id,
+            AsteroidRecord {
+                asteroid_id: ast_id,
+                solar_system_id: sys_id,
+                belt_id: 40_000_001,
+                type_id: 1230,
+                quantity: 5_000,
+                initial_quantity: 5_000,
+                position: (1_000.0, 0.0, 0.0),
+                radius: 200.0,
+            },
+        );
+        snap.module_online_states.insert(miner_id, true);
+        snap.module_online_states.insert(cloak_id, true);
+        snap.module_online_states.insert(idle_turret_id, true);
+        snap.module_online_states.insert(mwd_id, true);
+        snap.module_online_states.insert(probe_id, true);
+        snap.module_online_states.insert(nullifier_id, true);
+        snap.module_active_states.insert(miner_id);
+        snap.module_active_states.insert(cloak_id);
+        snap.module_active_states.insert(mwd_id);
+        snap.module_active_states.insert(probe_id);
+        snap.module_active_states.insert(nullifier_id);
+    });
+    let _ = ctx
+        .db
+        .acquire_online_lock(char_id as u64, char_id as u64, Some(char_id), true, ctx.now_unix_secs());
+
+    let mut fit = ShipFittingEngine::from_sde(ship_id, 994_587, &ctx.sde);
+    for (iid, tid, flag, state) in [
+        (miner_id, miner_tid, InventoryFlag::HiSlot0, ModuleState::Active),
+        (cloak_id, cloak_tid, InventoryFlag::HiSlot1, ModuleState::Active),
+        (idle_turret_id, turret_tid, InventoryFlag::HiSlot2, ModuleState::Online),
+        (probe_id, probe_tid, InventoryFlag::HiSlot3, ModuleState::Active),
+        (nullifier_id, nullifier_tid, InventoryFlag::HiSlot4, ModuleState::Active),
+        (mwd_id, mwd_tid, InventoryFlag::MedSlot0, ModuleState::Active),
+    ] {
+        fit.modules.insert(
+            iid,
+            FittedModule {
+                item_id: iid,
+                type_id: tid,
+                flag_id: flag as u16,
+                state,
+                charge_type_id: None,
+                charge_quantity: 0,
+                damage_hp: 0.0,
+                max_hp: 40.0,
+                dynamic_attribute_overrides: HashMap::new(),
+            },
+        );
+    }
+    fit.recalculate_stats(&ctx.sde);
+    ctx.store_ship_fitting(ship_id, fit);
+
+    ctx.mining_cycles.write().unwrap().insert(
+        miner_id,
+        crate::services::mining_cycle::ActiveMiningCycle {
+            char_id,
+            ship_id,
+            module_id: miner_id,
+            target_id: ast_id,
+            solar_system_id: sys_id,
+            kind: crate::services::mining_cycle::MiningKind::Asteroid,
+            effect_name: "miningLaser".into(),
+            cycle_start_ms: 1_800_000_000_000,
+            duration_ms: 60_000,
+        },
+    );
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let mut cs = CombatState::default();
+    cs.capacitor = 500.0;
+    cs.max_capacitor = 500.0;
+    cs.is_cloaked = true;
+    cs.gate_cloak_remaining_ticks = 0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 994_587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: char_id,
+            char_id: Some(char_id),
+            corp_id: 1_000_009,
+            is_cloaked: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+
+    // 1a. While actively cloaked, inactive non-exempt Deactivate and any Deactivate(..., "online")
+    //     must reject with CannotActivateCloaked and 0 mutations.
+    for args in [
+        vec![PyRep::Integer(idle_turret_id)],
+        vec![PyRep::Integer(miner_id), PyRep::String("online".into())],
+        vec![PyRep::Integer(cloak_id), PyRep::String("online".into())],
+        vec![PyRep::Integer(mwd_id), PyRep::String("online".into())],
+        vec![PyRep::Integer(probe_id), PyRep::String("online".into())],
+    ] {
+        let err = handle_mining_and_deactivate(&ctx, &mut sess, None, "dogmaIM", "Deactivate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("actively cloaked inactive Deactivate / any offline must reject");
+        assert_eq!(err.code, "CannotActivateCloaked");
+        assert!(
+            crate::services::mining_cycle::active_cycles_for_ship(&ctx, ship_id).contains_key(&miner_id),
+            "rejected Deactivate must leave active mining cycle untouched"
+        );
+        assert!(!ctx.is_module_in_reactivation_delay(ship_id, miner_id));
+        ctx.db.with_snapshot(|snap| {
+            assert!(snap.module_active_states.contains(&miner_id));
+            assert!(snap.module_active_states.contains(&cloak_id));
+            assert!(snap.module_active_states.contains(&mwd_id));
+            assert!(!snap.module_active_states.contains(&idle_turret_id));
+            assert_eq!(snap.module_online_states.get(&miner_id), Some(&true));
+            assert_eq!(snap.module_online_states.get(&cloak_id), Some(&true));
+        });
+    }
+
+    // 1b. Non-"online" Deactivate while actively cloaked MUST succeed for modules already active
+    //     before cloak (e.g. MWD+cloak trick) plus groups 481 (probe launcher) & 4117 (nullifier);
+    //     re-deactivating an already-inactive 481/4117 rejects cleanly with DogmaDeactivateFailed.
+    for mod_id in [mwd_id, probe_id, nullifier_id] {
+        let ok = handle_mining_and_deactivate(
+            &ctx,
+            &mut sess,
+            None,
+            "dogmaIM",
+            "Deactivate",
+            &[PyRep::Integer(mod_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect("active pre-cloak module / 481 / 4117 Deactivate must succeed while cloaked");
+        assert_eq!(ok.dict_get("overloaded"), Some(&PyRep::Bool(false)));
+        assert!(
+            sys.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked,
+            "stopping MWD/481/4117 must not decloak ship"
+        );
+    }
+    let idle_probe_ok = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(probe_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("online inactive 481 Deactivate while cloaked stays idempotent");
+    assert_eq!(idle_probe_ok.dict_get("overloaded"), Some(&PyRep::Bool(false)));
+    assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(probe_id, false);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let offline_probe_err = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(probe_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("offline 481 Deactivate while cloaked rejects with DogmaDeactivateFailed");
+    assert_eq!(offline_probe_err.code, "DogmaDeactivateFailed");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.module_active_states.contains(&mwd_id));
+        assert!(!snap.module_active_states.contains(&probe_id));
+        assert!(!snap.module_active_states.contains(&nullifier_id));
+        assert!(snap.module_active_states.contains(&miner_id));
+        assert_eq!(snap.module_online_states.get(&probe_id), Some(&false));
+    });
+
+    // 2. Non-"online" Deactivate on the cloak module (group 330) MUST be allowed to decloak.
+    let decloak_ok = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(cloak_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("decloak via Deactivate(cloak_id) must succeed");
+    assert_eq!(decloak_ok.dict_get("overloaded"), Some(&PyRep::Bool(false)));
+    assert!(
+        !sys.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked,
+        "Deactivate(cloak_id) must clear combat_state.is_cloaked"
+    );
+
+    // 3. Unfitted cargo module fails ownership validation with 0 mining-cycle mutation.
+    let cargo_err = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(cargo_mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("cargo module must fail ownership before mining_cycle::deactivate");
+    assert_eq!(cargo_err.code, "ModuleNotOwnedByShip");
+    assert!(crate::services::mining_cycle::active_cycles_for_ship(&ctx, ship_id).contains_key(&miner_id));
+
+    // 4. Uncloaked Deactivate(miner) stops the mining cycle; Deactivate(miner, "online") offlines cleanly.
+    let stop_ok = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(miner_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked Deactivate(miner) must succeed");
+    assert_eq!(stop_ok.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert!(!crate::services::mining_cycle::active_cycles_for_ship(&ctx, ship_id).contains_key(&miner_id));
+
+    let off_ok = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(miner_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked Deactivate(miner, \"online\") must succeed");
+    assert_eq!(off_ok.dict_get("online"), Some(&PyRep::Bool(false)));
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.module_online_states.get(&miner_id), Some(&false)));
+
+    // 5. Gate cloak (gate_cloak_remaining_ticks > 0) does NOT trigger active-module cloak block.
+    let mut gate_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    gate_cs.is_cloaked = true;
+    gate_cs.gate_cloak_remaining_ticks = 20;
+    sys.set_combat_state(ship_id, gate_cs).await.unwrap();
+    let gate_off_ok = handle_mining_and_deactivate(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(cloak_id), PyRep::String("online".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("gate-cloaked Deactivate(cloak_id, \"online\") must remain allowed");
+    assert_eq!(gate_off_ok.dict_get("online"), Some(&PyRep::Bool(false)));
+}
