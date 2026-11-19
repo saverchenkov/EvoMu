@@ -813,6 +813,88 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
                 f"gateway_request_count={gw_extra} shadowed observed server log warning",
             )
 
+    def test_bf1344_01_eve_pre_frame_does_not_shadow_log_args_or_py_frames(self) -> None:
+        # 1. LogException args containing `foo.py(42)` must still extract fallback message.
+        trace_with_py_ref = (
+            "Traceback (most recent call last):\n"
+            '  File "packages/ui/window.py", line 88, in Open\n'
+            'logmodule.LogException args=("Failed in helper.py(42)",)\n'
+        )
+        exc_cls, msg, loc = sync_mod.parse_traceback_summary(trace_with_py_ref, "FallbackKey")
+        self.assertEqual(exc_cls, "LogException")
+        self.assertEqual(msg, "Failed in helper.py(42)")
+        self.assertEqual(loc, "window.py:88 in Open")
+
+        # 2. Inline prose/STACKTRACE lines with `.py(N)` outside Thrown at:/Traced at:
+        # must not override real `File "...", line N` frames.
+        trace_mixed = (
+            "Traceback (most recent call last):\n"
+            '  File "packages/ui/real_module.py", line 19, in Render\n'
+            "    return draw()\n"
+            "STACKTRACE #1 decoy.py(999)\n"
+            "RuntimeError: broken while calling foo.py(42)\n"
+        )
+        exc_cls2, msg2, loc2 = sync_mod.parse_traceback_summary(trace_mixed, "FallbackKey")
+        self.assertEqual(exc_cls2, "RuntimeError")
+        self.assertEqual(msg2, "broken while calling foo.py(42)")
+        self.assertEqual(loc2, "real_module.py:19 in Render")
+
+        # 3. Real `<pre>` frames including `<module>` and trailing `</pre>` still parse cleanly.
+        trace_pre = (
+            "Thrown at:\n"
+            "<pre>e:\\Program Files (x86)\\EVE\\packages\\boot.py(12) <module></pre>\n"
+            "KeyError: 'id'\n"
+        )
+        exc_cls3, msg3, loc3 = sync_mod.parse_traceback_summary(trace_pre, "FallbackKey")
+        self.assertEqual(exc_cls3, "KeyError")
+        self.assertEqual(msg3, "'id'")
+        self.assertEqual(loc3, "boot.py:12 in <module>")
+
+    def test_bf1344_03_kind_quasar_recognized_without_gateway_name(self) -> None:
+        # `kind == "quasar"` identifies a gateway call even when service/method omit "quasar"/"gateway".
+        b_ok = _make_crash_bundle(
+            stack_hash=9901,
+            trace=(
+                "Traceback (most recent call last):\n"
+                '  File "char.py", line 10, in Create\n'
+                "GatewayError: public gateway RPC response invalid\n"
+            ),
+            flight_recorder=[
+                {
+                    "kind": "quasar",
+                    "service": "eve_public.character.api.CreateRequest",
+                    "method": "Send",
+                    "status": "OK",
+                }
+            ],
+            extra={"server_request_count": 5, "gateway_request_count": 0},
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(b_ok))
+
+        b_err = _make_crash_bundle(
+            stack_hash=9902,
+            trace=(
+                "Traceback (most recent call last):\n"
+                '  File "char.py", line 10, in Create\n'
+                "RuntimeError: service unavailable\n"
+            ),
+            flight_recorder=[
+                {
+                    "kind": "quasar",
+                    "service": "eve_public.character.api.CreateRequest",
+                    "method": "Send",
+                    "status": "UNAVAILABLE",
+                    "error": "DNS resolution failed",
+                }
+            ],
+            extra={"server_request_count": 5, "gateway_request_count": 0},
+        )
+        fault = sync_mod.classify_environment_fault(b_err)
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertEqual(fault[0], "zero_gateway_requests")
+        self.assertEqual(fault[1], "env:zero_gateway_requests")
+
 
 if __name__ == "__main__":
     unittest.main()

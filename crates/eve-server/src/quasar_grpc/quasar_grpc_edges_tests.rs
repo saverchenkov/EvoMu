@@ -738,11 +738,17 @@ async fn grpc_h2c_error_guards_compression_events_and_notices_edges() {
 #[tokio::test]
 async fn grpc_bf1344_03_gateway_telemetry_and_unauthenticated_warn_paths() {
     use crate::log_ring_buffer::{LogRingBuffer, LogRingLayer};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::filter::Targets;
     use tracing_subscriber::layer::SubscriberExt;
 
-    let ring = Arc::new(LogRingBuffer::new(128));
-    let subscriber = tracing_subscriber::registry().with(LogRingLayer::new(Arc::clone(&ring)));
-    let _log_guard = tracing::subscriber::set_default(subscriber);
+    let ring = Arc::new(LogRingBuffer::new(512));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(Targets::new().with_target("eve_server", tracing::Level::WARN))
+            .with(LogRingLayer::new(Arc::clone(&ring))),
+    );
+    let _log_guard = tracing::dispatcher::set_default(&dispatch);
 
     let ctx = Arc::new(ServerContext::with_repository(Arc::new(
         eve_db::WorldRepository::with_demo_seed(),
@@ -756,11 +762,15 @@ async fn grpc_bf1344_03_gateway_telemetry_and_unauthenticated_warn_paths() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let accept_ctx = Arc::clone(&ctx);
+    let accept_dispatch = dispatch.clone();
     let accept_task = tokio::spawn(async move {
         while let Ok((sock, _)) = listener.accept().await {
             let c = Arc::clone(&accept_ctx);
+            let sub = accept_dispatch.clone();
             tokio::spawn(async move {
-                let _ = handle_quasar_grpc_connection(sock, c).await;
+                let _ = handle_quasar_grpc_connection(sock, c)
+                    .with_subscriber(sub)
+                    .await;
             });
         }
     });
@@ -776,11 +786,13 @@ async fn grpc_bf1344_03_gateway_telemetry_and_unauthenticated_warn_paths() {
         .issue_gateway_dev_token(1, Some(90_000_001), "tranquility", now_u + 3600, now_u)
         .unwrap();
 
-    // 1. Missing-auth rejection across Requests/Send, Notices/Consume, and Events/Publish logs WARN on all 3 paths without incrementing uid=1 counters.
+    // 1. Missing-auth rejection across Requests/Send, Notices/Consume, and Events/Publish logs WARN on all 3 paths without incrementing uid=1 counters,
+    // and repeats on the same (peer_ip, route) within 10s are rate-limited to 1 warning.
     for path in [
         "/eve_public.gateway.Requests/Send",
         "/eve_public.gateway.Notices/Consume",
         "/eve_public.gateway.Events/Publish",
+        "/eve_public.gateway.Requests/Send",
     ] {
         let req = Request::builder()
             .method("POST")
@@ -884,24 +896,172 @@ async fn grpc_bf1344_03_gateway_telemetry_and_unauthenticated_warn_paths() {
         3
     );
 
-    let logs = ring.snapshot_recent(100);
+    let logs = ring.snapshot_recent(512);
     for expected_path in [
         "/eve_public.gateway.Requests/Send",
         "/eve_public.gateway.Notices/Consume",
         "/eve_public.gateway.Events/Publish",
     ] {
-        assert!(
-            logs.iter().any(|l| {
+        let match_count = logs
+            .iter()
+            .filter(|l| {
                 l.contains("WARN")
                     && l.contains("Quasar gRPC request returned UNAUTHENTICATED trailer")
                     && l.contains(expected_path)
-            }),
-            "missing header UNAUTHENTICATED warn for {expected_path}: {logs:?}"
+            })
+            .count();
+        assert_eq!(
+            match_count, 1,
+            "expected exactly 1 rate-limited header UNAUTHENTICATED warn for {expected_path}: {logs:?}"
         );
     }
     assert!(logs.iter().any(|l| l.contains("Quasar gRPC request returned INVALID_ARGUMENT trailer")));
     assert!(logs.iter().any(|l| l.contains("Quasar gRPC event publish returned INVALID_ARGUMENT trailer")));
     assert!(!logs.iter().any(|l| l.contains(&dev_jwt)), "JWT leaked to logs");
+    accept_task.abort();
+}
+
+#[tokio::test]
+async fn grpc_bf1344_03_notices_consume_teardown_does_not_repopulate_telemetry_after_reset() {
+    use crate::log_ring_buffer::{LogRingBuffer, LogRingLayer};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let ring = Arc::new(LogRingBuffer::new(256));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(Targets::new().with_target("eve_server", tracing::Level::WARN))
+            .with(LogRingLayer::new(Arc::clone(&ring))),
+    );
+    let _log_guard = tracing::dispatcher::set_default(&dispatch);
+
+    let ctx = Arc::new(ServerContext::with_repository(Arc::new(
+        eve_db::WorldRepository::with_demo_seed(),
+    )));
+    let now_u = ctx.now_unix();
+    let old_sid = 77_002_u64;
+    ctx.db
+        .acquire_online_lock(1, old_sid, Some(90_000_001), true, ctx.now_unix_secs())
+        .expect("online lock");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let accept_ctx = Arc::clone(&ctx);
+    let accept_dispatch = dispatch.clone();
+    let accept_task = tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            let c = Arc::clone(&accept_ctx);
+            let sub = accept_dispatch.clone();
+            tokio::spawn(async move {
+                let _ = handle_quasar_grpc_connection(sock, c)
+                    .with_subscriber(sub)
+                    .await;
+            });
+        }
+    });
+
+    let tcp = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
+        .await
+        .expect("connect timeout")
+        .expect("connect");
+    let (mut client, conn) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        h2::client::handshake(tcp),
+    )
+    .await
+    .expect("h2 handshake timeout")
+    .expect("h2 handshake");
+    let conn_task = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let dev_jwt = ctx
+        .db
+        .issue_gateway_dev_token(1, Some(90_000_001), "tranquility", now_u + 3600, now_u)
+        .unwrap();
+
+    // Open Notices/Consume stream; subscribe records 1 initial gateway request.
+    let req = Request::builder()
+        .method("POST")
+        .uri("http://127.0.0.1/eve_public.gateway.Notices/Consume")
+        .header("content-type", "application/grpc")
+        .header("authorization", format!("Bearer {dev_jwt}"))
+        .body(())
+        .unwrap();
+    let (rsp_fut, mut send_body) = client.send_request(req, false).unwrap();
+    let rsp = tokio::time::timeout(std::time::Duration::from_secs(5), rsp_fut)
+        .await
+        .expect("Notices/Consume headers timeout")
+        .unwrap();
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(old_sid, Some(1))
+            .gateway_request_count,
+        1
+    );
+
+    // Simulate MachoNet disconnect + fresh session login (`new_sid`) replacing `old_sid`
+    // while stale Notices/Consume stream is still open (`MultiLoginBlocked` -> `Err(reason)`).
+    let new_sid = 77_003_u64;
+    ctx.db.release_online_lock(1, old_sid);
+    ctx.db
+        .acquire_online_lock(1, new_sid, Some(90_000_001), true, ctx.now_unix_secs())
+        .expect("new online lock");
+    ctx.flight_recorder.reset_user_telemetry(1);
+    ctx.flight_recorder.remove_session_telemetry(old_sid);
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(old_sid, Some(1))
+            .gateway_request_count,
+        0
+    );
+
+    // Send a client frame (`end_of_stream=false`) to hit the post-subscribe `Err(reason)` arm.
+    send_body
+        .send_data(Bytes::from_static(&EMPTY_GRPC_FRAME), false)
+        .unwrap();
+    let mut body = rsp.into_body();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(_) = body.data().await {}
+    })
+    .await
+    .expect("Notices/Consume body drain timeout");
+    let trailers = tokio::time::timeout(std::time::Duration::from_secs(5), body.trailers())
+        .await
+        .expect("Notices/Consume trailers timeout")
+        .unwrap()
+        .expect("trailers");
+    assert_eq!(
+        trailers.get("grpc-status").unwrap(),
+        GRPC_STATUS_UNAUTHENTICATED
+    );
+
+    // Post-subscribe UNAUTHENTICATED teardown must warn without repopulating reset telemetry.
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(old_sid, Some(1))
+            .gateway_request_count,
+        0
+    );
+    assert_eq!(
+        ctx.flight_recorder
+            .get_session_telemetry(0, Some(1))
+            .gateway_request_count,
+        0
+    );
+    let logs = ring.snapshot_recent(100);
+    assert!(
+        logs.iter().any(|l| {
+            l.contains("WARN")
+                && l.contains("Quasar gRPC request returned UNAUTHENTICATED trailer")
+                && l.contains("/eve_public.gateway.Notices/Consume")
+        }),
+        "expected post-subscribe Notices/Consume UNAUTHENTICATED warn: {logs:?}"
+    );
+    drop(send_body);
+    drop(client);
+    conn_task.abort();
     accept_task.abort();
 }
 

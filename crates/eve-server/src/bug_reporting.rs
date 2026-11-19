@@ -519,7 +519,7 @@ impl BugIncidentBundle {
             .get_destiny_stamps(session.session_id, MAX_DESTINY_STAMPS_PER_SESSION);
         let telemetry = ctx
             .flight_recorder
-            .get_session_telemetry(session.session_id, session.user_id);
+            .get_session_telemetry(session.session_id, sess_snap.user_id);
         let handshake = resolve_bundle_handshake(telemetry.handshake, None);
         let server_logs_before = global_log_ring().snapshot_recent(40);
 
@@ -1016,7 +1016,7 @@ fn handle_post_bug_issue(
     let telemetry = ctx
         .flight_recorder
         .get_session_telemetry(sess_snap.session_id, sess_snap.user_id);
-    let fallback_client_build = client_build.and_then(|b| u32::try_from(b).ok());
+    let fallback_client_build = client_build.and_then(|b| u32::try_from(b).ok()).filter(|&b| b > 0);
     let handshake = resolve_bundle_handshake(telemetry.handshake, fallback_client_build);
 
     let bundle = BugIncidentBundle {

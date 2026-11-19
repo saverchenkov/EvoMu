@@ -123,7 +123,7 @@ _NOISE_LINE_PREFIXES = (
 
 _FILE_LINE_RE = re.compile(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+([^\s)]+))?')
 _EVE_PRE_FRAME_RE = re.compile(
-    r"^(?:<pre>|(?![A-Za-z_][\w.]*:\s))(.+?\.py[a-z]*)\((\d+)\)\s*([^\s]+)?"
+    r"^(?:<pre>(?![^\r\n]*args=)|(?=(?:[A-Za-z]:[\\/]|/|[^\s\"'=<>:]+\.py[a-z]*\(\d+\)))(?![^\r\n]*[\"'=]))([^\r\n<>]+?\.py[a-z]*)\((\d+)\)(?:\s+(?!\s*</pre>)([^\s]+?(?=(?:\s*</pre>)?$)))?(?:\s*</pre>)?$"
 )
 _LOG_TRACEBACK_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?LogTraceback\s+args=")
 _LOG_CALL_ARGS_RE = re.compile(r"^(?:[\w.]+\.)?_?Log(?:Exception|Traceback)\s+args=")
@@ -244,9 +244,6 @@ def _extract_exception_from_lines(lines: List[str]) -> Tuple[str, str]:
             if _FILE_LINE_RE.search(line):
                 skip_next_code_line = True
                 continue
-            if _EVE_PRE_FRAME_RE.match(line):
-                skip_next_code_line = False
-                continue
             if any(line.startswith(p) for p in _NOISE_LINE_PREFIXES) or line in (
                 "None",
                 "NoneType: None",
@@ -255,7 +252,7 @@ def _extract_exception_from_lines(lines: List[str]) -> Tuple[str, str]:
             ):
                 skip_next_code_line = False
                 continue
-            if _LOG_CALL_ARGS_RE.match(line):
+            if _LOG_CALL_ARGS_RE.match(line) or _LOG_TRACEBACK_ARGS_RE.match(line):
                 saw_logexc_call = True
                 if not fallback_logexc_msg:
                     fallback_logexc_msg = _parse_logtraceback_args(line, pattern=_LOG_CALL_ARGS_RE)
@@ -267,6 +264,9 @@ def _extract_exception_from_lines(lines: List[str]) -> Tuple[str, str]:
                 skip_next_code_line = False
                 continue
             if line.startswith(("EXCEPTION #", "STACKTRACE #")):
+                skip_next_code_line = False
+                continue
+            if _EVE_PRE_FRAME_RE.match(line):
                 skip_next_code_line = False
                 continue
             if skip_next_code_line and ":" not in line and not re.match(
@@ -296,21 +296,35 @@ def _extract_location_from_lines(lines: List[str]) -> Optional[str]:
     # Collect EVE `<pre>/path/file.py(123) fn` or `Traced at:` frames cleanly.
     thrown_idx = next((i for i, l in enumerate(lines) if l.startswith("Thrown at:")), None)
     traced_idx = next((i for i, l in enumerate(lines) if l.startswith("Traced at:")), None)
+    in_eve_frame_block = thrown_idx is not None or traced_idx is not None
     search_start = (
         thrown_idx + 1 if thrown_idx is not None else (traced_idx + 1 if traced_idx is not None else 0)
     )
     search_lines = lines[search_start:]
 
     pre_frames: List[Tuple[str, str, Optional[str]]] = []
+    unprefixed_pre_frames: List[Tuple[str, str, Optional[str]]] = []
     for line in search_lines:
         if line.startswith(("Formatted exception info:", "Common path prefix", "EXCEPTION END")):
             break
-        if line.startswith("Traced at:") and pre_frames:
+        if line.startswith("Traced at:") and (pre_frames or unprefixed_pre_frames):
             break
+        if (
+            _FILE_LINE_RE.search(line)
+            or _LOG_CALL_ARGS_RE.match(line)
+            or _LOG_TRACEBACK_ARGS_RE.match(line)
+            or any(line.startswith(p) for p in _NOISE_LINE_PREFIXES)
+            or line.startswith(("EXCEPTION #", "STACKTRACE #"))
+        ):
+            continue
         m_pre = _EVE_PRE_FRAME_RE.match(line)
         if m_pre:
             filepath = os.path.basename(m_pre.group(1).replace("\\", "/"))
-            pre_frames.append((filepath, m_pre.group(2), m_pre.group(3)))
+            frame = (filepath, m_pre.group(2), m_pre.group(3))
+            if in_eve_frame_block or line.startswith("<pre>"):
+                pre_frames.append(frame)
+            else:
+                unprefixed_pre_frames.append(frame)
 
     if pre_frames:
         filepath, lineno, fn = _pick_leaf_frame(pre_frames)
@@ -325,6 +339,10 @@ def _extract_location_from_lines(lines: List[str]) -> Optional[str]:
 
     if py_frames:
         filepath, lineno, fn = _pick_leaf_frame(py_frames)
+        return f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
+
+    if unprefixed_pre_frames:
+        filepath, lineno, fn = _pick_leaf_frame(unprefixed_pre_frames)
         return f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
 
     return None
@@ -480,7 +498,7 @@ def _is_client_transport_failure_call(call: Any) -> bool:
     else:
         status_str = str(raw_status).strip()
     combined_status = f"{status_str} {err_str}".strip()
-    is_gateway = "quasar" in svc or "gateway" in svc or "quasar" in method
+    is_gateway = _is_quasar_call(call)
 
     if status_str.upper().startswith("OK") and not err_str:
         return False
@@ -505,12 +523,15 @@ def _is_client_transport_failure_call(call: Any) -> bool:
     return False
 
 
-def _is_gateway_flight_call_reached_server(call: Any) -> bool:
-    if not isinstance(call, dict):
-        return False
+def _is_quasar_call(call: Dict[str, Any]) -> bool:
+    kind = str(call.get("kind") or "").strip().lower()
     svc = str(call.get("service") or "").lower()
     method = str(call.get("method") or "").lower()
-    if not ("quasar" in svc or "gateway" in svc or "quasar" in method):
+    return kind == "quasar" or "quasar" in svc or "gateway" in svc or "quasar" in method
+
+
+def _is_gateway_flight_call_reached_server(call: Any) -> bool:
+    if not isinstance(call, dict) or not _is_quasar_call(call):
         return False
     return not _is_client_transport_failure_call(call)
 
@@ -648,11 +669,7 @@ def _is_gateway_failure_bundle(bundle: Dict[str, Any]) -> bool:
             return True
 
     for call in bundle.get("flight_recorder") or []:
-        if not isinstance(call, dict):
-            continue
-        svc = str(call.get("service") or "").lower()
-        method = str(call.get("method") or "").lower()
-        if ("quasar" in svc or "gateway" in svc or "quasar" in method) and (
+        if isinstance(call, dict) and _is_quasar_call(call) and (
             _is_client_transport_failure_call(call)
             or bool(call.get("error"))
             or str(call.get("status") or "").strip().upper().startswith(("ERR", "FAIL", "TIMEOUT"))

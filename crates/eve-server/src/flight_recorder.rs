@@ -6,7 +6,9 @@
 
 use eve_proto::PyRep;
 use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,6 +27,8 @@ pub const UNKNOWN_RPC_LABEL: &str = "<unknown>";
 const MAX_INDIVIDUAL_RPC_METHODS: usize = MAX_TRACKED_RPC_METHODS.saturating_sub(1);
 const MAX_TRACKED_SESSIONS: usize = 512;
 const MAX_ARGS_REPR_LEN: usize = 160;
+const MAX_UNAUTH_WARN_KEYS: usize = 64;
+const UNAUTH_WARN_RATE_LIMIT_SECS: u64 = 10;
 
 fn is_valid_rpc_latency_segment(segment: &str) -> bool {
     !segment.is_empty()
@@ -396,6 +400,8 @@ pub struct FlightRecorder {
     session_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
     preauth_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
     user_handshakes: RwLock<HashMap<u64, HandshakeBuildMetadata>>,
+    quasar_unauth_warn_times: RwLock<HashMap<(Option<IpAddr>, &'static str), u64>>,
+    quasar_unauth_warn_fallback_unix: AtomicU64,
 }
 
 impl Default for FlightRecorder {
@@ -428,6 +434,8 @@ impl FlightRecorder {
             session_handshakes: RwLock::new(HashMap::new()),
             preauth_handshakes: RwLock::new(HashMap::new()),
             user_handshakes: RwLock::new(HashMap::new()),
+            quasar_unauth_warn_times: RwLock::new(HashMap::new()),
+            quasar_unauth_warn_fallback_unix: AtomicU64::new(0),
         }
     }
 
@@ -1010,6 +1018,47 @@ impl FlightRecorder {
         if let Some(uid) = user_id.filter(|&id| id > 0) {
             Self::increment_bounded_counter(&self.user_gateway_counts, uid);
         }
+    }
+
+    /// Rate-limits header-rejection `UNAUTHENTICATED` warnings per `(peer_ip, route)` on this
+    /// server context (`<= 1` warning per 10s per key, bounded at `64` keys with a fallback cap)
+    /// so repeated probe floods cannot evict entries from the 256-entry `global_log_ring()`.
+    pub fn should_warn_quasar_unauth_header(
+        &self,
+        peer_ip: Option<IpAddr>,
+        path: &str,
+        now_unix: u64,
+    ) -> bool {
+        let route: &'static str = match path {
+            "/eve_public.gateway.Requests/Send" => "/eve_public.gateway.Requests/Send",
+            "/eve_public.gateway.Notices/Consume" => "/eve_public.gateway.Notices/Consume",
+            "/eve_public.gateway.Events/Publish" => "/eve_public.gateway.Events/Publish",
+            _ => "other",
+        };
+        let now = now_unix.max(1);
+        let key = (peer_ip, route);
+        if let Ok(mut map) = self.quasar_unauth_warn_times.write() {
+            if let Some(&prev) = map.get(&key) {
+                if now < prev.saturating_add(UNAUTH_WARN_RATE_LIMIT_SECS) {
+                    return false;
+                }
+                map.insert(key, now);
+                return true;
+            }
+            if map.len() >= MAX_UNAUTH_WARN_KEYS {
+                map.retain(|_, &mut prev| now < prev.saturating_add(UNAUTH_WARN_RATE_LIMIT_SECS));
+            }
+            if map.len() < MAX_UNAUTH_WARN_KEYS {
+                map.insert(key, now);
+                return true;
+            }
+        }
+        let prev = self.quasar_unauth_warn_fallback_unix.load(Ordering::Relaxed);
+        (prev == 0 || now >= prev.saturating_add(UNAUTH_WARN_RATE_LIMIT_SECS))
+            && self
+                .quasar_unauth_warn_fallback_unix
+                .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
     }
 
     /// Records client and server boot builds observed during MachoNet handshake (`BF-1344-03`).

@@ -564,8 +564,8 @@ fn test_bundle_cumulative_rpc_and_handshake_telemetry() {
     assert_eq!(decoded.handshake.as_ref(), Some(hs));
 }
 
-#[test]
-fn test_bundle_telemetry_defaults_and_user_fallback() {
+#[tokio::test]
+async fn test_bundle_telemetry_defaults_and_user_fallback() {
     // Legacy bundle JSON without new BF-1344-02 / BF-1344-03 fields still deserializes cleanly.
     let legacy_json = serde_json::json!({
         "incident_id": "legacy-1",
@@ -644,4 +644,55 @@ fn test_bundle_telemetry_defaults_and_user_fallback() {
         bare_json["handshake"].get("build_mismatch").is_none(),
         "unknown client build must omit build_mismatch instead of emitting false"
     );
+
+    // Enriched `sess_snap.user_id` (from character_id) resolves user-keyed telemetry even when
+    // raw `session.user_id` is None.
+    ctx.flight_recorder.record_gateway_request(None, Some(1));
+    ctx.flight_recorder.record_handshake_builds(
+        777,
+        Some(1),
+        Some(eve_machonet::V24_BOOT_BUILD),
+        eve_machonet::V24_BOOT_BUILD,
+        false,
+    );
+    let mut char_only_session = SessionState::new(0);
+    char_only_session.user_id = None;
+    char_only_session.character_id = Some(90_000_001);
+    let char_snap = BugIncidentBundle::build_snapshot(&ctx, &char_only_session, 2, "UI", "");
+    assert_eq!(char_snap.session.user_id, Some(1));
+    assert_eq!(char_snap.gateway_request_count, 1);
+    let char_hs = char_snap.handshake.as_ref().expect("enriched user handshake");
+    assert_eq!(char_hs.client_boot_build, Some(eve_machonet::V24_BOOT_BUILD));
+    assert_eq!(char_hs.build_mismatch, Some(false));
+
+    // HTTP `/bugs/api/issue` with `"Build": 0` treats client_build == 0 as unknown (not stale mismatch).
+    let dir = make_temp_queue_dir("bug_build_zero");
+    let issue_ctx = ServerContext::new();
+    issue_ctx.bug_reporting.set_queue_dir_override(Some(dir.clone()));
+    let zero_build_payload = serde_json::to_vec(&json!({
+        "categoryID": "UI",
+        "summary": "Build zero sentinel test",
+        "description": "No character session attached",
+        "reproductionSteps": "N/A",
+        "computerInfo": "macOS",
+        "Build": 0
+    }))
+    .unwrap();
+    let zero_resp = handle_bugs_http_request(
+        &issue_ctx,
+        "POST",
+        "/bugs/api/issue",
+        &HashMap::new(),
+        &zero_build_payload,
+    );
+    assert_eq!(zero_resp.status_code, 201);
+    let zero_json: serde_json::Value = serde_json::from_slice(&zero_resp.body).unwrap();
+    let zero_key = zero_json["key"].as_str().unwrap();
+    let zero_path = issue_ctx.bug_reporting.lookup_report_path(zero_key).unwrap();
+    let zero_bundle: BugIncidentBundle =
+        serde_json::from_slice(&std::fs::read(&zero_path).unwrap()).unwrap();
+    let zero_hs = zero_bundle.handshake.as_ref().expect("server build present");
+    assert_eq!(zero_hs.client_boot_build, None);
+    assert_eq!(zero_hs.build_mismatch, None);
+    let _ = std::fs::remove_dir_all(&dir);
 }
