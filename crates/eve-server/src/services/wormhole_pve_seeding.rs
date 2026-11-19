@@ -900,25 +900,53 @@ pub fn build_specialized_npc_components(
     } else {
         None
     };
-    let (web_factor, web_range, scram_str, scram_range) = if is_static_structure || npc_type_id == 79_507 {
-        (0.0, 0.0, 0.0, 0.0)
-    } else if archetype == "CloneSoldier" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        if name.contains("Transporter") {
-            (attr(20).unwrap_or(-60.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
-        } else if name.contains("Negotiator") {
-            (0.0, 0.0, attr(105).unwrap_or(2.0).max(2.0), attr(103).unwrap_or(24_000.0))
+    // Resolve EWAR from SDE dogma attributes (`20`=speedFactor, `514`=modifyTargetSpeedRange,
+    // `105`=warpScrambleStrength, `103`=warpScrambleRange). Only Sleeper archetypes and named
+    // Clone Soldier tiers fall back to synthetic defaults when SDE dogma is omitted; regular
+    // Pirate/mission/belt/other NPCs without explicit EWAR attributes default to 0.0 (no EWAR).
+    let resolve_web = |default_factor: f64| -> (f64, f64) {
+        let factor = attr(20).filter(|&v| v < 0.0).unwrap_or(default_factor);
+        if factor < 0.0 {
+            let range = attr(514).or_else(|| attr(580)).unwrap_or(10_000.0);
+            if range > 0.0 { (factor, range) } else { (0.0, 0.0) }
         } else {
-            (attr(20).unwrap_or(0.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
+            (0.0, 0.0)
         }
-    } else {
-        (
-            attr(20).unwrap_or(-50.0),
-            attr(514).or_else(|| attr(580)).unwrap_or(10_000.0),
-            attr(105).unwrap_or(2.0),
-            attr(103).or_else(|| attr(582)).unwrap_or(20_000.0),
-        )
     };
+    let resolve_scram = |default_strength: f64| -> (f64, f64) {
+        let strength = attr(105).filter(|&v| v > 0.0).unwrap_or(default_strength);
+        if strength > 0.0 {
+            let range = attr(103).or_else(|| attr(582)).unwrap_or(20_000.0);
+            if range > 0.0 { (strength, range) } else { (0.0, 0.0) }
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let (web_factor, web_range, scram_str, scram_range) =
+        if is_static_structure || npc_type_id == 79_507 {
+            (0.0, 0.0, 0.0, 0.0)
+        } else if archetype == "CloneSoldier" {
+            let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+            if name.contains("Transporter") {
+                let (wf, wr) = resolve_web(-60.0);
+                (wf, wr, 0.0, 0.0)
+            } else if name.contains("Negotiator") {
+                let ss = attr(105).filter(|&v| v > 0.0).unwrap_or(2.0).max(2.0);
+                let sr = attr(103).filter(|&v| v > 0.0).unwrap_or(24_000.0);
+                (0.0, 0.0, ss, sr)
+            } else {
+                let (wf, wr) = resolve_web(0.0);
+                (wf, wr, 0.0, 0.0)
+            }
+        } else if archetype == "Sleeper" {
+            let (wf, wr) = resolve_web(-50.0);
+            let (ss, sr) = resolve_scram(2.0);
+            (wf, wr, ss, sr)
+        } else {
+            let (wf, wr) = resolve_web(0.0);
+            let (ss, sr) = resolve_scram(0.0);
+            (wf, wr, ss, sr)
+        };
     let mut cs = ctx.build_type_combat_state(npc_type_id);
     if cs.max_structure_hp <= 0.0 {
         cs.max_shield_hp = 2_000.0;
@@ -988,7 +1016,13 @@ pub fn build_specialized_npc_components(
         web_range,
         scram_strength: scram_str,
         scram_range,
-        neut_amount: if is_static_structure { 0.0 } else { attr(97).unwrap_or(120.0) },
+        neut_amount: if is_static_structure || npc_type_id == 79_507 {
+            0.0
+        } else if archetype == "Sleeper" {
+            attr(97).filter(|&v| v >= 0.0).unwrap_or(120.0)
+        } else {
+            attr(97).filter(|&v| v > 0.0).unwrap_or(0.0)
+        },
         ecm_jammed: false,
         // Remote shield / armor repair amounts come from NPC SDE attributes 1460 / 1455 (with
         // fallback to module attributes 68 / 84) and assistance range from attr 1464.
