@@ -690,17 +690,19 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
         .sde
         .missions
         .values()
-        .find(|m| m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .filter(|m| m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .min_by_key(|m| m.mission_id)
         .cloned()
         .expect("SDE must contain a Trade mission");
     let mining_tmpl = ctx
         .sde
         .missions
         .values()
-        .find(|m| {
+        .filter(|m| {
             let ct = m.content_template.as_deref().unwrap_or_default();
             ct.contains("Mining") && !ct.contains("Kill")
         })
+        .min_by_key(|m| m.mission_id)
         .cloned()
         .expect("SDE must contain a Mining mission");
 
