@@ -3525,3 +3525,217 @@ async fn fleet_warp_skips_caller_and_tourney_restrictions_preserve_invuln_and_sa
         "fleet warp including FC must emit OnSafeLogoffAborted: {fw_notifs:?}"
     );
 }
+
+#[tokio::test]
+async fn bookmark_validation_runs_before_ship_movement_and_preserves_read_purity_gh_1408() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let ship_id = 895_408_i64;
+    let sys_id = 30_000_142_u32;
+    let kw = HashMap::new();
+    let mut sess = SessionState {
+        user_id: Some(1),
+        character_id: Some(char_id),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    mark_char_online(&ctx, &mut sess, char_id);
+
+    spawn_ship_in_space(&ctx, char_id, ship_id, 587, sys_id, DVec3::ZERO);
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                warp_scramble_strength: 2,
+                is_cloaked: true,
+                is_covert_cloak: false,
+                gate_cloak_remaining_ticks: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let kind_bm = PyRep::String("bookmark".into());
+    let valid_bm_id = 900_408_1_i64;
+    let expired_bm_id = 900_408_2_i64;
+    let zarzakh_bm_id = 900_408_3_i64;
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            valid_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: valid_bm_id,
+                owner_id: char_id,
+                label: "ValidFar".into(),
+                solar_system_id: sys_id,
+                x: 1e11,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            expired_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: expired_bm_id,
+                owner_id: char_id,
+                label: "ExpiredFar".into(),
+                solar_system_id: sys_id,
+                x: 1e11,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmark_expiries.insert(expired_bm_id, now_unix);
+        snap.bookmarks.insert(
+            zarzakh_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: zarzakh_bm_id,
+                owner_id: char_id,
+                label: "ZarzakhBM".into(),
+                solar_system_id: SOLAR_SYSTEM_ZARZAKH,
+                x: 1e11,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    // Warm up lazy crimewatch entry creation once so baseline `epoch_0`/`tx_0` measures only RPC read-purity.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let _ = cw.get_or_create(char_id);
+    }
+
+    let epoch_0 = ctx.db.state_epoch();
+    let tx_0 = ctx.db.tx_commit_count();
+
+    // 1. Missing bookmark reports BookmarkNotFound even while scrambled and cloaked (zero DB/cloak mutation).
+    let missing_err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[kind_bm.clone(), PyRep::Integer(999_408)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(missing_err.code, "BookmarkNotFound");
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    // 2. Expired bookmark reports BookmarkExpired even while scrambled.
+    let exp_err = handle(
+        &ctx,
+        &mut sess,
+        None,
+        "beyonce",
+        "CmdWarpToStuff",
+        &[kind_bm.clone(), PyRep::Integer(expired_bm_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(exp_err.code.to_ascii_lowercase(), "bookmarkexpired");
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+
+    // 3. Valid bookmark while scrambled reports WarpScrambled; while non-covert cloaked & unscrambled reports CloakedCannotWarp.
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdWarpToStuff",
+            &[kind_bm.clone(), PyRep::Integer(valid_bm_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "WarpScrambled"
+    );
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                warp_scramble_strength: 0,
+                is_cloaked: true,
+                is_covert_cloak: false,
+                gate_cloak_remaining_ticks: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdWarpToStuff",
+            &[kind_bm.clone(), PyRep::Integer(valid_bm_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CloakedCannotWarp"
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    // 4. Zarzakh bookmark warp ban reports DunBlacklistCannotWarp even if scrambled.
+    spawn_ship_in_space(&ctx, char_id, ship_id, 587, SOLAR_SYSTEM_ZARZAKH, DVec3::ZERO);
+    let zz_h = ctx.systems.get_or_spawn(SOLAR_SYSTEM_ZARZAKH);
+    zz_h.set_combat_state(
+        ship_id,
+        CombatState {
+            warp_scramble_strength: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sess.solar_system_id = Some(SOLAR_SYSTEM_ZARZAKH);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut sess,
+            None,
+            "beyonce",
+            "CmdWarpToStuff",
+            &[kind_bm, PyRep::Integer(zarzakh_bm_id)],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "DunBlacklistCannotWarp"
+    );
+}

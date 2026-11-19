@@ -639,6 +639,12 @@ impl ServerContext {
                         "Cannot activate filament while cloaked",
                     ));
                 }
+                MovementIntent::CynoBridge { .. }
+                | MovementIntent::ConduitJump { .. }
+                | MovementIntent::AccelerationGate {
+                    kind: AccelerationGateKind::EssBank,
+                    ..
+                } => {}
                 MovementIntent::StargateJump { .. }
                 | MovementIntent::AnsiblexJump { .. }
                 | MovementIntent::WormholeJump { .. }
@@ -648,8 +654,6 @@ impl ServerContext {
                         eve_proto::UserErrorKey::ShipCloaked,
                     ));
                 }
-                MovementIntent::CynoBridge { .. }
-                | MovementIntent::ConduitJump { .. } => {}
                 MovementIntent::Warp { .. }
                 | MovementIntent::BookmarkWarp { .. }
                 | MovementIntent::AgencyWarp { .. }

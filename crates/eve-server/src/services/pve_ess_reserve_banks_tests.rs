@@ -835,3 +835,217 @@ async fn wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges() {
         1
     );
 }
+
+#[tokio::test]
+async fn ess_gate_auto_decloaks_fitted_cloak_module_only_after_range_and_hull_checks_gh_1408() {
+    let sde = shared_sde();
+    let null_sys: SolarSystemId = sde
+        .solar_systems
+        .values()
+        .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .min_by_key(|s| s.solar_system_id)
+        .map(|s| s.solar_system_id)
+        .expect("SDE has K-space null-sec system");
+    let cruiser_tid = sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 26 && t.published)
+        .map(|(tid, _)| *tid)
+        .expect("cruiser type");
+    let frigate_tid = sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 25 && t.published)
+        .map(|(tid, _)| *tid)
+        .expect("frigate type");
+    let cloak_tid = sde
+        .types
+        .iter()
+        .find(|(_, t)| t.group_id == 330 && t.published)
+        .map(|(tid, _)| *tid)
+        .expect("cloak module type");
+
+    let char_id: i64 = 90_050_408;
+    let cruiser_id: i64 = 1_050_408_001;
+    let frigate_id: i64 = 1_050_408_002;
+    let cloak_mod_id: i64 = 1_050_408_101;
+    let now_unix = 1_775_760_000_u64;
+
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("ess_cloak_pilot", "pw", char_id, "EssCloakPilot");
+    let user_id = db.with_snapshot(|s| s.accounts["ess_cloak_pilot"].user_id);
+    db.acquire_online_lock(user_id, 501, Some(char_id), true, now_unix)
+        .expect("online lock");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = null_sys;
+            ch.active_ship_id = cruiser_id;
+        }
+        snap.system_states
+            .insert(null_sys, SystemDynamicState::default());
+        snap.items.insert(
+            cruiser_id,
+            eve_db::InventoryItemRecord {
+                item_id: cruiser_id,
+                type_id: cruiser_tid,
+                owner_id: char_id,
+                location_id: i64::from(null_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            frigate_id,
+            eve_db::InventoryItemRecord {
+                item_id: frigate_id,
+                type_id: frigate_tid,
+                owner_id: char_id,
+                location_id: i64::from(null_sys),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cloak_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: cloak_tid,
+                owner_id: char_id,
+                location_id: cruiser_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(cloak_mod_id, true);
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(null_sys);
+    ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
+    let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
+    let gate_pos = sys_handle
+        .get_ball_snapshot(gate_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .position;
+
+    // Spawn cloaked cruiser outside activation range (>2500m) with fitted cloak penalty.
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: cruiser_id,
+            type_id: cruiser_tid,
+            position: gate_pos + glam::DVec3::new(3_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 20.0,
+            inertia: 1.0,
+            mass: 10_000_000.0,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            is_cloaked: true,
+            is_covert_cloak: false,
+            cloak_velocity_multiplier: Some(0.1),
+            cloak_stabilization_remaining_s: 600.0,
+            ..Default::default()
+        },
+    );
+    crate::services::mobile_deployables_ext::record_ship_cloak_activated(&ctx, cruiser_id);
+
+    // 1. Out of range (>2500m) fails OutsideGateActivationRange WITHOUT decloaking or clearing module_active_states.
+    assert_eq!(
+        try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "OutsideGateActivationRange"
+    );
+    assert!(sys_handle
+        .get_combat_state(cruiser_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_cloaked);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
+
+    // 2. Ineligible hull inside range fails ShipRestrictedByEssGate WITHOUT decloaking.
+    sys_handle.try_spawn_ball_with_combat(
+        Ball {
+            id: frigate_id,
+            type_id: frigate_tid,
+            position: gate_pos + glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            is_cloaked: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, frigate_id, gate_id)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ShipRestrictedByEssGate"
+    );
+    assert!(sys_handle
+        .get_combat_state(frigate_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_cloaked);
+
+    // 3. Eligible cruiser inside <= 2500m activates, auto-decloaks both combat state and fitted cloak module, and emits notification.
+    let _ = sys_handle
+        .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(500.0, 0.0, 0.0))
+        .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let ok = try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+        .await
+        .expect("handled")
+        .expect("eligible cloaked cruiser inside 2500m activates ESS gate");
+    assert_eq!(ok.dict_get("success").and_then(|v| v.as_bool()), Some(true));
+    let cs_after = sys_handle.get_combat_state(cruiser_id).await.unwrap().unwrap();
+    assert!(!cs_after.is_cloaked);
+    assert!(!cs_after.is_covert_cloak);
+    assert_eq!(cs_after.cloak_stabilization_remaining_s, 0.0);
+    assert_eq!(cs_after.cloak_velocity_multiplier, None);
+    assert!(!ctx
+        .db
+        .with_snapshot(|s| s.module_active_states.contains(&cloak_mod_id)));
+    assert!(ctx.db.with_snapshot(|s| {
+        !crate::services::mobile_deployables::read_deployable_state_snap(s)
+            .cloak_activated_unix
+            .contains_key(&cruiser_id)
+    }));
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs
+            .iter()
+            .any(|n| n.event == "OnCloakModuleForceDeactivated"),
+        "expected OnCloakModuleForceDeactivated notification, got: {notifs:?}"
+    );
+}

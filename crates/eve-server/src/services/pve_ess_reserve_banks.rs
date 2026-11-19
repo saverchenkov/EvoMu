@@ -680,6 +680,88 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
 /// enforcing tackle/immobilization/warp/session-change checks, `<= 2,500 m` gate proximity, and
 /// combat hull group eligibility (`ESS_ALLOWED_SHIP_GROUP_IDS`), decloaking the ship and warping it
 /// onto the ESS grid (`feat:pve.ess-grid-warp-mwd-restrictions`).
+/// Force-decloaks an eligible ship entering an ESS acceleration gate, clearing both combat state and any active cloak module.
+async fn force_decloak_on_ess_gate_activation(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+) {
+    // Only take a write snapshot when an active group-330 cloak module exists so non-module paths leave db.state_epoch() untouched.
+    let has_fitting_cloak =
+        crate::services::space_nav_movement_guard::resolve_active_fitting_cloak_read_only(
+            ctx, char_id, sys_id, ship_id,
+        )
+        .is_some();
+    let mut cleared_fitting_cloak = false;
+    if has_fitting_cloak {
+        ctx.db.with_mut_snapshot(|snap| {
+            let cloak_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|item| {
+                    item.location_id == ship_id
+                        && snap.module_active_states.contains(&item.item_id)
+                        && ctx
+                            .sde
+                            .types
+                            .get(&item.type_id)
+                            .is_some_and(|ty| ty.group_id == 330)
+                })
+                .map(|item| item.item_id)
+                .collect();
+            for mid in cloak_ids {
+                if snap.module_active_states.remove(&mid) {
+                    cleared_fitting_cloak = true;
+                }
+            }
+        });
+        if cleared_fitting_cloak {
+            ctx.invalidate_ship_fitting(ship_id);
+        }
+    }
+
+    let mut decloaked = cleared_fitting_cloak;
+    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+        let had_cs_cloak =
+            cs.is_cloaked || cs.is_covert_cloak || cs.cloak_velocity_multiplier.is_some();
+        if had_cs_cloak || cleared_fitting_cloak {
+            cs.is_cloaked = false;
+            cs.is_covert_cloak = false;
+            cs.gate_cloak_remaining_ticks = 0;
+            cs.cloak_stabilization_remaining_s = 0.0;
+            if cs.cloak_velocity_multiplier.take().is_some() {
+                if let Ok(Some((_, mut ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                    cs.recompute_attributes(&mut ball);
+                    let _ = sys_handle
+                        .set_ball_max_velocity(ship_id, ball.max_velocity)
+                        .await;
+                }
+            }
+            let _ = sys_handle.set_combat_state(ship_id, cs).await;
+            decloaked = decloaked || had_cs_cloak;
+        }
+    }
+
+    if decloaked {
+        let cloak_recorded = ctx.db.with_snapshot(|snap| {
+            crate::services::mobile_deployables::read_deployable_state_snap(snap)
+                .cloak_activated_unix
+                .contains_key(&ship_id)
+        });
+        if cloak_recorded {
+            crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
+        }
+        crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
+            ctx,
+            char_id,
+            "DecloakProximityOrDeactivation",
+            2000.0,
+        );
+    }
+}
+
 pub async fn try_activate_ess_acceleration_gate(
     ctx: &ServerContext,
     char_id: CharacterId,
@@ -744,20 +826,7 @@ pub async fn try_activate_ess_acceleration_gate(
             client_error: None,
         }));
     }
-    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-        if cs.is_cloaked {
-            cs.is_cloaked = false;
-            cs.is_covert_cloak = false;
-            cs.cloak_stabilization_remaining_s = 0.0;
-            let _ = sys_handle.set_combat_state(ship_id, cs).await;
-            crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
-                ctx,
-                char_id,
-                "DecloakProximityOrDeactivation",
-                2000.0,
-            );
-        }
-    }
+    force_decloak_on_ess_gate_activation(ctx, &sys_handle, sys_id, char_id, ship_id).await;
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let ess_pos = balls
         .iter()

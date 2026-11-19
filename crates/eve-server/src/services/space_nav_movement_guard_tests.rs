@@ -2600,3 +2600,163 @@ async fn unsynced_active_fitting_cloak_blocks_intents_and_preserves_covert_warp_
         .expect("active Covert Ops fitting module must override stale is_covert_cloak=false");
     assert!(ok_stale_flag.is_covert_cloaked);
 }
+
+#[tokio::test]
+async fn ess_acceleration_gate_exempts_cloak_for_range_then_decloak_while_other_gates_reject_cloaked_gh_1408() {
+    let ctx = test_ctx();
+    let sys_id = find_system_by_pred(&ctx.sde, |s| {
+        s.solar_system_id < 31_000_000 && s.security_status <= 0.0
+    });
+    let cruiser_tid = find_ship_type_by_group(&ctx.sde, 26);
+    let non_covert_cloak_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| {
+            t.group_id == 330
+                && !t.effect_ids.iter().any(|eid| {
+                    ctx.sde
+                        .effects
+                        .get(eid)
+                        .is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                })
+        })
+        .map(|(tid, _)| *tid)
+        .expect("non-covert cloak type in SDE");
+    let char_id = 91_408_001_i64;
+    let ship_id = 91_408_101_i64;
+    let cloak_mod_id = 91_408_201_i64;
+
+    spawn_test_ship(
+        &ctx,
+        sys_id,
+        char_id,
+        ship_id,
+        cruiser_tid,
+        DVec3::ZERO,
+        10_000_000.0,
+        CombatState {
+            is_cloaked: true,
+            is_covert_cloak: false,
+            gate_cloak_remaining_ticks: 0,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let epoch_0 = ctx.db.state_epoch();
+    let tx_0 = ctx.db.tx_commit_count();
+
+    // ESS acceleration gates permit cloaked ships through pre-check so range, hull restriction, and auto-decloak execute.
+    assert!(ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            MovementIntent::AccelerationGate {
+                sys_id,
+                kind: AccelerationGateKind::EssBank,
+            },
+        )
+        .await
+        .is_ok());
+
+    // All non-ESS acceleration gate kinds still reject active non-gate cloaks with ShipCloaked.
+    for (label, kind) in [
+        ("Generic", AccelerationGateKind::Generic),
+        ("FwComplex", AccelerationGateKind::FwComplex),
+        ("InsurgencyOutpost", AccelerationGateKind::InsurgencyOutpost),
+        ("AnomicBurner", AccelerationGateKind::AnomicBurner),
+        ("Dungeon", AccelerationGateKind::Dungeon),
+        ("DedOrExploration", AccelerationGateKind::DedOrExploration),
+        ("VoidExit", AccelerationGateKind::VoidExit),
+    ] {
+        let err = ctx
+            .validate_ship_movement(
+                char_id,
+                ship_id,
+                MovementIntent::AccelerationGate { sys_id, kind },
+            )
+            .await
+            .expect_err("{label} gate must reject cloaked activation");
+        assert_eq!(err.code, "ShipCloaked", "{label} must return ShipCloaked");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch_0);
+    assert_eq!(ctx.db.tx_commit_count(), tx_0);
+    assert!(sys_h.get_combat_state(ship_id).await.unwrap().unwrap().is_cloaked);
+
+    // Unsynced active fitted cloak in module_active_states follows the exact same ESS exemption + tackle guard.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: non_covert_cloak_tid,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(cloak_mod_id, true);
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    sys_h
+        .set_combat_state(ship_id, CombatState::default())
+        .await
+        .unwrap();
+    assert!(ctx
+        .validate_ship_movement(
+            char_id,
+            ship_id,
+            MovementIntent::AccelerationGate {
+                sys_id,
+                kind: AccelerationGateKind::EssBank,
+            },
+        )
+        .await
+        .is_ok());
+    assert_eq!(
+        ctx.validate_ship_movement(
+            char_id,
+            ship_id,
+            MovementIntent::AccelerationGate {
+                sys_id,
+                kind: AccelerationGateKind::FwComplex,
+            },
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ShipCloaked"
+    );
+
+    // Tackle (WarpScrambled) still blocks ESS gates even when cloaked.
+    sys_h
+        .set_combat_state(
+            ship_id,
+            CombatState {
+                is_cloaked: true,
+                warp_scramble_strength: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.validate_ship_movement(
+            char_id,
+            ship_id,
+            MovementIntent::AccelerationGate {
+                sys_id,
+                kind: AccelerationGateKind::EssBank,
+            },
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "WarpScrambled"
+    );
+}
