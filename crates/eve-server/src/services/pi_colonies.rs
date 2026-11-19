@@ -19,6 +19,43 @@ use std::collections::HashMap;
 
 pub use crate::services::industry_pi::pi_helpers::*;
 
+/// Ensures PI spherical coordinates are finite radians (`[-pi/2, pi/2]` lat, `[-pi, pi]` lon).
+fn validate_pi_radians(lat: f64, lon: f64) -> Result<(), BridgeRpcError> {
+    let half_pi = std::f64::consts::FRAC_PI_2 + 1e-6;
+    let full_pi = std::f64::consts::PI + 1e-6;
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || !(-half_pi..=half_pi).contains(&lat)
+        || !(-full_pi..=full_pi).contains(&lon)
+    {
+        return Err(BridgeRpcError {
+            code: "InvalidPinCoordinates".into(),
+            message: "Pin coordinates must be finite radians".into(),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
+/// Validates extractor head coordinates are finite radians within the ECU's `0.50` rad radius.
+fn validate_extractor_head_coords(
+    pin: &PiPinState,
+    hlat: f64,
+    hlon: f64,
+) -> Result<(), BridgeRpcError> {
+    validate_pi_radians(hlat, hlon)?;
+    // Reject non-finite distances as well so `NaN > 0.50 == false` cannot persist JSON `null` (#1387).
+    let dist = (hlat - pin.latitude).hypot(hlon - pin.longitude);
+    if !dist.is_finite() || dist > 0.50 {
+        return Err(BridgeRpcError {
+            code: "ExtractorHeadOutOfRange".into(),
+            message: "Extractor head exceeds maximum extraction radius from ECU".into(),
+            client_error: None,
+        });
+    }
+    Ok(())
+}
+
 pub fn handle_pi_colonies(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -512,15 +549,7 @@ pub fn handle_pi_colonies(
                                         client_error: None,
                                     });
                                 };
-                                let half_pi = std::f64::consts::FRAC_PI_2 + 1e-6;
-                                let full_pi = std::f64::consts::PI + 1e-6;
-                                if !lat.is_finite() || !lon.is_finite() || !(-half_pi..=half_pi).contains(&lat) || !(-full_pi..=full_pi).contains(&lon) {
-                                    return Err(BridgeRpcError {
-                                        code: "InvalidPinCoordinates".into(),
-                                        message: "Pin coordinates must be finite radians".into(),
-                                        client_error: None,
-                                    });
-                                }
+                                validate_pi_radians(lat, lon)?;
 
                                 if is_command_center_type(ctx, pin_type_id) {
                                     if is_docked {
@@ -1159,13 +1188,13 @@ pub fn handle_pi_colonies(
                                             .filter_map(|(idx, h)| match h {
                                                 PyRep::Tuple(t) | PyRep::List(t) if t.len() >= 3 => Some((
                                                     t[0].as_i64().unwrap_or(idx as i64),
-                                                    t[1].as_f64().unwrap_or(0.0),
-                                                    t[2].as_f64().unwrap_or(0.0),
+                                                    t[1].as_f64().unwrap_or(f64::NAN),
+                                                    t[2].as_f64().unwrap_or(f64::NAN),
                                                 )),
                                                 PyRep::Tuple(t) | PyRep::List(t) if t.len() == 2 => Some((
                                                     idx as i64,
-                                                    t[0].as_f64().unwrap_or(0.0),
-                                                    t[1].as_f64().unwrap_or(0.0),
+                                                    t[0].as_f64().unwrap_or(f64::NAN),
+                                                    t[1].as_f64().unwrap_or(f64::NAN),
                                                 )),
                                                 _ => None,
                                             })
@@ -1202,13 +1231,7 @@ pub fn handle_pi_colonies(
                                 };
                                 if let Some(ref heads) = parsed_heads {
                                     for &(_, hlat, hlon) in heads {
-                                        if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
-                                            return Err(BridgeRpcError {
-                                                code: "ExtractorHeadOutOfRange".into(),
-                                                message: "Extractor head exceeds maximum extraction radius from ECU".into(),
-                                                client_error: None,
-                                            });
-                                        }
+                                        validate_extractor_head_coords(pin, hlat, hlon)?;
                                     }
                                 }
                                 let actual_res_tid = if res_tid > 0 { res_tid } else { 2268 };
@@ -1320,8 +1343,8 @@ pub fn handle_pi_colonies(
                                 let pin_id_raw = extract_pi_pin_id(els.get(1));
                                 let pin_id = client_to_server_pin_id.get(&pin_id_raw).copied().unwrap_or(pin_id_raw);
                                 let head_id = els.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
-                                let hlat = els.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let hlon = els.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let hlat = els.get(3).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
+                                let hlon = els.get(4).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
                                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                                     return Err(BridgeRpcError {
                                         code: "ColonyNotFound".into(),
@@ -1337,13 +1360,7 @@ pub fn handle_pi_colonies(
                                         client_error: None,
                                     });
                                 };
-                                if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
-                                    return Err(BridgeRpcError {
-                                        code: "ExtractorHeadOutOfRange".into(),
-                                        message: "Extractor head exceeds maximum extraction radius from ECU".into(),
-                                        client_error: None,
-                                    });
-                                }
+                                validate_extractor_head_coords(pin, hlat, hlon)?;
                                 if let Some(existing) = pin.extractor_heads.iter_mut().find(|h| h.0 == head_id) {
                                     existing.1 = hlat;
                                     existing.2 = hlon;

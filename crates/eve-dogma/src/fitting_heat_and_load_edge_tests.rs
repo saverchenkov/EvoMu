@@ -467,3 +467,224 @@ fn activate_offline_and_unfit_clear_pending_overload_queue() {
     eng.fit_and_online_module(8001, 7099, 27, &sde).unwrap();
     assert!(!eng.pending_overload_modules.contains(&8001));
 }
+
+#[test]
+fn refit_and_online_rollback_preserves_pending_overload_state() {
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.types.insert(
+        9587,
+        make_test_type(
+            9587,
+            25,
+            6,
+            &[
+                (attr_ids::LOW_SLOTS, 2.0),
+                (attr_ids::MED_SLOTS, 2.0),
+                (attr_ids::HI_SLOTS, 3.0),
+                (attr_ids::CPU_OUTPUT, 100.0),
+                (attr_ids::POWER_OUTPUT, 100.0),
+                (attr_ids::MAX_VELOCITY, 200.0),
+                (2045, 100.0),
+            ],
+            &[],
+        ),
+    );
+
+    let active_eff_id = 9901_u16;
+    let overload_eff_id = 9902_u16;
+    sde.effects.insert(
+        active_eff_id,
+        DogmaEffectType {
+            effect_id: active_eff_id,
+            name: "syntheticActiveSpeedBoost".to_string(),
+            effect_category: 1,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: attr_ids::MAX_VELOCITY,
+                modifying_attribute_id: 9910,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: Some(active_eff_id),
+            }],
+            ..DogmaEffectType::default()
+        },
+    );
+    sde.effects.insert(
+        overload_eff_id,
+        DogmaEffectType {
+            effect_id: overload_eff_id,
+            name: "syntheticOverloadAttrBoost".to_string(),
+            effect_category: 5,
+            modifiers: vec![EffectModifierSpec {
+                domain: "shipID".to_string(),
+                func: "ItemModifier".to_string(),
+                modified_attribute_id: 2045,
+                modifying_attribute_id: 9911,
+                operator: 6,
+                group_id: None,
+                skill_type_id: None,
+                effect_id: Some(overload_eff_id),
+            }],
+            ..DogmaEffectType::default()
+        },
+    );
+
+    let mut base_mod = make_test_type(
+        9601,
+        55,
+        7,
+        &[
+            (attr_ids::CPU, 20.0),
+            (attr_ids::POWER, 20.0),
+            (9910, 50.0),
+            (9911, 50.0),
+        ],
+        &[16, 12, active_eff_id, overload_eff_id],
+    );
+    base_mod.default_effect_id = Some(active_eff_id);
+    sde.types.insert(9601, base_mod);
+
+    sde.types.insert(
+        9602,
+        make_test_type(
+            9602,
+            55,
+            7,
+            &[
+                (attr_ids::CPU, 150.0),
+                (attr_ids::POWER, 10.0),
+                (9910, 50.0),
+                (9911, 50.0),
+            ],
+            &[16, 12, active_eff_id, overload_eff_id],
+        ),
+    );
+    sde.types.insert(
+        9603,
+        make_test_type(
+            9603,
+            55,
+            7,
+            &[
+                (attr_ids::CPU, 10.0),
+                (attr_ids::POWER, 150.0),
+                (9910, 50.0),
+                (9911, 50.0),
+            ],
+            &[16, 12, active_eff_id, overload_eff_id],
+        ),
+    );
+
+    let mut eng = ShipFittingEngine::from_sde(1, 9587, &sde);
+    eng.fit_and_online_module(8101, 9601, 27, &sde).unwrap();
+    let base_vel = eng
+        .evaluated_context(&sde)
+        .ship
+        .get_attribute(attr_ids::MAX_VELOCITY, &sde);
+    let base_overload_attr = eng.evaluated_context(&sde).ship.get_attribute(2045, &sde);
+
+    let queue_pre_overload = |eng: &mut ShipFittingEngine| {
+        eng.modules.get_mut(&8101).unwrap().state = ModuleState::Overloaded;
+        eng.pending_overload_modules.insert(8101);
+        eng.recalculate_stats(&sde);
+    };
+    let assert_pre_overload_intact = |eng: &ShipFittingEngine, label: &str| {
+        assert!(
+            eng.pending_overload_modules.contains(&8101),
+            "{label}: pending_overload_modules lost item"
+        );
+        let m = &eng.modules[&8101];
+        assert_eq!(m.type_id, 9601, "{label}: module type changed on rollback");
+        assert_eq!(
+            m.state,
+            ModuleState::Overloaded,
+            "{label}: module state changed on rollback"
+        );
+        let ctx = eng.evaluated_context(&sde);
+        assert!(
+            (ctx.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) - base_vel).abs() < 1e-6,
+            "{label}: pending overload must keep active speed modifier suppressed"
+        );
+        assert!(
+            (ctx.ship.get_attribute(2045, &sde) - base_overload_attr).abs() < 1e-6,
+            "{label}: pending overload must keep overload modifier suppressed"
+        );
+    };
+
+    queue_pre_overload(&mut eng);
+    assert_pre_overload_intact(&eng, "initial pending overload");
+
+    // fit_module_with_state failing CPU or PG rollback must preserve pending_overload_modules.
+    let cpu_err = eng.fit_module_with_state(8101, 9602, 27, true, &sde).unwrap_err();
+    assert!(cpu_err.contains("Insufficient CPU"), "{cpu_err}");
+    assert_pre_overload_intact(&eng, "fit_module_with_state CPU rollback");
+
+    let pg_err = eng.fit_module_with_state(8101, 9603, 27, true, &sde).unwrap_err();
+    assert!(pg_err.contains("Insufficient Powergrid"), "{pg_err}");
+    assert_pre_overload_intact(&eng, "fit_module_with_state PG rollback");
+
+    // fit_module_with_dynamic_attributes failing CPU or PG rollback must preserve pending_overload_modules.
+    let dyn_cpu_err = eng
+        .fit_module_with_dynamic_attributes(
+            8101,
+            9601,
+            27,
+            true,
+            HashMap::from([(attr_ids::CPU, 150.0)]),
+            &sde,
+        )
+        .unwrap_err();
+    assert!(dyn_cpu_err.contains("Insufficient CPU"), "{dyn_cpu_err}");
+    assert!(eng.modules[&8101].dynamic_attribute_overrides.is_empty());
+    assert_pre_overload_intact(&eng, "dynamic fit CPU rollback");
+
+    let dyn_pg_err = eng
+        .fit_module_with_dynamic_attributes(
+            8101,
+            9601,
+            27,
+            true,
+            HashMap::from([(attr_ids::POWER, 150.0)]),
+            &sde,
+        )
+        .unwrap_err();
+    assert!(dyn_pg_err.contains("Insufficient Powergrid"), "{dyn_pg_err}");
+    assert!(eng.modules[&8101].dynamic_attribute_overrides.is_empty());
+    assert_pre_overload_intact(&eng, "dynamic fit PG rollback");
+
+    // set_module_online failing CPU rollback must preserve pending_overload_modules as well.
+    eng.modules
+        .get_mut(&8101)
+        .unwrap()
+        .dynamic_attribute_overrides
+        .insert(attr_ids::CPU, 150.0);
+    let online_err = eng.set_module_online(8101, &sde).unwrap_err();
+    assert!(online_err.contains("Insufficient CPU"), "{online_err}");
+    eng.modules
+        .get_mut(&8101)
+        .unwrap()
+        .dynamic_attribute_overrides
+        .clear();
+    eng.recalculate_stats(&sde);
+    assert_pre_overload_intact(&eng, "set_module_online CPU rollback");
+
+    // Contrast: actively overloaded module (not pending) stays non-pending on failed re-fit.
+    eng.activate_module(8101, true, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8101));
+    assert!(eng.fit_module_with_state(8101, 9602, 27, true, &sde).is_err());
+    assert!(!eng.pending_overload_modules.contains(&8101));
+    assert_eq!(eng.modules[&8101].state, ModuleState::Overloaded);
+    let ctx_active = eng.evaluated_context(&sde);
+    assert!(
+        (ctx_active.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde) - base_vel * 1.5).abs() < 1e-6
+    );
+    assert!((ctx_active.ship.get_attribute(2045, &sde) - base_overload_attr * 1.5).abs() < 1e-6);
+
+    // Contrast: valid re-fit to Online clears pending overload cleanly.
+    queue_pre_overload(&mut eng);
+    eng.fit_module_with_state(8101, 9601, 27, true, &sde).unwrap();
+    assert!(!eng.pending_overload_modules.contains(&8101));
+    assert_eq!(eng.modules[&8101].state, ModuleState::Online);
+}
