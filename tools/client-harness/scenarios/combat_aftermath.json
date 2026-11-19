@@ -1,0 +1,279 @@
+{
+  "id": "combat_aftermath",
+  "title": "Combat Aftermath Scenario Probe (#1206): Kill NPC, LootAll, Salvager, Platinum Insurance, Self-Destruct, Combat Log, Wallet/Mail, Safe Logoff",
+  "starting_state": {
+    "account": "demo",
+    "password": "demo-secret",
+    "char_id": 90000001,
+    "defer_char_select": false
+  },
+  "steps": [
+    {"id": "setup_skill_3327", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3327 5"}},
+    {"id": "setup_skill_3330", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3330 5"}},
+    {"id": "setup_skill_3300", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3300 5"}},
+    {"id": "setup_skill_3302", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3302 5"}},
+    {"id": "setup_skill_11084", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 11084 5"}},
+    {"id": "setup_skill_25863", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 25863 5"}},
+    {"id": "setup_skill_3318", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3318 5"}},
+    {"id": "setup_skill_3413", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3413 5"}},
+    {"id": "setup_skill_3417", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3417 5"}},
+    {"id": "setup_skill_3418", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3418 5"}},
+    {"id": "setup_skill_3426", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3426 5"}},
+    {"id": "setup_skill_3392", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3392 5"}},
+    {"id": "setup_skill_3393", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3393 5"}},
+    {"id": "setup_skill_3394", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3394 5"}},
+    {"id": "setup_skill_3319", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3319 5"}},
+    {"id": "setup_skill_3416", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3416 5"}},
+    {"id": "setup_skill_3425", "setup": true, "action": {"type": "slash_command", "command": "/giveskill 90000001 3425 5"}},
+    {"id": "setup_give_isk", "setup": true, "action": {"type": "slash_command", "command": "/giveisk 90000001 500000000"}},
+    {"id": "setup_give_merlin", "setup": true, "action": {"type": "slash_command", "command": "/giveitem 90000001 603 1"}},
+    {"id": "setup_give_shuttle", "setup": true, "action": {"type": "slash_command", "command": "/giveitem 90000001 672 1"}},
+    {
+      "id": "open_shiphangar_merlin",
+      "action": {"type": "open_window", "target": "shiphangar"},
+      "checks": {"expect_window_open": "StationShips", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "rclick_merlin",
+      "action": {"type": "click_widget", "target": "ItemEntry_603", "right_click": true, "wait_ms": 800},
+      "checks": {"expect_context_menu_item": "Board Ship", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "board_merlin",
+      "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1200},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "close_shiphangar_merlin",
+      "action": {"type": "close_window", "target": "StationShips", "wait_ms": 500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "setup_fit_gun1", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 2889"}},
+    {"id": "setup_fit_gun2", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 2889"}},
+    {"id": "setup_fit_salvager", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 25861"}},
+    {"id": "setup_fit_gyro", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 519"}},
+    {"id": "setup_fit_sse", "setup": true, "action": {"type": "slash_command", "command": "/fit 90000001 3829"}},
+    {"id": "setup_load_ammo", "setup": true, "action": {"type": "slash_command", "command": "/load 90000001 185 400"}},
+    {
+      "id": "wait_fit_settled",
+      "action": {"type": "wait", "wait_ms": 1000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "undock_for_combat",
+      "action": {"type": "undock", "wait_ms": 3500},
+      "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "stop_after_undock",
+      "action": {"type": "stop", "wait_ms": 500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "setup_spawn_npc", "setup": true, "action": {"type": "slash_command", "command": "/spawnnpc 90000001 16997"}},
+    {"id": "tc_npc_spawn", "time_control": true, "action": {"type": "advance_server_time", "seconds": 2}},
+    {
+      "id": "wait_npc_ball",
+      "action": {"type": "wait", "wait_ms": 1500},
+      "checks": {"expect_ball_present": "Pithi Invader", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "approach_npc",
+      "action": {"type": "approach", "target": "Pithi Invader", "wait_ms": 1000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "lock_npc",
+      "action": {"type": "lock_target", "target": "Pithi Invader", "wait_ms": 4000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "tc_npc_lock", "time_control": true, "action": {"type": "advance_server_time", "seconds": 2}},
+    {
+      "id": "wait_npc_locked",
+      "action": {"type": "wait", "wait_ms": 2000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "fire_gun_1",
+      "action": {"type": "activate_module", "target": "inFlightHighSlot1", "wait_ms": 800},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "fire_gun_2",
+      "action": {"type": "activate_module", "target": "inFlightHighSlot2", "wait_ms": 800},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "tc_combat_1", "time_control": true, "action": {"type": "advance_server_time", "seconds": 6}},
+    {"id": "wait_combat_1", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "tc_combat_2", "time_control": true, "action": {"type": "advance_server_time", "seconds": 6}},
+    {"id": "wait_combat_2", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "tc_combat_3", "time_control": true, "action": {"type": "advance_server_time", "seconds": 6}},
+    {"id": "wait_combat_3", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "tc_combat_4", "time_control": true, "action": {"type": "advance_server_time", "seconds": 6}},
+    {
+      "id": "wait_wreck_spawn",
+      "action": {"type": "wait", "wait_ms": 2500},
+      "checks": {"expect_ball_present": "Guristas Small Wreck", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "approach_wreck",
+      "action": {"type": "approach", "target": "Guristas Small Wreck", "wait_ms": 1200},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "tc_approach_wreck", "time_control": true, "action": {"type": "advance_server_time", "seconds": 3}},
+    {"id": "wait_approach_wreck", "action": {"type": "wait", "wait_ms": 1200}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "stop_at_wreck", "action": {"type": "stop", "wait_ms": 300}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "switch_overview_all",
+      "action": {"type": "click_widget", "target": "OverviewTab_DefaultPreset_639443", "wait_ms": 800},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "select_wreck",
+      "action": {"type": "select_overview", "target": "Guristas Small Wreck", "wait_ms": 1000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_wreck_cargo",
+      "action": {"type": "click_widget", "target": "main/l_main/selecteditemview/content/main/bottomCont/buttonCont/selectedItemOpenCargo", "wait_ms": 1800},
+      "checks": {"expect_window_open": "InventorySpace", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "select_wreck_inv_tree",
+      "action": {"type": "click_widget", "target": "main/l_main/InventorySpace/content/main/dividerCont/mainCont/Container/tree/clipCont/mainCont/ItemWreck", "wait_ms": 1200},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "click_loot_all",
+      "action": {"type": "click_widget", "target": "main/l_main/InventorySpace/content/main/rightCont/bottomRightcont/specialActionsCont/invLootAllBtn", "wait_ms": 1500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "lock_wreck",
+      "action": {"type": "lock_target", "target": "Guristas Small Wreck", "wait_ms": 4000},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "tc_wreck_lock", "time_control": true, "action": {"type": "advance_server_time", "seconds": 2}},
+    {"id": "wait_wreck_locked", "action": {"type": "wait", "wait_ms": 2000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "activate_salvager",
+      "action": {"type": "activate_module", "target": "ModuleButton_25861", "wait_ms": 800},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "wait_salvage_cycle",
+      "action": {"type": "wait", "wait_ms": 12000, "strict_wait": true},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "dock_for_insurance",
+      "action": {"type": "dock", "target": "60003760", "wait_ms": 2500},
+      "checks": {"expect_session_field": "stationid==60003760", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_insurance",
+      "action": {"type": "open_window", "target": "insurance", "wait_ms": 1200},
+      "checks": {"expect_window_open": "insurance", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "select_merlin_insurance",
+      "action": {"type": "click_widget", "target": "Merlin - - - Merlin", "wait_ms": 500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "click_insure_button",
+      "action": {"type": "click_widget", "target": "main/l_main/insurance/content/main/ContainerAutoSize/Button", "wait_ms": 1200},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "accept_insurance_terms_modal",
+      "action": {"type": "click_widget", "target": "modal/l_modal/l_modal_modal/modal/content/main/bottom/ButtonGroup/btns/ButtonWrapper/yes_dialog_button", "wait_ms": 1200},
+      "checks": {"expect_window_open": "InsuranceTermsWindow", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "select_platinum_insurance",
+      "action": {"type": "click_widget", "target": "Platinum Cost", "wait_ms": 500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "confirm_platinum_insurance",
+      "action": {"type": "click_widget", "target": "main/l_main/InsuranceTermsWindow/content/main/mainCont/ButtonGroup/btns/ButtonWrapper/Insure_Btn", "wait_ms": 1200},
+      "checks": {"expect_window_closed": "InsuranceTermsWindow", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "undock_for_self_destruct",
+      "action": {"type": "undock", "wait_ms": 3500},
+      "checks": {"expect_session_field": "stationid==None", "no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "stop_before_sd", "action": {"type": "stop", "wait_ms": 500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "wait_session_change_sd", "action": {"type": "wait", "wait_ms": 16000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "rclick_ship_for_sd",
+      "action": {"type": "click_widget", "target": "capacitorContainer", "right_click": true, "wait_ms": 800},
+      "checks": {"expect_context_menu_item": "Self-Destruct...", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "click_self_destruct",
+      "action": {"type": "click_widget", "target": "context_menu_Self-Destruct...", "wait_ms": 1200},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "confirm_self_destruct",
+      "action": {"type": "click_widget", "target": "modal/l_modal/l_modal_modal/modal/content/main/bottom/ButtonGroup/btns/ButtonWrapper/yes_dialog_button", "wait_ms": 1500},
+      "checks": {"expect_modal_absent": true, "no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "tc_self_destruct_detonate", "time_control": true, "action": {"type": "advance_server_time", "seconds": 125}},
+    {
+      "id": "wait_after_detonate",
+      "action": {"type": "wait", "wait_ms": 3500, "strict_wait": true},
+      "checks": {"expect_ball_present": "Caldari Frigate Wreck", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "dock_in_capsule",
+      "action": {"type": "dock", "target": "60003760", "wait_ms": 3500},
+      "checks": {"expect_session_field": "stationid==60003760", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_charactersheet",
+      "action": {"type": "open_window", "target": "charactersheet", "wait_ms": 1000},
+      "checks": {"expect_window_open": "charactersheet", "no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "open_cs_interactions", "action": {"type": "click_widget", "target": "interactions", "wait_ms": 1000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_cs_combat_log", "action": {"type": "click_widget", "target": "mykills", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "open_combat_log_combo",
+      "action": {"type": "click_widget", "target": "main/l_main/charactersheet/content/main/mainCont/panelCont/InteractionsPanel/panelCont/KillsPanel/combatlogpanel/combo", "wait_ms": 800},
+      "checks": {"expect_context_menu_item": "Show Losses", "no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "select_show_losses",
+      "action": {"type": "click_widget", "target": "menu/l_menu/Container/scroll/maincontainer/__clipper/__content/entry_1", "wait_ms": 1500},
+      "checks": {"no_client_exception": true, "no_error_reply": true}
+    },
+    {
+      "id": "open_kill_report",
+      "action": {"type": "click_widget", "target": "/content/main/mainCont/panelCont/InteractionsPanel/panelCont/KillsPanel/scroll/maincontainer/__clipper/__content/entry_0", "double_click": true, "wait_ms": 1500},
+      "checks": {"expect_window_open": "KillReportWnd", "no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "open_wallet", "action": {"type": "open_window", "target": "wallet", "wait_ms": 1000}, "checks": {"expect_window_open": "walletWindow", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_wallet_personal", "action": {"type": "click_widget", "target": "personal", "wait_ms": 1000}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_wallet_transactions", "action": {"type": "click_widget", "target": "IskPanelTab_transactions", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_mail", "action": {"type": "open_window", "target": "mail", "wait_ms": 1000}, "checks": {"expect_window_open": "mail", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_mail_inbox", "action": {"type": "click_widget", "target": "entry_2", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "wait_session_timer_shuttle", "action": {"type": "wait", "wait_ms": 11000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "open_shiphangar_shuttle", "action": {"type": "open_window", "target": "shiphangar", "wait_ms": 1000}, "checks": {"expect_window_open": "StationShips", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "rclick_shuttle", "action": {"type": "click_widget", "target": "ItemEntry_672", "right_click": true, "wait_ms": 800}, "checks": {"expect_context_menu_item": "Board Ship", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "board_shuttle", "action": {"type": "click_widget", "target": "context_menu_Board Ship", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "wait_session_timer_undock_shuttle", "action": {"type": "wait", "wait_ms": 11000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "undock_shuttle", "action": {"type": "undock", "wait_ms": 3500}, "checks": {"expect_session_field": "!stationid", "no_client_exception": true, "no_error_reply": true}},
+    {"id": "stop_shuttle", "action": {"type": "stop", "wait_ms": 500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "wait_session_timer_safelogoff", "action": {"type": "wait", "wait_ms": 16000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {
+      "id": "rclick_ship_for_safelogoff",
+      "action": {"type": "click_widget", "target": "capacitorContainer", "right_click": true, "wait_ms": 800},
+      "checks": {"expect_context_menu_item": "Log Off Safely", "no_client_exception": true, "no_error_reply": true}
+    },
+    {"id": "click_safe_logoff", "action": {"type": "click_widget", "target": "context_menu_Log Off Safely", "wait_ms": 1500}, "checks": {"no_client_exception": true, "no_error_reply": true}},
+    {"id": "tc_safe_logoff", "time_control": true, "action": {"type": "advance_server_time", "seconds": 35}},
+    {"id": "wait_after_safe_logoff", "action": {"type": "wait", "wait_ms": 4000, "strict_wait": true}, "checks": {"no_client_exception": true, "no_error_reply": true}}
+  ]
+}
