@@ -890,3 +890,60 @@ fn propulsion_matched_undersized_oversized_mwd_and_afterburner() {
     assert!((ab_res.mass - 149_500_000.0).abs() < 1e-9);
     assert!((ab_res.signature_radius - 360.0).abs() < 1e-9);
 }
+
+#[test]
+fn get_module_falloff_applies_dogma_modifiers_and_td_disruption() {
+    use crate::{AttributeModifier, ModifierOperator};
+
+    let mut sde = SdeRegistry::default();
+    sde.types
+        .insert(3041, make_inv_type(3041, 53, "Small Focused Pulse Laser II", &[(attr_ids::FALLOFF, 2500.0)], &[]));
+    sde.types
+        .insert(100, make_inv_type(100, 71, "NeutWith2044", &[(2044, 8000.0), (attr_ids::FALLOFF, 4000.0)], &[]));
+
+    // Skill (+25% Trajectory Analysis) + Tracking Disruptor II (-60% falloff) on base attr 158.
+    let mut turret = make_item(1, 3041, &[(attr_ids::FALLOFF, 2500.0)]);
+    turret.modifiers.push(AttributeModifier {
+        source_item_id: 3312,
+        effect_id: None,
+        target_attribute_id: attr_ids::FALLOFF,
+        operator: ModifierOperator::PostPercent,
+        value: 25.0,
+        stacking_penalized: false,
+    });
+    assert!((get_module_falloff(&turret, &sde) - 3125.0).abs() < 1e-9);
+
+    turret.modifiers.push(AttributeModifier {
+        source_item_id: 9001,
+        effect_id: Some(6424),
+        target_attribute_id: attr_ids::FALLOFF,
+        operator: ModifierOperator::PostPercent,
+        value: -60.0,
+        stacking_penalized: true,
+    });
+    assert!((get_module_falloff(&turret, &sde) - 1250.0).abs() < 1e-9);
+
+    // Default-attribute-only item (attr 158 only in sde type) also evaluates TD modifiers.
+    let mut default_only_turret = make_item(2, 3041, &[]);
+    default_only_turret.modifiers.push(AttributeModifier {
+        source_item_id: 9002,
+        effect_id: Some(6424),
+        target_attribute_id: attr_ids::FALLOFF,
+        operator: ModifierOperator::PostPercent,
+        value: -50.0,
+        stacking_penalized: true,
+    });
+    assert!((get_module_falloff(&default_only_turret, &sde) - 1250.0).abs() < 1e-9);
+
+    // Attr 2044 fallback evaluates modifiers targeting 2044 as well.
+    let mut neut = make_item(3, 100, &[]);
+    neut.modifiers.push(AttributeModifier {
+        source_item_id: 9003,
+        effect_id: None,
+        target_attribute_id: 2044,
+        operator: ModifierOperator::PostPercent,
+        value: -25.0,
+        stacking_penalized: false,
+    });
+    assert!((get_module_falloff(&neut, &sde) - 6000.0).abs() < 1e-9);
+}
