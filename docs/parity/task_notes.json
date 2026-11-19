@@ -288,8 +288,8 @@
     "note": "Binary AddBalls/AddBalls2/SetState encoder and decoder matching DestinyStructs.h byte layouts, SlimItemMeta from SDE/DB, and DoDestinyUpdate notification push on space actions and ticks."
   },
   "PVE-1": {
-    "assessment": "NOT STARTED",
-    "note": "Active (#1395, 1 track): deterministic wiki NPC/mission table importer under tools/ writing only gitignored data/ output and resolution report (>=90% resolved); hand-written test fixtures only."
+    "assessment": "PARTIAL",
+    "note": "Landed in b53ce3e65 (#1395): tools/import_wiki_pve.py + 17 passing unit tests in tools/tests/test_import_wiki_pve.py (dual >=85%/90% floors); awaiting parity_status Python-test or Rust hook closure."
   },
   "PVE-2": {
     "assessment": "NOT STARTED",
