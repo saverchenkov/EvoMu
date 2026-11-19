@@ -534,19 +534,16 @@ fn resolve_warp_target_readonly(
     (resolved_pos, unscanned_blocked, pve_seeded, mining_seeded)
 }
 
-fn unseeded_pve_signature_specs(
+pub(crate) fn unseeded_pve_signature_specs(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
 ) -> Vec<(u32, String)> {
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
+        return Vec::new();
+    };
     let (wh_class, _, is_shattered, _) =
         crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, sys_id);
-    if (14..=18).contains(&wh_class)
-        || ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .is_some_and(|s| s.region_id == 10_000_070)
-    {
+    if (14..=18).contains(&wh_class) || sys.region_id == 10_000_070 {
         return Vec::new();
     }
     if wh_class == 13 || ((1..=6).contains(&wh_class) && is_shattered) {

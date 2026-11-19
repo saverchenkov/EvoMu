@@ -164,13 +164,16 @@ async fn ensure_seeded_covers_all_factions_special_wh_unknown_sys_and_preexistin
     db.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_200_000)));
     let ctx = ServerContext::with_sde_and_repository(sde.clone(), db);
 
-    // Pick one K-space system for each of the 5 pirate factions
+    // Pick one K-space non-Pochven system for each of the 5 pirate factions deterministically
+    let mut kspace_systems: Vec<_> = sde
+        .solar_systems
+        .values()
+        .filter(|sys| sys.solar_system_id < 30_100_000 && sys.region_id != 10_000_070)
+        .collect();
+    kspace_systems.sort_by_key(|sys| sys.solar_system_id);
     let mut faction_systems = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for sys in sde.solar_systems.values() {
-        if sys.solar_system_id >= 30_100_000 {
-            continue;
-        }
+    for sys in kspace_systems {
         let fac = pirate_faction_for_system(&sde, sys.solar_system_id);
         let key = format!("{fac:?}");
         if seen.insert(key) {

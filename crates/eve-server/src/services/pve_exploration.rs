@@ -1070,20 +1070,47 @@ fn require_undocked_exploration_space(
     Ok((char_id, sys_id))
 }
 
-fn is_naturally_seedable_pve_site_id(sys_id: SolarSystemId, site_id: &str) -> bool {
-    site_id.starts_with(&format!("PVE-ANOM-{sys_id}-"))
-        || site_id.starts_with(&format!("DED-{sys_id}-"))
-        || site_id == format!("DSG-{sys_id}")
-        || site_id == format!("DAT-{sys_id}")
-        || site_id == format!("REL-{sys_id}")
-        || site_id == format!("GHO-{sys_id}")
-        || site_id == format!("SLC-{sys_id}")
-        || site_id == format!("PVE-POCHVEN-HIVE-{sys_id}")
+fn is_naturally_seedable_pve_site_id(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    site_id: &str,
+) -> bool {
+    if !ctx.sde.solar_systems.contains_key(&sys_id) {
+        return false;
+    }
+    crate::services::pve_dungeon_cache::unseeded_combat_anomaly_specs(ctx, sys_id)
+        .iter()
+        .any(|spec| spec.site_id == site_id)
+        || crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
+            .iter()
+            .any(|(_, sig_id)| sig_id == site_id)
 }
 
-fn is_naturally_seedable_ded_gate_ball(sys_id: SolarSystemId, item_id: i64) -> bool {
-    item_id > 1_864_000_000
-        && (item_id - 1_864_000_000) / 10 == i64::from(sys_id % 100_000)
+fn is_naturally_seedable_ded_gate_ball(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    item_id: i64,
+) -> bool {
+    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
+        return false;
+    };
+    if !ctx.sde.types.values().any(|t| t.group_id == 366) {
+        return false;
+    }
+    let default_ded_rating: u8 = if sys.security_status >= 0.5 {
+        3
+    } else if sys.security_status > 0.0 {
+        5
+    } else {
+        10
+    };
+    let expected_sig_id = format!("DED-{sys_id}-{default_ded_rating}");
+    let expected_ball_id =
+        1_864_000_000 + i64::from(sys_id % 100_000) * 10 + i64::from(default_ded_rating);
+    item_id == expected_ball_id
+        && crate::services::pve_dungeon_cache::unseeded_pve_signature_specs(ctx, sys_id)
+            .iter()
+            .any(|(_, sig_id)| sig_id == &expected_sig_id)
 }
 
 fn is_naturally_seedable_incursion_site(
@@ -1101,13 +1128,6 @@ fn is_naturally_seedable_incursion_site(
     };
     let eligible = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(ctx);
     if !eligible.into_iter().take(3).any(|(cid, _)| cid == const_id) {
-        return false;
-    }
-    let middle_matches = site_id
-        .strip_prefix("INC-")
-        .and_then(|r| r.split_once('-'))
-        .is_some_and(|(mid, _)| mid.parse::<u32>().map_or(true, |cid| cid == const_id));
-    if !middle_matches {
         return false;
     }
     let mut sys_list: Vec<SolarSystemId> = ctx
@@ -1140,13 +1160,8 @@ fn is_naturally_seedable_incursion_site(
     ]
     .into_iter()
     .any(|(expected_sys, did)| {
-        if expected_sys != sys_id {
-            return false;
-        }
-        let canonical = format!("INC-{const_id}-{did}");
-        canonical == site_id
-            || canonical.ends_with(site_id)
-            || site_id.ends_with(&format!("-{did}"))
+        expected_sys == sys_id
+            && (site_id == format!("INC-{const_id}-{did}") || site_id == format!("INC-{did}"))
     })
 }
 
@@ -1451,7 +1466,7 @@ async fn handle_enter_combat_anomaly(
         )
     });
     if !site_exists {
-        if !already_seeded && is_naturally_seedable_pve_site_id(sys_id, &site_id) {
+        if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {
@@ -1550,7 +1565,7 @@ async fn handle_activate_acceleration_gate(
         if gate_site.is_none()
             && !already_seeded
             && session.ship_id.is_some()
-            && is_naturally_seedable_ded_gate_ball(sys_id, item_id)
+            && is_naturally_seedable_ded_gate_ball(ctx, sys_id, item_id)
         {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             gate_site = read_pve_exploration_reg(ctx, |reg| {
@@ -1679,7 +1694,7 @@ async fn handle_activate_acceleration_gate(
         )
     });
     if !site_exists {
-        if !already_seeded && is_naturally_seedable_pve_site_id(sys_id, &site_id) {
+        if !already_seeded && is_naturally_seedable_pve_site_id(ctx, sys_id, &site_id) {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
         }
         let exists_after = read_pve_exploration_reg(ctx, |reg| {

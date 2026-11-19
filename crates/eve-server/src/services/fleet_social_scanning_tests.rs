@@ -1050,8 +1050,9 @@ async fn scan_mgr_launch_probes_request_scans_and_dispatch_cone_scan_guards() {
     assert_eq!(ctx.db.tx_commit_count(), c1);
 
     // Real dispatch_rpc unbound RequestScans: docked -> NotInSpace; shipless -> NoActiveShip.
-    // Note: pre-existing mining_sites::handle intercepts RequestScans at dispatch.rs:1702 to call
-    // seed_system_mining_sites_from_sde once per system; verify repeat docked & shipless calls stay read-pure afterward.
+    // Note: `services::mining_sites::handle` in `crates/eve-server/src/router/dispatch.rs`
+    // intercepts RequestScans ahead of space_probe_scanning to call seed_system_mining_sites_from_sde once per system;
+    // verify repeat docked & shipless calls stay read-pure afterward.
     let scan_args = [PyRep::Real(4.0 * 149_597_870_700.0), PyRep::Real(40.0)];
     let err = ctx
         .dispatch_rpc(&mut docked, svc_scan_mgr, None, m_request_scans, &scan_args, &kw, None)

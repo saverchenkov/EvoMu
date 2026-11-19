@@ -280,7 +280,7 @@ async fn agency_get_content_data_is_read_pure_and_warp_error_paths_do_not_seed_d
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn r2_review_unseeded_wh_alignment_and_signature_warp_purity() {
+async fn unseeded_wh_alignment_and_signature_warp_purity() {
     use crate::services::mining_sites::{resolve_gas_site, resolve_ore_site, SiteKind, COSMIC_ORE_SITES, GAS_SITES};
     use crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde;
 
