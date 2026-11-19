@@ -4653,6 +4653,71 @@ class TestDirectionalScannerOpenAndVisibility(unittest.TestCase):
                 self.assertIn("in space", res_docked.get("error", ""))
                 self.assertEqual(len(cmd_calls), calls_before_dock)
 
+    def test_dock_skips_warp_when_client_already_docked_during_warp_settle(self):
+        """Regression test for #1421: background CmdDock completing during _wait_warp_fx_settled must not call CmdWarpToStuff."""
+        hook = _load_hook_with_py2_stubs()
+        warp_calls = []
+        dock_calls = []
+        fake_sess = types.SimpleNamespace(
+            solarsystemid=30000144,
+            solarsystemid2=30000144,
+            stationid=None,
+            structureid=None,
+            shipid=1897928255,
+            mutating=0,
+            changing=None,
+        )
+
+        class FakeBallpark:
+            slimItems = {60006880: types.SimpleNamespace(categoryID=3)}
+
+            def GetBall(self, bid):
+                if fake_sess.stationid is not None:
+                    return None
+                if bid == 1897928255:
+                    return types.SimpleNamespace(mode=3)
+                return None
+
+        fake_bp = FakeBallpark()
+        fake_michelle = types.SimpleNamespace(GetBallpark=lambda: fake_bp)
+        fake_beyonce = types.SimpleNamespace(
+            CmdWarpToStuff=lambda *args: warp_calls.append(args),
+        )
+        fake_sm = mock.Mock()
+        fake_sm.IsServiceRunning.return_value = False
+        fake_sm.services = {"michelle": fake_michelle}
+        fake_sm.GetService.side_effect = lambda name: {
+            "michelle": fake_michelle,
+            "viewState": types.SimpleNamespace(secondaryInfo=None),
+        }.get(name)
+        fake_sm.RemoteSvc.side_effect = lambda name: {
+            "timeControl": types.SimpleNamespace(ClearSessionTimer=lambda: None, AdvanceClock=lambda _s: None),
+            "stationSvc": types.SimpleNamespace(Dock=lambda sid: dock_calls.append(sid)),
+        }[name]
+        fake_es = types.SimpleNamespace(_EXC_SEQ=0, _RECENT_EXCEPTIONS=[], _PT_CONSUMED_EXC_SEQ=0, _REPORTED_LOG_EXC_SIGS=set())
+
+        def _finish_bg_dock(*args, **kwargs):
+            # Simulate client background CmdDock completing right as warp ends
+            fake_sess.stationid = 60006880
+            fake_sess.solarsystemid = None
+
+        with mock.patch.dict(sys.modules, {"evomu_site": fake_es}), \
+             mock.patch.object(builtins, "session", fake_sess, create=True), \
+             mock.patch.object(hook, "_install_flight_recorder_hooks"), \
+             mock.patch.object(hook, "_install_warp_telemetry"), \
+             mock.patch.object(hook, "_get_state_snapshot", return_value={"open_windows": [], "modals": [], "ui": {}, "space": {}, "skills_state": {}, "wallet_state": {}, "active_view": "hangar"}), \
+             mock.patch.object(hook.H, "_get_beyonce", return_value=fake_beyonce, create=True), \
+             mock.patch.object(hook.H, "_wait_warp_fx_settled", side_effect=_finish_bg_dock, create=True), \
+             mock.patch.object(hook.H, "_wait_view_settled", create=True), \
+             mock.patch.object(hook.H, "_ensure_view", create=True), \
+             mock.patch.object(hook.H, "_sleep_ms", create=True), \
+             mock.patch.object(hook.H, "_sleep_sim_ms", create=True):
+            res = hook._execute_action(fake_sm, {"type": "dock", "target": "60006880"})
+
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(warp_calls, [])
+        self.assertEqual(dock_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()
