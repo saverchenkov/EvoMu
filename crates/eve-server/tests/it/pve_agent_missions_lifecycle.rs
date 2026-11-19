@@ -246,11 +246,16 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     let journal = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None).await.expect("GetMyJournalDetails");
     let PyRep::Tuple(j_sections) = journal else { panic!() };
     let PyRep::List(active_missions) = &j_sections[0] else { panic!() };
-    let j_entry = active_missions.iter().find(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)).expect("Mission must be present in journal");
-    assert_eq!(j_entry.dict_get("state").and_then(|v| v.as_str()), Some("Accepted"));
-    assert_eq!(j_entry.dict_get("missionState").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(j_entry.dict_get("level").and_then(|v| v.as_i64()), Some(1));
-    if let Some(PyRep::List(bms)) = j_entry.dict_get("bookmarks") {
+    let PyRep::Tuple(j_entry) = active_missions
+        .iter()
+        .find(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mission_id as i64)))
+        .expect("Mission must be present in journal")
+    else {
+        panic!("Expected V24 10-tuple in GetMyJournalDetails");
+    };
+    assert_eq!(j_entry.len(), 10);
+    assert_eq!(j_entry[0].as_i64(), Some(2));
+    if let PyRep::List(bms) = &j_entry[6] {
         assert!(bms.iter().any(|b| b.dict_get("bookmarkID").and_then(|v| v.as_i64()) == Some(bookmark_id)));
     } else {
         panic!("Expected bookmarks list in journal entry");
@@ -318,7 +323,7 @@ async fn test_pve_mission_lifecycle_accept_tracker_complete_journal() {
     let post_journal = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None).await.expect("GetMyJournalDetails after completion");
     let PyRep::Tuple(post_tuple) = post_journal else { panic!() };
     let PyRep::List(post_missions) = &post_tuple[0] else { panic!() };
-    assert!(!post_missions.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)));
+    assert!(!post_missions.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mission_id as i64))));
 }
 
 #[tokio::test]
@@ -454,7 +459,7 @@ async fn test_pve_mission_decline_quit_and_expiration() {
     let j_exp = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None).await.expect("Journal sweep");
     let PyRep::Tuple(je_tup) = j_exp else { panic!() };
     let PyRep::List(je_list) = &je_tup[0] else { panic!() };
-    assert!(!je_list.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mid_4 as i64)));
+    assert!(!je_list.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mid_4 as i64))));
     assert_eq!(ctx.db.with_snapshot(|snap| snap.active_missions[&(char_id, mid_4)].state.clone()), "Expired");
 
     // 3b. Accepted mission deadline expiration
@@ -598,9 +603,13 @@ async fn test_live_plan_e5_agent_missions_end_to_end() {
     crate::common::slash_cmd(&ctx, &mut sess, "/giveskill 3355 5").await;
 
     let obj_skilled = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(sec_oid), "GetMissionObjectiveInfo", &[], &kw, None).await.expect("GetMissionObjectiveInfo skilled");
-    let skilled_isk = obj_skilled.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap();
-    let skilled_lp = obj_skilled.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
-    let skilled_bonus = obj_skilled.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap();
+    let Some(PyRep::List(norm_rw)) = obj_skilled.dict_get("normalRewards") else { panic!("expected normalRewards") };
+    let PyRep::Tuple(norm_tup) = &norm_rw[0] else { panic!("expected normalRewards tuple") };
+    let skilled_isk = norm_tup[1].as_i64().unwrap();
+    let skilled_lp = obj_skilled.dict_get("loyaltyPoints").and_then(|v| v.as_i64()).unwrap();
+    let Some(PyRep::List(bon_rw)) = obj_skilled.dict_get("bonusRewards") else { panic!("expected bonusRewards") };
+    let PyRep::Tuple(bon_tup) = &bon_rw[0] else { panic!("expected bonusRewards tuple") };
+    let skilled_bonus = bon_tup[2].as_i64().unwrap();
     assert_eq!(skilled_isk, ((base_isk as f64) * 1.25).round() as i64, "Negotiation V must give +25% ISK");
     assert_eq!(skilled_bonus, ((base_bonus as f64) * 1.25).round() as i64, "Negotiation V must give +25% bonus ISK");
     assert!(skilled_lp > base_lp, "Connections V must increase LP reward");
@@ -1074,7 +1083,7 @@ async fn test_mission_complete_lp_isk_formula_and_plan_e5_end_to_end() {
         .dispatch_rpc(&mut sess, "agentMgr", Some(lo_oid), "GetMissionObjectiveInfo", &[PyRep::Integer(lowsec_l1.agent_id), PyRep::Integer(13_514)], &kw, None)
         .await
         .expect("GetMissionObjectiveInfo expired");
-    assert_eq!(obj_exp.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+    assert_eq!(obj_exp.dict_get("bonusRewards"), Some(&PyRep::List(Vec::new())));
 
     let bal_before_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.raw_cents());
     let lp_before_pat = ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&lowsec_l1.corporation_id).copied().unwrap_or(0));

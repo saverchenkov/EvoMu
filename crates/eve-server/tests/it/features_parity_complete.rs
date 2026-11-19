@@ -4646,7 +4646,7 @@ async fn test_plan_e5_agent_finder_and_conversation_lifecycle() {
     let journal = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &empty_kw, None).await.expect("GetMyJournalDetails");
     let PyRep::Tuple(j_tup) = journal else { panic!() };
     let PyRep::List(j_list) = &j_tup[0] else { panic!() };
-    assert!(j_list.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64)));
+    assert!(j_list.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.get(9).and_then(|v| v.as_i64()) == Some(mission_id as i64))));
 
     // 5. Decline mission without penalty on first decline
     let dec_res = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(agent_oid), "DoAction", &[PyRep::Integer(9)], &empty_kw, None).await.expect("DoAction(Decline)");

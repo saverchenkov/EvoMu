@@ -1580,7 +1580,7 @@ async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
     let journal_res = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None).await.expect("GetMyJournalDetails");
     let PyRep::Tuple(journal_tuple) = journal_res else { panic!("Expected Tuple") };
     let PyRep::List(journal_missions) = &journal_tuple[0] else { panic!("Expected List") };
-    assert!(journal_missions.iter().any(|m| m.dict_get("missionID").and_then(|v| v.as_i64()) == Some(mission_id as i64) && m.dict_get("missionState").and_then(|v| v.as_i64()) == Some(2)));
+    assert!(journal_missions.iter().any(|m| matches!(m, PyRep::Tuple(t) if t.len() == 10 && t[9].as_i64() == Some(mission_id as i64) && t[0].as_i64() == Some(2))));
 
     let pocket_ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
     let handle = ctx.systems.get_or_spawn(system_id);

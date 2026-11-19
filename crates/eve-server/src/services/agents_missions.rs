@@ -140,7 +140,7 @@ fn classify_mission_archetype(
     let is_rnd_turnin = agent.is_some_and(is_rnd_agent)
         && meta.is_none_or(|mt| mt.destination_station_id.is_none());
     let is_heraldry = ct.contains("Heraldry");
-    let is_trade = !is_data_center && ct.contains("Trade");
+    let is_trade = !is_data_center && !is_rnd_turnin && ct.contains("Trade");
     let has_courier_signal = tmpl.is_some_and(|t| t.is_courier)
         || ct.contains("Courier")
         || meta.is_some_and(|mt| mt.destination_station_id.is_some());
@@ -251,7 +251,7 @@ fn build_mission_briefing_text(
             let qty = meta
                 .map(|mt| mt.required_delivery_qty)
                 .filter(|&q| q > 0)
-                .unwrap_or(100);
+                .unwrap_or_else(|| rnd_tritanium_required_qty(agent_opt.map_or(1, |a| a.level)));
             let item = item_label(tid, "research material");
             format!(
                 "Research assignment \"{title}\" for {issuer}: supply {qty}x {item} to {dropoff} in {origin_sys_name} for active R&D work."
@@ -599,16 +599,30 @@ pub async fn handle_with_bound(
                         let st = snap.active_missions.get(&(char_id, mid)).map(|m| m.state.clone()).unwrap_or_default();
                         if st == "Offered" && meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix
                         {
-                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
-                                m.state = "Expired".into();
+                            let expired_bmid = snap
+                                .active_missions
+                                .get_mut(&(char_id, mid))
+                                .and_then(|m| {
+                                    m.state = "Expired".into();
+                                    m.bookmark_id.take()
+                                });
+                            if let Some(bmid) = expired_bmid {
+                                snap.bookmarks.remove(&bmid);
                             }
                             reclaim_courier_cargo(snap, char_id, mid);
                         } else if st == "Accepted"
                             && meta.accept_expiry_unix.is_some_and(|exp| exp > 0 && now > exp)
                         {
-                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
-                                m.state = "Failed".into();
-                                m.npcs_remaining = 0;
+                            let failed_bmid = snap
+                                .active_missions
+                                .get_mut(&(char_id, mid))
+                                .and_then(|m| {
+                                    m.state = "Failed".into();
+                                    m.npcs_remaining = 0;
+                                    m.bookmark_id.take()
+                                });
+                            if let Some(bmid) = failed_bmid {
+                                snap.bookmarks.remove(&bmid);
                             }
                             reclaim_courier_cargo(snap, char_id, mid);
                         }
@@ -618,10 +632,7 @@ pub async fn handle_with_bound(
                 let active_mission_bms: Vec<(u32, i64)> = snap
                     .active_missions
                     .values()
-                    .filter(|om| {
-                        om.character_id == char_id
-                            && matches!(om.state.as_str(), "Offered" | "Accepted")
-                    })
+                    .filter(|om| om.character_id == char_id)
                     .filter_map(|om| om.bookmark_id.map(|bid| (om.mission_id, bid)))
                     .collect();
                 let mut active: Vec<ActiveMissionRecord> = snap.active_missions.values().filter(|m| {
@@ -708,7 +719,12 @@ pub async fn handle_with_bound(
                                     .unwrap_or(5_i64);
                                 let is_deadspace_bm =
                                     i64::from(bm_loc_type == "dungeon" && b.item_id.is_none());
-                                PyRep::keyval([
+                                let bm_sys = if b.solar_system_id > 0 {
+                                    b.solar_system_id
+                                } else {
+                                    m.solar_system_id
+                                };
+                                let mut bm_fields = vec![
                                     ("bookmarkID", PyRep::Integer(b.bookmark_id)),
                                     ("agentID", PyRep::Integer(m.agent_id)),
                                     ("creatorID", PyRep::None),
@@ -716,9 +732,13 @@ pub async fn handle_with_bound(
                                     ("expiry", PyRep::None),
                                     ("deadspace", PyRep::Integer(is_deadspace_bm)),
                                     ("note", PyRep::String(String::new())),
-                                    ("solarSystemID", PyRep::Integer(b.solar_system_id as i64)),
-                                    ("solarsystemID", PyRep::Integer(b.solar_system_id as i64)),
-                                    ("locationID", PyRep::Integer(b.solar_system_id as i64)),
+                                ];
+                                if bm_sys > 0 {
+                                    bm_fields.push(("solarSystemID", PyRep::Integer(bm_sys as i64)));
+                                    bm_fields.push(("solarsystemID", PyRep::Integer(bm_sys as i64)));
+                                    bm_fields.push(("locationID", PyRep::Integer(bm_sys as i64)));
+                                }
+                                bm_fields.extend([
                                     ("locationNumber", PyRep::Integer(idx as i64)),
                                     ("locationType", PyRep::String(bm_loc_type.into())),
                                     (
@@ -731,27 +751,26 @@ pub async fn handle_with_bound(
                                     ("x", PyRep::Real(b.x)),
                                     ("y", PyRep::Real(b.y)),
                                     ("z", PyRep::Real(b.z)),
-                                ])
+                                ]);
+                                PyRep::keyval(bm_fields)
                             })
                             .collect();
-                        let offer_lvl = meta
-                            .as_ref()
-                            .and_then(|mt| mt.offered_level)
-                            .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
-                            .unwrap_or(1);
-                        PyRep::keyval([
-                            ("missionID", PyRep::Integer(m.mission_id as i64)),
-                            ("contentID", PyRep::Integer(m.mission_id as i64)),
-                            ("agentID", PyRep::Integer(m.agent_id)),
-                            ("solarSystemID", PyRep::Integer(m.solar_system_id as i64)),
-                            ("level", PyRep::Integer(offer_lvl as i64)),
-                            ("state", PyRep::String(m.state)),
-                            ("missionState", PyRep::Integer(mission_state)),
-                            ("importantMission", PyRep::Bool(important)),
-                            ("missionNameID", PyRep::String(title.clone())),
-                            ("title", PyRep::String(title)),
-                            ("expirationTime", PyRep::Integer(exp_unix as i64)),
-                            ("bookmarks", PyRep::List(bms)),
+                        let exp_rep = if exp_unix > 0 {
+                            agents_standings_arcs::unix_to_filetime_rep(exp_unix)
+                        } else {
+                            PyRep::None
+                        };
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(mission_state),
+                            PyRep::Bool(important),
+                            PyRep::String(bm_hint.into()),
+                            PyRep::String(title),
+                            PyRep::Integer(m.agent_id),
+                            exp_rep,
+                            PyRep::List(bms),
+                            PyRep::Bool(false),
+                            PyRep::Bool(false),
+                            PyRep::Integer(m.mission_id as i64),
                         ])
                     })
                     .collect::<Vec<PyRep>>();
@@ -790,7 +809,24 @@ pub async fn handle_with_bound(
                 resolve_target_agent_id_with_bound(ctx, session, bound_entry, char_id, sys_id, args, _kwargs);
             let lookup_agent_id = if explicit_agent { agent_id } else { 0 };
             let mission_id =
-                match resolve_target_mission_id(ctx, char_id, lookup_agent_id, None, args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                match resolve_target_mission_id(ctx, char_id, lookup_agent_id, None, args, _kwargs) {
+                    Ok(v) => v,
+                    Err(ref e) if e.code == "MissionNotActive" && method == "GetMissionObjectiveInfo" => {
+                        return Some(Ok(PyRep::None));
+                    }
+                    Err(e) => return Some(Err(e)),
+                };
+            let not_active_reply = |msg: String| {
+                if method == "GetMissionObjectiveInfo" {
+                    Ok(PyRep::None)
+                } else {
+                    Err(BridgeRpcError {
+                        code: "MissionNotActive".into(),
+                        message: msg,
+                        client_error: None,
+                    })
+                }
+            };
             let Some((m, meta, bm_coords)) = ctx.db.with_snapshot(|snap| {
                 snap.active_missions.get(&(char_id, mission_id)).cloned().map(|m| {
                     let meta = load_mission_meta(snap, char_id, mission_id);
@@ -802,7 +838,9 @@ pub async fn handle_with_bound(
                     (m, meta, bm_coords)
                 })
             }) else {
-                return Some(Err(BridgeRpcError { code: "MissionNotActive".into(), message: format!("Mission {mission_id} is not active for character {char_id}"), client_error: None }));
+                return Some(not_active_reply(format!(
+                    "Mission {mission_id} is not active for character {char_id}"
+                )));
             };
             let has_explicit_mission_id = args.get(1).and_then(|a| a.as_i64()).is_some()
                 || args.first().and_then(|a| a.as_i64()).is_some_and(|v| {
@@ -819,25 +857,17 @@ pub async fn handle_with_bound(
                 if (explicit_agent && m.agent_id != agent_id)
                     || !matches!(m.state.as_str(), "Offered" | "Accepted")
                 {
-                    return Some(Err(BridgeRpcError {
-                        code: "MissionNotActive".into(),
-                        message: format!(
-                            "No active Offered/Accepted mission for character {char_id} with agent {agent_id}"
-                        ),
-                        client_error: None,
-                    }));
+                    return Some(not_active_reply(format!(
+                        "No active Offered/Accepted mission for character {char_id} with agent {agent_id}"
+                    )));
                 }
                 if m.state == "Offered" {
                     if let Some(ref agent_info) = ctx.sde.agents.get(&m.agent_id).cloned() {
                         if !is_agent_colocated(ctx, session, sys_id, agent_info).await {
-                            return Some(Err(BridgeRpcError {
-                                code: "MissionNotActive".into(),
-                                message: format!(
-                                    "Offered mission {mission_id} with agent {} is not accessible remotely",
-                                    m.agent_id
-                                ),
-                                client_error: None,
-                            }));
+                            return Some(not_active_reply(format!(
+                                "Offered mission {mission_id} with agent {} is not accessible remotely",
+                                m.agent_id
+                            )));
                         }
                     }
                 }
@@ -874,10 +904,11 @@ pub async fn handle_with_bound(
                     || ct.contains("BasicMining")
                     || ct.contains("Mining")
                     || ctx.sde.agents.get(&m.agent_id).is_some_and(|a| a.division_id == 23));
+            let agent_lvl = ctx.sde.agents.get(&m.agent_id).map_or(1, |a| a.level);
             let objectives = if is_rnd_turnin {
                 let item_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(34);
                 let item_name = ctx.sde.types.get(&item_tid).map(|t| t.name.as_str()).unwrap_or("Tritanium");
-                let qty = if req_qty > 0 { req_qty } else { 1 };
+                let qty = if req_qty > 0 { req_qty } else { i64::from(rnd_tritanium_required_qty(agent_lvl)) };
                 format!("Deliver {qty} units of {item_name} to agent station hangar.")
             } else if is_data_center {
                 let tag_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(17202);
@@ -964,7 +995,7 @@ pub async fn handle_with_bound(
                     || dest_sid_opt.is_some_and(|sid| sid == loc_id);
                 let lsys = st_opt
                     .map(|st| st.solar_system_id as i64)
-                    .unwrap_or(m.solar_system_id as i64);
+                    .unwrap_or_else(|| if m.solar_system_id > 0 { m.solar_system_id as i64 } else { sys_id as i64 });
                 let (station_rep, ltid) = if is_station_loc {
                     (
                         PyRep::Integer(loc_id),
@@ -1013,9 +1044,11 @@ pub async fn handle_with_bound(
                     (PyRep::String("locationType".into()), PyRep::String("dungeon".into())),
                 ])
             });
-            let mut locations = vec![make_loc(origin_loc_id, "agenthomebase")];
-            if let Some(dsid) = dest_sid_opt {
-                locations.push(make_loc(dsid, "objective.destination"));
+            let origin_loc = make_loc(origin_loc_id, "agenthomebase");
+            let dest_loc_opt = dest_sid_opt.map(|dsid| make_loc(dsid, "objective.destination"));
+            let mut locations = vec![origin_loc.clone()];
+            if let Some(ref dloc) = dest_loc_opt {
+                locations.push(dloc.clone());
             }
             if let Some(ref dloc) = dungeon_loc {
                 locations.push(dloc.clone());
@@ -1134,6 +1167,150 @@ pub async fn handle_with_bound(
             } else {
                 Vec::new()
             };
+            let bonus_rewards_rep = {
+                let rem_secs = bonus_expiry_unix
+                    .map(|bexp| bexp.saturating_sub(now))
+                    .unwrap_or(bonus_window_secs);
+                let window_mins = ((bonus_window_secs + 59) / 60).max(1) as i64;
+                if bonus_reward > 0 {
+                    PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(rem_secs.saturating_mul(10_000_000) as i64),
+                        PyRep::Integer(29), // const.typeCredits
+                        PyRep::Integer(bonus_reward),
+                        PyRep::None,
+                        PyRep::Integer(window_mins),
+                    ])])
+                } else {
+                    PyRep::List(Vec::new())
+                }
+            };
+            if method == "GetMissionObjectiveInfo" {
+                let mut v24_objectives = vec![PyRep::Tuple(vec![
+                    PyRep::String("agent".into()),
+                    PyRep::Tuple(vec![PyRep::Integer(m.agent_id), origin_loc.clone()]),
+                ])];
+                let make_cargo_dict = |tid: i64, qty: i64| {
+                    PyRep::Dict(vec![
+                        (PyRep::String("typeID".into()), PyRep::Integer(tid)),
+                        (PyRep::String("quantity".into()), PyRep::Integer(qty)),
+                        (PyRep::String("volume".into()), PyRep::Real(qty as f64)),
+                        (
+                            PyRep::String("hasCargo".into()),
+                            PyRep::Bool(completion_status > 0 || mission_state >= 2),
+                        ),
+                    ])
+                };
+                let req_tid_opt = meta.as_ref().and_then(|mt| mt.required_delivery_type_id);
+                if let Some(dest_loc) = dest_loc_opt {
+                    let cargo_tid = req_tid_opt.map(i64::from).unwrap_or(34);
+                    let cargo_qty = if req_qty > 0 { req_qty } else { 1 };
+                    v24_objectives.push(PyRep::Tuple(vec![
+                        PyRep::String("transport".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(pickup_owner_id),
+                            origin_loc,
+                            PyRep::Integer(dropoff_owner_id),
+                            dest_loc,
+                            make_cargo_dict(cargo_tid, cargo_qty),
+                        ]),
+                    ]));
+                } else if is_rnd_turnin || is_data_center || is_mining || is_trade {
+                    let (fetch_tid, fetch_qty) = if is_rnd_turnin {
+                        (
+                            i64::from(req_tid_opt.unwrap_or(34)),
+                            if req_qty > 0 {
+                                req_qty
+                            } else {
+                                i64::from(rnd_tritanium_required_qty(agent_lvl))
+                            },
+                        )
+                    } else if is_data_center {
+                        (
+                            i64::from(req_tid_opt.unwrap_or(17202)),
+                            if req_qty > 0 { req_qty } else { 1 },
+                        )
+                    } else if is_mining {
+                        let md = tmpl.map(|t| resolve_mining_mission_details(ctx, t));
+                        (
+                            i64::from(
+                                req_tid_opt
+                                    .or_else(|| md.as_ref().map(|d| d.ore_type_id))
+                                    .unwrap_or(1230),
+                            ),
+                            if req_qty > 0 {
+                                req_qty
+                            } else {
+                                md.map_or(500, |d| i64::from(d.required_units))
+                            },
+                        )
+                    } else {
+                        let td = tmpl.map(|t| resolve_trade_mission_details(ctx, t));
+                        (
+                            i64::from(
+                                req_tid_opt
+                                    .or_else(|| td.as_ref().map(|d| d.trade_type_id))
+                                    .unwrap_or(3683),
+                            ),
+                            if req_qty > 0 {
+                                req_qty
+                            } else {
+                                td.map_or(10, |d| i64::from(d.trade_quantity))
+                            },
+                        )
+                    };
+                    v24_objectives.push(PyRep::Tuple(vec![
+                        PyRep::String("fetch".into()),
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(dropoff_owner_id),
+                            origin_loc,
+                            make_cargo_dict(fetch_tid, fetch_qty),
+                        ]),
+                    ]));
+                }
+                let normal_rewards = if isk_reward > 0 {
+                    PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(29), // const.typeCredits
+                        PyRep::Integer(isk_reward),
+                        PyRep::None,
+                    ])])
+                } else {
+                    PyRep::List(Vec::new())
+                };
+                return Some(Ok(PyRep::Dict(vec![
+                    (
+                        PyRep::String("completionStatus".into()),
+                        PyRep::Integer(completion_status),
+                    ),
+                    (
+                        PyRep::String("missionTitleID".into()),
+                        PyRep::String(title.clone()),
+                    ),
+                    (
+                        PyRep::String("missionState".into()),
+                        PyRep::Integer(mission_state),
+                    ),
+                    (PyRep::String("missionName".into()), PyRep::String(title)),
+                    (
+                        PyRep::String("objectives".into()),
+                        PyRep::List(v24_objectives),
+                    ),
+                    (PyRep::String("dungeons".into()), PyRep::List(dungeons)),
+                    (PyRep::String("locations".into()), PyRep::List(locations)),
+                    (PyRep::String("agentGift".into()), PyRep::List(Vec::new())),
+                    (PyRep::String("normalRewards".into()), normal_rewards),
+                    (
+                        PyRep::String("loyaltyPoints".into()),
+                        PyRep::Integer(lp_reward),
+                    ),
+                    (PyRep::String("researchPoints".into()), PyRep::Integer(0)),
+                    (PyRep::String("bonusRewards".into()), bonus_rewards_rep),
+                    (PyRep::String("collateral".into()), PyRep::List(Vec::new())),
+                    (
+                        PyRep::String("contentID".into()),
+                        PyRep::Integer(mission_id as i64),
+                    ),
+                ])));
+            }
             let mut info_fields = vec![
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -1161,23 +1338,7 @@ pub async fn handle_with_bound(
                 ("lpReward", PyRep::Integer(lp_reward)),
                 ("bonusReward", PyRep::Integer(bonus_reward)),
                 ("bonusWindowSecs", PyRep::Integer(bonus_window_secs as i64)),
-                ("bonusRewards", {
-                    let rem_secs = bonus_expiry_unix
-                        .map(|bexp| bexp.saturating_sub(now))
-                        .unwrap_or(bonus_window_secs);
-                    let window_mins = ((bonus_window_secs + 59) / 60).max(1) as i64;
-                    if bonus_reward > 0 {
-                        PyRep::List(vec![PyRep::Tuple(vec![
-                            PyRep::Integer(rem_secs.saturating_mul(10_000_000) as i64),
-                            PyRep::Integer(29), // const.typeCredits
-                            PyRep::Integer(bonus_reward),
-                            PyRep::None,
-                            PyRep::Integer(window_mins),
-                        ])])
-                    } else {
-                        PyRep::List(Vec::new())
-                    }
-                }),
+                ("bonusRewards", bonus_rewards_rep),
             ];
             if let Some(bexp) = bonus_expiry_unix {
                 info_fields.push(("bonusExpiryUnix", PyRep::Integer(bexp as i64)));
@@ -2108,7 +2269,7 @@ pub async fn handle_with_bound(
                         let is_trade = arch.is_trade;
                         let is_courier = arch.is_courier;
                         let is_kill = !is_dc && arch.is_kill;
-                        let is_mining_mission = !is_rnd && !is_kill && !is_trade && !is_courier && !is_heraldry && {
+                        let is_mining_mission = !is_rnd && !is_dc && !is_kill && !is_trade && !is_courier && !is_heraldry && {
                             let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
                             agent_div == 23 || {
                                 let t = tmpl.title.to_lowercase();
@@ -2138,6 +2299,10 @@ pub async fn handle_with_bound(
                                 } else if is_trade {
                                     let td = resolve_trade_mission_details(ctx, &tmpl);
                                     Some((td.trade_type_id, td.trade_quantity))
+                                } else if is_rnd {
+                                    Some((34, rnd_tritanium_required_qty(agent_opt.map_or(1, |a| a.level))))
+                                } else if is_dc {
+                                    Some((17202, 1))
                                 } else {
                                     None
                                 }
@@ -2179,8 +2344,15 @@ pub async fn handle_with_bound(
                             )?;
                         }
 
-                        if let Some(m_mut) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-                            m_mut.state = "Completed".into();
+                        let completed_bmid = snap
+                            .active_missions
+                            .get_mut(&(char_id, mission_id))
+                            .and_then(|m_mut| {
+                                m_mut.state = "Completed".into();
+                                m_mut.bookmark_id.take()
+                            });
+                        if let Some(bmid) = completed_bmid {
+                            snap.bookmarks.remove(&bmid);
                         }
                         reclaim_courier_cargo(snap, char_id, mission_id);
 

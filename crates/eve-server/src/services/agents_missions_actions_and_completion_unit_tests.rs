@@ -88,9 +88,11 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     let PyRep::Tuple(parts) = journal else { panic!("expected tuple") };
     let PyRep::List(missions) = &parts[0] else { panic!("expected missions list") };
     assert_eq!(missions.len(), 1);
-    assert_eq!(missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid_active as i64)));
-    assert_eq!(missions[0].dict_get("level"), Some(&PyRep::Integer(3)));
-    assert_eq!(missions[0].dict_get("missionState"), Some(&PyRep::Integer(2)));
+    let PyRep::Tuple(m0) = &missions[0] else { panic!("expected V24 10-tuple mission row") };
+    assert_eq!(m0.len(), 10);
+    assert_eq!(m0[0], PyRep::Integer(2));
+    assert_eq!(m0[2], PyRep::String("UI/Agents/MissionTypes/Courier".into()));
+    assert_eq!(m0[9], PyRep::Integer(mid_active as i64));
 
     let PyRep::List(research) = &parts[1] else { panic!("expected research list") };
     assert_eq!(research[0].dict_get("points"), Some(&PyRep::Real(200.0)));
@@ -110,10 +112,13 @@ async fn journal_expiration_sweep_and_briefing_objective_formatting_branches() {
     )
     .await
     .unwrap();
-    let Some(PyRep::String(obj_str)) = obj_info.dict_get("objectives") else { panic!("expected objectives") };
-    assert!(obj_str.contains("Transport 250 units"));
-    assert_eq!(obj_info.dict_get("requiredTypeID"), Some(&PyRep::Integer(34)));
-    assert_eq!(obj_info.dict_get("requiredQuantity"), Some(&PyRep::Integer(250)));
+    let Some(PyRep::List(objs)) = obj_info.dict_get("objectives") else { panic!("expected V24 objectives list") };
+    assert_eq!(objs.len(), 2);
+    let PyRep::Tuple(trans_entry) = &objs[1] else { panic!("expected transport tuple") };
+    assert_eq!(trans_entry[0], PyRep::String("transport".into()));
+    let PyRep::Tuple(trans_args) = &trans_entry[1] else { panic!("expected transport args") };
+    assert_eq!(trans_args[4].dict_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(trans_args[4].dict_get("quantity"), Some(&PyRep::Integer(250)));
 
     let failed_info = call_agent_mgr(
         &ctx,
@@ -347,9 +352,9 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
     .await
     .expect("GetMissionObjectiveInfo when bonus expired");
     assert_eq!(
-        expired_obj.dict_get("bonusReward"),
-        Some(&PyRep::Integer(0)),
-        "GetMissionObjectiveInfo must also zero bonusReward once bonusExpiryUnix passes"
+        expired_obj.dict_get("bonusRewards"),
+        Some(&PyRep::List(Vec::new())),
+        "GetMissionObjectiveInfo must also clear bonusRewards once bonusExpiryUnix passes"
     );
     assert_eq!(
         call_agent_mgr(
@@ -513,9 +518,8 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
             &kw,
         )
         .await
-        .unwrap_err()
-        .code,
-        "MissionNotActive"
+        .expect("unbound GetMissionObjectiveInfo returns None when not active"),
+        PyRep::None
     );
 }
 
@@ -560,10 +564,9 @@ async fn unbound_briefing_and_objective_info_reject_completed_and_declined_missi
                 &kw,
             )
             .await
-            .unwrap_err()
-            .code,
-            "MissionNotActive",
-            "unbound GetMissionObjectiveInfo(agent_id) must reject {state} missions"
+            .expect("unbound GetMissionObjectiveInfo returns None for completed/declined"),
+            PyRep::None,
+            "unbound GetMissionObjectiveInfo(agent_id) must return None for {state} missions"
         );
         assert_eq!(
             call_agent_mgr(
@@ -702,11 +705,16 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
     let PyRep::List(ref j_missions) = j_parts[0] else {
         panic!("expected missions list");
     };
-    let enc_row = j_missions
+    let PyRep::Tuple(enc_row) = j_missions
         .iter()
-        .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(encounter_mid as i64)))
-        .expect("encounter mission in journal");
-    let Some(PyRep::List(bms)) = enc_row.dict_get("bookmarks") else {
+        .find(|r| {
+            matches!(r, PyRep::Tuple(cols) if cols.get(9) == Some(&PyRep::Integer(encounter_mid as i64)))
+        })
+        .expect("encounter mission in journal")
+    else {
+        panic!("expected 10-tuple journal row");
+    };
+    let PyRep::List(bms) = &enc_row[6] else {
         panic!("expected bookmarks list");
     };
     assert_eq!(bms.len(), 1);
@@ -761,11 +769,16 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
         let PyRep::List(ref j2_missions) = j2_parts[0] else {
             panic!("expected missions");
         };
-        let enc_row2 = j2_missions
+        let PyRep::Tuple(enc_row2) = j2_missions
             .iter()
-            .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(encounter_mid as i64)))
-            .expect("encounter row2");
-        let Some(PyRep::List(bms2)) = enc_row2.dict_get("bookmarks") else {
+            .find(|r| {
+                matches!(r, PyRep::Tuple(cols) if cols.get(9) == Some(&PyRep::Integer(encounter_mid as i64)))
+            })
+            .expect("encounter row2")
+        else {
+            panic!("expected 10-tuple journal row2");
+        };
+        let PyRep::List(bms2) = &enc_row2[6] else {
             panic!("expected bookmarks list2");
         };
         let st_bm = bms2
@@ -932,8 +945,9 @@ async fn bound_get_my_journal_details_filters_by_bound_agent_id_1016() {
     let PyRep::List(b1_missions) = &b1_parts[0] else { panic!("expected missions list") };
     let PyRep::List(b1_research) = &b1_parts[1] else { panic!("expected research list") };
     assert_eq!(b1_missions.len(), 1);
-    assert_eq!(b1_missions[0].dict_get("agentID"), Some(&PyRep::Integer(ag1_id)));
-    assert_eq!(b1_missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid1 as i64)));
+    let PyRep::Tuple(b1_row) = &b1_missions[0] else { panic!("expected 10-tuple b1") };
+    assert_eq!(b1_row[4], PyRep::Integer(ag1_id));
+    assert_eq!(b1_row[9], PyRep::Integer(mid1 as i64));
     assert_eq!(b1_research.len(), 1);
     assert_eq!(b1_research[0].dict_get("agentID"), Some(&PyRep::Integer(ag1_id)));
 
@@ -964,8 +978,9 @@ async fn bound_get_my_journal_details_filters_by_bound_agent_id_1016() {
     let PyRep::List(b2_missions) = &b2_parts[0] else { panic!("expected missions list") };
     let PyRep::List(b2_research) = &b2_parts[1] else { panic!("expected research list") };
     assert_eq!(b2_missions.len(), 1);
-    assert_eq!(b2_missions[0].dict_get("agentID"), Some(&PyRep::Integer(ag2_id)));
-    assert_eq!(b2_missions[0].dict_get("missionID"), Some(&PyRep::Integer(mid2 as i64)));
+    let PyRep::Tuple(b2_row) = &b2_missions[0] else { panic!("expected 10-tuple b2") };
+    assert_eq!(b2_row[4], PyRep::Integer(ag2_id));
+    assert_eq!(b2_row[9], PyRep::Integer(mid2 as i64));
     assert_eq!(b2_research.len(), 1);
     assert_eq!(b2_research[0].dict_get("agentID"), Some(&PyRep::Integer(ag2_id)));
 }
@@ -1065,27 +1080,8 @@ async fn gh1023_courier_objective_info_emits_station_corp_owners_and_normalizes_
     )
     .await
     .expect("raw GetMissionObjectiveInfo");
-    assert_eq!(
-        raw_obj.dict_get("corporationID"),
-        Some(&PyRep::Integer(agent.corporation_id))
-    );
-    assert_eq!(
-        raw_obj.dict_get("pickupOwnerID"),
-        Some(&PyRep::Integer(expected_pickup_owner))
-    );
-    assert_eq!(
-        raw_obj.dict_get("dropoffOwnerID"),
-        Some(&PyRep::Integer(expected_dropoff_owner))
-    );
-
-    let norm = crate::router::client_compat::normalize_macho_rpc_reply(
-        "agentMgr",
-        "GetMissionObjectiveInfo",
-        Ok(raw_obj),
-    )
-    .expect("normalized GetMissionObjectiveInfo");
-    let Some(PyRep::List(objs)) = norm.dict_get("objectives") else {
-        panic!("expected normalized objectives list");
+    let Some(PyRep::List(objs)) = raw_obj.dict_get("objectives") else {
+        panic!("expected V24 objectives list");
     };
     assert_eq!(objs.len(), 2);
     let PyRep::Tuple(agent_obj) = &objs[0] else { panic!() };
@@ -1188,8 +1184,13 @@ async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
     )
     .await
     .expect("GetMissionObjectiveInfo active");
-    assert_eq!(obj_before.dict_get("bonusWindowSecs"), Some(&PyRep::Integer(2_640)));
-    assert!(obj_before.dict_get("bonusReward").and_then(|v| v.as_i64()).unwrap_or(0) >= 25_000);
+    let Some(PyRep::List(active_bonus)) = obj_before.dict_get("bonusRewards") else {
+        panic!("expected bonusRewards list");
+    };
+    assert_eq!(active_bonus.len(), 1);
+    let PyRep::Tuple(bonus_tup) = &active_bonus[0] else { panic!() };
+    assert!(bonus_tup[2].as_i64().unwrap_or(0) >= 25_000);
+    assert_eq!(bonus_tup[4], PyRep::Integer(44));
 
     // Advance 2,641s past 13_512's 44-minute window -> GetMissionObjectiveInfo and Complete both return 0 bonusReward
     eve_db::ServerClock::advance_secs(&*clock, 2_641);
@@ -1202,7 +1203,7 @@ async fn per_mission_bonus_window_accept_and_objective_expiry_zeroes_bonus() {
     )
     .await
     .expect("GetMissionObjectiveInfo expired");
-    assert_eq!(obj_after.dict_get("bonusReward"), Some(&PyRep::Integer(0)));
+    assert_eq!(obj_after.dict_get("bonusRewards"), Some(&PyRep::List(Vec::new())));
     let done_13512 = call_agent_mgr(
         &ctx,
         &mut sess,
@@ -2130,11 +2131,16 @@ async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_hu
     let PyRep::List(ref j_missions) = j_parts[0] else {
         panic!("expected missions list");
     };
-    let kill_row = j_missions
+    let PyRep::Tuple(kill_row) = j_missions
         .iter()
-        .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(mid_kill as i64)))
-        .expect("mid_kill present in journal");
-    let Some(PyRep::List(bms)) = kill_row.dict_get("bookmarks") else {
+        .find(|r| {
+            matches!(r, PyRep::Tuple(cols) if cols.get(9) == Some(&PyRep::Integer(mid_kill as i64)))
+        })
+        .expect("mid_kill present in journal")
+    else {
+        panic!("expected 10-tuple kill row");
+    };
+    let PyRep::List(bms) = &kill_row[6] else {
         panic!("expected bookmarks list");
     };
     assert_eq!(bms.len(), 1, "must include only mid_kill's pocket bookmark");
@@ -2373,7 +2379,16 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
 
     let mut sess = char_session(char_id, Some(dc_sys), dc_ag.station_id);
     let kw = HashMap::new();
-    let journal = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+    let journal = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMyJournalDetails",
+            &[],
+            &kw,
+            Some("machoNet:26000"),
+        )
         .await
         .expect("GetMyJournalDetails");
     let PyRep::Tuple(j_parts) = journal else {
@@ -2383,11 +2398,22 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
         panic!("expected missions list");
     };
     for mid in [mid_dc, mid_rnd] {
-        let row = j_missions
+        let PyRep::Tuple(row) = j_missions
             .iter()
-            .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(mid as i64)))
-            .expect("mission present in journal");
-        let Some(PyRep::List(bms)) = row.dict_get("bookmarks") else {
+            .find(|r| {
+                matches!(r, PyRep::Tuple(cols) if cols.get(9) == Some(&PyRep::Integer(mid as i64)))
+            })
+            .expect("mission present in journal")
+        else {
+            panic!("expected 10-tuple mission row");
+        };
+        assert_eq!(row.len(), 10);
+        assert_eq!(
+            row.get(2),
+            Some(&PyRep::String("UI/Agents/MissionTypes/Trade".into())),
+            "#1368 F-2: V24 journal slot [2] must report Trade rather than Encounter"
+        );
+        let PyRep::List(bms) = &row[6] else {
             panic!("expected bookmarks list");
         };
         assert_eq!(bms.len(), 1);
@@ -2403,31 +2429,33 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
         assert_eq!(bms[0].dict_get("deadspace"), Some(&PyRep::Integer(0)));
     }
 
-    let dc_obj = call_agent_mgr(
-        &ctx,
-        &mut sess,
-        "GetMissionObjectiveInfo",
-        &[PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_dc as i64)],
-        &kw,
-    )
-    .await
-    .expect("DC GetMissionObjectiveInfo");
+    let dc_obj = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_dc as i64)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("DC GetMissionObjectiveInfo");
     assert_eq!(dc_obj.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
     assert_eq!(dc_obj.dict_get("dungeons"), Some(&PyRep::List(Vec::new())));
-    let expected_dc_tag = ctx
-        .sde
-        .types
-        .get(&17202)
-        .map(|t| t.name.as_str())
-        .unwrap_or("Pirate Tag");
-    assert!(
-        dc_obj
-            .dict_get("objectives")
-            .and_then(PyRep::as_str)
-            .is_some_and(|s| s.contains(expected_dc_tag)),
-        "DC objective must require {expected_dc_tag}: {:?}",
-        dc_obj.dict_get("objectives")
-    );
+    let Some(PyRep::List(dc_objs)) = dc_obj.dict_get("objectives") else {
+        panic!("expected DC objectives list");
+    };
+    assert_eq!(dc_objs.len(), 2);
+    let PyRep::Tuple(dc_fetch) = &dc_objs[1] else {
+        panic!("expected DC fetch tuple");
+    };
+    assert_eq!(dc_fetch[0], PyRep::String("fetch".into()));
+    let PyRep::Tuple(dc_fetch_args) = &dc_fetch[1] else {
+        panic!("expected DC fetch args");
+    };
+    assert_eq!(dc_fetch_args[2].dict_get("typeID"), Some(&PyRep::Integer(17202)));
+    assert_eq!(dc_fetch_args[2].dict_get("quantity"), Some(&PyRep::Integer(1)));
     let Some(PyRep::List(dc_locs)) = dc_obj.dict_get("locations") else {
         panic!("expected DC locations");
     };
@@ -2439,25 +2467,33 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
     );
 
     let mut rnd_sess = char_session(char_id, Some(rnd_sys), rnd_ag.station_id);
-    let rnd_obj = call_agent_mgr(
-        &ctx,
-        &mut rnd_sess,
-        "GetMissionObjectiveInfo",
-        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
-        &kw,
-    )
-    .await
-    .expect("R&D GetMissionObjectiveInfo");
+    let rnd_obj = ctx
+        .dispatch_rpc(
+            &mut rnd_sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("R&D GetMissionObjectiveInfo");
     assert_eq!(rnd_obj.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
     assert_eq!(rnd_obj.dict_get("dungeons"), Some(&PyRep::List(Vec::new())));
-    assert!(
-        rnd_obj
-            .dict_get("objectives")
-            .and_then(PyRep::as_str)
-            .is_some_and(|s| s.contains("Tritanium")),
-        "R&D objective must require Tritanium: {:?}",
-        rnd_obj.dict_get("objectives")
-    );
+    let Some(PyRep::List(rnd_objs)) = rnd_obj.dict_get("objectives") else {
+        panic!("expected R&D objectives list");
+    };
+    assert_eq!(rnd_objs.len(), 2);
+    let PyRep::Tuple(rnd_fetch) = &rnd_objs[1] else {
+        panic!("expected R&D fetch tuple");
+    };
+    assert_eq!(rnd_fetch[0], PyRep::String("fetch".into()));
+    let PyRep::Tuple(rnd_fetch_args) = &rnd_fetch[1] else {
+        panic!("expected R&D fetch args");
+    };
+    assert_eq!(rnd_fetch_args[2].dict_get("typeID"), Some(&PyRep::Integer(34)));
+    assert_eq!(rnd_fetch_args[2].dict_get("quantity"), Some(&PyRep::Integer(300)));
     let Some(PyRep::List(rnd_locs)) = rnd_obj.dict_get("locations") else {
         panic!("expected R&D locations");
     };
@@ -2466,5 +2502,54 @@ async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_co
             .iter()
             .all(|l| l.dict_get("locationType") != Some(&PyRep::String("dungeon".into()))),
         "R&D locations must not emit deadspace dungeon location"
+    );
+
+    // #1367: Space encounter dungeon dispatched over machoNet:26000 preserves `stationID: None` + `typeID: 5`.
+    let combat_ag = find_standard_agent(&ctx, 1);
+    let combat_sys = combat_ag.solar_system_id.unwrap();
+    let combat_mid = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            !m.is_courier
+                && (ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter"))
+        })
+        .min_by_key(|m| m.mission_id)
+        .map(|m| m.mission_id)
+        .expect("SDE combat mission");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, combat_mid),
+            make_active_mission(combat_mid, char_id, combat_ag.agent_id, combat_sys, "Accepted", None),
+        );
+    });
+    let mut combat_sess = char_session(char_id, Some(combat_sys), combat_ag.station_id);
+    let combat_wire = ctx
+        .dispatch_rpc(
+            &mut combat_sess,
+            "agentMgr",
+            None,
+            "GetMissionObjectiveInfo",
+            &[PyRep::Integer(combat_ag.agent_id), PyRep::Integer(combat_mid as i64)],
+            &kw,
+            Some("machoNet:26000"),
+        )
+        .await
+        .expect("#1367 combat GetMissionObjectiveInfo");
+    let Some(PyRep::List(combat_duns)) = combat_wire.dict_get("dungeons") else {
+        panic!("expected combat dungeons list");
+    };
+    assert_eq!(combat_duns.len(), 1);
+    assert_eq!(
+        combat_duns[0].dict_get("stationID"),
+        Some(&PyRep::None),
+        "#1367: deadspace dungeon must preserve stationID == None over MachoNet"
+    );
+    assert_eq!(combat_duns[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+    assert_eq!(
+        combat_duns[0].dict_get("locationID"),
+        Some(&PyRep::Integer(i64::from(combat_sys)))
     );
 }

@@ -667,6 +667,14 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
         .min_by_key(|a| a.agent_id)
         .cloned()
         .expect("SDE must contain an R&D agent with station");
+    let dc_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 5 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("SDE must contain a Data Center agent with station");
     let courier_tmpl = ctx
         .sde
         .missions
@@ -678,10 +686,32 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
         .min_by_key(|m| m.mission_id)
         .cloned()
         .expect("SDE must contain a BasicCourier mission");
+    let trade_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .cloned()
+        .expect("SDE must contain a Trade mission");
+    let mining_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .find(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            ct.contains("Mining") && !ct.contains("Kill")
+        })
+        .cloned()
+        .expect("SDE must contain a Mining mission");
 
     let arch_without_meta = classify_mission_archetype(Some(&courier_tmpl), None, Some(&rnd_ag));
     assert!(arch_without_meta.is_rnd_turnin);
     assert!(!arch_without_meta.is_courier);
+    assert!(!arch_without_meta.is_trade);
+
+    let arch_rnd_trade_tmpl = classify_mission_archetype(Some(&trade_tmpl), None, Some(&rnd_ag));
+    assert!(arch_rnd_trade_tmpl.is_rnd_turnin);
+    assert!(!arch_rnd_trade_tmpl.is_trade);
 
     let char_id = 90_000_001_i64;
     let rnd_sys = rnd_ag.solar_system_id.unwrap();
@@ -703,7 +733,35 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
                 bookmark_id: None,
             },
         );
-        // Intentionally do NOT insert MissionTimingAndCargoMeta (meta_opt == None) to cover #1368 F-3.
+        // Intentionally do NOT insert MissionTimingAndCargoMeta (meta_opt == None) to cover #1368 F-3 / REV-02.
+    });
+
+    let mut sess = docked_session(char_id, rnd_sys, Some(rnd_st));
+    let mut remote_sess = docked_session(char_id, rnd_sys, None);
+    let bound = bound_agent(char_id, rnd_ag.agent_id);
+    let kw = HashMap::new();
+
+    // Missing Tritanium must fail with MissionIncomplete rather than completing free.
+    let err_missing = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(courier_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DoAction(6) must be handled")
+    .expect_err("R&D turn-in without Tritanium must be rejected");
+    assert_eq!(err_missing.code, "MissionIncomplete");
+
+    let req_trit_qty = rnd_tritanium_required_qty(rnd_ag.level);
+    ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             990_701,
             eve_db::InventoryItemRecord {
@@ -712,7 +770,7 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
                 owner_id: char_id,
                 location_id: rnd_st,
                 flag: eve_db::InventoryFlag::Hangar,
-                quantity: rnd_tritanium_required_qty(rnd_ag.level) as i32,
+                quantity: req_trit_qty,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -720,9 +778,33 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
         );
     });
 
-    let mut sess = docked_session(char_id, rnd_sys, Some(rnd_st));
-    let bound = bound_agent(char_id, rnd_ag.agent_id);
-    let kw = HashMap::new();
+    // Remote completion DoAction(7) must be rejected without consuming Tritanium.
+    let err_remote = handle_with_bound(
+        &ctx,
+        &mut remote_sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(7),
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(courier_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DoAction(7) must be handled")
+    .expect_err("R&D turn-in must reject remote DoAction(7)");
+    assert_eq!(err_remote.code, "CannotCompleteRemotely");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items.get(&990_701).map(|i| i.quantity),
+            Some(req_trit_qty),
+            "rejected DoAction(7) must not consume Tritanium"
+        );
+    });
+
+    // Docked completion DoAction(6) succeeds, consumes Tritanium, and completes mission.
     let res = handle_with_bound(
         &ctx,
         &mut sess,
@@ -738,8 +820,128 @@ async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
     )
     .await
     .expect("DoAction(6) must be handled")
-    .expect("R&D turn-in completion without meta must not demand courier cargo");
+    .expect("R&D turn-in completion with Tritanium must succeed even without meta");
     assert_eq!(res.dict_get("state"), Some(&PyRep::String("Completed".into())));
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            !snap.items.contains_key(&990_701),
+            "DoAction(6) must consume exact Tritanium delivery stack"
+        );
+    });
+
+    // Data Center (agent_type_id == 5) with meta_opt == None and a Mining-named template must NOT
+    // fall into is_mining_mission and must require Pirate Tag (17202) x1 rather than ore.
+    let dc_sys = dc_ag.solar_system_id.unwrap();
+    let dc_st = dc_ag.station_id.unwrap();
+    move_demo_character(&ctx, char_id, dc_sys, Some(dc_st));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.insert(
+            (char_id, mining_tmpl.mission_id),
+            ActiveMissionRecord {
+                mission_id: mining_tmpl.mission_id,
+                character_id: char_id,
+                agent_id: dc_ag.agent_id,
+                solar_system_id: dc_sys,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        // Seed Veldspar only; no Pirate Tag yet.
+        snap.items.insert(
+            990_703,
+            eve_db::InventoryItemRecord {
+                item_id: 990_703,
+                type_id: 1230,
+                owner_id: char_id,
+                location_id: dc_st,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 5_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut dc_sess = docked_session(char_id, dc_sys, Some(dc_st));
+    let mut dc_remote = docked_session(char_id, dc_sys, None);
+    let dc_bound = bound_agent(char_id, dc_ag.agent_id);
+
+    let dc_missing = handle_with_bound(
+        &ctx,
+        &mut dc_sess,
+        Some(&dc_bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(dc_ag.agent_id),
+            PyRep::Integer(mining_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DC DoAction(6) handled")
+    .expect_err("DC mission without Pirate Tag (17202) must fail even with ore in hangar");
+    assert_eq!(dc_missing.code, "MissionIncomplete");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            990_702,
+            eve_db::InventoryItemRecord {
+                item_id: 990_702,
+                type_id: 17202,
+                owner_id: char_id,
+                location_id: dc_st,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let dc_err_remote = handle_with_bound(
+        &ctx,
+        &mut dc_remote,
+        Some(&dc_bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(7),
+            PyRep::Integer(dc_ag.agent_id),
+            PyRep::Integer(mining_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DC DoAction(7) handled")
+    .expect_err("DC turn-in must reject remote DoAction(7)");
+    assert_eq!(dc_err_remote.code, "CannotCompleteRemotely");
+
+    let dc_res = handle_with_bound(
+        &ctx,
+        &mut dc_sess,
+        Some(&dc_bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(dc_ag.agent_id),
+            PyRep::Integer(mining_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DC DoAction(6) handled")
+    .expect("DC turn-in with Pirate Tag must succeed without meta");
+    assert_eq!(dc_res.dict_get("state"), Some(&PyRep::String("Completed".into())));
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&990_702), "DC DoAction(6) must consume Pirate Tag 17202");
+        assert_eq!(snap.items.get(&990_703).map(|i| i.quantity), Some(5_000));
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
