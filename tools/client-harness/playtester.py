@@ -8518,7 +8518,7 @@ def _is_gm_or_time_control_action(action: Dict[str, Any]) -> Tuple[bool, bool, s
         elif cand_s.startswith("/"):
             slash_candidates.append(cand_s)
 
-    if act_type not in ("click_widget", "drag_widget", "type_text") and target.startswith("/"):
+    if act_type not in ("click_widget", "click_xy", "drag_widget", "type_text") and target.startswith("/"):
         slash_candidates.append(target)
 
     for cand in slash_candidates:
