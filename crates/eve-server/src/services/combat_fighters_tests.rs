@@ -1,4 +1,5 @@
 use super::*;
+use crate::router::ActiveFighterSquadron;
 use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_sde::{
     FighterAbilityCharges, FighterAbilityInfo, FighterAbilitySlot, InvType, SdeRegistry,
@@ -914,4 +915,372 @@ async fn fighter_recall_abandon_and_launch_guards_preserve_docked_tube_managemen
     .unwrap()
     .unwrap_err();
     assert_eq!(err_dup.code, CODE_FIGHTER_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fighter_r2_db_dock_structure_control_cloak_launch_and_movement_scoop_guards() {
+    const CODE_SHIP_DOCKED: &str = "ShipDocked";
+    const CODE_CANNOT_LAUNCH_CLOAKED: &str = "CannotOpenFighterTubesWhileCloaked";
+    const CODE_CANNOT_ACTIVATE_CLOAKED: &str = "CannotActivateCloaked";
+
+    let (ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kw = HashMap::new();
+    let station_id = ctx.sde.stations.keys().next().copied().unwrap_or(60_003_760);
+    let other_struct_id = 1_000_931_999i64;
+    let f_tube_id = 931_001i64;
+    let ab_f_id = 931_002i64;
+    let no_cs_carrier = 200_931_003i64;
+    let no_cs_fighter = 931_003i64;
+    let cloak_mod_id = 931_004i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            f_tube_id,
+            make_fighter_item(f_tube_id, 23_057, char_id, ship_id, InventoryFlag::FighterBay, 9),
+        );
+        snap.items.insert(
+            ab_f_id,
+            make_fighter_item(ab_f_id, 23_057, char_id, sys_id as i64, InventoryFlag::None, 9),
+        );
+        snap.items.insert(
+            no_cs_carrier,
+            make_fighter_item(no_cs_carrier, 23_915, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+        snap.items.insert(
+            no_cs_fighter,
+            make_fighter_item(no_cs_fighter, 23_057, char_id, no_cs_carrier, InventoryFlag::FighterBay, 9),
+        );
+    });
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LoadFightersToTube",
+        &[PyRep::Integer(0), PyRep::Integer(f_tube_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("LoadFightersToTube succeeds");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 120.0,
+                inertia: 1.0,
+                mass: 1_000_000_000.0,
+                radius: 500.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    // Seed an active fighter and an abandoned fighter for movement / scoop guard verification
+    let active_f = 931_010i64;
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: active_f,
+                type_id: 23_057,
+                position: DVec3::new(300.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 1_000.0,
+                inertia: 0.5,
+                mass: 50_000.0,
+                radius: 25.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Follow {
+                    target_id: ship_id,
+                    range: 500.0,
+                },
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ab_f_id,
+                type_id: 23_057,
+                position: DVec3::new(200.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 1_000.0,
+                inertia: 0.5,
+                mass: 50_000.0,
+                radius: 25.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    {
+        let mut fighters = ctx.active_fighters.write().unwrap();
+        fighters.insert(
+            active_f,
+            ActiveFighterSquadron {
+                ball_id: active_f,
+                item_id: active_f,
+                type_id: 23_057,
+                owner_char_id: char_id,
+                parent_ship_id: ship_id,
+                tube_index: 1,
+                squadron_size: 9,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+        );
+        fighters.insert(
+            ab_f_id,
+            ActiveFighterSquadron {
+                ball_id: ab_f_id,
+                item_id: ab_f_id,
+                type_id: 23_057,
+                owner_char_id: char_id,
+                parent_ship_id: 0,
+                tube_index: 0,
+                squadron_size: 9,
+                target_id: None,
+                is_abandoned: true,
+                mwd_active: false,
+            },
+        );
+    }
+
+    let guarded_cmds: &[(&str, Vec<PyRep>)] = &[
+        ("LaunchFightersFromTubes", vec![PyRep::List(vec![PyRep::Integer(0)])]),
+        ("RecallFightersToTubes", vec![PyRep::List(vec![PyRep::Integer(active_f)])]),
+        ("CmdAbandonFighter", vec![PyRep::List(vec![PyRep::Integer(active_f)])]),
+        (
+            "ExecuteMovementCommandOnFighters",
+            vec![PyRep::List(vec![PyRep::Integer(active_f)]), PyRep::String("STOP".into())],
+        ),
+        ("CmdScoopAbandonedFighterFromSpace", vec![PyRep::Integer(ab_f_id)]),
+    ];
+
+    // 1. DB station-docked rejects even with stale undocked session & lingering ship ball
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(station_id);
+    });
+    for (method, args) in guarded_cmds {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_DOCKED, "{method} must reject DB station-docked");
+    }
+
+    // Even if session claims structure control over ship_id, DB station_id STILL rejects ShipDocked
+    session.structure_id = Some(ship_id);
+    let err_db_station_vs_sess_struct = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_db_station_vs_sess_struct.code, CODE_SHIP_DOCKED);
+    session.structure_id = None;
+
+    // 2. DB structure-docked in another structure rejects ShipDocked even with undocked session
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(other_struct_id);
+    });
+    for (method, args) in guarded_cmds {
+        let err = handle_fighters(&ctx, &mut session, "fighterMgr", method, args, &kw)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_DOCKED, "{method} must reject DB structure-docked");
+    }
+
+    // 3. Controlling own structure (structure_id == Some(ship_id)) is ALLOWED, whereas docked in other_struct_id rejects
+    session.structure_id = Some(other_struct_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = Some(ship_id);
+    });
+    let err_sess_other_struct = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_sess_other_struct.code, CODE_SHIP_DOCKED);
+
+    session.structure_id = Some(ship_id);
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("structure controller (structure_id == Some(ship_id)) may launch fighters");
+    session.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().structure_id = None;
+    });
+
+    // 4. ExecuteMovementCommandOnFighters and CmdScoopAbandonedFighterFromSpace reject cloaked without mutating state
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = true);
+    let err_move_cloaked = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[PyRep::List(vec![PyRep::Integer(active_f)]), PyRep::String("STOP".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_move_cloaked.code, CODE_CANNOT_ACTIVATE_CLOAKED);
+    assert!(matches!(
+        sys_handle.get_ball_snapshot(active_f).await.unwrap().unwrap().1.mode,
+        MovementMode::Follow { .. }
+    ));
+
+    let err_scoop_cloaked = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdScoopAbandonedFighterFromSpace",
+        &[PyRep::Integer(ab_f_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_scoop_cloaked.code, CODE_CANNOT_ACTIVATE_CLOAKED);
+    assert!(ctx.active_fighters.read().unwrap().contains_key(&ab_f_id));
+
+    // 5. LaunchFightersFromTubes rejects cloak_velocity_multiplier.is_some() (even if is_cloaked == false) without tether mutation
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.is_cloaked = false;
+        cs.cloak_velocity_multiplier = Some(0.25);
+        cs.is_tethered = false;
+    });
+    let err_mult_cloak = handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(1)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_mult_cloak.code, CODE_CANNOT_LAUNCH_CLOAKED);
+    assert!(!sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| {
+        cs.cloak_velocity_multiplier = None;
+    });
+
+    // Uncloaked movement and scoop now succeed cleanly
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "ExecuteMovementCommandOnFighters",
+        &[PyRep::List(vec![PyRep::Integer(active_f)]), PyRep::String("STOP".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked ExecuteMovementCommandOnFighters succeeds");
+    assert!(matches!(
+        sys_handle.get_ball_snapshot(active_f).await.unwrap().unwrap().1.mode,
+        MovementMode::Stop
+    ));
+    handle_fighters(
+        &ctx,
+        &mut session,
+        "fighterMgr",
+        "CmdScoopAbandonedFighterFromSpace",
+        &[PyRep::Integer(ab_f_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked CmdScoopAbandonedFighterFromSpace succeeds");
+    assert!(!ctx.active_fighters.read().unwrap().contains_key(&ab_f_id));
+
+    // 6. LaunchFightersFromTubes rejects active DB cloak module even when ship ball has NO CombatState (Ok(None))
+    let mut no_cs_sess = session.clone();
+    no_cs_sess.ship_id = Some(no_cs_carrier);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = no_cs_carrier;
+        snap.items.insert(
+            cloak_mod_id,
+            make_fighter_item(cloak_mod_id, 11_370, char_id, no_cs_carrier, InventoryFlag::HiSlot0, 1),
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    handle_fighters(
+        &ctx,
+        &mut no_cs_sess,
+        "fighterMgr",
+        "LoadFightersToTube",
+        &[PyRep::Integer(0), PyRep::Integer(no_cs_fighter)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("LoadFightersToTube succeeds on second carrier");
+    sys_handle
+        .spawn_ball(Ball {
+            id: no_cs_carrier,
+            type_id: 23_915,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 120.0,
+            inertia: 1.0,
+            mass: 1_000_000_000.0,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let pre_cs = sys_handle.get_combat_state(no_cs_carrier).await.unwrap().unwrap();
+    assert!(!pre_cs.is_cloaked && pre_cs.cloak_velocity_multiplier.is_none());
+    let err_no_cs_db_cloak = handle_fighters(
+        &ctx,
+        &mut no_cs_sess,
+        "fighterMgr",
+        "LaunchFightersFromTubes",
+        &[PyRep::List(vec![PyRep::Integer(0)])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_no_cs_db_cloak.code, CODE_CANNOT_LAUNCH_CLOAKED);
+    assert!(!sys_handle.get_combat_state(no_cs_carrier).await.unwrap().unwrap().is_tethered);
 }

@@ -1712,3 +1712,301 @@ async fn entity_drone_commands_reject_docked_cloaked_missing_ship_and_invalid_ta
     .expect("CmdReturnBay on destroyed drone ID succeeds as no-op");
     assert_eq!(vanished_res, PyRep::Dict(Vec::new()));
 }
+
+#[tokio::test]
+async fn entity_return_home_and_p1_r2_scoop_salvage_guards() {
+    const CODE_SHIP_NOT_IN_SPACE: &str = "ShipNotInSpace";
+    const CODE_CANNOT_ACTIVATE_CLOAKED: &str = "CannotActivateCloaked";
+    const CODE_DRONE_NOT_FOUND: &str = "DroneNotFound";
+    const CODE_NO_DRONES_IN_SPACE: &str = "NoDronesInSpace";
+
+    let (mut ctx, mut sess, char_id, ship_id, sys_id) = make_drone_test_ctx();
+    let kwargs = HashMap::new();
+    let station_id = ctx.sde.stations.keys().next().copied().unwrap_or(60_003_760);
+    let mut sde = (*ctx.sde).clone();
+    sde.types.entry(11_370).or_insert_with(|| make_fighter_type(11_370, 330, 7, 5.0, vec![]));
+    sde.types.entry(32_787).or_insert_with(|| {
+        make_fighter_type(32_787, 1159, 18, 5.0, vec![(1272, 5.0), (37, 1_500.0)])
+    });
+    ctx.sde = Arc::new(sde);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    // 1. Empty list / tuple selectors reject with NoDronesInSpace when 0 controlled drones are in space
+    let mut empty_kw = HashMap::new();
+    empty_kw.insert("droneIDs".into(), PyRep::Tuple(vec![]));
+    for method in ["CmdReturnHome", "CmdReturnAndOrbit"] {
+        let err_empty_arg = handle_npcs_drones(
+            &ctx,
+            &mut sess,
+            "entity",
+            method,
+            &[PyRep::List(vec![])],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_empty_arg.code, CODE_NO_DRONES_IN_SPACE);
+
+        let err_empty_kw = handle_npcs_drones(
+            &ctx,
+            &mut sess,
+            "entity",
+            method,
+            &[PyRep::None],
+            &empty_kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err_empty_kw.code, CODE_NO_DRONES_IN_SPACE);
+    }
+
+    // Launch a combat drone and seed an active salvage drone, an abandoned drone, and a cross-system drone
+    let active_drone_id = 701_020i64;
+    let salvage_drone_id = 701_021i64;
+    let aban_drone_id = 701_022i64;
+    let other_sys_drone_id = 701_023i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            active_drone_id,
+            make_fighter_item(active_drone_id, 2_456, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            salvage_drone_id,
+            make_fighter_item(salvage_drone_id, 32_787, char_id, ship_id, InventoryFlag::DroneBay, 1),
+        );
+        snap.items.insert(
+            aban_drone_id,
+            make_fighter_item(aban_drone_id, 2_456, char_id, sys_id as i64, InventoryFlag::None, 1),
+        );
+    });
+    let launch_res = handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "LaunchDrones",
+        &[PyRep::List(vec![
+            PyRep::Integer(active_drone_id),
+            PyRep::Integer(salvage_drone_id),
+        ])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (active_ball, salvage_ball) = match launch_res {
+        PyRep::List(v) => (v[0].as_i64().unwrap(), v[1].as_i64().unwrap()),
+        other => panic!("expected LaunchDrones list, got {other:?}"),
+    };
+    let _ = sys_handle.set_ball_position(active_ball, DVec3::new(3_000.0, 0.0, 0.0)).await;
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: aban_drone_id,
+                type_id: 2_456,
+                position: DVec3::new(500.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 2_600.0,
+                inertia: 1.0,
+                mass: 1_000.0,
+                radius: 10.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+    with_mut_combat_runtime(&ctx, |rt| {
+        let mut ab_st = rt.active_drones_in_space[&active_ball].clone();
+        ab_st.ball_id = aban_drone_id;
+        ab_st.drone_item_id = aban_drone_id;
+        ab_st.owner_char_id = 0;
+        ab_st.parent_ship_id = 0;
+        ab_st.is_abandoned = true;
+        rt.active_drones_in_space.insert(aban_drone_id, ab_st);
+
+        let mut cross_st = rt.active_drones_in_space[&active_ball].clone();
+        cross_st.ball_id = other_sys_drone_id;
+        cross_st.drone_item_id = other_sys_drone_id;
+        cross_st.solar_system_id = 30_002_187;
+        rt.active_drones_in_space.insert(other_sys_drone_id, cross_st);
+    });
+
+    // 2. CmdReturnHome / CmdReturnAndOrbit reject abandoned or cross-system IDs (positional or kwargs["droneIDs"])
+    for bad_id in [aban_drone_id, other_sys_drone_id] {
+        let mut bad_kw = HashMap::new();
+        bad_kw.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(bad_id)]));
+        for method in ["CmdReturnHome", "CmdReturnAndOrbit"] {
+            let err_pos = handle_npcs_drones(
+                &ctx,
+                &mut sess,
+                "entity",
+                method,
+                &[PyRep::Integer(bad_id)],
+                &kwargs,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(err_pos.code, CODE_DRONE_NOT_FOUND, "{method} positional {bad_id}");
+
+            let err_kw = handle_npcs_drones(
+                &ctx,
+                &mut sess,
+                "entity",
+                method,
+                &[PyRep::None],
+                &bad_kw,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(err_kw.code, CODE_DRONE_NOT_FOUND, "{method} kwargs {bad_id}");
+        }
+    }
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space[&aban_drone_id].is_abandoned);
+        assert_eq!(rt.active_drones_in_space[&other_sys_drone_id].solar_system_id, 30_002_187);
+    });
+
+    // 3. CmdReturnHome honors kwargs["droneIDs"] selectively and empty list recalls controlled drones
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.get_mut(&active_ball).unwrap().target_id = Some(999_111);
+        rt.active_drones_in_space.get_mut(&salvage_ball).unwrap().target_id = Some(999_222);
+    });
+    let mut kw_active = HashMap::new();
+    kw_active.insert("droneIDs".into(), PyRep::List(vec![PyRep::Integer(active_ball)]));
+    handle_npcs_drones(&ctx, &mut sess, "entity", "CmdReturnHome", &[PyRep::None], &kw_active)
+        .await
+        .unwrap()
+        .expect("CmdReturnHome with kwargs[droneIDs] succeeds");
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.active_drones_in_space[&active_ball].target_id, None);
+        assert_eq!(
+            rt.active_drones_in_space[&salvage_ball].target_id,
+            Some(999_222),
+            "selective kwargs[droneIDs] must not recall unspecified drone"
+        );
+    });
+    handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "entity",
+        "CmdReturnAndOrbit",
+        &[PyRep::List(vec![])],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("empty list recalls all controlled drones");
+    with_combat_runtime(&ctx, |rt| {
+        assert_eq!(rt.active_drones_in_space[&salvage_ball].target_id, None);
+    });
+
+    // 4. ScoopToDroneBay, ScoopDrone, and CmdSalvage reject docked & cloaked without mutating space drones
+    let scoop_salvage_cmds: &[(&str, &str, Vec<PyRep>)] = &[
+        ("ship", "ScoopToDroneBay", vec![PyRep::Integer(aban_drone_id)]),
+        ("ship", "ScoopDrone", vec![PyRep::Integer(aban_drone_id)]),
+        ("entity", "CmdSalvage", vec![]),
+    ];
+
+    sess.station_id = Some(station_id);
+    for (svc, method, args) in scoop_salvage_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_NOT_IN_SPACE, "{method} station-docked");
+    }
+    sess.station_id = None;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = Some(station_id);
+    });
+    for (svc, method, args) in scoop_salvage_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_SHIP_NOT_IN_SPACE, "{method} DB-docked");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().station_id = None;
+    });
+
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = true);
+    for (svc, method, args) in scoop_salvage_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_CANNOT_ACTIVATE_CLOAKED, "{method} CombatState cloaked");
+    }
+    let _ = sys_handle.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
+
+    let cloak_mod_id = 701_099i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            make_fighter_item(cloak_mod_id, 11_370, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+    for (svc, method, args) in scoop_salvage_cmds {
+        let err = handle_npcs_drones(&ctx, &mut sess, svc, method, args, &kwargs)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, CODE_CANNOT_ACTIVATE_CLOAKED, "{method} DB cloak module");
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_mod_id);
+        snap.items.remove(&cloak_mod_id);
+    });
+
+    // Abandoned drone remained untouched in space across all rejected calls; uncloaked scoop & salvage-target-check now pass guard
+    with_combat_runtime(&ctx, |rt| {
+        assert!(rt.active_drones_in_space.contains_key(&aban_drone_id));
+    });
+    let salv_target_err = handle_npcs_drones(&ctx, &mut sess, "entity", "CmdSalvage", &[], &kwargs)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(salv_target_err.code, "TargetRequired");
+    handle_npcs_drones(
+        &ctx,
+        &mut sess,
+        "ship",
+        "ScoopToDroneBay",
+        &[PyRep::Integer(aban_drone_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect("uncloaked ScoopToDroneBay succeeds");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.items.get(&aban_drone_id).map(|i| i.flag)),
+        Some(InventoryFlag::DroneBay)
+    );
+}

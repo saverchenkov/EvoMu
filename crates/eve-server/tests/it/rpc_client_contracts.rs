@@ -102,6 +102,8 @@ const BPO_ITEM_ID: i64 = 100_000_007;
 const ALSC_CONTAINER_ID: i64 = 100_000_020;
 const SIPHON_ID: i64 = 100_000_021;
 const SPACE_CAN_ID: i64 = 100_000_022;
+const ACTIVE_DRONE_ID: i64 = 100_000_030;
+const ACTIVE_FIGHTER_ID: i64 = 100_000_031;
 const STRUCTURE_ID: i64 = 1_030_000_000_001;
 const SOV_HUB_ID: i64 = 1_030_000_000_002;
 const SKYHOOK_ID: i64 = 1_030_000_000_003;
@@ -666,6 +668,34 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
             InventoryItemRecord {
                 item_id: SPACE_CAN_ID,
                 type_id: 23, // Cargo Container (space jetcan)
+                owner_id: CHAR_ID,
+                location_id: SYSTEM_ID as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ACTIVE_DRONE_ID,
+            InventoryItemRecord {
+                item_id: ACTIVE_DRONE_ID,
+                type_id: 2_454, // Hobgoblin I
+                owner_id: CHAR_ID,
+                location_id: SYSTEM_ID as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ACTIVE_FIGHTER_ID,
+            InventoryItemRecord {
+                item_id: ACTIVE_FIGHTER_ID,
+                type_id: 23_057, // Dragonfly I
                 owner_id: CHAR_ID,
                 location_id: SYSTEM_ID as i64,
                 flag: InventoryFlag::None,
@@ -1261,8 +1291,17 @@ fn arg_from_expr(expr: &str, service: &str, method: &str, idx: usize) -> Option<
     if e.ends_with("itemids") || e.ends_with("items") || e == "ids" || e.ends_with("_ids") {
         return Some(PyRep::List(vec![PyRep::Integer(HANGAR_ITEM_ID)]));
     }
+    if service == "entity" && e == "keys()" {
+        return Some(PyRep::List(vec![PyRep::Integer(ACTIVE_DRONE_ID)]));
+    }
     if e.ends_with("droneids") || e.contains("drones") {
-        return Some(PyRep::List(vec![PyRep::Integer(100_000_006)]));
+        return Some(PyRep::List(vec![PyRep::Integer(ACTIVE_DRONE_ID)]));
+    }
+    if e == "fighterid" {
+        return Some(PyRep::Integer(ACTIVE_FIGHTER_ID));
+    }
+    if service == "fighterMgr" && method == "ExecuteMovementCommandOnFighters" && e.ends_with("fighterids") {
+        return Some(PyRep::List(vec![PyRep::Integer(ACTIVE_FIGHTER_ID)]));
     }
     if e == "recruiters" {
         return Some(PyRep::List(vec![PyRep::Integer(CHAR_ID)]));
@@ -1340,7 +1379,13 @@ fn arg_from_expr(expr: &str, service: &str, method: &str, idx: usize) -> Option<
         return Some(PyRep::Integer(CORP_ID));
     }
     if e.contains("charid") || e.contains("characterid") || e.contains("memberid") || e.contains("pilotid") {
-        if service.starts_with("fleet") || m.contains("invite") || m.contains("kick") || m.contains("move") || m.contains("target") {
+        if service.starts_with("fleet")
+            || (service == "entity" && matches!(method, "CmdAssist" | "CmdGuard"))
+            || m.contains("invite")
+            || m.contains("kick")
+            || m.contains("move")
+            || m.contains("target")
+        {
             return Some(PyRep::Integer(OTHER_CHAR_ID));
         }
         return Some(PyRep::Integer(CHAR_ID));
@@ -1776,6 +1821,8 @@ fn is_destructive_rpc(service: &str, method: &str) -> bool {
             | ("machoNet", "TerminateAllClients" | "GracefulShutdown")
             | ("sessionMgr", "EndAllGameSessions")
             | ("ship", "Eject" | "SelfDestruct")
+            | ("entity", "CmdAbandonDrone" | "CmdReturnBay")
+            | ("fighterMgr", "CmdAbandonFighter")
             | ("stationSvc", "Undock")
             | ("structureDocking", "Undock")
     ) || m.starts_with("delete")
@@ -1791,6 +1838,97 @@ fn is_destructive_rpc(service: &str, method: &str) -> bool {
         || m.starts_with("cancel")
         || m.starts_with("trash")
         || m.starts_with("extract")
+}
+
+async fn reset_contract_space_drones_and_fighters(ctx: &ServerContext) {
+    let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
+    for (ball_id, type_id, pos) in [
+        (SHIP_ID, 587_u32, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0)),
+        (SIPHON_ID, 33_477_u32, glam::DVec3::new(11_000.0, 20_000.0, 30_000.0)),
+        (SPACE_CAN_ID, 23_u32, glam::DVec3::new(12_000.0, 20_000.0, 30_000.0)),
+        (ACTIVE_DRONE_ID, 2_454_u32, glam::DVec3::new(13_500.0, 20_000.0, 30_000.0)),
+        (ACTIVE_FIGHTER_ID, 23_057_u32, glam::DVec3::new(10_500.0, 20_000.0, 30_000.0)),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: ball_id,
+                type_id,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.5,
+                mass: 1_350_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    }
+    let _ = sys_handle
+        .set_ball_position(SHIP_ID, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0))
+        .await;
+    let _ = sys_handle
+        .set_ball_position(ACTIVE_DRONE_ID, glam::DVec3::new(13_500.0, 20_000.0, 30_000.0))
+        .await;
+    let _ = sys_handle.try_update_combat_state(SHIP_ID, |cs| {
+        cs.is_cloaked = false;
+        cs.is_tethered = false;
+        cs.cloak_velocity_multiplier = None;
+    });
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.insert(
+            ACTIVE_DRONE_ID,
+            eve_server::services::combat_crimewatch::DroneSpaceState {
+                ball_id: ACTIVE_DRONE_ID,
+                drone_item_id: ACTIVE_DRONE_ID,
+                type_id: 2_454,
+                group_id: 100,
+                owner_char_id: CHAR_ID,
+                original_owner_char_id: CHAR_ID,
+                parent_ship_id: SHIP_ID,
+                solar_system_id: SYSTEM_ID,
+                target_id: None,
+                activity_state: 0,
+                assist_char_id: None,
+                guard_char_id: None,
+                is_abandoned: false,
+                is_sentry: false,
+                bandwidth_used: 5.0,
+                max_velocity: 2_600.0,
+                optimal_range: 2_000.0,
+                damage_vector: eve_destiny::DamageVector {
+                    em: 0.0,
+                    thermal: 20.0,
+                    kinetic: 0.0,
+                    explosive: 0.0,
+                },
+                shield_repair_amount: 0.0,
+                armor_repair_amount: 0.0,
+                hull_repair_amount: 0.0,
+                web_speed_factor: 0.0,
+                neut_amount: 0.0,
+                ecm_strength: 0.0,
+                tp_sig_bonus_pct: 0.0,
+            },
+        );
+    });
+    if let Ok(mut fighters) = ctx.active_fighters.write() {
+        fighters.insert(
+            ACTIVE_FIGHTER_ID,
+            eve_server::router::ActiveFighterSquadron {
+                ball_id: ACTIVE_FIGHTER_ID,
+                item_id: ACTIVE_FIGHTER_ID,
+                type_id: 23_057,
+                owner_char_id: CHAR_ID,
+                parent_ship_id: SHIP_ID,
+                tube_index: 0,
+                squadron_size: 9,
+                target_id: None,
+                is_abandoned: false,
+                mwd_active: false,
+            },
+        );
+    }
 }
 
 #[tokio::test]
@@ -1815,30 +1953,10 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
     .await
     .expect("SelectCharacterID");
 
-    let base_snapshot = ctx.db.with_snapshot(|snap| snap.clone());
+    // Spawn the active ship ball (plus deployed siphon, space container, active drone & active fighter) in Jita
+    reset_contract_space_drones_and_fighters(&ctx).await;
 
-    // Spawn the active ship ball (plus deployed siphon & space container) in Jita so space/destiny/dogma RPCs work when undocked
-    let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
-    for (ball_id, type_id, pos) in [
-        (SHIP_ID, 587_u32, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0)),
-        (SIPHON_ID, 33_477_u32, glam::DVec3::new(11_000.0, 20_000.0, 30_000.0)),
-        (SPACE_CAN_ID, 23_u32, glam::DVec3::new(12_000.0, 20_000.0, 30_000.0)),
-    ] {
-        let _ = sys_handle
-            .spawn_ball(eve_destiny::Ball {
-                id: ball_id,
-                type_id,
-                position: pos,
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 350.0,
-                inertia: 2.5,
-                mass: 1_350_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            })
-            .await;
-    }
+    let base_snapshot = ctx.db.with_snapshot(|snap| snap.clone());
 
     // Partition into non-destructive (read/query) first, then destructive/mutating second
     let mut non_destructive = Vec::new();
@@ -1989,6 +2107,11 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
             for cand_args in &sig.candidates {
                 ctx.release_session_rate_bucket(sess.session_id);
                 restore_session_profile(&ctx, &mut sess, profile);
+                if matches!(profile, SessionProfile::InSpace)
+                    && matches!(sig.service.as_str(), "entity" | "fighterMgr" | "ship")
+                {
+                    reset_contract_space_drones_and_fighters(&ctx).await;
+                }
                 let bound_id = bind_for_service(&ctx, &sess, &sig.service, &sig.method);
                 let res = ctx
                     .dispatch_rpc(
@@ -2036,6 +2159,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
                             ctx.db
                                 .with_mut_snapshot(|snap| *snap = base_snapshot.clone());
                             ctx.invalidate_ship_fitting(SHIP_ID);
+                            reset_contract_space_drones_and_fighters(&ctx).await;
                         }
                         break;
                     }
@@ -3430,27 +3554,7 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
     harness.drain_frames();
 
     for ctx_pair in [&ctx_raw, &ctx_wire] {
-        let sys_handle = ctx_pair.systems.get_or_spawn(SYSTEM_ID);
-        for (ball_id, type_id, pos) in [
-            (SHIP_ID, 587_u32, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0)),
-            (SIPHON_ID, 33_477_u32, glam::DVec3::new(11_000.0, 20_000.0, 30_000.0)),
-            (SPACE_CAN_ID, 23_u32, glam::DVec3::new(12_000.0, 20_000.0, 30_000.0)),
-        ] {
-            let _ = sys_handle
-                .spawn_ball(eve_destiny::Ball {
-                    id: ball_id,
-                    type_id,
-                    position: pos,
-                    velocity: glam::DVec3::ZERO,
-                    max_velocity: 350.0,
-                    inertia: 2.5,
-                    mass: 1_350_000.0,
-                    radius: 40.0,
-                    speed_fraction: 0.0,
-                    mode: eve_destiny::MovementMode::Stop,
-                })
-                .await;
-        }
+        reset_contract_space_drones_and_fighters(ctx_pair).await;
     }
 
     let raw_base_snapshot = ctx_raw.db.with_snapshot(|snap| snap.clone());
@@ -3554,6 +3658,12 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     &mut harness.transport_mut().inner.session,
                     profile,
                 );
+                if matches!(profile, SessionProfile::InSpace)
+                    && matches!(sig.service.as_str(), "entity" | "fighterMgr" | "ship")
+                {
+                    reset_contract_space_drones_and_fighters(&ctx_raw).await;
+                    reset_contract_space_drones_and_fighters(&ctx_wire).await;
+                }
                 let bound_raw =
                     bind_for_service(&ctx_raw, &sess_raw, &sig.service, &sig.method);
                 let bound_wire = bind_for_service(
@@ -3621,6 +3731,8 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     ctx_wire
                         .db
                         .with_mut_snapshot(|snap| *snap = wire_base_snapshot.clone());
+                    reset_contract_space_drones_and_fighters(&ctx_raw).await;
+                    reset_contract_space_drones_and_fighters(&ctx_wire).await;
                 }
 
                 if resolved_rpcs.contains(&sig.rpc_key) {

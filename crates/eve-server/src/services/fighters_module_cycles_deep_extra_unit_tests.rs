@@ -150,6 +150,12 @@ async fn combat_fighters_all_commands_error_guards_and_squadron_damage() {
     let non_fighter_id = 950_102_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
         let ship_rec = snap.items.entry(ship_id).or_insert(InventoryItemRecord {
             item_id: ship_id, type_id: carrier_tid, owner_id: char_id, location_id: 60_003_760,
             flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1,

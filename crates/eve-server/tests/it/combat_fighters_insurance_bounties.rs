@@ -2005,6 +2005,8 @@ async fn setup_carrier(ctx: &ServerContext, char_id: i64, ship_id: i64) {
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) {
             ch.solar_system_id = SYS_ID;
+            ch.station_id = None;
+            ch.structure_id = None;
             ch.active_ship_id = ship_id;
             ch.balance = IskCents::from_isk(500_000_000);
         }
@@ -2419,6 +2421,8 @@ async fn setup_ship_ball(ctx: &ServerContext, ship_id: i64, type_id: u32, char_i
             let mut ch = base;
             ch.character_id = char_id;
             ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
             ch.active_ship_id = ship_id;
             snap.characters.insert(char_id, ch);
         }

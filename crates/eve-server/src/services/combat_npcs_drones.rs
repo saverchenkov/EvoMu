@@ -1561,7 +1561,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReturnHome") | ("entity", "CmdReturnAndOrbit") => {
-            let (char_id, ship_id, sys_id, _) = match require_undocked_uncloaked_drone_ship(
+            let (char_id, ship_id, sys_id, sys_handle) = match require_undocked_uncloaked_drone_ship(
                 ctx,
                 session,
                 "command drones",
@@ -1581,21 +1581,18 @@ pub async fn handle_npcs_drones(
                 ship_id,
                 sys_id,
                 &filter,
-                false,
-                false,
+                true,
+                true,
                 false,
                 EmptyFilterMode::ControlledInSystem,
             ) {
                 return Some(Err(e));
             }
-            let filter_drone_ids: Option<Vec<i64>> = match args.first() {
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    Some(items.iter().filter_map(|it| it.as_i64()).collect())
-                }
-                Some(PyRep::Integer(id)) => Some(vec![*id]),
-                _ => None,
+            let filter_drone_ids: Option<&[i64]> = match &filter {
+                EntityDroneFilter::Ids(ids) => Some(ids.as_slice()),
+                EntityDroneFilter::All => None,
+                EntityDroneFilter::Invalid => unreachable!("validated by validate_entity_drone_presence"),
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await
@@ -1612,7 +1609,6 @@ pub async fn handle_npcs_drones(
                             && d.parent_ship_id == ship_id
                             && !d.is_abandoned
                             && filter_drone_ids
-                                .as_ref()
                                 .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
                                 .unwrap_or(true)
                     })
@@ -2164,19 +2160,15 @@ pub async fn handle_npcs_drones(
         }
 
         ("ship", "ScoopToDroneBay") | ("ship", "ScoopDrone") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, sys_handle) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "scoop drones",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                    client_error: None,
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
             };
             if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
                 return Some(Err(e));
@@ -2185,7 +2177,6 @@ pub async fn handle_npcs_drones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
                 .await
@@ -2400,21 +2391,24 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdSalvage") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (char_id, ship_id, sys_id, _) = match require_undocked_uncloaked_drone_ship(
+                ctx,
+                session,
+                "command salvage drones",
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None }));
-            };
             let has_salvage_drone = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space.values().any(|d| {
-                    d.parent_ship_id == ship_id && !d.is_abandoned && (d.group_id == 1159 || d.type_id == 32787)
+                    d.solar_system_id == sys_id
+                        && d.parent_ship_id == ship_id
+                        && !d.is_abandoned
+                        && (d.group_id == 1159 || d.type_id == 32787)
                 })
             });
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into(), client_error: None }));
-            };
             if !has_salvage_drone {
                 return Some(Err(BridgeRpcError { code: "NoActiveSalvageDrones".into(), message: "No active Salvage Drones in space".into(), client_error: None }));
             }

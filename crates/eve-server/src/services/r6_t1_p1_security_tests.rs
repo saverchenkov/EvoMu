@@ -231,6 +231,7 @@ async fn issue_364_fighter_mwd_enforces_sde_ability_cooldown_and_charges() {
     }
 
     let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys.spawn_ball(make_ship_ball(carrier_id, 23_757, DVec3::ZERO)).await;
     let _ = sys.spawn_ball(make_ship_ball(no_mwd_fighter, 23_061, DVec3::ZERO)).await;
     let _ = sys.spawn_ball(make_ship_ball(light_fighter, 23_055, DVec3::new(1000.0, 0.0, 0.0))).await;
 

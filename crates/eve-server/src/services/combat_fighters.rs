@@ -227,8 +227,9 @@ fn parse_fighter_id_filter(
     }
 }
 
-/// Resolves an undocked in-space ship session and ball, tolerating stale session station/structure
-/// flags only when the ship ball is actively spawned in space and the DB item is located in `sys_id`.
+/// Resolves an undocked in-space ship session and ball. Unconditionally rejects station-docked
+/// sessions/DB characters with `ShipDocked`, and allows `structure_id` only when the pilot is
+/// actively controlling that structure (`structure_id == Some(ship_id)`).
 async fn resolve_in_space_fighter_ship(
     ctx: &ServerContext,
     session: &SessionState,
@@ -244,6 +245,30 @@ async fn resolve_in_space_fighter_ship(
     BridgeRpcError,
 > {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let db_char_loc = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.station_id, c.structure_id))
+    });
+    if session.station_id.is_some()
+        || db_char_loc.is_some_and(|(station_id, _)| station_id.is_some())
+    {
+        return Err(fighter_rpc_err(
+            "ShipDocked",
+            format!("Cannot {action_label} while docked"),
+        ));
+    }
+    let db_structure_id = db_char_loc.and_then(|(_, s)| s);
+    let structure_docked = session
+        .structure_id
+        .is_some_and(|st_id| session.ship_id != Some(st_id))
+        || db_structure_id.is_some_and(|st_id| session.ship_id != Some(st_id));
+    if structure_docked {
+        return Err(fighter_rpc_err(
+            "ShipDocked",
+            format!("Cannot {action_label} while docked"),
+        ));
+    }
     let Some(ship_id) = session.ship_id else {
         return Err(fighter_rpc_err(
             "NoActiveShip",
@@ -260,12 +285,6 @@ async fn resolve_in_space_fighter_ship(
     let ship_ball = match sys_handle.get_ball_snapshot(ship_id).await {
         Ok(Some((_, b))) => b,
         Ok(None) => {
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Err(fighter_rpc_err(
-                    "ShipDocked",
-                    format!("Cannot {action_label} while docked"),
-                ));
-            }
             return Err(fighter_rpc_err(
                 "ShipNotInSpace",
                 "Active ship is not spawned in space",
@@ -273,19 +292,6 @@ async fn resolve_in_space_fighter_ship(
         }
         Err(e) => return Err(fighter_rpc_err("DestinyCommandFailed", e)),
     };
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        let ship_in_space_db = ctx.db.with_snapshot(|snap| {
-            snap.items
-                .get(&ship_id)
-                .is_some_and(|it| it.location_id == i64::from(sys_id))
-        });
-        if !ship_in_space_db {
-            return Err(fighter_rpc_err(
-                "ShipDocked",
-                format!("Cannot {action_label} while docked"),
-            ));
-        }
-    }
     Ok((char_id, ship_id, sys_id, sys_handle, ship_ball))
 }
 
@@ -769,22 +775,25 @@ async fn handle_fighters_inner(
                     client_error: None,
                 }));
             }
+            let pre_ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+            let is_cloaked = pre_ship_cs
+                .as_ref()
+                .is_some_and(|cs| cs.is_cloaked || cs.cloak_velocity_multiplier.is_some())
+                || crate::services::inventory_fitting::fitting_module_cycles::is_ship_actively_cloaked(
+                    ctx,
+                    &sys_handle,
+                    ship_id,
+                )
+                .await;
+            if is_cloaked {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotOpenFighterTubesWhileCloaked".into(),
+                    message: "UserError: Cannot launch fighters while cloaked".into(),
+                    client_error: None,
+                }));
+            }
             crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
-            let active_cloak_module = ctx.db.with_snapshot(|snap| {
-                snap.items.values().any(|it| {
-                    it.location_id == ship_id
-                        && snap.module_active_states.contains(&it.item_id)
-                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
-                })
-            });
             if let Ok(Some(ship_cs)) = sys_handle.get_combat_state(ship_id).await {
-                if ship_cs.is_cloaked || active_cloak_module {
-                    return Some(Err(BridgeRpcError {
-                        code: "CannotOpenFighterTubesWhileCloaked".into(),
-                        message: "UserError: Cannot launch fighters while cloaked".into(),
-                        client_error: None,
-                    }));
-                }
                 if ship_cs.is_tethered {
                     return Some(Err(BridgeRpcError {
                         code: "DeniedTethered".into(),
@@ -1420,17 +1429,11 @@ async fn handle_fighters_inner(
         }
 
         ("fighterMgr", "ExecuteMovementCommandOnFighters") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
-            };
+            let (char_id, _ship_id, _sys_id, sys_handle) =
+                match require_undocked_uncloaked_fighter_ship(ctx, session, "command fighters").await {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
             let fighter_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
                     items.iter().filter_map(|x| x.as_i64()).collect()
@@ -1464,7 +1467,6 @@ async fn handle_fighters_inner(
                     }
                 }
             }
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let cmd = args
                 .get(1)
                 .and_then(|a| a.as_str())
@@ -1686,31 +1688,12 @@ async fn handle_scoop_abandoned_fighter(
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Some(Err(BridgeRpcError {
-            code: "ShipDocked".into(),
-            message: "Cannot scoop abandoned fighters while docked".into(),
-            client_error: None,
-        }));
-    }
-    let Some(ship_id) = session.ship_id else {
-        return Some(Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-            client_error: None,
-        }));
-    };
-    let Some(sys_id) = session.solar_system_id else {
-        return Some(Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solar system".into(),
-            client_error: None,
-        }));
-    };
+    let (char_id, ship_id, sys_id, sys_handle) =
+        match require_undocked_uncloaked_fighter_ship(ctx, session, "scoop abandoned fighters").await
+        {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
     let entry_db_state = ctx.db.with_snapshot(|snap| {
         snap.characters
             .get(&char_id)
@@ -1803,7 +1786,6 @@ async fn handle_scoop_abandoned_fighter(
             client_error: None,
         }));
     }
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let f_pos = sys_handle
         .get_ball_snapshot(squad.ball_id)
         .await
