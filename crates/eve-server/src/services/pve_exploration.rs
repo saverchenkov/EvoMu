@@ -1219,11 +1219,6 @@ pub async fn handle_pve_exploration(
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered")
         | ("scanSvc", "GetEscalatingPathDungeonsEntered") => {
-            if service == "scanSvc" {
-                if let Err(e) = require_undocked_exploration_space(ctx, session, true) {
-                    return Some(Err(e));
-                }
-            }
             Some(handle_get_escalating_path_dungeons_entered(ctx, session))
         }
 

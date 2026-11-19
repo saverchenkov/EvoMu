@@ -968,4 +968,35 @@ async fn probe_scanning_read_purity_and_docked_guards() {
     assert!(handle_scan_and_wormhole_extras(&ctx, &mut sess, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
     assert_eq!(ctx.db.state_epoch(), e1);
     assert_eq!(ctx.db.tx_commit_count(), c1);
+
+    // Docked GetSystemScanMgr still materializes existing wormhole Ballpark balls without mutating EveDb.
+    let (ctx_wh, mut docked_wh) = make_scan_ctx_and_session();
+    docked_wh.station_id = Some(60_003_760);
+    ctx_wh.db.with_mut_snapshot(|snap| {
+        let now_u = ctx_wh.now_unix();
+        snap.cosmic_signatures.insert(30_000_142, vec![CosmicSignatureRecord {
+            signature_id: "WH-TST-1".into(),
+            solar_system_id: 30_000_142,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole (K162)".into(),
+            position: [1_000_000.0, 2_000_000.0, 3_000_000.0],
+            signal_strength: 0.25,
+            wormhole_type_id: Some(26_272),
+            destination_system_id: Some(31_000_005),
+            created_unix: now_u,
+            lifetime_seconds: 86_400,
+            max_mass_kg: 2_000_000_000.0,
+            remaining_mass_kg: 2_000_000_000.0,
+            max_jump_mass_kg: 375_000_000.0,
+            collapsed: false,
+        }]);
+    });
+    let ew0 = ctx_wh.db.state_epoch();
+    let cw0 = ctx_wh.db.tx_commit_count();
+    assert!(handle_scan_and_wormhole_extras(&ctx_wh, &mut docked_wh, None, "scanMgr", "GetSystemScanMgr", &[], &kw).await.unwrap().is_ok());
+    assert_eq!(ctx_wh.db.state_epoch(), ew0);
+    assert_eq!(ctx_wh.db.tx_commit_count(), cw0);
+    let wh_item_id = crate::services::space_destiny::wormhole_item_id_for_signature(30_000_142, "WH-TST-1");
+    let sys_wh = ctx_wh.systems.get_or_spawn(30_000_142);
+    assert!(sys_wh.get_ball_snapshot(wh_item_id).await.unwrap().is_some());
 }

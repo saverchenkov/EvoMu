@@ -254,18 +254,20 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
     let e0 = ctx.db.state_epoch();
     let c0 = ctx.db.tx_commit_count();
 
-    let dng_entered = handle_pve_exploration(
-        &ctx,
-        &mut docked,
-        "dungeonExplorationMgr",
-        "GetEscalatingPathDungeonsEntered",
-        &[],
-        &kw,
-    )
-    .await
-    .expect("handled")
-    .expect("read-only dungeonExplorationMgr.GetEscalatingPathDungeonsEntered ok");
-    assert_eq!(dng_entered, PyRep::List(Vec::new()));
+    for svc in ["dungeonExplorationMgr", "scanSvc"] {
+        let dng_entered = handle_pve_exploration(
+            &ctx,
+            &mut docked,
+            svc,
+            "GetEscalatingPathDungeonsEntered",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .expect("read-only GetEscalatingPathDungeonsEntered ok");
+        assert_eq!(dng_entered, PyRep::List(Vec::new()), "{svc}");
+    }
 
     for (svc, meth, args) in [
         ("keeper", "GetDungeonShipRestrictions", vec![PyRep::Integer(2)]),
@@ -276,7 +278,6 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
         ("keeper", "EnterNextDungeonRoom", vec![PyRep::String("DED-30000142-3".into())]),
         ("beyonce", "ActivateAccelerationGate", vec![PyRep::String("DED-30000142-3".into())]),
         ("scanSvc", "EnterCombatAnomaly", vec![PyRep::String("PVE-ANOM-30000142-1".into())]),
-        ("scanSvc", "GetEscalatingPathDungeonsEntered", vec![]),
     ] {
         let err = handle_pve_exploration(&ctx, &mut docked, svc, meth, &args, &kw)
             .await
@@ -295,7 +296,6 @@ async fn exploration_read_purity_and_undocked_guards_do_not_mutate_db() {
     for (svc, meth, args) in [
         ("keeper", "CanEnterDungeonInCurrentShip", vec![PyRep::Integer(2)]),
         ("scanSvc", "EnterCombatAnomaly", vec![PyRep::String("PVE-ANOM-30000142-1".into())]),
-        ("scanSvc", "GetEscalatingPathDungeonsEntered", vec![]),
         ("keeper", "EnterNextDungeonRoom", vec![PyRep::Integer(999_999)]),
     ] {
         let err = handle_pve_exploration(&ctx, &mut no_ship, svc, meth, &args, &kw)

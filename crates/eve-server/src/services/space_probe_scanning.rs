@@ -6,10 +6,11 @@
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::space_destiny::{
     compute_wormhole_stages_with_sde, derive_wormhole_buckets, ensure_system_signatures_and_anomalies,
-    system_wormhole_profile, wormhole_item_id_for_signature, AU_IN_METERS,
+    pochven_wormhole_ball_position, system_wormhole_profile, wormhole_item_id_for_signature,
+    AU_IN_METERS,
 };
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag};
-use eve_destiny::Ball;
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId};
@@ -82,21 +83,72 @@ fn read_system_signatures_and_anomalies_ready(
     })
 }
 
+/// Materializes missing Ballpark wormhole balls for existing active wormhole
+/// signatures without mutating `EveDb`.
+async fn sync_existing_wormhole_balls(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    sigs: &[CosmicSignatureRecord],
+    now_unix: u64,
+) {
+    let has_active_wh = sigs
+        .iter()
+        .any(|s| s.sig_group == "Wormhole" && !s.collapsed);
+    if !has_active_wh {
+        return;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for sig in sigs {
+        if sig.sig_group == "Wormhole" && !sig.collapsed {
+            let wh_item_id = wormhole_item_id_for_signature(sys_id, &sig.signature_id);
+            if sys_handle
+                .get_ball_snapshot(wh_item_id)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let ball_pos = pochven_wormhole_ball_position(&ctx.sde, sig);
+                let _ = sys_handle
+                    .spawn_ball(Ball {
+                        id: wh_item_id,
+                        type_id: sig.wormhole_type_id.unwrap_or(26272),
+                        position: ball_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: sig.remaining_mass_kg.max(1.0),
+                        radius: 1500.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Rigid,
+                    })
+                    .await;
+            }
+            let (_, wh_size, _, wh_age, _) =
+                compute_wormhole_stages_with_sde(sig, now_unix, Some(&ctx.sde));
+            let _ = sys_handle
+                .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
+                .await;
+        }
+    }
+}
+
 async fn load_system_signatures_and_anomalies(
     ctx: &ServerContext,
     session: &SessionState,
     sys_id: SolarSystemId,
     now_unix: u64,
 ) -> (Vec<CosmicSignatureRecord>, Vec<CosmicAnomalyRecord>) {
-    if let Some(ready) = read_system_signatures_and_anomalies_ready(ctx, sys_id, now_unix) {
-        return ready;
+    if let Some((sigs, anoms)) = read_system_signatures_and_anomalies_ready(ctx, sys_id, now_unix) {
+        sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
+        return (sigs, anoms);
     }
     // Docked or shipless pilots may inspect readouts, so avoid mutating DB if unseeded.
     if session.station_id.is_some()
         || session.structure_id.is_some()
         || session.ship_id.is_none()
     {
-        return ctx.db.with_snapshot(|snap| {
+        let (sigs, anoms) = ctx.db.with_snapshot(|snap| {
             let sigs = snap.cosmic_signatures.get(&sys_id).cloned().unwrap_or_default();
             let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_else(|| {
                 let wh_class = system_wormhole_profile(sys_id).0;
@@ -120,6 +172,8 @@ async fn load_system_signatures_and_anomalies(
             });
             (sigs, anoms)
         });
+        sync_existing_wormhole_balls(ctx, sys_id, &sigs, now_unix).await;
+        return (sigs, anoms);
     }
     ensure_system_signatures_and_anomalies(ctx, sys_id).await
 }
