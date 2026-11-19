@@ -355,7 +355,12 @@ fn test_parity_plan_t6_client_harness_runner_and_journeys() {
         &std::fs::read_to_string(out_dir.join("result.json")).expect("read result.json"),
     )
     .expect("parse result.json");
-    assert_eq!(result_json["concurrent_clients_tested"].as_u64(), Some(2));
+    assert_eq!(result_json["client_app_present"].as_bool(), Some(false));
+    assert_eq!(
+        result_json["concurrent_clients_tested"].as_u64(),
+        Some(0),
+        "no real or bridge clients authenticated when client app and bridge port are absent"
+    );
     assert_eq!(result_json["log_errors"].as_array().map(Vec::len), Some(0));
 
     let reported_map = result_json["journeys"].as_object().expect("result journeys object");
