@@ -162,11 +162,38 @@ fn pos_mgr_moon_lookup_permissions_sentry_notifications_password_and_links() {
         call_ws(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[PyRep::Integer(tower_id)]).unwrap(),
         PyRep::List(_)
     ));
+    let owned_silo_id = 1_000_000_603_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            owned_silo_id,
+            InventoryItemRecord {
+                item_id: owned_silo_id,
+                type_id: 14_343,
+                owner_id: corp_id,
+                location_id: tower_id,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let silo_cap = call_ws(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(owned_silo_id)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!(silo_cap >= 20_000.0);
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(999_999)])
-            .unwrap()
-            .as_f64(),
-        Some(20_000.0)
+            .unwrap_err()
+            .code,
+        "StructureNotFound"
+    );
+    assert_eq!(
+        call_ws(&ctx, &mut outsider_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(owned_silo_id)])
+            .unwrap_err()
+            .code,
+        "NotStarbaseOwner"
     );
     assert_eq!(
         call_ws(&ctx, &mut ceo_sess, "posMgr", "GetConsumptionFactor", &[PyRep::Integer(tower_id)])

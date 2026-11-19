@@ -272,3 +272,268 @@ async fn cmd_unanchor_validates_auth_range_single_use_and_mutates_drone_and_depl
     assert_eq!(kv_field(&dep_bound_ok, "isDrone").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(kv_field(&dep_bound_ok, "typeID").and_then(|v| v.as_i64()), Some(990_002));
 }
+
+#[tokio::test]
+async fn beyonce_siphon_and_container_expiry_enforce_type_cloak_and_grid_range() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let foreign_id = 90_000_002_i64;
+    let sys_id = 30_000_142_u32;
+    let invalid_target = "InvalidContainerTarget";
+    let blocked_cloaked = "ActionBlockedWhileCloaked";
+    let ship_id = 98_400_100_i64;
+    let foreign_ship_id = 98_400_101_i64;
+    let siphon_id = 98_400_200_i64;
+    let far_can_id = 98_400_201_i64;
+    let near_can_id = 98_400_202_i64;
+    let can_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 12)
+        .map(|t| t.type_id)
+        .unwrap_or(23);
+    let siphon_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 1247)
+        .map(|t| t.type_id)
+        .unwrap_or(33_477);
+    let mtu_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 1250)
+        .map(|t| t.type_id)
+        .unwrap_or(33_475);
+    let wreck_tid = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 186)
+        .map(|t| t.type_id)
+        .unwrap_or(26_512);
+    let far_siphon_id = 98_400_203_i64;
+    let unspawned_siphon_id = 98_400_204_i64;
+    let unspawned_can_id = 98_400_205_i64;
+    let cargo_siphon_id = 98_400_206_i64;
+    let cargo_can_id = 98_400_207_i64;
+    let mtu_id = 98_400_208_i64;
+    let ore_id = 98_400_209_i64;
+    let wreck_id = 98_400_210_i64;
+    let unspawned_ship_id = 98_400_211_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, owner, loc) in [
+            (ship_id, 587, char_id, sys_id as i64),
+            (foreign_ship_id, 587, foreign_id, sys_id as i64),
+            (siphon_id, siphon_tid, foreign_id, sys_id as i64),
+            (far_can_id, can_tid, foreign_id, sys_id as i64),
+            (near_can_id, can_tid, foreign_id, sys_id as i64),
+            (far_siphon_id, siphon_tid, foreign_id, sys_id as i64),
+            (cargo_siphon_id, siphon_tid, char_id, ship_id),
+            (cargo_can_id, can_tid, char_id, ship_id),
+            (mtu_id, mtu_tid, foreign_id, sys_id as i64),
+            (ore_id, 34, foreign_id, sys_id as i64),
+            (wreck_id, wreck_tid, foreign_id, sys_id as i64),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag: if loc == ship_id { InventoryFlag::Cargo } else { InventoryFlag::None },
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    for (bid, tid, pos) in [
+        (ship_id, 587, DVec3::ZERO),
+        (siphon_id, siphon_tid, DVec3::new(10_000.0, 0.0, 0.0)),
+        (near_can_id, can_tid, DVec3::new(15_000.0, 0.0, 0.0)),
+        (far_can_id, can_tid, DVec3::new(300_000.0, 0.0, 0.0)),
+        (far_siphon_id, siphon_tid, DVec3::new(300_000.0, 0.0, 0.0)),
+        (mtu_id, mtu_tid, DVec3::new(12_000.0, 0.0, 0.0)),
+        (ore_id, 34, DVec3::new(13_000.0, 0.0, 0.0)),
+        (wreck_id, wreck_tid, DVec3::new(14_000.0, 0.0, 0.0)),
+    ] {
+        let _ = sys
+            .spawn_ball_with_meta(
+                Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1e6,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+                eve_destiny::SlimItemMeta::default(),
+            )
+            .await;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for (iid, tid, owner) in [
+            (unspawned_ship_id, 587, char_id),
+            (unspawned_siphon_id, siphon_tid, foreign_id),
+            (unspawned_can_id, can_tid, foreign_id),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: sys_id as i64,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut sess = make_session(char_id, 98_000_001, Some(sys_id), Some(ship_id), 0);
+    let kw = HashMap::new();
+
+    // Non-GM querying a ship must be rejected.
+    for method in ["GetCapacityOfSiphon", "GetContainerExpiryDate"] {
+        assert_eq!(
+            handle(&ctx, &mut sess, None, "beyonce", method, &[PyRep::Integer(foreign_ship_id)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            invalid_target
+        );
+    }
+
+    // Out-of-grid (>250km) siphon & container must both be rejected.
+    for (method, tid) in [
+        ("GetCapacityOfSiphon", far_siphon_id),
+        ("GetContainerExpiryDate", far_can_id),
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut sess, None, "beyonce", method, &[PyRep::Integer(tid)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "OutOfRange"
+        );
+    }
+
+    // Wrong SDE groups (MTU 1250 on siphon endpoint; non-container ore 34 on either) must reject.
+    assert_eq!(
+        handle(&ctx, &mut sess, None, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(mtu_id)], &kw)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        invalid_target
+    );
+    for method in ["GetCapacityOfSiphon", "GetContainerExpiryDate"] {
+        assert_eq!(
+            handle(&ctx, &mut sess, None, "beyonce", method, &[PyRep::Integer(ore_id)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            invalid_target
+        );
+    }
+
+    // Target inside cargo or not spawned as a live ball in system must reject.
+    for (method, tid, code) in [
+        ("GetCapacityOfSiphon", cargo_siphon_id, "ItemNotInSpace"),
+        ("GetContainerExpiryDate", cargo_can_id, "ItemNotInSpace"),
+        ("GetCapacityOfSiphon", unspawned_siphon_id, "TargetNotInSpace"),
+        ("GetContainerExpiryDate", unspawned_can_id, "TargetNotInSpace"),
+    ] {
+        let err = handle(&ctx, &mut sess, None, "beyonce", method, &[PyRep::Integer(tid)], &kw)
+            .await
+            .unwrap()
+            .expect_err(&format!("expected {code} for {method} {tid}"));
+        assert_eq!(err.code, code);
+    }
+
+    // Docked callers (station or Upwell structure) and missing/unspawned active ship must reject.
+    let mut station_docked = sess.clone();
+    station_docked.station_id = Some(60_003_760);
+    let mut structure_docked = sess.clone();
+    structure_docked.structure_id = Some(1_040_000_050);
+    let mut no_ship_sess = sess.clone();
+    no_ship_sess.ship_id = None;
+    let mut unspawned_ship_sess = sess.clone();
+    unspawned_ship_sess.ship_id = Some(unspawned_ship_id);
+    for (bad_sess, code) in [
+        (&mut station_docked, "NotInSpace"),
+        (&mut structure_docked, "NotInSpace"),
+        (&mut no_ship_sess, "NoActiveShip"),
+        (&mut unspawned_ship_sess, "ShipNotInSpace"),
+    ] {
+        for (method, tid) in [
+            ("GetCapacityOfSiphon", siphon_id),
+            ("GetContainerExpiryDate", near_can_id),
+        ] {
+            assert_eq!(
+                handle(&ctx, bad_sess, None, "beyonce", method, &[PyRep::Integer(tid)], &kw)
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+
+    // Cloaked caller must be rejected even for in-grid siphon/container.
+    let _ = sys.try_update_combat_state(ship_id, |cs| cs.is_cloaked = true);
+    for (method, tid) in [
+        ("GetCapacityOfSiphon", siphon_id),
+        ("GetContainerExpiryDate", near_can_id),
+    ] {
+        assert_eq!(
+            handle(&ctx, &mut sess, None, "beyonce", method, &[PyRep::Integer(tid)], &kw)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            blocked_cloaked
+        );
+    }
+
+    // Uncloaked in-grid siphon, container, and wreck (group 186) succeed.
+    let _ = sys.try_update_combat_state(ship_id, |cs| cs.is_cloaked = false);
+    assert!(
+        handle(&ctx, &mut sess, None, "beyonce", "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        handle(&ctx, &mut sess, None, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(near_can_id)], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        handle(&ctx, &mut sess, None, "beyonce", "GetContainerExpiryDate", &[PyRep::Integer(wreck_id)], &kw)
+            .await
+            .unwrap()
+            .is_ok()
+    );
+}

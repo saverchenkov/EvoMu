@@ -1386,12 +1386,12 @@ pub(super) async fn handle_get_container_contents(
         char_id,
         session.has_gm_role(),
     )?;
-    {
-        let mut st = fitting_containers_ships::read_container_ship_state(ctx);
-        if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
+    let newly_unlocked = {
+        let st = fitting_containers_ships::read_container_ship_state(ctx);
+        if let Some(req_pw) = st.container_passwords.get(&container_id) {
             if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
                 if supplied_pw == Some(req_pw.as_str()) {
-                    st.unlocked_containers.insert((container_id, char_id));
+                    true
                 } else {
                     return Err(BridgeRpcError {
                         code: "ALSCPasswordRequired".into(),
@@ -1399,16 +1399,29 @@ pub(super) async fn handle_get_container_contents(
                         client_error: None,
                     });
                 }
+            } else {
+                false
             }
+        } else {
+            false
         }
-        let is_alsc = ctx.db.with_snapshot(|snap| {
-            snap.items.get(&container_id).is_some_and(|it| {
-                ctx.sde
-                    .types
-                    .get(&it.type_id)
-                    .is_some_and(|t| t.group_id == 448)
-            })
-        });
+    };
+    let out = ctx
+        .get_container_contents(session, bound_entry, char_id, container_id)
+        .await?;
+    let is_alsc = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&container_id).is_some_and(|it| {
+            ctx.sde
+                .types
+                .get(&it.type_id)
+                .is_some_and(|t| t.group_id == 448)
+        })
+    });
+    if newly_unlocked || is_alsc {
+        let mut st = fitting_containers_ships::read_container_ship_state(ctx);
+        if newly_unlocked {
+            st.unlocked_containers.insert((container_id, char_id));
+        }
         if is_alsc {
             let now_unix = ctx.now_unix_secs();
             st.alsc_logs
@@ -1425,8 +1438,7 @@ pub(super) async fn handle_get_container_contents(
         }
         fitting_containers_ships::save_container_ship_state(ctx, &st);
     }
-    ctx.get_container_contents(session, bound_entry, char_id, container_id)
-        .await
+    Ok(out)
 }
 
 fn extract_flag_list(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> Vec<i64> {

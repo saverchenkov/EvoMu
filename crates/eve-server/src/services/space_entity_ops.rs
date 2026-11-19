@@ -18,7 +18,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
-use crate::services::inventory_fitting::fitting_containers_ships;
+use crate::services::inventory_fitting::fitting_containers_ships::{self, rpc_err};
 
 fn fleet_of(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> Option<i64> {
     snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id)
@@ -677,11 +677,20 @@ pub async fn handle(
             ])))
         }
         ("beyonce", "GetCapacityOfSiphon") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let unit_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Err(e) = authorize_space_siphon_or_container(
+                ctx,
+                session,
+                char_id,
+                unit_id,
+                SpaceInspectKind::Siphon,
+            ) {
+                return Some(Err(e));
+            }
             let ratio_res = ctx.db.with_snapshot(|s| {
                 let it = s.items.get(&unit_id)?;
                 let cap = ctx.sde.types.get(&it.type_id).map(|t| t.capacity).unwrap_or(1200.0);
@@ -704,11 +713,20 @@ pub async fn handle(
             Some(Ok(PyRep::Real(ratio)))
         }
         ("beyonce", "GetContainerExpiryDate") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Err(e) = authorize_space_siphon_or_container(
+                ctx,
+                session,
+                char_id,
+                item_id,
+                SpaceInspectKind::Container,
+            ) {
+                return Some(Err(e));
+            }
             let in_items = ctx.db.with_snapshot(|s| s.items.contains_key(&item_id));
             let expiry_unix = with_combat_runtime(ctx, |rt| {
                 rt.container_lifetimes.get(&item_id).map(|c| c.created_unix + c.lifetime_secs)
@@ -1425,6 +1443,166 @@ async fn handle_open_shipping_unit_storage(
 }
 
 pub(crate) use crate::services::corp_medals_bulletins::{handle_corp_bulletins, handle_corp_medals};
+
+fn resolve_item_solar_system_in_snap(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    start_loc: i64,
+) -> Option<u32> {
+    let mut loc = start_loc;
+    for _ in 0..16 {
+        if loc <= 0 {
+            return None;
+        }
+        if let Some(st) = ctx.sde.stations.get(&loc) {
+            return Some(st.solar_system_id);
+        }
+        if let Some(st) = snap.structures.get(&loc) {
+            return Some(st.solar_system_id);
+        }
+        if let Ok(sys_id) = u32::try_from(loc) {
+            if ctx.sde.solar_systems.contains_key(&sys_id) {
+                return Some(sys_id);
+            }
+        }
+        let parent = snap.items.get(&loc)?;
+        if parent.location_id <= 0 || parent.location_id == loc {
+            return None;
+        }
+        loc = parent.location_id;
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpaceInspectKind {
+    Siphon,
+    Container,
+}
+
+fn authorize_space_siphon_or_container(
+    ctx: &ServerContext,
+    session: &SessionState,
+    _char_id: i64,
+    target_id: i64,
+    kind: SpaceInspectKind,
+) -> Result<(), BridgeRpcError> {
+    if target_id <= 0 {
+        return Err(rpc_err(
+            "InvalidItemID",
+            format!("Invalid target item ID {target_id}"),
+        ));
+    }
+    let is_gm = session.has_gm_role()
+        || (session.role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+    if is_gm {
+        return Ok(());
+    }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Caller must be in space to inspect a siphon or container",
+        ));
+    }
+    let Some(caller_sys) = session.solar_system_id else {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Caller must be in a solar system",
+        ));
+    };
+    let Some(ship_id) = session.ship_id else {
+        return Err(rpc_err(
+            "NoActiveShip",
+            "Caller must have an active ship",
+        ));
+    };
+    ctx.db.with_snapshot(|snap| {
+        if snap.structures.contains_key(&target_id) {
+            return Err(rpc_err(
+                "InvalidContainerTarget",
+                format!("Target {target_id} is a structure"),
+            ));
+        }
+        let Some(it) = snap.items.get(&target_id) else {
+            return match kind {
+                SpaceInspectKind::Siphon => Err(rpc_err(
+                    "ItemNotFound",
+                    format!("Siphon unit {target_id} not found"),
+                )),
+                SpaceInspectKind::Container => Err(rpc_err(
+                    "ContainerNotFound",
+                    format!("Container {target_id} not found"),
+                )),
+            };
+        };
+        let type_rec = ctx.sde.types.get(&it.type_id);
+        let cat_id = type_rec.map(|t| t.category_id).unwrap_or(0);
+        let grp_id = type_rec.map(|t| t.group_id).unwrap_or(0);
+        let valid_target = !matches!(cat_id, 6 | 65)
+            && match kind {
+                SpaceInspectKind::Siphon => type_rec.is_some() && grp_id == 1247,
+                SpaceInspectKind::Container => {
+                    crate::services::fitting_containers_ships::is_container_group(
+                        grp_id,
+                        it.type_id,
+                    ) || grp_id == 186
+                }
+            };
+        if !valid_target {
+            return Err(rpc_err(
+                "InvalidContainerTarget",
+                format!("Target {target_id} is not a valid container or siphon unit"),
+            ));
+        }
+        if it.location_id != i64::from(caller_sys) {
+            if let Some(item_sys) = resolve_item_solar_system_in_snap(ctx, snap, it.location_id) {
+                if item_sys != caller_sys {
+                    return Err(rpc_err(
+                        "OutOfSystem",
+                        format!("Target {target_id} is not in caller solar system"),
+                    ));
+                }
+            }
+            return Err(rpc_err(
+                "ItemNotInSpace",
+                format!("Target {target_id} must be in space in caller solar system"),
+            ));
+        }
+        Ok(())
+    })?;
+    let Some(sys_handle) = ctx.systems.get_or_spawn_if_runtime(caller_sys) else {
+        return Err(rpc_err(
+            "NotInSpace",
+            "Solar system runtime is not active",
+        ));
+    };
+    let view = sys_handle.view();
+    if view.is_ball_cloaked(ship_id) {
+        return Err(rpc_err(
+            "ActionBlockedWhileCloaked",
+            "Cannot inspect siphon or container while cloaked",
+        ));
+    }
+    let Some(ship_pos) = view.ball_position(ship_id) else {
+        return Err(rpc_err(
+            "ShipNotInSpace",
+            "Caller ship is not spawned in space",
+        ));
+    };
+    let Some(target_pos) = view.ball_position(target_id) else {
+        return Err(rpc_err(
+            "TargetNotInSpace",
+            format!("Target {target_id} is not spawned in space"),
+        ));
+    };
+    if (ship_pos - target_pos).length() > 250_000.0 {
+        return Err(rpc_err(
+            "OutOfRange",
+            format!("Target {target_id} is out of grid range"),
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 #[path = "space_entity_ops_tests.rs"]

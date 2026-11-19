@@ -99,6 +99,9 @@ const SHIP_ID: i64 = 100_000_001;
 const MODULE_ID: i64 = 100_000_005;
 const HANGAR_ITEM_ID: i64 = 100_000_003;
 const BPO_ITEM_ID: i64 = 100_000_007;
+const ALSC_CONTAINER_ID: i64 = 100_000_020;
+const SIPHON_ID: i64 = 100_000_021;
+const SPACE_CAN_ID: i64 = 100_000_022;
 const STRUCTURE_ID: i64 = 1_030_000_000_001;
 const SOV_HUB_ID: i64 = 1_030_000_000_002;
 const SKYHOOK_ID: i64 = 1_030_000_000_003;
@@ -628,6 +631,48 @@ fn seed_comprehensive_world(ctx: &ServerContext) {
                 last_damage_tick: 0,
                 last_damage_unix: 0,
                 self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            ALSC_CONTAINER_ID,
+            InventoryItemRecord {
+                item_id: ALSC_CONTAINER_ID,
+                type_id: 17_363, // Audit Log Secure Container (group 448)
+                owner_id: CHAR_ID,
+                location_id: STATION_ID,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            SIPHON_ID,
+            InventoryItemRecord {
+                item_id: SIPHON_ID,
+                type_id: 33_477, // Small Mobile Siphon Unit
+                owner_id: CHAR_ID,
+                location_id: SYSTEM_ID as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            SPACE_CAN_ID,
+            InventoryItemRecord {
+                item_id: SPACE_CAN_ID,
+                type_id: 23, // Cargo Container (space jetcan)
+                owner_id: CHAR_ID,
+                location_id: SYSTEM_ID as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
             },
         );
     });
@@ -1501,6 +1546,18 @@ fn build_candidate_arg_sets(
     if service == "sovMgr" && method == "DestroySkyhooks" {
         return vec![vec![PyRep::List(vec![PyRep::Integer(SKYHOOK_ID)])]];
     }
+    if service == "beyonce" && method == "GetCapacityOfSiphon" {
+        return vec![vec![PyRep::Integer(SIPHON_ID)]];
+    }
+    if service == "beyonce" && method == "GetContainerExpiryDate" {
+        return vec![vec![PyRep::Integer(SPACE_CAN_ID)]];
+    }
+    if service == "invbroker" && method == "HasExistingPasswordSet" {
+        return vec![
+            vec![PyRep::String("general".to_string())],
+            vec![PyRep::Integer(ALSC_CONTAINER_ID)],
+        ];
+    }
     let mut base = Vec::with_capacity(arity);
     for i in 0..arity {
         if let Some(Some(c)) = arg_consts.get(i) {
@@ -1541,11 +1598,31 @@ fn build_candidate_arg_sets(
     candidates
 }
 
-fn bind_for_service(ctx: &ServerContext, sess: &SessionState, service: &str) -> Option<u64> {
+fn bind_for_service(
+    ctx: &ServerContext,
+    sess: &SessionState,
+    service: &str,
+    method: &str,
+) -> Option<u64> {
     let obj_id = match service {
         "populationCap" | "skillMgr2" | "charMgr" | "jumpCloneSvc" | "crimewatch" => CHAR_ID,
         "beyonce" | "scanMgr" | "devIndexManager" | "posMgr" | "keeper" => SYSTEM_ID as i64,
         "dogmaIM" | "ship" => sess.ship_id.unwrap_or(SHIP_ID),
+        "invbroker"
+            if matches!(
+                method,
+                "ALSCConfigGet"
+                    | "ALSCConfigSet"
+                    | "ALSCLockItems"
+                    | "ALSCLogGet"
+                    | "ALSCUnlockItems"
+                    | "HasExistingPasswordSet"
+                    | "RetrievePassword"
+                    | "SetPassword"
+            ) =>
+        {
+            ALSC_CONTAINER_ID
+        }
         "invbroker" | "station" | "corpStationMgr" | "repairSvc" | "reprocessingSvc"
         | "insuranceSvc" => sess
             .station_id
@@ -1740,22 +1817,28 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
 
     let base_snapshot = ctx.db.with_snapshot(|snap| snap.clone());
 
-    // Spawn the active ship ball in Jita so space/destiny/dogma RPCs work when undocked
+    // Spawn the active ship ball (plus deployed siphon & space container) in Jita so space/destiny/dogma RPCs work when undocked
     let sys_handle = ctx.systems.get_or_spawn(SYSTEM_ID);
-    let _ = sys_handle
-        .spawn_ball(eve_destiny::Ball {
-            id: SHIP_ID,
-            type_id: 587,
-            position: glam::DVec3::new(10_000.0, 20_000.0, 30_000.0),
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 350.0,
-            inertia: 2.5,
-            mass: 1_350_000.0,
-            radius: 40.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        })
-        .await;
+    for (ball_id, type_id, pos) in [
+        (SHIP_ID, 587_u32, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0)),
+        (SIPHON_ID, 33_477_u32, glam::DVec3::new(11_000.0, 20_000.0, 30_000.0)),
+        (SPACE_CAN_ID, 23_u32, glam::DVec3::new(12_000.0, 20_000.0, 30_000.0)),
+    ] {
+        let _ = sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: ball_id,
+                type_id,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 2.5,
+                mass: 1_350_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    }
 
     // Partition into non-destructive (read/query) first, then destructive/mutating second
     let mut non_destructive = Vec::new();
@@ -1906,7 +1989,7 @@ async fn test_all_client_rpc_call_sites_and_reply_shape_contracts() {
             for cand_args in &sig.candidates {
                 ctx.release_session_rate_bucket(sess.session_id);
                 restore_session_profile(&ctx, &mut sess, profile);
-                let bound_id = bind_for_service(&ctx, &sess, &sig.service);
+                let bound_id = bind_for_service(&ctx, &sess, &sig.service, &sig.method);
                 let res = ctx
                     .dispatch_rpc(
                         &mut sess,
@@ -3348,20 +3431,26 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
 
     for ctx_pair in [&ctx_raw, &ctx_wire] {
         let sys_handle = ctx_pair.systems.get_or_spawn(SYSTEM_ID);
-        let _ = sys_handle
-            .spawn_ball(eve_destiny::Ball {
-                id: SHIP_ID,
-                type_id: 587,
-                position: glam::DVec3::new(10_000.0, 20_000.0, 30_000.0),
-                velocity: glam::DVec3::ZERO,
-                max_velocity: 350.0,
-                inertia: 2.5,
-                mass: 1_350_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: eve_destiny::MovementMode::Stop,
-            })
-            .await;
+        for (ball_id, type_id, pos) in [
+            (SHIP_ID, 587_u32, glam::DVec3::new(10_000.0, 20_000.0, 30_000.0)),
+            (SIPHON_ID, 33_477_u32, glam::DVec3::new(11_000.0, 20_000.0, 30_000.0)),
+            (SPACE_CAN_ID, 23_u32, glam::DVec3::new(12_000.0, 20_000.0, 30_000.0)),
+        ] {
+            let _ = sys_handle
+                .spawn_ball(eve_destiny::Ball {
+                    id: ball_id,
+                    type_id,
+                    position: pos,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 350.0,
+                    inertia: 2.5,
+                    mass: 1_350_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                })
+                .await;
+        }
     }
 
     let raw_base_snapshot = ctx_raw.db.with_snapshot(|snap| snap.clone());
@@ -3465,11 +3554,13 @@ async fn test_c2_raw_dispatch_ratchet_and_none_vs_wire_harness_diff_count() {
                     &mut harness.transport_mut().inner.session,
                     profile,
                 );
-                let bound_raw = bind_for_service(&ctx_raw, &sess_raw, &sig.service);
+                let bound_raw =
+                    bind_for_service(&ctx_raw, &sess_raw, &sig.service, &sig.method);
                 let bound_wire = bind_for_service(
                     &ctx_wire,
                     &harness.transport().inner.session,
                     &sig.service,
+                    &sig.method,
                 );
 
                 let raw_res = ctx_raw

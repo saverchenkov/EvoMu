@@ -446,13 +446,52 @@ async fn test_beyonce_structures_containers_and_siphons() {
     assert_eq!(coords.len(), 3);
     assert_eq!(coords[0], PyRep::Real(1000.0));
 
-    // 3. GetContainerExpiryDate (BF-06): ContainerNotFound error
+    // 3. GetContainerExpiryDate (BF-06): undock caller and seed container + siphon in space on grid
+    let pilot_ship_id = 77_000_010;
+    let can_id = 88_000_001;
+    let siphon_id = 77_000_001;
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(pilot_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&C1) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = SYS_ORIGIN;
+            ch.active_ship_id = pilot_ship_id;
+        }
+        seed_item(snap, pilot_ship_id, 587, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
+        seed_item(snap, can_id, 23, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
+        seed_item(snap, siphon_id, 33477, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
+        seed_item(snap, 77_000_002, 34, C1, siphon_id, InventoryFlag::None, 100);
+    });
+    let sys_h = ctx.systems.get_or_spawn(SYS_ORIGIN);
+    for (bid, tid, dx) in [
+        (pilot_ship_id, 587_u32, 0.0),
+        (can_id, 23_u32, 1_000.0),
+        (siphon_id, 33477_u32, 2_000.0),
+    ] {
+        let _ = sys_h
+            .spawn_ball(Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::new(dx, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1e6,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            })
+            .await;
+    }
+
     let can_err = ctx
         .dispatch_rpc(&mut sess, "beyonce", None, "GetContainerExpiryDate", &[PyRep::Integer(999_999_999)], &HashMap::new(), None)
         .await;
     assert!(can_err.is_err(), "missing container must return error");
 
-    let can_id = 88_000_001;
     with_mut_combat_runtime(&ctx, |rt| {
         rt.container_lifetimes.insert(
             can_id,
@@ -480,11 +519,6 @@ async fn test_beyonce_structures_containers_and_siphons() {
         .await;
     assert!(siphon_err.is_err(), "missing siphon must return error");
 
-    let siphon_id = 77_000_001;
-    ctx.db.with_mut_snapshot(|snap| {
-        seed_item(snap, siphon_id, 33477, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
-        seed_item(snap, 77_000_002, 34, C1, siphon_id, InventoryFlag::None, 100);
-    });
     let cap_usage = ctx
         .dispatch_rpc(&mut sess, "beyonce", None, "GetCapacityOfSiphon", &[PyRep::Integer(siphon_id)], &HashMap::new(), None)
         .await

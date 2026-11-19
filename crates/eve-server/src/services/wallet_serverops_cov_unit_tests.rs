@@ -295,34 +295,35 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
 
     ctx.db.with_mut_snapshot(|snap| {
         // GM bypasses foreign check
-        assert!(check_starbase_auth(snap, &gm_sess, member_id, tower_corp).is_ok());
+        assert!(check_starbase_auth(snap, &gm_sess, member_id, tower_corp, 1_700_000_000).is_ok());
         // Missing structure -> StructureNotFound
-        assert_eq!(check_starbase_auth(snap, &mem_sess, member_id, 999_888_111).unwrap_err().code, "StructureNotFound");
+        assert_eq!(check_starbase_auth(snap, &mem_sess, member_id, 999_888_111, 1_700_000_000).unwrap_err().code, "StructureNotFound");
         // Foreign corp -> NotStarbaseOwner
-        assert_eq!(check_starbase_auth(snap, &foreign_sess, member_id, tower_corp).unwrap_err().code, "NotStarbaseOwner");
+        assert_eq!(check_starbase_auth(snap, &foreign_sess, member_id, tower_corp, 1_700_000_000).unwrap_err().code, "NotStarbaseOwner");
         // Personal tower owned by member_id even if session is in corp_b (or corp_a) -> Ok(())
-        assert!(check_starbase_auth(snap, &foreign_sess, member_id, tower_char).is_ok());
+        assert!(check_starbase_auth(snap, &foreign_sess, member_id, tower_char, 1_700_000_000).is_ok());
         // CEO with 0 bitmask -> Ok(())
         let ceo_zero = make_session(ceo_id, corp_a, 0);
-        assert!(check_starbase_auth(snap, &ceo_zero, ceo_id, tower_corp).is_ok());
+        assert!(check_starbase_auth(snap, &ceo_zero, ceo_id, tower_corp, 1_700_000_000).is_ok());
     });
 
-    // Test every allowed bitshift individually in session.corp_role (with eff_roles == 0): 1<<0, 1<<24, 1<<25, 1<<40
-    for shift in [0_u32, 24, 25, 40] {
+    // Test every allowed bitshift individually in session.corp_role (with eff_roles == 0):
+    // ROLE_DIRECTOR (0), ROLE_STARBASE_CONFIG (53), ROLE_INFRASTRUCTURE_TACTICIAN (57)
+    for shift in [0_u32, 53, 57] {
         mem_sess.corp_role = 1_u64 << shift;
         ctx.db.with_snapshot(|snap| {
             assert!(
-                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).is_ok(),
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000).is_ok(),
                 "session shift {shift} must authorize"
             );
         });
     }
-    // Every neighboring non-starbase bit must FAIL in session.corp_role when eff_roles == 0
-    for bad_shift in [1_u32, 2, 23, 26, 39, 41] {
+    // Every non-starbase/hangar-query/operator bit must FAIL in session.corp_role when eff_roles == 0
+    for bad_shift in [1_u32, 2, 23, 24, 25, 26, 39, 40, 41, 52, 54, 56, 58] {
         mem_sess.corp_role = 1_u64 << bad_shift;
         ctx.db.with_snapshot(|snap| {
             assert_eq!(
-                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).unwrap_err().code,
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000).unwrap_err().code,
                 "RoleNotAuthorized",
                 "bad session shift {bad_shift} must reject"
             );
@@ -331,20 +332,20 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
 
     // Now test session.corp_role == 0 and DB member_roles containing each allowed bit individually!
     mem_sess.corp_role = 0;
-    for shift in [0_u32, 24, 25, 40] {
+    for shift in [0_u32, 53, 57] {
         ctx.db.with_mut_snapshot(|snap| {
             snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(member_id, 1_u64 << shift);
             assert!(
-                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).is_ok(),
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000).is_ok(),
                 "DB eff_roles shift {shift} must authorize"
             );
         });
     }
-    for bad_shift in [1_u32, 2, 23, 26, 39, 41] {
+    for bad_shift in [1_u32, 2, 23, 24, 25, 26, 39, 40, 41, 52, 54, 56, 58] {
         ctx.db.with_mut_snapshot(|snap| {
             snap.corporations.get_mut(&corp_a).unwrap().member_roles.insert(member_id, 1_u64 << bad_shift);
             assert_eq!(
-                check_starbase_auth(snap, &mem_sess, member_id, tower_corp).unwrap_err().code,
+                check_starbase_auth(snap, &mem_sess, member_id, tower_corp, 1_700_000_000).unwrap_err().code,
                 "RoleNotAuthorized",
                 "bad DB shift {bad_shift} must reject"
             );
@@ -354,11 +355,11 @@ fn check_starbase_auth_all_role_bitshifts_and_ownership_combinations() {
     // Unregistered corp (not in snap.corporations) only authorizes via session.corp_role
     let mut unreg_sess = make_session(member_unreg, unreg_corp, 0);
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg).unwrap_err().code, "RoleNotAuthorized");
+        assert_eq!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg, 1_700_000_000).unwrap_err().code, "RoleNotAuthorized");
     });
-    unreg_sess.corp_role = 1_u64 << 25;
+    unreg_sess.corp_role = eve_db::corp_roles::ROLE_STARBASE_CONFIG;
     ctx.db.with_snapshot(|snap| {
-        assert!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg).is_ok());
+        assert!(check_starbase_auth(snap, &unreg_sess, member_unreg, tower_unreg, 1_700_000_000).is_ok());
     });
 }
 
@@ -604,10 +605,13 @@ async fn pos_mgr_all_arms_bill_mgr_autopay_count_give_cash_contact_cost_and_tele
     );
 
     // posMgr.GetSiloCapacityByItemID & RunMoonProcessCycleforTower & LinkResourceForTower
-    assert!(handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(silo_id)], &kw).unwrap().is_ok());
     assert_eq!(
-        handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(999_888_777)], &kw).unwrap().unwrap(),
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(silo_id)], &kw).unwrap().unwrap(),
         PyRep::Real(20_000.0)
+    );
+    assert_eq!(
+        handle(&ctx, &mut ceo_sess, "posMgr", "GetSiloCapacityByItemID", &[PyRep::Integer(999_888_777)], &kw).unwrap().unwrap_err().code,
+        "StructureNotFound"
     );
     assert_eq!(
         handle(&ctx, &mut ceo_sess, "posMgr", "RunMoonProcessCycleforTower", &[], &kw).unwrap().unwrap_err().code,
