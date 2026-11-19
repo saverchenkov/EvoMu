@@ -144,19 +144,36 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
         Some(&PyRep::String("N:Mining".into()))
     );
 
-    // Issue #895: charMgr.GetRecentShipKillsAndLosses preserves moonID and V24.01 combat log columns
+    // Issue #895 & #1359: charMgr.GetRecentShipKillsAndLosses preserves moonID and all V24.02 KillReportWnd columns
     let kills = normalize_macho_rpc_reply(
         "charMgr",
         "GetRecentShipKillsAndLosses",
-        Ok(PyRep::List(vec![PyRep::DBRow {
-            header: Box::new(PyRep::None),
-            columns: vec![
-                ("killID".into(), PyRep::Integer(55)),
-                ("victimCharacterID".into(), PyRep::Integer(90_000_001)),
-                ("attackerID".into(), PyRep::Integer(90_000_002)),
-            ],
-            raw_rle: Vec::new(),
-        }])),
+        Ok(PyRep::List(vec![
+            PyRep::DBRow {
+                header: Box::new(PyRep::None),
+                columns: vec![
+                    ("killID".into(), PyRep::Integer(55)),
+                    ("victimCharacterID".into(), PyRep::Integer(90_000_001)),
+                    ("attackerID".into(), PyRep::Integer(90_000_002)),
+                ],
+                raw_rle: Vec::new(),
+            },
+            PyRep::DBRow {
+                header: Box::new(PyRep::None),
+                columns: vec![
+                    ("killID".into(), PyRep::Integer(56)),
+                    ("victimCharacterID".into(), PyRep::Integer(90_000_001)),
+                    ("finalCharacterID".into(), PyRep::Integer(90_000_002)),
+                    ("warID".into(), PyRep::Integer(42)),
+                    ("iskLost".into(), PyRep::Real(1_500_000.0)),
+                    ("iskDestroyed".into(), PyRep::Real(900_000.0)),
+                    ("bountyClaimed".into(), PyRep::Real(50_000.0)),
+                    ("loyaltyPoints".into(), PyRep::Integer(250)),
+                    ("killRightSupplied".into(), PyRep::Integer(90_000_009)),
+                ],
+                raw_rle: Vec::new(),
+            },
+        ])),
     )
     .expect("kills");
     let PyRep::Rowset {
@@ -169,8 +186,38 @@ fn normalize_structure_jump_xmpp_beyonce_blueprint_and_char_branches() {
     assert!(columns.iter().any(|c| c == "moonID"));
     assert!(columns.iter().any(|c| c == "victimShipTypeID"));
     assert!(columns.iter().any(|c| c == "finalShipTypeID"));
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].len(), columns.len());
+    assert_eq!(rows[1].len(), columns.len());
+    let col_idx = |name: &str| {
+        columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("missing column {name}"))
+    };
+    for required in [
+        "warID",
+        "iskLost",
+        "iskDestroyed",
+        "bountyClaimed",
+        "loyaltyPoints",
+        "killRightSupplied",
+    ] {
+        assert_eq!(
+            rows[0][col_idx(required)],
+            PyRep::None,
+            "missing upstream column {required} should default to None"
+        );
+    }
+    assert_eq!(rows[1][col_idx("warID")], PyRep::Integer(42));
+    assert_eq!(rows[1][col_idx("iskLost")], PyRep::Real(1_500_000.0));
+    assert_eq!(rows[1][col_idx("iskDestroyed")], PyRep::Real(900_000.0));
+    assert_eq!(rows[1][col_idx("bountyClaimed")], PyRep::Real(50_000.0));
+    assert_eq!(rows[1][col_idx("loyaltyPoints")], PyRep::Integer(250));
+    assert_eq!(
+        rows[1][col_idx("killRightSupplied")],
+        PyRep::Integer(90_000_009)
+    );
 
     // 6. charUnboundMgr.GetCharacterInfo (KeyVal + non-KeyVal fallback)
     let cinfo = normalize_macho_rpc_reply(

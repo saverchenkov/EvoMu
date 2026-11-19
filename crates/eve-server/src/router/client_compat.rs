@@ -713,34 +713,34 @@ pub fn normalize_macho_rpc_reply_at(
                     let f_dmg = row_field(&it, "finalDamageDone")
                         .unwrap_or_else(|| v_dmg.clone());
                     let k_blob = row_field(&it, "killBlob").unwrap_or_else(|| PyRep::String(String::new()));
+                    let war_id = row_field(&it, "warID").unwrap_or(PyRep::None);
+                    let isk_lost = row_field(&it, "iskLost")
+                        .or_else(|| row_field(&it, "totalValueISK"))
+                        .unwrap_or(PyRep::None);
+                    let isk_destroyed = row_field(&it, "iskDestroyed").unwrap_or(PyRep::None);
+                    let bounty_claimed = row_field(&it, "bountyClaimed").unwrap_or(PyRep::None);
+                    let loyalty_points = row_field(&it, "loyaltyPoints").unwrap_or(PyRep::None);
+                    let kill_right_supplied =
+                        row_field(&it, "killRightSupplied").unwrap_or(PyRep::None);
                     vec![
                         kid, vid, sys, kt, vc, fc, moon_id, v_corp, v_ally, v_fac, v_ship, v_dmg,
-                        f_corp, f_ally, f_fac, f_ship, f_weap, f_sec, f_dmg, k_blob,
+                        f_corp, f_ally, f_fac, f_ship, f_weap, f_sec, f_dmg, k_blob, war_id,
+                        isk_lost, isk_destroyed, bounty_claimed, loyalty_points,
+                        kill_right_supplied,
                     ]
                 })
                 .collect();
             return Ok(PyRep::rowset(
                 vec![
-                    "killID",
-                    "victimID",
-                    "solarSystemID",
-                    "killTime",
-                    "victimCharacterID",
-                    "finalCharacterID",
-                    "moonID",
-                    "victimCorporationID",
-                    "victimAllianceID",
-                    "victimFactionID",
-                    "victimShipTypeID",
-                    "victimDamageTaken",
-                    "finalCorporationID",
-                    "finalAllianceID",
-                    "finalFactionID",
-                    "finalShipTypeID",
-                    "finalWeaponTypeID",
-                    "finalSecurityStatus",
-                    "finalDamageDone",
-                    "killBlob",
+                    "killID", "victimID", "solarSystemID", "killTime",
+                    "victimCharacterID", "finalCharacterID", "moonID",
+                    "victimCorporationID", "victimAllianceID", "victimFactionID",
+                    "victimShipTypeID", "victimDamageTaken",
+                    "finalCorporationID", "finalAllianceID", "finalFactionID",
+                    "finalShipTypeID", "finalWeaponTypeID", "finalSecurityStatus",
+                    "finalDamageDone", "killBlob",
+                    "warID", "iskLost", "iskDestroyed",
+                    "bountyClaimed", "loyaltyPoints", "killRightSupplied",
                 ],
                 rows,
             ));

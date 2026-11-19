@@ -294,6 +294,12 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
             "finalSecurityStatus",
             "finalDamageDone",
             "killBlob",
+            "warID",
+            "iskLost",
+            "iskDestroyed",
+            "bountyClaimed",
+            "loyaltyPoints",
+            "killRightSupplied",
         ]
     );
     assert_eq!(rows.len(), 2);
@@ -306,6 +312,12 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     assert_eq!(rows[0][16], PyRep::Integer(3170)); // finalWeaponTypeID
     assert_eq!(rows[0][17], PyRep::Real(2.3)); // finalSecurityStatus
     assert_eq!(rows[0][18], PyRep::Integer(1150)); // finalDamageDone
+    assert_eq!(rows[0][20], PyRep::None); // warID (non-war kill)
+    assert_eq!(rows[0][21], PyRep::Real(3_400_000.0)); // iskLost
+    assert_eq!(rows[0][22], PyRep::Real(3_400_000.0)); // iskDestroyed
+    assert_eq!(rows[0][23], PyRep::None); // bountyClaimed
+    assert_eq!(rows[0][24], PyRep::None); // loyaltyPoints
+    assert_eq!(rows[0][25], PyRep::None); // killRightSupplied
     // Legacy killmail without detailed_killmails (88001): finalShipTypeID must be None, never victim ship 587.
     assert_eq!(rows[1][0], PyRep::Integer(88001));
     assert_eq!(rows[1][1], PyRep::Integer(90_000_001));
@@ -313,6 +325,12 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     assert_eq!(rows[1][9], PyRep::Integer(587)); // victimShipTypeID
     assert_eq!(rows[1][11], PyRep::Integer(90_000_002)); // finalCharacterID
     assert_eq!(rows[1][15], PyRep::None); // finalShipTypeID unknown -> None
+    assert_eq!(rows[1][20], PyRep::None); // warID
+    assert_eq!(rows[1][21], PyRep::Real(1_200_000.0)); // iskLost
+    assert_eq!(rows[1][22], PyRep::None); // iskDestroyed unknown without detailed_killmails
+    assert_eq!(rows[1][23], PyRep::None); // bountyClaimed
+    assert_eq!(rows[1][24], PyRep::None); // loyaltyPoints
+    assert_eq!(rows[1][25], PyRep::None); // killRightSupplied
 
     // 8. SetActivityStatus (persists to snapshot and across SQLite reload)
     let mut kw_act = HashMap::new();

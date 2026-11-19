@@ -1190,6 +1190,12 @@ fn handle_char_mgr(
                     PyRep::Real(e.final_security_status),
                     PyRep::Integer(e.final_damage_done),
                     PyRep::String(String::new()),
+                    e.war_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    e.isk_lost.map(PyRep::Real).unwrap_or(PyRep::None),
+                    e.isk_destroyed.map(PyRep::Real).unwrap_or(PyRep::None),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::None,
                 ]
             })
             .collect();
@@ -1215,6 +1221,12 @@ fn handle_char_mgr(
                     "finalSecurityStatus".into(),
                     "finalDamageDone".into(),
                     "killBlob".into(),
+                    "warID".into(),
+                    "iskLost".into(),
+                    "iskDestroyed".into(),
+                    "bountyClaimed".into(),
+                    "loyaltyPoints".into(),
+                    "killRightSupplied".into(),
                 ],
                 rows,
             }))
@@ -1292,59 +1304,166 @@ pub(crate) struct CombatLogResolvedEntry {
     pub final_weapon_type_id: Option<u32>,
     pub final_security_status: f64,
     pub final_damage_done: i64,
+    pub war_id: Option<i64>,
+    pub isk_lost: Option<f64>,
+    pub isk_destroyed: Option<f64>,
+}
+
+/// Snapshot of a war and its accepted defender allies used to match killmails deterministically.
+struct WarMatchCandidate {
+    war_id: i64,
+    aggressor_corp_id: i64,
+    defender_corp_id: i64,
+    started_unix: u64,
+    finish_at_unix: Option<u64>,
+    accepted_allies: Vec<(i64, u64)>,
+}
+
+/// Resolves the lowest matching `war_id` for a killmail based on war window and participant corps.
+fn resolve_killmail_war_id(
+    wars: &[WarMatchCandidate],
+    victim_corp_id: i64,
+    attacker_corps: &[i64],
+    killed_unix: u64,
+) -> Option<i64> {
+    if victim_corp_id <= 0 || attacker_corps.is_empty() {
+        return None;
+    }
+    wars.iter()
+        .filter(|w| {
+            if killed_unix > 0 {
+                if killed_unix < w.started_unix {
+                    return false;
+                }
+                if w.finish_at_unix.is_some_and(|fin| killed_unix > fin) {
+                    return false;
+                }
+            }
+            let is_def_side = |cid: i64| {
+                cid == w.defender_corp_id
+                    || w.accepted_allies
+                        .iter()
+                        .any(|&(ally_cid, eff)| ally_cid == cid && (killed_unix == 0 || killed_unix >= eff))
+            };
+            (victim_corp_id == w.aggressor_corp_id && attacker_corps.iter().any(|&c| is_def_side(c)))
+                || (is_def_side(victim_corp_id) && attacker_corps.contains(&w.aggressor_corp_id))
+        })
+        .map(|w| w.war_id)
+        .min()
+}
+
+/// Computes total ISK destroyed (`total_value_isk` minus dropped items' SDE value) when a
+/// `DetailedKillmail` is present and total value is positive.
+fn resolve_killmail_isk_destroyed(
+    sde: &eve_sde::SdeRegistry,
+    dkm: Option<&eve_db::DetailedKillmail>,
+    total_value_isk: f64,
+) -> Option<f64> {
+    let dkm = dkm?;
+    if total_value_isk <= 0.0 {
+        return None;
+    }
+    let dropped_isk: f64 = dkm
+        .dropped_items
+        .iter()
+        .filter(|it| it.qty_dropped > 0)
+        .map(|it| {
+            let sde_isk = sde
+                .types
+                .get(&it.type_id)
+                .map(|t| t.base_price.max(0.0))
+                .unwrap_or(0.0);
+            let unit_isk = if sde_isk > 0.0 { sde_isk } else { 100.0 };
+            unit_isk * (it.qty_dropped as f64)
+        })
+        .sum();
+    Some((total_value_isk - dropped_isk).max(0.0))
 }
 
 pub(crate) fn resolve_combat_log_entries(
     ctx: &ServerContext,
     filter: impl Fn(&eve_db::KillmailRecord) -> bool,
 ) -> Vec<CombatLogResolvedEntry> {
-    let candidates: Vec<_> = ctx.db.with_snapshot(|snap| {
-        snap.killmails
-            .values()
-            .filter(|km| filter(km))
-            .map(|km| {
-                let snap_dkm = snap
-                    .combat_crimewatch_state
-                    .detailed_killmails
-                    .get(&km.kill_id)
-                    .cloned();
-                let victim_corp_id = if km.victim_corp_id > 0 {
-                    km.victim_corp_id
-                } else {
-                    snap.characters
-                        .get(&km.victim_character_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(0)
-                };
-                let victim_alliance_id = km.victim_alliance_id.or_else(|| {
-                    snap.corporations
-                        .get(&victim_corp_id)
-                        .and_then(|c| c.alliance_id)
-                });
-                let att_corp_id = if km.attacker_corp_id > 0 {
-                    km.attacker_corp_id
-                } else {
-                    snap.characters
-                        .get(&km.attacker_character_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(0)
-                };
-                let att_alliance_id = km.attacker_alliance_id.or_else(|| {
-                    snap.corporations
-                        .get(&att_corp_id)
-                        .and_then(|c| c.alliance_id)
-                });
-                (
-                    km.clone(),
-                    snap_dkm,
-                    victim_corp_id,
-                    victim_alliance_id,
-                    att_corp_id,
-                    att_alliance_id,
-                )
-            })
-            .collect()
-    });
+    let (candidates, war_candidates): (Vec<_>, Vec<WarMatchCandidate>) =
+        ctx.db.with_snapshot(|snap| {
+            let cands: Vec<_> = snap
+                .killmails
+                .values()
+                .filter(|km| filter(km))
+                .map(|km| {
+                    let snap_dkm = snap
+                        .combat_crimewatch_state
+                        .detailed_killmails
+                        .get(&km.kill_id)
+                        .cloned();
+                    let victim_corp_id = if km.victim_corp_id > 0 {
+                        km.victim_corp_id
+                    } else {
+                        snap.characters
+                            .get(&km.victim_character_id)
+                            .map(|c| c.corporation_id)
+                            .unwrap_or(0)
+                    };
+                    let victim_alliance_id = km.victim_alliance_id.or_else(|| {
+                        snap.corporations
+                            .get(&victim_corp_id)
+                            .and_then(|c| c.alliance_id)
+                    });
+                    let att_corp_id = if km.attacker_corp_id > 0 {
+                        km.attacker_corp_id
+                    } else {
+                        snap.characters
+                            .get(&km.attacker_character_id)
+                            .map(|c| c.corporation_id)
+                            .unwrap_or(0)
+                    };
+                    let att_alliance_id = km.attacker_alliance_id.or_else(|| {
+                        snap.corporations
+                            .get(&att_corp_id)
+                            .and_then(|c| c.alliance_id)
+                    });
+                    (
+                        km.clone(),
+                        snap_dkm,
+                        victim_corp_id,
+                        victim_alliance_id,
+                        att_corp_id,
+                        att_alliance_id,
+                    )
+                })
+                .collect();
+            let wars = if cands.is_empty() {
+                Vec::new()
+            } else {
+                snap.wars
+                    .iter()
+                    .map(|(&war_id, w)| {
+                        let finish_at_unix =
+                            snap.war_state.wars.get(&war_id).and_then(|m| m.finish_at_unix);
+                        let accepted_allies = snap
+                            .war_state
+                            .negotiations
+                            .iter()
+                            .filter(|n| {
+                                n.war_id == war_id
+                                    && n.kind == eve_db::PersistedNegKind::Ally
+                                    && n.status == "Accepted"
+                            })
+                            .map(|n| (n.from_corp, n.effective_unix.unwrap_or(0)))
+                            .collect();
+                        WarMatchCandidate {
+                            war_id,
+                            aggressor_corp_id: w.aggressor_corp_id,
+                            defender_corp_id: w.defender_corp_id,
+                            started_unix: w.started_unix,
+                            finish_at_unix,
+                            accepted_allies,
+                        }
+                    })
+                    .collect()
+            };
+            (cands, wars)
+        });
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -1395,6 +1514,33 @@ pub(crate) fn resolve_combat_log_entries(
                 let final_damage_done = final_attacker
                     .map(|a| a.damage_done.max(0.0).round() as i64)
                     .unwrap_or(0);
+                let mut attacker_corps = Vec::new();
+                for cid in [final_corp_id, att_corp_id]
+                    .into_iter()
+                    .chain(
+                        dkm.as_ref()
+                            .into_iter()
+                            .flat_map(|d| d.attackers.iter().map(|a| a.corporation_id)),
+                    )
+                {
+                    if cid > 0 && !attacker_corps.contains(&cid) {
+                        attacker_corps.push(cid);
+                    }
+                }
+                let war_id = resolve_killmail_war_id(
+                    &war_candidates,
+                    victim_corp_id,
+                    &attacker_corps,
+                    km.killed_unix,
+                );
+                let total_value_isk = if km.total_value_isk > 0.0 {
+                    km.total_value_isk
+                } else {
+                    dkm.as_ref().map(|d| d.total_value_isk).unwrap_or(0.0)
+                };
+                let isk_lost = (total_value_isk > 0.0).then_some(total_value_isk);
+                let isk_destroyed =
+                    resolve_killmail_isk_destroyed(&ctx.sde, dkm.as_ref(), total_value_isk);
                 CombatLogResolvedEntry {
                     kill_id: km.kill_id,
                     victim_character_id: km.victim_character_id,
@@ -1411,6 +1557,9 @@ pub(crate) fn resolve_combat_log_entries(
                     final_weapon_type_id,
                     final_security_status,
                     final_damage_done,
+                    war_id,
+                    isk_lost,
+                    isk_destroyed,
                 }
             },
         )
