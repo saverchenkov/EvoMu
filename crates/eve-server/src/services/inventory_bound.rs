@@ -126,8 +126,9 @@ pub fn handle(
             // `monolith_task_tracker/client/eventHandler.pyj:38-46` (`OnHighSlotFittingChanged`):
             // calls `sm.GetService('invCache').GetInventoryFromId(shipID).GetAvailableTurretSlots()`
             // and compares `numberOfFreeSlots >= 2`.
-            if crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+            if resolve_missing_ship_stub_type_id_for_session(
                 ctx,
+                session,
                 char_id,
                 location_id,
             )
@@ -214,11 +215,12 @@ pub fn handle(
             };
             let is_missing_dynamic_ship_stub =
                 crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
-                    ctx,
-                    char_id,
-                    item_id,
+                    ctx, char_id, item_id,
                 )
                 .is_some();
+            let is_missing_removed_starter_stub = !is_missing_dynamic_ship_stub
+                && resolve_missing_ship_stub_type_id_for_session(ctx, session, char_id, item_id)
+                    .is_some();
             let is_structure = ctx
                 .db
                 .with_snapshot(|snap| snap.structures.contains_key(&item_id));
@@ -229,6 +231,7 @@ pub fn handle(
             let item_exists = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
+                || is_missing_removed_starter_stub
                 || is_structure
                 || is_station
                 || solar_system_id_opt.is_some()
@@ -274,6 +277,7 @@ pub fn handle(
             let accessible = item_id == char_id
                 || is_storage_auth
                 || is_missing_dynamic_ship_stub
+                || (is_missing_removed_starter_stub && at_location)
                 || station_accessible
                 || solar_system_accessible
                 || ctx.db.with_snapshot(|snap| {
@@ -702,9 +706,7 @@ fn self_inv_item(
         }
     }
     if let Some(stub_type_id) =
-        crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
-            ctx, char_id, object_id,
-        )
+        resolve_missing_ship_stub_type_id_for_session(ctx, session, char_id, object_id)
     {
         let (group_id, category_id, type_name) = ctx
             .sde
@@ -753,6 +755,80 @@ fn self_inv_item(
         message: format!("invbroker.GetSelfInvItem for inventory {object_id} is not yet implemented"),
         client_error: None,
     })
+}
+
+/// Returns `true` when `id` already identifies any live world entity in `snap`.
+pub(crate) fn snapshot_contains_entity_id(snap: &eve_db::WorldStateSnapshot, id: i64) -> bool {
+    snap.items.contains_key(&id)
+        || snap.structures.contains_key(&id)
+        || snap.characters.contains_key(&id)
+        || snap.corporations.contains_key(&id)
+        || snap.alliances.contains_key(&id)
+        || snap.wars.contains_key(&id)
+        || snap.fleets.contains_key(&id)
+}
+
+/// Resolves a stub ship `type_id` for a missing ship inventory handle (`GH #803` dynamic ships
+/// and stale removed demo starter Rifter `100_000_001` / `100_000_002`, `GH #1371`).
+///
+/// For the legacy demo starter ships, only returns a Rifter (`587`) stub when `seed_demo` is
+/// enabled, `item_id` does not collide with any live world entity table, and the authenticated
+/// owner is either docked or piloting a different non-capsule hull so non-demo servers and
+/// in-space post-ship-loss capsule checks continue raising `FakeItemNotFound`.
+pub(crate) fn resolve_missing_ship_stub_type_id(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+    authenticated: bool,
+    is_docked: bool,
+    active_ship_id: Option<i64>,
+) -> Option<u32> {
+    if let Some(tid) =
+        crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
+            ctx, char_id, item_id,
+        )
+    {
+        return Some(tid);
+    }
+    if !authenticated
+        || !ctx.feature_flags_snapshot().seed_demo
+        || !matches!(
+            (char_id, item_id),
+            (90_000_001, 100_000_001) | (90_000_002, 100_000_002)
+        )
+    {
+        return None;
+    }
+    ctx.db.with_snapshot(|snap| {
+        if snapshot_contains_entity_id(snap, item_id) {
+            return None;
+        }
+        if is_docked {
+            return Some(587);
+        }
+        let active_non_capsule = active_ship_id
+            .and_then(|sid| snap.items.get(&sid))
+            .is_some_and(|ship| ship.type_id != 670);
+        active_non_capsule.then_some(587)
+    })
+}
+
+/// Session-aware wrapper around [`resolve_missing_ship_stub_type_id`] for bound inventory RPCs
+/// and `invbroker` binding verification.
+pub(crate) fn resolve_missing_ship_stub_type_id_for_session(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    item_id: i64,
+) -> Option<u32> {
+    resolve_missing_ship_stub_type_id(
+        ctx,
+        char_id,
+        item_id,
+        session.user_id.is_some() && Some(char_id) == session.character_id,
+        session.station_id.or(session.structure_id).is_some(),
+        session.ship_id,
+    )
 }
 
 /// `i2.IsPrimed(itemID)`: checks whether the requested inventory item or container entity

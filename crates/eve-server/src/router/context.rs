@@ -1272,21 +1272,36 @@ impl ServerContext {
                 st.wormhole_destination_system_id = Some(30_002_813);
                 st.signature_position = Some([12_000.0, 0.0, 0.0]);
             }
-            snap.items.entry(100_000_200).or_insert_with(|| eve_db::InventoryItemRecord {
-                item_id: 100_000_200,
-                type_id: 53977, // Noise-5 'Needlejack' Filament
-                owner_id: 90_000_001,
-                location_id: 100_000_001,
-                flag: eve_db::InventoryFlag::Cargo,
-                quantity: 5,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: std::collections::HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            });
+            let starter_ship_owned = snap
+                .items
+                .get(&100_000_001)
+                .is_some_and(|ship| ship.owner_id == 90_000_001);
+            if starter_ship_owned {
+                snap.items.entry(100_000_200).or_insert_with(|| eve_db::InventoryItemRecord {
+                    item_id: 100_000_200,
+                    type_id: 53977, // Noise-5 'Needlejack' Filament
+                    owner_id: 90_000_001,
+                    location_id: 100_000_001,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: 5,
+                    singleton: false,
+                    version: 1,
+                    dynamic_attributes: std::collections::HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                });
+            } else if !crate::services::inventory_bound::snapshot_contains_entity_id(
+                snap,
+                100_000_001,
+            ) {
+                // Purge items left orphaned inside removed starter ship `100_000_001`
+                // across persistent SQLite `--seed-demo` restarts (GH `#1371`).
+                snap.items.retain(|_, item| item.location_id != 100_000_001);
+                snap.transient_items
+                    .retain(|_, item| item.location_id != 100_000_001);
+            }
         });
     }
 

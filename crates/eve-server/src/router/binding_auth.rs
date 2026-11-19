@@ -263,8 +263,13 @@ pub(super) fn should_invalidate_bound_object(
     let _ = dock_is_structure;
     let inv_in_ctx = inv_in_ctx
         || (entry.service == "invbroker"
-            && crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
-                ctx, char_id, oid,
+            && crate::services::inventory_bound::resolve_missing_ship_stub_type_id(
+                ctx,
+                char_id,
+                oid,
+                true,
+                active_dock_id.is_some(),
+                ship_id,
             )
             .is_some());
 
@@ -904,8 +909,8 @@ fn authorize_invbroker_binding(
     }
     session.user_id.is_some()
         && Some(char_id) == session.character_id
-        && crate::services::fitting_containers_ships::resolve_missing_dynamic_ship_stub_type_id(
-            ctx, char_id, object_id,
+        && crate::services::inventory_bound::resolve_missing_ship_stub_type_id_for_session(
+            ctx, session, char_id, object_id,
         )
         .is_some()
 }

@@ -174,6 +174,19 @@ async fn context_constructors_production_accounts_and_demo_world_fixtures() {
     assert!(ctx.db.authenticate("spaced_user", "pw_user").is_ok());
     assert!(ctx.db.authenticate("adm_user", "adm_pw").is_ok());
     ctx.db.with_snapshot(|snap| {
+        assert!(snap.quasar_commerce.nes_store_catalog.is_some());
+        // `admin_accounts` suppressed `populate_demo_snapshot`, so `100_000_001` is absent and
+        // `100_000_200` must not be seeded orphaned into a nonexistent ship (GH #1371).
+        assert!(snap.items.get(&100_000_200).is_none());
+    });
+    let mut pure_demo_cfg = ServerConfig::default();
+    pure_demo_cfg.storage.backend = "memory".into();
+    pure_demo_cfg.feature_flags = FeatureFlagsConfig {
+        seed_demo: true,
+        ..Default::default()
+    };
+    let pure_demo_ctx = ServerContext::from_config(&pure_demo_cfg).expect("pure demo from_config succeeds");
+    pure_demo_ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.items.get(&100_000_200).map(|i| i.type_id), Some(53_977));
     });
     // Also exercise seed_demo_world_fixtures when dynamic solar system states are present
@@ -839,5 +852,119 @@ async fn skill_queue_alpha_caps_expired_jetcans_moon_decay_and_auto_offline() {
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.module_online_states.get(&oversized_mod_id), Some(&false));
         assert!(!snap.module_active_states.contains(&oversized_mod_id));
+    });
+}
+
+#[test]
+fn issue_1371_seed_demo_world_fixtures_skips_missing_ship_and_purges_orphans() {
+    let (ctx, _) = fast_test_context(1_800_000_000);
+    let starter_ship_id = 100_000_001_i64;
+    let filament_id = 100_000_200_i64;
+    let station_id = 60_003_754_i64;
+    let legit_hangar_item_id = 200_371_998_i64;
+    let orphan_transient_id = 200_371_999_i64;
+
+    // 1. With starter ship `100_000_001` present & owned by `90_000_001`, seeding adds `100_000_200`.
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&filament_id).map(|i| i.type_id), Some(53_977));
+        assert_eq!(snap.items.get(&filament_id).map(|i| i.location_id), Some(starter_ship_id));
+    });
+
+    // 2. If `100_000_001` belongs to a different owner, neither inject `100_000_200` nor purge its contents.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&filament_id);
+        snap.items.get_mut(&starter_ship_id).unwrap().owner_id = 90_000_002;
+    });
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&filament_id));
+        assert!(snap.items.values().any(|it| it.location_id == starter_ship_id));
+    });
+
+    // 3. When `100_000_001` is removed (e.g. persistent SQLite restart after starter ship loss),
+    //    pre-existing orphaned `items` and `transient_items` pointing into `100_000_001` are purged,
+    //    `100_000_200` is NOT re-inserted, and legitimate hangar items remain untouched.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&starter_ship_id);
+        snap.items.insert(
+            filament_id,
+            InventoryItemRecord {
+                item_id: filament_id,
+                type_id: 53_977,
+                owner_id: 90_000_001,
+                location_id: starter_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.transient_items.insert(
+            orphan_transient_id,
+            InventoryItemRecord {
+                item_id: orphan_transient_id,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: starter_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            legit_hangar_item_id,
+            InventoryItemRecord {
+                item_id: legit_hangar_item_id,
+                type_id: 34,
+                owner_id: 90_000_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 250,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        // 3a. Non-item entity collision (e.g. corporation/structure/fleet ID) skips purge.
+        snap.corporations
+            .insert(starter_ship_id, eve_db::CorporationRecord::default());
+    });
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(snap.items.contains_key(&filament_id));
+        assert!(snap.transient_items.contains_key(&orphan_transient_id));
+        snap.corporations.remove(&starter_ship_id);
+    });
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&filament_id));
+        assert!(!snap.items.values().any(|it| it.location_id == starter_ship_id));
+        assert!(!snap.transient_items.contains_key(&orphan_transient_id));
+        assert_eq!(
+            snap.items.get(&legit_hangar_item_id).map(|it| it.location_id),
+            Some(station_id)
+        );
+    });
+
+    // 4. Legitimately moved `100_000_200` (e.g. placed in station hangar before ship loss) is kept.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            filament_id,
+            InventoryItemRecord {
+                item_id: filament_id,
+                type_id: 53_977,
+                owner_id: 90_000_001,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 5,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&filament_id).map(|it| it.location_id), Some(station_id));
     });
 }
