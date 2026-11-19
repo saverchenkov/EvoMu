@@ -680,6 +680,295 @@ fn industry_job_queries_and_monitor_connect_disconnect_work() {
     assert_eq!(zero_disc.as_bool(), Some(true));
 }
 
+#[test]
+fn industry_job_queries_resolve_real_solar_system_and_fail_closed_when_unresolvable() {
+    let ctx = make_test_context();
+    let char_id = 90_000_001_i64;
+    let mut session = char_session(char_id, 98_000_001);
+    let (&non_jita_station_id, non_jita_station) = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(_, st)| st.solar_system_id != 30_000_142)
+        .expect("canonical SDE contains non-Jita station");
+    let station_sys = non_jita_station.solar_system_id;
+    let perimeter_sys = 30_000_144_u32;
+    let struct_id = 1_099_119_701_i64;
+    let pos_item_id = 1_099_119_702_i64;
+    let missing_facility_id = 1_099_119_799_i64;
+
+    let mk_job = |job_id: i64, facility_id: i64| IndustryJobRecord {
+        job_id,
+        installer_id: char_id,
+        facility_id,
+        blueprint_item_id: 90_000 + job_id,
+        blueprint_type_id: 688,
+        activity_id: 1,
+        runs: 1,
+        product_type_id: 587,
+        status: "Active".into(),
+        duration_seconds: 600,
+        start_unix: 1_000,
+        blueprint_location_id: facility_id,
+        output_location_id: facility_id,
+        cost: Some(100.0),
+        licensed_runs: None,
+        probability: None,
+        completed_unix: None,
+        completed_character_id: None,
+    };
+
+    // Unbound helper without DB/SDE context must emit PyRep::None rather than hardcoded Jita.
+    let uncontextualized = format_industry_job_pyrep(
+        &mk_job(9100, missing_facility_id),
+        &IndustryJobCostMeta::default(),
+    );
+    assert_eq!(uncontextualized.dict_get("solarSystemID"), Some(&PyRep::None));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.clear();
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_825,
+                owner_corp_id: 98_000_001,
+                solar_system_id: perimeter_sys,
+                name: "Perimeter Raitaru".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            pos_item_id,
+            InventoryItemRecord {
+                item_id: pos_item_id,
+                type_id: 24570,
+                owner_id: 98_000_001,
+                location_id: i64::from(perimeter_sys),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.industry_jobs
+            .insert(9101, mk_job(9101, non_jita_station_id));
+        snap.industry_jobs.insert(9102, mk_job(9102, struct_id));
+        snap.industry_jobs.insert(9103, mk_job(9103, pos_item_id));
+        snap.industry_jobs
+            .insert(9104, mk_job(9104, missing_facility_id));
+    });
+
+    for (job_id, expected_sys) in [
+        (9101, station_sys),
+        (9102, perimeter_sys),
+        (9103, perimeter_sys),
+    ] {
+        let rep = handle_industry_job_queries(
+            &ctx,
+            &mut session,
+            "industryManager",
+            "GetJob",
+            &[PyRep::Integer(job_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("resolvable job succeeds");
+        assert_eq!(
+            rep.dict_get("solarSystemID"),
+            Some(&PyRep::Integer(i64::from(expected_sys))),
+            "job {job_id} must report its real solarSystemID"
+        );
+    }
+
+    let err = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "GetJob",
+        &[PyRep::Integer(9104)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect_err("unresolvable facility must fail closed instead of falling back to Jita");
+    assert_eq!(err.code, "FacilityNotFound");
+
+    let list_rep = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "GetJobsByOwner",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::List(jobs) = list_rep else {
+        panic!("expected List from GetJobsByOwner");
+    };
+    assert_eq!(
+        jobs.len(),
+        3,
+        "unresolvable-facility job 9104 must be omitted instead of synthesizing Jita"
+    );
+    let mut by_id = HashMap::new();
+    for job in jobs {
+        let jid = job.dict_get("jobID").and_then(PyRep::as_i64).unwrap();
+        let sys = job.dict_get("solarSystemID").and_then(PyRep::as_i64).unwrap();
+        by_id.insert(jid, sys);
+    }
+    assert_eq!(by_id.get(&9101), Some(&i64::from(station_sys)));
+    assert_eq!(by_id.get(&9102), Some(&i64::from(perimeter_sys)));
+    assert_eq!(by_id.get(&9103), Some(&i64::from(perimeter_sys)));
+    assert!(!by_id.contains_key(&9104));
+}
+
+#[test]
+fn industry_job_solar_system_resolution_handles_four_hop_limit_and_cycles() {
+    let ctx = make_test_context();
+    let char_id = 90_000_002_i64;
+    let corp_id = 98_000_002_i64;
+    let mut session = char_session(char_id, corp_id);
+    let perimeter_sys = 30_000_144_u32;
+
+    let chain4 = [
+        1_099_119_800_i64,
+        1_099_119_801_i64,
+        1_099_119_802_i64,
+        1_099_119_803_i64,
+    ];
+    let chain5 = [
+        1_099_119_810_i64,
+        1_099_119_811_i64,
+        1_099_119_812_i64,
+        1_099_119_813_i64,
+        1_099_119_814_i64,
+    ];
+    let self_cycle_id = 1_099_119_820_i64;
+    let cycle_a = 1_099_119_821_i64;
+    let cycle_b = 1_099_119_822_i64;
+
+    let mk_item = |item_id: i64, location_id: i64| InventoryItemRecord {
+        item_id,
+        type_id: 24570,
+        owner_id: corp_id,
+        location_id,
+        flag: InventoryFlag::Hangar,
+        quantity: 1,
+        singleton: true,
+        ..Default::default()
+    };
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.industry_jobs.clear();
+        // Exact 4-hop chain: chain4[0] -> [1] -> [2] -> [3] -> perimeter_sys
+        for idx in 0..chain4.len() {
+            let next_loc = if idx + 1 < chain4.len() {
+                chain4[idx + 1]
+            } else {
+                i64::from(perimeter_sys)
+            };
+            snap.items
+                .insert(chain4[idx], mk_item(chain4[idx], next_loc));
+        }
+        // 5-hop chain exceeds 4-hop bound: chain5[0] -> [1] -> [2] -> [3] -> [4] -> perimeter_sys
+        for idx in 0..chain5.len() {
+            let next_loc = if idx + 1 < chain5.len() {
+                chain5[idx + 1]
+            } else {
+                i64::from(perimeter_sys)
+            };
+            snap.items
+                .insert(chain5[idx], mk_item(chain5[idx], next_loc));
+        }
+        // Self-cycle and 2-node cycle
+        snap.items
+            .insert(self_cycle_id, mk_item(self_cycle_id, self_cycle_id));
+        snap.items.insert(cycle_a, mk_item(cycle_a, cycle_b));
+        snap.items.insert(cycle_b, mk_item(cycle_b, cycle_a));
+
+        for (job_id, facility_id) in [
+            (9201, chain4[0]),
+            (9202, chain5[0]),
+            (9203, self_cycle_id),
+            (9204, cycle_a),
+        ] {
+            snap.industry_jobs.insert(
+                job_id,
+                IndustryJobRecord {
+                    job_id,
+                    installer_id: char_id,
+                    facility_id,
+                    blueprint_item_id: 90_000 + job_id,
+                    blueprint_type_id: 688,
+                    activity_id: 1,
+                    runs: 1,
+                    product_type_id: 587,
+                    status: "Active".into(),
+                    duration_seconds: 600,
+                    start_unix: 1_000,
+                    blueprint_location_id: facility_id,
+                    output_location_id: facility_id,
+                    cost: Some(100.0),
+                    licensed_runs: None,
+                    probability: None,
+                    completed_unix: None,
+                    completed_character_id: None,
+                },
+            );
+        }
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            resolve_industry_job_solar_system_id(&ctx, snap, chain4[0]),
+            Some(perimeter_sys)
+        );
+        assert_eq!(
+            resolve_industry_job_solar_system_id(&ctx, snap, chain5[0]),
+            None
+        );
+        assert_eq!(
+            resolve_industry_job_solar_system_id(&ctx, snap, self_cycle_id),
+            None
+        );
+        assert_eq!(
+            resolve_industry_job_solar_system_id(&ctx, snap, cycle_a),
+            None
+        );
+    });
+
+    let ok_rep = handle_industry_job_queries(
+        &ctx,
+        &mut session,
+        "industryManager",
+        "GetJob",
+        &[PyRep::Integer(9201)],
+        &HashMap::new(),
+    )
+    .unwrap()
+    .expect("exact 4-hop facility resolves");
+    assert_eq!(
+        ok_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(i64::from(perimeter_sys)))
+    );
+
+    for failing_job_id in [9202_i64, 9203_i64, 9204_i64] {
+        let err = handle_industry_job_queries(
+            &ctx,
+            &mut session,
+            "industryManager",
+            "GetJob",
+            &[PyRep::Integer(failing_job_id)],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect_err("5-hop / cyclic facility must fail closed");
+        assert_eq!(err.code, "FacilityNotFound");
+    }
+}
+
 #[cfg(test)]
 #[path = "industry_pi_extra_unit_tests.rs"]
 mod industry_pi_extra_unit_tests;

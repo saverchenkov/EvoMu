@@ -994,3 +994,162 @@ fn build_all_info_primes_structure_info_and_orders_godma_prime_notifications() {
         .collect();
     assert_eq!(station_prime_locs, vec![ship_id]);
 }
+
+#[test]
+fn build_all_info_does_not_fabricate_missing_structure_and_resolves_item_structure() {
+    let ctx = test_ctx();
+    let char_id = 93_001_197;
+    let corp_id = 98_001_197;
+    let perimeter_sys = 30_000_144_u32;
+    let missing_struct_id = 1_000_991_197_i64;
+    let item_struct_id = 1_000_991_198_i64;
+    let ship_id = 1_000_301_197_i64;
+
+    ensure_char(&ctx, char_id, corp_id, perimeter_sys, ship_id);
+    insert_item(
+        &ctx,
+        ship_id,
+        587,
+        char_id,
+        missing_struct_id,
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+
+    // 1. Negative: stale/non-existent session.structure_id must not fabricate an Astrahus or
+    //    default to Jita (30_000_142); structureInfo stays None and only ship_id is primed.
+    let missing_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ship_id: Some(ship_id),
+        solar_system_id: None,
+        station_id: None,
+        structure_id: Some(missing_struct_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let missing_info = build_all_info(
+        &ctx,
+        &missing_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[PyRep::Bool(false), PyRep::Bool(true), PyRep::Integer(missing_struct_id)],
+    );
+    assert_eq!(missing_info.dict_get("structureInfo"), Some(&PyRep::None));
+    let missing_prime_locs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "ProcessGodmaPrimeLocation")
+        .filter_map(|n| n.args.first().and_then(|a| a.as_i64()))
+        .collect();
+    assert_eq!(missing_prime_locs, vec![ship_id]);
+
+    // 2. Positive: structure seeded in snap.items resolves real type_id, owner_id, and solar_system_id.
+    insert_item(
+        &ctx,
+        item_struct_id,
+        35_832,
+        corp_id,
+        i64::from(perimeter_sys),
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = item_struct_id;
+        }
+    });
+    let item_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ship_id: Some(ship_id),
+        solar_system_id: None,
+        station_id: None,
+        structure_id: Some(item_struct_id),
+        ..Default::default()
+    };
+    let item_info = build_all_info(
+        &ctx,
+        &item_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[PyRep::Bool(false), PyRep::Bool(true), PyRep::Integer(item_struct_id)],
+    );
+    let PyRep::Dict(struct_info) = item_info.dict_get("structureInfo").expect("structureInfo key") else {
+        panic!("expected structureInfo Dict for structure present in snap.items");
+    };
+    let (_, entry) = struct_info
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(item_struct_id))
+        .expect("structureInfo contains item_struct_id");
+    let inv = entry.dict_get("invItem").expect("structure invItem");
+    assert_eq!(
+        inv.dbrow_get("locationID"),
+        Some(&PyRep::Integer(i64::from(perimeter_sys)))
+    );
+    let item_prime_locs: Vec<i64> = ctx
+        .drain_notifications_for_char(char_id)
+        .into_iter()
+        .filter(|n| n.event == "ProcessGodmaPrimeLocation")
+        .filter_map(|n| n.args.first().and_then(|a| a.as_i64()))
+        .collect();
+    assert_eq!(item_prime_locs, vec![item_struct_id, ship_id]);
+
+    // 3. Negative: item-backed structure whose location_id is not a valid SDE solar system or
+    //    celestial/station (and no session solar_system_id) returns structureInfo = None.
+    let unresolvable_item_struct_id = 1_000_991_199_i64;
+    insert_item(
+        &ctx,
+        unresolvable_item_struct_id,
+        35_832,
+        corp_id,
+        999_999_999,
+        InventoryFlag::Hangar,
+        1,
+        true,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = unresolvable_item_struct_id;
+        }
+    });
+    let unresolvable_sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(corp_id),
+        ship_id: Some(ship_id),
+        solar_system_id: None,
+        station_id: None,
+        structure_id: Some(unresolvable_item_struct_id),
+        ..Default::default()
+    };
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let unresolvable_info = build_all_info(
+        &ctx,
+        &unresolvable_sess,
+        char_id,
+        ship_id,
+        587,
+        PyRep::None,
+        Vec::new(),
+        Vec::new(),
+        &[
+            PyRep::Bool(false),
+            PyRep::Bool(true),
+            PyRep::Integer(unresolvable_item_struct_id),
+        ],
+    );
+    assert_eq!(unresolvable_info.dict_get("structureInfo"), Some(&PyRep::None));
+}

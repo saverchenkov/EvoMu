@@ -124,6 +124,16 @@ pub fn format_industry_job_pyrep_at(
     now_unix: Option<u64>,
     unrebased_offset_secs: u64,
 ) -> PyRep {
+    format_industry_job_pyrep_with_system(j, meta, now_unix, unrebased_offset_secs, None)
+}
+
+fn format_industry_job_pyrep_with_system(
+    j: &IndustryJobRecord,
+    meta: &IndustryJobCostMeta,
+    now_unix: Option<u64>,
+    unrebased_offset_secs: u64,
+    solar_system_id: Option<u32>,
+) -> PyRep {
     let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
     let end_unix = j.start_unix.saturating_add(j.duration_seconds);
     let to_ft = |u: u64| {
@@ -165,13 +175,16 @@ pub fn format_industry_job_pyrep_at(
     let prob = j.probability.map(f64::from).unwrap_or(1.0);
     let job_cost = j.cost.unwrap_or(meta.total_cost_isk);
     let lic_runs = j.licensed_runs.unwrap_or(j.runs) as i64;
+    let solar_system_rep = solar_system_id
+        .map(|sid| PyRep::Integer(i64::from(sid)))
+        .unwrap_or(PyRep::None);
     PyRep::keyval([
         ("jobID", PyRep::Integer(j.job_id)),
         ("installerID", PyRep::Integer(j.installer_id)),
         ("ownerID", PyRep::Integer(owner_id)),
         ("facilityID", PyRep::Integer(j.facility_id)),
         ("stationID", PyRep::Integer(j.facility_id)),
-        ("solarSystemID", PyRep::Integer(30_000_142)),
+        ("solarSystemID", solar_system_rep),
         ("blueprintID", PyRep::Integer(j.blueprint_item_id)),
         ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
         ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
@@ -206,6 +219,45 @@ pub fn format_industry_job_pyrep_at(
         ("alphaCloneTaxISK", PyRep::Real(meta.alpha_clone_tax_isk)),
         ("totalJobCostISK", PyRep::Real(meta.total_cost_isk)),
     ])
+}
+
+/// Resolves the authoritative solar system ID for an industry job's facility from SDE
+/// stations/celestials, player Upwell structures, or deployed facility items.
+fn resolve_industry_job_solar_system_id(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    facility_id: i64,
+) -> Option<u32> {
+    let mut cur = facility_id;
+    // Evaluate `facility_id` plus up to 4 item-container hops before failing closed.
+    for _ in 0..=4 {
+        if cur <= 0 {
+            return None;
+        }
+        if let Some(st) = ctx.sde.stations.get(&cur) {
+            return Some(st.solar_system_id);
+        }
+        if let Some(st) = snap.structures.get(&cur) {
+            return (st.solar_system_id > 0).then_some(st.solar_system_id);
+        }
+        if let Some(sys_id) = u32::try_from(cur)
+            .ok()
+            .filter(|id| ctx.sde.solar_systems.contains_key(id))
+        {
+            return Some(sys_id);
+        }
+        if let Some(sys_id) = ctx.sde.location_solar_system(cur) {
+            return Some(sys_id);
+        }
+        let Some(it) = snap.items.get(&cur) else {
+            return None;
+        };
+        if it.location_id == cur {
+            return None;
+        }
+        cur = it.location_id;
+    }
+    None
 }
 
 /// SDE dogma attribute IDs for Planetary Industry pins & harvesters.
@@ -996,19 +1048,24 @@ pub(crate) fn handle_industry_job_queries(
                         client_error: None,
                     });
                 }
-                let mut rep =
-                    format_industry_job_pyrep_at(j, &meta, Some(now_unix), unrebased_offset_secs);
-                let sys_id = ctx
-                    .sde
-                    .stations
-                    .get(&j.facility_id)
-                    .map(|st| st.solar_system_id)
-                    .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
-                    .unwrap_or(30_000_142);
-                if let PyRep::KeyVal(ref mut entries) = rep {
-                    entries.insert("solarSystemID".to_string(), PyRep::Integer(sys_id as i64));
-                }
-                Ok(rep)
+                let Some(sys_id) = resolve_industry_job_solar_system_id(ctx, snap, j.facility_id) else {
+                    let msg = format!(
+                        "Cannot resolve solar system for industry job {} facility {}",
+                        j.job_id, j.facility_id
+                    );
+                    return Err(BridgeRpcError::with_client_error(
+                        "FacilityNotFound",
+                        msg.clone(),
+                        eve_proto::ClientError::CustomInfo(msg),
+                    ));
+                };
+                Ok(format_industry_job_pyrep_with_system(
+                    j,
+                    &meta,
+                    Some(now_unix),
+                    unrebased_offset_secs,
+                    Some(sys_id),
+                ))
             });
             Some(res)
         }
@@ -1053,25 +1110,17 @@ pub(crate) fn handle_industry_job_queries(
                             meta.owner_id == req_owner_id || j.installer_id == req_owner_id
                         }
                     })
-                    .map(|j| {
+                    .filter_map(|j| {
+                        let sys_id =
+                            resolve_industry_job_solar_system_id(ctx, snap, j.facility_id)?;
                         let meta = load_job_cost_meta(snap, j.job_id).unwrap_or_default();
-                        let mut rep = format_industry_job_pyrep_at(
+                        Some(format_industry_job_pyrep_with_system(
                             j,
                             &meta,
                             Some(now_unix),
                             unrebased_offset_secs,
-                        );
-                        let sys_id = ctx
-                            .sde
-                            .stations
-                            .get(&j.facility_id)
-                            .map(|st| st.solar_system_id)
-                            .or_else(|| snap.structures.get(&j.facility_id).map(|s| s.solar_system_id))
-                            .unwrap_or(30_000_142);
-                        if let PyRep::KeyVal(ref mut entries) = rep {
-                            entries.insert("solarSystemID".to_string(), PyRep::Integer(sys_id as i64));
-                        }
-                        rep
+                            Some(sys_id),
+                        ))
                     })
                     .collect::<Vec<_>>()
             });

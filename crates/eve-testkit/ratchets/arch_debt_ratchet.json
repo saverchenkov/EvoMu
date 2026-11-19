@@ -29,12 +29,13 @@
       "description": "Direct .member_base_roles(...) / .member_base_roles_opt(...) wrapper calls outside effective_corp_role_breakdown (#1197)."
     },
     "hardcoded_fallback_entity_ids": {
-      "max_occurrences": 3,
-      "max_files": 2,
-      "exact": false,
+      "max_occurrences": 0,
+      "max_files": 0,
+      "exact": true,
+      "zero_required": true,
       "owning_issue": 1197,
       "regex": "\\.unwrap_or(?:_else\\s*\\(\\s*(?:move\\s+)?\\|\\s*(?:_\\s*)?\\|\\s*(?:\\{\\s*)?|\\s*\\(\\s*)(?:90_?000_?001|30_?000_?142|60_?003_?760)(?:_?[iu](?:8|16|32|64|128|size))?\\b",
-      "description": "Hardcoded .unwrap_or / .unwrap_or_else(90_000_001|30_000_142|60_003_760) fallback entity IDs; residual 3 sites are in wt-par-1331-c excluded files (services/industry_pi.rs, services/fitting_module_cycles_helpers.rs) (#1197)."
+      "description": "Hardcoded .unwrap_or / .unwrap_or_else(90_000_001|30_000_142|60_003_760) fallback entity IDs (#1197)."
     },
     "service_state_blobs_refs": {
       "max_occurrences": 47,
