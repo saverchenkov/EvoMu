@@ -208,14 +208,25 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
         assert!(!ok_fail_b);
         assert!((acc_fail_b - (0.0216 / 0.0936)).abs() < 1e-6, "got {acc_fail_b}");
 
-        // Far polygon with spoofed accurate=true fails IoU == 0.0
+        // Valid inside-canvas disjoint polygon with spoofed accurate=true fails IoU == 0.0
         let far_spoof = PyRep::Dict(vec![
             (PyRep::String("accurate".into()), PyRep::Bool(true)),
-            (PyRep::String("polygons".into()), PyRep::List(vec![box_poly(1.25, 1.25, 0.12)])),
+            (PyRep::String("polygons".into()), PyRep::List(vec![box_poly(0.05, 0.05, 0.04)])),
         ]);
         let (acc_miss, ok_miss) =
             grade_and_record_classification(snap, &mut store, 106, 10, &far_spoof);
         assert!(!ok_miss && acc_miss == 0.0);
+
+        // Out-of-canvas spoof polygon is rejected at extraction (`None`) and graded (0.0, false)
+        let oob_spoof = PyRep::Dict(vec![
+            (PyRep::String("accurate".into()), PyRep::Bool(true)),
+            (PyRep::String("polygons".into()), PyRep::List(vec![box_poly(1.25, 1.25, 0.12)])),
+        ]);
+        assert!(extract_submission_polygons(&oob_spoof).is_none());
+        assert_eq!(
+            grade_and_record_classification(snap, &mut store, 106_001, 10, &oob_spoof),
+            (0.0, false)
+        );
 
         // Full-canvas cheat box [0..1]^2 fails IoU = 0.0576 < 0.35
         let (acc_giant, ok_giant) = grade_and_record_classification(
@@ -233,10 +244,85 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             (0.0, false)
         );
 
-        // Overlapping duplicate gates use grid fallback and remain <= 1.0
+        // Overlapping duplicate gates use single-shared-grid fallback and remain <= 1.0
         let ctrl_poly = control_solution_polygon(10);
-        let dup_iou = compute_polygons_iou(&[ctrl_poly.clone(), ctrl_poly.clone()], &[ctrl_poly]);
+        let dup_iou = compute_polygons_iou(&[ctrl_poly.clone(), ctrl_poly.clone()], &[ctrl_poly.clone()]);
         assert!((0.95..=1.0).contains(&dup_iou), "got {dup_iou}");
+
+        // F-01 regression: 3-polygon pixel bounding-box aliasing exploit rejected at extraction AND
+        // single-shared-grid direct compute_polygons_iou_grid resists unbounded disparate boxes
+        let f01_exploit = PyRep::List(vec![
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(25.6), PyRep::Real(25.6)]),
+                PyRep::List(vec![PyRep::Real(460.8), PyRep::Real(25.6)]),
+                PyRep::List(vec![PyRep::Real(460.8), PyRep::Real(460.8)]),
+                PyRep::List(vec![PyRep::Real(25.6), PyRep::Real(460.8)]),
+            ]),
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0)]),
+                PyRep::List(vec![PyRep::Real(2359.296), PyRep::Real(0.0)]),
+                PyRep::List(vec![PyRep::Real(256.0), PyRep::Real(256.0)]),
+            ]),
+            PyRep::List(vec![
+                PyRep::List(vec![PyRep::Real(5.12), PyRep::Real(163_072.0)]),
+                PyRep::List(vec![PyRep::Real(10.24), PyRep::Real(163_072.0)]),
+                PyRep::List(vec![PyRep::Real(10.24), PyRep::Real(163_840.0)]),
+                PyRep::List(vec![PyRep::Real(5.12), PyRep::Real(163_840.0)]),
+            ]),
+        ]);
+        assert!(extract_submission_polygons(&f01_exploit).is_none());
+        assert_eq!(
+            grade_and_record_classification(snap, &mut store, 109, 10, &f01_exploit),
+            (0.0, false)
+        );
+        let grid_direct = compute_polygons_iou_grid(
+            &[
+                vec![[0.05, 0.05], [0.90, 0.05], [0.90, 0.90], [0.05, 0.90]],
+                vec![[0.0, 0.0], [4.608, 0.0], [0.5, 0.5]],
+                vec![[0.01, 318.5], [0.02, 318.5], [0.02, 320.0], [0.01, 320.0]],
+            ],
+            &[ctrl_poly.clone()],
+        );
+        assert!(grid_direct < 0.01, "single shared grid must prevent aliasing IoU=1.0, got {grid_direct}");
+
+        // F-02 regression: 6-vertex CCW double-wound triangle cannot pass via ear-clipping double-count
+        let ox = tx - 0.12;
+        let oy = ty - 0.12;
+        let double_wound_pts = vec![
+            [ox + 0.04, oy + 0.04],
+            [ox + 0.20, oy + 0.04],
+            [ox + 0.04, oy + 0.22],
+            [ox + 0.0405, oy + 0.039],
+            [ox + 0.201, oy + 0.04],
+            [ox + 0.039, oy + 0.222],
+        ];
+        assert!(polygon_has_self_intersection(&double_wound_pts));
+        assert!(ear_clip_triangulate(&double_wound_pts).is_none());
+        let double_wound_iou = compute_polygons_iou(&[double_wound_pts.clone()], &[ctrl_poly.clone()]);
+        assert!(double_wound_iou < CONTROL_IOU_ACCURACY_THRESHOLD, "got {double_wound_iou}");
+        let double_wound_rep = PyRep::List(vec![PyRep::List(
+            double_wound_pts
+                .iter()
+                .map(|&[px, py]| PyRep::List(vec![PyRep::Real(px), PyRep::Real(py)]))
+                .collect(),
+        )]);
+        let (dw_acc, dw_ok) =
+            grade_and_record_classification(snap, &mut store, 110, 10, &double_wound_rep);
+        assert!(!dw_ok && dw_acc < CONTROL_IOU_ACCURACY_THRESHOLD, "got ({dw_acc}, {dw_ok})");
+
+        // Symmetric zero-area bowtie is rejected as degenerate
+        let zero_bowtie = PyRep::List(vec![PyRep::List(vec![
+            PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.2)]),
+            PyRep::List(vec![PyRep::Real(0.4), PyRep::Real(0.4)]),
+            PyRep::List(vec![PyRep::Real(0.4), PyRep::Real(0.2)]),
+            PyRep::List(vec![PyRep::Real(0.2), PyRep::Real(0.4)]),
+        ])]);
+        assert!(extract_submission_polygons(&zero_bowtie).is_none());
+
+        // P2 #1: direct Rust CW 3-vertex triangle matches CCW twin with IoU == 1.0
+        let cw_tri = vec![[ox, oy], [ox, oy + 0.24], [ox + 0.24, oy]];
+        let ccw_tri = vec![[ox, oy], [ox + 0.24, oy], [ox, oy + 0.24]];
+        assert!((compute_polygons_iou(&[cw_tri], &[ccw_tri]) - 1.0).abs() < 1e-6);
 
         // 4. Standard task (idx % 5 != 0): crowd consensus via 2D polygon IoU
         let std_idx = 13;
@@ -259,13 +345,13 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
         );
         assert!(ok1 && a1 == 1.0);
 
-        // Second responder far away -> disagrees -> (0.0, false)
+        // Second responder inside-canvas disjoint -> disagrees -> (0.0, false)
         let (a2, ok2) = grade_and_record_classification(
             snap,
             &mut store,
             202,
             std_idx,
-            &box_poly(1.3, 1.3, 0.1),
+            &box_poly(0.05, 0.05, 0.04),
         );
         assert!(!ok2 && a2 == 0.0);
 
@@ -287,11 +373,11 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             &mut store,
             204,
             std_idx,
-            &box_poly(1.3, 1.3, 0.1),
+            &box_poly(0.05, 0.05, 0.04),
         );
         assert!(!ok4 && a4 == 0.0);
 
-        // 5. First responder implausible (out of canvas bounds or full-canvas) -> (0.0, false), no consensus stored
+        // 5. First responder implausible (out of canvas bounds, full-canvas, or vertex-clustered cheat) -> (0.0, false)
         let (bad_first_acc, bad_first_ok) = grade_and_record_classification(
             snap,
             &mut store,
@@ -300,11 +386,46 @@ fn grade_classification_handles_consensus_overrides_explicit_flags_and_payload_s
             &box_poly(1.3, 1.3, 0.1),
         );
         assert!(!bad_first_ok && bad_first_acc == 0.0);
+        assert!(!grade_and_record_classification(
+            snap,
+            &mut store,
+            301_001,
+            14,
+            &box_poly(0.5, 0.5, 0.5),
+        )
+        .1);
         assert!(snap
             .seasons_and_campaigns
             .project_discovery_votes
             .get(&14)
             .is_none_or(|b| b.consensus_centroid.is_none()));
+
+        // P2 #2 regression: clustering 80 vertices near sample_target_center_norm(3) = [0.60, 0.68]
+        // via a hairline needle cannot pull area-weighted polygons_centroid away from [0.01..0.25]^2
+        let [t3x, t3y] = sample_target_center_norm(3);
+        let mut cheat_pts = vec![
+            [0.01, 0.01],
+            [0.25, 0.01],
+            [0.25, 0.25],
+            [0.082, 0.25],
+            [t3x + 0.002, t3y - 0.002],
+        ];
+        for k in 0..80 {
+            let ang = -std::f64::consts::FRAC_PI_4 + (k as f64 / 79.0) * std::f64::consts::PI;
+            cheat_pts.push([t3x + 0.003 * ang.cos(), t3y + 0.003 * ang.sin()]);
+        }
+        cheat_pts.push([t3x - 0.002, t3y + 0.002]);
+        cheat_pts.push([0.080, 0.25]);
+        cheat_pts.push([0.01, 0.25]);
+        let cheat_centroid = polygons_centroid(std::slice::from_ref(&cheat_pts));
+        assert!(cheat_centroid[0] < 0.20 && cheat_centroid[1] < 0.20, "got {cheat_centroid:?}");
+        assert!(!is_plausible_first_responder(&[cheat_pts], 3));
+
+        // P2 #3 regression: save_crowd_consensus_polygons bounds store.tasks at <= MAX_CACHED_TASKS
+        for idx in 1000..1080 {
+            save_crowd_consensus_polygons(&mut store, idx, std::slice::from_ref(&ctrl_poly));
+        }
+        assert!(store.tasks.len() <= MAX_CACHED_TASKS, "len={}", store.tasks.len());
 
         // 6. Standard task with None payload -> (0.0, false)
         assert_eq!(

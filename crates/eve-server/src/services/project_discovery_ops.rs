@@ -154,6 +154,7 @@ const MAX_POLYGONS_PER_SUBMISSION: usize = 32;
 const MAX_VERTICES_PER_POLYGON: usize = 256;
 const MAX_JSON_CLASSIFICATION_BYTES: usize = 65_536;
 const MAX_PAYLOAD_DEPTH: usize = 8;
+pub(crate) const MAX_CACHED_TASKS: usize = 64;
 const FIRST_RESPONDER_MIN_AREA_NORM: f64 = 5e-4;
 const FIRST_RESPONDER_MAX_AREA_NORM: f64 = 0.50;
 const FIRST_RESPONDER_MAX_CENTER_DIST: f64 = 0.65;
@@ -376,7 +377,11 @@ fn clean_single_polygon(pts: &[[f64; 2]], scale: f64) -> Option<Vec<[f64; 2]>> {
     let mut dedup: Vec<[f64; 2]> = Vec::with_capacity(pts.len());
     for &[rx, ry] in pts {
         let p = [rx * scale, ry * scale];
-        if !p[0].is_finite() || !p[1].is_finite() {
+        if !p[0].is_finite()
+            || !p[1].is_finite()
+            || !(CANVAS_BOUNDS_MIN..=CANVAS_BOUNDS_MAX).contains(&p[0])
+            || !(CANVAS_BOUNDS_MIN..=CANVAS_BOUNDS_MAX).contains(&p[1])
+        {
             return None;
         }
         if dedup.last().is_none_or(|&prev| dist_sq(prev, p) > 1e-18) {
@@ -461,25 +466,90 @@ fn triangle_area(tri: [[f64; 2]; 3]) -> f64 {
     0.5 * cross_2d(tri[0], tri[1], tri[2]).abs()
 }
 
+fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2], eps: f64) -> bool {
+    p[0] >= a[0].min(b[0]) - eps
+        && p[0] <= a[0].max(b[0]) + eps
+        && p[1] >= a[1].min(b[1]) - eps
+        && p[1] <= a[1].max(b[1]) + eps
+}
+
+fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let eps = 1e-11;
+    if a[0].max(b[0]) + eps < c[0].min(d[0])
+        || c[0].max(d[0]) + eps < a[0].min(b[0])
+        || a[1].max(b[1]) + eps < c[1].min(d[1])
+        || c[1].max(d[1]) + eps < a[1].min(b[1])
+    {
+        return false;
+    }
+    let o1 = cross_2d(a, b, c);
+    let o2 = cross_2d(a, b, d);
+    let o3 = cross_2d(c, d, a);
+    let o4 = cross_2d(c, d, b);
+    let tol_ab = eps * dist_sq(a, b).sqrt().max(1.0);
+    let tol_cd = eps * dist_sq(c, d).sqrt().max(1.0);
+
+    let ab_straddles = (o1 > tol_ab && o2 < -tol_ab) || (o1 < -tol_ab && o2 > tol_ab);
+    let cd_straddles = (o3 > tol_cd && o4 < -tol_cd) || (o3 < -tol_cd && o4 > tol_cd);
+    if ab_straddles && cd_straddles {
+        return true;
+    }
+    (o1.abs() <= tol_ab && point_on_segment(c, a, b, eps))
+        || (o2.abs() <= tol_ab && point_on_segment(d, a, b, eps))
+        || (o3.abs() <= tol_cd && point_on_segment(a, c, d, eps))
+        || (o4.abs() <= tol_cd && point_on_segment(b, c, d, eps))
+}
+
+fn polygon_has_self_intersection(poly: &[[f64; 2]]) -> bool {
+    let n = poly.len();
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        for j in (i + 2)..n {
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            if segments_intersect(a, b, poly[j], poly[(j + 1) % n]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn ear_clip_triangulate(poly: &[[f64; 2]]) -> Option<Vec<[[f64; 2]; 3]>> {
     if poly.len() < 3 {
         return None;
     }
-    if poly.len() == 3 {
-        return Some(vec![[poly[0], poly[1], poly[2]]]);
+    let signed_area = signed_polygon_area(poly);
+    if !signed_area.is_finite() || signed_area.abs() <= MIN_POLYGON_AREA_NORM {
+        return None;
     }
-    let poly_area = signed_polygon_area(poly).abs();
-    let mut rem: Vec<usize> = (0..poly.len()).collect();
-    let mut tris = Vec::with_capacity(poly.len() - 2);
+    let ccw_storage: Vec<[f64; 2]>;
+    let poly_ccw: &[[f64; 2]] = if signed_area < 0.0 {
+        ccw_storage = poly.iter().copied().rev().collect();
+        &ccw_storage
+    } else {
+        poly
+    };
+    if poly_ccw.len() == 3 {
+        return Some(vec![[poly_ccw[0], poly_ccw[1], poly_ccw[2]]]);
+    }
+    if polygon_has_self_intersection(poly_ccw) {
+        return None;
+    }
+    let poly_area = signed_area.abs();
+    let mut rem: Vec<usize> = (0..poly_ccw.len()).collect();
+    let mut tris = Vec::with_capacity(poly_ccw.len() - 2);
     while rem.len() > 3 {
         let len = rem.len();
         let mut clipped = false;
         for i in 0..len {
             let prev_idx = (i + len - 1) % len;
             let next_idx = (i + 1) % len;
-            let a = poly[rem[prev_idx]];
-            let b = poly[rem[i]];
-            let c = poly[rem[next_idx]];
+            let a = poly_ccw[rem[prev_idx]];
+            let b = poly_ccw[rem[i]];
+            let c = poly_ccw[rem[next_idx]];
             if cross_2d(a, b, c) <= 1e-12 {
                 continue;
             }
@@ -487,7 +557,7 @@ fn ear_clip_triangulate(poly: &[[f64; 2]]) -> Option<Vec<[[f64; 2]; 3]>> {
                 j != prev_idx
                     && j != i
                     && j != next_idx
-                    && point_in_or_on_ccw_triangle(poly[rem[j]], a, b, c)
+                    && point_in_or_on_ccw_triangle(poly_ccw[rem[j]], a, b, c)
             });
             if !any_inside {
                 tris.push([a, b, c]);
@@ -500,7 +570,7 @@ fn ear_clip_triangulate(poly: &[[f64; 2]]) -> Option<Vec<[[f64; 2]; 3]>> {
             return None;
         }
     }
-    tris.push([poly[rem[0]], poly[rem[1]], poly[rem[2]]]);
+    tris.push([poly_ccw[rem[0]], poly_ccw[rem[1]], poly_ccw[rem[2]]]);
     let tri_sum: f64 = tris.iter().map(|&t| triangle_area(t)).sum();
     if (tri_sum - poly_area).abs() > 1e-5 * poly_area.max(1e-6) {
         return None;
@@ -655,49 +725,39 @@ fn compute_polygons_iou_grid(sub_polys: &[Vec<[f64; 2]>], ref_polys: &[Vec<[f64;
     let (Some(sb), Some(rb)) = (polygons_bbox(sub_polys), polygons_bbox(ref_polys)) else {
         return 0.0;
     };
-    let area_sub = if let Some((_, a)) = triangulate_disjoint_set(sub_polys) {
-        a
-    } else {
-        grid_union_area(sub_polys, sb)
-    };
-    let area_ref = if let Some((_, a)) = triangulate_disjoint_set(ref_polys) {
-        a
-    } else {
-        grid_union_area(ref_polys, rb)
-    };
-    let ib = [
-        sb[0].max(rb[0]),
-        sb[1].max(rb[1]),
-        sb[2].min(rb[2]),
-        sb[3].min(rb[3]),
+    let ub = [
+        sb[0].min(rb[0]),
+        sb[1].min(rb[1]),
+        sb[2].max(rb[2]),
+        sb[3].max(rb[3]),
     ];
-    let iw = ib[2] - ib[0];
-    let ih = ib[3] - ib[1];
-    if iw <= 0.0 || ih <= 0.0 || area_sub <= 0.0 || area_ref <= 0.0 {
+    let uw = ub[2] - ub[0];
+    let uh = ub[3] - ub[1];
+    if uw <= 0.0 || uh <= 0.0 {
         return 0.0;
     }
     let n = PIP_GRID_SAMPLES;
     let mut inter_hits = 0usize;
+    let mut union_hits = 0usize;
     for iy in 0..n {
-        let y = ib[1] + ((iy as f64 + 0.5) / n as f64) * ih;
+        let y = ub[1] + ((iy as f64 + 0.5) / n as f64) * uh;
         for ix in 0..n {
-            let x = ib[0] + ((ix as f64 + 0.5) / n as f64) * iw;
+            let x = ub[0] + ((ix as f64 + 0.5) / n as f64) * uw;
             let p = [x, y];
-            if sub_polys.iter().any(|poly| point_in_polygon_even_odd(p, poly))
-                && ref_polys.iter().any(|poly| point_in_polygon_even_odd(p, poly))
-            {
-                inter_hits += 1;
+            let in_sub = sub_polys.iter().any(|poly| point_in_polygon_even_odd(p, poly));
+            let in_ref = ref_polys.iter().any(|poly| point_in_polygon_even_odd(p, poly));
+            if in_sub || in_ref {
+                union_hits += 1;
+                if in_sub && in_ref {
+                    inter_hits += 1;
+                }
             }
         }
     }
-    let inter_area = ((inter_hits as f64 / ((n * n) as f64)) * (iw * ih))
-        .min(area_sub)
-        .min(area_ref);
-    let union = (area_sub + area_ref - inter_area).max(0.0);
-    if union <= 1e-12 {
+    if union_hits == 0 {
         0.0
     } else {
-        (inter_area / union).clamp(0.0, 1.0)
+        (inter_hits as f64 / union_hits as f64).clamp(0.0, 1.0)
     }
 }
 
@@ -730,7 +790,45 @@ pub fn compute_polygons_iou(sub_polys: &[Vec<[f64; 2]>], ref_polys: &[Vec<[f64; 
     compute_polygons_iou_grid(sub_polys, ref_polys)
 }
 
+fn single_polygon_area_centroid(poly: &[[f64; 2]]) -> Option<(f64, [f64; 2])> {
+    if poly.len() < 3 {
+        return None;
+    }
+    let mut twice_area = 0.0;
+    let mut cx_sum = 0.0;
+    let mut cy_sum = 0.0;
+    for i in 0..poly.len() {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len()];
+        let cross = a[0] * b[1] - b[0] * a[1];
+        twice_area += cross;
+        cx_sum += (a[0] + b[0]) * cross;
+        cy_sum += (a[1] + b[1]) * cross;
+    }
+    if !twice_area.is_finite() || twice_area.abs() <= 1e-12 {
+        return None;
+    }
+    let centroid = [cx_sum / (3.0 * twice_area), cy_sum / (3.0 * twice_area)];
+    if !centroid[0].is_finite() || !centroid[1].is_finite() {
+        return None;
+    }
+    Some((0.5 * twice_area.abs(), centroid))
+}
+
 fn polygons_centroid(polys: &[Vec<[f64; 2]>]) -> [f64; 2] {
+    let mut weight_sum = 0.0;
+    let mut wx = 0.0;
+    let mut wy = 0.0;
+    for poly in polys {
+        if let Some((area, [cx, cy])) = single_polygon_area_centroid(poly) {
+            weight_sum += area;
+            wx += area * cx;
+            wy += area * cy;
+        }
+    }
+    if weight_sum > 1e-12 {
+        return [wx / weight_sum, wy / weight_sum];
+    }
     let mut sum_x = 0.0;
     let mut sum_y = 0.0;
     let mut count = 0usize;
@@ -799,11 +897,49 @@ fn load_crowd_consensus_polygons(
         .map(|[cx, cy]| vec![square_polygon(cx, cy, CONTROL_HALF_EXTENT)])
 }
 
+fn task_has_crowd_consensus(task: &ProjectDiscoveryTaskData) -> bool {
+    task.payload_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|v| v.get(CROWD_CONSENSUS_POLYGONS_KEY).is_some())
+}
+
+pub(crate) fn ensure_store_task_capacity(store: &mut ProjectDiscoveryStore, keep_idx: i64) {
+    while store.tasks.len() >= MAX_CACHED_TASKS && !store.tasks.contains_key(&keep_idx) {
+        let evict_idx = store
+            .tasks
+            .iter()
+            .filter(|(&idx, task)| idx != keep_idx && !task_has_crowd_consensus(task))
+            .map(|(&idx, _)| idx)
+            .min()
+            .or_else(|| store.tasks.keys().copied().filter(|&idx| idx != keep_idx).min());
+        match evict_idx {
+            Some(idx) => {
+                store.tasks.remove(&idx);
+            }
+            None => break,
+        }
+    }
+}
+
+pub(crate) fn insert_bounded_store_task_if_absent(
+    store: &mut ProjectDiscoveryStore,
+    task_idx: i64,
+    task: ProjectDiscoveryTaskData,
+) {
+    if store.tasks.contains_key(&task_idx) {
+        return;
+    }
+    ensure_store_task_capacity(store, task_idx);
+    store.tasks.insert(task_idx, task);
+}
+
 fn save_crowd_consensus_polygons(
     store: &mut ProjectDiscoveryStore,
     req_task_index: i64,
     polys: &[Vec<[f64; 2]>],
 ) {
+    ensure_store_task_capacity(store, req_task_index);
     let task = store
         .tasks
         .entry(req_task_index)

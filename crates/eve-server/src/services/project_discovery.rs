@@ -40,18 +40,13 @@ fn insert_bounded_char_task(
         .iter()
         .filter_map(|(k, v)| k.starts_with(&prefix).then_some((v.task_number, k.clone())))
         .collect();
-    if char_keys.len() >= 64 {
+    if char_keys.len() >= ops::MAX_CACHED_TASKS {
         if let Some((_, oldest_key)) = char_keys.into_iter().min_by_key(|(n, _)| *n) {
             store.char_tasks.remove(&oldest_key);
         }
     }
-    if !store.tasks.contains_key(&task_idx) && store.tasks.len() >= 64 {
-        if let Some(&oldest_idx) = store.tasks.keys().min() {
-            store.tasks.remove(&oldest_idx);
-        }
-    }
     store.char_tasks.insert(char_task_key(char_id, task_idx), task.clone());
-    store.tasks.insert(task_idx, task);
+    ops::insert_bounded_store_task_if_absent(store, task_idx, task);
 }
 
 /// Server-side Analysis Kredits (AK) debit helper for AK-priced rewards and store offers.
@@ -838,6 +833,7 @@ pub fn handle_project_discovery(
                     });
                     if let Some(obj) = val.as_object_mut() {
                         obj.remove("crowd_consensus_polygons");
+                        obj.remove("control_solution");
                         obj.insert("fetch_count".into(), serde_json::json!(fetch_cnt));
                         obj.insert("url".into(), serde_json::json!(entry.url));
                         obj.insert("task_id".into(), serde_json::json!(entry.task_id));

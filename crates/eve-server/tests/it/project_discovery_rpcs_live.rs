@@ -327,6 +327,8 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
         PyRep::List(vec![PyRep::Real(1.0)]),
         PyRep::String("{\"accurate\":true,\"is_accurate\":true,\"consensus\":true}".into()),
         PyRep::String("{\"gates\":[[[0.4,0.4],[0.6,0.6]]]}".into()),
+        PyRep::String("{\"accurate\":true,\"polygons\":[[[1.25,1.25],[1.45,1.25],[1.45,1.45],[1.25,1.45]]]}".into()),
+        PyRep::String("{\"polygons\":[[[25.6,25.6],[460.8,25.6],[460.8,460.8],[25.6,460.8]],[[0.0,0.0],[2359.296,0.0],[256.0,256.0]],[[5.12,163072.0],[10.24,163072.0],[10.24,163840.0],[5.12,163840.0]]]}".into()),
     ] {
         let err = rpc(
             &ctx,
@@ -350,11 +352,28 @@ async fn test_project_discovery_tasks_url_classification_and_stats_live() {
     .expect("post_classification 4");
 
     ctx.advance_secs(5);
-    let _t5 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
+    let t5 = rpc(&ctx, &mut pilot, "ProjectDiscovery", "get_new_task", &[])
         .await
         .expect("get_new_task 5 (control)");
+    let t5_url = t5.dict_get("url").and_then(|v| v.as_str()).unwrap().to_string();
+    let t5_payload_str = match rpc(
+        &ctx,
+        &mut pilot,
+        "ProjectDiscovery",
+        "get_data_from_url",
+        &[PyRep::String(t5_url)],
+    )
+    .await
+    .expect("get_data_from_url 5")
+    {
+        PyRep::String(s) => s,
+        other => panic!("expected String payload, got {other:?}"),
+    };
+    let t5_payload: serde_json::Value = serde_json::from_str(&t5_payload_str).expect("valid JSON");
+    assert_eq!(t5_payload["task_type"], "control");
+    assert!(t5_payload.get("control_solution").is_none());
     let spoofed_miss = PyRep::String(
-        "{\"accurate\":true,\"polygons\":[[[1.25,1.25],[1.45,1.25],[1.45,1.45],[1.25,1.45]]]}".into(),
+        "{\"accurate\":true,\"polygons\":[[[0.01,0.01],[0.09,0.01],[0.09,0.09],[0.01,0.09]]]}".into(),
     );
     let post5 = rpc(
         &ctx,
