@@ -680,7 +680,9 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
 /// enforcing tackle/immobilization/warp/session-change checks, `<= 2,500 m` gate proximity, and
 /// combat hull group eligibility (`ESS_ALLOWED_SHIP_GROUP_IDS`), decloaking the ship and warping it
 /// onto the ESS grid (`feat:pve.ess-grid-warp-mwd-restrictions`).
-/// Force-decloaks an eligible ship entering an ESS acceleration gate, clearing both combat state and any active cloak module.
+/// Force-decloaks an eligible ship entering an ESS acceleration gate, clearing actor
+/// `ActiveModuleCycle`s, `ball_slim_meta.is_cloaked`, `CombatState`, and fitted cloak
+/// `module_active_states` while restoring uncloaked speed and emitting Destiny/Godma notifications.
 async fn force_decloak_on_ess_gate_activation(
     ctx: &ServerContext,
     sys_handle: &crate::system_actor::SystemHandle,
@@ -688,45 +690,103 @@ async fn force_decloak_on_ess_gate_activation(
     char_id: i64,
     ship_id: i64,
 ) {
-    // Only take a write snapshot when an active group-330 cloak module exists so non-module paths leave db.state_epoch() untouched.
-    let has_fitting_cloak =
-        crate::services::space_nav_movement_guard::resolve_active_fitting_cloak_read_only(
-            ctx, char_id, sys_id, ship_id,
-        )
-        .is_some();
-    let mut cleared_fitting_cloak = false;
-    if has_fitting_cloak {
+    let pre_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
+    let was_gate_cloak = pre_cs
+        .as_ref()
+        .is_some_and(|cs| cs.gate_cloak_remaining_ticks > 0);
+    let pre_was_cloaked = pre_cs
+        .as_ref()
+        .is_some_and(|cs| cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0);
+    let had_residual_cs_cloak = pre_cs.as_ref().is_some_and(|cs| {
+        cs.is_covert_cloak
+            || cs.cloak_stabilization_remaining_s > 0.0
+            || cs.cloak_velocity_multiplier.is_some()
+    });
+    let had_slim_cloaked = sys_handle
+        .ballpark
+        .read()
+        .is_ok_and(|bp| bp.ball_slim_meta.get(&ship_id).is_some_and(|m| m.is_cloaked));
+
+    // Align owner/slot filtering with `resolve_active_fitting_cloak_read_only`: only clear fitted
+    // group-330 cloak modules (slots 11..=34 or 125..=132) owned by `char_id` that are active
+    // in `snap.module_active_states` or hold an actor `ActiveModuleCycle`.
+    let fitted_cloaks =
+        crate::services::space_nav_movement_guard::fitted_cloak_modules_read_only(
+            ctx, char_id, ship_id,
+        );
+    let mut active_cloaks: Vec<(i64, u32, bool, bool)> = Vec::new();
+    for (mid, mtid, is_covert, is_active_in_db) in fitted_cloaks {
+        if is_active_in_db || sys_handle.has_module_cycle(ship_id, mid).await {
+            active_cloaks.push((mid, mtid, is_covert, is_active_in_db));
+        }
+    }
+
+    if active_cloaks.is_empty()
+        && !pre_was_cloaked
+        && !had_residual_cs_cloak
+        && !had_slim_cloaked
+    {
+        return;
+    }
+
+    // Only take a write snapshot when an active cloak module is recorded in DB state so
+    // non-module decloak paths leave `db.state_epoch()` untouched.
+    if active_cloaks.iter().any(|&(_, _, _, in_db)| in_db) {
+        let mut mutated_db = false;
         ctx.db.with_mut_snapshot(|snap| {
-            let cloak_ids: Vec<i64> = snap
-                .items
-                .values()
-                .filter(|item| {
-                    item.location_id == ship_id
-                        && snap.module_active_states.contains(&item.item_id)
-                        && ctx
-                            .sde
-                            .types
-                            .get(&item.type_id)
-                            .is_some_and(|ty| ty.group_id == 330)
-                })
-                .map(|item| item.item_id)
-                .collect();
-            for mid in cloak_ids {
+            for &(mid, _, _, _) in &active_cloaks {
                 if snap.module_active_states.remove(&mid) {
-                    cleared_fitting_cloak = true;
+                    mutated_db = true;
                 }
+                if snap.module_active_charges.remove(&mid).is_some() {
+                    mutated_db = true;
+                }
+                ServerContext::clear_persisted_module_overload(snap, ship_id, mid);
             }
         });
-        if cleared_fitting_cloak {
+        if mutated_db {
             ctx.invalidate_ship_fitting(ship_id);
         }
     }
 
-    let mut decloaked = cleared_fitting_cloak;
+    // Call `break_gate_cloak` BEFORE removing module cycles so `ballpark.deactivate_cloak` sees
+    // `was_cloaked == true`, clears `ball_slim_meta.is_cloaked` via `change_slim_item`, preserves
+    // non-gate `decloak_targeting_delay_remaining_s`, emits `CloakBall(0)`, queues `AddBalls2`,
+    // and recomputes ball speed.
+    let broken = sys_handle.break_gate_cloak(ship_id).await.unwrap_or(false);
+
+    // Remove every cloak `ActiveModuleCycle` BEFORE any subsequent `set_combat_state` / tick so
+    // `reconcile_tackle_and_bubbles` -> `reconcile_velocity_for_ship` sees zero active cloak
+    // cycles and never resurrects `cloak_velocity_multiplier` / speed nerfs or `ModuleAlreadyActive`.
+    for &(mid, mtid, _, _) in &active_cloaks {
+        let removed_delay = sys_handle
+            .remove_module_cycle(ship_id, mid)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0.0);
+        let react_delay_s = ctx
+            .sde
+            .types
+            .get(&mtid)
+            .and_then(|t| t.default_attributes.get(&669).copied())
+            .map(|ms| (ms / 1000.0).max(removed_delay))
+            .unwrap_or(removed_delay);
+        if react_delay_s > 0.0 {
+            ctx.record_module_reactivation_delay(ship_id, mid, react_delay_s);
+        }
+    }
+
+    // Safety net for residual cloak state when `cs.is_cloaked` was already false (where
+    // `ballpark.deactivate_cloak` is a no-op): clear it now that `ActiveModuleCycle`s are removed.
+    let mut cleared_residual = false;
     if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-        let had_cs_cloak =
-            cs.is_cloaked || cs.is_covert_cloak || cs.cloak_velocity_multiplier.is_some();
-        if had_cs_cloak || cleared_fitting_cloak {
+        if cs.is_cloaked
+            || cs.is_covert_cloak
+            || cs.gate_cloak_remaining_ticks > 0
+            || cs.cloak_stabilization_remaining_s > 0.0
+            || cs.cloak_velocity_multiplier.is_some()
+        {
             cs.is_cloaked = false;
             cs.is_covert_cloak = false;
             cs.gate_cloak_remaining_ticks = 0;
@@ -740,26 +800,140 @@ async fn force_decloak_on_ess_gate_activation(
                 }
             }
             let _ = sys_handle.set_combat_state(ship_id, cs).await;
-            decloaked = decloaked || had_cs_cloak;
+            cleared_residual = true;
         }
     }
 
-    if decloaked {
-        let cloak_recorded = ctx.db.with_snapshot(|snap| {
-            crate::services::mobile_deployables::read_deployable_state_snap(snap)
-                .cloak_activated_unix
-                .contains_key(&ship_id)
-        });
-        if cloak_recorded {
-            crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
+    let decloaked = !active_cloaks.is_empty()
+        || pre_was_cloaked
+        || had_residual_cs_cloak
+        || had_slim_cloaked
+        || broken
+        || cleared_residual;
+    if !decloaked {
+        return;
+    }
+
+    if !broken && (pre_was_cloaked || had_slim_cloaked || !active_cloaks.is_empty()) {
+        let _ = sys_handle
+            .emit_destiny_event(
+                ship_id,
+                eve_destiny::DestinyEvent::CloakBall {
+                    ball_id: ship_id,
+                    cloaked: 0,
+                },
+            )
+            .await;
+    }
+    if !was_gate_cloak && (broken || pre_was_cloaked || !active_cloaks.is_empty()) {
+        let _ = sys_handle
+            .emit_destiny_event(
+                ship_id,
+                eve_destiny::DestinyEvent::OnSpecialFX {
+                    ball_id: ship_id,
+                    module_id: active_cloaks.first().map(|&(m, _, _, _)| m),
+                    guid: "effects.Cloak".to_string(),
+                    is_active: false,
+                },
+            )
+            .await;
+    }
+
+    if !active_cloaks.is_empty() {
+        let now = ctx.now_system_sim_filetime_ticks(Some(sys_id));
+        let observers = ctx.space_observer_chars_for_ship(ship_id, char_id);
+        for &(mid, mtid, is_covert, _) in &active_cloaks {
+            let eff_name = if is_covert {
+                "cloakingWarpSafe"
+            } else {
+                "cloaking"
+            };
+            let effect_id = ctx
+                .effect_id_for_module(mtid, Some(eff_name))
+                .or_else(|| ctx.effect_id_for_module(mtid, None))
+                .unwrap_or(0);
+            let environment = PyRep::Tuple(vec![
+                PyRep::Integer(mid),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::None,
+                PyRep::None,
+                PyRep::List(vec![]),
+                PyRep::Integer(effect_id),
+            ]);
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                crate::router::notify_registry::OnGodmaShipEffect {
+                    item_id: mid,
+                    effect: PyRep::Integer(effect_id),
+                    start_or_time: PyRep::Integer(now),
+                    start: Some(PyRep::Integer(0)),
+                    active: Some(PyRep::Integer(0)),
+                    environment: Some(environment),
+                    start_time: Some(PyRep::Integer(now)),
+                    duration: Some(PyRep::Real(0.0)),
+                    repeat: Some(PyRep::Integer(0)),
+                    error: Some(PyRep::None),
+                    actual_stop_time: None,
+                },
+            );
+            let (sfx_guid, is_offensive) =
+                crate::router::binding::special_fx_guid_for_module_sde(
+                    &ctx.sde,
+                    mtid,
+                    effect_id,
+                    Some(eff_name),
+                )
+                .unwrap_or_else(|| ("effects.Cloak".to_string(), false));
+            let sfx_notif = crate::router::notify_registry::OnSpecialFX {
+                ship_id,
+                module_id: Some(mid),
+                module_type_id: Some(i64::from(mtid)),
+                target_id: None,
+                other_type_id: None,
+                guid: sfx_guid,
+                is_offensive,
+                start: 0,
+                active: 0,
+                duration: 0.0,
+                repeat: 0,
+                start_time: now,
+                time_from_start: 0.0,
+                graphic_info: None,
+            };
+            ctx.emit_typed(
+                crate::router::NotificationTarget::Character(char_id),
+                sfx_notif.clone(),
+            );
+            for &(obs_cid, _) in &observers {
+                ctx.emit_typed(
+                    crate::router::NotificationTarget::Character(obs_cid),
+                    sfx_notif.clone(),
+                );
+            }
         }
-        crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
-            ctx,
-            char_id,
-            "DecloakProximityOrDeactivation",
-            2000.0,
+    }
+
+    if was_gate_cloak {
+        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+            ctx, char_id, ship_id, true, false,
         );
     }
+
+    let cloak_recorded = ctx.db.with_snapshot(|snap| {
+        crate::services::mobile_deployables::read_deployable_state_snap(snap)
+            .cloak_activated_unix
+            .contains_key(&ship_id)
+    });
+    if cloak_recorded {
+        crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
+    }
+    crate::services::notify_emitters_space_dungeons::emit_cloak_module_force_deactivated(
+        ctx,
+        char_id,
+        "DecloakProximityOrDeactivation",
+        2000.0,
+    );
 }
 
 pub async fn try_activate_ess_acceleration_gate(

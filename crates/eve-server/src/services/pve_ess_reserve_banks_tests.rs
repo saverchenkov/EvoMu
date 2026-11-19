@@ -837,6 +837,521 @@ async fn wave4_ess_boundary_thresholds_tax_exempt_and_autopayout_edges() {
 }
 
 #[tokio::test]
+async fn ess_gate_dogma_activate_decloak_clears_actor_cycle_slim_meta_velocity_and_allows_ess_link_gh_1408()
+{
+    let mut sde = (*shared_sde()).clone();
+    let null_sys: SolarSystemId = 30_099_408;
+    sde.solar_systems
+        .insert(null_sys, synthetic_solar_system(null_sys, -0.5));
+    let cloak_type_id: eve_sde::TypeId = 11577; // Improved Cloaking Device II (non-covert)
+    assert!(
+        sde.types.contains_key(&cloak_type_id),
+        "SDE must contain Improved Cloaking Device II (11577)"
+    );
+    let cruiser_type_id: eve_sde::TypeId = 626; // Vexor (group 26, ESS-eligible)
+    let frig_type_id: eve_sde::TypeId = 587; // Rifter (group 25, ESS-ineligible)
+    let sde = Arc::new(sde);
+
+    let db = Arc::new(WorldRepository::new_in_memory().unwrap());
+    let now_unix = 1_700_050_000_i64;
+    let char_id = 91_408_501_i64;
+    let cruiser_id = 91_408_502_i64;
+    let cloak_id = 91_408_503_i64;
+    let frig_char_id = 91_408_511_i64;
+    let frig_id = 91_408_512_i64;
+    let frig_cloak_id = 91_408_513_i64;
+
+    db.provision_gm_account("ess_dogma_pilot", "pw", char_id, "EssDogmaPilot");
+    db.provision_gm_account("ess_dogma_frig", "pw", frig_char_id, "EssDogmaFrig");
+
+    let req_skills: Vec<u32> = [182_u16, 183, 184]
+        .into_iter()
+        .filter_map(|aid| {
+            sde.types
+                .get(&cloak_type_id)
+                .and_then(|t| t.default_attributes.get(&aid))
+                .map(|&v| v as u32)
+        })
+        .chain([SKILL_CPU_MANAGEMENT, SKILL_POWER_GRID_MANAGEMENT, 11579])
+        .collect();
+
+    db.with_mut_snapshot(|snap| {
+        for &(cid, sid, ship_tid, mid) in &[
+            (char_id, cruiser_id, cruiser_type_id, cloak_id),
+            (frig_char_id, frig_id, frig_type_id, frig_cloak_id),
+        ] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = null_sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = sid;
+            }
+            let skills = snap.skills.entry(cid).or_default();
+            for &skill_tid in &req_skills {
+                skills.insert(
+                    skill_tid,
+                    eve_db::TrainedSkillRecord {
+                        type_id: skill_tid,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: ship_tid,
+                    owner_id: cid,
+                    location_id: i64::from(null_sys),
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                mid,
+                eve_db::InventoryItemRecord {
+                    item_id: mid,
+                    type_id: cloak_type_id,
+                    owner_id: cid,
+                    location_id: sid,
+                    flag: eve_db::InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(mid, true);
+        }
+        snap.system_states.insert(
+            null_sys,
+            SystemDynamicState {
+                solar_system_id: null_sys,
+                dbs_multiplier: 1.0,
+                ess_main_bank: IskCents::from_isk(15_000_000),
+                ess_reserve_bank: IskCents::from_isk(45_000_000),
+                ..SystemDynamicState::default()
+            },
+        );
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::clone(&db));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix as u64)));
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels
+            .insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+        rt.safety_levels
+            .insert(frig_char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+
+    ensure_ess_intrusion_site_balls(&ctx, null_sys).await;
+    let ess_ball_id = ESS_BEACON_ID_BASE + i64::from(null_sys);
+    let gate_id = ESS_GATE_ID_BASE + i64::from(null_sys);
+    let sys = ctx.systems.get_or_spawn(null_sys);
+    let ess_pos = sys.get_ball_snapshot(ess_ball_id).await.unwrap().unwrap().1.position;
+    let gate_pos = sys.get_ball_snapshot(gate_id).await.unwrap().unwrap().1.position;
+    let cloak_activate_pos = ess_pos + glam::DVec3::new(600_000.0, 0.0, 0.0);
+
+    let baseline_max_vel = ctx
+        .sde
+        .types
+        .get(&cruiser_type_id)
+        .and_then(|t| t.default_attributes.get(&37).copied())
+        .unwrap_or(195.0);
+    for &(cid, sid, ship_tid, group_id, radius, pos) in &[
+        (
+            char_id,
+            cruiser_id,
+            cruiser_type_id,
+            26_u32,
+            150.0_f64,
+            cloak_activate_pos,
+        ),
+        (
+            frig_char_id,
+            frig_id,
+            frig_type_id,
+            25_u32,
+            40.0_f64,
+            cloak_activate_pos + glam::DVec3::new(0.0, 5_000.0, 0.0),
+        ),
+    ] {
+        let _ = sys
+            .spawn_ball_with_meta(
+                Ball {
+                    id: sid,
+                    type_id: ship_tid,
+                    position: pos,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: baseline_max_vel,
+                    inertia: 1.0,
+                    mass: 10_000_000.0,
+                    radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                eve_destiny::CombatState {
+                    base_max_velocity: Some(baseline_max_vel),
+                    shield_hp: 1000.0,
+                    max_shield_hp: 1000.0,
+                    armor_hp: 1000.0,
+                    max_armor_hp: 1000.0,
+                    structure_hp: 1000.0,
+                    capacitor: 1000.0,
+                    max_capacitor: 1000.0,
+                    ..Default::default()
+                },
+                eve_destiny::SlimItemMeta {
+                    group_id,
+                    category_id: 6,
+                    owner_id: cid,
+                    char_id: Some(cid),
+                    corp_id: 1_000_009,
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    let make_sess = |cid: i64, sid: i64| {
+        let uid = ctx.db.with_snapshot(|s| s.characters[&cid].user_id);
+        ctx.db
+            .acquire_online_lock(uid, cid as u64, Some(cid), true, now_unix as u64)
+            .unwrap();
+        let mut s = eve_machonet::SessionState::new(cid as u64);
+        s.user_id = Some(uid);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(1_000_009);
+        s.solar_system_id = Some(null_sys);
+        s.ship_id = Some(sid);
+        s
+    };
+    let mut cruiser_sess = make_sess(char_id, cruiser_id);
+    let mut frig_sess = make_sess(frig_char_id, frig_id);
+    let kw = HashMap::new();
+
+    // Activate real non-covert cloak via dogmaIM.Activate on both cruiser and frigate outside 500 km ESS zone.
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut cruiser_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cloak_id), PyRep::String("cloaking".into())],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("cruiser dogmaIM.Activate cloak should succeed");
+    crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut frig_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(frig_cloak_id),
+            PyRep::String("cloaking".into()),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("frigate dogmaIM.Activate cloak should succeed");
+
+    // Preconditions: active module cycle, CombatState cloak + velocity multiplier, nerfed ball speed, slim meta cloaked.
+    assert!(sys.has_module_cycle(cruiser_id, cloak_id).await);
+    let pre_cs = sys.get_combat_state(cruiser_id).await.unwrap().unwrap();
+    assert!(pre_cs.is_cloaked);
+    assert!(pre_cs.cloak_velocity_multiplier.is_some());
+    let (_, pre_ball) = sys.get_ball_snapshot(cruiser_id).await.unwrap().unwrap();
+    assert!(
+        pre_ball.max_velocity < baseline_max_vel - 1.0,
+        "cloaked cruiser max_velocity {} must be below baseline {}",
+        pre_ball.max_velocity,
+        baseline_max_vel
+    );
+
+    // 1. Out-of-range ESS gate activation fails WITHOUT clearing actor cycle, DB state, or CombatState cloak.
+    let _ = sys
+        .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(10_000.0, 0.0, 0.0))
+        .await;
+    assert_eq!(
+        try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "OutsideGateActivationRange"
+    );
+    assert!(sys.has_module_cycle(cruiser_id, cloak_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)));
+    assert!(sys.get_combat_state(cruiser_id).await.unwrap().unwrap().is_cloaked);
+
+    // 2. Restricted hull within range fails WITHOUT clearing actor cycle or decloaking.
+    let _ = sys
+        .set_ball_position(frig_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+    assert_eq!(
+        try_activate_ess_acceleration_gate(&ctx, frig_char_id, null_sys, frig_id, gate_id)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "ShipRestrictedByEssGate"
+    );
+    assert!(sys.has_module_cycle(frig_id, frig_cloak_id).await);
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&frig_cloak_id)));
+    assert!(sys.get_combat_state(frig_id).await.unwrap().unwrap().is_cloaked);
+
+    // 3. Move cloaked cruiser within <= 2500m of ESS gate, clear buffered events/notifs, and activate gate.
+    let _ = sys
+        .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    sys.ballpark.write().unwrap().pending_events.clear();
+
+    try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+        .await
+        .unwrap()
+        .expect("cloaked eligible cruiser within range should activate ESS gate and auto-decloak");
+
+    // (a) Actor ActiveModuleCycle + DB active state completely removed
+    assert!(
+        !sys.has_module_cycle(cruiser_id, cloak_id).await,
+        "cloak ActiveModuleCycle must be removed on ESS gate decloak"
+    );
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&cloak_id)));
+
+    // (b) CombatState decloaked & velocity multiplier cleared
+    let post_cs = sys.get_combat_state(cruiser_id).await.unwrap().unwrap();
+    assert!(!post_cs.is_cloaked);
+    assert!(!post_cs.is_covert_cloak);
+    assert!(post_cs.cloak_velocity_multiplier.is_none());
+    assert!(post_cs.decloak_targeting_delay_remaining_s > 0.0);
+
+    // (c) Ball max_velocity restored to uncloaked baseline immediately on ESS gate decloak
+    let (_, post_ball) = sys.get_ball_snapshot(cruiser_id).await.unwrap().unwrap();
+    assert!(
+        (post_ball.max_velocity - baseline_max_vel).abs() < 1e-6,
+        "expected restored max_velocity {}, got {}",
+        baseline_max_vel,
+        post_ball.max_velocity
+    );
+
+    // (d) ball_slim_meta.is_cloaked cleared + CloakBall(0) + OnSpecialFX + OnGodmaShipEffect(active=0) emitted
+    assert!(
+        !sys.ballpark
+            .read()
+            .unwrap()
+            .ball_slim_meta
+            .get(&cruiser_id)
+            .is_some_and(|m| m.is_cloaked),
+        "ball_slim_meta.is_cloaked must be false after ESS gate decloak"
+    );
+    {
+        let bp = sys.ballpark.read().unwrap();
+        assert!(
+            bp.pending_events.iter().any(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
+            )),
+            "expected DestinyEvent::CloakBall(cloaked=0), got {:?}",
+            bp.pending_events
+        );
+        assert!(
+            bp.pending_events.iter().any(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: false, .. }
+                    if *ball_id == cruiser_id && guid == "effects.Cloak"
+            )),
+            "expected DestinyEvent::OnSpecialFX(effects.Cloak, false), got {:?}",
+            bp.pending_events
+        );
+    }
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnCloakModuleForceDeactivated"),
+        "expected OnCloakModuleForceDeactivated: {notifs:?}"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnGodmaShipEffect"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(cloak_id)
+                && n.args.get(4).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "expected OnGodmaShipEffect(active=0) for cloak {cloak_id}: {notifs:?}"
+    );
+    assert!(
+        notifs.iter().any(|n| {
+            n.event == "OnSpecialFX"
+                && n.args.first().and_then(|v| v.as_i64()) == Some(cruiser_id)
+                && matches!(n.args.get(5), Some(PyRep::String(g)) if g == "effects.Cloak")
+                && n.args.get(8).and_then(|v| v.as_i64()) == Some(0)
+        }),
+        "expected Macho OnSpecialFX(effects.Cloak, active=0): {notifs:?}"
+    );
+
+    // Subsequent set_combat_state + tick must NOT resurrect cloak_velocity_multiplier or re-nerf max_velocity
+    let _ = sys.set_combat_state(cruiser_id, post_cs.clone()).await;
+    let _ = sys.try_step_full_tick(1.0);
+    let after_tick_cs = sys.get_combat_state(cruiser_id).await.unwrap().unwrap();
+    let (_, after_tick_ball) = sys.get_ball_snapshot(cruiser_id).await.unwrap().unwrap();
+    assert!(
+        after_tick_cs.cloak_velocity_multiplier.is_none(),
+        "reconcile_tackle_and_bubbles must not resurrect cloak_velocity_multiplier"
+    );
+    assert!(
+        (after_tick_ball.max_velocity - baseline_max_vel).abs() < 1e-6,
+        "expected baseline max_velocity {} after tick, got {}",
+        baseline_max_vel,
+        after_tick_ball.max_velocity
+    );
+
+    // (e) ESS main bank link succeeds (NOT rejected with CantLinkWhileCloaked) once positioned at beacon
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let b = bp.balls.get_mut(&cruiser_id).unwrap();
+        b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
+        b.mode = MovementMode::Stop;
+        b.velocity = glam::DVec3::ZERO;
+    }
+    let link_res = crate::services::encounter_surveillance_system::handle_ess_link(
+        &ctx,
+        &cruiser_sess,
+        "AttemptLinkToMainBank",
+        &[PyRep::Integer(ess_ball_id)],
+    )
+    .await;
+    assert!(
+        link_res.is_ok(),
+        "AttemptLinkToMainBank should succeed after ESS gate decloak, got: {:?}",
+        link_res
+    );
+
+    // (f) Reactivating cloak outside 500 km must NOT hit ModuleAlreadyActive (orphaned cycle is gone)
+    let _ = sys
+        .set_ball_position(cruiser_id, cloak_activate_pos)
+        .await;
+    let reactivate_res = crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles(
+        &ctx,
+        &mut cruiser_sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cloak_id), PyRep::String("cloaking".into())],
+        &kw,
+    )
+    .await;
+    if let Some(Err(err)) = reactivate_res {
+        assert_ne!(
+            err.code, "ModuleAlreadyActive",
+            "cloak cycle must not stay locked as ModuleAlreadyActive"
+        );
+    }
+
+    // (g) Residual cloak_velocity_multiplier without is_cloaked still clears cleanly at ESS gate
+    let _ = sys.remove_module_cycle(cruiser_id, cloak_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&cloak_id);
+        if let Some(st) = snap.system_states.get_mut(&null_sys) {
+            st.ess_linked_character_id = None;
+            st.ess_link_started_tick = None;
+        }
+    });
+    let _ = sys
+        .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+    let _ = sys
+        .set_combat_state(
+            cruiser_id,
+            eve_destiny::CombatState {
+                base_max_velocity: Some(baseline_max_vel),
+                cloak_velocity_multiplier: Some(0.25),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = sys.set_ball_max_velocity(cruiser_id, baseline_max_vel * 0.25).await;
+    try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+        .await
+        .unwrap()
+        .expect("residual cloak_velocity_multiplier should still clear cleanly");
+    let residual_cs = sys.get_combat_state(cruiser_id).await.unwrap().unwrap();
+    let (_, residual_ball) = sys.get_ball_snapshot(cruiser_id).await.unwrap().unwrap();
+    assert!(residual_cs.cloak_velocity_multiplier.is_none());
+    assert!((residual_ball.max_velocity - baseline_max_vel).abs() < 1e-6);
+
+    // (h) Stale `ball_slim_meta.is_cloaked = true` (which blocks AttemptLinkToMainBank with
+    // CantLinkWhileCloaked) is cleared by `break_gate_cloak` + ESS link succeeds afterwards.
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.ball_slim_meta.get_mut(&cruiser_id).unwrap().is_cloaked = true;
+        let b = bp.balls.get_mut(&cruiser_id).unwrap();
+        b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
+        b.mode = MovementMode::Stop;
+        b.velocity = glam::DVec3::ZERO;
+        bp.pending_events.clear();
+    }
+    assert_eq!(
+        crate::services::encounter_surveillance_system::handle_ess_link(
+            &ctx,
+            &cruiser_sess,
+            "AttemptLinkToMainBank",
+            &[PyRep::Integer(ess_ball_id)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "CantLinkWhileCloaked"
+    );
+    let _ = sys
+        .set_ball_position(cruiser_id, gate_pos + glam::DVec3::new(1_000.0, 0.0, 0.0))
+        .await;
+    try_activate_ess_acceleration_gate(&ctx, char_id, null_sys, cruiser_id, gate_id)
+        .await
+        .unwrap()
+        .expect("ESS gate must clear stale ball_slim_meta.is_cloaked");
+    assert!(
+        !sys.ballpark
+            .read()
+            .unwrap()
+            .ball_slim_meta
+            .get(&cruiser_id)
+            .is_some_and(|m| m.is_cloaked)
+    );
+    assert!(
+        sys.ballpark
+            .read()
+            .unwrap()
+            .pending_events
+            .iter()
+            .any(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::CloakBall { ball_id, cloaked: 0 } if *ball_id == cruiser_id
+            )),
+        "expected DestinyEvent::CloakBall(cloaked=0) when clearing stale slim_meta.is_cloaked"
+    );
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        let b = bp.balls.get_mut(&cruiser_id).unwrap();
+        b.position = ess_pos + glam::DVec3::new(1_000.0, 0.0, 0.0);
+        b.mode = MovementMode::Stop;
+        b.velocity = glam::DVec3::ZERO;
+    }
+    crate::services::encounter_surveillance_system::handle_ess_link(
+        &ctx,
+        &cruiser_sess,
+        "AttemptLinkToMainBank",
+        &[PyRep::Integer(ess_ball_id)],
+    )
+    .await
+    .expect("AttemptLinkToMainBank must succeed once stale ball_slim_meta.is_cloaked is cleared");
+}
+
+#[tokio::test]
 async fn ess_gate_auto_decloaks_fitted_cloak_module_only_after_range_and_hull_checks_gh_1408() {
     let sde = shared_sde();
     let null_sys: SolarSystemId = sde
