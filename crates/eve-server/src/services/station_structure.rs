@@ -411,16 +411,14 @@ pub async fn handle(
                     }));
                 }
             };
+            let is_structure =
+                ctx.db.with_snapshot(|snap| snap.structures.contains_key(&station_id))
+                    || station_id >= 1_000_000_000_000;
             crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
                 ctx,
                 char_id,
                 ship.item_id,
             );
-            if let Some(sid) = controlled_sid {
-                crate::services::structure_control_ops::release_structure_control_on_undock(
-                    ctx, session, sid, char_id,
-                );
-            }
 
             if kwargs
                 .get("onlineModules")
@@ -445,6 +443,13 @@ pub async fn handle(
             }
             ctx.invalidate_ship_fitting(ship.item_id);
             let Some(ship_type) = ctx.sde.types.get(&ship.type_id) else {
+                ctx.db
+                    .rollback_undock_at(char_id, station_id, ship.item_id, is_structure);
+                if let Some(sid) = controlled_sid {
+                    crate::services::structure_control_ops::rollback_ship_after_failed_undock(
+                        ctx, sid, char_id,
+                    );
+                }
                 return Some(Err(BridgeRpcError {
                     code: "UnknownShipType".into(),
                     message: format!("Active ship type {} not found in SDE", ship.type_id),
@@ -452,7 +457,7 @@ pub async fn handle(
                 }));
             };
 
-            let (spawn_pos, undock_dir) = if station_id >= 1_000_000_000_000 {
+            let (spawn_pos, undock_dir) = if is_structure {
                 ctx.db
                     .with_snapshot(|snap| {
                         snap.structures.get(&station_id).map(|st| {
@@ -561,10 +566,12 @@ pub async fn handle(
 
             let slim_meta = ctx.build_ship_slim_meta(char_id, ship.type_id);
             let sys_handle = ctx.systems.get_or_spawn(ch.solar_system_id);
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.item_positions
+            let prev_item_pos = ctx.db.with_mut_snapshot(|snap| {
+                let prev = snap
+                    .item_positions
                     .insert(ship.item_id, spawn_pos.to_array());
                 crate::sp6_lifecycle::enter_space_in_snap(snap, ship.item_id, ch.solar_system_id);
+                prev
             });
             let tick = match sys_handle
                 .spawn_ball_with_meta(ball, combat_state, slim_meta)
@@ -573,6 +580,11 @@ pub async fn handle(
                 Ok(t) => t,
                 Err(e) => {
                     ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(prev) = prev_item_pos {
+                            snap.item_positions.insert(ship.item_id, prev);
+                        } else {
+                            snap.item_positions.remove(&ship.item_id);
+                        }
                         crate::sp6_lifecycle::leave_space_in_snap(
                             snap,
                             ship.item_id,
@@ -581,7 +593,13 @@ pub async fn handle(
                             None,
                         );
                     });
-                    ctx.db.rollback_undock(char_id, station_id, ship.item_id);
+                    ctx.db
+                        .rollback_undock_at(char_id, station_id, ship.item_id, is_structure);
+                    if let Some(sid) = controlled_sid {
+                        crate::services::structure_control_ops::rollback_ship_after_failed_undock(
+                            ctx, sid, char_id,
+                        );
+                    }
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
@@ -589,6 +607,11 @@ pub async fn handle(
                     }));
                 }
             };
+            if let Some(sid) = controlled_sid {
+                crate::services::structure_control_ops::release_structure_control_on_undock(
+                    ctx, session, sid, char_id,
+                );
+            }
             if ctx.feature_flags_snapshot().enable_living_world {
                 let _ = ctx
                     .living_world
@@ -624,7 +647,7 @@ pub async fn handle(
                     ],
                 );
             }
-            if station_id >= 1_000_000_000_000 {
+            if is_structure {
                 ctx.emit_typed(
                     crate::router::NotificationTarget::Station(station_id),
                     crate::router::notify_registry::OnCharacterLeftStructure {

@@ -332,6 +332,11 @@ async fn ships_mastery_leave_eject_board_error_paths_and_existing_capsule_reuse(
         let mut cw = ctx.crimewatch.write().unwrap();
         cw.states.entry(char_id).or_default().criminal_flag_until_unix = now_u + 120;
     }
+    let ls_sys_handle = ctx.systems.get_or_spawn(lowsec_sys);
+    ls_sys_handle
+        .spawn_ball(make_ball(lowsec_ship, 587, DVec3::new(10_000.0, 0.0, 0.0)))
+        .await
+        .expect("spawn lowsec ship ball");
     let mut ls_sess = space_session(char_id, corp_id, lowsec_sys, Some(lowsec_ship));
     let ej_ok = handle_ships_mastery_and_fitting_ext(&ctx, &mut ls_sess, None, "ship", "Eject", &[], &HashMap::new())
         .await

@@ -44,6 +44,14 @@ fn handoff_in_space_pilot_observer(
     }
 }
 
+fn ship_not_in_space_err(message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "ShipNotInSpace".into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 pub(crate) async fn handle_ships_mastery_and_fitting_ext(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -170,14 +178,40 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .or(if char_home > 0 { Some(char_home) } else { None })
                 .unwrap_or(0);
 
+            let old_ship_precheck = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&old_ship_id).map(|item| item.type_id)
+            });
             let live_eject_pos = if dock_opt.is_none() {
-                if let Some(sys_id) = sys_opt {
-                    let sys = ctx.systems.get_or_spawn(sys_id);
-                    sys.get_ball_snapshot(old_ship_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|(_, b)| b.position)
+                if let Some(old_type_id) = old_ship_precheck {
+                    if method == "Eject" && old_type_id != 670 {
+                        let Some(sys_id) = sys_opt else {
+                            return Some(Err(ship_not_in_space_err(format!(
+                                "Cannot eject from ship {old_ship_id}: no active solar system"
+                            ))));
+                        };
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        let ball_pos = sys
+                            .get_ball_snapshot(old_ship_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|(_, b)| b.position);
+                        let Some(pos) = ball_pos else {
+                            return Some(Err(ship_not_in_space_err(format!(
+                                "Active ship {old_ship_id} has no live ballpark entity in solar system {sys_id}"
+                            ))));
+                        };
+                        Some(pos)
+                    } else if let Some(sys_id) = sys_opt {
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        sys.get_ball_snapshot(old_ship_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|(_, b)| b.position)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -310,6 +344,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .ok()
                         .flatten()
                         .map(|(_, b)| b.position)
+                        .or(live_eject_pos)
                         .unwrap_or(DVec3::ZERO);
                     let pod_pos = DVec3::new(old_pos.x + 150.0, old_pos.y, old_pos.z);
                     ctx.db.with_mut_snapshot(|snap| {
@@ -517,13 +552,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .ok()
                         .flatten();
                     let (Some((_, cb)), Some((_, tb))) = (cur_ball, tgt_ball) else {
-                        return Some(Err(BridgeRpcError {
-                            code: "ShipNotInSpace".into(),
-                            message: format!(
-                                "Target ship {target_ship_id} is not spawned on grid in system {sys_id}"
-                            ),
-                            client_error: None,
-                        }));
+                        return Some(Err(ship_not_in_space_err(format!(
+                            "Target ship {target_ship_id} is not spawned on grid in system {sys_id}"
+                        ))));
                     };
                     if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(
                         ctx,

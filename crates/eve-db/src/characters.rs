@@ -482,19 +482,66 @@ impl WorldRepository {
         })
     }
 
-    /// Compensating transaction to restore docked station state if solar-system actor spawn fails.
+    fn apply_rollback_undock_in_snap(
+        guard: &mut crate::snapshot_ext::WorldStateSnapshot,
+        character_id: i64,
+        location_id: i64,
+        ship_id: i64,
+        is_structure: bool,
+    ) {
+        if let Some(ch) = guard.characters.get_mut(&character_id) {
+            if is_structure {
+                ch.structure_id = Some(location_id);
+                ch.station_id = None;
+            } else {
+                ch.station_id = Some(location_id);
+                ch.structure_id = None;
+            }
+            ch.version += 1;
+            ch.system_epoch += 1;
+        }
+        if let Some(ship) = guard.items.get_mut(&ship_id) {
+            ship.location_id = location_id;
+            ship.flag = InventoryFlag::Hangar;
+            ship.version += 1;
+        }
+    }
+
+    /// Compensating transaction to restore docked NPC station or Upwell structure state
+    /// when the caller already knows whether `location_id` is a structure.
+    pub fn rollback_undock_at(
+        &self,
+        character_id: i64,
+        location_id: i64,
+        ship_id: i64,
+        is_structure: bool,
+    ) {
+        let _ = self.try_with_mut_snapshot(|guard| {
+            Self::apply_rollback_undock_in_snap(
+                guard,
+                character_id,
+                location_id,
+                ship_id,
+                is_structure,
+            );
+            Ok::<(), std::convert::Infallible>(())
+        });
+    }
+
+    /// Compensating transaction to restore docked station or Upwell structure state if
+    /// solar-system actor spawn fails. Distinguishes Upwell structures (`guard.structures`
+    /// entry or `station_id >= 1_000_000_000_000`) from NPC stations.
     pub fn rollback_undock(&self, character_id: i64, station_id: i64, ship_id: i64) {
         let _ = self.try_with_mut_snapshot(|guard| {
-            if let Some(ch) = guard.characters.get_mut(&character_id) {
-                ch.station_id = Some(station_id);
-                ch.version += 1;
-                ch.system_epoch += 1;
-            }
-            if let Some(ship) = guard.items.get_mut(&ship_id) {
-                ship.location_id = station_id;
-                ship.flag = InventoryFlag::Hangar;
-                ship.version += 1;
-            }
+            let is_structure =
+                guard.structures.contains_key(&station_id) || station_id >= 1_000_000_000_000;
+            Self::apply_rollback_undock_in_snap(
+                guard,
+                character_id,
+                station_id,
+                ship_id,
+                is_structure,
+            );
             Ok::<(), std::convert::Infallible>(())
         });
     }

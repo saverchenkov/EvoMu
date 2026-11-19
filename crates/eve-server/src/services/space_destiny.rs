@@ -857,11 +857,24 @@ async fn handle_update_state_request_inner(
         })? {
         Some((_, b)) => b,
         None => {
-            spawned_new_ball = true;
-            let Some(ship_item) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned())
-            else {
+            let Some(ship_item) = ctx.db.with_snapshot(|snap| {
+                let ch = snap.characters.get(&char_id)?;
+                if ch.station_id.is_some()
+                    || ch.structure_id.is_some()
+                    || ch.solar_system_id != sys_id
+                    || ch.active_ship_id != ship_id
+                {
+                    return None;
+                }
+                let item = snap.items.get(&ship_id)?;
+                if item.location_id != sys_id as i64 {
+                    return None;
+                }
+                Some(item.clone())
+            }) else {
                 return Ok(PyRep::None);
             };
+            spawned_new_ball = true;
             let ship_type = ctx.sde.types.get(&ship_item.type_id);
             let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             let max_vel = fit_opt
