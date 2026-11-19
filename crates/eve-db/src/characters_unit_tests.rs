@@ -469,3 +469,104 @@ fn dock_if_in_space_transition_fallback_and_mining_waste_edges() {
             .contains_key(&(base_idx + 1)));
     });
 }
+
+#[test]
+fn rollback_undock_restores_structure_id_without_polluting_station_id() {
+    let sde = test_sde();
+    let repo = WorldRepository::with_demo_seed();
+    let uid = repo.provision_player_account("rollback_struct_user", "pass");
+    let created = repo
+        .create_character_with_system(
+            uid,
+            "Struct Rollback",
+            1,
+            1,
+            1,
+            17,
+            &sde,
+            Some(30_000_142),
+        )
+        .expect("create character");
+    let cid = created.character_id;
+    let ship_id = created.active_ship_id;
+
+    // 1) Small-ID Upwell structure registered in snap.structures (`< 1_000_000_000_000`).
+    let small_struct = 1_700_055_i64;
+    repo.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            small_struct,
+            UpwellStructureRecord {
+                structure_id: small_struct,
+                type_id: 35832,
+                owner_corp_id: 1_000_044,
+                solar_system_id: 30_000_142,
+                name: "Test Astrahus".into(),
+                position: [50_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = Some(small_struct);
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = small_struct;
+            ship.flag = InventoryFlag::Hangar;
+        }
+    });
+    let (undocked_loc, _, _) = repo.undock_character(uid, cid).expect("undock small struct");
+    assert_eq!(undocked_loc, small_struct);
+    repo.rollback_undock(cid, small_struct, ship_id);
+    repo.with_snapshot(|snap| {
+        let ch = &snap.characters[&cid];
+        assert_eq!(ch.structure_id, Some(small_struct));
+        assert_eq!(ch.station_id, None);
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.location_id, small_struct);
+        assert_eq!(ship.flag, InventoryFlag::Hangar);
+    });
+
+    // 2) Production-range Upwell structure ID (`>= 1_000_000_000_000`), even without snap.structures entry.
+    let large_struct = 1_000_000_000_777_i64;
+    repo.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.station_id = None;
+            ch.structure_id = Some(large_struct);
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = large_struct;
+            ship.flag = InventoryFlag::Hangar;
+        }
+    });
+    let (undocked_large, _, _) = repo.undock_character(uid, cid).expect("undock large struct");
+    assert_eq!(undocked_large, large_struct);
+    repo.rollback_undock(cid, large_struct, ship_id);
+    repo.with_snapshot(|snap| {
+        let ch = &snap.characters[&cid];
+        assert_eq!(ch.structure_id, Some(large_struct));
+        assert_eq!(ch.station_id, None);
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.location_id, large_struct);
+        assert_eq!(ship.flag, InventoryFlag::Hangar);
+    });
+
+    // 3) NPC station rollback clears any structure_id and restores station_id.
+    repo.rollback_undock_at(cid, 60_003_760, ship_id, false);
+    repo.with_snapshot(|snap| {
+        let ch = &snap.characters[&cid];
+        assert_eq!(ch.station_id, Some(60_003_760));
+        assert_eq!(ch.structure_id, None);
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.location_id, 60_003_760);
+        assert_eq!(ship.flag, InventoryFlag::Hangar);
+    });
+}

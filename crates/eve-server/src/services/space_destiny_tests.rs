@@ -1244,3 +1244,229 @@ async fn update_state_rate_limit_is_isolated_per_server_context_and_cleared_on_s
     assert!(ctx_a.systems.explicit_update_state_guards.lock().unwrap().is_empty());
     assert!(!ctx_b.systems.explicit_update_state_guards.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn update_state_request_fallback_respawn_requires_space_residency_and_system_match() {
+    let ctx = test_ctx();
+    let sys_a = 30_000_142_u32;
+    let sys_b = 30_000_144_u32;
+    let corp_id = 98_100_900_i64;
+    let kw = HashMap::new();
+
+    // 1. Stale session in sys_a while DB character is docked at station -> must NOT spawn ghost ball.
+    let docked_cid = 9_910_001_i64;
+    let docked_ship = 9_910_002_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("demo char").clone();
+        ch.character_id = docked_cid;
+        ch.user_id = docked_cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_a;
+        ch.station_id = Some(60_003_760);
+        ch.structure_id = None;
+        ch.active_ship_id = docked_ship;
+        snap.characters.insert(docked_cid, ch);
+        snap.items.insert(
+            docked_ship,
+            eve_db::InventoryItemRecord {
+                item_id: docked_ship,
+                type_id: 587,
+                owner_id: docked_cid,
+                location_id: sys_a as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess_docked = make_session(docked_cid, corp_id, Some(sys_a), Some(docked_ship), 0);
+    let bound_a = bound_sys(sys_a);
+    handle(&ctx, &mut sess_docked, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    let handle_a = ctx.systems.get_or_spawn(sys_a);
+    assert!(
+        handle_a.get_ball_snapshot(docked_ship).await.unwrap().is_none(),
+        "docked DB character must not respawn ghost ship ball in space"
+    );
+
+    // 2. DB character docked in Upwell structure -> must NOT spawn ghost ball.
+    let struct_cid = 9_910_011_i64;
+    let struct_ship = 9_910_012_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("demo char").clone();
+        ch.character_id = struct_cid;
+        ch.user_id = struct_cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_a;
+        ch.station_id = None;
+        ch.structure_id = Some(1_000_000_990_001);
+        ch.active_ship_id = struct_ship;
+        snap.characters.insert(struct_cid, ch);
+        snap.items.insert(
+            struct_ship,
+            eve_db::InventoryItemRecord {
+                item_id: struct_ship,
+                type_id: 587,
+                owner_id: struct_cid,
+                location_id: sys_a as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess_struct = make_session(struct_cid, corp_id, Some(sys_a), Some(struct_ship), 0);
+    handle(&ctx, &mut sess_struct, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        handle_a.get_ball_snapshot(struct_ship).await.unwrap().is_none(),
+        "structure-docked DB character must not respawn ghost ship ball in space"
+    );
+
+    // 3. Cross-system mismatch (DB character moved to sys_b while stale request hits sys_a) -> must NOT spawn.
+    let cross_cid = 9_910_021_i64;
+    let cross_ship = 9_910_022_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("demo char").clone();
+        ch.character_id = cross_cid;
+        ch.user_id = cross_cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_b;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = cross_ship;
+        snap.characters.insert(cross_cid, ch);
+        snap.items.insert(
+            cross_ship,
+            eve_db::InventoryItemRecord {
+                item_id: cross_ship,
+                type_id: 587,
+                owner_id: cross_cid,
+                location_id: sys_b as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess_cross = make_session(cross_cid, corp_id, Some(sys_a), Some(cross_ship), 0);
+    handle(&ctx, &mut sess_cross, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        handle_a.get_ball_snapshot(cross_ship).await.unwrap().is_none(),
+        "cross-system stale UpdateStateRequest must not spawn ghost ball in old system"
+    );
+
+    // 4. Ship active_ship_id mismatch or docked ship item location mismatch -> must NOT spawn.
+    let stale_ship_cid = 9_910_031_i64;
+    let old_ship = 9_910_032_i64;
+    let current_ship = 9_910_033_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("demo char").clone();
+        ch.character_id = stale_ship_cid;
+        ch.user_id = stale_ship_cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_a;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = current_ship;
+        snap.characters.insert(stale_ship_cid, ch);
+        snap.items.insert(
+            old_ship,
+            eve_db::InventoryItemRecord {
+                item_id: old_ship,
+                type_id: 587,
+                owner_id: stale_ship_cid,
+                location_id: sys_a as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            current_ship,
+            eve_db::InventoryItemRecord {
+                item_id: current_ship,
+                type_id: 587,
+                owner_id: stale_ship_cid,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess_old_ship = make_session(stale_ship_cid, corp_id, Some(sys_a), Some(old_ship), 0);
+    handle(&ctx, &mut sess_old_ship, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        handle_a.get_ball_snapshot(old_ship).await.unwrap().is_none(),
+        "stale session.ship_id != active_ship_id must not spawn old ship ball"
+    );
+    let mut sess_docked_item = make_session(stale_ship_cid, corp_id, Some(sys_a), Some(current_ship), 0);
+    handle(&ctx, &mut sess_docked_item, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        handle_a.get_ball_snapshot(current_ship).await.unwrap().is_none(),
+        "ship item not located in solar system must not spawn ghost ball"
+    );
+
+    // 5. Valid in-space resident character and ship -> fallback ball respawn succeeds.
+    let valid_cid = 9_910_041_i64;
+    let valid_ship = 9_910_042_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.values().next().expect("demo char").clone();
+        ch.character_id = valid_cid;
+        ch.user_id = valid_cid as u64;
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_a;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = valid_ship;
+        snap.characters.insert(valid_cid, ch);
+        snap.items.insert(
+            valid_ship,
+            eve_db::InventoryItemRecord {
+                item_id: valid_ship,
+                type_id: 587,
+                owner_id: valid_cid,
+                location_id: sys_a as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(valid_ship, [12_000.0, 0.0, 0.0]);
+    });
+    let mut sess_valid = make_session(valid_cid, corp_id, Some(sys_a), Some(valid_ship), 0);
+    handle(&ctx, &mut sess_valid, Some(&bound_a), "beyonce", "UpdateStateRequest", &[], &kw)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        handle_a.get_ball_snapshot(valid_ship).await.unwrap().is_some(),
+        "valid in-space character + ship must still support fallback ball respawn"
+    );
+}

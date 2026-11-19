@@ -501,3 +501,138 @@ async fn corp_station_mgr_standing_check_accepts_service_id_and_bitmask_695() {
         assert_eq!(res, PyRep::Bool(true));
     }
 }
+
+#[tokio::test]
+async fn structure_undock_spawn_failure_rolls_back_structure_id_and_control() {
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let jita_sys = 30_000_142_u32;
+    let struct_id = 1_000_000_970_001_i64;
+    let char_id = 910_701_i64;
+    let corp_id = 98_600_701_i64;
+    let ship_id = 910_702_i64;
+    let ship_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 6 && t.group_id == 25)
+        .or_else(|| ctx.sde.types.values().find(|t| t.category_id == 6 && t.type_id != 670))
+        .map(|t| t.type_id)
+        .unwrap_or(587);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord::default();
+        corp.corporation_id = corp_id;
+        corp.ceo_id = char_id;
+        snap.corporations.insert(corp_id, corp);
+
+        let mut ch = clone_char_with(snap, char_id, "Struct Undock Rollback", corp_id, jita_sys, ship_id);
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35_832,
+                owner_corp_id: corp_id,
+                solar_system_id: jita_sys,
+                name: "Rollback Astrahus".into(),
+                position: [50_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10_000.0,
+                armor_hp: 10_000.0,
+                hull_hp: 10_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: struct_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut session = SessionState::new(71);
+    session.user_id = Some(char_id as u64);
+    session.character_id = Some(char_id);
+    session.corporation_id = Some(corp_id);
+    session.solar_system_id = Some(jita_sys);
+    session.structure_id = Some(struct_id);
+    session.ship_id = Some(ship_id);
+
+    crate::services::structure_control_ops::handle_take_control(
+        &ctx,
+        &mut session,
+        &[PyRep::Integer(struct_id)],
+    )
+    .await
+    .expect("take structure control before undock");
+    assert_eq!(session.ship_id, Some(struct_id));
+
+    let sys_handle = ctx.systems.get_or_spawn(jita_sys);
+    // Drain startup stargate commands, then arm countdown=2 to skip `invalidate_ship_fitting`'s
+    // `ApplyFitProjection` (#1) and fail `spawn_ball_with_meta` (#2).
+    let _ = sys_handle.get_ball_snapshot(0).await;
+    sys_handle
+        .panic_on_command_countdown_for_test
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    let kw = HashMap::new();
+    let err = handle(&ctx, &mut session, "structureDocking", "Undock", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("spawn_ball_with_meta failure must reject Undock");
+    assert_eq!(err.code, "SystemActorError");
+
+    ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        assert_eq!(
+            ch.structure_id,
+            Some(struct_id),
+            "failed structure undock must restore structure_id"
+        );
+        assert_eq!(
+            ch.station_id, None,
+            "failed structure undock must keep station_id None"
+        );
+        assert_eq!(
+            ch.active_ship_id, struct_id,
+            "failed undock while controlling structure must restore structure control"
+        );
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.location_id, struct_id);
+        assert_eq!(ship.flag, eve_db::InventoryFlag::Hangar);
+        assert!(
+            !snap.item_positions.contains_key(&ship_id),
+            "rolled-back ship should not retain stale space item_positions entry"
+        );
+    });
+    assert_eq!(session.structure_id, Some(struct_id));
+    assert_eq!(session.station_id, None);
+    assert_eq!(session.ship_id, Some(struct_id));
+
+    // Subsequent undock once actor recovers must succeed cleanly.
+    handle(&ctx, &mut session, "structureDocking", "Undock", &[], &kw)
+        .await
+        .expect("handled")
+        .expect("structure undock must succeed after rollback preserved clean docked state");
+    assert_eq!(session.structure_id, None);
+    assert_eq!(session.station_id, None);
+    assert_eq!(session.ship_id, Some(ship_id));
+}

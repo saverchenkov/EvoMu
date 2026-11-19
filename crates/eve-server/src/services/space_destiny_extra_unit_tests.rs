@@ -395,6 +395,12 @@ async fn update_state_request_and_admin_get_bubble_id_edge_branches() {
 
     // 4. Ship not yet in ballpark, but in snap.items -> spawns ball and finishes active warp if stopped
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
         put_item(snap, ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
         snap.item_positions.insert(ship_id, [15_000.0, 0.0, 0.0]);
     });

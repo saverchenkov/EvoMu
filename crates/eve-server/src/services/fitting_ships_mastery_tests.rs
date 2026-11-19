@@ -965,3 +965,100 @@ async fn ship_board_uses_surface_distance_for_large_titan_hull() {
         "expected 4-tuple ship_state from ship.Board, got {boarded:?}"
     );
 }
+
+#[tokio::test]
+async fn eject_in_space_missing_hull_ball_rejects_without_mutating_db_or_spawning_origin_pod() {
+    use crate::services::fleet_social::fleet_social_fleet_ops::fleet_social_fleet_ops_tests::{
+        clone_char_with, test_ctx_with_clock,
+    };
+
+    let ctx = test_ctx_with_clock(1_800_000_000);
+    let sys_id = 30_000_142_u32;
+    let char_id = 9_850_001_i64;
+    let corp_id = 98_600_850_i64;
+    let ship_id = 9_850_002_i64;
+    let ship_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.category_id == 6 && t.group_id == 25)
+        .or_else(|| ctx.sde.types.values().find(|t| t.category_id == 6 && t.type_id != 670))
+        .map(|t| t.type_id)
+        .unwrap_or(587);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = clone_char_with(snap, char_id, "Missing Ball Eject", corp_id, sys_id, ship_id);
+        ch.station_id = None;
+        ch.structure_id = None;
+        snap.characters.insert(char_id, ch);
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    assert!(
+        sys.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "precondition: ship ball is absent from ballpark"
+    );
+    let (pre_items, pre_next_id) = ctx
+        .db
+        .with_snapshot(|snap| (snap.items.len(), snap.next_entity_id));
+
+    let mut sess = SessionState::new(9_850);
+    sess.user_id = Some(char_id as u64);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    let kw = HashMap::new();
+
+    let err = handle_ships_mastery_and_fitting_ext(&ctx, &mut sess, None, "ship", "Eject", &[], &kw)
+        .await
+        .expect("handled")
+        .expect_err("ship.Eject must reject when active hull ball is missing from system actor");
+    assert_eq!(err.code, "ShipNotInSpace");
+
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.len(), pre_items, "missing ball Eject must not create capsule");
+        assert_eq!(
+            snap.next_entity_id, pre_next_id,
+            "missing ball Eject must not allocate entity IDs"
+        );
+        assert_eq!(
+            snap.characters[&char_id].active_ship_id, ship_id,
+            "missing ball Eject must keep original active_ship_id"
+        );
+        let ship = &snap.items[&ship_id];
+        assert_eq!(ship.owner_id, char_id);
+        assert_eq!(ship.location_id, i64::from(sys_id));
+        assert!(
+            !snap
+                .items
+                .values()
+                .any(|it| it.owner_id == char_id && it.type_id == 670),
+            "no capsule item may be minted on rejected Eject"
+        );
+    });
+    assert_eq!(sess.ship_id, Some(ship_id));
+    assert!(
+        !sys.ballpark
+            .write()
+            .unwrap()
+            .balls
+            .values()
+            .any(|b| b.type_id == 670),
+        "no capsule ball may be spawned near star origin (150, 0, 0)"
+    );
+}
