@@ -1219,6 +1219,148 @@ fn abandoned_repair_services_and_fitting_profile_disablement_work() {
     );
 }
 
+#[test]
+fn are_corps_at_war_in_snap_honors_ally_expiry_and_alliance_allies() {
+    use eve_db::{
+        clock::VirtualServerClock, AllianceRecord, PersistedNegKind, PersistedWarNegotiation,
+        ServerClock,
+    };
+
+    let ctx = test_ctx();
+    let now = 1_750_000_000_u64;
+    let eff = now + 100;
+    let exp = now + 500;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(eff - 1));
+    ctx.set_clock(clock.clone());
+
+    let sys_id = 30_000_142_u32;
+    let sid = 10_000_990_777_i64;
+    let agg_corp = 98_760_001_i64;
+    let def_corp = 98_760_002_i64;
+    let corp_ally = 98_760_003_i64;
+    let ext_alliance = 99_760_004_i64;
+    let ext_member_corp = 98_760_004_i64;
+    let agg_pilot = 760_001_i64;
+    let corp_ally_pilot = 760_003_i64;
+    let alliance_ally_pilot = 760_004_i64;
+    let war_id = 700_760_001_i64;
+
+    seed_char_and_corp(&ctx, agg_pilot, agg_corp, sys_id, true);
+    seed_char_and_corp(&ctx, corp_ally_pilot, corp_ally, sys_id, true);
+    seed_char_and_corp(&ctx, alliance_ally_pilot, ext_member_corp, sys_id, true);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut def_c = CorporationRecord::default();
+        def_c.corporation_id = def_corp;
+        snap.corporations.insert(def_corp, def_c);
+        snap.corporations
+            .get_mut(&ext_member_corp)
+            .unwrap()
+            .alliance_id = Some(ext_alliance);
+        snap.alliances.insert(
+            ext_alliance,
+            AllianceRecord {
+                alliance_id: ext_alliance,
+                name: "Defense Ally Alliance".into(),
+                short_name: "DALA".into(),
+                executor_corp_id: ext_member_corp,
+                member_corp_ids: [ext_member_corp].into_iter().collect(),
+            },
+        );
+        snap.structures.insert(
+            sid,
+            UpwellStructureRecord {
+                structure_id: sid,
+                type_id: 35_832,
+                owner_corp_id: agg_corp,
+                solar_system_id: sys_id,
+                name: "Ally Expiry Defense".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                ..Default::default()
+            },
+        );
+        let mut ds = StructureDefenseSettings::default();
+        ds.structure_id = sid;
+        ds.auto_defense_enabled = true;
+        ds.auto_target_war_targets = true;
+        save_defense_settings(snap, &ds);
+
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: true,
+                started_unix: now,
+                active: true,
+            },
+        );
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 31,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: corp_ally,
+            isk: IskCents::ZERO,
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 32,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: ext_alliance,
+            isk: IskCents::ZERO,
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state.ally_expires_unix.insert((war_id, corp_ally), exp);
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_id, ext_alliance), exp);
+    });
+
+    // Before effective_unix (eff - 1): neither ally is at war or auto-targeted.
+    ctx.db.with_snapshot(|snap| {
+        assert!(!are_corps_at_war_in_snap(snap, agg_corp, corp_ally, eff - 1));
+        assert!(!are_corps_at_war_in_snap(snap, agg_corp, ext_member_corp, eff - 1));
+        assert!(!evaluate_auto_defense_target(&ctx, snap, sid, corp_ally_pilot));
+        assert!(!evaluate_auto_defense_target(&ctx, snap, sid, alliance_ally_pilot));
+    });
+
+    // Active window [eff, exp): both corp ally and alliance-ID ally are at war and auto-targeted.
+    clock.advance_secs(1);
+    assert_eq!(ctx.now_unix(), eff);
+    ctx.db.with_snapshot(|snap| {
+        for ts in [eff, exp - 1] {
+            assert!(are_corps_at_war_in_snap(snap, agg_corp, corp_ally, ts));
+            assert!(are_corps_at_war_in_snap(snap, corp_ally, agg_corp, ts));
+            assert!(are_corps_at_war_in_snap(snap, agg_corp, ext_member_corp, ts));
+            assert!(are_corps_at_war_in_snap(snap, ext_member_corp, agg_corp, ts));
+        }
+        assert!(evaluate_auto_defense_target(&ctx, snap, sid, corp_ally_pilot));
+        assert!(evaluate_auto_defense_target(&ctx, snap, sid, alliance_ally_pilot));
+    });
+
+    // At and after ally_expires_unix: expired allies are no longer at war or auto-targeted.
+    clock.advance_secs(exp - eff);
+    assert_eq!(ctx.now_unix(), exp);
+    ctx.db.with_snapshot(|snap| {
+        for ts in [exp, exp + 60] {
+            assert!(!are_corps_at_war_in_snap(snap, agg_corp, corp_ally, ts));
+            assert!(!are_corps_at_war_in_snap(snap, corp_ally, agg_corp, ts));
+            assert!(!are_corps_at_war_in_snap(snap, agg_corp, ext_member_corp, ts));
+            assert!(!are_corps_at_war_in_snap(snap, ext_member_corp, agg_corp, ts));
+        }
+        assert!(!evaluate_auto_defense_target(&ctx, snap, sid, corp_ally_pilot));
+        assert!(!evaluate_auto_defense_target(&ctx, snap, sid, alliance_ally_pilot));
+    });
+}
+
 #[cfg(test)]
 #[path = "structure_acl_defense_rules_extra_unit_tests.rs"]
 mod extra_unit_tests;

@@ -607,6 +607,133 @@ fn on_advance_secs_internal_sweeps_expired_crimewatch_and_runtime_maps() {
     });
 }
 
+#[test]
+fn war_interference_assistance_honors_ally_expiry_and_alliance_allies() {
+    use eve_db::{
+        AllianceRecord, CorporationRecord, PersistedNegKind, PersistedWarNegotiation, WarRecord,
+    };
+
+    let (ctx, _sess, def_char, _ship_id, _sys_id) = make_fighter_ctx_and_session();
+    let corp_ally_char = 90_000_302_i64;
+    let alliance_ally_char = 90_000_303_i64;
+    let neutral_char = 90_000_304_i64;
+    let agg_corp = 98_300_001_i64;
+    let def_corp = 98_300_002_i64;
+    let corp_ally = 98_300_003_i64;
+    let ext_alliance = 99_300_004_i64;
+    let ext_member_corp = 98_300_004_i64;
+    let neutral_corp = 98_300_005_i64;
+    let war_id = 700_300_001_i64;
+    let now = 1_750_000_000_u64;
+    let eff = now + 100;
+    let exp = now + 500;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters.get(&def_char).cloned().expect("base char");
+        if let Some(ch) = snap.characters.get_mut(&def_char) {
+            ch.corporation_id = def_corp;
+            ch.alliance_id = None;
+        }
+        for (cid, corp_id) in [
+            (corp_ally_char, corp_ally),
+            (alliance_ally_char, ext_member_corp),
+            (neutral_char, neutral_corp),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp_id;
+            ch.alliance_id = None;
+            snap.characters.insert(cid, ch);
+        }
+        for (cid, alliance_opt) in [
+            (agg_corp, None),
+            (def_corp, None),
+            (corp_ally, None),
+            (ext_member_corp, Some(ext_alliance)),
+            (neutral_corp, None),
+        ] {
+            let mut corp = CorporationRecord::default();
+            corp.corporation_id = cid;
+            corp.alliance_id = alliance_opt;
+            snap.corporations.insert(cid, corp);
+        }
+        snap.alliances.insert(
+            ext_alliance,
+            AllianceRecord {
+                alliance_id: ext_alliance,
+                name: "Ally Alliance".into(),
+                short_name: "ALYA".into(),
+                executor_corp_id: ext_member_corp,
+                member_corp_ids: [ext_member_corp].into_iter().collect(),
+            },
+        );
+        snap.wars.insert(
+            war_id,
+            WarRecord {
+                war_id,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: true,
+                active: true,
+                started_unix: now,
+            },
+        );
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 21,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: corp_ally,
+            isk: IskCents::ZERO,
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state.negotiations.push(PersistedWarNegotiation {
+            id: 22,
+            war_id,
+            kind: PersistedNegKind::Ally,
+            from_corp: ext_alliance,
+            isk: IskCents::ZERO,
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(eff),
+        });
+        snap.war_state.ally_expires_unix.insert((war_id, corp_ally), exp);
+        snap.war_state
+            .ally_expires_unix
+            .insert((war_id, ext_alliance), exp);
+    });
+
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        for cid in [def_char, corp_ally_char, alliance_ally_char] {
+            cw.get_or_create(cid).pvp_timer_until_unix = exp + 1_000;
+        }
+    }
+
+    // Before effective_unix: allies are not yet active on the defender's side.
+    assert!(is_war_interference_assistance(&ctx, corp_ally_char, def_char, eff - 1));
+    assert!(is_war_interference_assistance(&ctx, alliance_ally_char, def_char, eff - 1));
+    assert!(!is_war_interference_assistance(&ctx, neutral_char, corp_ally_char, eff - 1));
+
+    // Active window [eff, exp): allies may assist defender legally; neutrals assisting allies interfere.
+    for ts in [eff, exp - 1] {
+        assert!(!is_war_interference_assistance(&ctx, corp_ally_char, def_char, ts));
+        assert!(!is_war_interference_assistance(&ctx, alliance_ally_char, def_char, ts));
+        assert!(is_war_interference_assistance(&ctx, neutral_char, corp_ally_char, ts));
+        assert!(is_war_interference_assistance(&ctx, neutral_char, alliance_ally_char, ts));
+    }
+
+    // At and after ally_expires_unix: expired allies trigger interference when assisting defender,
+    // and neutral pilots assisting expired allies no longer interfere.
+    for ts in [exp, exp + 60] {
+        assert!(is_war_interference_assistance(&ctx, corp_ally_char, def_char, ts));
+        assert!(is_war_interference_assistance(&ctx, alliance_ally_char, def_char, ts));
+        assert!(!is_war_interference_assistance(&ctx, neutral_char, corp_ally_char, ts));
+        assert!(!is_war_interference_assistance(&ctx, neutral_char, alliance_ally_char, ts));
+    }
+}
+
 #[cfg(test)]
 #[path = "crimewatch_timers_extra_unit_tests.rs"]
 mod crimewatch_timers_extra_unit_tests;

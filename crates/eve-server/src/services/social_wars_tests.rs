@@ -1334,7 +1334,19 @@ fn war_extend_ally_contract_preserves_effective_unix_and_enforces_expiry() {
     .unwrap()
     .unwrap();
     let allies_dict = base_info.dict_get("allies").expect("allies dict");
-    assert!(matches!(allies_dict, PyRep::Dict(entries) if entries.len() == 1));
+    match allies_dict {
+        PyRep::Dict(entries) => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, PyRep::Integer(ally_corp));
+            assert_eq!(dict_i64(&entries[0].1, "allyID"), Some(ally_corp));
+            assert_eq!(dict_i64(&entries[0].1, "timeStarted"), Some(t0 as i64));
+            assert_eq!(
+                dict_i64(&entries[0].1, "timeFinished"),
+                Some((t0 + 5_400) as i64)
+            );
+        }
+        other => panic!("expected Dict, got {other:?}"),
+    }
 
     ally_sess.role = ROLE_PLAYER_DEFAULT;
     let bound_rep = handle_wars(
@@ -1747,4 +1759,536 @@ fn war_gm_ally_corp_vs_alliance_cannot_ally_own_war_and_alliance_ally_stats_and_
         .code,
         "BindAuthorizationDenied"
     );
+}
+
+#[test]
+fn gm_extend_ally_contract_rejects_zero_and_anchors_warmup_on_effective_unix() {
+    use super::social_wars_helpers::is_war_participant_corp;
+    use eve_db::clock::VirtualServerClock;
+    use eve_machonet::service_roles::ROLE_GMH;
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, _agg_corp, mut def_sess, def_corp, mut ally_sess, ally_corp, _hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(t0)));
+
+    let decl = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "corpRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&decl, "warID").unwrap();
+    handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "SetOpenForAllies",
+        &[PyRep::Integer(war_id), PyRep::Bool(true)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let offer = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "warsInfoMgr",
+        "CreateWarAllyOffer",
+        &[
+            PyRep::Integer(war_id),
+            PyRep::Real(0.0),
+            PyRep::String("warmup ally".into()),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let offer_id = dict_i64(&offer, "negotiationID").unwrap();
+    handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "AcceptAllyNegotiation",
+        &[PyRep::Integer(offer_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let effective_unix = t0 + WAR_TIMER_SECS;
+
+    agg_sess.role = ROLE_GMH;
+    let snap_before_zero = ctx.db.snapshot_tables();
+    // ts_or_delta == 0 (raw 0 and FILETIME Unix epoch 0) must fail with InvalidArgument without mutating state.
+    for zero_rep in [PyRep::Integer(0), PyRep::Integer(116_444_736_000_000_000)] {
+        assert_eq!(
+            handle_wars(
+                &ctx,
+                &mut agg_sess,
+                "warRegistry",
+                "GMExtendAllyContract",
+                &[PyRep::Integer(war_id), PyRep::Integer(ally_corp), zero_rep],
+                None,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            "InvalidArgument"
+        );
+    }
+    assert_eq!(ctx.db.snapshot_tables(), snap_before_zero);
+
+    // Extending during the 24h warm-up anchors on effective_unix so updated_exp >= effective_unix + delta.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[
+                PyRep::Integer(war_id),
+                PyRep::Integer(ally_corp),
+                PyRep::Integer(3_600),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.war_state.ally_expires_unix.get(&(war_id, ally_corp)),
+            Some(&(effective_unix + 3_600))
+        );
+    });
+
+    // A second relative extension during warm-up stacks onto current_exp.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMExtendAllyContract",
+            &[
+                PyRep::Integer(war_id),
+                PyRep::Integer(ally_corp),
+                PyRep::Integer(1_800),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.war_state.ally_expires_unix.get(&(war_id, ally_corp)),
+            Some(&(effective_unix + 5_400))
+        );
+        assert!(!is_war_participant_corp(snap, war_id, ally_corp, effective_unix - 1));
+        assert!(is_war_participant_corp(snap, war_id, ally_corp, effective_unix));
+        assert!(is_war_participant_corp(
+            snap,
+            war_id,
+            ally_corp,
+            effective_unix + 5_399
+        ));
+        assert!(!is_war_participant_corp(
+            snap,
+            war_id,
+            ally_corp,
+            effective_unix + 5_400
+        ));
+    });
+}
+
+#[test]
+fn create_war_ally_offer_and_accept_enforce_same_alliance_and_allow_reoffer_after_expiry() {
+    use super::social_wars_helpers::is_war_participant_corp;
+    use eve_db::{clock::VirtualServerClock, AllianceRecord, PersistedWarMeta};
+    use eve_machonet::service_roles::ROLE_GMH;
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, agg_corp, mut def_sess, def_corp, mut ally_sess, ally_corp, _hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let agg_alliance = 99_930_001_i64;
+    let sister_corp = 98_930_002_i64;
+    let sister_char = 90_930_002_i64;
+    let war_alliance_vs_corp = 700_930_001_i64;
+
+    let mut sister_sess = agg_sess.clone();
+    sister_sess.character_id = Some(sister_char);
+    sister_sess.corporation_id = Some(sister_corp);
+    sister_sess.alliance_id = Some(agg_alliance);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.get_mut(&agg_corp).unwrap().alliance_id = Some(agg_alliance);
+        let mut s_ch = snap.characters[&agg_sess.character_id.unwrap()].clone();
+        s_ch.character_id = sister_char;
+        s_ch.user_id = 930;
+        s_ch.corporation_id = sister_corp;
+        s_ch.alliance_id = Some(agg_alliance);
+        snap.characters.insert(sister_char, s_ch);
+
+        let mut s_corp = CorporationRecord::default();
+        s_corp.corporation_id = sister_corp;
+        s_corp.name = "Agg Sister Corp".into();
+        s_corp.ticker = "ASIS".into();
+        s_corp.ceo_id = sister_char;
+        s_corp.alliance_id = Some(agg_alliance);
+        s_corp.members = [sister_char].into_iter().collect();
+        s_corp.member_roles = [(sister_char, u64::MAX)].into_iter().collect();
+        snap.corporations.insert(sister_corp, s_corp);
+
+        snap.alliances.insert(
+            agg_alliance,
+            AllianceRecord {
+                alliance_id: agg_alliance,
+                name: "Agg Alliance".into(),
+                short_name: "AGGA".into(),
+                executor_corp_id: agg_corp,
+                member_corp_ids: [agg_corp, sister_corp].into_iter().collect(),
+            },
+        );
+        snap.wars.insert(
+            war_alliance_vs_corp,
+            WarRecord {
+                war_id: war_alliance_vs_corp,
+                aggressor_corp_id: agg_alliance,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: t0.saturating_sub(WAR_TIMER_SECS),
+                active: true,
+            },
+        );
+        snap.war_state.wars.insert(
+            war_alliance_vs_corp,
+            PersistedWarMeta {
+                open_for_allies: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Member corp of an alliance at war cannot bypass CannotAllyOwnWar via CreateWarAllyOffer.
+    let snap_before_own_war = ctx.db.snapshot_tables();
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut sister_sess,
+            "warsInfoMgr",
+            "CreateWarAllyOffer",
+            &[
+                PyRep::Integer(war_alliance_vs_corp),
+                PyRep::Real(0.0),
+                PyRep::String("sneaky".into()),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "CannotAllyOwnWar"
+    );
+    assert_eq!(ctx.db.snapshot_tables(), snap_before_own_war);
+
+    // Member corp of an alliance at war IS recognized as a war party for CreateSurrenderNegotiation.
+    let surr = handle_wars(
+        &ctx,
+        &mut sister_sess,
+        "warsInfoMgr",
+        "CreateSurrenderNegotiation",
+        &[
+            PyRep::Integer(war_alliance_vs_corp),
+            PyRep::Real(0.0),
+            PyRep::String("peace".into()),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(dict_str(&surr, "status"), Some("Offered"));
+
+    // External ally joins, receives a finite expiry via GMExtendAllyContract, and cannot re-offer while unexpired.
+    agg_sess.role = ROLE_GMH;
+    handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "GMJoinDefender",
+        &[PyRep::Integer(war_alliance_vs_corp), PyRep::Integer(ally_corp)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "GMExtendAllyContract",
+        &[
+            PyRep::Integer(war_alliance_vs_corp),
+            PyRep::Integer(ally_corp),
+            PyRep::Integer(600),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+
+    // Before expiry (t0 + 599): duplicate CreateWarAllyOffer is blocked with AllyOfferAlreadyExists,
+    // and AcceptAllyNegotiation rejects an existing pending offer with AlreadyWarAlly.
+    clock.advance_secs_and_read_offset(599);
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut ally_sess,
+            "warsInfoMgr",
+            "CreateWarAllyOffer",
+            &[
+                PyRep::Integer(war_alliance_vs_corp),
+                PyRep::Real(0.0),
+                PyRep::String("too early".into()),
+            ],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AllyOfferAlreadyExists"
+    );
+    let pre_expiry_pending_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state.next_negotiation_id += 1;
+        let id = snap.war_state.next_negotiation_id;
+        snap.war_state.negotiations.push(Negotiation {
+            id,
+            war_id: war_alliance_vs_corp,
+            kind: NegKind::Ally,
+            from_corp: ally_corp,
+            isk: IskCents::ZERO,
+            message: "pending before expiry".into(),
+            status: "Offered".into(),
+            effective_unix: None,
+        });
+        id
+    });
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut def_sess,
+            "warsInfoMgr",
+            "AcceptAllyNegotiation",
+            &[PyRep::Integer(pre_expiry_pending_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "AlreadyWarAlly"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state
+            .negotiations
+            .retain(|n| n.id != pre_expiry_pending_id);
+    });
+
+    // At expiry (t0 + 600): expired ally can re-offer and defender can accept again cleanly.
+    clock.advance_secs_and_read_offset(1);
+    let reoffer_now = ctx.now_unix();
+    assert_eq!(reoffer_now, t0 + 600);
+    let reoffer = handle_wars(
+        &ctx,
+        &mut ally_sess,
+        "warsInfoMgr",
+        "CreateWarAllyOffer",
+        &[
+            PyRep::Integer(war_alliance_vs_corp),
+            PyRep::Real(0.0),
+            PyRep::String("re-join".into()),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let reoffer_id = dict_i64(&reoffer, "negotiationID").unwrap();
+    let accepted = handle_wars(
+        &ctx,
+        &mut def_sess,
+        "warsInfoMgr",
+        "AcceptAllyNegotiation",
+        &[PyRep::Integer(reoffer_id)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let new_eff = reoffer_now + WAR_TIMER_SECS;
+    assert_eq!(dict_i64(&accepted, "allyID"), Some(ally_corp));
+    assert_eq!(dict_i64(&accepted, "timeStarted"), Some(new_eff as i64));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .war_state
+            .ally_expires_unix
+            .contains_key(&(war_alliance_vs_corp, ally_corp)));
+        // Old expired contract must not bypass the new contract's 24h warm-up.
+        assert!(!is_war_participant_corp(
+            snap,
+            war_alliance_vs_corp,
+            ally_corp,
+            new_eff - 1
+        ));
+        assert!(is_war_participant_corp(
+            snap,
+            war_alliance_vs_corp,
+            ally_corp,
+            new_eff
+        ));
+        let accepted_count = snap
+            .war_state
+            .negotiations
+            .iter()
+            .filter(|n| {
+                n.war_id == war_alliance_vs_corp
+                    && n.kind == NegKind::Ally
+                    && n.from_corp == ally_corp
+                    && n.status == "Accepted"
+            })
+            .count();
+        assert_eq!(accepted_count, 1);
+        let lm_count = snap.war_lifecycle_meta[&war_alliance_vs_corp]
+            .allies
+            .iter()
+            .filter(|a| a.corporation_id == Some(ally_corp))
+            .count();
+        assert_eq!(lm_count, 1);
+    });
+}
+
+#[test]
+fn gm_activate_defender_without_ally_id_clears_expired_ally_expiries_and_preserves_unexpired() {
+    use super::social_wars_helpers::is_war_participant_corp;
+    use eve_db::clock::VirtualServerClock;
+    use eve_machonet::service_roles::ROLE_GMH;
+    use std::sync::Arc;
+
+    let (ctx, mut agg_sess, _agg_corp, _def_sess, def_corp, _ally_sess, ally_corp, _hq_id) =
+        setup_wars_ctx();
+    let t0 = 1_700_000_000_u64;
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(t0));
+    ctx.set_clock(clock.clone());
+
+    let decl = handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "corpRegistry",
+        "DeclareWarAgainst",
+        &[PyRep::Integer(def_corp)],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let war_id = dict_i64(&decl, "warID").unwrap();
+    let other_war_id = war_id + 100;
+    let ally_corp_2 = 98_000_299_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut c2 = snap.corporations[&ally_corp].clone();
+        c2.corporation_id = ally_corp_2;
+        snap.corporations.insert(ally_corp_2, c2);
+        snap.war_state
+            .ally_expires_unix
+            .insert((other_war_id, ally_corp), t0);
+    });
+
+    agg_sess.role = ROLE_GMH;
+    for aid in [ally_corp, ally_corp_2] {
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMJoinDefender",
+            &[PyRep::Integer(war_id), PyRep::Integer(aid)],
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    }
+    // ally_corp expires at t0 + 300; ally_corp_2 expires at t0 + 3_600.
+    handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "GMExtendAllyContract",
+        &[
+            PyRep::Integer(war_id),
+            PyRep::Integer(ally_corp),
+            PyRep::Integer(300),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    handle_wars(
+        &ctx,
+        &mut agg_sess,
+        "warRegistry",
+        "GMExtendAllyContract",
+        &[
+            PyRep::Integer(war_id),
+            PyRep::Integer(ally_corp_2),
+            PyRep::Integer(3_600),
+        ],
+        None,
+    )
+    .unwrap()
+    .unwrap();
+
+    clock.advance_secs_and_read_offset(300);
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        assert!(!is_war_participant_corp(snap, war_id, ally_corp, now));
+        assert!(is_war_participant_corp(snap, war_id, ally_corp_2, now));
+    });
+
+    // GMActivateDefender(war_id) without allyID clears expired ally_corp expiry while keeping unexpired ally_corp_2 and other wars intact.
+    assert_eq!(
+        handle_wars(
+            &ctx,
+            &mut agg_sess,
+            "warRegistry",
+            "GMActivateDefender",
+            &[PyRep::Integer(war_id)],
+            None,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap
+            .war_state
+            .ally_expires_unix
+            .contains_key(&(war_id, ally_corp)));
+        assert_eq!(
+            snap.war_state.ally_expires_unix.get(&(war_id, ally_corp_2)),
+            Some(&(t0 + 3_600))
+        );
+        assert_eq!(
+            snap.war_state
+                .ally_expires_unix
+                .get(&(other_war_id, ally_corp)),
+            Some(&t0)
+        );
+        assert!(is_war_participant_corp(snap, war_id, ally_corp, now));
+        assert!(is_war_participant_corp(snap, war_id, ally_corp_2, now));
+    });
 }
