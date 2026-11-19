@@ -428,11 +428,26 @@ fn char_mgr_queries_roles_kills_activity_and_cohorts() {
     .unwrap()
     .unwrap();
     assert_eq!(kills.row_count(), Some(1));
-    if let PyRep::Rowset { rows, .. } = &kills {
+    if let PyRep::Rowset { columns, rows } = &kills {
+        assert_eq!(rows[0].len(), columns.len());
         assert_eq!(
             rows[0][3],
             PyRep::Integer(unix_to_filetime(1_700_000_000))
         );
+        for required in [
+            "warID",
+            "iskLost",
+            "iskDestroyed",
+            "bountyClaimed",
+            "loyaltyPoints",
+            "killRightSupplied",
+        ] {
+            let idx = columns
+                .iter()
+                .position(|c| c == required)
+                .unwrap_or_else(|| panic!("missing KillReportWnd column {required}"));
+            assert_eq!(rows[0][idx], PyRep::None);
+        }
     } else {
         panic!("expected Rowset from GetRecentShipKillsAndLosses");
     }
@@ -573,4 +588,187 @@ fn biomass_prepare_blocked_when_ship_keyed_self_destruct_active() {
             snap, member_id, test_corp_id
         ));
     });
+}
+
+#[test]
+fn char_mgr_combat_log_resolves_war_id_and_isk_values() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let victim_cid = 90_000_001_i64;
+    let attacker_cid = 90_000_002_i64;
+    let agg_corp = 98_100_001_i64;
+    let def_corp = 98_100_002_i64;
+    let ally_corp = 98_100_003_i64;
+    let other_corp = 98_100_004_i64;
+    let mut sess = auth_session(uid, victim_cid, def_corp, 30_000_142);
+    let kw = HashMap::new();
+
+    let (priced_tid, unit_price) = ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| t.base_price >= 1_000.0)
+        .map(|(&tid, t)| (tid, t.base_price))
+        .expect("SDE has at least one type with positive base_price");
+    let total_val = unit_price * 4.0;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        // Active war 701: agg_corp vs def_corp (started at 1000, active indefinitely)
+        snap.wars.insert(
+            701,
+            eve_db::WarRecord {
+                war_id: 701,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: def_corp,
+                mutual: false,
+                started_unix: 1_000,
+                active: true,
+            },
+        );
+        // Accepted defender ally effective at 1_500
+        snap.war_state.negotiations.push(eve_db::PersistedWarNegotiation {
+            id: 1,
+            war_id: 701,
+            from_corp: ally_corp,
+            kind: eve_db::PersistedNegKind::Ally,
+            isk: IskCents::from_isk(0),
+            message: String::new(),
+            status: "Accepted".into(),
+            effective_unix: Some(1_500),
+        });
+        // Finished war 702: agg_corp vs other_corp (ended at 1_200)
+        snap.wars.insert(
+            702,
+            eve_db::WarRecord {
+                war_id: 702,
+                aggressor_corp_id: agg_corp,
+                defender_corp_id: other_corp,
+                mutual: false,
+                started_unix: 500,
+                active: false,
+            },
+        );
+        snap.war_state.wars.insert(
+            702,
+            eve_db::PersistedWarMeta {
+                finish_at_unix: Some(1_200),
+                ..Default::default()
+            },
+        );
+
+        // Kill 1 (ts 2_000): victim in def_corp vs attacker in agg_corp -> warID 701, dropped qty 1 -> iskDestroyed = 3x unit_price
+        snap.killmails.insert(
+            990_001,
+            KillmailRecord {
+                kill_id: 990_001,
+                victim_character_id: victim_cid,
+                attacker_character_id: attacker_cid,
+                solar_system_id: 30_000_142,
+                ship_type_id: 587,
+                total_value_isk: total_val,
+                killed_unix: 2_000,
+                victim_corp_id: def_corp,
+                attacker_corp_id: agg_corp,
+                ..Default::default()
+            },
+        );
+        snap.combat_crimewatch_state.detailed_killmails.insert(
+            990_001,
+            eve_db::DetailedKillmail {
+                kill_id: 990_001,
+                kill_time_unix: 2_000,
+                solar_system_id: 30_000_142,
+                victim_character_id: victim_cid,
+                victim_corporation_id: def_corp,
+                victim_ship_type_id: 587,
+                dropped_items: vec![eve_db::KillmailItemEntry {
+                    type_id: priced_tid,
+                    flag: 5,
+                    qty_dropped: 1,
+                    qty_destroyed: 0,
+                    singleton: false,
+                }],
+                total_value_isk: total_val,
+                ..Default::default()
+            },
+        );
+
+        // Kill 2 (ts 1_800): accepted ally (ally_corp) killed agg_corp -> warID 701, no DetailedKillmail -> iskDestroyed None
+        snap.killmails.insert(
+            990_002,
+            KillmailRecord {
+                kill_id: 990_002,
+                victim_character_id: attacker_cid,
+                attacker_character_id: victim_cid,
+                solar_system_id: 30_000_142,
+                ship_type_id: 588,
+                total_value_isk: 500_000.0,
+                killed_unix: 1_800,
+                victim_corp_id: agg_corp,
+                attacker_corp_id: ally_corp,
+                ..Default::default()
+            },
+        );
+
+        // Kill 3 (ts 1_400): after war 702 finish_at_unix (1_200) -> warID None
+        snap.killmails.insert(
+            990_003,
+            KillmailRecord {
+                kill_id: 990_003,
+                victim_character_id: victim_cid,
+                attacker_character_id: attacker_cid,
+                solar_system_id: 30_000_142,
+                ship_type_id: 589,
+                total_value_isk: 0.0,
+                killed_unix: 1_400,
+                victim_corp_id: other_corp,
+                attacker_corp_id: agg_corp,
+                ..Default::default()
+            },
+        );
+    });
+
+    let rep = handle(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "GetRecentShipKillsAndLosses",
+        &[],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Rowset { columns, rows } = rep else {
+        panic!("expected Rowset");
+    };
+    let col = |name: &str| columns.iter().position(|c| c == name).expect(name);
+    let kid_i = col("killID");
+    let war_i = col("warID");
+    let lost_i = col("iskLost");
+    let dest_i = col("iskDestroyed");
+    let bounty_i = col("bountyClaimed");
+    let lp_i = col("loyaltyPoints");
+    let kr_i = col("killRightSupplied");
+
+    assert_eq!(rows.len(), 3);
+    // Most recent first: 990_001 (ts 2_000)
+    assert_eq!(rows[0][kid_i], PyRep::Integer(990_001));
+    assert_eq!(rows[0][war_i], PyRep::Integer(701));
+    assert_eq!(rows[0][lost_i], PyRep::Real(total_val));
+    assert_eq!(rows[0][dest_i], PyRep::Real(total_val - unit_price));
+    assert_eq!(rows[0][bounty_i], PyRep::None);
+    assert_eq!(rows[0][lp_i], PyRep::None);
+    assert_eq!(rows[0][kr_i], PyRep::None);
+
+    // 990_002 (ts 1_800): accepted ally kill in war 701, no detailed killmail breakdown
+    assert_eq!(rows[1][kid_i], PyRep::Integer(990_002));
+    assert_eq!(rows[1][war_i], PyRep::Integer(701));
+    assert_eq!(rows[1][lost_i], PyRep::Real(500_000.0));
+    assert_eq!(rows[1][dest_i], PyRep::None);
+
+    // 990_003 (ts 1_400): after war 702 finished at 1_200, zero iskLost
+    assert_eq!(rows[2][kid_i], PyRep::Integer(990_003));
+    assert_eq!(rows[2][war_i], PyRep::None);
+    assert_eq!(rows[2][lost_i], PyRep::None);
+    assert_eq!(rows[2][dest_i], PyRep::None);
 }
