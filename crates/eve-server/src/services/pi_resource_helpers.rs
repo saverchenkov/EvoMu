@@ -48,6 +48,12 @@ pub struct PlanetResourceDepletionState {
     /// Unix timestamp when resource/local depletion state was last persisted/regenerated.
     #[serde(default)]
     pub last_updated_unix: u64,
+    /// Cumulative planetary extraction pressure per resource type (subject to exponential recovery).
+    #[serde(default)]
+    pub colony_extraction_pressure: HashMap<TypeId, f64>,
+    /// Unix timestamp when `colony_extraction_pressure` was last updated or regenerated.
+    #[serde(default)]
+    pub colony_pressure_last_unix: u64,
     /// GM-injected resource nugget layers boosting local resource density.
     #[serde(default)]
     pub nugget_layers: Vec<PiNuggetLayer>,
@@ -297,6 +303,69 @@ pub fn regenerate_planet_depletion(state: &mut PlanetResourceDepletionState, now
     if now_unix > 0 {
         state.last_updated_unix = now_unix;
     }
+    if state.colony_pressure_last_unix > 0 && now_unix > state.colony_pressure_last_unix {
+        let factor = depletion_recovery_factor(state.colony_pressure_last_unix, now_unix);
+        for v in state.colony_extraction_pressure.values_mut() {
+            *v *= factor;
+        }
+        state.colony_extraction_pressure.retain(|_, v| *v >= 1.0);
+    }
+    if now_unix > 0
+        && (state.colony_pressure_last_unix > 0 || !state.colony_extraction_pressure.is_empty())
+    {
+        state.colony_pressure_last_unix = now_unix;
+    }
+}
+
+/// Records newly extracted commodity quantities into planetary depletion pressure without mutating pin inventory.
+pub fn record_planet_colony_extraction(
+    snap: &mut WorldStateSnapshot,
+    planet_id: i64,
+    extracted_by_type: &HashMap<TypeId, u64>,
+    now_unix: u64,
+) {
+    if extracted_by_type.values().all(|&q| q == 0) {
+        return;
+    }
+    let mut depl_state = load_planet_depletion(snap, planet_id);
+    if depl_state.colony_pressure_last_unix == 0 && now_unix > 0 {
+        depl_state.colony_pressure_last_unix = now_unix;
+    }
+    regenerate_planet_depletion(&mut depl_state, now_unix);
+    for (&tid, &qty) in extracted_by_type {
+        if qty > 0 {
+            *depl_state.colony_extraction_pressure.entry(tid).or_insert(0.0) += qty as f64;
+        }
+    }
+    if now_unix > 0 {
+        depl_state.colony_pressure_last_unix = now_unix;
+    }
+    save_planet_depletion(snap, &depl_state);
+}
+
+/// Regenerates persisted planetary depletion when an idle colony ticks with zero new extraction.
+pub fn regenerate_idle_planet_depletion(
+    snap: &mut WorldStateSnapshot,
+    planet_id: i64,
+    baseline_unix: u64,
+    now_unix: u64,
+    always_persist: bool,
+) {
+    let mut depl_state = load_planet_depletion(snap, planet_id);
+    let has_existing_state = !depl_state.resource_depletion.is_empty()
+        || !depl_state.local_depletion.is_empty()
+        || depl_state.gm_depletion_rate > 0.0
+        || !depl_state.colony_extraction_pressure.is_empty()
+        || depl_state.colony_pressure_last_unix > 0
+        || depl_state.last_updated_unix > 0;
+    if !always_persist && !has_existing_state {
+        return;
+    }
+    if depl_state.last_updated_unix == 0 && baseline_unix > 0 && baseline_unix < now_unix {
+        depl_state.last_updated_unix = baseline_unix;
+    }
+    regenerate_planet_depletion(&mut depl_state, now_unix);
+    save_planet_depletion(snap, &depl_state);
 }
 
 /// Decays colony cumulative extraction pressure over idle `elapsed_secs` when extractors stop.
@@ -320,22 +389,33 @@ fn global_colony_and_gm_depletion_at(
     resource_tid: TypeId,
     now_unix: u64,
 ) -> (f64, f64, PlanetResourceDepletionState) {
-    let mut colony_extracted_effective = 0.0_f64;
-    for col in snap.planetary_colonies.values() {
-        if col.planet_id == planet_id {
-            let qty = col
-                .extracted_commodities
-                .get(&resource_tid)
-                .copied()
-                .unwrap_or(0) as f64;
-            if qty > 0.0 {
-                colony_extracted_effective += qty * depletion_recovery_factor(col.last_extracted_unix, now_unix);
-            }
-        }
-    }
-    let colony_depletion = (colony_extracted_effective / 100_000.0).min(0.40);
     let mut depl_state = load_planet_depletion(snap, planet_id);
     regenerate_planet_depletion(&mut depl_state, now_unix);
+    let colony_extracted_effective = if depl_state.colony_pressure_last_unix > 0
+        || !depl_state.colony_extraction_pressure.is_empty()
+    {
+        depl_state
+            .colony_extraction_pressure
+            .get(&resource_tid)
+            .copied()
+            .unwrap_or(0.0)
+    } else {
+        let mut total = 0.0_f64;
+        for col in snap.planetary_colonies.values() {
+            if col.planet_id == planet_id {
+                let qty = col
+                    .extracted_commodities
+                    .get(&resource_tid)
+                    .copied()
+                    .unwrap_or(0) as f64;
+                if qty > 0.0 {
+                    total += qty * depletion_recovery_factor(col.last_extracted_unix, now_unix);
+                }
+            }
+        }
+        total
+    };
+    let colony_depletion = (colony_extracted_effective / 100_000.0).min(0.40);
     let gm_depl = depl_state
         .resource_depletion
         .get(&resource_tid)

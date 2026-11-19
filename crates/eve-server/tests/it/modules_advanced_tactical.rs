@@ -4420,6 +4420,142 @@ async fn test_dogma_im_overload_bypasses_warp_cloak_tether_and_activation_paths(
 }
 
 #[tokio::test]
+async fn test_dogma_im_overload_rejects_docked_and_preserves_invulnerability() {
+    let ctx = Arc::new(build_ctx());
+    let char_id: i64 = 95_199;
+    let ship_id: i64 = 96_199;
+    let structure_id: i64 = 1_000_000_098_199;
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, JITA_SYS, false);
+    let sys = ctx.systems.get_or_spawn(JITA_SYS);
+
+    let ab_id: i64 = 97_101; // 1MN Afterburner I (439)
+    let sb_id: i64 = 97_102; // Small Proton Smartbomb I (1547)
+    let turret_id: i64 = 97_103; // 125mm Gatling AutoCannon I (484)
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            28_164,
+            TrainedSkillRecord { type_id: 28_164, level: 5, skill_points: 256_000.0 },
+        );
+        let st = make_structure(structure_id, 35_832, 98_000_001, JITA_SYS, "Jita Astrahus");
+        snap.structures.insert(structure_id, st);
+        for (iid, tid, flag) in [
+            (ab_id, 439_u32, InventoryFlag::MedSlot0),
+            (sb_id, 1547, InventoryFlag::HiSlot0),
+            (turret_id, 484, InventoryFlag::HiSlot1),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(iid, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    cs.capacitor = 10_000.0;
+    cs.max_capacitor = 10_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    )
+    .await
+    .unwrap();
+
+    // 1. Docked at NPC station or Upwell structure must reject Overload with ShipDocked
+    let set_dock_state = |sess: &mut eve_machonet::SessionState,
+                          station: Option<i64>,
+                          structure: Option<i64>| {
+        sess.station_id = station;
+        sess.structure_id = structure;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.station_id = station;
+                c.structure_id = structure;
+            }
+        });
+    };
+    for (station, structure, label) in [
+        (Some(60_003_760), None, "NPC station"),
+        (None, Some(structure_id), "Upwell structure"),
+    ] {
+        set_dock_state(&mut sess, station, structure);
+        for (mod_label, mod_id) in [("AB", ab_id), ("Smartbomb", sb_id), ("Turret", turret_id)] {
+            let err = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mod_id)])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "ShipDocked", "{mod_label} in {label} must reject ShipDocked");
+            assert_eq!(
+                ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap().modules[&mod_id].state,
+                eve_dogma::ModuleState::Online,
+                "{mod_label} in {label} must remain Online"
+            );
+        }
+    }
+
+    // 2. Undocked with active location-change invulnerability: both idle pre-overload and mid-cycle Overload preserve invuln
+    set_dock_state(&mut sess, None, None);
+    let until = ctx.now_unix() + 60;
+    eve_server::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, until);
+
+    let ab_pre = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
+        .await
+        .expect("Idle pre-overload AB in space");
+    assert_eq!(ab_pre.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    let sb_pre = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(sb_id)])
+        .await
+        .expect("Idle pre-overload Smartbomb in space");
+    assert_eq!(sb_pre.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    let tur_pre = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(turret_id)])
+        .await
+        .expect("Idle pre-overload Turret in space");
+    assert_eq!(tur_pre.dict_get("overloaded"), Some(&PyRep::Bool(true)));
+    assert!(
+        eve_server::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        "Targetless Overload calls must preserve location-change invulnerability"
+    );
+
+    // Clear pre-overload, activate AB cleanly, re-grant invuln, and toggle mid-cycle Overload without breaking invuln
+    rpc(&ctx, &mut sess, "dogmaIM", "StopOverload", vec![PyRep::Integer(ab_id)])
+        .await
+        .expect("StopOverload AB");
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id), PyRep::String("online".into())])
+        .await
+        .expect("Activate AB");
+    eve_server::services::space_destiny::grant_location_change_invulnerability(&ctx, char_id, ctx.now_unix() + 60);
+    rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)])
+        .await
+        .expect("Mid-cycle Overload AB");
+    assert!(
+        eve_server::services::space_destiny::is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+        "Mid-cycle Overload toggle must preserve location-change invulnerability"
+    );
+}
+
+#[tokio::test]
 async fn test_warp_to_within_min_range_sub_150km_rejected() {
     let ctx = Arc::new(build_ctx());
     let jita_sys: u32 = 30_004_759;

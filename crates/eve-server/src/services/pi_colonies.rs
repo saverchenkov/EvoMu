@@ -61,16 +61,17 @@ pub fn handle_pi_colonies(
                     0
                 };
                 let (sim_extracted, sim_processed) = if elapsed > 0 {
-                    let (e, p) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
-                    if e == 0 {
-                        crate::services::industry_pi::pi_resource_helpers::decay_colony_extracted_commodities(&mut col, elapsed);
-                        let mut depl_state = load_planet_depletion(snap, planet_id);
-                        if depl_state.last_updated_unix == 0 && baseline > 0 && baseline < now_unix {
-                            depl_state.last_updated_unix = baseline;
-                        }
-                        crate::services::industry_pi::pi_resource_helpers::regenerate_planet_depletion(&mut depl_state, now_unix);
-                        save_planet_depletion(snap, &depl_state);
-                    }
+                    let (e, p) = crate::services::industry_pi::pi_helpers::advance_colony_and_update_depletion(
+                        ctx,
+                        snap,
+                        planet_id,
+                        &mut col,
+                        &mut net,
+                        baseline,
+                        elapsed,
+                        now_unix,
+                        true,
+                    );
                     let tot_e = e.saturating_add(std::mem::take(&mut net.pending_login_extracted));
                     let tot_p = p.saturating_add(std::mem::take(&mut net.pending_login_processed));
                     snap.planetary_colonies.insert((char_id, planet_id), col.clone());
@@ -85,8 +86,13 @@ pub fn handle_pi_colonies(
                     (0, 0)
                 };
                 let (pins_rep, links_rep, routes_rep) = format_pi_pins_links(&net);
-                let stored_entries: Vec<(PyRep, PyRep)> = col
-                    .extracted_commodities
+                let pin_totals = crate::services::industry_pi::pi_helpers::sum_pi_pin_contents(&net.pins);
+                let stored_source = if net.pins.is_empty() {
+                    &col.extracted_commodities
+                } else {
+                    &pin_totals
+                };
+                let stored_entries: Vec<(PyRep, PyRep)> = stored_source
                     .iter()
                     .map(|(&tid, &q)| (PyRep::Integer(tid as i64), PyRep::Integer(q as i64)))
                     .collect();

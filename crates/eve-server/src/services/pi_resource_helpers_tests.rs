@@ -183,6 +183,7 @@ fn test_pi_resource_edge_branches_caps_fallbacks_and_truncation() {
             gm_depletion_rate: 0.35, // overrides resource_depletion 0.20 via max()
             gm_depletion_curve: vec![],
             gm_last_sim_unix: 0,
+            ..Default::default()
         };
         save_planet_depletion(snap, &state);
     });

@@ -599,6 +599,189 @@ async fn test_pi_depletion_factory_cycles_and_storage_overflow() {
     assert_eq!(full_fac_net.pins[0].contents.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied(), Some(3_000), "Inputs preserved when destination storage is full");
 }
 
+#[tokio::test]
+async fn test_pi_idle_colony_depletion_recovers_across_get_colony_without_corrupting_stored() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 7019, char_id).await;
+    let ship_id = sess.ship_id.expect("Active ship ID");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(500_000_000);
+            ch.station_id = None;
+        }
+        grant_skills(snap, char_id, &[
+            (COMMAND_CENTER_UPGRADES_SKILL, 5),
+            (INTERPLANETARY_CONSOLIDATION_SKILL, 4),
+            (REMOTE_SENSING_SKILL, 5),
+            (PLANETOLOGY_SKILL, 5),
+            (ADV_PLANETOLOGY_SKILL, 5),
+        ]);
+        seed_cargo_item(snap, GAS_COMMAND_CENTER_TYPE, char_id, ship_id, 1);
+    });
+
+    let cc_lat = 0.35;
+    let cc_lon = -1.10;
+    let head_lat = 0.36;
+    let head_lon = -1.09;
+
+    let col_res = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_pin_tup(0, 1, GAS_COMMAND_CENTER_TYPE, cc_lat, cc_lon),
+            cmd_up_cc_tup(0, 1, 4),
+        ]),
+    ]).await.expect("Deploy CC");
+    let PyRep::List(cc_pins) = col_res.dict_get("pins").cloned().expect("pins") else { panic!("pins"); };
+    let cc_pin_id = cc_pins[0].dict_get("pinID").and_then(|v| v.as_i64()).expect("cc_pin_id");
+
+    let net_res = rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_pin_tup(1, 2, EXTRACTOR_CONTROL_UNIT_TYPE, head_lat, head_lon),
+            cmd_pin_tup(1, 3, STORAGE_FACILITY_TYPE, 0.37, -1.08),
+            cmd_link(cc_pin_id, 2),
+            cmd_link(2, 3),
+        ]),
+    ]).await.expect("Place ECU + storage");
+    let PyRep::List(net_pins) = net_res.dict_get("pins").cloned().expect("pins") else { panic!("pins"); };
+    let ecu_pin_id = net_pins.iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(EXTRACTOR_CONTROL_UNIT_TYPE as i64))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("ecu_pin_id");
+    let storage_pin_id = net_pins.iter()
+        .find(|p| p.dict_get("typeID").and_then(|v| v.as_i64()) == Some(STORAGE_FACILITY_TYPE as i64))
+        .and_then(|p| p.dict_get("pinID").and_then(|v| v.as_i64()))
+        .expect("storage_pin_id");
+
+    // Route ECU -> Storage and install a 6-hour extractor program (never calling simulate_planet_depletion)
+    rpc(&ctx, &mut sess, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            cmd_route(701, ecu_pin_id, storage_pin_id, AQUEOUS_LIQUIDS_P0_TYPE, 5_000),
+            PyRep::Tuple(vec![
+                PyRep::Integer(10),
+                PyRep::Integer(ecu_pin_id),
+                PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64),
+                PyRep::Integer(900),
+                PyRep::Integer(4),
+                PyRep::List(vec![
+                    PyRep::Tuple(vec![PyRep::Real(head_lat), PyRep::Real(head_lon)]),
+                    PyRep::Tuple(vec![PyRep::Real(head_lat + 0.02), PyRep::Real(head_lon)]),
+                    PyRep::Tuple(vec![PyRep::Real(head_lat), PyRep::Real(head_lon + 0.02)]),
+                    PyRep::Tuple(vec![PyRep::Real(head_lat + 0.02), PyRep::Real(head_lon + 0.02)]),
+                ]),
+                PyRep::Integer(21_600),
+            ]),
+        ]),
+    ]).await.expect("Route + install 6h extractor program");
+
+    // Advance 6h so the extractor finishes and deposits P0 into storage, then fetch GetColony
+    ctx.advance_secs(21_600);
+    let t1 = ctx.now_unix();
+    let get1 = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony after extraction");
+    let stored1 = match get1.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert!(stored1 > 0, "Expected positive extracted quantity after 6h run");
+
+    let (density_t1, pressure_t1, col_ts_t1) = ctx.db.with_snapshot(|snap| {
+        let dens = eve_server::services::industry_pi::compute_planet_resource_density(
+            &ctx,
+            snap,
+            JITA_PLANET_ID,
+            AQUEOUS_LIQUIDS_P0_TYPE,
+            head_lat,
+            head_lon,
+        );
+        let depl = eve_server::services::industry_pi::load_planet_depletion(snap, JITA_PLANET_ID);
+        let pressure = depl
+            .colony_extraction_pressure
+            .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+            .copied()
+            .unwrap_or(0.0);
+        let col_ts = snap.planetary_colonies.get(&(char_id, JITA_PLANET_ID)).unwrap().last_extracted_unix;
+        (dens, pressure, col_ts)
+    });
+    assert_eq!(col_ts_t1, t1);
+    assert!((pressure_t1 - (stored1 as f64)).abs() < 1e-6);
+
+    // Advance 12h while extractor is idle and invoke GetColony twice
+    ctx.advance_secs(43_200);
+    let get2 = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("GetColony after 12h idle");
+    let stored2 = match get2.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert_eq!(
+        stored2, stored1,
+        "Idle GetColony must preserve physical pin storedCommodities"
+    );
+
+    ctx.advance_secs(60);
+    let get3 = rpc(&ctx, &mut sess, "planetMgr", "GetColony", &[PyRep::Integer(JITA_PLANET_ID)])
+        .await
+        .expect("Second idle GetColony");
+    let stored3 = match get3.dict_get("storedCommodities") {
+        Some(PyRep::Dict(entries)) => entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(AQUEOUS_LIQUIDS_P0_TYPE as i64))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0),
+        _ => panic!("storedCommodities dict expected"),
+    };
+    assert_eq!(stored3, stored1);
+
+    let (density_t2, pressure_t2, col_ts_t2, snap_stored) = ctx.db.with_snapshot(|snap| {
+        let dens = eve_server::services::industry_pi::compute_planet_resource_density(
+            &ctx,
+            snap,
+            JITA_PLANET_ID,
+            AQUEOUS_LIQUIDS_P0_TYPE,
+            head_lat,
+            head_lon,
+        );
+        let depl = eve_server::services::industry_pi::load_planet_depletion(snap, JITA_PLANET_ID);
+        let pressure = depl
+            .colony_extraction_pressure
+            .get(&AQUEOUS_LIQUIDS_P0_TYPE)
+            .copied()
+            .unwrap_or(0.0);
+        let col = snap.planetary_colonies.get(&(char_id, JITA_PLANET_ID)).unwrap();
+        let ss = col.extracted_commodities.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied().unwrap_or(0);
+        (dens, pressure, col.last_extracted_unix, ss)
+    });
+    assert_eq!(
+        col_ts_t2, t1,
+        "Idle GetColony must not advance col.last_extracted_unix when e == 0"
+    );
+    assert_eq!(snap_stored as i64, stored1);
+    assert!(
+        pressure_t2 < pressure_t1 * 0.55,
+        "Expected ~50% idle recovery after 12h: before={pressure_t1}, after={pressure_t2}"
+    );
+    assert!(
+        density_t2 > density_t1,
+        "Planetary resource density must recover across idle GetColony without simulate_planet_depletion: t1={density_t1}, t2={density_t2}"
+    );
+}
+
 #[allow(dead_code, unused_imports)]
 pub(crate) mod planetary_customs_and_evermarks {
     use super::*;

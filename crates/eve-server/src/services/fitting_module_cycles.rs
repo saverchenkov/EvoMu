@@ -63,6 +63,15 @@ pub(crate) fn target_not_locked_rpc_error(message: impl Into<String>) -> BridgeR
     )
 }
 
+/// Builds a `ShipDocked` error for space-only module/overload calls made while docked.
+fn ship_docked_rpc_error(message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "ShipDocked".into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
 enum ChargeVolatility {
     VolatileCrystal { damage: f64, chance: f64 },
     NonVolatileCrystal,
@@ -221,6 +230,9 @@ async fn handle_module_cycles_inner(
                         .await,
                     );
                 }
+            }
+            if method == "Overload" && (session.station_id.is_some() || session.structure_id.is_some()) {
+                return Some(Err(ship_docked_rpc_error("Cannot overload modules while docked")));
             }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into(), client_error: None }));
@@ -564,11 +576,9 @@ async fn handle_module_cycles_inner(
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
             if mod_type.group_id == 589 {
                 if session.station_id.is_some() || session.structure_id.is_some() {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipDocked".into(),
-                        message: "Cannot activate Interdiction Sphere Launcher while docked".into(),
-                        client_error: None,
-                    }));
+                    return Some(Err(ship_docked_rpc_error(
+                        "Cannot activate Interdiction Sphere Launcher while docked",
+                    )));
                 }
                 if sys
                     .get_combat_state(ship_id)

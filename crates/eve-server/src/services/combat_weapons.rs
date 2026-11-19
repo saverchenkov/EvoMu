@@ -222,7 +222,9 @@ pub async fn handle_weapons(
                 char_id,
                 "SAFE_LOGOFF_ABORT_MODULE",
             );
-            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+            if method != "Overload" {
+                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+            }
             let controlling_structure = session.structure_id.is_some() && session.structure_id == session.ship_id;
             if session.station_id.is_some() || (session.structure_id.is_some() && !controlling_structure) {
                 return Some(Err(BridgeRpcError {
@@ -570,6 +572,9 @@ pub async fn handle_weapons(
                         ),
                     )));
                 }
+                if method == "Overload" {
+                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+                }
                 if let (Some(vc), Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct))) =
                     (victim_char_opt, pvp_precheck)
                 {
@@ -758,6 +763,9 @@ pub async fn handle_weapons(
                             Err(e) => return Some(Err(e)),
                         }
                     }
+                }
+                if method == "Overload" {
+                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
                 }
                 let mut eff_m = m.clone();
                 if is_overloaded {
@@ -1248,6 +1256,9 @@ pub async fn handle_weapons(
                 }
                 m.charge_type_id = Some(plan.ammo_type_id);
                 fit.recalculate_stats(&ctx.sde);
+            }
+            if method == "Overload" {
+                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             }
             if let Some(new_cap) = pending_cap_after {
                 let _ = sys_handle.set_capacitor(ship_id, new_cap).await;

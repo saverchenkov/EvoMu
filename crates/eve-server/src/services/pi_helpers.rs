@@ -528,13 +528,7 @@ pub fn save_pi_network(
     };
     snap.planetary_colony_layouts.insert((char_id, planet_id), layout);
     if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-        let mut pin_totals: HashMap<TypeId, u64> = HashMap::new();
-        for p in &net.pins {
-            for (&tid, &amt) in &p.contents {
-                *pin_totals.entry(tid).or_insert(0) += amt;
-            }
-        }
-        col.extracted_commodities = pin_totals;
+        col.extracted_commodities = sum_pi_pin_contents(&net.pins);
     }
 }
 
@@ -610,6 +604,19 @@ pub fn queue_pi_notification(
     }
 }
 
+/// Sums commodity quantities stored across all pins in a colony network.
+pub fn sum_pi_pin_contents(pins: &[PiPinState]) -> HashMap<TypeId, u64> {
+    let mut pin_totals: HashMap<TypeId, u64> = HashMap::new();
+    for p in pins {
+        for (&tid, &amt) in &p.contents {
+            if amt > 0 {
+                *pin_totals.entry(tid).or_insert(0) += amt;
+            }
+        }
+    }
+    pin_totals
+}
+
 pub fn advance_colony_simulation(
     ctx: &ServerContext,
     col: &mut PlanetaryColonyRecord,
@@ -617,8 +624,47 @@ pub fn advance_colony_simulation(
     elapsed_sec: u64,
     now_unix: u64,
 ) -> (u64, u64) {
+    let (extracted, processed, _) =
+        advance_colony_simulation_detailed(ctx, col, net, elapsed_sec, now_unix);
+    (extracted, processed)
+}
+
+pub(crate) fn advance_colony_and_update_depletion(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    planet_id: i64,
+    col: &mut PlanetaryColonyRecord,
+    net: &mut PiColonyNetworkState,
+    baseline_unix: u64,
+    elapsed_sec: u64,
+    now_unix: u64,
+    always_persist_idle_depletion: bool,
+) -> (u64, u64) {
+    let (e, p, ext_by_type) =
+        advance_colony_simulation_detailed(ctx, col, net, elapsed_sec, now_unix);
+    if e > 0 {
+        record_planet_colony_extraction(snap, planet_id, &ext_by_type, now_unix);
+    } else {
+        regenerate_idle_planet_depletion(
+            snap,
+            planet_id,
+            baseline_unix,
+            now_unix,
+            always_persist_idle_depletion,
+        );
+    }
+    (e, p)
+}
+
+pub(crate) fn advance_colony_simulation_detailed(
+    ctx: &ServerContext,
+    col: &mut PlanetaryColonyRecord,
+    net: &mut PiColonyNetworkState,
+    elapsed_sec: u64,
+    now_unix: u64,
+) -> (u64, u64, HashMap<TypeId, u64>) {
     if elapsed_sec == 0 {
-        return (0, 0);
+        return (0, 0, HashMap::new());
     }
     let default_p0 = list_sde_planet_p0_resources(ctx, col.solar_system_id, col.planet_id)
         .first()
@@ -626,6 +672,7 @@ pub fn advance_colony_simulation(
         .unwrap_or(2268);
     let mut extracted_total = 0_u64;
     let mut processed_total = 0_u64;
+    let mut extracted_by_type: HashMap<TypeId, u64> = HashMap::new();
 
     let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
     let sim_start = now_unix.saturating_sub(elapsed_sec);
@@ -698,6 +745,7 @@ pub fn advance_colony_simulation(
             if actual_deposit > 0 {
                 *target_pin.contents.entry(p0_tid).or_insert(0) += actual_deposit;
                 *col.extracted_commodities.entry(p0_tid).or_insert(0) += actual_deposit;
+                *extracted_by_type.entry(p0_tid).or_insert(0) += actual_deposit;
                 extracted_total += actual_deposit;
             }
             let new_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
@@ -887,8 +935,10 @@ pub fn advance_colony_simulation(
     }
 
     net.last_simulated_unix = now_unix;
-    col.last_extracted_unix = now_unix;
-    (extracted_total, processed_total)
+    if extracted_total > 0 {
+        col.last_extracted_unix = now_unix;
+    }
+    (extracted_total, processed_total, extracted_by_type)
 }
 
 pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
@@ -912,7 +962,17 @@ pub fn sync_character_pi_colonies_on_login(ctx: &ServerContext, char_id: i64) {
             };
             if baseline > 0 && now_unix > baseline {
                 let elapsed = now_unix.saturating_sub(baseline);
-                let (ext, proc_qty) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                let (ext, proc_qty) = advance_colony_and_update_depletion(
+                    ctx,
+                    snap,
+                    pid,
+                    &mut col,
+                    &mut net,
+                    baseline,
+                    elapsed,
+                    now_unix,
+                    false,
+                );
                 net.pending_login_extracted = net.pending_login_extracted.saturating_add(ext);
                 net.pending_login_processed = net.pending_login_processed.saturating_add(proc_qty);
                 snap.planetary_colonies.insert((cid, pid), col);
@@ -963,7 +1023,17 @@ pub fn tick_all_colonies_background(ctx: &ServerContext, now_unix: u64) {
             let baseline = colony_baseline(&col, &net);
             if baseline > 0 && now_unix > baseline {
                 let elapsed = now_unix.saturating_sub(baseline);
-                let (ext, proc_qty) = advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                let (ext, proc_qty) = advance_colony_and_update_depletion(
+                    ctx,
+                    snap,
+                    pid,
+                    &mut col,
+                    &mut net,
+                    baseline,
+                    elapsed,
+                    now_unix,
+                    false,
+                );
                 net.pending_login_extracted = net.pending_login_extracted.saturating_add(ext);
                 net.pending_login_processed = net.pending_login_processed.saturating_add(proc_qty);
                 snap.planetary_colonies.insert((cid, pid), col);

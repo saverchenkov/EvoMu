@@ -465,9 +465,10 @@ pub(crate) fn reconcile_module_active_state(
     (in_delay, already_active)
 }
 
-/// Validates module overload eligibility (`attr 1211` + Thermodynamics >= required level) and
-/// checks cycle/delay state: returns `Ok(true)` for mid-cycle overload toggle, `Ok(false)` for
-/// idle pre-overload, or `Err(ModuleAlreadyActive)` during reactivation delay / entropic spool.
+/// Validates module overload eligibility (`effect_category == 5` + `attr 1212`
+/// `requiredThermoDynamicsSkill`, minimum 1) and checks cycle/delay state: returns `Ok(true)` for
+/// mid-cycle overload toggle, `Ok(false)` for idle pre-overload, or `Err(ModuleAlreadyActive)`
+/// during reactivation delay / entropic spool.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_overload_cycle_or_delay(
     ctx: &ServerContext,
