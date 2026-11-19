@@ -240,15 +240,18 @@ async fn mission_completion_expiry_penalty_and_courier_delivery_branches() {
         .missions
         .iter()
         .filter(|(_, t)| {
-            t.is_courier
-                && !t.content_template.as_deref().unwrap_or_default().contains("Trade")
+            let ct = t.content_template.as_deref().unwrap_or_default();
+            t.is_courier && !ct.contains("Trade") && !ct.contains("Heraldry")
         })
         .min_by_key(|&(&id, _)| id)
         .or_else(|| {
             ctx.sde
                 .missions
                 .iter()
-                .filter(|(_, t)| !t.content_template.as_deref().unwrap_or_default().contains("Trade"))
+                .filter(|(_, t)| {
+                    let ct = t.content_template.as_deref().unwrap_or_default();
+                    !ct.contains("Trade") && !ct.contains("Heraldry")
+                })
                 .min_by_key(|&(&id, _)| id)
         })
         .map(|(&id, _)| id)
@@ -634,19 +637,30 @@ async fn gh998_gh999_gh1000_bookmarks_dungeon_owner_and_courier_item_notificatio
     let kw = HashMap::new();
     let now = ctx.now_unix();
 
-    // Pick a real non-courier mission (for #998 bookmark + #999 dungeon ownerID) and a courier mission (for #1000).
+    // Pick a real non-courier mission (#998 bookmark + #999 dungeon ownerID) and a deterministic non-Trade/non-Heraldry courier mission (#1000, #1370).
     let encounter_mid = ctx
         .sde
         .missions
         .values()
-        .find(|m| !m.is_courier && !m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            !m.is_courier
+                && !ct.contains("Courier")
+                && !ct.contains("Trade")
+                && !ct.contains("Heraldry")
+        })
+        .min_by_key(|m| m.mission_id)
         .map(|m| m.mission_id)
         .unwrap_or(10_301);
     let courier_mid = ctx
         .sde
         .missions
         .values()
-        .find(|m| m.is_courier && !m.content_template.as_deref().unwrap_or_default().contains("Trade"))
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            m.is_courier && !ct.contains("Trade") && !ct.contains("Heraldry")
+        })
+        .min_by_key(|m| m.mission_id)
         .map(|m| m.mission_id)
         .expect("SDE should contain at least one courier mission");
 
@@ -999,7 +1013,11 @@ async fn gh1023_courier_objective_info_emits_station_corp_owners_and_normalizes_
         .sde
         .missions
         .values()
-        .find(|m| m.is_courier)
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            m.is_courier && !ct.contains("Trade") && !ct.contains("Heraldry")
+        })
+        .min_by_key(|m| m.mission_id)
         .map(|m| m.mission_id)
         .unwrap_or(72_001);
 
@@ -1951,4 +1969,502 @@ async fn briefing_distinguishes_data_center_cosmos_heraldry_div23_mining_and_ini
     .await
     .expect("R&D GetMissionBriefingInfo");
     assert_eq!(rnd_info.dict_get("briefing").and_then(|v| v.as_str()), Some(rnd_brief.as_str()));
+}
+
+// Regression coverage for #1367 (V24 dungeon bookmark locations and Telecom dialogue).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v24_dungeon_bookmark_locations_and_telecom_dialogue_are_warpable_and_human_readable() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let ag = find_standard_agent(&ctx, 1);
+    let sys_id = ag.solar_system_id.unwrap();
+    let st_id = ag.station_id.unwrap();
+    let now = ctx.now_unix();
+    ctx.db
+        .acquire_online_lock(1, 501, Some(char_id), true, now)
+        .expect("online lock");
+
+    let mid_kill = 999_875_u32;
+    let mid_other = 999_876_u32;
+    let mut sde = (*ctx.sde).clone();
+    let dun_id = sde.dungeons.keys().copied().min();
+    sde.missions.insert(
+        mid_kill,
+        eve_sde::MissionTemplate {
+            mission_id: mid_kill,
+            title: "The Guristas Spies".into(),
+            is_courier: false,
+            lp_alpha: 100,
+            lp_omega: 100,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicKillMission".into()),
+            dungeon_id: dun_id,
+        },
+    );
+    sde.missions.insert(
+        mid_other,
+        eve_sde::MissionTemplate {
+            mission_id: mid_other,
+            title: "Other Patrol".into(),
+            is_courier: false,
+            lp_alpha: 100,
+            lp_omega: 100,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicKillMission".into()),
+            dungeon_id: dun_id,
+        },
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = Some(st_id);
+            ch.standings.insert(ag.agent_id, 10.0);
+        }
+        snap.active_missions.insert(
+            (char_id, mid_kill),
+            make_active_mission(mid_kill, char_id, ag.agent_id, sys_id, "Offered", None),
+        );
+        let mut offer_meta = make_meta(mid_kill, ag.agent_id, now + 3_600, None);
+        offer_meta.offered_at_unix = now.saturating_sub(60);
+        offer_meta.origin_station_id = Some(st_id);
+        save_mission_meta(snap, char_id, &offer_meta);
+
+        let other_bm_id = 888_999_002_i64;
+        snap.bookmarks.insert(
+            other_bm_id,
+            BookmarkRecord {
+                bookmark_id: other_bm_id,
+                owner_id: char_id,
+                solar_system_id: sys_id,
+                label: "Other Pocket".into(),
+                x: 9_000.0,
+                y: 8_000.0,
+                z: 7_000.0,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mid_other),
+            make_active_mission(mid_other, char_id, ag.agent_id, sys_id, "Accepted", Some(other_bm_id)),
+        );
+        save_mission_meta(
+            snap,
+            char_id,
+            &make_meta(mid_other, ag.agent_id, now + 3_600, Some(now + 7_200)),
+        );
+    });
+
+    let mut sess = char_session(char_id, Some(sys_id), Some(st_id));
+    let kw = HashMap::new();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(ag.agent_id), PyRep::Integer(mid_kill as i64)],
+        &kw,
+    )
+    .await
+    .expect("DoAction(3) accept must succeed");
+
+    let accept_notifs = ctx.drain_notifications_for_char(char_id);
+    let accept_dialogue = accept_notifs
+        .iter()
+        .find(|n| n.event == "OnIncomingAgentMessage")
+        .expect("accept must emit OnIncomingAgentMessage for Telecom");
+    let accept_args_dbg = format!("{:?}", accept_dialogue.args);
+    assert!(
+        accept_args_dbg.contains("UI/Agents/Dialogue/StandardMissionAccepted"),
+        "accept dialogue must use StandardMissionAccepted label: {accept_args_dbg}"
+    );
+    assert!(
+        accept_args_dbg.contains("The Guristas Spies")
+            && !accept_args_dbg.contains("agent.missionTemplatizedContent_"),
+        "accept dialogue must include readable mission title instead of raw content_template key: {accept_args_dbg}"
+    );
+    let accept_tx = accept_notifs
+        .iter()
+        .find(|n| n.event == "OnIncomingTransmission")
+        .expect("accept must emit OnIncomingTransmission for Telecom");
+    let accept_tx_dbg = format!("{:?}", accept_tx.args);
+    let accept_tx_text = accept_tx
+        .args
+        .first()
+        .and_then(|kv| kv.dict_get("text"))
+        .and_then(PyRep::as_str)
+        .unwrap_or("");
+    assert!(
+        accept_tx_text.contains("The Guristas Spies")
+            && accept_tx_text.contains("report back")
+            && !accept_tx_text.contains("agent.missionTemplatizedContent_"),
+        "accept transmission text must emit human-readable briefing prose instead of raw content_template key: {accept_tx_dbg}"
+    );
+
+    let (bm_id, bx, by, bz) = ctx.db.with_snapshot(|snap| {
+        let m = snap
+            .active_missions
+            .get(&(char_id, mid_kill))
+            .expect("accepted mission record");
+        let bmid = m.bookmark_id.expect("accept must create pocket bookmark");
+        let bm = snap.bookmarks.get(&bmid).expect("pocket bookmark stored");
+        (bmid, bm.x, bm.y, bm.z)
+    });
+
+    // GetMyJournalDetails emits creatorID/created/expiry/deadspace/note and never leaks mid_other's bookmark.
+    let journal = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+        .await
+        .expect("GetMyJournalDetails");
+    let PyRep::Tuple(j_parts) = journal else {
+        panic!("expected tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(ref j_missions) = j_parts[0] else {
+        panic!("expected missions list");
+    };
+    let kill_row = j_missions
+        .iter()
+        .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(mid_kill as i64)))
+        .expect("mid_kill present in journal");
+    let Some(PyRep::List(bms)) = kill_row.dict_get("bookmarks") else {
+        panic!("expected bookmarks list");
+    };
+    assert_eq!(bms.len(), 1, "must include only mid_kill's pocket bookmark");
+    assert_eq!(bms[0].dict_get("bookmarkID"), Some(&PyRep::Integer(bm_id)));
+    assert_eq!(bms[0].dict_get("creatorID"), Some(&PyRep::None));
+    assert_eq!(bms[0].dict_get("expiry"), Some(&PyRep::None));
+    assert_eq!(bms[0].dict_get("deadspace"), Some(&PyRep::Integer(1)));
+    assert_eq!(bms[0].dict_get("note"), Some(&PyRep::String(String::new())));
+    assert_eq!(bms[0].dict_get("itemID"), Some(&PyRep::None));
+    assert_eq!(bms[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+    assert_eq!(bms[0].dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+    assert_eq!(bms[0].dict_get("locationType"), Some(&PyRep::String("dungeon".into())));
+    let expected_ft = (now as i64 + 11_644_473_600) * 10_000_000;
+    assert_eq!(bms[0].dict_get("created"), Some(&PyRep::Integer(expected_ft)));
+
+    // GetMissionObjectiveInfo and GetMissionBriefingInfo expose warpable dungeon location + coords.
+    for method in ["GetMissionObjectiveInfo", "GetMissionBriefingInfo"] {
+        let info = call_agent_mgr(
+            &ctx,
+            &mut sess,
+            method,
+            &[PyRep::Integer(ag.agent_id), PyRep::Integer(mid_kill as i64)],
+            &kw,
+        )
+        .await
+        .expect(method);
+        let Some(PyRep::List(locs)) = info.dict_get("locations") else {
+            panic!("{method} must include locations list");
+        };
+        assert!(
+            locs.iter()
+                .any(|l| l.dict_get("locationType") == Some(&PyRep::String("agenthomebase".into()))),
+            "{method} locations must keep agenthomebase"
+        );
+        let dun_loc = locs
+            .iter()
+            .find(|l| l.dict_get("locationType") == Some(&PyRep::String("dungeon".into())))
+            .expect("locations must include warpable dungeon entry");
+        assert_eq!(dun_loc.dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+        assert_eq!(dun_loc.dict_get("solarsystemID"), Some(&PyRep::Integer(sys_id as i64)));
+        assert_eq!(dun_loc.dict_get("stationID"), Some(&PyRep::None));
+        assert_eq!(dun_loc.dict_get("typeID"), Some(&PyRep::Integer(5)));
+        assert_eq!(dun_loc.dict_get("BookmarkID"), Some(&PyRep::Integer(bm_id)));
+        assert_eq!(
+            dun_loc.dict_get("coords"),
+            Some(&PyRep::Tuple(vec![
+                PyRep::Real(bx),
+                PyRep::Real(by),
+                PyRep::Real(bz),
+            ]))
+        );
+
+        let Some(PyRep::List(dungeons)) = info.dict_get("dungeons") else {
+            panic!("{method} must include dungeons list");
+        };
+        if dun_id.is_some() {
+            assert_eq!(dungeons.len(), 1);
+            assert_eq!(dungeons[0].dict_get("locationID"), Some(&PyRep::Integer(sys_id as i64)));
+            assert_eq!(dungeons[0].dict_get("stationID"), Some(&PyRep::None));
+            assert_eq!(dungeons[0].dict_get("typeID"), Some(&PyRep::Integer(5)));
+            let inner_loc = dungeons[0]
+                .dict_get("location")
+                .expect("dungeons[0].location present");
+            assert_eq!(
+                inner_loc.dict_get("locationType"),
+                Some(&PyRep::String("dungeon".into()))
+            );
+            assert_eq!(
+                inner_loc.dict_get("coords"),
+                Some(&PyRep::Tuple(vec![
+                    PyRep::Real(bx),
+                    PyRep::Real(by),
+                    PyRep::Real(bz),
+                ]))
+            );
+        }
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, mid_kill)) {
+            m.npcs_remaining = 0;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(char_id);
+    call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(ag.agent_id), PyRep::Integer(mid_kill as i64)],
+        &kw,
+    )
+    .await
+    .expect("DoAction(6) complete must succeed");
+
+    let complete_notifs = ctx.drain_notifications_for_char(char_id);
+    let complete_dialogue = complete_notifs
+        .iter()
+        .find(|n| n.event == "OnIncomingAgentMessage")
+        .expect("complete must emit OnIncomingAgentMessage for Telecom");
+    let complete_args_dbg = format!("{:?}", complete_dialogue.args);
+    assert!(
+        complete_args_dbg.contains("UI/Agents/Dialogue/StandardMissionCompleted"),
+        "complete dialogue must use StandardMissionCompleted label: {complete_args_dbg}"
+    );
+    assert!(
+        complete_args_dbg.contains("The Guristas Spies")
+            && !complete_args_dbg.contains("agent.missionTemplatizedContent_"),
+        "complete dialogue must include readable mission title instead of raw content_template key: {complete_args_dbg}"
+    );
+    let complete_tx = complete_notifs
+        .iter()
+        .find(|n| n.event == "OnIncomingTransmission")
+        .expect("complete must emit OnIncomingTransmission for Telecom");
+    let complete_tx_dbg = format!("{:?}", complete_tx.args);
+    assert!(
+        complete_tx_dbg.contains("Well done!")
+            && !complete_tx_dbg.contains("agent.missionTemplatizedContent_"),
+        "complete transmission must emit readable completion prose instead of content_template key: {complete_tx_dbg}"
+    );
+}
+
+// Regression coverage for #1368 (F-2: Data Center / R&D journal/objective suppression of dungeon warps and R&D completion).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_center_and_rnd_objective_and_journal_suppress_dungeons_and_auto_complete() {
+    let mut ctx = test_ctx();
+    ctx.set_clock(std::sync::Arc::new(
+        eve_db::clock::VirtualServerClock::with_fixed_base(1_800_000_000),
+    ));
+    let char_id = 90_000_001_i64;
+    let dc_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 5 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("Data Center agent in SDE");
+    let rnd_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("R&D agent in SDE");
+
+    let mid_dc = 999_901_u32;
+    let mid_rnd = 999_902_u32;
+    let mut sde = (*ctx.sde).clone();
+    let dun_id = sde.dungeons.keys().copied().min();
+    sde.missions.insert(
+        mid_dc,
+        eve_sde::MissionTemplate {
+            mission_id: mid_dc,
+            title: "Tag Turn-In".into(),
+            is_courier: false,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicKillMission".into()),
+            dungeon_id: dun_id,
+        },
+    );
+    sde.missions.insert(
+        mid_rnd,
+        eve_sde::MissionTemplate {
+            mission_id: mid_rnd,
+            title: "R&D Synthesis".into(),
+            is_courier: true,
+            lp_alpha: 0,
+            lp_omega: 0,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_Research".into()),
+            dungeon_id: dun_id,
+        },
+    );
+    ctx.sde = std::sync::Arc::new(sde);
+
+    let dc_sys = dc_ag.solar_system_id.unwrap();
+    let rnd_sys = rnd_ag.solar_system_id.unwrap();
+    let now = ctx.now_unix();
+    let bm_dc_id = 888_999_101_i64;
+    let bm_rnd_id = 888_999_102_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        snap.bookmarks.insert(
+            bm_dc_id,
+            BookmarkRecord {
+                bookmark_id: bm_dc_id,
+                owner_id: char_id,
+                solar_system_id: dc_sys,
+                label: "DC Turn-in".into(),
+                x: 100.0,
+                y: 200.0,
+                z: 300.0,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm_rnd_id,
+            BookmarkRecord {
+                bookmark_id: bm_rnd_id,
+                owner_id: char_id,
+                solar_system_id: rnd_sys,
+                label: "R&D Turn-in".into(),
+                x: 400.0,
+                y: 500.0,
+                z: 600.0,
+                item_id: None,
+                memo: "Mission Pocket Destination".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mid_dc),
+            make_active_mission(mid_dc, char_id, dc_ag.agent_id, dc_sys, "Accepted", Some(bm_dc_id)),
+        );
+        let mut dc_meta = make_meta(mid_dc, dc_ag.agent_id, now + 3_600, Some(now + 7_200));
+        dc_meta.required_delivery_type_id = Some(17202);
+        dc_meta.required_delivery_qty = 1;
+        save_mission_meta(snap, char_id, &dc_meta);
+
+        snap.active_missions.insert(
+            (char_id, mid_rnd),
+            make_active_mission(mid_rnd, char_id, rnd_ag.agent_id, rnd_sys, "Accepted", Some(bm_rnd_id)),
+        );
+        let mut rnd_meta = make_meta(mid_rnd, rnd_ag.agent_id, now + 3_600, Some(now + 7_200));
+        rnd_meta.required_delivery_type_id = Some(34);
+        rnd_meta.required_delivery_qty = 300;
+        save_mission_meta(snap, char_id, &rnd_meta);
+    });
+
+    let mut sess = char_session(char_id, Some(dc_sys), dc_ag.station_id);
+    let kw = HashMap::new();
+    let journal = call_agent_mgr(&ctx, &mut sess, "GetMyJournalDetails", &[], &kw)
+        .await
+        .expect("GetMyJournalDetails");
+    let PyRep::Tuple(j_parts) = journal else {
+        panic!("expected tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(ref j_missions) = j_parts[0] else {
+        panic!("expected missions list");
+    };
+    for mid in [mid_dc, mid_rnd] {
+        let row = j_missions
+            .iter()
+            .find(|r| r.dict_get("missionID") == Some(&PyRep::Integer(mid as i64)))
+            .expect("mission present in journal");
+        let Some(PyRep::List(bms)) = row.dict_get("bookmarks") else {
+            panic!("expected bookmarks list");
+        };
+        assert_eq!(bms.len(), 1);
+        assert_eq!(
+            bms[0].dict_get("hint"),
+            Some(&PyRep::String("UI/Agents/MissionTypes/Trade".into())),
+            "Data Center / R&D journal hint must not classify as Encounter or Mining"
+        );
+        assert_eq!(
+            bms[0].dict_get("locationType"),
+            Some(&PyRep::String("objective.destination".into()))
+        );
+        assert_eq!(bms[0].dict_get("deadspace"), Some(&PyRep::Integer(0)));
+    }
+
+    let dc_obj = call_agent_mgr(
+        &ctx,
+        &mut sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(dc_ag.agent_id), PyRep::Integer(mid_dc as i64)],
+        &kw,
+    )
+    .await
+    .expect("DC GetMissionObjectiveInfo");
+    assert_eq!(dc_obj.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
+    assert_eq!(dc_obj.dict_get("dungeons"), Some(&PyRep::List(Vec::new())));
+    let expected_dc_tag = ctx
+        .sde
+        .types
+        .get(&17202)
+        .map(|t| t.name.as_str())
+        .unwrap_or("Pirate Tag");
+    assert!(
+        dc_obj
+            .dict_get("objectives")
+            .and_then(PyRep::as_str)
+            .is_some_and(|s| s.contains(expected_dc_tag)),
+        "DC objective must require {expected_dc_tag}: {:?}",
+        dc_obj.dict_get("objectives")
+    );
+    let Some(PyRep::List(dc_locs)) = dc_obj.dict_get("locations") else {
+        panic!("expected DC locations");
+    };
+    assert!(
+        dc_locs
+            .iter()
+            .all(|l| l.dict_get("locationType") != Some(&PyRep::String("dungeon".into()))),
+        "DC locations must not emit deadspace dungeon location"
+    );
+
+    let mut rnd_sess = char_session(char_id, Some(rnd_sys), rnd_ag.station_id);
+    let rnd_obj = call_agent_mgr(
+        &ctx,
+        &mut rnd_sess,
+        "GetMissionObjectiveInfo",
+        &[PyRep::Integer(rnd_ag.agent_id), PyRep::Integer(mid_rnd as i64)],
+        &kw,
+    )
+    .await
+    .expect("R&D GetMissionObjectiveInfo");
+    assert_eq!(rnd_obj.dict_get("completionStatus"), Some(&PyRep::Integer(0)));
+    assert_eq!(rnd_obj.dict_get("dungeons"), Some(&PyRep::List(Vec::new())));
+    assert!(
+        rnd_obj
+            .dict_get("objectives")
+            .and_then(PyRep::as_str)
+            .is_some_and(|s| s.contains("Tritanium")),
+        "R&D objective must require Tritanium: {:?}",
+        rnd_obj.dict_get("objectives")
+    );
+    let Some(PyRep::List(rnd_locs)) = rnd_obj.dict_get("locations") else {
+        panic!("expected R&D locations");
+    };
+    assert!(
+        rnd_locs
+            .iter()
+            .all(|l| l.dict_get("locationType") != Some(&PyRep::String("dungeon".into()))),
+        "R&D locations must not emit deadspace dungeon location"
+    );
 }

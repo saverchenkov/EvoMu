@@ -655,3 +655,356 @@ async fn heraldry_colocation_and_basic_courier_cargo_contract_hold() {
         );
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn classify_rnd_turnin_without_meta_and_complete_without_courier_cargo() {
+    let ctx = test_ctx();
+    let rnd_ag = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 4 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .cloned()
+        .expect("SDE must contain an R&D agent with station");
+    let courier_tmpl = ctx
+        .sde
+        .missions
+        .values()
+        .filter(|m| {
+            let ct = m.content_template.as_deref().unwrap_or_default();
+            m.is_courier && !ct.contains("Trade") && !ct.contains("Heraldry")
+        })
+        .min_by_key(|m| m.mission_id)
+        .cloned()
+        .expect("SDE must contain a BasicCourier mission");
+
+    let arch_without_meta = classify_mission_archetype(Some(&courier_tmpl), None, Some(&rnd_ag));
+    assert!(arch_without_meta.is_rnd_turnin);
+    assert!(!arch_without_meta.is_courier);
+
+    let char_id = 90_000_001_i64;
+    let rnd_sys = rnd_ag.solar_system_id.unwrap();
+    let rnd_st = rnd_ag.station_id.unwrap();
+    move_demo_character(&ctx, char_id, rnd_sys, Some(rnd_st));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        snap.active_missions.insert(
+            (char_id, courier_tmpl.mission_id),
+            ActiveMissionRecord {
+                mission_id: courier_tmpl.mission_id,
+                character_id: char_id,
+                agent_id: rnd_ag.agent_id,
+                solar_system_id: rnd_sys,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        // Intentionally do NOT insert MissionTimingAndCargoMeta (meta_opt == None) to cover #1368 F-3.
+        snap.items.insert(
+            990_701,
+            eve_db::InventoryItemRecord {
+                item_id: 990_701,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: rnd_st,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: rnd_tritanium_required_qty(rnd_ag.level) as i32,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut sess = docked_session(char_id, rnd_sys, Some(rnd_st));
+    let bound = bound_agent(char_id, rnd_ag.agent_id);
+    let kw = HashMap::new();
+    let res = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[
+            PyRep::Integer(6),
+            PyRep::Integer(rnd_ag.agent_id),
+            PyRep::Integer(courier_tmpl.mission_id as i64),
+        ],
+        &kw,
+    )
+    .await
+    .expect("DoAction(6) must be handled")
+    .expect("R&D turn-in completion without meta must not demand courier cargo");
+    assert_eq!(res.dict_get("state"), Some(&PyRep::String("Completed".into())));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fw_initial_offer_target_sys_courier_origin_sys_and_epic_arc_v24_briefing_regressions() {
+    let mut ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+
+    // Clone SDE with deterministic fixtures covering #1362 (BF-1204-01, BF-1204-02) and #1368 (F-1).
+    let mut sde = (*ctx.sde).clone();
+    let home_sys_tmpl = sde
+        .solar_systems
+        .get(&30_000_142)
+        .or_else(|| sde.solar_systems.values().next())
+        .cloned()
+        .expect("SDE must contain at least one solar system");
+    let home_sys = home_sys_tmpl.solar_system_id;
+    let home_sys_name = home_sys_tmpl.name.clone();
+
+    let mut warzone_sys = home_sys_tmpl.clone();
+    warzone_sys.solar_system_id = 30_002_062;
+    warzone_sys.name = "Onnamon".into();
+    sde.solar_systems.entry(30_002_062).or_insert(warzone_sys);
+    let warzone_sys_name = sde.solar_systems[&30_002_062].name.clone();
+    assert_ne!(warzone_sys_name, home_sys_name);
+
+    let dest_sys_id = 30_002_097_u32;
+    if dest_sys_id != home_sys {
+        let mut dest_sys = home_sys_tmpl.clone();
+        dest_sys.solar_system_id = dest_sys_id;
+        dest_sys.name = "Mehatoor".into();
+        sde.solar_systems.entry(dest_sys_id).or_insert(dest_sys);
+    }
+    let dest_sys_name = sde.solar_systems[&dest_sys_id].name.clone();
+    assert_ne!(home_sys_name, dest_sys_name);
+
+    let st_tmpl = sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == home_sys)
+        .or_else(|| sde.stations.values().next())
+        .cloned()
+        .expect("SDE must contain at least one station");
+    let mut origin_st = st_tmpl.clone();
+    origin_st.station_id = 69_990_001;
+    origin_st.solar_system_id = home_sys;
+    origin_st.name = "Origin Hub".into();
+    sde.stations.insert(origin_st.station_id, origin_st.clone());
+
+    let mut dest_st = st_tmpl;
+    dest_st.station_id = 69_990_002;
+    dest_st.solar_system_id = dest_sys_id;
+    dest_st.name = "Dest Hub".into();
+    sde.stations.insert(dest_st.station_id, dest_st.clone());
+
+    let fw_agent_id = 3_999_181_i64;
+    let fw_corp_id = 1_000_181_i64;
+    sde.agents.insert(
+        fw_agent_id,
+        eve_sde::AgentInfo {
+            agent_id: fw_agent_id,
+            name: "FDU Agent".into(),
+            corporation_id: fw_corp_id,
+            station_id: Some(origin_st.station_id),
+            solar_system_id: Some(home_sys),
+            level: 1,
+            division_id: 24,
+            agent_type_id: 9,
+            is_locator: false,
+            research_skills: Vec::new(),
+        },
+    );
+
+    let talk_agent_id = 3_999_182_i64;
+    sde.agents.insert(
+        talk_agent_id,
+        eve_sde::AgentInfo {
+            agent_id: talk_agent_id,
+            name: "Regular Contact".into(),
+            corporation_id: 1_000_009,
+            station_id: Some(origin_st.station_id),
+            solar_system_id: Some(home_sys),
+            level: 2,
+            division_id: 24,
+            agent_type_id: 2,
+            is_locator: false,
+            research_skills: Vec::new(),
+        },
+    );
+
+    let epic_agent_id = 3_999_183_i64;
+    sde.agents.insert(
+        epic_agent_id,
+        eve_sde::AgentInfo {
+            agent_id: epic_agent_id,
+            name: "Sister Alitura".into(),
+            corporation_id: 1_000_130,
+            station_id: Some(origin_st.station_id),
+            solar_system_id: Some(home_sys),
+            level: 1,
+            division_id: 24,
+            agent_type_id: 10,
+            is_locator: false,
+            research_skills: Vec::new(),
+        },
+    );
+
+    sde.epic_arcs.insert(
+        29,
+        eve_sde::EpicArcTemplate {
+            epic_arc_id: 29,
+            name: "The Blood-Stained Stars".into(),
+            faction_id: Some(500_003),
+            restart_interval: Some(90),
+            missions_count: 50,
+        },
+    );
+
+    let fw_kill_mid = 1_u32;
+    let talk_mid = 999_881_u32;
+    let epic_mid = 14_117_u32;
+    let courier_mid = 999_882_u32;
+    sde.missions.insert(
+        fw_kill_mid,
+        eve_sde::MissionTemplate {
+            mission_id: fw_kill_mid,
+            title: "FW Strike".into(),
+            is_courier: false,
+            lp_alpha: 100,
+            lp_omega: 100,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicKillMission".into()),
+            dungeon_id: None,
+        },
+    );
+    sde.missions.insert(
+        talk_mid,
+        eve_sde::MissionTemplate {
+            mission_id: talk_mid,
+            title: "Meet Contact".into(),
+            is_courier: false,
+            lp_alpha: 50,
+            lp_omega: 50,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_TalkToAgentMission".into()),
+            dungeon_id: None,
+        },
+    );
+    sde.missions.insert(
+        epic_mid,
+        eve_sde::MissionTemplate {
+            mission_id: epic_mid,
+            title: "A Beacon of Hope".into(),
+            is_courier: false,
+            lp_alpha: 50,
+            lp_omega: 50,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_EpicArcTalkToAgent".into()),
+            dungeon_id: None,
+        },
+    );
+    sde.missions.insert(
+        courier_mid,
+        eve_sde::MissionTemplate {
+            mission_id: courier_mid,
+            title: "Cross-System Haul".into(),
+            is_courier: true,
+            lp_alpha: 50,
+            lp_omega: 50,
+            has_standing_rewards: true,
+            content_template: Some("agent.missionTemplatizedContent_BasicCourierMission".into()),
+            dungeon_id: None,
+        },
+    );
+
+    let fw_fac_id = sde
+        .factions
+        .values()
+        .find(|f| f.militia_corporation_id == Some(fw_corp_id))
+        .map(|f| f.faction_id as i64);
+    ctx.sde = Arc::new(sde);
+
+    // 1. BF-1204-01: Epic Arc briefing uses V24 arc name; non-Epic-Arc TalkToAgent never emits "Epic Arc".
+    let epic_brief =
+        build_mission_briefing_text(&ctx, epic_agent_id, epic_mid, "A Beacon of Hope", home_sys, None);
+    assert!(
+        epic_brief.contains("The Blood-Stained Stars") && !epic_brief.contains("Epic Arc 4"),
+        "Epic Arc briefing must resolve V24 arc name: {epic_brief}"
+    );
+    let non_epic_talk_brief =
+        build_mission_briefing_text(&ctx, talk_agent_id, talk_mid, "Meet Contact", home_sys, None);
+    assert!(
+        non_epic_talk_brief.starts_with("Level 2 mission liaison")
+            && !non_epic_talk_brief.contains("Epic Arc"),
+        "non-Epic-Arc TalkToAgent briefing must not emit Epic Arc prefix: {non_epic_talk_brief}"
+    );
+
+    // 2. BF-1204-02 (courier origin system): uses origin_station's solar system even when sys_id == dest_sys.
+    let courier_meta = crate::services::agents_missions::agents_standings_arcs::MissionTimingAndCargoMeta {
+        mission_id: courier_mid,
+        agent_id: talk_agent_id,
+        offered_at_unix: 100,
+        offer_expiry_unix: 200,
+        accepted_at_unix: None,
+        accept_expiry_unix: None,
+        bonus_expiry_unix: None,
+        completed_at_unix: None,
+        required_delivery_type_id: Some(3814),
+        required_delivery_qty: 10,
+        granted_courier_item_id: None,
+        granted_courier_qty: 0,
+        is_anomic_burner: false,
+        chosen_branch: None,
+        destination_station_id: Some(dest_st.station_id),
+        origin_station_id: Some(origin_st.station_id),
+        offered_level: Some(2),
+    };
+    let courier_brief = build_mission_briefing_text(
+        &ctx,
+        talk_agent_id,
+        courier_mid,
+        "Cross-System Haul",
+        dest_sys_id,
+        Some(&courier_meta),
+    );
+    assert!(
+        courier_brief.contains(&format!("from Origin Hub ({home_sys_name}) to Dest Hub ({dest_sys_name})")),
+        "Courier briefing must label origin station with origin system name: {courier_brief}"
+    );
+
+    // 3. BF-1204-02 (FW DoAction(2)): initial offer resolves encounter/objectives using warzone target_sys.
+    move_demo_character(&ctx, char_id, home_sys, Some(origin_st.station_id));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.war_faction_id = fw_fac_id;
+            ch.standings.insert(fw_agent_id, 10.0);
+        }
+    });
+    let mut sess = docked_session(char_id, home_sys, Some(origin_st.station_id));
+    let bound = bound_agent(char_id, fw_agent_id);
+    let kw = HashMap::new();
+    let offer = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "DoAction",
+        &[PyRep::Integer(2), PyRep::Integer(fw_agent_id)],
+        &kw,
+    )
+    .await
+    .expect("FW DoAction(2) must be handled")
+    .expect("FW DoAction(2) must succeed");
+
+    let offered_mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    assert_eq!(offered_mid, fw_kill_mid);
+    let objectives = offer.dict_get("objectives").and_then(PyRep::as_str).unwrap_or("");
+    assert!(
+        objectives.contains(&warzone_sys_name) && !objectives.contains(&home_sys_name),
+        "FW initial offer objectives must name warzone system {warzone_sys_name} instead of home system {home_sys_name}: {objectives}"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.active_missions.get(&(char_id, offered_mid)).map(|m| m.solar_system_id),
+            Some(30_002_062)
+        );
+    });
+}
