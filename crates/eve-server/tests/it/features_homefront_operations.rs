@@ -29,16 +29,20 @@ use std::collections::HashMap;
 
 async fn setup_pilot_in_space(ctx: &ServerContext, conn_id: u64, char_id: i64, ship_id: i64, ship_type_id: u32, sys_id: u32, pos: DVec3) -> SessionState {
     let mut sess = SessionState::new(conn_id);
-    let uid = (char_id - 90_000_000).max(1) as u64;
-    ctx.db.with_mut_snapshot(|s| {
+    let uid = ctx.db.with_mut_snapshot(|s| {
         if !s.characters.contains_key(&char_id) {
             let mut base = s.characters[&90_000_001].clone();
             base.character_id = char_id;
             base.name = format!("Pilot_{char_id}");
+            base.user_id = if char_id > 90_000_000 {
+                (char_id - 90_000_000) as u64
+            } else {
+                100_000_u64 + char_id.unsigned_abs()
+            };
             s.characters.insert(char_id, base);
         }
+        let uid = s.characters[&char_id].user_id;
         if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.user_id = uid;
             ch.solar_system_id = sys_id;
             ch.active_ship_id = ship_id;
             ch.station_id = None;
@@ -64,6 +68,7 @@ async fn setup_pilot_in_space(ctx: &ServerContext, conn_id: u64, char_id: i64, s
             ship_id,
             InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: sys_id as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() },
         );
+        uid
     });
     let _ = ctx.db.acquire_online_lock(uid, conn_id, Some(char_id), true, ctx.now_unix());
     sess.user_id = Some(uid);
@@ -1386,6 +1391,14 @@ mod homefront_operations_it {
         });
         let _ = ctx.drain_notifications_for_char(miner_cid);
         let jita_h = ctx.systems.get_or_spawn(jita);
+        let mut miner_cs = ctx.build_type_combat_state(32_880);
+        miner_cs.shield_hp = 5_000_000.0;
+        miner_cs.max_shield_hp = 5_000_000.0;
+        miner_cs.armor_hp = 5_000_000.0;
+        miner_cs.max_armor_hp = 5_000_000.0;
+        miner_cs.structure_hp = 5_000_000.0;
+        miner_cs.max_structure_hp = 5_000_000.0;
+        let _ = jita_h.set_combat_state(miner_ship, miner_cs).await;
 
         for w in 1..=9_u8 {
             // Clear mining hold & cargo between waves so Venture (5,000 m3 MiningHold) never stalls on CargoFull.
@@ -1420,7 +1433,7 @@ mod homefront_operations_it {
                     if rem <= 0 {
                         break;
                     }
-                    let res = ctx
+                    let _ = ctx
                         .dispatch_rpc(
                             &mut miner_sess,
                             "dogmaIM",
@@ -1430,10 +1443,8 @@ mod homefront_operations_it {
                             &kw,
                             None,
                         )
-                        .await;
-                    if res.is_err() {
-                        break;
-                    }
+                        .await
+                        .unwrap_or_else(|e| panic!("dogmaIM.Mine failed on wave {w} rock {rid}: {e:?}"));
                 }
             }
 
@@ -1608,10 +1619,11 @@ mod homefront_operations_it {
         }
 
         // Unentered pilot rejected with GateNotEntered
-        let err_unentered = execute_wreck_salvage_cycle(&ctx, jita, unentered_cid, unentered_ship, wreck_0, Some(25_861))
+        let res_unentered = execute_wreck_salvage_cycle(&ctx, jita, unentered_cid, unentered_ship, wreck_0, Some(25_861))
             .await
-            .expect_err("unentered pilot must fail GateNotEntered on Homefront wreck");
-        assert_eq!(err_unentered.code, "GateNotEntered");
+            .expect("unentered Homefront salvage cycle returns non-salvaged status");
+        assert_eq!(res_unentered.dict_get("salvaged"), Some(&PyRep::Bool(false)));
+        assert_eq!(res_unentered.dict_get("reason"), Some(&PyRep::String("GateNotEntered".into())));
 
         // Fill entered Coercer cargo so capacity check fails with NotEnoughCargoSpace on successful salvage roll
         seed_item(&ctx, 743_399_999, 34, salv_cid, salv_ship, InventoryFlag::Cargo, 500_000, false);
