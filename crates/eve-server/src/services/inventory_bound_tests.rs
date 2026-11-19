@@ -3043,3 +3043,483 @@ async fn gh_1307_get_inventory_from_id_supports_docked_station_and_current_solar
     assert_eq!(err_code(&docked_sess, &b_station, 60_999_999), "FakeItemNotFound");
     assert_eq!(err_code(&docked_sess, &b_station, 199_888_777), "FakeItemNotFound");
 }
+
+#[tokio::test]
+async fn issue_1371_removed_starter_ship_inventory_stub_and_guards() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let other_demo_char = 90_000_002_i64;
+    let third_char = 95_371_003_i64;
+    let station_id = 60_002_956_i64; // Perimeter IX - Caldari Constructions Production Plant (SDE)
+    let remote_station_id = 60_003_760_i64; // Jita 4-4
+    let system_id = 30_000_144_u32; // Perimeter
+    let removed_starter_id = 100_000_001_i64;
+    let venture_id = 1_897_814_543_i64;
+    let capsule_id = 200_371_001_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&removed_starter_id);
+        snap.items.retain(|_, item| item.location_id != removed_starter_id);
+        snap.items.insert(
+            venture_id,
+            InventoryItemRecord {
+                item_id: venture_id,
+                type_id: 32_880, // Venture
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            capsule_id,
+            InventoryItemRecord {
+                item_id: capsule_id,
+                type_id: 670, // Capsule
+                owner_id: char_id,
+                location_id: i64::from(system_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = system_id;
+            ch.active_ship_id = venture_id;
+        }
+        let mut ch3 = snap.characters[&char_id].clone();
+        ch3.character_id = third_char;
+        ch3.user_id = third_char as u64;
+        ch3.name = "Foreign Observer".into();
+        ch3.station_id = Some(station_id);
+        ch3.solar_system_id = system_id;
+        ch3.active_ship_id = 0;
+        snap.characters.insert(third_char, ch3);
+    });
+
+    let mut docked_sess = SessionState {
+        session_id: 13_710,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(system_id),
+        station_id: Some(station_id),
+        ship_id: Some(venture_id),
+        ..Default::default()
+    };
+    let space_venture_sess = SessionState {
+        session_id: 13_711,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(system_id),
+        station_id: None,
+        ship_id: Some(venture_id),
+        ..Default::default()
+    };
+    let space_capsule_sess = SessionState {
+        session_id: 13_712,
+        user_id: Some(1),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(system_id),
+        station_id: None,
+        ship_id: Some(capsule_id),
+        ..Default::default()
+    };
+    let space_no_ship_sess = SessionState {
+        ship_id: None,
+        ..space_capsule_sess.clone()
+    };
+    let unauth_docked_sess = SessionState {
+        user_id: None,
+        ..docked_sess.clone()
+    };
+    let third_docked_sess = SessionState {
+        session_id: 13_713,
+        user_id: Some(third_char as u64),
+        character_id: Some(third_char),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(system_id),
+        station_id: Some(station_id),
+        ship_id: None,
+        ..Default::default()
+    };
+    let other_demo_docked_sess = SessionState {
+        session_id: 13_714,
+        user_id: Some(2),
+        character_id: Some(other_demo_char),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(system_id),
+        station_id: Some(station_id),
+        ship_id: Some(100_000_002),
+        ..Default::default()
+    };
+
+    // 1. Stub resolver boundaries: Rifter (587) only for owner when docked or in non-capsule hull.
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(&ctx, &docked_sess, char_id, removed_starter_id),
+        Some(587)
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &space_venture_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        Some(587)
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &space_capsule_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &space_no_ship_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &unauth_docked_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &third_docked_sess,
+            third_char,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &docked_sess,
+            char_id,
+            100_000_002,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &docked_sess,
+            char_id,
+            199_999_999,
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_missing_ship_stub_type_id(&ctx, char_id, removed_starter_id, true, true, None),
+        Some(587)
+    );
+
+    // 2. Docked `GetInventoryFromId(100_000_001, 0)` + `GetSelfInvItem` + `GetAvailableTurretSlots` + `List`.
+    let b_station = bound_invbroker(char_id, station_id);
+    let docked_inv_rep = handle(
+        &ctx,
+        &docked_sess,
+        Some(&b_station),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+        None,
+    )
+    .expect("GetInventoryFromId handled")
+    .expect("docked GetInventoryFromId(100_000_001, 0) must not fail with FakeItemNotFound");
+    let stub_bid = docked_inv_rep
+        .as_i64()
+        .filter(|&bid| bid > 0)
+        .expect("stub bound id") as u64;
+    let verified_entry = ctx
+        .verify_bound_object(&docked_sess, stub_bid)
+        .expect("docked stub sub-object must pass authorize_invbroker_binding");
+    assert_eq!(verified_entry.service, "invbroker");
+    assert_eq!(verified_entry.object_id, removed_starter_id);
+
+    // Foreign and in-space-capsule sessions cannot verify or bind the removed starter ship stub.
+    assert_eq!(
+        ctx.verify_bound_object(&third_docked_sess, stub_bid)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.bind_object(&third_docked_sess, "invbroker", removed_starter_id)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+    assert_eq!(
+        ctx.bind_object(&space_capsule_sess, "invbroker", removed_starter_id)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+    assert_eq!(
+        ctx.bind_object(&docked_sess, "invbroker", 199_999_999)
+            .unwrap_err()
+            .code,
+        "BindAuthorizationDenied" // rpc-lint: allow error code assertion
+    );
+
+    // `should_invalidate_bound_object`: survives non-capsule `"undock"` / `"dock"`, invalidates on
+    // in-space `"ship_loss"` into a capsule.
+    ctx.invalidate_bound_objects_for_session_transition(char_id, system_id, None, "undock");
+    let mut undocked_same_sess = docked_sess.clone();
+    undocked_same_sess.station_id = None;
+    assert!(ctx.verify_bound_object(&undocked_same_sess, stub_bid).is_ok());
+
+    ctx.invalidate_bound_objects_for_session_transition(
+        char_id,
+        system_id,
+        Some(station_id),
+        "dock",
+    );
+    assert!(ctx.verify_bound_object(&docked_sess, stub_bid).is_ok());
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.active_ship_id = capsule_id;
+        }
+    });
+    ctx.invalidate_bound_objects_for_session_transition(char_id, system_id, None, "ship_loss");
+    assert_eq!(
+        ctx.verify_bound_object(&docked_sess, stub_bid)
+            .unwrap_err()
+            .code,
+        "InvalidBoundObject"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.active_ship_id = venture_id;
+        }
+    });
+
+    let b_stub = bound_invbroker(char_id, removed_starter_id);
+    let self_row = handle(
+        &ctx,
+        &docked_sess,
+        Some(&b_stub),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .expect("GetSelfInvItem handled")
+    .expect("docked GetSelfInvItem on removed starter ship stub");
+    assert_eq!(self_row.dbrow_get("itemID"), Some(&PyRep::Integer(removed_starter_id)));
+    assert_eq!(self_row.dbrow_get("typeID"), Some(&PyRep::Integer(587)));
+    assert_eq!(self_row.dbrow_get("ownerID"), Some(&PyRep::Integer(char_id)));
+    assert_eq!(self_row.dbrow_get("locationID"), Some(&PyRep::Integer(station_id)));
+    assert_eq!(self_row.dbrow_get("flagID"), Some(&PyRep::Integer(0)));
+    assert_eq!(self_row.dbrow_get("quantity"), Some(&PyRep::Integer(-1)));
+    assert_eq!(self_row.dbrow_get("groupID"), Some(&PyRep::Integer(25)));
+    assert_eq!(self_row.dbrow_get("categoryID"), Some(&PyRep::Integer(6)));
+    assert_eq!(self_row.dbrow_get("customInfo"), Some(&PyRep::String("Rifter".into())));
+
+    let free_turrets = handle(
+        &ctx,
+        &docked_sess,
+        Some(&b_stub),
+        "invbroker",
+        "GetAvailableTurretSlots",
+        &[],
+        None,
+    )
+    .expect("GetAvailableTurretSlots handled")
+    .expect("docked GetAvailableTurretSlots on removed starter ship stub");
+    assert_eq!(free_turrets, PyRep::Integer(0));
+
+    let listed = crate::services::inventory_fitting::handle(
+        &ctx,
+        &mut docked_sess,
+        Some(&b_stub),
+        "invbroker",
+        "List",
+        &[],
+        &HashMap::new(),
+    )
+    .await
+    .expect("List handled")
+    .expect("List on removed starter ship stub returns empty CRowset");
+    let PyRep::ObjectEx { list: rows, .. } = listed else {
+        panic!("expected CRowset ObjectEx from List, got {listed:?}");
+    };
+    assert!(rows.is_empty());
+
+    // 3. Undocked in non-capsule Venture also resolves `100_000_001` cleanly with solar-system location.
+    let b_sys = bound_invbroker(char_id, i64::from(system_id));
+    assert!(
+        handle(
+            &ctx,
+            &space_venture_sess,
+            Some(&b_sys),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .is_ok()
+    );
+    let space_self_row = handle(
+        &ctx,
+        &space_venture_sess,
+        Some(&b_stub),
+        "invbroker",
+        "GetSelfInvItem",
+        &[],
+        None,
+    )
+    .unwrap()
+    .expect("in-space non-capsule GetSelfInvItem on removed starter ship stub");
+    assert_eq!(
+        space_self_row.dbrow_get("locationID"),
+        Some(&PyRep::Integer(i64::from(system_id)))
+    );
+
+    // 4. Negative / security guards:
+    //    (a) In-space capsule right after ship loss still raises `FakeItemNotFound` (`abyssal_real_client_sync` HoldTracker).
+    let cap_inv_err = handle(
+        &ctx,
+        &space_capsule_sess,
+        Some(&b_sys),
+        "invbroker",
+        "GetInventoryFromId",
+        &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+        None,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(cap_inv_err.code, "FakeItemNotFound");
+    assert_eq!(
+        handle(&ctx, &space_capsule_sess, Some(&b_stub), "invbroker", "GetSelfInvItem", &[], None)
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "UnimplementedRPC"
+    );
+
+    //    (b) Foreign / other demo characters cannot obtain `100_000_001` stub when missing.
+    for (foreign_sess, foreign_char) in [
+        (&third_docked_sess, third_char),
+        (&other_demo_docked_sess, other_demo_char),
+    ] {
+        let foreign_bound = bound_invbroker(foreign_char, station_id);
+        let err = handle(
+            &ctx,
+            foreign_sess,
+            Some(&foreign_bound),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "FakeItemNotFound");
+        let foreign_stub = bound_invbroker(foreign_char, removed_starter_id);
+        assert_eq!(
+            handle(&ctx, foreign_sess, Some(&foreign_stub), "invbroker", "GetSelfInvItem", &[], None)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "UnimplementedRPC"
+        );
+    }
+
+    //    (c) Bogus IDs remain rejected with `FakeItemNotFound`, and unauthenticated callers with `Unauthorized`.
+    for bogus_id in [100_000_099_i64, 199_999_999, 999_999] {
+        let err = handle(
+            &ctx,
+            &docked_sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(bogus_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.code, "FakeItemNotFound");
+    }
+    assert_eq!(
+        handle(
+            &ctx,
+            &unauth_docked_sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+
+    //    (d) If `100_000_001` exists and is owned by someone else elsewhere, the stub never bypasses ACLs.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            removed_starter_id,
+            InventoryItemRecord {
+                item_id: removed_starter_id,
+                type_id: 587,
+                owner_id: third_char,
+                location_id: remote_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    assert_eq!(
+        resolve_missing_ship_stub_type_id_for_session(
+            &ctx,
+            &docked_sess,
+            char_id,
+            removed_starter_id,
+        ),
+        None
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &docked_sess,
+            Some(&b_station),
+            "invbroker",
+            "GetInventoryFromId",
+            &[PyRep::Integer(removed_starter_id), PyRep::Integer(0)],
+            None,
+        )
+        .unwrap()
+        .unwrap_err()
+        .code,
+        "InventoryNotAccessible"
+    );
+}
