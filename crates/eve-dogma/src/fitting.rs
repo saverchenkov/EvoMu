@@ -387,6 +387,7 @@ impl ShipFittingEngine {
             }
         }
         let prev_entry = self.modules.remove(&module_item_id);
+        let prev_pending_overload = self.pending_overload_modules.contains(&module_item_id);
         let prev_damage_hp = prev_entry.as_ref().map(|p| p.damage_hp).unwrap_or(0.0);
         let prev_max_hp = prev_entry.as_ref().map(|p| p.max_hp).unwrap_or(40.0);
         let prev_load_cpu = {
@@ -418,31 +419,45 @@ impl ShipFittingEngine {
         self.recalculate_stats(sde);
 
         if online {
-            let cpu_load = self.ship.get_attribute(attr_ids::CPU_LOAD, sde);
-            let cpu_out = self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde);
-            let pg_load = self.ship.get_attribute(attr_ids::POWER_LOAD, sde);
-            let pg_out = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde);
+            if let Err(err) =
+                self.check_cpu_pg_load(prev_load_cpu, prev_load_pg, cpu_avail, pg_avail, sde)
+            {
+                self.modules.remove(&module_item_id);
+                if let Some(prev) = prev_entry {
+                    self.modules.insert(module_item_id, prev);
+                }
+                // Restore queued pre-overload state stripped by `recalculate_stats` during validation (#1387).
+                if prev_pending_overload {
+                    self.pending_overload_modules.insert(module_item_id);
+                }
+                self.recalculate_stats(sde);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
 
-            if cpu_load > cpu_out + 1e-6 {
-                let cpu_need = cpu_load - prev_load_cpu;
-                self.modules.remove(&module_item_id);
-                if let Some(prev) = prev_entry {
-                    self.modules.insert(module_item_id, prev);
-                }
-                self.recalculate_stats(sde);
-                return Err(format!("Insufficient CPU: need {cpu_need}, available {cpu_avail}"));
-            }
-            if pg_load > pg_out + 1e-6 {
-                let pg_need = pg_load - prev_load_pg;
-                self.modules.remove(&module_item_id);
-                if let Some(prev) = prev_entry {
-                    self.modules.insert(module_item_id, prev);
-                }
-                self.recalculate_stats(sde);
-                return Err(format!(
-                    "Insufficient Powergrid: need {pg_need}, available {pg_avail}"
-                ));
-            }
+    fn check_cpu_pg_load(
+        &self,
+        prev_load_cpu: f64,
+        prev_load_pg: f64,
+        cpu_avail: f64,
+        pg_avail: f64,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let cpu_load = self.ship.get_attribute(attr_ids::CPU_LOAD, sde);
+        let cpu_out = self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde);
+        if cpu_load > cpu_out + 1e-6 {
+            let cpu_need = cpu_load - prev_load_cpu;
+            return Err(format!("Insufficient CPU: need {cpu_need}, available {cpu_avail}"));
+        }
+        let pg_load = self.ship.get_attribute(attr_ids::POWER_LOAD, sde);
+        let pg_out = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde);
+        if pg_load > pg_out + 1e-6 {
+            let pg_need = pg_load - prev_load_pg;
+            return Err(format!(
+                "Insufficient Powergrid: need {pg_need}, available {pg_avail}"
+            ));
         }
         Ok(())
     }
@@ -482,92 +497,86 @@ impl ShipFittingEngine {
         sde: &SdeRegistry,
     ) -> Result<(), String> {
         let prev_modules = self.modules.clone();
-        if let Err(e) = self.fit_module_with_state_and_overrides(
-            module_item_id,
-            module_type_id,
-            flag_id,
-            false,
-            &dynamic_attributes,
-            sde,
-        ) {
+        let prev_pending_overload = self.pending_overload_modules.clone();
+        let attempt = (|| -> Result<(), String> {
+            self.fit_module_with_state_and_overrides(
+                module_item_id,
+                module_type_id,
+                flag_id,
+                false,
+                &dynamic_attributes,
+                sde,
+            )?;
+            if !dynamic_attributes.is_empty() {
+                self.set_module_dynamic_attributes(module_item_id, dynamic_attributes.clone());
+            }
+
+            // Validate calibration against any UPGRADE_COST override in dynamic_attributes
+            if (92..=94).contains(&flag_id) {
+                let hull_type = sde
+                    .types
+                    .get(&self.ship.type_id)
+                    .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
+                let mod_type = sde
+                    .types
+                    .get(&module_type_id)
+                    .ok_or_else(|| format!("Unknown module type {module_type_id}"))?;
+                let cal_need = dynamic_attributes
+                    .get(&attr_ids::UPGRADE_COST)
+                    .copied()
+                    .or_else(|| mod_type.default_attributes.get(&attr_ids::UPGRADE_COST).copied())
+                    .unwrap_or(0.0);
+                if cal_need > 0.0 {
+                    let current_cal_used: f64 = self
+                        .modules
+                        .values()
+                        .filter(|m| m.item_id != module_item_id && (92..=94).contains(&m.flag_id))
+                        .filter_map(|m| {
+                            m.dynamic_attribute_overrides
+                                .get(&attr_ids::UPGRADE_COST)
+                                .copied()
+                                .or_else(|| {
+                                    sde.types
+                                        .get(&m.type_id)?
+                                        .default_attributes
+                                        .get(&attr_ids::UPGRADE_COST)
+                                        .copied()
+                                })
+                        })
+                        .sum();
+                    let cal_capacity = self
+                        .ship
+                        .base_attributes
+                        .get(&attr_ids::UPGRADE_CAPACITY)
+                        .copied()
+                        .or_else(|| {
+                            hull_type
+                                .default_attributes
+                                .get(&attr_ids::UPGRADE_CAPACITY)
+                                .copied()
+                        })
+                        .unwrap_or(0.0);
+                    if current_cal_used + cal_need > cal_capacity + 1e-6 {
+                        return Err(format!(
+                            "Insufficient Calibration: need {cal_need}, available {}",
+                            cal_capacity - current_cal_used
+                        ));
+                    }
+                }
+            }
+
+            if online {
+                self.set_module_online(module_item_id, sde)?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = attempt {
             self.modules = prev_modules;
+            // Restore queued pre-overload state stripped during offline refit/onlining attempts (#1387).
+            self.pending_overload_modules = prev_pending_overload;
             self.recalculate_stats(sde);
             return Err(e);
-        }
-        if !dynamic_attributes.is_empty() {
-            self.set_module_dynamic_attributes(module_item_id, dynamic_attributes.clone());
-        }
-
-        // Validate calibration against any UPGRADE_COST override in dynamic_attributes
-        if (92..=94).contains(&flag_id) {
-            let hull_type = match sde.types.get(&self.ship.type_id) {
-                Some(h) => h,
-                None => {
-                    self.modules = prev_modules;
-                    self.recalculate_stats(sde);
-                    return Err(format!("Unknown ship hull type {}", self.ship.type_id));
-                }
-            };
-            let mod_type = match sde.types.get(&module_type_id) {
-                Some(m) => m,
-                None => {
-                    self.modules = prev_modules;
-                    self.recalculate_stats(sde);
-                    return Err(format!("Unknown module type {module_type_id}"));
-                }
-            };
-            let cal_need = dynamic_attributes
-                .get(&attr_ids::UPGRADE_COST)
-                .copied()
-                .or_else(|| mod_type.default_attributes.get(&attr_ids::UPGRADE_COST).copied())
-                .unwrap_or(0.0);
-            if cal_need > 0.0 {
-                let current_cal_used: f64 = self
-                    .modules
-                    .values()
-                    .filter(|m| m.item_id != module_item_id && (92..=94).contains(&m.flag_id))
-                    .filter_map(|m| {
-                        m.dynamic_attribute_overrides
-                            .get(&attr_ids::UPGRADE_COST)
-                            .copied()
-                            .or_else(|| {
-                                sde.types
-                                    .get(&m.type_id)?
-                                    .default_attributes
-                                    .get(&attr_ids::UPGRADE_COST)
-                                    .copied()
-                            })
-                    })
-                    .sum();
-                let cal_capacity = self
-                    .ship
-                    .base_attributes
-                    .get(&attr_ids::UPGRADE_CAPACITY)
-                    .copied()
-                    .or_else(|| {
-                        hull_type
-                            .default_attributes
-                            .get(&attr_ids::UPGRADE_CAPACITY)
-                            .copied()
-                    })
-                    .unwrap_or(0.0);
-                if current_cal_used + cal_need > cal_capacity + 1e-6 {
-                    self.modules = prev_modules;
-                    self.recalculate_stats(sde);
-                    return Err(format!(
-                        "Insufficient Calibration: need {cal_need}, available {}",
-                        cal_capacity - current_cal_used
-                    ));
-                }
-            }
-        }
-
-        if online {
-            if let Err(e) = self.set_module_online(module_item_id, sde) {
-                self.modules = prev_modules;
-                self.recalculate_stats(sde);
-                return Err(e);
-            }
         }
         Ok(())
     }
@@ -717,33 +726,24 @@ impl ShipFittingEngine {
         let pg_avail = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde) - prev_load_pg;
 
         let prev_state = self.modules.get(&module_item_id).map(|m| m.state);
+        let prev_pending_overload = self.pending_overload_modules.contains(&module_item_id);
         if let Some(m) = self.modules.get_mut(&module_item_id) {
             m.state = ModuleState::Online;
         }
         self.recalculate_stats(sde);
 
-        let cpu_load = self.ship.get_attribute(attr_ids::CPU_LOAD, sde);
-        let cpu_out = self.ship.get_attribute(attr_ids::CPU_OUTPUT, sde);
-        let pg_load = self.ship.get_attribute(attr_ids::POWER_LOAD, sde);
-        let pg_out = self.ship.get_attribute(attr_ids::POWER_OUTPUT, sde);
-
-        if cpu_load > cpu_out + 1e-6 {
-            let cpu_need = cpu_load - prev_load_cpu;
+        if let Err(err) =
+            self.check_cpu_pg_load(prev_load_cpu, prev_load_pg, cpu_avail, pg_avail, sde)
+        {
             if let (Some(m), Some(st)) = (self.modules.get_mut(&module_item_id), prev_state) {
                 m.state = st;
             }
-            self.recalculate_stats(sde);
-            return Err(format!("Insufficient CPU: need {cpu_need}, available {cpu_avail}"));
-        }
-        if pg_load > pg_out + 1e-6 {
-            let pg_need = pg_load - prev_load_pg;
-            if let (Some(m), Some(st)) = (self.modules.get_mut(&module_item_id), prev_state) {
-                m.state = st;
+            // Restore queued pre-overload state stripped by `recalculate_stats` during validation (#1387).
+            if prev_pending_overload {
+                self.pending_overload_modules.insert(module_item_id);
             }
             self.recalculate_stats(sde);
-            return Err(format!(
-                "Insufficient Powergrid: need {pg_need}, available {pg_avail}"
-            ));
+            return Err(err);
         }
 
         Ok(())
