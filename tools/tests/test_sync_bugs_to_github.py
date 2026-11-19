@@ -599,9 +599,9 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
 
     def test_bf1344_01_pre_frame_spaces_and_pyj_pyc_wrappers(self) -> None:
         trace_pre = (
-            "<pre>/Users/Shared/EVE Online (Dev)/eve/client/script/ui/my window.py(88) OnOpen\n"
-            "<pre>/Users/Shared/EVE Online (Dev)/eve/common/lib/moniker.pyj(14) Call\n"
-            "<pre>/Users/Shared/EVE Online (Dev)/evomu_site.pyc(120) _wrap\n"
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/eve/client/script/ui/my window.py(88) OnOpen\n"
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/eve/common/lib/moniker.pyj(14) Call\n"
+            "<pre>C:/Program Files (x86)/EVE Online (Dev)/evomu_site.pyc(120) _wrap\n"
             "KeyError: 'foo'\n"
         )
         self.assertEqual(
@@ -610,8 +610,8 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         )
 
         trace_pyj = (
-            "<pre>/Users/Shared/EVE Online/eve/client/script/ui/shipui.pyj(312) DoWarp\n"
-            "<pre>/Users/Shared/EVE Online/bluepyimpl.pyc(44) __call__\n"
+            "<pre>/Applications/EVE Online.app/Contents/eve/client/script/ui/shipui.pyj(312) DoWarp\n"
+            "<pre>/Applications/EVE Online.app/Contents/bluepyimpl.pyc(44) __call__\n"
             "RuntimeError: warp failed\n"
         )
         self.assertEqual(
