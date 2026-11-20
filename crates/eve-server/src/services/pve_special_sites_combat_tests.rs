@@ -1051,3 +1051,467 @@ async fn seasonal_completion_atomic_rollback_and_no_double_pay_and_sde_fallback(
         assert_eq!(st.season_points, site.reward_points);
     });
 }
+
+fn setup_seasonal_test_ctx(
+    sde: Arc<SdeRegistry>,
+    base_unix: u64,
+    season_id: i64,
+    season_name: &str,
+    window_days: u64,
+    pilot: i64,
+    ship_id: i64,
+    sys_id: SolarSystemId,
+) -> ServerContext {
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account(&format!("season_u_{pilot}"), "pw", pilot, "SeasonPilot");
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let ship_tid = sde
+        .types
+        .values()
+        .find(|t| t.category_id == 6 && t.group_id == 25 && t.capacity > 50.0)
+        .map(|t| t.type_id)
+        .unwrap_or(587);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.balance = IskCents(0);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_tid,
+                owner_id: pilot,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut cfg = crate::services::season_fsd::load_season_config(snap);
+        cfg.season_id = season_id;
+        cfg.season_name = season_name.into();
+        let day_ticks = 86_400_i64 * 10_000_000;
+        cfg.start_time_ft = now_ft - day_ticks;
+        cfg.end_time_ft = now_ft + (window_days as i64) * day_ticks;
+        snap.seasons_and_campaigns.season_configuration = Some(cfg);
+    });
+    ctx
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_24h_anomaly_expiry_prunes_stale_site_and_respawns_in_multiday_season() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let base_unix = 1_775_800_000_u64;
+    let ctx = setup_seasonal_test_ctx(
+        sde,
+        base_unix,
+        1,
+        "Crimson Harvest",
+        14,
+        90_060_501,
+        1_060_501,
+        sys_id,
+    );
+
+    let first = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(first.len(), 1);
+    let site1 = &first[0];
+    let details1 = get_seasonal_site_details(&ctx, site1.instance_id).expect("details1");
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // Advance past the 24h cosmic anomaly lifetime while staying well inside the 14-day window.
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 86_405)));
+    assert!(
+        active_seasonal_anomaly_instances_readonly(&ctx, sys_id).is_empty(),
+        "readonly anomaly view must hide 24h-expired seasonal anomalies"
+    );
+
+    let second = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(
+        second.len(),
+        1,
+        "24h-expired seasonal site inside active multi-day season must prune and respawn"
+    );
+    assert_ne!(
+        second[0].instance_id, site1.instance_id,
+        "respawned site must get a fresh instance_id"
+    );
+    assert!(
+        sys_handle.get_ball_snapshot(site1.boss_npc_ball_id).await.unwrap().is_none()
+            && sys_handle.get_ball_snapshot(details1.relay_ball_id).await.unwrap().is_none(),
+        "stale boss and relay balls from 24h-expired site must be despawned"
+    );
+    crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+        assert!(!rt.npc_entities.contains_key(&site1.boss_npc_ball_id));
+        for ebid in &site1.escort_ball_ids {
+            assert!(!rt.npc_entities.contains_key(ebid));
+        }
+    });
+    let exp_cleared = crate::services::pve_exploration::read_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .get(&sys_id)
+            .is_some_and(|l| l.iter().any(|s| s.site_id == details1.exploration_site_id))
+    });
+    assert!(!exp_cleared, "stale exploration site must be removed on 24h expiry");
+    assert!(
+        get_seasonal_site_details(&ctx, site1.instance_id).is_none(),
+        "stale seasonal details entry must be removed on 24h expiry"
+    );
+    let ro = active_seasonal_anomaly_instances_readonly(&ctx, sys_id);
+    assert_eq!(
+        ro.get(&second[0].dungeon_id),
+        Some(&vec![second[0].instance_id]),
+        "newly respawned site must appear in GetCombatAnomalyInstances"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_state() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let base_unix = 1_775_900_000_u64;
+    let ctx = setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        base_unix,
+        2,
+        "Winter Nexus",
+        7,
+        90_060_601,
+        1_060_601,
+        sys_id,
+    );
+
+    let initial = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(initial.len(), 1);
+    let site = initial[0].clone();
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    assert_ne!(details.faction_id, 0);
+    assert_ne!(
+        details.faction_id, 500_012,
+        "Winter Nexus seasonal site must not carry Crimson Harvest faction fallback"
+    );
+    let (initial_boss_fid, initial_escort_fid) =
+        crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
+            (
+                rt.npc_entities[&site.boss_npc_ball_id].faction_id,
+                rt.npc_entities[&site.escort_ball_ids[1]].faction_id,
+            )
+        });
+
+    // Defeat one escort before simulated server restart.
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site.escort_ball_ids[0],
+            Some(90_060_601),
+        )
+        .await
+        .is_empty()
+    );
+
+    // Fresh ServerContext sharing the persisted DB (fresh SystemRegistry, rehydrated combat runtime).
+    let restarted = ServerContext::with_sde_and_repository(sde, Arc::clone(&ctx.db));
+    restarted.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 60)));
+    crate::services::combat_crimewatch::with_combat_ephemeral(&restarted, |rt| {
+        assert!(
+            !rt.npc_entities.contains_key(&site.escort_ball_ids[0]),
+            "defeated escort must be cleared from persisted combat runtime"
+        );
+    });
+    // Wipe ephemeral NPC AI entries so ensure_seasonal_event_sites_for_system must rebuild both
+    // the Ballpark-present boss (!in_ai && in_ballpark) and Ballpark-absent escort (!in_ai && !in_ballpark).
+    crate::services::combat_crimewatch::with_mut_combat_ephemeral(&restarted, |rt| {
+        rt.npc_entities.clear();
+    });
+    let sys_restarted = restarted.systems.get_or_spawn(sys_id);
+
+    // Simulate an already-present Ballpark boss with moved coordinates and weakened shields (!in_ai).
+    let moved_pos = DVec3::from_array(details.site_position) + DVec3::new(3_750.0, -450.0, 120.0);
+    let boss_ball = make_site_npc_ball(site.boss_npc_ball_id, site.boss_type_id, moved_pos);
+    let damaged_cs = eve_destiny::CombatState {
+        shield_hp: 42.0,
+        max_shield_hp: 500.0,
+        armor_hp: 300.0,
+        max_armor_hp: 300.0,
+        structure_hp: 300.0,
+        max_structure_hp: 300.0,
+        ..Default::default()
+    };
+    let _ = sys_restarted.spawn_ball_with_combat(boss_ball, damaged_cs).await;
+
+    let resumed = ensure_seasonal_event_sites_for_system(&restarted, sys_id).await;
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].instance_id, site.instance_id);
+
+    // 1. Relay ball re-materialized into Ballpark.
+    assert!(
+        sys_restarted
+            .get_ball_snapshot(details.relay_ball_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "SHK relay ball must be re-materialized into Ballpark after restart"
+    );
+    // 2. Defeated escort stays dead.
+    assert!(
+        sys_restarted
+            .get_ball_snapshot(site.escort_ball_ids[0])
+            .await
+            .unwrap()
+            .is_none(),
+        "already-defeated escort must stay absent after restart"
+    );
+    // 3. Surviving escort re-materialized into Ballpark with persisted theme faction & spawn group.
+    assert!(
+        sys_restarted
+            .get_ball_snapshot(site.escort_ball_ids[1])
+            .await
+            .unwrap()
+            .is_some(),
+        "surviving escort missing from Ballpark must be re-materialized"
+    );
+    crate::services::combat_crimewatch::with_combat_ephemeral(&restarted, |rt| {
+        assert!(!rt.npc_entities.contains_key(&site.escort_ball_ids[0]));
+        let boss_ent = rt
+            .npc_entities
+            .get(&site.boss_npc_ball_id)
+            .expect("living seasonal boss must be re-registered in rt.npc_entities");
+        assert_eq!(boss_ent.faction_id, initial_boss_fid);
+        assert_eq!(boss_ent.spawn_group_id, details.faction_id);
+        let escort_ent = rt
+            .npc_entities
+            .get(&site.escort_ball_ids[1])
+            .expect("living seasonal escort must be re-registered in rt.npc_entities");
+        assert_eq!(escort_ent.faction_id, initial_escort_fid);
+        assert_eq!(escort_ent.spawn_group_id, details.faction_id);
+    });
+    // 4. Existing Ballpark boss ball retains live position and damaged shield HP.
+    let (_, boss_after) = sys_restarted
+        .get_ball_snapshot(site.boss_npc_ball_id)
+        .await
+        .unwrap()
+        .expect("boss ball still present");
+    assert_eq!(boss_after.position, moved_pos);
+    let cs_after = sys_restarted
+        .get_combat_state(site.boss_npc_ball_id)
+        .await
+        .unwrap()
+        .expect("boss combat state");
+    assert!(
+        (cs_after.shield_hp - 42.0).abs() < 1e-6,
+        "re-materialization must preserve existing Ballpark HP ({})",
+        cs_after.shield_hp
+    );
+
+    // 5. Fallback faction test: when an NPC InvType has faction_id == None in Jita (regional
+    // Guristas 500_010), Winter Nexus restart must preserve 500_019 (not 0, 500_010, or 500_012).
+    let mut no_fid_sde = SdeRegistry::default();
+    if let Some(jita) = shared_sde().solar_systems.get(&sys_id).cloned() {
+        no_fid_sde.solar_systems.insert(sys_id, jita);
+    }
+    let no_fid_sde = Arc::new(no_fid_sde);
+    let ctx_nf = setup_seasonal_test_ctx(
+        Arc::clone(&no_fid_sde),
+        base_unix,
+        2,
+        "Winter Nexus",
+        7,
+        90_060_602,
+        1_060_602,
+        sys_id,
+    );
+    let nf_sites = ensure_seasonal_event_sites_for_system(&ctx_nf, sys_id).await;
+    assert_eq!(nf_sites.len(), 1);
+    let restarted_nf =
+        ServerContext::with_sde_and_repository(no_fid_sde, Arc::clone(&ctx_nf.db));
+    restarted_nf.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 60)));
+    crate::services::combat_crimewatch::with_mut_combat_ephemeral(&restarted_nf, |rt| {
+        rt.npc_entities.clear();
+    });
+    let nf_resumed = ensure_seasonal_event_sites_for_system(&restarted_nf, sys_id).await;
+    assert_eq!(nf_resumed.len(), 1);
+    crate::services::combat_crimewatch::with_combat_ephemeral(&restarted_nf, |rt| {
+        let ent = rt
+            .npc_entities
+            .get(&nf_resumed[0].boss_npc_ball_id)
+            .expect("fallback NPC rematerialized");
+        assert_eq!(ent.faction_id, 500_019);
+        assert_eq!(ent.spawn_group_id, 500_019);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_boss_first_relay_hack_awards_crate_pool_and_booster_priority() {
+    // Part A: boss killed before escorts -> SHK relay hack still sets relay_hacked and grants pool.
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot: i64 = 90_060_701;
+    let ship_id: i64 = 1_060_701;
+    let ctx = setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        1_775_950_000,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_id,
+    );
+
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(sites.len(), 1);
+    let site = sites[0].clone();
+
+    // Ensure at least one valid SDE pool item exists even if canonical unit SDE omits FSD tables.
+    let mut details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    if details.crate_loot_pool.is_empty() {
+        let fallback_pool_tid = sde
+            .types
+            .keys()
+            .copied()
+            .find(|&tid| tid != site.loot_type_id)
+            .expect("canonical SDE contains at least two item types");
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut map = load_seasonal_site_details_map(snap);
+            if let Some(d) = map.get_mut(&site.instance_id) {
+                d.crate_loot_pool.push((fallback_pool_tid, 3));
+            }
+            save_seasonal_site_details_map(snap, &map);
+        });
+        details = get_seasonal_site_details(&ctx, site.instance_id).expect("updated details");
+    }
+    let expected_pool: Vec<(u32, i64)> = details
+        .crate_loot_pool
+        .iter()
+        .copied()
+        .filter(|&(ptid, pqty)| ptid != site.loot_type_id && pqty > 0 && sde.types.contains_key(&ptid))
+        .collect();
+    assert!(!expected_pool.is_empty());
+
+    // Kill boss FIRST while both escorts survive.
+    assert!(
+        on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            site.boss_npc_ball_id,
+            Some(pilot),
+        )
+        .await
+        .is_empty()
+    );
+
+    // Hack relay AFTER boss death but BEFORE escorts die -> relay_hacked must flip to true.
+    on_seasonal_relay_hacked(&ctx, sys_id, &details.exploration_site_id, pilot).await;
+    assert!(
+        get_seasonal_site_details(&ctx, site.instance_id)
+            .expect("details still active before escorts die")
+            .relay_hacked,
+        "hacking SHK relay after boss-first kill must record relay_hacked = true"
+    );
+
+    for ebid in &site.escort_ball_ids {
+        let _ = on_special_site_npc_destroyed_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            sys_id,
+            *ebid,
+            Some(pilot),
+        )
+        .await;
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        for &(ptid, pqty) in &expected_pool {
+            let found_qty: i64 = snap
+                .items
+                .values()
+                .chain(snap.transient_items.values())
+                .filter(|it| it.owner_id == pilot && it.type_id == ptid)
+                .map(|it| i64::from(it.quantity))
+                .sum();
+            assert!(
+                found_qty >= pqty,
+                "bonus crate_loot_pool type {ptid} x{pqty} must be awarded after boss-first relay hack (got {found_qty})"
+            );
+        }
+    });
+
+    // Part B: Booster priority tiers & integer security-band ISK scaling.
+    let mut synth = SdeRegistry::default();
+    let base_type = sde.types.values().next().expect("non-empty canonical SDE types");
+    let make_booster = |type_id: u32, name: &str| {
+        let mut t = base_type.clone();
+        t.type_id = type_id;
+        t.group_id = 303;
+        t.category_id = 20;
+        t.name = name.into();
+        t.published = true;
+        t
+    };
+    synth
+        .types
+        .insert(4_001, make_booster(4_001, "Agency 'Overclocker' Dose I"));
+    synth
+        .types
+        .insert(9_950, make_booster(9_950, "Standard Blue Pill Booster"));
+    synth.types.insert(
+        88_001,
+        make_booster(88_001, "Crimson Harvest Cerebral Accelerator"),
+    );
+    assert_eq!(
+        resolve_seasonal_booster_type_id(&synth, "Crimson Harvest"),
+        Some(88_001),
+        "theme/cerebral booster must outrank lower-ID Standard Blue Pill (9950)"
+    );
+    synth.types.remove(&88_001);
+    assert_eq!(
+        resolve_seasonal_booster_type_id(&synth, "Crimson Harvest"),
+        Some(9_950),
+        "combat booster must outrank generic group_id=303 booster when no theme booster exists"
+    );
+    synth.types.remove(&9_950);
+    assert_eq!(
+        resolve_seasonal_booster_type_id(&synth, "Crimson Harvest"),
+        Some(4_001)
+    );
+
+    let base_sys = sde
+        .solar_systems
+        .values()
+        .next()
+        .expect("non-empty canonical SDE solar_systems");
+    let add_sys = |reg: &mut SdeRegistry, id: SolarSystemId, sec: f64| {
+        let mut s = base_sys.clone();
+        s.solar_system_id = id;
+        s.security_status = sec;
+        reg.solar_systems.insert(id, s);
+    };
+    add_sys(&mut synth, 30_000_001, 0.9);
+    add_sys(&mut synth, 30_000_002, 0.3);
+    add_sys(&mut synth, 30_000_003, -0.5);
+    let season_cfg = eve_db::SeasonConfig {
+        season_id: 1,
+        season_name: "Crimson Harvest".into(),
+        ..Default::default()
+    };
+    let hs = resolve_seasonal_event_spec(&synth, &season_cfg, 30_000_001).reward_isk;
+    let ls = resolve_seasonal_event_spec(&synth, &season_cfg, 30_000_002).reward_isk;
+    let ns = resolve_seasonal_event_spec(&synth, &season_cfg, 30_000_003).reward_isk;
+    assert_eq!(ls, hs * 3 / 2);
+    assert_eq!(ns, hs * 2);
+}
