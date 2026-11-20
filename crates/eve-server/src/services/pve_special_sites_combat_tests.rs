@@ -1179,16 +1179,41 @@ async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_s
     let sde = shared_sde();
     let sys_id: SolarSystemId = 30_000_142;
     let base_unix = 1_775_900_000_u64;
-    let ctx = setup_seasonal_test_ctx(
+    let pilot: i64 = 90_060_601;
+    let ship_id: i64 = 1_060_601;
+
+    let tmp_db = std::env::temp_dir().join(format!(
+        "evomu_seasonal_restart_{}_{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let cleanup_sqlite = |p: &std::path::Path| {
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(format!("{}-wal", p.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", p.display()));
+    };
+    cleanup_sqlite(&tmp_db);
+
+    let mem_ctx = setup_seasonal_test_ctx(
         Arc::clone(&sde),
         base_unix,
         2,
         "Winter Nexus",
         7,
-        90_060_601,
-        1_060_601,
+        pilot,
+        ship_id,
         sys_id,
     );
+    let initial_snap = mem_ctx.db.with_snapshot(|s| s.clone());
+    drop(mem_ctx);
+
+    let repo1 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("open sqlite repo1"));
+    repo1.with_mut_snapshot(|snap| *snap = initial_snap);
+    let ctx = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&repo1));
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
 
     let initial = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
     assert_eq!(initial.len(), 1);
@@ -1199,6 +1224,19 @@ async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_s
         details.faction_id, 500_012,
         "Winter Nexus seasonal site must not carry Crimson Harvest faction fallback"
     );
+
+    // R1482-R2-P1-3: both exploration entry & rt.npc_entities must be persisted atomically by ensure.
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.owner_notes
+                .contains_key(&crate::services::pve_exploration::PVE_EXPLORATION_NOTE_ID),
+            "seasonal exploration site must be written inside atomic spawn snapshot"
+        );
+        assert!(
+            snap.get_any_item(details.relay_ball_id).is_some(),
+            "relay transient item must exist right after seasonal spawn"
+        );
+    });
     let (initial_boss_fid, initial_escort_fid) =
         crate::services::combat_crimewatch::with_combat_ephemeral(&ctx, |rt| {
             (
@@ -1207,27 +1245,42 @@ async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_s
             )
         });
 
-    // Defeat one escort before simulated server restart.
-    assert!(
-        on_special_site_npc_destroyed_core(
-            &ctx.systems,
-            &ctx.db,
-            &ctx.sde,
-            sys_id,
+    // Defeat one escort via live combat hook (`npc_death_hook` -> `on_special_site_npc_destroyed_core`
+    // + `handle_npc_destroyed_in_space_with_ctx`) before simulated server restart.
+    let sys_initial = ctx.systems.get_or_spawn(sys_id);
+    let (_, esc0_dead, _) = sys_initial
+        .apply_damage_with_attacker(
             site.escort_ball_ids[0],
-            Some(90_060_601),
+            eve_destiny::DamageVector::new(1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0),
+            Some(pilot),
         )
         .await
-        .is_empty()
-    );
+        .expect("damage escort 0")
+        .expect("escort 0 exists");
+    assert!(esc0_dead, "escort 0 must die from lethal live damage");
 
-    // Fresh ServerContext sharing the persisted DB (fresh SystemRegistry, rehydrated combat runtime).
-    let restarted = ServerContext::with_sde_and_repository(sde, Arc::clone(&ctx.db));
+    drop(sys_initial);
+    drop(ctx);
+    drop(repo1);
+
+    // Reopen SQLite repository from disk (where #[serde(skip)] `transient_items` has been dropped).
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&tmp_db).expect("reopen sqlite repo2"));
+    repo2.with_snapshot(|snap| {
+        assert!(
+            snap.transient_items.get(&details.relay_ball_id).is_none(),
+            "#[serde(skip)] transient_items must be empty immediately after SQLite reopen"
+        );
+    });
+    let restarted = ServerContext::with_sde_and_repository(Arc::clone(&sde), Arc::clone(&repo2));
     restarted.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 60)));
     crate::services::combat_crimewatch::with_combat_ephemeral(&restarted, |rt| {
         assert!(
             !rt.npc_entities.contains_key(&site.escort_ball_ids[0]),
             "defeated escort must be cleared from persisted combat runtime"
+        );
+        assert!(
+            rt.bounty_credited_balls.contains(&site.escort_ball_ids[0]),
+            "defeated seasonal escort must mark bounty_credited_balls to block SDE double-bounty"
         );
     });
     // Wipe ephemeral NPC AI entries so ensure_seasonal_event_sites_for_system must rebuild both
@@ -1255,7 +1308,17 @@ async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_s
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0].instance_id, site.instance_id);
 
-    // 1. Relay ball re-materialized into Ballpark.
+    // 1. Relay ball AND transient_items + item_positions rehydrated after SQLite restart (`R1482-R2-P1-2`).
+    restarted.db.with_snapshot(|snap| {
+        let relay_item = snap
+            .get_any_item(details.relay_ball_id)
+            .expect("SHK relay transient item must be restored into snap on restart recovery");
+        assert_eq!(relay_item.type_id, details.relay_type_id);
+        assert!(
+            snap.item_positions.contains_key(&details.relay_ball_id),
+            "SHK relay item_positions must be restored on restart recovery"
+        );
+    });
     assert!(
         sys_restarted
             .get_ball_snapshot(details.relay_ball_id)
@@ -1314,6 +1377,10 @@ async fn seasonal_restart_rematerializes_relay_preserves_faction_and_live_ball_s
         "re-materialization must preserve existing Ballpark HP ({})",
         cs_after.shield_hp
     );
+    drop(sys_restarted);
+    drop(restarted);
+    drop(repo2);
+    cleanup_sqlite(&tmp_db);
 
     // 5. Fallback faction test: when an NPC InvType has faction_id == None in Jita (regional
     // Guristas 500_010), Winter Nexus restart must preserve 500_019 (not 0, 500_010, or 500_012).
@@ -1514,4 +1581,121 @@ async fn seasonal_boss_first_relay_hack_awards_crate_pool_and_booster_priority()
     let ns = resolve_seasonal_event_spec(&synth, &season_cfg, 30_000_003).reward_isk;
     assert_eq!(ls, hs * 3 / 2);
     assert_eq!(ns, hs * 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seasonal_relay_hack_idempotent_expiry_and_overflow_container_consistency() {
+    let sde = shared_sde();
+    let sys_id: SolarSystemId = 30_000_142;
+    let pilot: i64 = 90_060_801;
+    let ship_id: i64 = 1_060_801;
+    let base_unix = 1_776_050_000_u64;
+    let ctx = setup_seasonal_test_ctx(
+        Arc::clone(&sde),
+        base_unix,
+        1,
+        "Crimson Harvest",
+        7,
+        pilot,
+        ship_id,
+        sys_id,
+    );
+
+    let sites = ensure_seasonal_event_sites_for_system(&ctx, sys_id).await;
+    assert_eq!(sites.len(), 1);
+    let site = sites[0].clone();
+    let details = get_seasonal_site_details(&ctx, site.instance_id).expect("details");
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Repeat relay hack is strictly idempotent (`R1482-R2-P1-4`).
+    let shield_0 = sys_handle
+        .get_combat_state(site.boss_npc_ball_id)
+        .await
+        .unwrap()
+        .expect("boss combat state")
+        .shield_hp;
+    on_seasonal_relay_hacked(&ctx, sys_id, &details.exploration_site_id, pilot).await;
+    assert!(
+        get_seasonal_site_details(&ctx, site.instance_id)
+            .expect("details")
+            .relay_hacked
+    );
+    let shield_1 = sys_handle
+        .get_combat_state(site.boss_npc_ball_id)
+        .await
+        .unwrap()
+        .expect("boss combat state")
+        .shield_hp;
+    if shield_0 > 20.0 {
+        assert!(shield_1 < shield_0);
+    }
+    on_seasonal_relay_hacked(&ctx, sys_id, &details.exploration_site_id, pilot).await;
+    let shield_2 = sys_handle
+        .get_combat_state(site.boss_npc_ball_id)
+        .await
+        .unwrap()
+        .expect("boss combat state")
+        .shield_hp;
+    assert!(
+        (shield_2 - shield_1).abs() < 1e-6,
+        "repeat on_seasonal_relay_hacked must not drain boss shield a second time"
+    );
+
+    // 2. Overflow cargo container DB metadata matches Ballpark ball (`P2 #1`).
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot) {
+            ch.active_ship_id = 0;
+        }
+    });
+    let expected_cont_type = resolve_loot_container_type_id(&sde);
+    let expected_pos = DVec3::from_array(details.site_position) + DVec3::new(500.0, 0.0, 0.0);
+    let mut kill_ids = vec![site.boss_npc_ball_id];
+    kill_ids.extend_from_slice(&site.escort_ball_ids);
+    for npc_bid in kill_ids {
+        let (_, dead, _) = sys_handle
+            .apply_damage_with_attacker(
+                npc_bid,
+                eve_destiny::DamageVector::new(1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0),
+                Some(pilot),
+            )
+            .await
+            .expect("damage npc")
+            .expect("npc ball exists");
+        assert!(dead);
+    }
+    let (cont_id, cont_type, cont_pos, has_meta) = ctx.db.with_snapshot(|snap| {
+        let (&cid, item) = snap
+            .items
+            .iter()
+            .find(|(_, it)| it.owner_id == pilot && it.location_id == i64::from(sys_id) && it.type_id == expected_cont_type)
+            .expect("seasonal overflow cargo container must be persisted with resolved type_id");
+        let pos = snap.item_positions.get(&cid).copied();
+        let meta = snap.sp6_lifecycle.space_object_meta.contains_key(&cid);
+        (cid, item.type_id, pos, meta)
+    });
+    assert_eq!(cont_type, expected_cont_type);
+    assert_eq!(cont_pos, Some([expected_pos.x, expected_pos.y, expected_pos.z]));
+    assert!(has_meta, "overflow container must record sp6_lifecycle space_object_meta");
+    let (_, cont_ball) = sys_handle
+        .get_ball_snapshot(cont_id)
+        .await
+        .unwrap()
+        .expect("overflow container ball spawned in Ballpark");
+    assert_eq!(cont_ball.type_id, expected_cont_type);
+    assert_eq!(cont_ball.position, expected_pos);
+
+    // 3. Expired (>24h) or out-of-window seasonal site rejects `on_seasonal_relay_hacked` (`R1482-R2-P1-4`).
+    let other_sys: SolarSystemId = 30_000_144;
+    let sites2 = ensure_seasonal_event_sites_for_system(&ctx, other_sys).await;
+    assert_eq!(sites2.len(), 1);
+    let site2 = sites2[0].clone();
+    let details2 = get_seasonal_site_details(&ctx, site2.instance_id).expect("details2");
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix + 90_000)));
+    on_seasonal_relay_hacked(&ctx, other_sys, &details2.exploration_site_id, pilot).await;
+    assert!(
+        !get_seasonal_site_details(&ctx, site2.instance_id)
+            .expect("details2 unpruned")
+            .relay_hacked,
+        "expired >24h seasonal site must reject on_seasonal_relay_hacked"
+    );
 }
