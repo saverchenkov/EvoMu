@@ -10,7 +10,7 @@ use eve_db::{
     TrainedSkillRecord, WorldStateSnapshot,
 };
 use eve_machonet::SessionState;
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::{BridgeRpcError, ItemQty, PyRep};
 use eve_sde::{attr_ids, TypeId};
 use std::collections::HashMap;
 
@@ -52,14 +52,18 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
         let mut map = HashMap::new();
         if let Ok(cfsd) = ctx.sde.load_cfsd_nested("res:/staticdata/crates.fsdbinary") {
             for (_k, v) in cfsd {
-                let Some(type_id) = v.get("typeID").and_then(|t| t.as_u64()).map(|t| t as u32) else {
+                let Some(type_id) = v
+                    .get("typeID")
+                    .and_then(|t| t.as_u64())
+                    .and_then(|t| u32::try_from(t).ok())
+                else {
                     continue;
                 };
                 let mut items = Vec::new();
                 if let Some(list) = v.get("fixedLootItems").and_then(|l| l.as_array()) {
                     for item_val in list {
-                        if let Some(tid) = item_val.as_u64() {
-                            items.push((tid as u32, 1));
+                        if let Some(tid) = item_val.as_u64().and_then(|t| u32::try_from(t).ok()) {
+                            items.push((tid, 1));
                         }
                     }
                 }
@@ -71,8 +75,8 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
                 let mut fittings = Vec::new();
                 if let Some(fits) = v.get("fittings").and_then(|f| f.as_array()) {
                     for fit_val in fits {
-                        if let Some(fid) = fit_val.as_u64() {
-                            fittings.push(fid as u32);
+                        if let Some(fid) = fit_val.as_u64().and_then(|f| u32::try_from(f).ok()) {
+                            fittings.push(fid);
                         }
                     }
                     if !fits.is_empty() {
@@ -262,7 +266,7 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &SessionState, args:
         }
         let (crate_item, spec) = require_owned_crate(ctx, snap, session, char_id, crate_id)?;
         let ship_type_id = spec.fitting_ship_type_id.ok_or_else(|| err("InvalidCrateFitting", "This crate does not contain a ship fitting"))?;
-        if !spec.fittings.contains(&(fitting_id as u32)) {
+        if !u32::try_from(fitting_id).is_ok_and(|fid| spec.fittings.contains(&fid)) {
             return Err(err("InvalidCrateFitting", format!("Fitting {fitting_id} is not valid for crate type {}", crate_item.type_id)));
         }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
@@ -296,7 +300,11 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, ar
     let (_, char_id) = ServerContext::require_character(session)?;
     let rpc = crate::router::RpcArgs::positional(args);
     let crate_id = rpc.req_positive_i64(0, "crateID").map_err(|_| err("CrateNotFound", "Valid crate item ID required"))?;
-    let qty = rpc.opt_positive_i64(1, "quantity")?.unwrap_or(1).clamp(1, i64::from(i32::MAX)) as i32;
+    let qty_raw = rpc.opt_positive_i64(1, "quantity")?.unwrap_or(1);
+    let requested_qty = ItemQty::try_from_i64(qty_raw).map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
+    let qty = requested_qty
+        .try_into_stack_i32()
+        .map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
     let session_dock = session.station_id.or(session.structure_id);
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let dest_id = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).or(session_dock)
@@ -309,6 +317,8 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, ar
         if actual_to_open <= 0 {
             return Err(err("NoCratesToOpen", "No crates available in stack"));
         }
+        let actual_qty = ItemQty::try_from_i32(actual_to_open)
+            .map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
         let active_ship = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
         snap.consume_exact_item_quantity(
             crate_id,
@@ -320,14 +330,18 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &SessionState, ar
         )
         .map_err(|e| err("ItemLocked", e.to_string()))?;
         for (item_type, base_qty) in spec.items {
+            let spawn_qty = ItemQty::try_from_i32(base_qty)
+                .and_then(|base| base.checked_mul(actual_qty))
+                .and_then(ItemQty::try_into_stack_i32)
+                .map_err(|e| e.into_rpc_error("InvalidQuantity"))?;
             snap.next_entity_id += 1;
             let new_item_id = snap.next_entity_id;
             snap.items.insert(new_item_id, InventoryItemRecord {
                 item_id: new_item_id, type_id: item_type, owner_id: char_id, location_id: dest_id,
-                flag: InventoryFlag::Hangar, quantity: base_qty.saturating_mul(actual_to_open), singleton: false, ..Default::default()
+                flag: InventoryFlag::Hangar, quantity: spawn_qty, singleton: false, ..Default::default()
             });
         }
-        Ok(PyRep::Tuple(vec![PyRep::Integer(actual_to_open as i64), PyRep::Integer(qty as i64)]))
+        Ok(PyRep::Tuple(vec![PyRep::Integer(i64::from(actual_to_open)), PyRep::Integer(requested_qty.as_i64())]))
     })?;
     emit_crate_loot_spawned(ctx, char_id);
     Ok(res)
@@ -438,4 +452,98 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &SessionState, 
 #[cfg(test)]
 #[path = "crate_loot_service_edges_tests.rs"]
 mod crate_loot_service_edges_tests;
+
+#[cfg(test)]
+mod qty_tests {
+    use super::*;
+    use crate::services::account_services::account_services_tests::{auth_session, test_ctx};
+
+    #[test]
+    fn claim_loot_stack_rejects_over_stack_max_and_spawn_overflow() {
+        let ctx = test_ctx();
+        let cid = 90_000_001_i64;
+        let station_id = 60_003_760_i64;
+        let mut sess = auth_session(1, cid, 98_000_001, 30_000_142);
+        sess.station_id = Some(station_id);
+
+        let specs = get_crate_specs(&ctx);
+        let (&loot_crate_tid, _) = specs
+            .iter()
+            .find(|(_, s)| !s.items.is_empty())
+            .expect("SDE must have a crate with fixedLootItems");
+
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.station_id = Some(station_id);
+            }
+            snap.items.insert(
+                939_901,
+                InventoryItemRecord {
+                    item_id: 939_901,
+                    type_id: loot_crate_tid,
+                    owner_id: cid,
+                    location_id: station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 5,
+                    ..Default::default()
+                },
+            );
+        });
+
+        let over_err = handle_crate_service(
+            &ctx,
+            &sess,
+            "ClaimLootFromCrateStack",
+            &[
+                PyRep::Integer(939_901),
+                PyRep::Integer(i64::from(i32::MAX) + 1),
+            ],
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(over_err.code, "InvalidQuantity");
+        assert_eq!(
+            ctx.db.with_snapshot(|s| s.items.get(&939_901).map(|i| i.quantity)),
+            Some(5)
+        );
+
+        if let Some((multi_crate_tid, max_base)) = specs.iter().find_map(|(&tid, s)| {
+            s.items
+                .iter()
+                .map(|&(_, q)| q)
+                .max()
+                .filter(|&q| q >= 2)
+                .map(|q| (tid, q))
+        }) {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.insert(
+                    939_902,
+                    InventoryItemRecord {
+                        item_id: 939_902,
+                        type_id: multi_crate_tid,
+                        owner_id: cid,
+                        location_id: station_id,
+                        flag: InventoryFlag::Hangar,
+                        quantity: i32::MAX,
+                        ..Default::default()
+                    },
+                );
+            });
+            let overflow_open_count = i64::from(i32::MAX / max_base) + 1;
+            let spawn_err = handle_crate_service(
+                &ctx,
+                &sess,
+                "ClaimLootFromCrateStack",
+                &[PyRep::Integer(939_902), PyRep::Integer(overflow_open_count)],
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(spawn_err.code, "InvalidQuantity");
+            assert_eq!(
+                ctx.db.with_snapshot(|s| s.items.get(&939_902).map(|i| i.quantity)),
+                Some(i32::MAX)
+            );
+        }
+    }
+}
 
