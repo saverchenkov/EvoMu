@@ -1341,6 +1341,20 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
         ch.active_ship_id = freighter_id;
         s.characters.insert(char_id, ch);
 
+        // Grant Spaceship Command (3327) + Caldari/Gallente Frigate (3330/3328) so
+        // `find_boardable_corvette_in_hangar` skill checks pass for boardable test corvettes (#1417).
+        let char_skills = s.skills.entry(char_id).or_default();
+        for skill_id in [3327_u32, 3328_u32, 3330_u32] {
+            char_skills.insert(
+                skill_id,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_id,
+                    level: 1,
+                    skill_points: 250.0,
+                },
+            );
+        }
+
         for (item_id, type_id, flag) in [
             (freighter_id, 587_u32, InventoryFlag::Hangar),
             (locked_ibis_id, 601_u32, InventoryFlag::Locked),
@@ -1421,7 +1435,13 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
         "boarding existing corvette must not emit OnPodOrCorvetteAssembly"
     );
 
-    // 2. Calling again while already in a corvette returns typed AlreadyInNewbieShip UserErrorKey.
+    // 2. Calling again while already in a corvette returns typed AlreadyInNewbieShip UserErrorKey,
+    //    even when an active `claim_key` cooldown is set (HF1411-P1-01).
+    let claim_key = -8_800_000 - char_id;
+    let active_cd_ts = ctx.now_unix_secs().to_string();
+    ctx.db.with_mut_snapshot(|s| {
+        s.item_custom_names.insert(claim_key, active_cd_ts.clone());
+    });
     let already_err = handle_ships_mastery_and_fitting_ext(
         &ctx,
         &mut sess,
@@ -1433,7 +1453,7 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
     )
     .await
     .expect("handled")
-    .expect_err("must reject when already in corvette");
+    .expect_err("must reject when already in corvette even with active cooldown");
     assert_eq!(already_err.code, "AlreadyInNewbieShip");
     assert!(matches!(
         already_err.to_client_error("dogmaIM", "CreateNewbieShip"),
@@ -1443,8 +1463,36 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
         }
     ));
 
+    // 2b. Active `claim_key` cooldown must NOT block V24 Hangar corvette boarding (HF1411-P1-01).
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = freighter_id;
+    });
+    sess.ship_id = Some(freighter_id);
+    let board_during_cd = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("active cooldown must not block boarding existing Hangar corvette");
+    assert_eq!(
+        board_during_cd.dict_get("shipID").and_then(PyRep::as_i64),
+        Some(ibis_a_id)
+    );
+    assert_eq!(sess.ship_id, Some(ibis_a_id));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.item_custom_names.get(&claim_key).cloned()),
+        Some(active_cd_ts)
+    );
+
     // 3. Legacy 0-arg call from capsule still preserves AlreadyHaveShipInStation, while V24 2-arg
-    //    call from capsule falls back to boarding any remaining Hangar corvette (even non-racial Velator).
+    //    call from capsule falls back to boarding any remaining Hangar corvette (even non-racial Velator),
+    //    and once no Hangar corvette remains, fresh spawn is blocked by active `NewbieShipCooldown`.
     ctx.db.with_mut_snapshot(|s| {
         s.items.remove(&ibis_a_id);
         s.items.remove(&ibis_b_id);
@@ -1488,6 +1536,27 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
     );
     assert_eq!(sess.ship_id, Some(non_racial_velator_id));
 
+    // 3b. With no eligible Hangar corvettes remaining and active `claim_key`, fresh spawn hits `NewbieShipCooldown`.
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.remove(&non_racial_velator_id);
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = freighter_id;
+    });
+    sess.ship_id = Some(freighter_id);
+    let spawn_cd_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("fresh spawn with active claim_key must hit NewbieShipCooldown");
+    assert_eq!(spawn_cd_err.code, "NewbieShipCooldown");
+    assert_eq!(sess.ship_id, Some(freighter_id));
+
     // 4. Undocked returns NotDocked backed by typed UserErrorKey::MustBeDocked.
     sess.station_id = None;
     sess.structure_id = None;
@@ -1497,7 +1566,7 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
         None,
         "dogmaIM",
         "CreateNewbieShip",
-        &[PyRep::Integer(non_racial_velator_id), PyRep::Integer(station_id)],
+        &[PyRep::Integer(freighter_id), PyRep::Integer(station_id)],
         &kw,
     )
     .await
@@ -1511,4 +1580,238 @@ async fn v24_create_newbie_ship_boards_existing_station_corvette_and_emits_typed
             ..
         }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_newbie_ship_guards_structure_control_saved_ship_and_corvette_skill_prereqs() {
+    let mut sde = (*shared_sde()).clone();
+    // Require Caldari Frigate (3330) on Ibis (601) and Gallente Frigate (3328) on Velator (606)
+    // to exercise cross-race / special-edition Corvette prerequisite filtering (#1417 / HF1411-P1-03).
+    if let Some(ibis) = sde.types.get_mut(&601) {
+        ibis.default_attributes.insert(182, 3327.0);
+        ibis.default_attributes.insert(277, 1.0);
+        ibis.default_attributes.insert(183, 3330.0);
+        ibis.default_attributes.insert(278, 1.0);
+    }
+    if let Some(velator) = sde.types.get_mut(&606) {
+        velator.default_attributes.insert(182, 3327.0);
+        velator.default_attributes.insert(277, 1.0);
+        velator.default_attributes.insert(183, 3328.0);
+        velator.default_attributes.insert(278, 1.0);
+    }
+    let ctx = ServerContext::with_sde_and_repository(
+        Arc::new(sde),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_501_451_i64;
+    let other_gunner_id = 96_501_452_i64;
+    let corp_id = 98_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let structure_id = 1_000_000_514_001_i64;
+    let other_structure_id = 1_000_000_514_002_i64;
+    let freighter_id = 96_501_460_i64;
+    let saved_ibis_id = 96_501_461_i64;
+    let boardable_ibis_id = 96_501_462_i64;
+    let untrained_velator_id = 96_501_463_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 1;
+        ch.race_id = 1; // Caldari -> Ibis (601)
+        ch.name = "StructureGuardPilot".into();
+        ch.corporation_id = corp_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = Some(structure_id);
+        ch.active_ship_id = structure_id;
+        s.characters.insert(char_id, ch);
+
+        // Pilot has Spaceship Command (3327) + Caldari Frigate (3330), NOT Gallente Frigate (3328).
+        let skills = s.skills.entry(char_id).or_default();
+        for skill_id in [3327_u32, 3330_u32] {
+            skills.insert(
+                skill_id,
+                eve_db::TrainedSkillRecord {
+                    type_id: skill_id,
+                    level: 1,
+                    skill_points: 250.0,
+                },
+            );
+        }
+
+        for sid in [structure_id, other_structure_id] {
+            s.structures.insert(
+                sid,
+                eve_db::UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35_832,
+                    owner_corp_id: corp_id,
+                    solar_system_id: sys_id,
+                    name: format!("TestFort-{sid}"),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 10_000.0,
+                    armor_hp: 10_000.0,
+                    hull_hp: 10_000.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+
+        for (item_id, type_id) in [
+            (freighter_id, 587_u32),
+            (saved_ibis_id, 601_u32),
+            (boardable_ibis_id, 601_u32),
+            (untrained_velator_id, 606_u32),
+        ] {
+            s.items.insert(
+                item_id,
+                InventoryItemRecord {
+                    item_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: structure_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let mut ext =
+            crate::services::station_structure::structure_upwell_ops::load_ext_state(s);
+        ext.active_pilot_by_structure.insert(structure_id, char_id);
+        ext.previous_ship_by_structure
+            .insert(structure_id, freighter_id);
+        ext.active_pilot_by_structure
+            .insert(other_structure_id, other_gunner_id);
+        ext.previous_ship_by_structure
+            .insert(other_structure_id, saved_ibis_id);
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(s, &ext);
+    });
+
+    let mut sess = SessionState::new(9_417);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(corp_id);
+    sess.solar_system_id = Some(sys_id);
+    sess.structure_id = Some(structure_id);
+    sess.ship_id = Some(structure_id);
+
+    // 1. Controlling a docked Upwell structure rejects CreateNewbieShip with ControllingStructure
+    //    (both 2-arg V24 call and 0-arg call) without orphaning active_pilot_by_structure (HF1411-P1-02).
+    let ctrl_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(structure_id), PyRep::Integer(structure_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("controlling structure must reject CreateNewbieShip");
+    assert_eq!(ctrl_err.code, "ControllingStructure");
+    assert_eq!(sess.ship_id, Some(structure_id));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(
+            s.characters.get(&char_id).map(|c| c.active_ship_id),
+            Some(structure_id)
+        );
+        let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(s);
+        assert_eq!(
+            ext.active_pilot_by_structure.get(&structure_id),
+            Some(&char_id)
+        );
+    });
+
+    // 1b. Even if active_ship_id / session.ship_id were desynced to a regular ship, membership in
+    //     active_pilot_by_structure still rejects with ControllingStructure.
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = freighter_id;
+    });
+    sess.ship_id = Some(freighter_id);
+    let ctrl_ext_err = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(structure_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect_err("active_pilot_by_structure entry must still reject with ControllingStructure");
+    assert_eq!(ctrl_ext_err.code, "ControllingStructure");
+
+    // 2. After releasing structure control, `find_boardable_corvette_in_hangar` must skip
+    //    `saved_ibis_id` (`is_structure_controller_saved_ship`) even though its item_id is lower
+    //    than `boardable_ibis_id` (HF1411-P1-02).
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ext =
+            crate::services::station_structure::structure_upwell_ops::load_ext_state(s);
+        ext.active_pilot_by_structure.remove(&structure_id);
+        ext.previous_ship_by_structure.remove(&structure_id);
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(s, &ext);
+    });
+    let skipped_saved = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(structure_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("must skip structure-saved corvette and board next eligible Hangar corvette");
+    assert_eq!(
+        skipped_saved.dict_get("shipID").and_then(PyRep::as_i64),
+        Some(boardable_ibis_id)
+    );
+    assert_eq!(sess.ship_id, Some(boardable_ibis_id));
+
+    // 3. With only the untrained cross-race Velator (606, requiring Gallente Frigate 3328) left
+    //    in Hangar alongside `saved_ibis_id`, `find_boardable_corvette_in_hangar` must skip the
+    //    untrained Velator (`HF1411-P1-03`) and spawn a fresh racial Ibis (601) instead.
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.remove(&boardable_ibis_id);
+        s.characters.get_mut(&char_id).unwrap().active_ship_id = freighter_id;
+    });
+    sess.ship_id = Some(freighter_id);
+    let spawned_instead = handle_ships_mastery_and_fitting_ext(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "CreateNewbieShip",
+        &[PyRep::Integer(freighter_id), PyRep::Integer(structure_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("must skip untrained cross-race Velator and spawn racial Ibis");
+    let spawned_id = spawned_instead
+        .dict_get("shipID")
+        .and_then(PyRep::as_i64)
+        .expect("spawned corvette shipID");
+    assert_ne!(spawned_id, untrained_velator_id);
+    assert_ne!(spawned_id, saved_ibis_id);
+    assert_eq!(
+        spawned_instead.dict_get("typeID").and_then(PyRep::as_i64),
+        Some(601)
+    );
+    assert_eq!(sess.ship_id, Some(spawned_id));
 }

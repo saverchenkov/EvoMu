@@ -1934,7 +1934,8 @@ async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
         .expect("corvette shipID");
     assert!(corv1_id > 0);
 
-    let cooldown_err = harness
+    // Calling while still seated in corv1_id returns AlreadyInNewbieShip rather than NewbieShipCooldown (#1417).
+    let already_corv_err = harness
         .call(
             "dogmaIM",
             None,
@@ -1943,7 +1944,29 @@ async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
             &kw,
         )
         .await
-        .expect_err("immediate second CreateNewbieShip must hit NewbieShipCooldown");
+        .expect_err("CreateNewbieShip while seated in corvette must hit AlreadyInNewbieShip");
+    assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
+
+    // Back in orig_ship_id with corv1_id moved away, a fresh spawn within 60s hits NewbieShipCooldown.
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    harness
+        .call_ok("ship", None, "Board", &[PyRep::Integer(orig_ship_id)], &kw)
+        .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&corv1_id) {
+            item.location_id = 60_008_494;
+        }
+    });
+    let cooldown_err = harness
+        .call(
+            "dogmaIM",
+            None,
+            "CreateNewbieShip",
+            &[PyRep::Integer(orig_ship_id), PyRep::Integer(station_id)],
+            &kw,
+        )
+        .await
+        .expect_err("immediate second CreateNewbieShip spawn must hit NewbieShipCooldown");
     assert_eq!(cooldown_err.code, "NewbieShipCooldown");
 
     // #1054: /cleartimers clears persisted corvette cooldown key so re-claim succeeds immediately.
@@ -1962,15 +1985,6 @@ async fn live_client_hotfixes_1054_1058_1060_wire_harness() {
             !snap.item_custom_names.contains_key(&claim_key),
             "/cleartimers must clear persisted corvette cooldown key"
         );
-    });
-    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
-    harness
-        .call_ok("ship", None, "Board", &[PyRep::Integer(orig_ship_id)], &kw)
-        .await;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(item) = snap.items.get_mut(&corv1_id) {
-            item.location_id = 60_008_494;
-        }
     });
     let corv2_rep = harness
         .call_ok(

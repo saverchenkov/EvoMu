@@ -100,12 +100,16 @@ fn find_boardable_corvette_in_hangar(
                 && i.flag == InventoryFlag::Hangar
                 && i.singleton
                 && i.item_id != active_ship_id
-                && !snap.is_item_locked_in_contract_or_job(i.item_id)
                 && ctx
                     .sde
                     .types
                     .get(&i.type_id)
                     .is_some_and(|t| Some(t.group_id) == corvette_group && t.published)
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                && !snap.is_structure_controller_saved_ship(i.item_id)
+                && ctx
+                    .check_type_skill_prerequisites_in_snapshot(snap, char_id, i.type_id)
+                    .is_ok()
         })
         .min_by_key(|i| (Some(i.type_id) != preferred_type_id, i.item_id))
         .cloned()
@@ -206,31 +210,6 @@ async fn handle_dogma_create_newbie_ship(
     }
     let now_unix = ctx.now_unix_secs();
     let claim_key = -8_800_000 - char_id;
-    // Match #1036 (#1054): future-dated claim timestamps are stale/expired,
-    // so clear them rather than blocking corvette claims until that future time.
-    let (on_cooldown, stale_future) = ctx.db.with_snapshot(|snap| {
-        match snap
-            .item_custom_names
-            .get(&claim_key)
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            Some(last_ts) if last_ts > now_unix => (false, true),
-            Some(last_ts) => (now_unix < last_ts.saturating_add(60), false),
-            None => (false, false),
-        }
-    });
-    if stale_future {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.item_custom_names.remove(&claim_key);
-        });
-    }
-    if on_cooldown {
-        return Err(BridgeRpcError {
-            code: "NewbieShipCooldown".into(),
-            message: "Corvette claim cooldown is still active".into(),
-            client_error: None,
-        });
-    }
     let capsule_group = ctx
         .sde
         .groups
@@ -243,149 +222,189 @@ async fn handle_dogma_create_newbie_ship(
         .values()
         .find(|g| g.name == "Corvette")
         .map(|g| g.group_id);
-    let (active_ship_id, in_capsule, in_corvette) = ctx.db.with_snapshot(|snap| {
-        let active = snap
+    let (
+        prev_ship_id,
+        corvette_id,
+        corvette_tid,
+        race_id,
+        spawned_items,
+        old_ship_left,
+        reused_existing,
+    ) = ctx.db.try_with_mut_snapshot(|snap| {
+        let active_ship_id = snap
             .characters
             .get(&char_id)
             .map(|c| c.active_ship_id)
             .unwrap_or(0);
+        // Match `ship.Board` (#1417 / HF1411-P1-02): never orphan `active_pilot_by_structure`
+        // or bypass Standup gunner immobilization by spawning/boarding a corvette while controlling a structure.
+        let controlling_structure = (active_ship_id > 0
+            && snap.structures.contains_key(&active_ship_id))
+            || session
+                .ship_id
+                .is_some_and(|sid| snap.structures.contains_key(&sid))
+            || crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
+                .active_pilot_by_structure
+                .values()
+                .any(|&pid| pid == char_id);
+        if controlling_structure {
+            return Err(BridgeRpcError {
+                code: "ControllingStructure".into(),
+                message: "Release structure control before boarding another ship".into(),
+                client_error: None,
+            });
+        }
         let ship_grp = snap
             .items
-            .get(&active)
+            .get(&active_ship_id)
             .and_then(|i| ctx.sde.types.get(&i.type_id))
             .map(|t| t.group_id);
-        (
-            active,
-            ship_grp == capsule_group,
-            ship_grp == corvette_group,
-        )
-    });
-    // Legacy 0-arg callers require being in a capsule; V24.01 `base.pyj` passes `(shipID, locationID)`
-    // directly from any active docked non-corvette ship (and auto-ejects/leaves that ship into the station hangar).
-    if in_corvette || (!in_capsule && req_ship_id != Some(active_ship_id)) {
-        return Err(BridgeRpcError::with_client_error(
-            "AlreadyInNewbieShip",
-            "Character is already in a corvette",
-            eve_proto::ClientError::user(eve_proto::UserErrorKey::AlreadyInNewbieShip),
-        ));
-    }
-    let prev_ship_id = session.ship_id.unwrap_or(active_ship_id);
-    let (corvette_id, corvette_tid, race_id, spawned_items, old_ship_left, reused_existing) = ctx
-        .db
-        .try_with_mut_snapshot(|snap| {
-            let race_id = snap.characters.get(&char_id).map(|c| c.race_id).unwrap_or(2);
-            // DERIVED selection: the lowest-ID published SDE type in group "Corvette" whose raceID
-            // matches the character's race (Reaper/Impairor/Ibis/Velator in the V24 SDE).
-            let racial_corvette_type_id = ctx
-                .sde
-                .types
-                .values()
-                .filter(|t| {
-                    Some(t.group_id) == corvette_group
-                        && t.published
-                        && t.race_id == Some(race_id as _)
-                })
-                .map(|t| t.type_id)
-                .min();
+        let in_capsule = ship_grp == capsule_group;
+        let in_corvette = ship_grp == corvette_group;
+        // Legacy 0-arg callers require being in a capsule; V24.01 `base.pyj` passes `(shipID, locationID)`
+        // directly from any active docked non-corvette ship (and auto-ejects/leaves that ship into the station hangar).
+        if in_corvette || (!in_capsule && req_ship_id != Some(active_ship_id)) {
+            return Err(BridgeRpcError::with_client_error(
+                "AlreadyInNewbieShip",
+                "Character is already in a corvette",
+                eve_proto::ClientError::user(eve_proto::UserErrorKey::AlreadyInNewbieShip),
+            ));
+        }
 
-            let existing_corvette = if req_ship_id.is_some() {
-                find_boardable_corvette_in_hangar(
-                    ctx,
-                    snap,
-                    char_id,
-                    station_id,
-                    active_ship_id,
-                    corvette_group,
-                    racial_corvette_type_id,
-                )
-            } else {
-                let has_corvette_in_station = snap.items.values().any(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == station_id
-                        && i.singleton
-                        && ctx
-                            .sde
-                            .types
-                            .get(&i.type_id)
-                            .is_some_and(|t| Some(t.group_id) == corvette_group)
-                });
-                if has_corvette_in_station {
-                    return Err(BridgeRpcError {
-                        code: "AlreadyHaveShipInStation".into(),
-                        message: "Character already has a corvette in this station".into(),
-                        client_error: None,
-                    });
-                }
-                None
-            };
+        let prev_ship_id = session.ship_id.unwrap_or(active_ship_id);
+        let race_id = snap.characters.get(&char_id).map(|c| c.race_id).unwrap_or(2);
+        // DERIVED selection: the lowest-ID published SDE type in group "Corvette" whose raceID
+        // matches the character's race (Reaper/Impairor/Ibis/Velator in the V24 SDE).
+        let racial_corvette_type_id = ctx
+            .sde
+            .types
+            .values()
+            .filter(|t| {
+                Some(t.group_id) == corvette_group
+                    && t.published
+                    && t.race_id == Some(race_id as _)
+            })
+            .map(|t| t.type_id)
+            .min();
 
-            let target_new_type_id = if existing_corvette.is_some() {
-                None
-            } else {
-                Some(racial_corvette_type_id.ok_or_else(|| BridgeRpcError {
-                    code: "NoRacialCorvette".into(),
-                    message: format!("No published SDE corvette for race {race_id}"),
-                    client_error: None,
-                })?)
-            };
-
-            let mut old_ship_left: Option<(eve_db::InventoryItemRecord, i64)> = None;
-            if !in_capsule && active_ship_id > 0 {
-                if let Some(old_it) = snap.items.get_mut(&active_ship_id) {
-                    let old_loc = old_it.location_id;
-                    old_it.location_id = station_id;
-                    old_it.flag = InventoryFlag::Hangar;
-                    old_it.version += 1;
-                    old_ship_left = Some((old_it.clone(), old_loc));
-                }
-            }
-
-            let (corvette_id, corvette_type_id, corvette_race_id, spawned_items, reused_existing) =
-                if let Some(existing) = existing_corvette {
-                    let existing_race_id = ctx
+        let existing_corvette = if req_ship_id.is_some() {
+            find_boardable_corvette_in_hangar(
+                ctx,
+                snap,
+                char_id,
+                station_id,
+                active_ship_id,
+                corvette_group,
+                racial_corvette_type_id,
+            )
+        } else {
+            let has_corvette_in_station = snap.items.values().any(|i| {
+                i.owner_id == char_id
+                    && i.location_id == station_id
+                    && i.singleton
+                    && ctx
                         .sde
                         .types
-                        .get(&existing.type_id)
-                        .and_then(|t| t.race_id)
-                        .map(|r| r as _)
-                        .unwrap_or(race_id);
-                    (
-                        existing.item_id,
-                        existing.type_id,
-                        existing_race_id,
-                        Vec::new(),
-                        true,
-                    )
-                } else {
-                    let corvette_type_id =
-                        target_new_type_id.expect("checked before leaving active ship");
-                    let (corvette_id, spawned_items) =
-                        spawn_starter_corvette_in_snap(ctx, snap, char_id, station_id, corvette_type_id);
-                    (corvette_id, corvette_type_id, race_id, spawned_items, false)
-                };
-
-            let _ = crate::router::apply_character_transition_in_snap(
-                snap,
-                &ctx.sde,
-                char_id,
-                crate::router::TransitionLocation::KeepCurrent,
-                Some(corvette_id),
-                false,
-                false,
-            );
-            if !reused_existing {
-                snap.item_custom_names
-                    .insert(claim_key, now_unix.to_string());
+                        .get(&i.type_id)
+                        .is_some_and(|t| Some(t.group_id) == corvette_group)
+            });
+            if has_corvette_in_station {
+                return Err(BridgeRpcError {
+                    code: "AlreadyHaveShipInStation".into(),
+                    message: "Character already has a corvette in this station".into(),
+                    client_error: None,
+                });
             }
-            Ok((
-                corvette_id,
-                corvette_type_id,
-                corvette_race_id,
-                spawned_items,
-                old_ship_left,
-                reused_existing,
-            ))
-        })?;
+            None
+        };
+
+        // Match #1036 (#1054) and #1417 (HF1411-P1-01): clear stale future claim timestamps and
+        // enforce the 60s spawn cooldown strictly on the spawn path (`existing_corvette.is_none()`)
+        // so it never blocks V24 Hangar corvette boarding or masks typed `AlreadyInNewbieShip`.
+        if let Some(last_ts) = snap
+            .item_custom_names
+            .get(&claim_key)
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if last_ts > now_unix {
+                snap.item_custom_names.remove(&claim_key);
+            } else if existing_corvette.is_none() && now_unix < last_ts.saturating_add(60) {
+                return Err(BridgeRpcError {
+                    code: "NewbieShipCooldown".into(),
+                    message: "Corvette claim cooldown is still active".into(),
+                    client_error: None,
+                });
+            }
+        }
+
+        let target_new_type_id = if existing_corvette.is_some() {
+            None
+        } else {
+            Some(racial_corvette_type_id.ok_or_else(|| BridgeRpcError {
+                code: "NoRacialCorvette".into(),
+                message: format!("No published SDE corvette for race {race_id}"),
+                client_error: None,
+            })?)
+        };
+
+        let mut old_ship_left: Option<(eve_db::InventoryItemRecord, i64)> = None;
+        if !in_capsule && active_ship_id > 0 {
+            if let Some(old_it) = snap.items.get_mut(&active_ship_id) {
+                let old_loc = old_it.location_id;
+                old_it.location_id = station_id;
+                old_it.flag = InventoryFlag::Hangar;
+                old_it.version += 1;
+                old_ship_left = Some((old_it.clone(), old_loc));
+            }
+        }
+
+        let (corvette_id, corvette_type_id, corvette_race_id, spawned_items, reused_existing) =
+            if let Some(existing) = existing_corvette {
+                let existing_race_id = ctx
+                    .sde
+                    .types
+                    .get(&existing.type_id)
+                    .and_then(|t| t.race_id)
+                    .map(|r| r as _)
+                    .unwrap_or(race_id);
+                (
+                    existing.item_id,
+                    existing.type_id,
+                    existing_race_id,
+                    Vec::new(),
+                    true,
+                )
+            } else {
+                let corvette_type_id =
+                    target_new_type_id.expect("checked before leaving active ship");
+                let (corvette_id, spawned_items) =
+                    spawn_starter_corvette_in_snap(ctx, snap, char_id, station_id, corvette_type_id);
+                (corvette_id, corvette_type_id, race_id, spawned_items, false)
+            };
+
+        let _ = crate::router::apply_character_transition_in_snap(
+            snap,
+            &ctx.sde,
+            char_id,
+            crate::router::TransitionLocation::KeepCurrent,
+            Some(corvette_id),
+            false,
+            false,
+        );
+        if !reused_existing {
+            snap.item_custom_names
+                .insert(claim_key, now_unix.to_string());
+        }
+        Ok((
+            prev_ship_id,
+            corvette_id,
+            corvette_type_id,
+            corvette_race_id,
+            spawned_items,
+            old_ship_left,
+            reused_existing,
+        ))
+    })?;
 
     if let Some((old_rec, old_loc)) = old_ship_left {
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(

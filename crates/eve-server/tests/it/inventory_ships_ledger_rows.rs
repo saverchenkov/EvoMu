@@ -341,7 +341,16 @@ async fn test_newbie_ship_racial_corvette_in_capsule_with_cooldown() {
     });
     s.ship_id = Some(650_001);
     let again = call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.expect("after cooldown");
-    assert_ne!(int(&again, "shipID"), corvette.item_id);
+    let again_id = int(&again, "shipID");
+    assert_ne!(again_id, corvette.item_id);
+    // While seated in the freshly spawned corvette, AlreadyInNewbieShip precedes cooldown;
+    // back in capsule with the corvette moved away, immediate re-spawn hits NewbieShipCooldown (#1417).
+    assert_eq!(call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code, "AlreadyInNewbieShip");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&again_id).unwrap().location_id = 60_008_494;
+        snap.characters.get_mut(&C1).unwrap().active_ship_id = 650_001;
+    });
+    s.ship_id = Some(650_001);
     assert_eq!(call(&ctx, &mut s, "dogmaIM", "CreateNewbieShip", vec![]).await.unwrap_err().code, "NewbieShipCooldown");
 }
 

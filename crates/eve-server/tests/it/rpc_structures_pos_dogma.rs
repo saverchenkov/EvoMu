@@ -626,21 +626,26 @@ async fn test_dogma_im_parity() {
     assert_eq!(created_item.owner_id, PILOT1);
     assert_eq!(created_item.location_id, STATION_JITA);
 
-    // Call again immediately: cooldown active
-    let cooldown_err = rpc(&ctx, &mut sess, "dogmaIM", "CreateNewbieShip", &[])
-        .await
-        .expect_err("Immediate second CreateNewbieShip must hit cooldown");
-    assert_eq!(cooldown_err.code, "NewbieShipCooldown");
-
-    // Call while already in corvette (even after cooldown expires) -> AlreadyInNewbieShip
-    let claim_key = -8_800_000 - PILOT1;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.item_custom_names.remove(&claim_key);
-    });
+    // Call while already in corvette (even while cooldown is active) -> AlreadyInNewbieShip (#1417)
     let already_corv_err = rpc(&ctx, &mut sess, "dogmaIM", "CreateNewbieShip", &[])
         .await
         .expect_err("CreateNewbieShip while in corvette must fail");
     assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
+
+    // Back in capsule with spawned corvette moved out of station while cooldown is active -> NewbieShipCooldown
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&new_ship_id) {
+            item.location_id = 60_008_494;
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.active_ship_id = capsule_item_id;
+        }
+    });
+    sess.ship_id = Some(capsule_item_id);
+    let cooldown_err = rpc(&ctx, &mut sess, "dogmaIM", "CreateNewbieShip", &[])
+        .await
+        .expect_err("Immediate second CreateNewbieShip spawn must hit cooldown");
+    assert_eq!(cooldown_err.code, "NewbieShipCooldown");
 
     // Call while not docked
     ctx.db.with_mut_snapshot(|snap| {

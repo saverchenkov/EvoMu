@@ -1196,17 +1196,39 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .expect("CreateNewbieShip succeeds even with non-corvette ship in station");
     let corvette_id = corvette_rep.dict_get("shipID").and_then(|v| v.as_i64()).unwrap();
     assert!(corvette_id > 0);
-    let cd_corvette_err = ctx
-        .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
-        .await
-        .expect_err("CreateNewbieShip within 60s must fail with NewbieShipCooldown");
-    assert_eq!(cd_corvette_err.code, "NewbieShipCooldown");
-    ctx.advance_virtual_clock(65);
+    // Calling while already in a corvette returns AlreadyInNewbieShip even while cooldown is active (#1417).
     let already_corv_err = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
         .await
         .expect_err("CreateNewbieShip while already in a corvette must fail with AlreadyInNewbieShip");
     assert_eq!(already_corv_err.code, "AlreadyInNewbieShip");
+
+    // Back in capsule with the corvette temporarily moved away, a fresh spawn within 60s hits NewbieShipCooldown.
+    let corv_station_id = sess.station_id.expect("docked station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&corvette_id) {
+            sh.location_id = 60_008_494;
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = pod_id;
+        }
+    });
+    sess.ship_id = Some(pod_id);
+    let cd_corvette_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "CreateNewbieShip", &[], &kw, None)
+        .await
+        .expect_err("CreateNewbieShip spawn within 60s must fail with NewbieShipCooldown");
+    assert_eq!(cd_corvette_err.code, "NewbieShipCooldown");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&corvette_id) {
+            sh.location_id = corv_station_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = corvette_id;
+        }
+    });
+    sess.ship_id = Some(corvette_id);
+    ctx.advance_virtual_clock(65);
 
     // Leave corvette into capsule -> calling CreateNewbieShip again while Corvette is in station fails AlreadyHaveShipInStation
     ctx.advance_secs(12);
