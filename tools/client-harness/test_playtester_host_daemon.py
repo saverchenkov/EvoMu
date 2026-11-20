@@ -1932,9 +1932,12 @@ class TestSpeedupOptimizations(unittest.TestCase):
             "click_xy",
         )
         self.assertEqual(playtester._normalize_action_defaults({"type": "drag"})["type"], "drag_widget")
+        self.assertEqual(playtester._normalize_action_defaults({"type": "drag_and_drop"})["type"], "drag_widget")
         self.assertEqual(playtester._normalize_action_defaults({"type": "type"})["type"], "type_text")
         self.assertEqual(playtester._normalize_action_defaults({"type": "input_text"})["type"], "type_text")
         self.assertEqual(playtester._normalize_action_defaults({"type": "enter_text"})["type"], "type_text")
+        for alias in ("key_press", "hotkey", "press_hotkey", "shortcut"):
+            self.assertEqual(playtester._normalize_action_defaults({"type": alias})["type"], "press_key")
 
 
     def test_benign_user_error_markers_for_boarding_lance_cooldown(self):

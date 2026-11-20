@@ -1202,6 +1202,11 @@ pub(crate) async fn handle_fleet_warp(
             client_error: None,
         }));
     }
+    if let Err(e) =
+        crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)
+    {
+        return Some(Err(e));
+    }
     let sys = ctx.systems.get_or_spawn(sys_id);
     let caller_ship_id = session.ship_id.unwrap_or(0);
     let caller_pos = sys
@@ -1211,6 +1216,7 @@ pub(crate) async fn handle_fleet_warp(
         .flatten()
         .map(|(_, b)| b.position);
     let now_unix = ctx.now_unix();
+    let mut dest_is_bookmark = false;
     let dest_pos = if let Some(pos) = explicit_dest {
         pos
     } else if let Ok(Some((_, b))) = sys.get_ball_snapshot(dest_id).await {
@@ -1247,7 +1253,10 @@ pub(crate) async fn handle_fleet_warp(
         Some(Ok(DVec3::new(bm.x, bm.y, bm.z)))
     }) {
         match bm_res {
-            Ok(p) => p,
+            Ok(p) => {
+                dest_is_bookmark = true;
+                p
+            }
             Err(e) => return Some(Err(e)),
         }
     } else if let Some(st) = ctx
@@ -1261,13 +1270,6 @@ pub(crate) async fn handle_fleet_warp(
         DVec3::new(150_000_000.0, 0.0, 0.0)
     };
 
-    if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
-        ctx, sys_id, dest_pos, dest_pos,
-    )
-    .await
-    {
-        return Some(Err(e));
-    }
     if let Err(e) = crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
         ctx,
         sys_id,
@@ -1276,6 +1278,25 @@ pub(crate) async fn handle_fleet_warp(
         dest_pos.to_array(),
     ) {
         return Some(Err(e));
+    }
+    if let Err(e) = crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
+        ctx, sys_id, dest_pos, dest_pos,
+    )
+    .await
+    {
+        return Some(Err(e));
+    }
+    if !dest_is_bookmark {
+        if let Err(e) =
+            crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+                ctx,
+                sys_id,
+                dest_pos,
+                (dest_id > 0).then_some(dest_id),
+            )
+        {
+            return Some(Err(e));
+        }
     }
 
     let fleet_warp_dir = caller_pos
@@ -1287,9 +1308,19 @@ pub(crate) async fn handle_fleet_warp(
     let mut landing_positions = Vec::new();
     let mut ess_bubble_blocked = false;
     let mut deadspace_blocked = false;
+    let mut gated_dungeon_err: Option<BridgeRpcError> = None;
     for (member_char_id, ship_id) in eligible_ship_ids {
         if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
             if ball.max_velocity <= 0.0 {
+                continue;
+            }
+            if crate::services::tourney_service::check_tourney_warp_restricted(
+                ctx,
+                sys_id,
+                member_char_id,
+            )
+            .is_err()
+            {
                 continue;
             }
             if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp").is_err()
@@ -1298,6 +1329,26 @@ pub(crate) async fn handle_fleet_warp(
                 continue;
             }
             if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                continue;
+            }
+            if crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
+                &sys, ship_id,
+            )
+            .await
+            .is_err()
+            {
+                continue;
+            }
+            if crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+                ctx,
+                member_char_id,
+                ship_id,
+                sys_id,
+                "warp",
+                now_unix,
+            )
+            .is_err()
+            {
                 continue;
             }
             if crate::services::pve_ess_reserve_banks::check_ess_intrusion_bubble_restriction(
@@ -1315,6 +1366,44 @@ pub(crate) async fn handle_fleet_warp(
                     continue;
                 }
             }
+            let cs_opt = sys.get_combat_state(ship_id).await.ok().flatten();
+            let cs_non_covert_cloak = cs_opt.as_ref().is_some_and(|cs| {
+                !cs.is_covert_cloak
+                    && ((cs.is_cloaked && cs.gate_cloak_remaining_ticks == 0)
+                        || cs.cloak_velocity_multiplier.is_some())
+            });
+            let (db_covert_cloak, db_non_covert_cloak, wdo_lvl) = ctx.db.with_snapshot(|s| {
+                let mut has_covert = false;
+                let mut has_non_covert = false;
+                for it in s.items.values() {
+                    if it.location_id == ship_id && s.module_active_states.contains(&it.item_id) {
+                        if let Some(t) = ctx.sde.types.get(&it.type_id) {
+                            if t.group_id == 330 {
+                                if crate::services::inventory_fitting::fitting_module_cycles::is_warp_safe_cloak_module(ctx, t) {
+                                    has_covert = true;
+                                } else {
+                                    has_non_covert = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                let lvl = s
+                    .skills
+                    .get(&member_char_id)
+                    .and_then(|m| m.get(&3455))
+                    .map(|sk| sk.level.min(5))
+                    .unwrap_or(0);
+                (has_covert, has_non_covert, lvl)
+            });
+            if db_non_covert_cloak || (cs_non_covert_cloak && !db_covert_cloak) {
+                continue;
+            }
+            let is_covert_cloaked = db_covert_cloak
+                || cs_opt
+                    .as_ref()
+                    .is_some_and(|cs| cs.is_cloaked && cs.is_covert_cloak);
+
             let dist = ball.position.distance(dest_pos);
             if dist >= WARP_MIN_DISTANCE_M {
                 let slot_idx = warped_members.len();
@@ -1327,16 +1416,57 @@ pub(crate) async fn handle_fleet_warp(
                     fleet_warp_dir,
                     rel_delta,
                 );
-                let landing = anchor_pos + offset;
-                if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
-                    ctx, sys_id, dest_pos, landing,
-                )
-                .await
-                .is_err()
-                {
-                    ess_bubble_blocked = true;
-                    continue;
+                let mut landing = anchor_pos + offset;
+
+                let (base_warp_cap_need, sde_max_cap) = ctx
+                    .sde
+                    .types
+                    .get(&ball.type_id)
+                    .map(|t| {
+                        let wcn = t.default_attributes.get(&153).copied().unwrap_or(1.24e-6);
+                        let cap = t
+                            .default_attributes
+                            .get(&eve_sde::attr_ids::CAPACITOR_CAPACITY)
+                            .copied()
+                            .unwrap_or(250.0);
+                        (wcn, cap)
+                    })
+                    .unwrap_or((1.24e-6, 250.0));
+                let eff_warp_cap_need = base_warp_cap_need * (1.0 - 0.10 * (wdo_lvl as f64));
+                let cap_per_m =
+                    (eff_warp_cap_need * ball.mass) / crate::services::space_destiny::AU_IN_METERS;
+                let requested_dist_m = ball.position.distance(landing);
+                let req_cap = cap_per_m * requested_dist_m;
+                let mut cap_debit_update: Option<(f64, f64, f64, bool)> = None;
+                if let Some(mut cs) = cs_opt.clone() {
+                    let mut repaired_max_cap = false;
+                    if (cs.max_capacitor - 250.0).abs() < 1e-6
+                        && (cs.capacitor - 250.0).abs() < 1e-6
+                        && sde_max_cap > 250.0
+                    {
+                        cs.max_capacitor = sde_max_cap;
+                        cs.capacitor = sde_max_cap;
+                        repaired_max_cap = true;
+                    }
+                    let old_cap = cs.capacitor;
+                    if cs.capacitor < req_cap {
+                        let affordable_dist_m = if cap_per_m > 0.0 {
+                            cs.capacitor / cap_per_m
+                        } else {
+                            requested_dist_m
+                        };
+                        if affordable_dist_m < WARP_MIN_DISTANCE_M {
+                            continue;
+                        }
+                        let warp_dir = (landing - ball.position).normalize_or_zero();
+                        landing = ball.position + warp_dir * affordable_dist_m;
+                        cs.capacitor = 0.0;
+                    } else {
+                        cs.capacitor = (cs.capacitor - req_cap).max(0.0);
+                    }
+                    cap_debit_update = Some((cs.capacitor, cs.max_capacitor, old_cap, repaired_max_cap));
                 }
+
                 if crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
                     ctx,
                     sys_id,
@@ -1349,8 +1479,31 @@ pub(crate) async fn handle_fleet_warp(
                     deadspace_blocked = true;
                     continue;
                 }
-                if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                    if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
+                if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
+                    ctx, sys_id, dest_pos, landing,
+                )
+                .await
+                .is_err()
+                {
+                    ess_bubble_blocked = true;
+                    continue;
+                }
+                if !dest_is_bookmark {
+                    if let Err(e) =
+                        crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+                            ctx, sys_id, landing, None,
+                        )
+                    {
+                        if gated_dungeon_err.is_none() {
+                            gated_dungeon_err = Some(e);
+                        }
+                        continue;
+                    }
+                }
+                if let Some(ref cs) = cs_opt {
+                    if cs.gate_cloak_remaining_ticks > 0
+                        || cs.undock_invulnerable_remaining_ticks > 0
+                    {
                         let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
                             ctx,
                             &sys,
@@ -1360,7 +1513,22 @@ pub(crate) async fn handle_fleet_warp(
                         .await;
                     }
                 }
-                let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
+                if is_covert_cloaked {
+                    let _ = sys
+                        .modify_combat_state(ship_id, |live_cs| {
+                            if live_cs.is_cloaked && !live_cs.is_covert_cloak {
+                                live_cs.is_covert_cloak = true;
+                            }
+                        })
+                        .await;
+                }
+                let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+                    ctx,
+                    member_char_id,
+                    sys_id,
+                    ball.type_id,
+                );
+                let warp_mode = MovementMode::new_warp(ball.position, landing, warp_speed);
                 if sys
                     .set_warp_movement_mode(
                         ship_id,
@@ -1370,6 +1538,27 @@ pub(crate) async fn handle_fleet_warp(
                     .await
                     .is_ok()
                 {
+                    if let Some((new_cap, new_max_cap, old_cap, repaired_max_cap)) =
+                        cap_debit_update
+                    {
+                        if repaired_max_cap {
+                            let _ = sys
+                                .modify_combat_state(ship_id, move |live_cs| {
+                                    live_cs.max_capacitor = new_max_cap;
+                                    live_cs.capacitor = new_cap;
+                                })
+                                .await;
+                        } else {
+                            let _ = sys.set_capacitor(ship_id, new_cap).await;
+                        }
+                        let _ = ctx.notify_ship_capacitor_change(
+                            member_char_id,
+                            ship_id,
+                            new_cap,
+                            new_max_cap,
+                            Some(old_cap),
+                        );
+                    }
                     crate::services::space_destiny::track_player_or_fleet_warp(
                         ctx,
                         None,
@@ -1387,6 +1576,13 @@ pub(crate) async fn handle_fleet_warp(
             }
         }
     }
+    if warped_members.is_empty() && deadspace_blocked {
+        return Some(Err(BridgeRpcError::with_client_error(
+            "NaturalPhenomenaDisruptingWarp",
+            "Natural phenomena are disrupting warp",
+            eve_proto::ClientError::CustomInfo("Natural phenomena are disrupting warp".into()),
+        )));
+    }
     if warped_members.is_empty() && ess_bubble_blocked {
         return Some(Err(BridgeRpcError {
             code: "EssIntrusionBubbleWarpBlocked".into(),
@@ -1394,12 +1590,10 @@ pub(crate) async fn handle_fleet_warp(
             client_error: None,
         }));
     }
-    if warped_members.is_empty() && deadspace_blocked {
-        return Some(Err(BridgeRpcError::with_client_error(
-            "NaturalPhenomenaDisruptingWarp",
-            "Natural phenomena are disrupting warp",
-            eve_proto::ClientError::CustomInfo("Natural phenomena are disrupting warp".into()),
-        )));
+    if warped_members.is_empty() {
+        if let Some(err) = gated_dungeon_err {
+            return Some(Err(err));
+        }
     }
 
     for &opt_out_cid in &skipped_opt_out_members {

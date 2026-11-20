@@ -822,3 +822,334 @@ fn resolve_deadspace_or_escalation_enforces_probe_scan_expedition_owner_and_drif
         Some(DVec3::new(10_000.0, 0.0, 0.0))
     );
 }
+
+#[test]
+fn resolve_dsg_probe_gate_by_inst_dungeon_or_site_id_and_filters_expired_escalations() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let scanner_char = 90_004_101i64;
+    let other_char = 90_004_102i64;
+    let ctx = make_ctx(sys_id, scanner_char);
+    let now_unix = ctx.now_unix();
+
+    let dsg_inst_id = 88_100_001i64;
+    let dsg_did = 4_901u32;
+    let dsg_sig_id = format!("DSG-{sys_id}");
+    let dsg_pos = [2_500_000.0, -500_000.0, 125_000.0];
+
+    let dsg_did_only_inst_id = 88_100_002i64;
+    let dsg_did_only_did = 4_902u32;
+    let dsg_did_only_sig_id = format!("DSG-{sys_id}-DID");
+
+    let expired_exp_id = 88_200_001i64;
+    let expired_exp_did = 4_903u32;
+    let active_exp_id = 88_200_002i64;
+    let active_exp_did = 4_904u32;
+    let timeless_exp_id = 88_200_003i64;
+    let timeless_exp_did = 4_905u32;
+
+    with_dungeon_runtime_store(&ctx, |store| {
+        let mut dsg_inst = sample_instance(dsg_inst_id, dsg_did, sys_id, 0, false);
+        dsg_inst.entry_gate_pos = Some(dsg_pos);
+        store.instances.insert(dsg_inst_id, dsg_inst);
+
+        let mut did_only_inst = sample_instance(dsg_did_only_inst_id, dsg_did_only_did, sys_id, 0, false);
+        did_only_inst.entry_gate_pos = Some([3_500_000.0, 0.0, 0.0]);
+        store.instances.insert(dsg_did_only_inst_id, did_only_inst);
+    });
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.escalations_by_char.insert(
+            scanner_char,
+            vec![
+                crate::services::pve_expeditions::EscalatingPathEntry {
+                    instance_id: expired_exp_id,
+                    character_id: scanner_char,
+                    source_dungeon_id: 100,
+                    expedition_dungeon_id: expired_exp_did,
+                    expedition_name: "Expired Escalation".into(),
+                    destination_solar_system_id: sys_id,
+                    step_index: 1,
+                    total_steps: 2,
+                    journal_text: String::new(),
+                    created_at_sec: now_unix.saturating_sub(90_000),
+                    expires_at_sec: now_unix.saturating_sub(60),
+                    dungeons_entered: Vec::new(),
+                    journal_entry_template_id: 0,
+                },
+                crate::services::pve_expeditions::EscalatingPathEntry {
+                    instance_id: active_exp_id,
+                    character_id: scanner_char,
+                    source_dungeon_id: 100,
+                    expedition_dungeon_id: active_exp_did,
+                    expedition_name: "Active Escalation".into(),
+                    destination_solar_system_id: sys_id,
+                    step_index: 1,
+                    total_steps: 2,
+                    journal_text: String::new(),
+                    created_at_sec: now_unix,
+                    expires_at_sec: now_unix + 3_600,
+                    dungeons_entered: Vec::new(),
+                    journal_entry_template_id: 0,
+                },
+                crate::services::pve_expeditions::EscalatingPathEntry {
+                    instance_id: timeless_exp_id,
+                    character_id: scanner_char,
+                    source_dungeon_id: 100,
+                    expedition_dungeon_id: timeless_exp_did,
+                    expedition_name: "Timeless Escalation".into(),
+                    destination_solar_system_id: sys_id,
+                    step_index: 1,
+                    total_steps: 2,
+                    journal_text: String::new(),
+                    created_at_sec: now_unix,
+                    expires_at_sec: 0,
+                    dungeons_entered: Vec::new(),
+                    journal_entry_template_id: 0,
+                },
+            ],
+        );
+        reg.sites_by_system.entry(sys_id).or_default().extend([
+            PveSiteInstance {
+                site_id: dsg_sig_id.clone(),
+                solar_system_id: sys_id,
+                dungeon_id: dsg_did,
+                dungeon_name: "Seeded DSG Deadspace".into(),
+                site_category: "Deadspace".into(),
+                probe_required: true,
+                cleared: false,
+                position: dsg_pos,
+                expedition_instance_id: Some(dsg_inst_id),
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: dsg_did_only_sig_id.clone(),
+                solar_system_id: sys_id,
+                dungeon_id: dsg_did_only_did,
+                dungeon_name: "Dungeon-Matched DSG Site".into(),
+                site_category: "Deadspace".into(),
+                probe_required: true,
+                cleared: false,
+                position: [3_500_000.0, 0.0, 0.0],
+                expedition_instance_id: None,
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: format!("EXP-{expired_exp_id}-1"),
+                solar_system_id: sys_id,
+                dungeon_id: expired_exp_did,
+                dungeon_name: "Expired Escalation".into(),
+                site_category: "Expedition".into(),
+                probe_required: false,
+                cleared: false,
+                position: [4_500_000.0, 0.0, 0.0],
+                expedition_instance_id: Some(expired_exp_id),
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: format!("EXP-{active_exp_id}-1"),
+                solar_system_id: sys_id,
+                dungeon_id: active_exp_did,
+                dungeon_name: "Active Escalation".into(),
+                site_category: "Expedition".into(),
+                probe_required: false,
+                cleared: false,
+                position: [5_500_000.0, 0.0, 0.0],
+                expedition_instance_id: Some(active_exp_id),
+                ..Default::default()
+            },
+            PveSiteInstance {
+                site_id: format!("EXP-{timeless_exp_id}-1"),
+                solar_system_id: sys_id,
+                dungeon_id: timeless_exp_did,
+                dungeon_name: "Timeless Escalation".into(),
+                site_category: "Expedition".into(),
+                probe_required: false,
+                cleared: false,
+                position: [6_500_000.0, 0.0, 0.0],
+                expedition_instance_id: Some(timeless_exp_id),
+                ..Default::default()
+            },
+        ]);
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.entry(sys_id).or_default().extend([
+            CosmicSignatureRecord {
+                signature_id: dsg_sig_id.clone(),
+                solar_system_id: sys_id,
+                sig_group: "Combat".into(),
+                type_name: "Seeded DSG Deadspace".into(),
+                position: dsg_pos,
+                signal_strength: 0.25,
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            },
+            CosmicSignatureRecord {
+                signature_id: dsg_did_only_sig_id.clone(),
+                solar_system_id: sys_id,
+                sig_group: "Combat".into(),
+                type_name: "Dungeon-Matched DSG Site".into(),
+                position: [3_500_000.0, 0.0, 0.0],
+                signal_strength: 0.25,
+                created_unix: now_unix,
+                lifetime_seconds: 86_400,
+                ..Default::default()
+            },
+        ]);
+    });
+
+    // 1. Before 100% probe scan, DSG-* must reject warp by dungeon_id, instance_id, DNG-INST-*, and site_id.
+    for &(tid, ref tstr) in &[
+        (i64::from(dsg_did), None),
+        (dsg_inst_id, None),
+        (0, Some(format!("DNG-INST-{dsg_inst_id}"))),
+        (0, Some(dsg_sig_id.clone())),
+    ] {
+        assert_eq!(
+            resolve_deadspace_or_escalation_warp_target(
+                &ctx,
+                scanner_char,
+                sys_id,
+                "dungeon",
+                tid,
+                tstr.as_deref(),
+            )
+            .unwrap(),
+            None,
+            "unscanned DSG site must be unwarpable for ({tid}, {tstr:?})"
+        );
+    }
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            i64::from(dsg_did_only_did),
+            None,
+        )
+        .unwrap(),
+        None
+    );
+
+    // 2. After 100% scan for scanner_char, all DSG-* selectors resolve for scanner_char only.
+    ctx.record_character_scan_progress(scanner_char, sys_id, &dsg_sig_id, 1.0);
+    ctx.record_character_scan_progress(scanner_char, sys_id, &dsg_did_only_sig_id, 1.0);
+
+    for &(tid, ref tstr) in &[
+        (i64::from(dsg_did), None),
+        (dsg_inst_id, None),
+        (0, Some(format!("DNG-INST-{dsg_inst_id}"))),
+        (0, Some(dsg_sig_id.clone())),
+    ] {
+        assert_eq!(
+            resolve_deadspace_or_escalation_warp_target(
+                &ctx,
+                scanner_char,
+                sys_id,
+                "dungeon",
+                tid,
+                tstr.as_deref(),
+            )
+            .unwrap(),
+            Some(DVec3::from_array(dsg_pos)),
+            "100%-scanned DSG site must resolve for ({tid}, {tstr:?})"
+        );
+    }
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            i64::from(dsg_did_only_did),
+            None,
+        )
+        .unwrap(),
+        Some(DVec3::new(3_500_000.0, 0.0, 0.0))
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            other_char,
+            sys_id,
+            "dungeon",
+            0,
+            Some(dsg_sig_id.as_str()),
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            other_char,
+            sys_id,
+            "dungeon",
+            dsg_inst_id,
+            None,
+        )
+        .unwrap(),
+        None
+    );
+
+    // 3. Collapsing the DSG-* signature closes warp access even with prior 100% scan progress.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys_id) {
+            if let Some(sig) = sigs.iter_mut().find(|s| s.signature_id == dsg_sig_id) {
+                sig.collapsed = true;
+            }
+        }
+    });
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            dsg_inst_id,
+            None,
+        )
+        .unwrap(),
+        None
+    );
+
+    // 4. Expired escalations are filtered out of owned_exp_ids, while active and timeless ones resolve.
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            i64::from(expired_exp_did),
+            None,
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            i64::from(active_exp_did),
+            None,
+        )
+        .unwrap(),
+        Some(DVec3::new(5_500_000.0, 0.0, 0.0))
+    );
+    assert_eq!(
+        resolve_deadspace_or_escalation_warp_target(
+            &ctx,
+            scanner_char,
+            sys_id,
+            "dungeon",
+            i64::from(timeless_exp_did),
+            None,
+        )
+        .unwrap(),
+        Some(DVec3::new(6_500_000.0, 0.0, 0.0))
+    );
+}
