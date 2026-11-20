@@ -13,6 +13,7 @@ use std::collections::HashMap;
 pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
     ctx: &ServerContext,
     sess: &mut SessionState,
+    victim_sess: &mut SessionState,
     ship_id: i64,
     victim_id: i64,
     damp_mod_id: i64,
@@ -121,14 +122,14 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
     ).await.expect("Deactivate ScanRes-scripted Remote Sensor Dampener I");
 
     // 4. Verify Tracking Disruptor & Guidance Disruptor with Scripts via dogmaIM.Activate (feat:modules.tracking-disruptor)
-    let base_turret_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
+    let base_turret_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
         .expect("ItemGetInfo baseline turret");
     let base_optimal = extract_item_attr(&base_turret_info, 54);
     let base_falloff = extract_item_attr(&base_turret_info, 158);
     let base_tracking = extract_item_attr(&base_turret_info, 160);
     assert!(base_optimal > 0.0 && base_falloff > 0.0 && base_tracking > 0.0);
 
-    let base_launcher_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
+    let base_launcher_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
         .expect("ItemGetInfo baseline launcher");
     let base_missile_vel = extract_item_attr(&base_launcher_info, 37);
     let base_flight_time = extract_item_attr(&base_launcher_info, 281);
@@ -142,7 +143,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(td_mod_id), PyRep::String("shipModuleTrackingDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate unscripted Tracking Disruptor I");
-    let td_unscripted_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
+    let td_unscripted_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
         .expect("ItemGetInfo under unscripted Tracking Disruptor I");
     let td_un_opt = extract_item_attr(&td_unscripted_info, 54);
     let td_un_fall = extract_item_attr(&td_unscripted_info, 158);
@@ -167,7 +168,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(td_mod_id), PyRep::String("shipModuleTrackingDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Optimal Range scripted Tracking Disruptor I");
-    let td_opt_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
+    let td_opt_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
         .expect("ItemGetInfo under Optimal Range scripted TD");
     let td_opt_opt = extract_item_attr(&td_opt_info, 54);
     let td_opt_fall = extract_item_attr(&td_opt_info, 158);
@@ -198,7 +199,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(td_mod_id), PyRep::String("shipModuleTrackingDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Tracking Speed scripted Tracking Disruptor I");
-    let td_trk_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
+    let td_trk_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_turret_id)], &kw, None).await
         .expect("ItemGetInfo under Tracking Speed scripted TD");
     let td_trk_opt = extract_item_attr(&td_trk_info, 54);
     let td_trk_fall = extract_item_attr(&td_trk_info, 158);
@@ -218,7 +219,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(gd_mod_id), PyRep::String("shipModuleGuidanceDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate unscripted Guidance Disruptor I");
-    let gd_un_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
+    let gd_un_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
         .expect("ItemGetInfo under unscripted Guidance Disruptor I");
     let gd_un_vel = extract_item_attr(&gd_un_info, 37);
     let gd_un_time = extract_item_attr(&gd_un_info, 281);
@@ -245,7 +246,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(gd_mod_id), PyRep::String("shipModuleGuidanceDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Missile Range scripted Guidance Disruptor I");
-    let gd_rng_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
+    let gd_rng_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
         .expect("ItemGetInfo under Missile Range scripted GD");
     let gd_rng_vel = extract_item_attr(&gd_rng_info, 37);
     let gd_rng_time = extract_item_attr(&gd_rng_info, 281);
@@ -272,7 +273,7 @@ pub(crate) async fn verify_ewar_disruptors_painter_and_locks(
         &[PyRep::Integer(gd_mod_id), PyRep::String("shipModuleGuidanceDisruptor".into()), PyRep::Integer(victim_id), PyRep::Integer(1)],
         &kw, None,
     ).await.expect("Activate Missile Precision scripted Guidance Disruptor I");
-    let gd_prec_info = ctx.dispatch_rpc(sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
+    let gd_prec_info = ctx.dispatch_rpc(victim_sess, "dogmaIM", None, "ItemGetInfo", &[PyRep::Integer(target_launcher_id)], &kw, None).await
         .expect("ItemGetInfo under Missile Precision scripted GD");
     let gd_prec_vel = extract_item_attr(&gd_prec_info, 37);
     let gd_prec_time = extract_item_attr(&gd_prec_info, 281);
