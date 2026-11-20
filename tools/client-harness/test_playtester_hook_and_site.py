@@ -3915,7 +3915,7 @@ class TestScenarioHookExtensions(unittest.TestCase):
             modals=[],
         )
         fake_uicore = types.SimpleNamespace(
-            cmd=types.SimpleNamespace(),
+            cmd=types.SimpleNamespace(OpenCorporationPanel=lambda: None),
             registry=fake_reg,
             layer=types.SimpleNamespace(modal=None, abovemain=None, main=None),
             desktop=types.SimpleNamespace(width=1280, height=800),
@@ -3943,6 +3943,12 @@ class TestScenarioHookExtensions(unittest.TestCase):
              mock.patch.object(hook.H, "_sleep_ms", create=True):
             res_open_corp = hook._open_client_window(fake_sm, "corporation", require_open=True)
             self.assertFalse(res_open_corp.get("ok"), res_open_corp)
+            self.assertIn("produced no visible window", str(res_open_corp.get("error", "")))
+            self.assertIn("cmd=OpenCorporationPanel", str(res_open_corp.get("error", "")))
+
+            res_tabs_corp = hook._click_top_tabs_in_window("corporation", require_match=True)
+            self.assertFalse(res_tabs_corp.get("ok"), res_tabs_corp)
+            self.assertIn("no visible open window found for click_top_tabs", str(res_tabs_corp.get("error", "")))
 
             corp_win = _make_win("corporation", "corporation", "Corporation")
             windows.append(corp_win)
