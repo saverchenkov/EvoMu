@@ -545,10 +545,41 @@ impl LivingWorldDirector {
             .await
             .unwrap_or_default();
 
+        // Keep at least a small local rock reserve per real SDE asteroid belt so ambient NPC
+        // MiningOp ships rotate to other belts instead of stripping a starter belt to zero rocks.
+        let mut belt_counts: std::collections::HashMap<i64, (usize, usize)> =
+            std::collections::HashMap::new();
+        for ast in &asteroids {
+            let entry = belt_counts.entry(ast.belt_id).or_insert((0, 0));
+            entry.0 += 1;
+            if !ast.depleted && ast.remaining_units > 0 {
+                entry.1 += 1;
+            }
+        }
+        let can_npc_mine = |belt_id: i64, depleted: bool, remaining_units: u64| -> bool {
+            if depleted || remaining_units == 0 {
+                return false;
+            }
+            if belt_id > 0 {
+                let (total, alive) = belt_counts.get(&belt_id).copied().unwrap_or((0, 0));
+                if total >= 8 {
+                    let min_reserve = (total / 4).clamp(2, 5);
+                    if alive <= min_reserve {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+
         let target_ast = asteroids
             .iter()
-            .find(|a| a.type_id == cargo_type && !a.depleted && a.remaining_units > 0)
-            .or_else(|| asteroids.iter().find(|a| !a.depleted && a.remaining_units > 0));
+            .find(|a| a.type_id == cargo_type && can_npc_mine(a.belt_id, a.depleted, a.remaining_units))
+            .or_else(|| {
+                asteroids
+                    .iter()
+                    .find(|a| can_npc_mine(a.belt_id, a.depleted, a.remaining_units))
+            });
 
         let Some(target) = target_ast else {
             let _ = handle.remove_ball(escort_ball_id).await;
@@ -691,7 +722,7 @@ impl LivingWorldDirector {
             let mut guard = self.mining_last_step.write().unwrap_or_else(|e| e.into_inner());
             let prev = guard.insert(convoy_id, now_unix);
             match prev {
-                Some(p) => (now_unix.saturating_sub(p).max(1)) as f64,
+                Some(p) => (now_unix.saturating_sub(p).max(1).min(300)) as f64,
                 None => 0.0,
             }
         };
@@ -702,11 +733,6 @@ impl LivingWorldDirector {
             .map(|t| t.volume)
             .unwrap_or(0.1)
             .max(0.01);
-        let units_per_tick = if elapsed_tick_secs > 0.0 {
-            ((tick_m3 / ore_unit_vol).floor() as u64).max(1)
-        } else {
-            0
-        };
         let ore_hold_m3 = ship_type
             .and_then(|t| {
                 t.default_attributes
@@ -717,6 +743,20 @@ impl LivingWorldDirector {
             })
             .unwrap_or(5_000.0)
             .clamp(500.0, 5_000.0);
+        let current_cargo_m3 = (current_cargo.max(0) as f64) * ore_unit_vol;
+        let remaining_hold_m3 = (ore_hold_m3 - current_cargo_m3).max(0.0);
+        let remaining_hold_units = if remaining_hold_m3 <= 1e-6 {
+            0
+        } else {
+            (remaining_hold_m3 / ore_unit_vol).ceil() as u64
+        };
+        let units_per_tick = if elapsed_tick_secs > 0.0 && remaining_hold_units > 0 {
+            ((tick_m3 / ore_unit_vol).floor() as u64)
+                .max(1)
+                .min(remaining_hold_units)
+        } else {
+            0
+        };
 
         let extraction = handle
             .mine_asteroid_with_db_sync(

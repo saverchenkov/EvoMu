@@ -2188,6 +2188,24 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    /// Builds the marshaled `SetState` `KeyVal` and `DoDestinyUpdate` list for `observer_ball_id`
+    /// along with the actor's latest `TickBroadcast.broadcast_seq` watermark at snapshot time (`#1461`).
+    pub async fn get_set_state_with_seq(
+        &self,
+        observer_ball_id: BallId,
+    ) -> Result<(u64, PyRep, PyRep, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_sender()
+            .send(SystemCommand::GetSetStateWithSeq {
+                observer_ball_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
     pub async fn get_bubble_id_for_ball(&self, ball_id: BallId) -> Result<Option<u64>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_sender()

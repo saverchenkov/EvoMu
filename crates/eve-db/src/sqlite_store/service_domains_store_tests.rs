@@ -74,6 +74,9 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     );
     snap.fleet_and_social_ops.contract_deposits.insert(77, 25_000);
     snap.mining_and_ess_state.mining_ledger_waste.insert(0, 420);
+    snap.mining_and_ess_state
+        .belt_respawn_due_unix
+        .insert(40_009_232, 1_796_468_400);
     snap.quasar_commerce.plex_invoices.push("inv-1".into());
 
     replace_sqlite_from_snapshot(&mut conn, &snap).expect("replace");
@@ -88,6 +91,10 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
         loaded.mining_and_ess_state.mining_ledger_waste,
         snap.mining_and_ess_state.mining_ledger_waste
     );
+    assert_eq!(
+        loaded.mining_and_ess_state.belt_respawn_due_unix,
+        snap.mining_and_ess_state.belt_respawn_due_unix
+    );
     assert_eq!(loaded.quasar_commerce.plex_invoices, vec!["inv-1".to_string()]);
 
     // Reload restores unmodified domain cleanly from SQLite.
@@ -97,8 +104,12 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
     let mut prev = loaded.clone();
     let mut dirty = loaded.clone();
 
-    // Reverting to default deletes domain row cleanly.
+    // Reverting to default deletes domain rows cleanly across both Quasar and belt respawn state.
     dirty.quasar_commerce.plex_invoices.clear();
+    dirty
+        .mining_and_ess_state
+        .belt_respawn_due_unix
+        .remove(&40_009_232);
     let tx = conn.transaction().expect("tx");
     let delta = sync_snapshot_diff_for_test(&tx, &mut prev, &dirty, true).expect("sync");
     assert!(delta.full_snapshot.is_some());
@@ -111,6 +122,14 @@ fn typed_service_domains_sqlite_roundtrip_and_rollback() {
         )
         .expect("count");
     assert_eq!(count, 0);
+    let belt_due_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM domain_rows WHERE domain = ?1 AND key = 'belt_respawn_due_unix/40009232'",
+            [crate::sqlite_store::domain_rows::DOMAIN_MINING_AND_ESS_STATE],
+            |r| r.get(0),
+        )
+        .expect("belt due count");
+    assert_eq!(belt_due_count, 0);
 
     let _ = std::fs::remove_file(&path);
 }

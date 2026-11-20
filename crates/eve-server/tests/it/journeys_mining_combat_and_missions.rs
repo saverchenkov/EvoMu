@@ -222,16 +222,16 @@ async fn test_journey_pve_combat() {
         (base, base + 1)
     });
     ctx.invalidate_ship_fitting(ship_id);
-    for slave_id in [t2_id, t3_id] {
-        call_rpc(&ctx, &mut sess, "dogmaIM", "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(slave_id)])
-            .await
-            .expect("LinkWeapons");
-    }
 
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     let sys_id = sess.solar_system_id.unwrap();
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     assert_eq!(sess.station_id, None);
+    for slave_id in [t2_id, t3_id] {
+        call_rpc(&ctx, &mut sess, "dogmaIM", "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(slave_id)])
+            .await
+            .expect("LinkWeapons");
+    }
 
     // Spawn a real SDE belt rat frigate with unmodified HP and positive bounty
     let rat_type_id = ctx

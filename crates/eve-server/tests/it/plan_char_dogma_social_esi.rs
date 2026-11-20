@@ -222,7 +222,15 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
         );
     });
 
-    // 1. LinkWeapons rejects mismatched weapon types (InvalidWeaponGroup) and links matching weapons
+    // 1. Undock before weapon linking; LinkWeapons rejects mismatched types (InvalidWeaponGroup) and links matching weapons.
+    let docked_link = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(t2_id)], &kw, None)
+        .await
+        .expect_err("LinkWeapons while docked must reject with CannotLinkWeaponsWhileDocked");
+    assert_eq!(docked_link.code, "CannotLinkWeaponsWhileDocked");
+
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+
     let bad_link = ctx
         .dispatch_rpc(&mut sess, "dogmaIM", None, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(mismatch_id)], &kw, None)
         .await
@@ -251,8 +259,7 @@ async fn test_plan_dg6_ammo_and_weapon_grouping() {
         .expect_err("LoadAmmo must reject incompatible charge size");
     assert_eq!(bad_load.code, "IncompatibleAmmo");
 
-    // 2. Undock into space, verify LoadAmmo emits OnChargeBeingLoadedToModule and enforces reloadTime (attr 1795)
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+    // 2b. Verify LoadAmmo in space emits OnChargeBeingLoadedToModule and enforces reloadTime (attr 1795)
     let sys = ctx.systems.get_or_spawn(30_000_142);
     let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball after undock");
     let npc_id = 700_099_001i64;

@@ -612,7 +612,10 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         sess.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STARBASE_CONFIG;
 
         call(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(ship_id), PyRep::Integer(mod1_id)]).await.expect("SetModuleOnline mod1");
+        call(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.expect("Undock for LinkWeapons");
         call(&ctx, &mut sess, "dogmaIM", "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(mod1_id), PyRep::Integer(mod2_id)]).await.expect("LinkWeapons");
+        ctx.advance_time_seconds(15);
+        call(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_STATION_ID)]).await.expect("Dock after LinkWeapons");
         call(&ctx, &mut sess, "dogmaIM", "TakeModuleOffline", &[PyRep::Integer(ship_id), PyRep::Integer(mod2_id)]).await.expect("TakeModuleOffline mod2");
         sess.station_id = None; sess.structure_id = Some(struct_id);
         ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&P1) { c.station_id = None; c.structure_id = Some(struct_id); } });

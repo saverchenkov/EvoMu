@@ -709,3 +709,132 @@ async fn step_ai_scram_cleanup_stale_target_reset_and_slim_meta_field_coverage()
     assert!(!w_meta.is_cloaked);
     assert_eq!(w_meta.name.as_deref(), Some("Drifter Response Battleship Wreck"));
 }
+
+#[tokio::test]
+async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        sde.groups.insert(
+            99,
+            eve_sde::GroupInfo {
+                group_id: 99,
+                category_id: 11,
+                name: "Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        sde.groups.insert(
+            383,
+            eve_sde::GroupInfo {
+                group_id: 383,
+                category_id: 11,
+                name: "Destructible Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+
+        let mut caldari_sentry = make_fighter_type(3_740, 99, 11, 1_000_000.0, vec![]);
+        caldari_sentry.name = "Caldari Sentry Gun I".into();
+        caldari_sentry.faction_id = Some(500_001);
+        sde.types.insert(3_740, caldari_sentry);
+
+        let mut amarr_sentry = make_fighter_type(1_194, 99, 11, 1_000_000.0, vec![]);
+        amarr_sentry.name = "Amarr Sentry Gun".into();
+        amarr_sentry.faction_id = None;
+        sde.types.insert(1_194, amarr_sentry);
+
+        let mut ci_sentry = make_fighter_type(79_507, 383, 11, 1_000_000.0, vec![]);
+        ci_sentry.name = "Counter-Insurgency Sentry Gun".into();
+        ci_sentry.faction_id = Some(500_001);
+        sde.types.insert(79_507, ci_sentry);
+    }
+
+    assert_eq!(derive_npc_archetype(&ctx, 3_740), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 1_194), "EmpireSentry");
+    assert_ne!(derive_npc_archetype(&ctx, 79_507), "EmpireSentry");
+
+    // Passing a poisoned "BeltRat" hint must still resolve to EmpireSentry, never Pirate/BeltRat.
+    let sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        3_740,
+        "BeltRat",
+        1,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].archetype, "EmpireSentry");
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Non-criminal pilot arriving in a Venture must never be targeted or damaged by Empire Sentry Guns.
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+    });
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp,
+        5_000.0
+    );
+
+    // Negative contrast: outlaw/criminal pilot (`security_status <= -5.0`) IS engaged.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().security_status = -10.0;
+    });
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
+    });
+    assert!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp
+            < 5_000.0
+    );
+}

@@ -1437,13 +1437,20 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
         let mut aids_to_restore: BTreeSet<i64> = BTreeSet::new();
-        for (_, aids) in unloaded_belts {
+        let mut restored_unloaded_belts: Vec<i64> = Vec::new();
+        for ((_, belt_id), aids) in unloaded_belts {
             let all_empty = aids
                 .iter()
                 .all(|id| snap.asteroids.get(id).is_some_and(|a| a.quantity <= 0));
             if all_empty {
                 aids_to_restore.extend(aids);
+                restored_unloaded_belts.push(belt_id);
             }
+        }
+        for belt_id in restored_unloaded_belts {
+            snap.mining_and_ess_state
+                .belt_respawn_due_unix
+                .remove(&belt_id);
         }
         for (&aid, arec) in &snap.asteroids {
             if !active_sys_set.contains(&arec.solar_system_id) {

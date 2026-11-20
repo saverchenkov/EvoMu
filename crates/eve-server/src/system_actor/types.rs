@@ -925,6 +925,12 @@ pub enum SystemCommand {
         observer_ball_id: BallId,
         reply: oneshot::Sender<Result<(u64, PyRep, PyRep), String>>,
     },
+    /// Like [`GetSetState`], and also returns the actor's `TickBroadcast.broadcast_seq`
+    /// watermark at the instant the `SetState` snapshot was encoded (`#1461`).
+    GetSetStateWithSeq {
+        observer_ball_id: BallId,
+        reply: oneshot::Sender<Result<(u64, PyRep, PyRep, u64), String>>,
+    },
     CurrentTick {
         reply: oneshot::Sender<u64>,
     },

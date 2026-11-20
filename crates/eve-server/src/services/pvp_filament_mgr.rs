@@ -51,56 +51,63 @@ fn parse_ymd_utc_seconds(ymd: &str, end_of_day: bool) -> Option<i64> {
     Some(days * 86_400 + if end_of_day { 86_399 } else { 0 })
 }
 
+const PVP_EVENT_DATES_RES: &str = "res:/staticdata/pvpfilamenteventdates.fsdbinary";
+const PVP_MATCH_TYPES_RES: &str = "res:/staticdata/pvpfilamentmatchtypes.fsdbinary";
+
 fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
+    if !sde.resources.contains_key(PVP_EVENT_DATES_RES) {
+        return Vec::new();
+    }
     static SDE_PVP_EVENTS: std::sync::OnceLock<Vec<PvpEventSchedule>> = std::sync::OnceLock::new();
-    SDE_PVP_EVENTS
-        .get_or_init(|| {
-            let Ok(dates) = sde.load_cfsd_table("res:/staticdata/pvpfilamenteventdates.fsdbinary")
-            else {
-                return Vec::new();
-            };
-            let match_types = sde
-                .load_cfsd_nested("res:/staticdata/pvpfilamentmatchtypes.fsdbinary")
-                .unwrap_or_default();
-            let mut out = Vec::new();
-            for (event_id, rec) in dates {
-                if rec.int("QA").unwrap_or(0) != 0 || rec.str("region").unwrap_or("ccp") != "ccp" {
-                    continue;
-                }
-                let Some(start_str) = rec.str("startDate") else { continue };
-                let Some(end_str) = rec.str("endDate") else { continue };
-                let Some(start_unix) = parse_ymd_utc_seconds(start_str, false) else { continue };
-                let Some(end_unix) = parse_ymd_utc_seconds(end_str, true) else { continue };
-                let match_type_id = rec.int("matchTypeID").unwrap_or(0);
-                let filament_type_id = match_types
-                    .get(&match_type_id.to_string())
-                    .and_then(|v| v.get("filamentTypeID"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let type_ids = if filament_type_id > 0 {
-                    vec![filament_type_id]
-                } else {
-                    Vec::new()
-                };
-                let (event_name, description) = u32::try_from(filament_type_id)
-                    .ok()
-                    .and_then(|tid| sde.types.get(&tid))
-                    .map(|t| (t.name.clone(), t.description.clone()))
-                    .unwrap_or_else(|| (format!("Proving Grounds #{event_id}"), String::new()));
-                out.push(PvpEventSchedule {
-                    event_id,
-                    schedule_id: event_id,
-                    event_name,
-                    description,
-                    match_type_id,
-                    start_unix,
-                    end_unix,
-                    type_ids,
-                });
-            }
-            out
-        })
-        .clone()
+    if let Some(cached) = SDE_PVP_EVENTS.get() {
+        return cached.clone();
+    }
+    let Ok(dates) = sde.load_cfsd_table(PVP_EVENT_DATES_RES) else {
+        return Vec::new();
+    };
+    let match_types_res = sde.load_cfsd_nested(PVP_MATCH_TYPES_RES);
+    let match_types_loaded = match_types_res.is_ok();
+    let match_types = match_types_res.unwrap_or_default();
+    let mut out = Vec::new();
+    for (event_id, rec) in dates {
+        if rec.int("QA").unwrap_or(0) != 0 || rec.str("region").unwrap_or("ccp") != "ccp" {
+            continue;
+        }
+        let Some(start_str) = rec.str("startDate") else { continue };
+        let Some(end_str) = rec.str("endDate") else { continue };
+        let Some(start_unix) = parse_ymd_utc_seconds(start_str, false) else { continue };
+        let Some(end_unix) = parse_ymd_utc_seconds(end_str, true) else { continue };
+        let match_type_id = rec.int("matchTypeID").unwrap_or(0);
+        let filament_type_id = match_types
+            .get(&match_type_id.to_string())
+            .and_then(|v| v.get("filamentTypeID"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let type_ids = if filament_type_id > 0 {
+            vec![filament_type_id]
+        } else {
+            Vec::new()
+        };
+        let (event_name, description) = u32::try_from(filament_type_id)
+            .ok()
+            .and_then(|tid| sde.types.get(&tid))
+            .map(|t| (t.name.clone(), t.description.clone()))
+            .unwrap_or_else(|| (format!("Proving Grounds #{event_id}"), String::new()));
+        out.push(PvpEventSchedule {
+            event_id,
+            schedule_id: event_id,
+            event_name,
+            description,
+            match_type_id,
+            start_unix,
+            end_unix,
+            type_ids,
+        });
+    }
+    if !out.is_empty() && match_types_loaded {
+        let _ = SDE_PVP_EVENTS.set(out.clone());
+    }
+    out
 }
 
 pub fn ensure_events_from_sde(sde: &eve_sde::SdeRegistry, store: &mut PvpFilamentStore) {
@@ -129,79 +136,92 @@ pub struct PvpFilamentMatchSpec {
     pub rewards: Vec<(u32, u32)>,
 }
 
+fn load_sde_pvp_match_specs(
+    sde: &eve_sde::SdeRegistry,
+) -> Option<&'static HashMap<u32, PvpFilamentMatchSpec>> {
+    if !sde.resources.contains_key(PVP_MATCH_TYPES_RES) {
+        return None;
+    }
+    static SDE_PVP_MATCH_SPECS: std::sync::OnceLock<HashMap<u32, PvpFilamentMatchSpec>> =
+        std::sync::OnceLock::new();
+    if let Some(cached) = SDE_PVP_MATCH_SPECS.get() {
+        return Some(cached);
+    }
+    let Ok(match_types) = sde.load_cfsd_nested(PVP_MATCH_TYPES_RES) else {
+        return None;
+    };
+    let mut map = HashMap::new();
+    for (_mt_id, val) in match_types {
+        let fid = val.get("filamentTypeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        if fid == 0 {
+            continue;
+        }
+        let fleet_size = val.get("fleetSize").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+        let number_of_fleets = val
+            .get("numberOfFleets")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2)
+            .max(2) as usize;
+        let ship_restrictions_list_id = val
+            .get("shipRestrictions")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .filter(|&v| v > 0);
+        let raw_meta = val
+            .get("moduleAndImplantMetaLevelRestrictions")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as u32;
+        let max_meta_level = if raw_meta == 0 { 5 } else { raw_meta };
+        let banned_modules_list_id = val
+            .get("bannedModulesTypeListID")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .filter(|&v| v > 0);
+        let limited_modules_list_id = val
+            .get("limitedAmountOfModulesTypeListID")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .filter(|&v| v > 0);
+        let number_of_limited_modules = val
+            .get("numberOfLimitedModules")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let mut rewards = Vec::new();
+        if let Some(arr) = val.get("rewards").and_then(|v| v.as_array()) {
+            for entry in arr {
+                let tid = entry.get("typeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let amt = entry.get("amount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                if tid > 0 && amt > 0 {
+                    rewards.push((tid, amt));
+                }
+            }
+        }
+        map.insert(
+            fid,
+            PvpFilamentMatchSpec {
+                fleet_size,
+                number_of_fleets,
+                ship_restrictions_list_id,
+                max_meta_level,
+                banned_modules_list_id,
+                limited_modules_list_id,
+                number_of_limited_modules,
+                rewards,
+            },
+        );
+    }
+    if map.is_empty() {
+        return None;
+    }
+    let _ = SDE_PVP_MATCH_SPECS.set(map);
+    SDE_PVP_MATCH_SPECS.get()
+}
+
 pub fn get_pvp_filament_match_spec(
     sde: &eve_sde::SdeRegistry,
     filament_type_id: u32,
 ) -> PvpFilamentMatchSpec {
-    static SDE_PVP_MATCH_SPECS: std::sync::OnceLock<HashMap<u32, PvpFilamentMatchSpec>> =
-        std::sync::OnceLock::new();
-    let specs = SDE_PVP_MATCH_SPECS.get_or_init(|| {
-        let match_types = sde
-            .load_cfsd_nested("res:/staticdata/pvpfilamentmatchtypes.fsdbinary")
-            .unwrap_or_default();
-        let mut map = HashMap::new();
-        for (_mt_id, val) in match_types {
-            let fid = val.get("filamentTypeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            if fid == 0 {
-                continue;
-            }
-            let fleet_size = val.get("fleetSize").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-            let number_of_fleets = val
-                .get("numberOfFleets")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2)
-                .max(2) as usize;
-            let ship_restrictions_list_id = val
-                .get("shipRestrictions")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .filter(|&v| v > 0);
-            let raw_meta = val
-                .get("moduleAndImplantMetaLevelRestrictions")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(5) as u32;
-            let max_meta_level = if raw_meta == 0 { 5 } else { raw_meta };
-            let banned_modules_list_id = val
-                .get("bannedModulesTypeListID")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .filter(|&v| v > 0);
-            let limited_modules_list_id = val
-                .get("limitedAmountOfModulesTypeListID")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .filter(|&v| v > 0);
-            let number_of_limited_modules = val
-                .get("numberOfLimitedModules")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let mut rewards = Vec::new();
-            if let Some(arr) = val.get("rewards").and_then(|v| v.as_array()) {
-                for entry in arr {
-                    let tid = entry.get("typeID").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let amt = entry.get("amount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    if tid > 0 && amt > 0 {
-                        rewards.push((tid, amt));
-                    }
-                }
-            }
-            map.insert(
-                fid,
-                PvpFilamentMatchSpec {
-                    fleet_size,
-                    number_of_fleets,
-                    ship_restrictions_list_id,
-                    max_meta_level,
-                    banned_modules_list_id,
-                    limited_modules_list_id,
-                    number_of_limited_modules,
-                    rewards,
-                },
-            );
-        }
-        map
-    });
-    if let Some(spec) = specs.get(&filament_type_id) {
+    if let Some(spec) = load_sde_pvp_match_specs(sde).and_then(|specs| specs.get(&filament_type_id)) {
         return spec.clone();
     }
     let name = sde

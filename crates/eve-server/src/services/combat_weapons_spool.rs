@@ -1278,30 +1278,217 @@ pub fn notify_weapon_banks_updated(
     );
 }
 
-/// Links all compatible weapon modules into banks (`charFittingMgr.LinkAllWeapons` / `dogmaIM.LinkAllWeapons`).
-pub fn handle_link_all_weapons(
-    ctx: &ServerContext,
+/// Returns `true` if `ty` is a linkable high-slot turret or missile launcher.
+pub(crate) fn is_linkable_weapon_type(ty: &InvType) -> bool {
+    ty.effect_ids.contains(&42)
+        || ty.effect_ids.contains(&40)
+        || ty.default_attributes.contains_key(&604)
+}
+
+fn resolve_weapon_link_sys_id_in_snapshot(
+    snap: &eve_db::WorldStateSnapshot,
+    session_opt: Option<&eve_machonet::SessionState>,
     char_id: i64,
     ship_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    let info = ctx.db.try_with_mut_snapshot(|snap| {
-        if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+) -> Result<u32, BridgeRpcError> {
+    if ship_id <= 0
+        || !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id)
+    {
+        return Err(BridgeRpcError {
+            code: "ShipOwnershipViolation".into(),
+            message: format!("Ship {ship_id} is not owned by {char_id}"),
+            client_error: None,
+        });
+    }
+    let ship = &snap.items[&ship_id];
+    let char_rec = snap.characters.get(&char_id);
+    let db_docked = char_rec.is_some_and(|ch| ch.station_id.is_some() || ch.structure_id.is_some());
+    let sess_docked = session_opt.is_some_and(|s| s.station_id.is_some() || s.structure_id.is_some());
+    if sess_docked || db_docked {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    }
+    let sys_id = if let Some(sess) = session_opt {
+        let Some(sys_id) = sess.solar_system_id else {
             return Err(BridgeRpcError {
-                code: "ShipOwnershipViolation".into(),
-                message: format!("Ship {ship_id} is not owned by {char_id}"),
+                code: "NotInSpace".into(),
+                message: "Weapons can only be linked while undocked in space".into(),
+                client_error: None,
+            });
+        };
+        sys_id
+    } else if let Some(ch) = char_rec {
+        ch.solar_system_id
+    } else {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Weapons can only be linked while undocked in space".into(),
+            client_error: None,
+        });
+    };
+    if ship.location_id != i64::from(sys_id) {
+        return Err(BridgeRpcError {
+            code: "CannotLinkWeaponsWhileDocked".into(),
+            message: format!("Ship {ship_id} must be in space in solar system {sys_id}"),
+            client_error: None,
+        });
+    }
+    let db_active_ship_id = char_rec.map(|ch| ch.active_ship_id).filter(|&id| id > 0);
+    if session_opt.is_some_and(|s| s.ship_id != Some(ship_id))
+        || db_active_ship_id != Some(ship_id)
+    {
+        return Err(BridgeRpcError {
+            code: "ShipNotActive".into(),
+            message: format!("Ship {ship_id} is not the caller's active ship"),
+            client_error: None,
+        });
+    }
+    Ok(sys_id)
+}
+
+/// Validates inside an active `WorldStateSnapshot` that the caller owns `ship_id`,
+/// is undocked in space with `ship_id` as their active ship, and is not cloaked
+/// according to a pre-resolved `SystemHandle` acquired outside DB locks.
+pub(crate) fn validate_weapon_link_context_in_snapshot(
+    snap: &eve_db::WorldStateSnapshot,
+    session_opt: Option<&eve_machonet::SessionState>,
+    char_id: i64,
+    ship_id: i64,
+    sys_handle_opt: Option<&crate::system_actor::SystemHandle>,
+) -> Result<(), BridgeRpcError> {
+    let _sys_id = resolve_weapon_link_sys_id_in_snapshot(snap, session_opt, char_id, ship_id)?;
+    if let Some(sys) = sys_handle_opt {
+        let view = sys.view();
+        if view.is_ball_cloaked(ship_id) || view.is_gate_cloaked(ship_id) {
+            return Err(BridgeRpcError {
+                code: "CannotLinkWeaponsWhileCloaked".into(),
+                message: "Cannot link weapons while cloaked".into(),
                 client_error: None,
             });
         }
-        let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {
-            ty.effect_ids.contains(&42) || ty.effect_ids.contains(&40) || ty.default_attributes.contains_key(&604)
-        };
+    }
+    Ok(())
+}
+
+/// Resolves `ctx.systems.get_handle(sys_id)` outside DB locks, validates weapon-linking
+/// preconditions inside `try_with_mut_snapshot`, retries once cleanly if `solar_system_id`
+/// changed between the pre-read and write lock, and executes `op`.
+pub(crate) fn run_with_weapon_link_context<T, F>(
+    ctx: &ServerContext,
+    session_opt: Option<&eve_machonet::SessionState>,
+    char_id: i64,
+    ship_id: i64,
+    mut op: F,
+) -> Result<T, BridgeRpcError>
+where
+    F: FnMut(&mut eve_db::WorldStateSnapshot) -> Result<T, BridgeRpcError>,
+{
+    enum LinkTxError {
+        Rpc(BridgeRpcError),
+        RetrySystem(u32),
+    }
+
+    impl eve_db::FromWalError for LinkTxError {
+        fn from_wal_error(message: String) -> Self {
+            Self::Rpc(<BridgeRpcError as eve_db::FromWalError>::from_wal_error(
+                message,
+            ))
+        }
+    }
+
+    let mut candidate_sys_id = session_opt.and_then(|s| s.solar_system_id).or_else(|| {
+        ctx.db
+            .with_snapshot(|snap| snap.characters.get(&char_id).map(|ch| ch.solar_system_id))
+    });
+
+    for attempt in 0..2 {
+        let sys_handle = candidate_sys_id.and_then(|sys_id| ctx.systems.get_handle(sys_id));
+        match ctx.db.try_with_mut_snapshot(|snap| {
+            let sys_id = resolve_weapon_link_sys_id_in_snapshot(snap, session_opt, char_id, ship_id)
+                .map_err(LinkTxError::Rpc)?;
+            if Some(sys_id) != candidate_sys_id {
+                return Err(if attempt == 0 {
+                    LinkTxError::RetrySystem(sys_id)
+                } else {
+                    LinkTxError::Rpc(BridgeRpcError {
+                        code: "NotInSpace".into(),
+                        message: "Solar system changed concurrently while validating weapon linking"
+                            .into(),
+                        client_error: None,
+                    })
+                });
+            }
+            validate_weapon_link_context_in_snapshot(
+                snap,
+                session_opt,
+                char_id,
+                ship_id,
+                sys_handle.as_ref(),
+            )
+            .map_err(LinkTxError::Rpc)?;
+            op(snap).map_err(LinkTxError::Rpc)
+        }) {
+            Ok(val) => return Ok(val),
+            Err(LinkTxError::Rpc(err)) => return Err(err),
+            Err(LinkTxError::RetrySystem(next_sys_id)) => {
+                candidate_sys_id = Some(next_sys_id);
+            }
+        }
+    }
+    Err(BridgeRpcError {
+        code: "NotInSpace".into(),
+        message: "Solar system changed concurrently while validating weapon linking".into(),
+        client_error: None,
+    })
+}
+
+/// Atomically validates weapon-linking preconditions and links compatible weapon modules
+/// inside a single `try_with_mut_snapshot` transaction.
+pub(crate) fn handle_link_all_weapons_atomic(
+    ctx: &ServerContext,
+    session_opt: Option<&eve_machonet::SessionState>,
+    char_id: i64,
+    ship_id: i64,
+    require_linkable_pair: bool,
+) -> Result<PyRep, BridgeRpcError> {
+    let info = run_with_weapon_link_context(ctx, session_opt, char_id, ship_id, |snap| {
         let mut by_type: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
+                let is_online = snap
+                    .module_online_states
+                    .get(&item.item_id)
+                    .copied()
+                    .unwrap_or(true);
+                if !is_online {
+                    continue;
+                }
                 if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if is_linkable_weapon(ty) { by_type.entry(item.type_id).or_default().push(item.item_id); }
+                    if is_linkable_weapon_type(ty) {
+                        by_type.entry(item.type_id).or_default().push(item.item_id);
+                    }
                 }
             }
+        }
+        let has_linkable_pair = by_type.values().any(|mods| mods.len() >= 2);
+        if require_linkable_pair && !has_linkable_pair {
+            return Err(BridgeRpcError {
+                code: "InvalidWeaponGroup".into(),
+                message: "At least two identical fitted weapons are required to form a weapon group"
+                    .into(),
+                client_error: None,
+            });
+        }
+        if !has_linkable_pair {
+            if let Some(banks) = snap.weapon_banks.get_mut(&ship_id) {
+                if !banks.is_empty() {
+                    banks.clear();
+                }
+            }
+            return Ok(build_weapon_banks_dict(snap, ship_id));
         }
         let banks = snap.weapon_banks.entry(ship_id).or_default();
         banks.clear();
@@ -1316,6 +1503,15 @@ pub fn handle_link_all_weapons(
     })?;
     notify_weapon_banks_updated(ctx, char_id, ship_id, &[], &info);
     Ok(info)
+}
+
+/// Links all compatible weapon modules into banks (`charFittingMgr.LinkAllWeapons` / `dogmaIM.LinkAllWeapons`).
+pub fn handle_link_all_weapons(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    handle_link_all_weapons_atomic(ctx, None, char_id, ship_id, false)
 }
 
 #[cfg(test)]

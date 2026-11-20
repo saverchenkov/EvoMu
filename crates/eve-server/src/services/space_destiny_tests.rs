@@ -1246,6 +1246,137 @@ async fn update_state_rate_limit_is_isolated_per_server_context_and_cleared_on_s
 }
 
 #[tokio::test]
+async fn pending_structure_view_outside_set_state_is_isolated_per_server_context_and_cleared_on_session_exit() {
+    let ctx_a = test_ctx();
+    let ctx_b = test_ctx();
+    let sys_id = 30_000_144_u32;
+    let corp_id = 98_100_910_i64;
+    let char_id = 91_001_002_i64;
+    let ship_id = 91_002_002_i64;
+    let struct_id = 1_040_001_461_202_i64;
+    let shared_session_id = 77_002_u64;
+
+    for ctx in [&ctx_a, &ctx_b] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.structures.insert(
+                struct_id,
+                eve_db::UpwellStructureRecord {
+                    structure_id: struct_id,
+                    type_id: 35832,
+                    solar_system_id: sys_id,
+                    owner_corp_id: corp_id,
+                    name: "GH1461 Context Isolation Astrahus".into(),
+                    position: [250_000.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 500,
+                    shield_hp: 2_500_000.0,
+                    armor_hp: 2_500_000.0,
+                    hull_hp: 2_500_000.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+            let mut ch = snap.characters.values().next().cloned().expect("seed char");
+            ch.character_id = char_id;
+            ch.user_id = char_id as u64;
+            ch.name = format!("Pilot-{char_id}");
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(struct_id);
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+            put_item(
+                snap,
+                Some(ship_id),
+                588,
+                char_id,
+                struct_id,
+                InventoryFlag::Hangar,
+                1,
+                true,
+            );
+        });
+    }
+
+    let mut sess_a = make_session(char_id, corp_id, Some(sys_id), Some(ship_id), 0);
+    sess_a.session_id = shared_session_id;
+    sess_a.station_id = None;
+    sess_a.structure_id = Some(struct_id);
+    let mut sess_b = make_session(char_id, corp_id, Some(sys_id), Some(ship_id), 0);
+    sess_b.session_id = shared_session_id;
+    sess_b.station_id = None;
+    sess_b.structure_id = Some(struct_id);
+    let bound = bound_sys(sys_id);
+    let kw = HashMap::new();
+
+    for (ctx, sess) in [(&ctx_a, &mut sess_a), (&ctx_b, &mut sess_b)] {
+        handle(
+            ctx,
+            sess,
+            Some(&bound),
+            "beyonce",
+            "UpdateStateRequest",
+            &[],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    assert!(ctx_a
+        .pending_structure_view_outside_set_state
+        .read()
+        .unwrap()
+        .contains_key(&(shared_session_id, char_id)));
+    assert!(ctx_b
+        .pending_structure_view_outside_set_state
+        .read()
+        .unwrap()
+        .contains_key(&(shared_session_id, char_id)));
+
+    // Session exit on ctx_a clears only ctx_a and leaves ctx_b untouched.
+    ctx_a.clear_pending_structure_view_outside_set_state_for_session(shared_session_id);
+    assert!(ctx_a
+        .pending_structure_view_outside_set_state
+        .read()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        take_pending_structure_set_state(&ctx_b, shared_session_id, char_id),
+        Some(struct_id)
+    );
+
+    // Transition/bootstrap clearing (`clear_space_ballpark_bootstrapped`) also evicts ctx_a without touching ctx_b.
+    ctx_a.set_pending_structure_view_outside_set_state(shared_session_id, char_id, struct_id);
+    ctx_b.set_pending_structure_view_outside_set_state(shared_session_id, char_id, struct_id);
+    ctx_a.clear_space_ballpark_bootstrapped(char_id);
+    assert!(ctx_a
+        .pending_structure_view_outside_set_state
+        .read()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        take_pending_structure_set_state(&ctx_b, shared_session_id, char_id),
+        Some(struct_id)
+    );
+
+    // Overflow (>4096 active entries) must NOT drop live recent sessions on ctx_a.
+    for idx in 0..4_100_u64 {
+        ctx_a.set_pending_structure_view_outside_set_state(900_000 + idx, char_id, struct_id);
+    }
+    assert_eq!(
+        take_pending_structure_set_state(&ctx_a, 900_000, char_id),
+        Some(struct_id),
+        "live entries under 600s age must NOT be wiped when map grows past 4096"
+    );
+}
+
+#[tokio::test]
 async fn update_state_request_fallback_respawn_requires_space_residency_and_system_match() {
     let ctx = test_ctx();
     let sys_a = 30_000_142_u32;
@@ -1593,11 +1724,29 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         ctx.is_space_ballpark_bootstrapped(sess.session_id, cid, sys_a),
         "View Outside UpdateStateRequest must mark ballpark bootstrapped for deduplication"
     );
+    assert_eq!(
+        take_pending_structure_set_state(&ctx, sess.session_id, cid),
+        Some(struct_id),
+        "View Outside UpdateStateRequest must record a one-shot session SetState refresh"
+    );
     let (_, evs, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
     assert!(
-        evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
-        "View Outside must queue SetState observing structure_id={struct_id}, got {evs:?}"
+        !evs.iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. })),
+        "View Outside must NOT queue SetState into shared observer_events[{struct_id}], got {evs:?}"
     );
+    let (_, ss_kv, ss_updates) = handle_a.get_set_state(struct_id).await.unwrap();
+    assert_eq!(ss_kv.dict_get("ego").and_then(|v| v.as_i64()), Some(struct_id));
+    let decoded_balls = match ss_kv.dict_get("state") {
+        Some(PyRep::Bytes(b)) => eve_destiny::wire::decode_add_balls(b).unwrap().2,
+        other => panic!("unexpected SetState state payload: {other:?}"),
+    };
+    assert!(decoded_balls.iter().any(|b| b.id == struct_id));
+    assert!(
+        !decoded_balls.iter().any(|b| b.id == docked_ship),
+        "non-destructive get_set_state must NEVER contain docked_ship={docked_ship}"
+    );
+    assert!(matches!(ss_updates, PyRep::List(items) if items.len() == 1));
     assert!(
         handle_a
             .drain_observer_updates(docked_ship)
@@ -1613,6 +1762,11 @@ async fn update_state_request_structure_view_outside_observes_structure_and_neve
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        take_pending_structure_set_state(&ctx, sess.session_id, cid),
+        None,
+        "rapid repeat View Outside UpdateStateRequest must respect cooldown"
+    );
     let (_, evs_dup, _) = handle_a.drain_observer_updates(struct_id).await.unwrap();
     assert!(
         !evs_dup
