@@ -9371,6 +9371,10 @@ def evaluate_scenario_checks(
                 break
         return False, failed_key, base_msg
 
+    # 1b. Wait-until timeout always fails closed even if checks.no_error_reply is False
+    if res.get("wait_until_timed_out"):
+        return False, "wait_until_timeout", str(res.get("action_error") or "wait_until timed out")
+
     # 2. No error reply (action_ok, quasar_errors, non-benign macho_exceptions/ERR calls)
     if chk.get("no_error_reply", True):
         if res.get("action_ok") is False:
@@ -10633,7 +10637,7 @@ class ScenarioRunner(PlaytesterRunner):
                 "macho_exceptions": all_macho_excs,
             }
             latest_res = merged_res
-            ok_until, _, _ = evaluate_scenario_checks(
+            ok_until, until_fail_chk, until_fail_msg = evaluate_scenario_checks(
                 until_checks, step_pre_state, latest_state, merged_res, context=context
             )
             if ok_until:
@@ -10641,6 +10645,16 @@ class ScenarioRunner(PlaytesterRunner):
             if all_log_excs or all_quasar_errs or all_macho_excs or tick_res.get("action_ok") is False:
                 return latest_res, latest_state
             if time.time() >= deadline:
+                latest_res = dict(latest_res)
+                latest_res["action_ok"] = False
+                latest_res["wait_until_timed_out"] = True
+                timeout_detail = (
+                    f"wait_until_timeout ({timeout_ms}ms, {until_fail_chk}): {until_fail_msg}"
+                )
+                prev_err = str(latest_res.get("action_error") or "").strip()
+                latest_res["action_error"] = (
+                    f"{timeout_detail} (previous: {prev_err})" if prev_err else timeout_detail
+                )
                 return latest_res, latest_state
 
     def _run_destiny_parity_check(self, client_logs: List[Path]) -> Optional[Dict[str, Any]]:

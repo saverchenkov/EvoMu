@@ -2170,6 +2170,185 @@ class Test1202R4And1242Acceptance(unittest.TestCase):
         ]
         self.assertEqual(events, expected)
 
+    def test_tt07_execute_wait_until_sets_action_ok_false_on_timeout_and_passes_when_met(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runner = self._runner_in_dir(root / "direct", [])
+            calls = []
+
+            def _timeout_rpc(method, params=None, timeout=15.0):
+                calls.append(method)
+                state = {"active_view": "hangar", "session": {"charid": 90000001}}
+                if method == "get_state":
+                    return {"ok": True, "state": state}
+                return {
+                    "action_ok": True,
+                    "post_state": state,
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "scatters_observed": [],
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                }
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = _timeout_rpc
+            step = {
+                "id": "wait_for_space",
+                "action": {"type": "wait", "wait_ms": 50},
+                "wait_until": {
+                    "timeout_ms": 300,
+                    "poll_interval_ms": 250,
+                    "checks": {"state_checks": [{"field": "active_view", "equals": "inflight"}]},
+                },
+                "checks": {},
+            }
+            clock = {"t": 1000.0}
+
+            def _advance_clock():
+                clock["t"] += 0.2
+                return clock["t"]
+
+            with mock.patch.object(playtester.time, "time", side_effect=_advance_clock):
+                res, post_state = runner._execute_wait_until(
+                    step,
+                    {"active_view": "hangar"},
+                    {"recent_rpcs": []},
+                    initial_res={"action_ok": True, "action_error": "prior hint", "flight_recorder": {}},
+                    initial_state={"active_view": "hangar"},
+                )
+            self.assertFalse(res.get("action_ok"))
+            self.assertTrue(res.get("wait_until_timed_out"))
+            self.assertIn("wait_until_timeout", str(res.get("action_error") or ""))
+            self.assertIn("(previous: prior hint)", str(res.get("action_error") or ""))
+            self.assertEqual(post_state.get("active_view"), "hangar")
+            self.assertLessEqual(len(calls), 5)
+
+            # Condition becoming true before deadline keeps action_ok=True.
+            poll_count = {"n": 0}
+
+            def _success_rpc(method, params=None, timeout=15.0):
+                if method == "execute_action":
+                    poll_count["n"] += 1
+                view = "inflight" if poll_count["n"] >= 2 else "hangar"
+                state = {"active_view": view, "session": {"charid": 90000001}}
+                if method == "get_state":
+                    return {"ok": True, "state": state}
+                return {
+                    "action_ok": True,
+                    "post_state": state,
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "scatters_observed": [],
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                }
+
+            runner.rpc.call.side_effect = _success_rpc
+            step_ok = dict(step)
+            step_ok["wait_until"] = {
+                "timeout_ms": 2000,
+                "poll_interval_ms": 250,
+                "checks": {"state_checks": [{"field": "active_view", "equals": "inflight"}]},
+            }
+            clock["t"] = 2000.0
+            with mock.patch.object(playtester.time, "time", side_effect=_advance_clock):
+                res_ok, post_ok = runner._execute_wait_until(
+                    step_ok,
+                    {"active_view": "hangar"},
+                    {"recent_rpcs": []},
+                    initial_res={"action_ok": True, "flight_recorder": {}},
+                    initial_state={"active_view": "hangar"},
+                )
+            self.assertTrue(res_ok.get("action_ok"))
+            self.assertFalse(res_ok.get("wait_until_timed_out", False))
+            self.assertEqual(post_ok.get("active_view"), "inflight")
+
+    def test_tt07_wait_until_timeout_fails_step_even_when_step_checks_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scen_path = root / "tt07_wait_until_timeout.json"
+            scen_path.write_text(
+                json.dumps(
+                    {
+                        "id": "tt07_wait_until_timeout",
+                        "title": "TT-07 wait_until timeout fails even with no_error_reply=false",
+                        "steps": [
+                            {
+                                "id": "wait_agent_mission_dialog",
+                                "action": {"type": "wait", "wait_ms": 50},
+                                "wait_until": {
+                                    "timeout_ms": 300,
+                                    "poll_interval_ms": 250,
+                                    "checks": {
+                                        "window_populated": "agent_dialog",
+                                    },
+                                },
+                                "checks": {"no_error_reply": False},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = self._runner_in_dir(root / "run_out", [scen_path])
+            hangar_state = {
+                "client_version": "24.02",
+                "client_build": "3698585",
+                "active_view": "hangar",
+                "session": {"charid": 90000001, "stationid": 60003760},
+                "open_windows": [],
+            }
+
+            def _fake_rpc(method, params=None, timeout=15.0):
+                if method == "get_state":
+                    return {"ok": True, "state": hangar_state}
+                return {
+                    "action_ok": True,
+                    "post_state": hangar_state,
+                    "flight_recorder": {
+                        "macho_calls": [],
+                        "scatters_observed": [],
+                        "log_exceptions": [],
+                        "quasar_errors": [],
+                        "macho_exceptions": [],
+                    },
+                }
+
+            runner.rpc = mock.Mock()
+            runner.rpc.call.side_effect = _fake_rpc
+            runner.start_server = lambda reset_db=True: True
+            runner.start_client = lambda: setattr(
+                runner,
+                "_last_boot_result",
+                {"ok": True, "state": hangar_state, "flight_recorder": {"macho_calls": []}},
+            ) or True
+            runner.stop_client = lambda: None
+            runner.stop_server = lambda: None
+
+            sc_clock = {"t": 3000.0}
+
+            def _advance_sc():
+                sc_clock["t"] += 0.2
+                return sc_clock["t"]
+
+            with mock.patch.object(playtester, "get_git_head", return_value="abc1234"), \
+                 mock.patch.object(runner, "_run_destiny_parity_check", return_value=None), \
+                 mock.patch.object(playtester.time, "time", side_effect=_advance_sc):
+                rc = runner.run_scenarios()
+
+            self.assertNotEqual(rc, 0)
+            res_data = json.loads((runner.out_dir / "result.json").read_text(encoding="utf-8"))
+            j_res = res_data["journeys"]["tt07_wait_until_timeout"]
+            self.assertFalse(j_res["passed"])
+            self.assertEqual(j_res["failure"]["step_id"], "wait_agent_mission_dialog")
+            self.assertEqual(j_res["failure"]["failed_check"], "wait_until_timeout")
+            self.assertIn("wait_until_timeout", json.dumps(j_res["failure"]))
+
 
 if __name__ == "__main__":
     unittest.main()
