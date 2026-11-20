@@ -1571,22 +1571,19 @@ fn is_naturally_seedable_ded_gate_ball(
             .any(|(_, sig_id)| sig_id == &expected_sig_id)
 }
 
-fn is_naturally_seedable_incursion_site(
+fn naturally_seedable_incursion_dungeon_id(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
     site_id: &str,
-) -> bool {
-    let Some(const_id) = ctx
+) -> Option<u32> {
+    let const_id = ctx
         .sde
         .solar_systems
         .get(&sys_id)
-        .map(|s| s.constellation_id)
-    else {
-        return false;
-    };
+        .map(|s| s.constellation_id)?;
     let eligible = crate::services::pve_incursion_lifecycle::eligible_incursion_constellations(ctx);
     if !eligible.into_iter().take(3).any(|(cid, _)| cid == const_id) {
-        return false;
+        return None;
     }
     let mut sys_list: Vec<SolarSystemId> = ctx
         .sde
@@ -1617,10 +1614,20 @@ fn is_naturally_seedable_incursion_site(
         (hq, 5171),
     ]
     .into_iter()
-    .any(|(expected_sys, did)| {
-        expected_sys == sys_id
-            && (site_id == format!("INC-{const_id}-{did}") || site_id == format!("INC-{did}"))
+    .find_map(|(expected_sys, did)| {
+        (expected_sys == sys_id
+            && (site_id == format!("INC-{const_id}-{did}") || site_id == format!("INC-{did}")))
+        .then_some(did)
     })
+}
+
+#[cfg(test)]
+fn is_naturally_seedable_incursion_site(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    site_id: &str,
+) -> bool {
+    naturally_seedable_incursion_dungeon_id(ctx, sys_id, site_id).is_some_and(|did| did != 5158)
 }
 
 pub async fn handle_pve_exploration(
@@ -2126,10 +2133,9 @@ async fn handle_activate_acceleration_gate(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (char_id, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
+    if let Err(e) = ServerContext::require_character(session) {
+        return Some(Err(e));
+    }
     if args.len() > 2 {
         return Some(Err(rpc_msg_err(
             "InvalidArguments",
@@ -2141,9 +2147,12 @@ async fn handle_activate_acceleration_gate(
         _ => None,
     };
     if method == "ActivateAccelerationGate" {
-        if let Some(gate_id) = gate_ball_arg {
+        if let (Ok(pre_sys), Some(gate_id)) = (
+            resolve_session_system_id(ctx, session),
+            gate_ball_arg,
+        ) {
             if let Some(res) = Box::pin(crate::services::pve_fob_observatory::try_activate_observatory_gate(
-                ctx, session, sys_id, gate_id,
+                ctx, session, pre_sys, gate_id,
             ))
             .await
             {
@@ -2151,6 +2160,10 @@ async fn handle_activate_acceleration_gate(
             }
         }
     }
+    let (char_id, sys_id) = match require_undocked_exploration_space(ctx, session, false) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
     let gate_str_arg = args
         .first()
         .and_then(|a| a.as_str())
@@ -2345,63 +2358,73 @@ async fn handle_activate_acceleration_gate(
             return Some(Err(rpc_msg_err(&code, msg)));
         }
         let mut spawned_for_system = false;
-        if !inc_exists {
-            if !special_initialized && is_naturally_seedable_incursion_site(ctx, sys_id, &site_id)
-            {
-                if let Err(e) = ctx
-                    .validate_ship_movement(
-                        char_id,
-                        ship_id,
-                        crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
-                            sys_id,
-                            kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
-                        },
-                    )
-                    .await
-                {
-                    return Some(Err(e));
+        if !inc_exists && !special_initialized {
+            match naturally_seedable_incursion_dungeon_id(ctx, sys_id, &site_id) {
+                Some(5158) => {
+                    return Some(Err(rpc_msg_err(
+                        "MothershipSiteLocked",
+                        format!(
+                            "Mothership HQ site {site_id} is locked while Sansha influence > 0.0"
+                        ),
+                    )));
                 }
-                Box::pin(
-                    crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
-                        ctx, sys_id,
-                    ),
-                )
-                .await;
-                spawned_for_system = true;
-                inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
-                    reg.incursions.values().any(|inc| {
-                        inc.state != "Ended"
-                            && inc.state != "Withdrawing"
-                            && inc.sites.iter().any(|s| {
-                                s.solar_system_id == sys_id
-                                    && (s.site_id == site_id
-                                        || s.site_id.ends_with(&site_id)
-                                        || site_id.ends_with(&format!("-{}", s.dungeon_id)))
-                            })
-                    })
-                });
-            }
-            if !inc_exists {
-                return Some(Err(rpc_msg_err(
-                    "DungeonNotFound",
-                    format!("Incursion site {site_id} not found"),
-                )));
+                Some(_) => {
+                    if let Err(e) = ctx
+                        .validate_ship_movement(
+                            char_id,
+                            ship_id,
+                            crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                                sys_id,
+                                kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                            },
+                        )
+                        .await
+                    {
+                        return Some(Err(e));
+                    }
+                    Box::pin(
+                        crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
+                            ctx, sys_id,
+                        ),
+                    )
+                    .await;
+                    spawned_for_system = true;
+                    inc_exists = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+                        reg.incursions.values().any(|inc| {
+                            inc.state != "Ended"
+                                && inc.state != "Withdrawing"
+                                && inc.sites.iter().any(|s| {
+                                    s.solar_system_id == sys_id
+                                        && (s.site_id == site_id
+                                            || s.site_id.ends_with(&site_id)
+                                            || site_id.ends_with(&format!("-{}", s.dungeon_id)))
+                                })
+                        })
+                    });
+                }
+                None => {}
             }
         }
-        if let Err(e) = ctx
-            .validate_ship_movement(
-                char_id,
-                ship_id,
-                crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
-                    sys_id,
-                    kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
-                },
-            )
-            .await
-        {
-            return Some(Err(e));
+        if !inc_exists {
+            return Some(Err(rpc_msg_err(
+                "DungeonNotFound",
+                format!("Incursion site {site_id} not found"),
+            )));
         }
         if !spawned_for_system {
+            if let Err(e) = ctx
+                .validate_ship_movement(
+                    char_id,
+                    ship_id,
+                    crate::services::space_nav_movement_guard::MovementIntent::AccelerationGate {
+                        sys_id,
+                        kind: crate::services::space_nav_movement_guard::AccelerationGateKind::DedOrExploration,
+                    },
+                )
+                .await
+            {
+                return Some(Err(e));
+            }
             Box::pin(
                 crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(
                     ctx, sys_id,
@@ -2548,20 +2571,41 @@ fn handle_get_escalating_path_dungeons_entered(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let invalid_err = || Err(BridgeRpcError::user_error("InvalidArguments"));
-    if service == "scanSvc" {
+    let invalid_err = || Err(rpc_msg_err("InvalidArguments", "Invalid escalation query arguments"));
+    let instance_filter = if service == "scanSvc" {
         if !args.is_empty() {
             return invalid_err();
         }
-    } else if args.len() > 1
-        || args
-            .first()
-            .is_some_and(|a| !matches!(a, PyRep::None) && !matches!(a, PyRep::Integer(id) if *id > 0))
-    {
-        return invalid_err();
-    }
+        None
+    } else {
+        if args.len() > 1 {
+            return invalid_err();
+        }
+        match args.first() {
+            None | Some(PyRep::None) => None,
+            Some(PyRep::Integer(id)) if *id > 0 => Some(*id),
+            Some(_) => return invalid_err(),
+        }
+    };
     let entered = read_pve_exploration_reg(ctx, |reg| {
-        crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
+        if let Some(target_inst) = instance_filter {
+            let now = now_sec(reg);
+            let mut seen = std::collections::HashSet::new();
+            reg.escalations_by_char
+                .get(&char_id)
+                .into_iter()
+                .flatten()
+                .filter(|e| {
+                    e.instance_id == target_inst
+                        && !crate::services::pve_expeditions::is_escalation_entry_expired(e, now)
+                })
+                .flat_map(|e| e.dungeons_entered.iter().copied())
+                .filter(|d| seen.insert(*d))
+                .map(|d| PyRep::Integer(d as i64))
+                .collect()
+        } else {
+            crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
+        }
     });
     Ok(PyRep::List(entered))
 }

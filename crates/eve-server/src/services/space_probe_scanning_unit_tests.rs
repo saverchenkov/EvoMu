@@ -1577,6 +1577,26 @@ async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
                 warp_end_ft: None,
             },
         );
+        map.insert(
+            890_500_009,
+            ActiveScannerProbe {
+                probe_id: 890_500_009,
+                probe_type_id: 30_013,
+                owner_char_id: 2_199_002,
+                ship_id: 100_000_099,
+                launcher_module_id: 0,
+                solar_system_id: sys_id,
+                position: [2_000.0, 0.0, 0.0],
+                destination: [2_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: 3_600.0,
+                launched_at_unix: now_unix,
+                state: PROBE_STATE_IDLE,
+                warp_end_ft: None,
+            },
+        );
     }
 
     let foreign_bound = BoundObjectEntry {
@@ -1643,8 +1663,9 @@ async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
         (Some(&own_bound), "RequestScans", vec![PyRep::Dict(vec![(PyRep::Integer(999_999_999), PyRep::keyval([("rangeStep", PyRep::Integer(2))]))])]),
         (Some(&own_bound), "RecoverProbes", vec![foreign_station_arg.clone()]),
         (Some(&own_bound), "RecoverProbes", vec![PyRep::Bool(true)]),
-        (Some(&own_bound), "ReconnectToLostProbes", vec![foreign_station_arg.clone()]),
-        (Some(&own_bound), "DestroyProbe", vec![foreign_station_arg]),
+        (Some(&own_bound), "ReconnectToLostProbes", vec![foreign_station_arg]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Integer(char_id)]),
+        (Some(&own_bound), "DestroyProbe", vec![PyRep::Integer(890_500_009)]),
         (Some(&own_bound), "DestroyProbe", vec![PyRep::Bool(true)]),
     ];
     for (bound_opt, meth, args) in neg_cases {
@@ -1699,4 +1720,214 @@ async fn scan_mgr_negative_guards_and_read_purity_across_probes_and_getters() {
     .expect("owned DestroyProbe succeeds");
     assert_eq!(destroyed.dict_get("destroyedCount"), Some(&PyRep::Integer(1)));
     assert!(!ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
+}
+
+#[tokio::test]
+async fn recover_and_destroy_probe_guards_and_range_step_clamping() {
+    let (ctx, mut sess) = make_scan_ctx_and_session();
+    let char_id = 90_000_001;
+    let foreign_char = 2_199_002;
+    let sys_id = 30_000_142;
+    let other_sys = 30_000_144;
+    let ship_id = 100_000_001;
+    let kw = HashMap::new();
+    let now_unix = ctx.now_unix();
+
+    let own_bound = BoundObjectEntry {
+        bound_id: 951,
+        session_id: sess.session_id,
+        user_id: sess.user_id.unwrap_or(1),
+        character_id: char_id,
+        service: "scanMgr".into(),
+        object_id: sys_id as i64,
+        oid_str: format!("scanMgr:{sys_id}"),
+        ref_id: 951,
+    };
+
+    let active_pid = 890_601_001_i64;
+    let overdue_pid = 890_601_002_i64;
+    let inactive_pid = 890_601_003_i64;
+    let other_sys_pid = 890_601_004_i64;
+    let foreign_pid = 890_601_005_i64;
+    {
+        let mut map = ctx.active_scanner_probes.write().unwrap();
+        let mk = |pid: i64, owner: i64, s_id: u32, st: i32, max_t: f64, launched: u64| {
+            ActiveScannerProbe {
+                probe_id: pid,
+                probe_type_id: 30_013,
+                owner_char_id: owner,
+                ship_id,
+                launcher_module_id: 0,
+                solar_system_id: s_id,
+                position: [1_000.0, 0.0, 0.0],
+                destination: [1_000.0, 0.0, 0.0],
+                range_step: 4,
+                scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+                base_sensor_strength: 40.0,
+                max_flight_time_s: max_t,
+                launched_at_unix: launched,
+                state: st,
+                warp_end_ft: None,
+            }
+        };
+        map.insert(active_pid, mk(active_pid, char_id, sys_id, PROBE_STATE_IDLE, 3_600.0, now_unix));
+        map.insert(
+            overdue_pid,
+            mk(overdue_pid, char_id, sys_id, PROBE_STATE_IDLE, 10.0, now_unix.saturating_sub(1_000)),
+        );
+        map.insert(inactive_pid, mk(inactive_pid, char_id, sys_id, 0, 3_600.0, now_unix));
+        map.insert(other_sys_pid, mk(other_sys_pid, char_id, other_sys, PROBE_STATE_IDLE, 3_600.0, now_unix));
+        map.insert(foreign_pid, mk(foreign_pid, foreign_char, sys_id, PROBE_STATE_IDLE, 3_600.0, now_unix));
+    }
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+
+    // 1. Explicit RecoverProbes([]) is a read-pure no-op (does NOT recover probes or expire overdue probes).
+    let empty_rec = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RecoverProbes",
+        &[PyRep::List(vec![])],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("RecoverProbes([]) must succeed as no-op");
+    assert_eq!(empty_rec.dict_get("recoveredCount"), Some(&PyRep::Integer(0)));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&active_pid));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&overdue_pid));
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    // 2. RecoverProbes rejects foreign, wrong-system, or inactive probe IDs before expiring overdue probes.
+    for bad_recover in [
+        vec![PyRep::List(vec![PyRep::Integer(foreign_pid)])],
+        vec![PyRep::List(vec![PyRep::Integer(other_sys_pid)])],
+        vec![PyRep::List(vec![PyRep::Integer(inactive_pid)])],
+        vec![PyRep::Integer(inactive_pid)],
+    ] {
+        let err = handle_scan_and_wormhole_extras(
+            &ctx,
+            &mut sess,
+            Some(&own_bound),
+            "scanMgr",
+            "RecoverProbes",
+            &bad_recover,
+            &kw,
+        )
+        .await
+        .unwrap()
+        .expect_err("foreign/wrong-system/inactive RecoverProbes must fail with ProbeNotFound");
+        assert_eq!(err.code, "ProbeNotFound");
+    }
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&overdue_pid));
+    assert_eq!(ctx.db.state_epoch(), e0);
+
+    // 3. P2 clamping: large rangeStep i64 values clamp without overflowing i32.
+    let mut max_kw = HashMap::new();
+    max_kw.insert("rangeStep".into(), PyRep::Integer(i64::MAX));
+    let _ = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::None],
+        &max_kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans clamps i64::MAX rangeStep to 8");
+    assert_eq!(ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step), Some(8));
+
+    let mut min_kw = HashMap::new();
+    min_kw.insert("rangeStep".into(), PyRep::Integer(i64::MIN));
+    let _ = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::None],
+        &min_kw,
+    )
+    .await
+    .unwrap()
+    .expect("RequestScans clamps i64::MIN rangeStep to 1");
+    assert_eq!(ctx.active_scanner_probes.read().unwrap().get(&active_pid).map(|p| p.range_step), Some(1));
+
+    // 4. DestroyProbe rejects wrong-system probe, leaves cargo sentinel (-1) as no-op, and spares other-system probes on bulk destroy.
+    let sentinel_pid = 890_601_006_i64;
+    ctx.active_scanner_probes.write().unwrap().insert(
+        sentinel_pid,
+        ActiveScannerProbe {
+            probe_id: sentinel_pid,
+            probe_type_id: 30_013,
+            owner_char_id: char_id,
+            ship_id,
+            launcher_module_id: 0,
+            solar_system_id: sys_id,
+            position: [0.0; 3],
+            destination: [0.0; 3],
+            range_step: 4,
+            scan_range_m: 4.0 * crate::services::space_destiny::AU_IN_METERS,
+            base_sensor_strength: 40.0,
+            max_flight_time_s: 3_600.0,
+            launched_at_unix: now_unix,
+            state: -1,
+            warp_end_ft: None,
+        },
+    );
+    let sentinel_res = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(sentinel_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("in-cargo sentinel probe (-1) DestroyProbe is idempotent no-op");
+    assert_eq!(sentinel_res.dict_get("destroyedCount"), Some(&PyRep::Integer(0)));
+    assert!(ctx.active_scanner_probes.read().unwrap().contains_key(&sentinel_pid));
+
+    let sys_err = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[PyRep::Integer(other_sys_pid)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("wrong-system DestroyProbe must fail with ProbeNotFound");
+    assert_eq!(sys_err.code, "ProbeNotFound");
+
+    let bulk_dest = handle_scan_and_wormhole_extras(
+        &ctx,
+        &mut sess,
+        Some(&own_bound),
+        "scanMgr",
+        "DestroyProbe",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("bulk DestroyProbe succeeds for current system");
+    assert_eq!(bulk_dest.dict_get("destroyedCount"), Some(&PyRep::Integer(2)));
+    assert!(
+        ctx.active_scanner_probes.read().unwrap().contains_key(&other_sys_pid),
+        "bulk DestroyProbe in sys_id must preserve probes in other systems"
+    );
+    assert!(
+        ctx.active_scanner_probes.read().unwrap().contains_key(&sentinel_pid),
+        "bulk DestroyProbe must preserve negative-state cargo sentinels"
+    );
 }

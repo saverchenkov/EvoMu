@@ -1463,7 +1463,7 @@ fn stage_probe_scan_updates(
             }
             let mut range_opt: Option<(i32, f64)> = None;
             if let Some(step_rep) = find_in_v("rangeStep") {
-                let step = (exact_int_arg(step_rep)? as i32).clamp(1, 8);
+                let step = exact_int_arg(step_rep)?.clamp(1, 8) as i32;
                 range_opt = Some((step, base_au * AU_IN_METERS * 2.0_f64.powi(step - 1)));
             } else if let Some(rad_rep) = find_in_v("scanRangeAU") {
                 range_opt = Some(
@@ -1503,7 +1503,7 @@ fn stage_probe_scan_updates(
             let z = exact_float_arg(&coords[2]).filter(|v| v.is_finite())?;
             let step_opt = match coords.get(3) {
                 None | Some(PyRep::None) => override_range_step,
-                Some(a) => Some((exact_int_arg(a)? as i32).clamp(1, 8)),
+                Some(a) => Some(exact_int_arg(a)?.clamp(1, 8) as i32),
             };
             if let Some(&pid) = owner_probe_ids.get(idx) {
                 if let Some(probe) = probe_map.get(&pid) {
@@ -1565,29 +1565,30 @@ async fn handle_request_scans(
             "RequestScans accepts at most 2 arguments",
         )));
     }
+    let invalid_probe_coords_err = || BridgeRpcError::user_error("InvalidProbeCoordinates");
     if !matches!(
         args.first(),
         None | Some(PyRep::None | PyRep::Dict(_) | PyRep::List(_))
     ) {
-        return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+        return Some(Err(invalid_probe_coords_err()));
     }
     let raw_range_step_arg = match args.get(1) {
         None | Some(PyRep::None) => None,
         Some(a) => match exact_int_arg(a) {
             Some(v) => Some(v),
-            None => return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates"))),
+            None => return Some(Err(invalid_probe_coords_err())),
         },
     };
     let raw_range_step_kw = match kwargs.get("rangeStep") {
         None | Some(PyRep::None) => None,
         Some(a) => match exact_int_arg(a) {
             Some(v) => Some(v),
-            None => return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates"))),
+            None => return Some(Err(invalid_probe_coords_err())),
         },
     };
     let override_range_step = raw_range_step_arg
         .or(raw_range_step_kw)
-        .map(|v| (v as i32).clamp(1, 8));
+        .map(|v| v.clamp(1, 8) as i32);
     let sys_id = caller_sys;
     if let Ok(probe_map) = ctx.active_scanner_probes.read() {
         let has_active_before = probe_map
@@ -1600,7 +1601,7 @@ async fn handle_request_scans(
             )));
         }
         if stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map).is_none() {
-            return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+            return Some(Err(invalid_probe_coords_err()));
         }
     }
 
@@ -1624,7 +1625,7 @@ async fn handle_request_scans(
         let Some((staged_updates, apply_bulk_step)) =
             stage_probe_scan_updates(ctx, char_id, sys_id, args, override_range_step, &probe_map)
         else {
-            return Some(Err(BridgeRpcError::user_error("InvalidProbeCoordinates")));
+            return Some(Err(invalid_probe_coords_err()));
         };
         if let Some(step) = apply_bulk_step {
             for p in probe_map.values_mut() {
@@ -2300,6 +2301,7 @@ async fn handle_recover_probes(
         )));
     }
     let mut target_probe_ids: Vec<i64> = Vec::new();
+    let mut explicit_empty_list = false;
     match args.first() {
         None | Some(PyRep::None) => {}
         Some(PyRep::List(list) | PyRep::Tuple(list)) => {
@@ -2312,6 +2314,21 @@ async fn handle_recover_probes(
                 };
                 target_probe_ids.push(pid);
             }
+            if list.is_empty() {
+                explicit_empty_list = true;
+            } else if let Ok(map) = ctx.active_scanner_probes.read() {
+                for &pid in &target_probe_ids {
+                    if let Some(p) = map.get(&pid) {
+                        if p.owner_char_id != char_id || p.solar_system_id != sys_id || p.state <= 0
+                        {
+                            return Some(Err(probe_rpc_err(
+                                "ProbeNotFound",
+                                format!("Scanner probe {pid} not found"),
+                            )));
+                        }
+                    }
+                }
+            }
         }
         Some(other) => {
             let Some(pid) = exact_int_arg(other).filter(|&v| v > 0) else {
@@ -2322,7 +2339,7 @@ async fn handle_recover_probes(
             };
             let found_owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
                 map.get(&pid)
-                    .is_some_and(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state >= 0)
+                    .is_some_and(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
             });
             if !found_owned {
                 return Some(Err(probe_rpc_err(
@@ -2335,9 +2352,15 @@ async fn handle_recover_probes(
     }
 
     let now_unix = ctx.now_unix();
-    let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
+    let (auto_returned, expired_lost) = if explicit_empty_list {
+        (Vec::new(), Vec::new())
+    } else {
+        expire_overdue_probes_for_char(ctx, char_id, now_unix).await
+    };
 
-    let candidate_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+    let candidate_probes: Vec<crate::router::ActiveScannerProbe> = if explicit_empty_list {
+        Vec::new()
+    } else if let Ok(mut map) = ctx.active_scanner_probes.write() {
         let ids: Vec<i64> = map.values()
             .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id)))
             .map(|p| p.probe_id)
@@ -2721,20 +2744,71 @@ async fn handle_destroy_probe(
             }
         },
     };
+    let sys_id = bound_sys.unwrap_or(caller_sys);
     if let Some(pid) = target_pid {
-        let owned = ctx.active_scanner_probes.read().ok().is_some_and(|map| {
-            map.get(&pid).is_some_and(|p| p.owner_char_id == char_id)
-        });
-        if !owned {
-            return Some(Err(probe_rpc_err(
-                "ProbeNotFound",
-                format!("Scanner probe {pid} not found"),
-            )));
+        enum ProbeTargetCheck {
+            OwnedDestroyable,
+            // Owned cargo/in-hangar sentinel (`state < 0`) must stay an idempotent 0-destroyed no-op (preserve cargo).
+            OwnedCargoSentinel,
+            RejectNotFound,
+            NotInTracker,
+        }
+        let check = ctx
+            .active_scanner_probes
+            .read()
+            .ok()
+            .map_or(ProbeTargetCheck::NotInTracker, |map| match map.get(&pid) {
+                Some(p) if p.owner_char_id == char_id && p.solar_system_id == sys_id => {
+                    if p.state >= 0 {
+                        ProbeTargetCheck::OwnedDestroyable
+                    } else {
+                        ProbeTargetCheck::OwnedCargoSentinel
+                    }
+                }
+                Some(_) => ProbeTargetCheck::RejectNotFound,
+                None => ProbeTargetCheck::NotInTracker,
+            });
+        match check {
+            ProbeTargetCheck::OwnedDestroyable | ProbeTargetCheck::OwnedCargoSentinel => {}
+            ProbeTargetCheck::RejectNotFound => {
+                return Some(Err(probe_rpc_err(
+                    "ProbeNotFound",
+                    format!("Scanner probe {pid} not found"),
+                )));
+            }
+            ProbeTargetCheck::NotInTracker => {
+                // Reject known non-probe entities while keeping already-expired/returned probe IDs idempotent.
+                let is_non_probe_entity = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&pid).is_some()
+                        || snap.corporations.get(&pid).is_some()
+                        || snap.structures.get(&pid).is_some()
+                        || snap.items.get(&pid).is_some_and(|it| {
+                            ctx.sde.types.get(&it.type_id).is_none_or(|t| t.group_id != 479)
+                        })
+                }) || ctx.sde.stations.contains_key(&pid)
+                    || ctx.sde.stargate_meta.contains_key(&pid)
+                    || u32::try_from(pid)
+                        .is_ok_and(|id| ctx.sde.solar_systems.contains_key(&id));
+                if is_non_probe_entity {
+                    return Some(Err(probe_rpc_err(
+                        "ProbeNotFound",
+                        format!("Scanner probe {pid} not found"),
+                    )));
+                }
+            }
         }
     }
-    let sys_id = bound_sys.unwrap_or(caller_sys);
     let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
-        let ids: Vec<i64> = map.values().filter(|p| p.owner_char_id == char_id && p.state >= 0 && (target_pid.is_none() || target_pid == Some(p.probe_id))).map(|p| p.probe_id).collect();
+        let ids: Vec<i64> = map
+            .values()
+            .filter(|p| {
+                p.owner_char_id == char_id
+                    && p.solar_system_id == sys_id
+                    && p.state >= 0
+                    && (target_pid.is_none() || target_pid == Some(p.probe_id))
+            })
+            .map(|p| p.probe_id)
+            .collect();
         ids.into_iter().filter_map(|id| map.remove(&id)).collect()
     } else { Vec::new() };
     if !destroyed_probes.is_empty() {

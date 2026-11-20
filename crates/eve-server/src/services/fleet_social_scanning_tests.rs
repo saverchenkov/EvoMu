@@ -1511,3 +1511,100 @@ async fn scan_and_wormhole_prechecks_and_docked_read_purity() {
     assert_eq!(ctx.db.state_epoch(), e_gate, "keyless gate activation must not write DB");
     assert_eq!(ctx.db.tx_commit_count(), c_gate, "keyless gate activation must not commit DB tx");
 }
+
+#[test]
+fn consume_gate_key_in_cargo_enforces_ownership_flag_type_and_presence_atomically() {
+    use eve_db::{InventoryFlag, InventoryItemRecord};
+
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let char_id = 100_000_001;
+    let ship_id = 500_000_001;
+    let other_ship_id = 500_000_002;
+    let key_type_id = 20_765_u32;
+    let missing_kid = 9_900_001_i64;
+    let moved_kid = 9_900_002_i64;
+    let wrong_flag_kid = 9_900_003_i64;
+    let wrong_type_kid = 9_900_004_i64;
+    let zero_qty_kid = 9_900_005_i64;
+    let valid_kid = 9_900_006_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            moved_kid,
+            InventoryItemRecord {
+                item_id: moved_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: other_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            wrong_flag_kid,
+            InventoryItemRecord {
+                item_id: wrong_flag_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            wrong_type_kid,
+            InventoryItemRecord {
+                item_id: wrong_type_kid,
+                type_id: key_type_id + 1,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            zero_qty_kid,
+            InventoryItemRecord {
+                item_id: zero_qty_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 0,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            valid_kid,
+            InventoryItemRecord {
+                item_id: valid_kid,
+                type_id: key_type_id,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                ..Default::default()
+            },
+        );
+    });
+
+    let e0 = ctx.db.state_epoch();
+    let c0 = ctx.db.tx_commit_count();
+    for bad_kid in [missing_kid, moved_kid, wrong_flag_kid, wrong_type_kid, zero_qty_kid] {
+        let err = consume_gate_key_in_cargo(&ctx, ship_id, bad_kid, Some(key_type_id))
+            .expect_err("TOCTOU-invalid gate key must fail with MissingGateKey");
+        assert_eq!(err.code, "MissingGateKey");
+    }
+    assert_eq!(ctx.db.state_epoch(), e0);
+    assert_eq!(ctx.db.tx_commit_count(), c0);
+
+    consume_gate_key_in_cargo(&ctx, ship_id, valid_kid, Some(key_type_id))
+        .expect("first valid cargo key consumption succeeds");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&valid_kid).map(|i| i.quantity)), Some(1));
+    consume_gate_key_in_cargo(&ctx, ship_id, valid_kid, Some(key_type_id))
+        .expect("second valid cargo key consumption removes exhausted stack");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.contains_key(&valid_kid)), false);
+}

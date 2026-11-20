@@ -1438,22 +1438,7 @@ pub(super) async fn handle_scanning_and_wormholes(
             };
 
             if let Some(kid) = consume_item_id {
-                if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
-                    if let Some(item) = snap.items.get_mut(&kid) {
-                        if item.quantity < 1 {
-                            return Err(BridgeRpcError {
-                                code: "MissingGateKey".into(),
-                                message: "Gate key item is no longer present in cargo".into(),
-                                client_error: None,
-                            });
-                        }
-                        item.quantity -= 1;
-                        if item.quantity <= 0 {
-                            snap.items.remove(&kid);
-                        }
-                    }
-                    Ok(())
-                }) {
+                if let Err(e) = consume_gate_key_in_cargo(ctx, ship_id, kid, key_type_used) {
                     return Some(Err(e));
                 }
             }
@@ -1573,6 +1558,36 @@ pub(crate) fn signal_tracker_subscribers_in_snap(
     subs.sort_unstable();
     subs.dedup();
     subs
+}
+
+pub(crate) fn consume_gate_key_in_cargo(
+    ctx: &ServerContext,
+    ship_id: i64,
+    kid: i64,
+    key_type_used: Option<u32>,
+) -> Result<(), BridgeRpcError> {
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let missing_key_err = || BridgeRpcError {
+            code: "MissingGateKey".into(),
+            message: "Gate key item is no longer present in cargo".into(),
+            client_error: None,
+        };
+        let Some(item) = snap.items.get_mut(&kid) else {
+            return Err(missing_key_err());
+        };
+        if item.location_id != ship_id
+            || item.flag != eve_db::InventoryFlag::Cargo
+            || key_type_used != Some(item.type_id)
+            || item.quantity < 1
+        {
+            return Err(missing_key_err());
+        }
+        item.quantity -= 1;
+        if item.quantity <= 0 {
+            snap.items.remove(&kid);
+        }
+        Ok(())
+    })
 }
 
 fn random_sphere_offset(dev_radius: f64, sig_id: &str) -> glam::DVec3 {
