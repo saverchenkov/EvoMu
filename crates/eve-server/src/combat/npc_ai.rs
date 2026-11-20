@@ -238,9 +238,11 @@ const ATTR_MISSILE_NEVER_DOES_DAMAGE: AttributeId = 1075;
 const ATTR_MISSILE_AOE_DRF: AttributeId = 1353;
 const ATTR_NPC_MAX_COMBAT_ORBIT_RANGE: AttributeId = 2786;
 
+const EFF_TARGET_ATTACK: EffectId = 10;
 const EFF_MISSILE_LAUNCHING_FOR_ENTITY: EffectId = 569;
 const EFF_TARGET_DISINTEGRATOR_ATTACK: EffectId = 6995;
 const EFF_CHAIN_LIGHTNING: EffectId = 8037;
+const EFF_ENTITY_CHAIN_LIGHTNING: EffectId = 8088;
 
 static LOGGED_FALLBACK_NPC_TYPES: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
@@ -272,20 +274,115 @@ impl NpcWeaponKind {
     }
 }
 
+/// Resolves an NPC weapon's `OnSpecialFX` GUID using SDE effect metadata (`sde.effects.guid`)
+/// when available, while preserving turret graphic overrides (`Hybrid`/`Projectile`) where
+/// SDE category-11 types tag generic `targetAttack(10)` alongside a Hybrid/Projectile turret gfx.
+fn resolve_npc_weapon_fx_guid(
+    sde: &SdeRegistry,
+    npc_type: &eve_sde::InvType,
+    kind: NpcWeaponKind,
+    gfx_group_id: Option<u32>,
+    is_missile: bool,
+) -> String {
+    let effect_guid = |eid: EffectId| -> Option<String> {
+        let eff = sde.effects.get(&eid)?;
+        let raw_guid = eff.guid.as_deref()?;
+        raw_guid
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|s| s.starts_with("effects."))
+            .map(str::to_string)
+    };
+
+    if is_missile {
+        if npc_type.effect_ids.contains(&EFF_MISSILE_LAUNCHING_FOR_ENTITY) {
+            if let Some(g) = effect_guid(EFF_MISSILE_LAUNCHING_FOR_ENTITY) {
+                return g;
+            }
+        }
+        return NpcWeaponKind::Missile.fx_guid().to_string();
+    }
+
+    match kind {
+        NpcWeaponKind::Hybrid => {
+            if gfx_group_id != Some(74) {
+                if let Some(g) = npc_type
+                    .default_effect_id
+                    .and_then(effect_guid)
+                    .filter(|g| g != "effects.Laser")
+                {
+                    return g;
+                }
+            }
+            return NpcWeaponKind::Hybrid.fx_guid().to_string();
+        }
+        NpcWeaponKind::Projectile => {
+            if gfx_group_id != Some(55) {
+                if let Some(g) = npc_type
+                    .default_effect_id
+                    .and_then(effect_guid)
+                    .filter(|g| g != "effects.Laser")
+                {
+                    return g;
+                }
+            }
+            return NpcWeaponKind::Projectile.fx_guid().to_string();
+        }
+        NpcWeaponKind::TriglavianBeam => {
+            if npc_type.effect_ids.contains(&EFF_TARGET_DISINTEGRATOR_ATTACK) {
+                if let Some(g) = effect_guid(EFF_TARGET_DISINTEGRATOR_ATTACK) {
+                    return g;
+                }
+            }
+        }
+        NpcWeaponKind::Vorton => {
+            for &eid in &[EFF_ENTITY_CHAIN_LIGHTNING, EFF_CHAIN_LIGHTNING] {
+                if npc_type.effect_ids.contains(&eid) {
+                    if let Some(g) = effect_guid(eid) {
+                        return g;
+                    }
+                }
+            }
+        }
+        NpcWeaponKind::Laser => {
+            if npc_type.effect_ids.contains(&EFF_TARGET_ATTACK) {
+                if let Some(g) = effect_guid(EFF_TARGET_ATTACK) {
+                    return g;
+                }
+            }
+            if let Some(g) = npc_type.default_effect_id.and_then(effect_guid) {
+                return g;
+            }
+        }
+        NpcWeaponKind::Missile => {}
+    }
+
+    kind.fx_guid().to_string()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NpcTurretProfile {
     pub kind: NpcWeaponKind,
+    pub fx_guid: String,
+    pub gfx_type_id: Option<u32>,
     pub shot_damage: DamageVector,
     pub cycle_duration_s: f64,
     pub optimal_range: f64,
     pub falloff_range: f64,
     pub tracking_speed: f64,
     pub signature_resolution: f64,
+    pub vorton_explosion_radius: f64,
+    pub vorton_explosion_velocity: f64,
+    pub vorton_drf: f64,
 }
 
 impl NpcTurretProfile {
     pub(crate) fn max_effective_range(&self) -> f64 {
-        if self.falloff_range > 0.0 {
+        if self.kind == NpcWeaponKind::Vorton {
+            // Vorton Projectors apply only within optimal range (`#1247`, `combat_weapons.rs:1539`).
+            self.optimal_range
+        } else if self.falloff_range > 0.0 {
             self.optimal_range + 3.0 * self.falloff_range
         } else {
             self.optimal_range
@@ -295,6 +392,8 @@ impl NpcTurretProfile {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NpcMissileProfile {
+    pub missile_type_id: u32,
+    pub fx_guid: String,
     pub volley_damage: DamageVector,
     pub cycle_duration_s: f64,
     pub max_flight_range: f64,
@@ -355,38 +454,44 @@ fn infer_turret_kind_from_damage(dmg: DamageVector) -> NpcWeaponKind {
     }
 }
 
-fn resolve_turret_kind(
+fn resolve_turret_kind_and_gfx(
     sde: &SdeRegistry,
     npc_type: &eve_sde::InvType,
     shot_damage: DamageVector,
     fallbacks: &mut Vec<&'static str>,
-) -> NpcWeaponKind {
-    if npc_type.effect_ids.contains(&EFF_TARGET_DISINTEGRATOR_ATTACK) {
-        return NpcWeaponKind::TriglavianBeam;
-    }
-    if npc_type.effect_ids.contains(&EFF_CHAIN_LIGHTNING) {
-        return NpcWeaponKind::Vorton;
-    }
-    if let Some(gfx_type_id) = npc_type
+) -> (NpcWeaponKind, Option<u32>, Option<u32>) {
+    let gfx_type_id = npc_type
         .default_attributes
         .get(&ATTR_GFX_TURRET_ID)
         .copied()
         .filter(|&v| v > 0.0)
-        .map(|v| v as u32)
+        .map(|v| v as u32);
+    let gfx_group_id = gfx_type_id.and_then(|id| sde.types.get(&id).map(|g| g.group_id));
+
+    if npc_type.effect_ids.contains(&EFF_TARGET_DISINTEGRATOR_ATTACK) {
+        return (NpcWeaponKind::TriglavianBeam, gfx_type_id, gfx_group_id);
+    }
+    if npc_type.effect_ids.contains(&EFF_ENTITY_CHAIN_LIGHTNING)
+        || npc_type.effect_ids.contains(&EFF_CHAIN_LIGHTNING)
     {
-        if let Some(gfx_group_id) = sde.types.get(&gfx_type_id).map(|g| g.group_id) {
-            match gfx_group_id {
-                1986 => return NpcWeaponKind::TriglavianBeam,
-                4060 => return NpcWeaponKind::Vorton,
-                53 | 54 | 464 => return NpcWeaponKind::Laser,
-                74 => return NpcWeaponKind::Hybrid,
-                55 => return NpcWeaponKind::Projectile,
-                _ => {}
-            }
+        return (NpcWeaponKind::Vorton, gfx_type_id, gfx_group_id);
+    }
+    if let Some(group_id) = gfx_group_id {
+        match group_id {
+            1986 => return (NpcWeaponKind::TriglavianBeam, gfx_type_id, gfx_group_id),
+            4060 => return (NpcWeaponKind::Vorton, gfx_type_id, gfx_group_id),
+            53 | 54 | 464 => return (NpcWeaponKind::Laser, gfx_type_id, gfx_group_id),
+            74 => return (NpcWeaponKind::Hybrid, gfx_type_id, gfx_group_id),
+            55 => return (NpcWeaponKind::Projectile, gfx_type_id, gfx_group_id),
+            _ => {}
         }
     }
     fallbacks.push("gfxTurretID(245)");
-    infer_turret_kind_from_damage(shot_damage)
+    (
+        infer_turret_kind_from_damage(shot_damage),
+        gfx_type_id,
+        gfx_group_id,
+    )
 }
 
 fn build_npc_turret_profile(
@@ -438,40 +543,81 @@ fn build_npc_turret_profile(
         5_000.0
     };
 
+    let (kind, gfx_type_id, gfx_group_id) =
+        resolve_turret_kind_and_gfx(sde, npc_type, shot_damage, fallbacks);
     let raw_trk = a.get(&eve_sde::attr_ids::TRACKING_SPEED).copied().filter(|&v| v > 0.0);
-    let signature_resolution = if let Some(sr) = a
-        .get(&ATTR_OPTIMAL_SIG_RADIUS)
-        .copied()
-        .filter(|&v| v > 0.0)
-    {
-        sr
-    } else {
-        fallbacks.push("optimalSigRadius(620)");
-        if raw_trk.is_some_and(|trk| trk > 2.0) {
-            40_000.0
+    let (
+        signature_resolution,
+        tracking_speed,
+        vorton_explosion_radius,
+        vorton_explosion_velocity,
+        vorton_drf,
+    ) = if kind == NpcWeaponKind::Vorton {
+        let er = if let Some(v) = a.get(&ATTR_MISSILE_AOE_CLOUD_SIZE).copied().filter(|&v| v > 0.0) {
+            v
         } else {
-            40.0
-        }
-    };
-    let tracking_speed = if let Some(trk) = raw_trk {
-        trk
-    } else {
-        fallbacks.push("trackingSpeed(160)");
-        if signature_resolution >= 10_000.0 {
-            1.0
+            fallbacks.push("aoeCloudSize(654)");
+            43.0
+        };
+        let ev = if let Some(v) = a.get(&ATTR_MISSILE_AOE_VELOCITY).copied().filter(|&v| v > 0.0) {
+            v
         } else {
-            0.05
-        }
+            fallbacks.push("aoeVelocity(653)");
+            190.0
+        };
+        let drf = if let Some(v) = a.get(&ATTR_MISSILE_AOE_DRF).copied().filter(|&v| v > 0.0) {
+            v
+        } else {
+            fallbacks.push("aoeDamageReductionFactor(1353)");
+            0.40
+        };
+        let sr = a
+            .get(&ATTR_OPTIMAL_SIG_RADIUS)
+            .copied()
+            .filter(|&v| v > 0.0)
+            .unwrap_or(40_000.0);
+        (sr, raw_trk.unwrap_or(1.0), er, ev, drf)
+    } else {
+        let signature_resolution = if let Some(sr) = a
+            .get(&ATTR_OPTIMAL_SIG_RADIUS)
+            .copied()
+            .filter(|&v| v > 0.0)
+        {
+            sr
+        } else {
+            fallbacks.push("optimalSigRadius(620)");
+            if raw_trk.is_some_and(|trk| trk > 2.0) {
+                40_000.0
+            } else {
+                40.0
+            }
+        };
+        let tracking_speed = if let Some(trk) = raw_trk {
+            trk
+        } else {
+            fallbacks.push("trackingSpeed(160)");
+            if signature_resolution >= 10_000.0 {
+                1.0
+            } else {
+                0.05
+            }
+        };
+        (signature_resolution, tracking_speed, 0.0, 0.0, 0.0)
     };
-    let kind = resolve_turret_kind(sde, npc_type, shot_damage, fallbacks);
+    let fx_guid = resolve_npc_weapon_fx_guid(sde, npc_type, kind, gfx_group_id, false);
     Some(NpcTurretProfile {
         kind,
+        fx_guid,
+        gfx_type_id,
         shot_damage,
         cycle_duration_s,
         optimal_range,
         falloff_range,
         tracking_speed,
         signature_resolution,
+        vorton_explosion_radius,
+        vorton_explosion_velocity,
+        vorton_drf,
     })
 }
 
@@ -565,7 +711,10 @@ fn build_npc_missile_profile(
         0.6
     };
 
+    let fx_guid = resolve_npc_weapon_fx_guid(sde, npc_type, NpcWeaponKind::Missile, None, true);
     Some(NpcMissileProfile {
+        missile_type_id,
+        fx_guid,
         volley_damage,
         cycle_duration_s,
         max_flight_range,
@@ -689,14 +838,14 @@ pub(crate) fn inspect_npc_sde_profile(
         .or_else(|| missile.as_ref().map(|m| m.max_flight_range))
         .unwrap_or(0.0);
 
-    let orbit_range = if let Some(fly) = fly_range_opt.filter(|&v| v > 0.0) {
+    let orbit_range = if max_velocity <= 0.0 {
+        0.0
+    } else if let Some(fly) = fly_range_opt.filter(|&v| v > 0.0) {
         fly
     } else if let Some(orb) = npc_orbit_opt.filter(|&v| v > 0.0) {
         orb
     } else if is_armed {
-        if max_velocity > 0.0 || fly_range_opt.is_none() {
-            fallbacks.push("entityFlyRange(416)");
-        }
+        fallbacks.push("entityFlyRange(416)");
         (engagement_optimal_range * 0.75).clamp(2_500.0, 15_000.0)
     } else {
         0.0
@@ -834,7 +983,7 @@ impl NpcSpawnManager {
                 inertia: ball_inertia,
                 mass: ball_mass,
                 radius: ball_radius,
-                speed_fraction: 1.0,
+                speed_fraction: if profile.max_velocity > 0.0 { 1.0 } else { 0.0 },
                 mode: MovementMode::Stop,
             };
 
@@ -1020,13 +1169,71 @@ impl NpcSpawnManager {
         } else {
             6 // Null-sec / W-space: up to Battleship
         };
+        let hull_rank = |g: &eve_sde::NpcSpawnGroupInfo| -> u8 {
+            if g.group_name.contains("Frigate") {
+                0
+            } else if g.group_name.contains("Destroyer") {
+                1
+            } else if g.group_name.contains("BattleCruiser") {
+                3
+            } else if g.group_name.contains("Cruiser") {
+                2
+            } else if g.group_name.contains("Battleship") {
+                4
+            } else {
+                5
+            }
+        };
+        let is_non_standard_belt_group = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
+            g.group_name.contains("Officer")
+                || g.group_name.contains("Commander")
+                || g.group_name.contains("Hauler")
+                || g.group_name.contains("Dreadnought")
+                || g.group_name.contains("Titan")
+                || g.group_name.contains("Deadspace")
+                || g.group_name.contains("Ghost")
+                || g.group_name.contains("Mission")
+                || g.group_name.contains("Incursion")
+        };
+        let max_hull_rank: u8 = if sys_sec >= 0.45 {
+            1 // High-sec: Frigate / Destroyer (plus untagged custom groups == 5)
+        } else if sys_sec >= 0.05 {
+            3 // Low-sec: up to BattleCruiser
+        } else {
+            4 // Null-sec / W-space: up to Battleship
+        };
+        let fits_sec_tier = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
+            let hr = hull_rank(g);
+            g.ship_class <= max_ship_class
+                && !is_non_standard_belt_group(g)
+                && (hr <= max_hull_rank || hr == 5)
+        };
+        let is_eligible_belt_group = |g: &eve_sde::NpcSpawnGroupInfo| -> bool {
+            !g.npc_type_ids.is_empty()
+                && !crate::services::combat_crimewatch::combat_legacy_ess::is_non_combat_npc_prop_group(g.group_id)
+                && !crate::services::combat_crimewatch::combat_legacy_ess::is_invulnerable_npc_authority_group(g.group_id)
+                && !crate::services::combat_crimewatch::combat_legacy_ess::is_sleeper_or_drifter_npc_group(g.group_id)
+                && !matches!(
+                    g.group_id,
+                    182 | 279 | 286 | 297 | 298 | 301 | 383 | 495 | 520 | 522 | 523 | 527 | 533 | 534
+                )
+        };
+        let regional_keyword = match reg_faction {
+            500_011 => "Angel",
+            500_012 => "Blood",
+            500_019 => "Sansha",
+            500_020 => "Serpentis",
+            _ => "Guristas",
+        };
         let mut candidate_groups: Vec<u32> = ctx
             .sde
             .npc_spawn_groups
             .iter()
             .filter(|(_, g)| {
-                (g.faction_id == reg_faction || g.faction_id == 0)
-                    && g.ship_class <= max_ship_class
+                is_eligible_belt_group(g)
+                    && fits_sec_tier(g)
+                    && (g.faction_id == reg_faction
+                        || (g.faction_id == 0 && g.group_name.contains(regional_keyword)))
             })
             .map(|(&gid, _)| gid)
             .collect();
@@ -1035,14 +1242,42 @@ impl NpcSpawnManager {
                 .sde
                 .npc_spawn_groups
                 .iter()
-                .filter(|(_, g)| g.faction_id == reg_faction || g.faction_id == 0)
+                .filter(|(_, g)| {
+                    is_eligible_belt_group(g)
+                        && (g.faction_id == reg_faction || g.faction_id == 0)
+                        && fits_sec_tier(g)
+                })
+                .map(|(&gid, _)| gid)
+                .collect();
+        }
+        if candidate_groups.is_empty() {
+            candidate_groups = ctx
+                .sde
+                .npc_spawn_groups
+                .iter()
+                .filter(|(_, g)| {
+                    is_eligible_belt_group(g) && (g.faction_id == reg_faction || g.faction_id == 0)
+                })
                 .map(|(&gid, _)| gid)
                 .collect();
         }
         if candidate_groups.is_empty() {
             candidate_groups = ctx.sde.npc_spawn_groups.keys().copied().collect();
         }
-        candidate_groups.sort_unstable();
+        candidate_groups.sort_by_key(|&gid| {
+            ctx.sde.npc_spawn_groups.get(&gid).map_or(
+                (true, true, u32::MAX, u8::MAX, gid),
+                |g| {
+                    (
+                        is_non_standard_belt_group(g),
+                        !g.group_name.starts_with("Asteroid "),
+                        g.ship_class,
+                        hull_rank(g),
+                        gid,
+                    )
+                },
+            )
+        });
 
         let mut planned_groups: Vec<(u32, eve_sde::NpcSpawnGroupInfo, DVec3)> = Vec::new();
         if !candidate_groups.is_empty() {
@@ -1538,36 +1773,39 @@ impl NpcSpawnManager {
                         .map(|tk| tk.radius)
                         .unwrap_or(0.0);
                     let surface_dist = (dist - npc_kin.radius.max(0.0) - target_radius.max(0.0)).max(0.0);
-                    let in_orbit_band = dist <= entity.orbit_range * 1.4;
+                    let is_stationary = max_velocity <= 0.0;
+                    let in_orbit_band = !is_stationary && dist <= entity.orbit_range * 1.4;
                     let prev_state = entity.state;
 
-                    if !in_orbit_band {
-                        // 1. Chase target at maxVelocity
-                        if prev_state != NpcAiState::Chase || target_changed {
-                            entity.state = NpcAiState::Chase;
-                            mode_updates.push(ModeUpdate {
-                                ball_id,
-                                mode: MovementMode::Follow {
-                                    target_id,
-                                    range: entity.orbit_range,
-                                },
-                                speed_fraction: chase_speed_fraction,
-                            });
-                        }
-                    } else {
-                        // 2. Orbit target at entityCruiseSpeed
-                        if !matches!(prev_state, NpcAiState::Orbit | NpcAiState::Attack)
-                            || target_changed
-                        {
-                            entity.state = NpcAiState::Orbit;
-                            mode_updates.push(ModeUpdate {
-                                ball_id,
-                                mode: MovementMode::Orbit {
-                                    target_id,
-                                    range: entity.orbit_range,
-                                },
-                                speed_fraction: orbit_speed_fraction,
-                            });
+                    if !is_stationary {
+                        if !in_orbit_band {
+                            // 1. Chase target at maxVelocity
+                            if prev_state != NpcAiState::Chase || target_changed {
+                                entity.state = NpcAiState::Chase;
+                                mode_updates.push(ModeUpdate {
+                                    ball_id,
+                                    mode: MovementMode::Follow {
+                                        target_id,
+                                        range: entity.orbit_range,
+                                    },
+                                    speed_fraction: chase_speed_fraction,
+                                });
+                            }
+                        } else {
+                            // 2. Orbit target at entityCruiseSpeed
+                            if !matches!(prev_state, NpcAiState::Orbit | NpcAiState::Attack)
+                                || target_changed
+                            {
+                                entity.state = NpcAiState::Orbit;
+                                mode_updates.push(ModeUpdate {
+                                    ball_id,
+                                    mode: MovementMode::Orbit {
+                                        target_id,
+                                        range: entity.orbit_range,
+                                    },
+                                    speed_fraction: orbit_speed_fraction,
+                                });
+                            }
                         }
                     }
 
@@ -1575,7 +1813,7 @@ impl NpcSpawnManager {
                     if uses_synthetic_legacy {
                         rt.turret_cooldown_s = (rt.turret_cooldown_s - step_dt).max(0.0);
                         rt.missile_cooldown_s = (rt.missile_cooldown_s - step_dt).max(0.0);
-                        if in_orbit_band && dist <= entity.optimal_range * 1.25 {
+                        if (is_stationary || in_orbit_band) && dist <= entity.optimal_range * 1.25 {
                             entity.state = NpcAiState::Attack;
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
@@ -1586,6 +1824,8 @@ impl NpcSpawnManager {
                                     dmg: entity.damage_vector.scaled(0.5),
                                 });
                             }
+                        } else if is_stationary {
+                            entity.state = NpcAiState::Idle;
                         }
                     } else {
                         let mut fired_or_in_range = false;
@@ -1599,18 +1839,36 @@ impl NpcSpawnManager {
                                     shots += 1;
                                     rt.turret_cooldown_s += turret.cycle_duration_s;
                                     entity.last_attack_tick = current_tick;
-                                    dmg_actions.push(AiDamageAction::Turret {
-                                        attacker_id: ball_id,
-                                        npc_type_id: entity.type_id,
-                                        target_id,
-                                        fx_guid: turret.kind.fx_guid(),
-                                        shot_damage: turret.shot_damage,
-                                        optimal_range: turret.optimal_range,
-                                        falloff_range: turret.falloff_range,
-                                        tracking_speed: turret.tracking_speed,
-                                        sig_resolution: turret.signature_resolution,
-                                        max_effective_range: max_r,
-                                    });
+                                    if turret.kind == NpcWeaponKind::Vorton {
+                                        dmg_actions.push(AiDamageAction::Vorton {
+                                            attacker_id: ball_id,
+                                            npc_type_id: entity.type_id,
+                                            target_id,
+                                            module_type_id: turret.gfx_type_id,
+                                            fx_guid: turret.fx_guid.clone(),
+                                            cycle_duration_s: turret.cycle_duration_s,
+                                            shot_damage: turret.shot_damage,
+                                            optimal_range: turret.optimal_range,
+                                            explosion_radius: turret.vorton_explosion_radius,
+                                            explosion_velocity: turret.vorton_explosion_velocity,
+                                            drf: turret.vorton_drf,
+                                        });
+                                    } else {
+                                        dmg_actions.push(AiDamageAction::Turret {
+                                            attacker_id: ball_id,
+                                            npc_type_id: entity.type_id,
+                                            target_id,
+                                            module_type_id: turret.gfx_type_id,
+                                            fx_guid: turret.fx_guid.clone(),
+                                            cycle_duration_s: turret.cycle_duration_s,
+                                            shot_damage: turret.shot_damage,
+                                            optimal_range: turret.optimal_range,
+                                            falloff_range: turret.falloff_range,
+                                            tracking_speed: turret.tracking_speed,
+                                            sig_resolution: turret.signature_resolution,
+                                            max_effective_range: max_r,
+                                        });
+                                    }
                                 }
                                 rt.turret_cooldown_s -= step_dt;
                             } else {
@@ -1632,7 +1890,9 @@ impl NpcSpawnManager {
                                         attacker_id: ball_id,
                                         npc_type_id: entity.type_id,
                                         target_id,
-                                        fx_guid: NpcWeaponKind::Missile.fx_guid(),
+                                        missile_type_id: missile.missile_type_id,
+                                        fx_guid: missile.fx_guid.clone(),
+                                        cycle_duration_s: missile.cycle_duration_s,
                                         volley_damage: missile.volley_damage,
                                         max_flight_range: missile.max_flight_range,
                                         explosion_radius: missile.explosion_radius,
@@ -1646,7 +1906,13 @@ impl NpcSpawnManager {
                             }
                         }
 
-                        if in_orbit_band {
+                        if is_stationary {
+                            entity.state = if fired_or_in_range {
+                                NpcAiState::Attack
+                            } else {
+                                NpcAiState::Idle
+                            };
+                        } else if in_orbit_band {
                             entity.state = if fired_or_in_range {
                                 NpcAiState::Attack
                             } else {
@@ -1662,11 +1928,15 @@ impl NpcSpawnManager {
                     if entity.state != NpcAiState::Idle {
                         entity.state = NpcAiState::Idle;
                         entity.target_id = None;
-                        mode_updates.push(ModeUpdate {
-                            ball_id,
-                            mode: MovementMode::Stop,
-                            speed_fraction: 0.0,
-                        });
+                        if max_velocity > 0.0 {
+                            mode_updates.push(ModeUpdate {
+                                ball_id,
+                                mode: MovementMode::Stop,
+                                speed_fraction: 0.0,
+                            });
+                        }
+                    } else if entity.target_id.is_some() {
+                        entity.target_id = None;
                     }
                 }
             }
@@ -1799,7 +2069,9 @@ enum AiDamageAction {
         attacker_id: i64,
         npc_type_id: u32,
         target_id: i64,
-        fx_guid: &'static str,
+        module_type_id: Option<u32>,
+        fx_guid: String,
+        cycle_duration_s: f64,
         shot_damage: DamageVector,
         optimal_range: f64,
         falloff_range: f64,
@@ -1807,11 +2079,26 @@ enum AiDamageAction {
         sig_resolution: f64,
         max_effective_range: f64,
     },
+    Vorton {
+        attacker_id: i64,
+        npc_type_id: u32,
+        target_id: i64,
+        module_type_id: Option<u32>,
+        fx_guid: String,
+        cycle_duration_s: f64,
+        shot_damage: DamageVector,
+        optimal_range: f64,
+        explosion_radius: f64,
+        explosion_velocity: f64,
+        drf: f64,
+    },
     Missile {
         attacker_id: i64,
         npc_type_id: u32,
         target_id: i64,
-        fx_guid: &'static str,
+        missile_type_id: u32,
+        fx_guid: String,
+        cycle_duration_s: f64,
         volley_damage: DamageVector,
         max_flight_range: f64,
         explosion_radius: f64,
@@ -2052,6 +2339,18 @@ fn combat_state_ratios(bp: &eve_destiny::Ballpark, tid: i64) -> (f64, f64, f64) 
         .unwrap_or((0.0, 0.0, 0.0))
 }
 
+fn resolve_target_sig_radius(
+    ball_kinematics: &HashMap<i64, AiBallKinematics>,
+    target_id: i64,
+    tgt_ball: &Ball,
+) -> f64 {
+    ball_kinematics
+        .get(&target_id)
+        .map(|k| k.target_sig_radius)
+        .filter(|&s| s > 0.0)
+        .unwrap_or_else(|| tgt_ball.radius.max(25.0))
+}
+
 fn apply_ai_step_world_effects(
     ctx: &ServerContext,
     sys_id: u32,
@@ -2075,10 +2374,26 @@ fn apply_ai_step_world_effects(
         let st = &mut *st_guard;
         for upd in mode_updates {
             let _ = bp.set_mode(upd.ball_id, upd.mode);
-            let _ = bp.set_speed_fraction(upd.ball_id, upd.speed_fraction);
+            let needs_speed_update = bp
+                .balls
+                .get(&upd.ball_id)
+                .is_some_and(|b| (b.speed_fraction - upd.speed_fraction).abs() >= 1e-6);
+            if needs_speed_update {
+                let _ = bp.set_speed_fraction(upd.ball_id, upd.speed_fraction);
+            }
         }
         for action in dmg_actions {
-            let (attacker_id, npc_type_id, tid, fx_guid, resolved_dmg, is_wrecking) = match action {
+            let (
+                attacker_id,
+                npc_type_id,
+                tid,
+                module_type_id,
+                other_type_id,
+                fx_guid,
+                cycle_duration_s,
+                resolved_dmg,
+                is_wrecking,
+            ) = match action {
                 AiDamageAction::Synthetic {
                     attacker_id,
                     npc_type_id,
@@ -2088,13 +2403,25 @@ fn apply_ai_step_world_effects(
                     if !bp.balls.contains_key(&attacker_id) || !bp.balls.contains_key(&target_id) {
                         continue;
                     }
-                    (attacker_id, npc_type_id, target_id, "effects.Laser", dmg, false)
+                    (
+                        attacker_id,
+                        npc_type_id,
+                        target_id,
+                        None,
+                        None,
+                        NpcWeaponKind::Laser.fx_guid().to_string(),
+                        2.0,
+                        dmg,
+                        false,
+                    )
                 }
                 AiDamageAction::Turret {
                     attacker_id,
                     npc_type_id,
                     target_id,
+                    module_type_id,
                     fx_guid,
+                    cycle_duration_s,
                     shot_damage,
                     optimal_range,
                     falloff_range,
@@ -2123,11 +2450,7 @@ fn apply_ai_step_world_effects(
                         .map(|cs| cs.tracking_speed_multiplier)
                         .filter(|&m| m > 0.0)
                         .unwrap_or(1.0);
-                    let target_sig = ball_kinematics
-                        .get(&target_id)
-                        .map(|k| k.target_sig_radius)
-                        .filter(|&s| s > 0.0)
-                        .unwrap_or_else(|| tgt_ball.radius.max(25.0));
+                    let target_sig = resolve_target_sig_radius(ball_kinematics, target_id, tgt_ball);
                     let p_hit = crate::formulas::turret_chance_to_hit_with_res(
                         omega,
                         (tracking_speed * tracking_mult).max(1e-6),
@@ -2140,13 +2463,66 @@ fn apply_ai_step_world_effects(
                     let roll_u = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.5);
                     let (dmg, wreck) =
                         crate::formulas::turret_shot_damage(shot_damage, p_hit, roll_u);
-                    (attacker_id, npc_type_id, target_id, fx_guid, dmg, wreck)
+                    (
+                        attacker_id,
+                        npc_type_id,
+                        target_id,
+                        module_type_id,
+                        None,
+                        fx_guid,
+                        cycle_duration_s,
+                        dmg,
+                        wreck,
+                    )
+                }
+                AiDamageAction::Vorton {
+                    attacker_id,
+                    npc_type_id,
+                    target_id,
+                    module_type_id,
+                    fx_guid,
+                    cycle_duration_s,
+                    shot_damage,
+                    optimal_range,
+                    explosion_radius,
+                    explosion_velocity,
+                    drf,
+                } => {
+                    let (Some(atk_ball), Some(tgt_ball)) =
+                        (bp.balls.get(&attacker_id), bp.balls.get(&target_id))
+                    else {
+                        continue;
+                    };
+                    if atk_ball.surface_distance(tgt_ball) > optimal_range {
+                        continue;
+                    }
+                    let target_sig = resolve_target_sig_radius(ball_kinematics, target_id, tgt_ball);
+                    let factor = crate::formulas::missile_damage_factor(
+                        target_sig,
+                        tgt_ball.velocity.length(),
+                        explosion_radius,
+                        explosion_velocity,
+                        drf,
+                    );
+                    (
+                        attacker_id,
+                        npc_type_id,
+                        target_id,
+                        module_type_id,
+                        None,
+                        fx_guid,
+                        cycle_duration_s,
+                        shot_damage.scaled(factor),
+                        false,
+                    )
                 }
                 AiDamageAction::Missile {
                     attacker_id,
                     npc_type_id,
                     target_id,
+                    missile_type_id,
                     fx_guid,
+                    cycle_duration_s,
                     volley_damage,
                     max_flight_range,
                     explosion_radius,
@@ -2161,11 +2537,7 @@ fn apply_ai_step_world_effects(
                     if atk_ball.surface_distance(tgt_ball) > max_flight_range {
                         continue;
                     }
-                    let target_sig = ball_kinematics
-                        .get(&target_id)
-                        .map(|k| k.target_sig_radius)
-                        .filter(|&s| s > 0.0)
-                        .unwrap_or_else(|| tgt_ball.radius.max(25.0));
+                    let target_sig = resolve_target_sig_radius(ball_kinematics, target_id, tgt_ball);
                     let factor = crate::formulas::missile_damage_factor(
                         target_sig,
                         tgt_ball.velocity.length(),
@@ -2177,7 +2549,10 @@ fn apply_ai_step_world_effects(
                         attacker_id,
                         npc_type_id,
                         target_id,
+                        None,
+                        Some(missile_type_id),
                         fx_guid,
+                        cycle_duration_s,
                         volley_damage.scaled(factor),
                         false,
                     )
@@ -2185,12 +2560,23 @@ fn apply_ai_step_world_effects(
             };
 
             damaged_target_ids.push(tid);
+            bp.special_fx_meta.insert(
+                (attacker_id, None, fx_guid.clone()),
+                eve_destiny::SpecialFxWireMeta {
+                    module_type_id,
+                    target_id: Some(tid),
+                    other_type_id,
+                    is_offensive: true,
+                    duration_ms: Some(cycle_duration_s * 1000.0),
+                    repeat: Some(1),
+                },
+            );
             bp.emit_event(
                 Some(attacker_id),
                 eve_destiny::DestinyEvent::OnSpecialFX {
                     ball_id: attacker_id,
-                    module_id: Some(tid),
-                    guid: fx_guid.to_string(),
+                    module_id: None,
+                    guid: fx_guid,
                     is_active: true,
                 },
             );

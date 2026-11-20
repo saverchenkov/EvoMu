@@ -1451,15 +1451,68 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
             bp.pending_events.clear();
         }
         mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
-        let fx_evs = std::mem::take(&mut sys_handle.ballpark.write().unwrap().pending_events);
+        let (fx_evs, encoded_fx_wires) = {
+            let mut bp = sys_handle.ballpark.write().unwrap();
+            let evs = std::mem::take(&mut bp.pending_events);
+            let encoded: Vec<eve_proto::PyRep> = evs
+                .iter()
+                .filter(|ev| matches!(ev, eve_destiny::DestinyEvent::OnSpecialFX { ball_id, .. } if *ball_id == npc_bid))
+                .map(|ev| eve_destiny::wire::encode_destiny_event(1, ev, Some(&bp)))
+                .collect();
+            (evs, encoded)
+        };
         assert!(
             fx_evs.iter().any(|ev| matches!(
                 ev,
-                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, guid, is_active: true, .. }
+                eve_destiny::DestinyEvent::OnSpecialFX { ball_id, module_id: None, guid, is_active: true }
                     if *ball_id == npc_bid && guid == expected_guid
             )),
-            "type_id {npc_type_id} must emit OnSpecialFX {expected_guid}, got {fx_evs:?}"
+            "type_id {npc_type_id} must emit OnSpecialFX(module_id: None) {expected_guid}, got {fx_evs:?}"
         );
+        assert_eq!(encoded_fx_wires.len(), 1, "expected 1 encoded OnSpecialFX for {npc_type_id}");
+        let eve_proto::PyRep::Tuple(top) = &encoded_fx_wires[0] else {
+            panic!("expected DestinyUpdate tuple, got {:?}", encoded_fx_wires[0]);
+        };
+        let eve_proto::PyRep::Tuple(act) = &top[1] else {
+            panic!("expected action tuple, got {:?}", top[1]);
+        };
+        assert_eq!(act[0], eve_proto::PyRep::String("OnSpecialFX".into()));
+        let eve_proto::PyRep::Tuple(args) = &act[1] else {
+            panic!("expected 14-arg OnSpecialFX tuple");
+        };
+        assert_eq!(args.len(), 14);
+        assert_eq!(args[0], eve_proto::PyRep::Integer(npc_bid));
+        assert_eq!(args[1], eve_proto::PyRep::None, "NPC OnSpecialFX moduleID must be None");
+        assert_eq!(
+            args[3],
+            eve_proto::PyRep::Integer(target_bid),
+            "NPC OnSpecialFX targetID must encode target ball ID"
+        );
+        if npc_type_id == 16_984 {
+            assert_eq!(args[2], eve_proto::PyRep::None);
+            assert!(
+                matches!(args[4], eve_proto::PyRep::Integer(mtid) if mtid > 0),
+                "missile NPC OnSpecialFX must set otherTypeID to missile type ID, got {:?}",
+                args[4]
+            );
+        } else {
+            assert!(
+                matches!(args[2], eve_proto::PyRep::Integer(tid) if tid > 0),
+                "turret/vorton NPC OnSpecialFX must set moduleTypeID, got {:?}",
+                args[2]
+            );
+            assert_eq!(args[4], eve_proto::PyRep::None);
+        }
+        assert_eq!(args[5], eve_proto::PyRep::String(expected_guid.into()));
+        assert_eq!(args[6], eve_proto::PyRep::Bool(true), "isOffensive must be true");
+        assert_eq!(args[7], eve_proto::PyRep::Integer(1));
+        assert_eq!(args[8], eve_proto::PyRep::Integer(1));
+        assert!(
+            matches!(args[9], eve_proto::PyRep::Real(d) if d > 0.0),
+            "duration_ms must be positive Real, got {:?}",
+            args[9]
+        );
+        assert_eq!(args[10], eve_proto::PyRep::Integer(1));
     }
 
     // Movement check: 16936 Corpii Follower (maxVelocity=440, entityCruiseSpeed=220, entityFlyRange=3625)
@@ -1507,6 +1560,9 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
         ),
         make_sponge_combat_state(1e6, 400.0),
     );
+    {
+        sys_handle.ballpark.write().unwrap().pending_events.clear();
+    }
     mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
     assert_eq!(mgr.entities[&follower_bid].state, NpcAiState::Chase);
     {
@@ -1518,6 +1574,19 @@ async fn npc_ai_on_special_fx_guids_and_movement_cruise_fraction() {
             b.mode,
             MovementMode::Follow { range, .. } if (range - 3_625.0).abs() < 1e-6
         ));
+        let chase_sf_count = bp
+            .pending_events
+            .iter()
+            .filter(|ev| matches!(
+                ev,
+                eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, fraction }
+                    if *ball_id == follower_bid && (*fraction - 1.0).abs() < 1e-6
+            ))
+            .count();
+        assert_eq!(
+            chase_sf_count, 1,
+            "mobile Chase Follow transition must emit exactly one SetSpeedFraction(1.0)"
+        );
     }
 
     // Move inside 3 km -> Orbit at entityCruiseSpeed / maxVelocity (220 / 440 = 0.5)
@@ -1647,5 +1716,222 @@ fn npc_ai_all_spawn_group_npcs_sde_profile_audit_and_once_per_type_fallback_log(
             .unwrap_or_else(|e| e.into_inner())
             .insert(custom_tid),
         "subsequent resolution must remain deduplicated per type_id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn npc_ai_vorton_uses_missile_drf_within_optimal_without_wrecking_or_tracking() {
+    // (#1396 BF-02) Skybreaker Disparu Troop (56188): effect 8088, optimal 19,200m,
+    // cycle 6s, damage 444 ((97 EM + 14 Kin) * 4.0 mult), er=43, ev=190, drf=0.6, no trackingSpeed(160).
+    let base_ctx = test_ctx();
+    let (profile, fallbacks) = inspect_npc_sde_profile(&base_ctx.sde, 56_188, None, 500_027);
+    assert!(
+        fallbacks.is_empty(),
+        "Vorton NPC 56188 must resolve cleanly from SDE without fallbacks, got {fallbacks:?}"
+    );
+    let turret = profile.turret.as_ref().expect("Vorton profile");
+    assert_eq!(turret.kind, NpcWeaponKind::Vorton);
+    assert_eq!(turret.fx_guid, "effects.AttackMode");
+    assert_eq!(turret.optimal_range, 19_200.0);
+    let shot_dmg = turret.shot_damage.total();
+    assert!((shot_dmg - 444.0).abs() < 1e-6);
+
+    let run_vorton = |npc_tid: u32, dist_m: f64, vel: DVec3, sig: f64, n_ticks: u64, mutate: bool| async move {
+        let mut ctx = test_ctx().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+        let sys_id = 30_000_142_u32;
+        if mutate {
+            let sde = Arc::make_mut(&mut ctx.sde);
+            if let Some(t) = sde.types.get_mut(&npc_tid) {
+                t.default_attributes.insert(eve_sde::attr_ids::FALLOFF, 5_000.0);
+            }
+        }
+        let sg_id = 998_601_u32;
+        Arc::make_mut(&mut ctx.sde).npc_spawn_groups.insert(
+            sg_id,
+            eve_sde::NpcSpawnGroupInfo {
+                spawn_group_id: sg_id,
+                faction_id: 500_027,
+                ship_class: 1,
+                group_id: 1982,
+                group_name: "Vorton Test".to_string(),
+                npc_type_ids: vec![npc_tid],
+            },
+        );
+        let mut mgr = NpcSpawnManager::new();
+        let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
+        let npc_bid = spawned[0];
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let npc_pos = sys_handle
+            .get_ball_snapshot(npc_bid)
+            .await
+            .unwrap()
+            .unwrap()
+            .1
+            .position;
+        let initial_shield = 1e6_f64;
+        let target_bid = 900_600_001_i64;
+        sys_handle.try_spawn_ball_with_combat(
+            make_target_ball(
+                target_bid,
+                587,
+                npc_pos + DVec3::new(dist_m, 0.0, 0.0),
+                vel,
+                37.0,
+            ),
+            make_sponge_combat_state(initial_shield, sig),
+        );
+        for tick in 1..=n_ticks {
+            mgr.step_ai_sync(&ctx, sys_id, tick, 1.0);
+        }
+        let remaining = sys_handle
+            .ballpark
+            .read()
+            .unwrap()
+            .combat_states[&target_bid]
+            .shield_hp;
+        initial_shield - remaining
+    };
+
+    // 1. Over 600 ticks (100 shots at 6s cycle), zero 3x wrecking hits: exact 100 * 444 = 44,400.
+    let dmg_large_600s = run_vorton(56_188, 10_000.0, DVec3::ZERO, 500.0, 600, false).await;
+    assert!(
+        (dmg_large_600s - 100.0 * shot_dmg).abs() < 1e-6,
+        "Vorton must apply exact deterministic DRF (no 3x wrecking variance), got {dmg_large_600s}"
+    );
+
+    // 2. High angular velocity at close range (500m, 100 m/s -> omega=0.2 rad/s, large 500m sig):
+    // Vorton ignores turret angular-velocity tracking misses and applies full DRF=1.0 damage.
+    let dmg_high_omega = run_vorton(56_188, 500.0, DVec3::new(0.0, 100.0, 0.0), 500.0, 1, false).await;
+    assert!(
+        (dmg_high_omega - shot_dmg).abs() < 1e-6,
+        "Vorton must ignore turret angular velocity tracking, got {dmg_high_omega}"
+    );
+
+    // 3. DRF mitigation for small slow (40m, 0 m/s) and small fast (40m, 400 m/s) targets.
+    let dmg_small_slow = run_vorton(56_188, 5_000.0, DVec3::ZERO, 40.0, 1, false).await;
+    let dmg_small_fast = run_vorton(56_188, 5_000.0, DVec3::new(0.0, 400.0, 0.0), 40.0, 1, false).await;
+    let exp_small_slow = shot_dmg * crate::formulas::missile_damage_factor(40.0, 0.0, 43.0, 190.0, 0.6);
+    let exp_small_fast = shot_dmg * crate::formulas::missile_damage_factor(40.0, 400.0, 43.0, 190.0, 0.6);
+    assert!((dmg_small_slow - exp_small_slow).abs() < 1e-6);
+    assert!((dmg_small_fast - exp_small_fast).abs() < 1e-6);
+    assert!(dmg_small_fast < dmg_small_slow);
+
+    // 4. Beyond optimal range (19,500m > 19,200m), even with non-zero falloff, Vorton deals 0 damage.
+    let dmg_beyond_opt = run_vorton(56_188, 19_500.0, DVec3::ZERO, 500.0, 20, true).await;
+    assert_eq!(dmg_beyond_opt, 0.0, "Vorton must not hit beyond optimal range");
+
+    // 5. SDE sde.effects.guid metadata takes precedence over hardcoded FX default.
+    let mut custom_ctx = test_ctx().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let custom_sg = 998_602_u32;
+    {
+        let sde = Arc::make_mut(&mut custom_ctx.sde);
+        if let Some(eff) = sde.effects.get_mut(&8088) {
+            eff.guid = Some("effects.CustomVortonArc,effects.Fallback".to_string());
+        }
+        sde.npc_spawn_groups.insert(
+            custom_sg,
+            eve_sde::NpcSpawnGroupInfo {
+                spawn_group_id: custom_sg,
+                faction_id: 500_027,
+                ship_class: 1,
+                group_id: 1982,
+                group_name: "Custom FX Vorton".to_string(),
+                npc_type_ids: vec![56_188],
+            },
+        );
+    }
+    let custom_prof = inspect_npc_sde_profile(&custom_ctx.sde, 56_188, None, 500_027).0;
+    assert_eq!(
+        custom_prof.turret.unwrap().fx_guid,
+        "effects.CustomVortonArc"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn npc_ai_stationary_armed_npc_has_zero_orbit_range_and_no_speed_churn() {
+    // (#1396 BF-03) Stationary armed NPC (1194 Sentry Gun, group 99, max_velocity=0.0):
+    // must have orbit_range=0.0 and emit zero Follow/Orbit/Stop/SetSpeedFraction events.
+    let mut ctx = test_ctx().with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
+    let (profile, _fallbacks) = inspect_npc_sde_profile(&ctx.sde, 1_194, None, 0);
+    assert_eq!(profile.max_velocity, 0.0);
+    assert_eq!(profile.cruise_velocity, 0.0);
+    assert_eq!(profile.orbit_range, 0.0);
+    assert!(profile.turret.is_some());
+
+    let sys_id = 30_000_142_u32;
+    let sg_id = 998_603_u32;
+    Arc::make_mut(&mut ctx.sde).npc_spawn_groups.insert(
+        sg_id,
+        eve_sde::NpcSpawnGroupInfo {
+            spawn_group_id: sg_id,
+            faction_id: 0,
+            ship_class: 1,
+            group_id: 99,
+            group_name: "Single Sentry Test".to_string(),
+            npc_type_ids: vec![1_194],
+        },
+    );
+    let mut mgr = NpcSpawnManager::new();
+    let spawned = mgr.spawn_group(&ctx, sys_id, sg_id, DVec3::ZERO).await.unwrap();
+    let sentry_bid = spawned[0];
+    assert_eq!(mgr.entities[&sentry_bid].orbit_range, 0.0);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let sentry_pos = {
+        let bp = sys_handle.ballpark.read().unwrap();
+        let b = &bp.balls[&sentry_bid];
+        assert_eq!(b.max_velocity, 0.0);
+        assert_eq!(b.speed_fraction, 0.0);
+        b.position
+    };
+
+    // Step idle with no target -> Attack at 25km -> Attack at 4km -> Idle at 80km
+    {
+        sys_handle.ballpark.write().unwrap().pending_events.clear();
+    }
+    mgr.step_ai_sync(&ctx, sys_id, 1, 1.0);
+    assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Idle);
+
+    let target_bid = 900_603_001_i64;
+    sys_handle.try_spawn_ball_with_combat(
+        make_target_ball(
+            target_bid,
+            587,
+            sentry_pos + DVec3::new(25_000.0, 0.0, 0.0),
+            DVec3::ZERO,
+            37.0,
+        ),
+        make_sponge_combat_state(1e6, 400.0),
+    );
+    mgr.step_ai_sync(&ctx, sys_id, 2, 1.0);
+    assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Attack);
+
+    sys_handle
+        .set_ball_position(target_bid, sentry_pos + DVec3::new(4_000.0, 0.0, 0.0))
+        .await;
+    mgr.step_ai_sync(&ctx, sys_id, 3, 1.0);
+    assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Attack);
+
+    sys_handle
+        .set_ball_position(target_bid, sentry_pos + DVec3::new(80_000.0, 0.0, 0.0))
+        .await;
+    mgr.step_ai_sync(&ctx, sys_id, 4, 1.0);
+    assert_eq!(mgr.entities[&sentry_bid].state, NpcAiState::Idle);
+
+    let bp = sys_handle.ballpark.read().unwrap();
+    let movement_churn: Vec<_> = bp
+        .pending_events
+        .iter()
+        .filter(|ev| match ev {
+            eve_destiny::DestinyEvent::Follow { ball_id, .. }
+            | eve_destiny::DestinyEvent::Orbit { ball_id, .. }
+            | eve_destiny::DestinyEvent::Stop { ball_id }
+            | eve_destiny::DestinyEvent::SetSpeedFraction { ball_id, .. } => *ball_id == sentry_bid,
+            _ => false,
+        })
+        .collect();
+    assert!(
+        movement_churn.is_empty(),
+        "stationary armed NPC must emit zero Follow/Orbit/Stop/SetSpeedFraction churn, got {movement_churn:?}"
     );
 }
