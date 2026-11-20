@@ -238,15 +238,20 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
         }
     } else {
         // Sell order modified downward: crosses resting bid orders in range
+        // (PLEX matches globally across all regions).
         let mut bid_ids: Vec<(i64, IskCents)> = snap.market_orders.values().filter(|o| {
-            o.is_bid && o.region_id == order.region_id && o.type_id == order.type_id
+            o.is_bid && o.type_id == order.type_id
                 && o.vol_remaining > 0 && o.price.0 >= new_price.0 && o.owner_id != order.owner_id
                 && (o.station_id == order.station_id
                     || !snap.structures.contains_key(&o.station_id)
                     || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
                         ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
                     ).is_ok())
-                && super::market_trading::can_bid_match_seller_station(ctx, snap, o, order.station_id, now_unix)
+                && (order.type_id == PLEX_TYPE_ID
+                    || (o.region_id == order.region_id
+                        && super::market_trading::can_bid_match_seller_station(
+                            ctx, snap, o, order.station_id, now_unix,
+                        )))
         }).map(|o| (o.order_id, o.price)).collect();
         bid_ids.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
 
@@ -335,17 +340,21 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
             career_fills.push((bid.owner_id, seller_owner_id, order.type_id, fill_cost));
 
             if let Some(b_mut) = snap.market_orders.get_mut(&bid_id) {
-                b_mut.vol_remaining -= fill_qty;
-                b_mut.escrow = b_mut.escrow.checked_sub(from_escrow).unwrap_or(IskCents(0));
-                if !bid.is_npc {
-                    matched_orders.push((bid_id, bid.owner_id));
-                }
-                if b_mut.vol_remaining == 0 && !bid.is_npc {
-                    let mut r_meta = load_market_order_meta(snap, &bid, now_unix);
-                    r_meta.order_state = Some(2);
-                    r_meta.final_vol_remaining = Some(0);
-                    r_meta.closed_unix = Some(now_unix);
-                    save_market_order_meta(snap, bid_id, r_meta);
+                if super::market_contracts::is_permanent_npc_sleeper_buy_order(b_mut) {
+                    b_mut.vol_remaining = b_mut.vol_entered.max(1);
+                } else {
+                    b_mut.vol_remaining -= fill_qty;
+                    b_mut.escrow = b_mut.escrow.checked_sub(from_escrow).unwrap_or(IskCents(0));
+                    if !bid.is_npc {
+                        matched_orders.push((bid_id, bid.owner_id));
+                    }
+                    if b_mut.vol_remaining == 0 && !bid.is_npc {
+                        let mut r_meta = load_market_order_meta(snap, &bid, now_unix);
+                        r_meta.order_state = Some(2);
+                        r_meta.final_vol_remaining = Some(0);
+                        r_meta.closed_unix = Some(now_unix);
+                        save_market_order_meta(snap, bid_id, r_meta);
+                    }
                 }
             }
 
@@ -359,25 +368,27 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 }
             }
 
-            let buyer_is_corp = snap.corporations.contains_key(&bid.owner_id);
-            let settled_to_vault = if order.type_id == PLEX_TYPE_ID && !buyer_is_corp {
-                snap.adjust_plex_vault(bid.owner_id, fill_qty as i64).is_some()
-            } else {
-                false
-            };
-            if !settled_to_vault {
-                snap.next_entity_id += 1;
-                let delivery_item_id = snap.next_entity_id;
-                let flag = if buyer_is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
-                let rec = InventoryItemRecord {
-                    item_id: delivery_item_id, type_id: order.type_id, owner_id: bid.owner_id,
-                    location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
-                    version: 1, ..Default::default()
+            if !bid.is_npc {
+                let buyer_is_corp = snap.corporations.contains_key(&bid.owner_id);
+                let settled_to_vault = if order.type_id == PLEX_TYPE_ID && !buyer_is_corp {
+                    snap.adjust_plex_vault(bid.owner_id, fill_qty as i64).is_some()
+                } else {
+                    false
                 };
-                snap.items.insert(delivery_item_id, rec.clone());
-                let b_issued = snap.market_order_meta.get(&bid_id).and_then(|m| m.issued_by);
-                let rec_char = super::market_trading::resolve_corp_recipient_char(snap, bid.owner_id, b_issued);
-                item_deliveries.push((rec_char, rec));
+                if !settled_to_vault {
+                    snap.next_entity_id += 1;
+                    let delivery_item_id = snap.next_entity_id;
+                    let flag = if buyer_is_corp { InventoryFlag::Deliveries } else { InventoryFlag::Hangar };
+                    let rec = InventoryItemRecord {
+                        item_id: delivery_item_id, type_id: order.type_id, owner_id: bid.owner_id,
+                        location_id: order.station_id, flag, quantity: fill_qty, singleton: false,
+                        version: 1, ..Default::default()
+                    };
+                    snap.items.insert(delivery_item_id, rec.clone());
+                    let b_issued = snap.market_order_meta.get(&bid_id).and_then(|m| m.issued_by);
+                    let rec_char = super::market_trading::resolve_corp_recipient_char(snap, bid.owner_id, b_issued);
+                    item_deliveries.push((rec_char, rec));
+                }
             }
         }
     }
@@ -421,6 +432,49 @@ pub fn date_str_to_filetime(date_str: &str) -> Option<i64> {
     Some((unix_secs as i64 + 11_644_473_600) * 10_000_000)
 }
 
+fn history_row(date_str: &str, low: f64, high: f64, avg: f64, vol: i64, orders: i64) -> Vec<PyRep> {
+    let file_time = date_str_to_filetime(date_str).unwrap_or(0);
+    vec![
+        PyRep::Integer(file_time),
+        PyRep::Real(low),
+        PyRep::Real(high),
+        PyRep::Real(avg),
+        PyRep::Integer(vol),
+        PyRep::Integer(orders),
+    ]
+}
+
+fn build_transaction_fallback_history_rows<'a>(
+    txs: impl Iterator<Item = &'a eve_db::ledger::MarketTransactionRecord>,
+) -> Vec<Vec<PyRep>> {
+    let mut daily_map: std::collections::BTreeMap<String, (f64, f64, i64, i64, f64)> =
+        std::collections::BTreeMap::new();
+    for tx in txs {
+        let date_str = eve_db::ledger::unix_secs_to_date_str(tx.date_unix);
+        let unit_price = tx.price.to_wire_f64();
+        let qty = tx.quantity.max(1);
+        let entry = daily_map
+            .entry(date_str)
+            .or_insert((unit_price, unit_price, 0, 0, 0.0));
+        entry.0 = entry.0.min(unit_price);
+        entry.1 = entry.1.max(unit_price);
+        entry.2 += qty;
+        entry.3 += 1;
+        entry.4 += unit_price * (qty as f64);
+    }
+    daily_map
+        .into_iter()
+        .map(|(date_str, (low, high, vol, orders, total_val))| {
+            let avg = if vol > 0 {
+                total_val / (vol as f64)
+            } else {
+                (low + high) / 2.0
+            };
+            history_row(&date_str, low, high, avg, vol, orders)
+        })
+        .collect()
+}
+
 /// Builds price history rows for a given `(region_id, type_id)` from persisted trade history.
 /// Returns an empty vector if no trades exist for this type in the region.
 pub fn build_price_history_rows(
@@ -428,61 +482,111 @@ pub fn build_price_history_rows(
     type_id: TypeId,
     region_id: u32,
 ) -> Vec<Vec<PyRep>> {
-    let mut rows = Vec::new();
     if let Some(entries) = snap.market_history.get(&(region_id, type_id)) {
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| a.date.cmp(&b.date));
-        for day in sorted {
-            let file_time = date_str_to_filetime(&day.date).unwrap_or(0);
-            rows.push(vec![
-                PyRep::Integer(file_time),
-                PyRep::Real(day.lowest),
-                PyRep::Real(day.highest),
-                PyRep::Real(day.average),
-                PyRep::Integer(day.volume),
-                PyRep::Integer(day.order_count),
-            ]);
-        }
-    } else {
-        // Fallback: check if market_transactions have fills for this type in this region
-        let mut daily_map: std::collections::BTreeMap<String, (f64, f64, i64, i64, f64)> = std::collections::BTreeMap::new();
-        for tx in snap.market_transactions.values() {
-            if tx.type_id == type_id {
-                let Some(tx_region) = snap
+        return sorted
+            .into_iter()
+            .map(|day| {
+                history_row(
+                    &day.date,
+                    day.lowest,
+                    day.highest,
+                    day.average,
+                    day.volume,
+                    day.order_count,
+                )
+            })
+            .collect();
+    }
+    build_transaction_fallback_history_rows(
+        snap.market_transactions.values().filter(|tx| {
+            tx.type_id == type_id
+                && snap
                     .market_orders
                     .values()
                     .find(|o| o.station_id == tx.location_id)
                     .map(|o| o.region_id)
-                else {
-                    continue;
-                };
-                if tx_region == region_id {
-                    let date_str = eve_db::ledger::unix_secs_to_date_str(tx.date_unix);
-                    let unit_price = tx.price.to_wire_f64();
-                    let qty = tx.quantity.max(1);
-                    let entry = daily_map.entry(date_str).or_insert((unit_price, unit_price, 0, 0, 0.0));
-                    entry.0 = entry.0.min(unit_price);
-                    entry.1 = entry.1.max(unit_price);
-                    entry.2 += qty;
-                    entry.3 += 1;
-                    entry.4 += unit_price * (qty as f64);
-                }
-            }
+                    == Some(region_id)
+        }),
+    )
+}
+
+/// Builds global price history rows for `type_id` aggregated across all regions
+/// (`feat:market.plex-market`).
+pub fn build_global_price_history_rows(
+    snap: &WorldStateSnapshot,
+    type_id: TypeId,
+) -> Vec<Vec<PyRep>> {
+    struct GlobalBucket {
+        lowest: f64,
+        highest: f64,
+        volume: i64,
+        order_count: i64,
+        weighted_sum: f64,
+        unweighted_sum: f64,
+        entry_count: usize,
+        first_average: f64,
+    }
+
+    let mut daily_buckets: std::collections::BTreeMap<String, GlobalBucket> =
+        std::collections::BTreeMap::new();
+    for ((_, tid), entries) in &snap.market_history {
+        if *tid != type_id {
+            continue;
         }
-        for (date_str, (low, high, vol, orders, total_val)) in daily_map {
-            let avg = if vol > 0 { total_val / (vol as f64) } else { (low + high) / 2.0 };
-            let file_time = date_str_to_filetime(&date_str).unwrap_or(0);
-            rows.push(vec![
-                PyRep::Integer(file_time),
-                PyRep::Real(low),
-                PyRep::Real(high),
-                PyRep::Real(avg),
-                PyRep::Integer(vol),
-                PyRep::Integer(orders),
-            ]);
+        for day in entries {
+            let vol = day.volume.max(0);
+            let weighted = if vol > 0 {
+                day.average * (vol as f64)
+            } else {
+                0.0
+            };
+            daily_buckets
+                .entry(day.date.clone())
+                .and_modify(|b| {
+                    b.lowest = b.lowest.min(day.lowest);
+                    b.highest = b.highest.max(day.highest);
+                    b.volume += vol;
+                    b.order_count += day.order_count;
+                    b.weighted_sum += weighted;
+                    b.unweighted_sum += day.average;
+                    b.entry_count += 1;
+                })
+                .or_insert(GlobalBucket {
+                    lowest: day.lowest,
+                    highest: day.highest,
+                    volume: vol,
+                    order_count: day.order_count,
+                    weighted_sum: weighted,
+                    unweighted_sum: day.average,
+                    entry_count: 1,
+                    first_average: day.average,
+                });
         }
     }
-    rows
+
+    if !daily_buckets.is_empty() {
+        return daily_buckets
+            .into_iter()
+            .map(|(date_str, b)| {
+                let avg = if b.entry_count == 1 {
+                    b.first_average
+                } else if b.volume > 0 {
+                    b.weighted_sum / (b.volume as f64)
+                } else {
+                    b.unweighted_sum / (b.entry_count as f64)
+                };
+                history_row(&date_str, b.lowest, b.highest, avg, b.volume, b.order_count)
+            })
+            .collect();
+    }
+
+    build_transaction_fallback_history_rows(
+        snap.market_transactions
+            .values()
+            .filter(|tx| tx.type_id == type_id),
+    )
 }
 
 /// Resolves `(solar_system_id, constellation_id)` for a station or structure ID.

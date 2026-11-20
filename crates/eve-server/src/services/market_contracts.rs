@@ -27,6 +27,15 @@ pub const SLEEPER_BLUE_LOOT_ORDERS: &[(TypeId, i64)] = &[
     (30_747, 5_000_000), // Sleeper Drone AI Nexus
 ];
 
+/// Returns `true` when `order` is one of the permanent NPC buy orders for Sleeper blue loot.
+pub(crate) fn is_permanent_npc_sleeper_buy_order(order: &MarketOrderRecord) -> bool {
+    order.is_npc
+        && order.is_bid
+        && SLEEPER_BLUE_LOOT_ORDERS
+            .iter()
+            .any(|&(loot_tid, _)| loot_tid == order.type_id)
+}
+
 use super::market_trading::{
     load_market_order_meta, resolve_station_solar_system, save_market_order_meta,
     unix_to_filetime, MarketOrderMeta,
@@ -523,14 +532,15 @@ pub fn handle(
                 let Some((tids, is_python_set)) = crate::services::market_price_history::extract_type_ids_arg(args.first()) else {
                     return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list or set of typeIDs")));
                 };
-                let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
                     let mut out = Vec::with_capacity(tids.len());
                     for tid in tids {
-                        let rows = crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id);
+                        let rows = if (tid as TypeId) == PLEX_TYPE_ID {
+                            crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                        } else {
+                            crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id)
+                        };
                         let val = if is_python_set {
                             PyRep::Tuple(vec![hdr.build_crowset(Vec::new()), hdr.build_crowset(rows)])
                         } else {
@@ -1046,8 +1056,6 @@ pub fn handle(
             "GetPlexOrders" => {
                 if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let (sell_rows, buy_rows) = ctx.db.with_snapshot(|snap| {
                     let mut sells = Vec::new();
                     let mut buys = Vec::new();
@@ -1065,12 +1073,9 @@ pub fn handle(
             }
 
             "GetPlexHistory" | "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
-                let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
-                let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
-                let rows = ctx.db
-                    .with_snapshot(|snap| crate::services::market_price_history::build_price_history_rows(snap, PLEX_TYPE_ID, region_id));
+                let rows = ctx.db.with_snapshot(|snap| {
+                    crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                });
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(rows)));
             }
 

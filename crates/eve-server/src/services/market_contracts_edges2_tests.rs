@@ -1108,3 +1108,148 @@ fn contract_proxy_page_info_finish_auction_no_winner_and_container_queries() {
     });
     assert_eq!(sweep_expired_orders_and_notify(&ctx, 1_700_000_000), 1);
 }
+
+#[test]
+fn plex_history_aliases_transaction_fallback_and_sleeper_helper_edges() {
+    use eve_db::ledger::MarketTransactionRecord;
+
+    for &(tid, _) in SLEEPER_BLUE_LOOT_ORDERS {
+        let npc_bid = MarketOrderRecord {
+            order_id: 1,
+            owner_id: 1_000_125,
+            station_id: JITA_STATION_ID,
+            region_id: THE_FORGE_REGION_ID,
+            type_id: tid,
+            is_bid: true,
+            price: IskCents::from_isk(200_000),
+            vol_entered: 1_000_000,
+            vol_remaining: 1_000_000,
+            min_volume: 1,
+            is_npc: true,
+            escrow: IskCents(0),
+        };
+        assert!(is_permanent_npc_sleeper_buy_order(&npc_bid));
+
+        let mut player_bid = npc_bid.clone();
+        player_bid.is_npc = false;
+        assert!(!is_permanent_npc_sleeper_buy_order(&player_bid));
+
+        let mut npc_ask = npc_bid.clone();
+        npc_ask.is_bid = false;
+        assert!(!is_permanent_npc_sleeper_buy_order(&npc_ask));
+    }
+    let non_sleeper_npc_bid = MarketOrderRecord {
+        order_id: 2,
+        owner_id: 1_000_125,
+        station_id: JITA_STATION_ID,
+        region_id: THE_FORGE_REGION_ID,
+        type_id: 34,
+        is_bid: true,
+        price: IskCents::from_isk(10),
+        vol_entered: 100,
+        vol_remaining: 100,
+        min_volume: 1,
+        is_npc: true,
+        escrow: IskCents(0),
+    };
+    assert!(!is_permanent_npc_sleeper_buy_order(&non_sleeper_npc_bid));
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let mut sess = jita_session(char_id, corp_id);
+    sess.region_id = None;
+    let kw = HashMap::new();
+    let now = ctx.now_unix();
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.clear();
+        s.market_history.clear();
+        s.market_transactions.clear();
+        s.market_transactions.insert(
+            501,
+            MarketTransactionRecord {
+                transaction_id: 501,
+                date_unix: now,
+                type_id: PLEX_TYPE_ID,
+                quantity: 4,
+                price: IskCents::from_isk(5_000_000),
+                location_id: JITA_STATION_ID,
+                buyer_id: char_id,
+                seller_id: 90_000_002,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 1,
+            },
+        );
+        s.market_transactions.insert(
+            502,
+            MarketTransactionRecord {
+                transaction_id: 502,
+                date_unix: now,
+                type_id: PLEX_TYPE_ID,
+                quantity: 1,
+                price: IskCents::from_isk(5_500_000),
+                location_id: 60_008_494, // Amarr (Domain)
+                buyer_id: char_id,
+                seller_id: 90_000_002,
+                buyer_account_key: 1000,
+                seller_account_key: 1000,
+                journal_ref_id: 2,
+            },
+        );
+        // Seed one expired order to verify pure history/order getters remain read-only (no premature sweep mutation).
+        s.market_orders.insert(
+            890_992,
+            MarketOrderRecord {
+                order_id: 890_992,
+                owner_id: char_id,
+                station_id: JITA_STATION_ID,
+                region_id: THE_FORGE_REGION_ID,
+                type_id: 34,
+                is_bid: true,
+                price: IskCents::from_isk(100),
+                vol_entered: 1,
+                vol_remaining: 1,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents::from_isk(100),
+            },
+        );
+        save_market_order_meta(
+            s,
+            890_992,
+            MarketOrderMeta {
+                range: 32767,
+                duration: 1,
+                issue_unix: now.saturating_sub(2 * 86_400),
+                order_state: None,
+                account_key: None,
+                final_vol_remaining: None,
+                closed_unix: None,
+            },
+        );
+    });
+
+    for method in [
+        "GetPlexHistory",
+        "GetPlexNewPriceHistory",
+        "GetPlexOldPriceHistory",
+    ] {
+        let rep = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
+            .unwrap()
+            .unwrap();
+        let rows = rep.crowset_rows().expect("PLEX transaction fallback rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(5_000_000.0)));
+        assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_500_000.0)));
+        assert_eq!(rows[0].dbrow_get("avgPrice"), Some(&PyRep::Real(5_100_000.0)));
+        assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(5)));
+        assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(2)));
+    }
+    let plex_orders = handle(&ctx, &mut sess, "marketProxy", "GetPlexOrders", &[], &kw)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(plex_orders, PyRep::Tuple(ref parts) if parts.len() == 2));
+    assert_eq!(ctx.db.with_snapshot(|s| s.market_orders[&890_992].vol_remaining), 1);
+}

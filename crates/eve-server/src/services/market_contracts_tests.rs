@@ -1199,6 +1199,118 @@ fn contract_container_corp_access_ignores_stale_session_corp_role() {
     );
 }
 
+#[test]
+fn plex_history_rpcs_aggregate_globally_and_read_pure_across_regions() {
+    use eve_db::MarketHistoryDayRecord;
+
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&char_id].corporation_id);
+    let mut sess = jita_session(char_id, corp_id);
+    let kw = std::collections::HashMap::new();
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.market_orders.retain(|_, o| o.is_npc || o.vol_remaining <= 0);
+        s.market_history.clear();
+        s.market_transactions.clear();
+        s.market_history.insert(
+            (THE_FORGE_REGION_ID, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2025-03-10".into(),
+                lowest: 5_000_000.0,
+                highest: 5_200_000.0,
+                average: 5_100_000.0,
+                volume: 30,
+                order_count: 2,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        s.market_history.insert(
+            (10_000_043, PLEX_TYPE_ID),
+            vec![MarketHistoryDayRecord {
+                date: "2025-03-10".into(),
+                lowest: 4_700_000.0,
+                highest: 4_900_000.0,
+                average: 4_800_000.0,
+                volume: 10,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+        s.market_history.insert(
+            (THE_FORGE_REGION_ID, 34),
+            vec![MarketHistoryDayRecord {
+                date: "2025-03-10".into(),
+                lowest: 5.0,
+                highest: 5.0,
+                average: 5.0,
+                volume: 100,
+                order_count: 1,
+                open_price: None,
+                close_price: None,
+            }],
+        );
+    });
+
+    let next_eid_before = ctx.db.with_snapshot(|s| s.next_entity_id);
+    for region_opt in [Some(10_000_032_u32), None] {
+        sess.region_id = region_opt;
+        for method in [
+            "GetPlexHistory",
+            "GetPlexNewPriceHistory",
+            "GetPlexOldPriceHistory",
+        ] {
+            let res = handle(&ctx, &mut sess, "marketProxy", method, &[], &kw)
+                .unwrap()
+                .unwrap();
+            assert!(res.is_crowset(), "{method} must return CRowset");
+            let rows = res.crowset_rows().expect("crowset rows");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].dbrow_get("lowPrice"), Some(&PyRep::Real(4_700_000.0)));
+            assert_eq!(rows[0].dbrow_get("highPrice"), Some(&PyRep::Real(5_200_000.0)));
+            let avg = rows[0].dbrow_get("avgPrice").and_then(PyRep::as_f64).unwrap();
+            assert!((avg - 5_025_000.0).abs() < 1e-4);
+            assert_eq!(rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
+            assert_eq!(rows[0].dbrow_get("orders"), Some(&PyRep::Integer(3)));
+        }
+    }
+    assert_eq!(ctx.db.with_snapshot(|s| s.next_entity_id), next_eid_before);
+
+    // GetHistoryForManyTypeIDs from Sinq Laison (10_000_032) returns global PLEX history while keeping Tritanium (34) regional
+    sess.region_id = Some(10_000_032);
+    let many = handle(
+        &ctx,
+        &mut sess,
+        "marketProxy",
+        "GetHistoryForManyTypeIDs",
+        &[PyRep::List(vec![
+            PyRep::Integer(PLEX_TYPE_ID as i64),
+            PyRep::Integer(34),
+        ])],
+        &kw,
+    )
+    .unwrap()
+    .unwrap();
+    let PyRep::Dict(entries) = many else {
+        panic!("expected Dict from GetHistoryForManyTypeIDs");
+    };
+    let plex_rows = entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(PLEX_TYPE_ID as i64))
+        .and_then(|(_, v)| v.crowset_rows())
+        .expect("PLEX global history rows");
+    assert_eq!(plex_rows.len(), 1);
+    assert_eq!(plex_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(40)));
+    let trit_rows = entries
+        .iter()
+        .find(|(k, _)| k.as_i64() == Some(34))
+        .and_then(|(_, v)| v.crowset_rows())
+        .expect("Tritanium regional history rows");
+    assert!(trit_rows.is_empty());
+}
+
 #[cfg(test)]
 #[path = "market_contracts_extra_unit_tests.rs"]
 mod market_contracts_extra_unit_tests;
