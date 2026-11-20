@@ -113,8 +113,8 @@ fn hacking_client_err(code: &str, message: impl Into<String>) -> BridgeRpcError 
     )
 }
 
-fn require_undocked_hacking_space_with_ctx(
-    ctx: Option<&ServerContext>,
+fn require_undocked_hacking_space(
+    ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<(i64, SolarSystemId, i64), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -129,22 +129,17 @@ fn require_undocked_hacking_space_with_ctx(
         .ok_or_else(|| hacking_client_err("NoSolarSystem", "Session has no active solar system"))?;
     let resolved_ship_id = match session.ship_id {
         Some(sid) => sid,
-        None => ctx
-            .map(|c| {
-                c.db.with_snapshot(|s| s.characters.get(&char_id).map(|ch| ch.active_ship_id).unwrap_or(0))
-            })
-            .unwrap_or(0),
+        None => ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .map(|ch| ch.active_ship_id)
+                .unwrap_or(0)
+        }),
     };
     if resolved_ship_id <= 0 {
         return Err(hacking_client_err("NoActiveShip", "Session has no active ship"));
     }
     Ok((char_id, sys_id, resolved_ship_id))
-}
-
-fn require_undocked_hacking_space(
-    session: &SessionState,
-) -> Result<(i64, SolarSystemId, i64), BridgeRpcError> {
-    require_undocked_hacking_space_with_ctx(None, session)
 }
 
 fn is_valid_hackable_target_readonly(
@@ -350,7 +345,7 @@ fn extract_tile_index(arg: Option<&PyRep>) -> Option<i64> {
             if items.len() >= 2 {
                 let x = items[0].as_i64()?;
                 let y = items[1].as_i64()?;
-                Some((y * 6 + x).clamp(0, 23))
+                Some((y.saturating_mul(6).saturating_add(x)).clamp(0, 23))
             } else {
                 items.first().and_then(|v| v.as_i64())
             }
@@ -359,13 +354,71 @@ fn extract_tile_index(arg: Option<&PyRep>) -> Option<i64> {
     }
 }
 
+/// Fail closed unless the pilot's ship is spawned in space, uncloaked, fitted with a matching
+/// analyzer module, and within analyzer range of the target container.
+async fn check_ship_in_space_uncloaked_and_range(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: SolarSystemId,
+    container_id: i64,
+    site_pos: [f64; 3],
+    is_relic: bool,
+    cloak_msg: &str,
+) -> Result<(i32, i32, usize, f64), BridgeRpcError> {
+    let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+        return Err(hacking_client_err(
+            "ShipNotInSpace",
+            format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+        ));
+    };
+    let sb = match sys_handle.get_ball_snapshot(ship_id).await {
+        Ok(Some((_, ball))) => ball,
+        _ => {
+            return Err(hacking_client_err(
+                "ShipNotInSpace",
+                format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+            ));
+        }
+    };
+    if sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_cloaked)
+    {
+        return Err(hacking_client_err("CannotHackWhileCloaked", cloak_msg));
+    }
+    let stats = resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic)?;
+    let max_range = stats.3;
+    let can_ball = sys_handle.get_ball_snapshot(container_id).await.ok().flatten();
+    let can_pos = if let Some((_, cb)) = &can_ball {
+        cb.position
+    } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
+        glam::DVec3::from_array(pos)
+    } else {
+        glam::DVec3::from_array(site_pos)
+    };
+    let can_radius = can_ball.map(|(_, b)| b.radius).unwrap_or(0.0);
+    let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
+    if dist > max_range {
+        return Err(hacking_client_err(
+            "OutOfRange",
+            format!("Target container is {dist:.1} m away (analyzer max range is {max_range:.1} m)"),
+        ));
+    }
+    Ok(stats)
+}
+
 async fn validate_active_hacking_ship_and_range(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
     container_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let (_, _, ship_id) = require_undocked_hacking_space_with_ctx(Some(ctx), session)?;
+    let (_, _, ship_id) = require_undocked_hacking_space(ctx, session)?;
     let game_meta = read_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games.get(&(char_id, container_id)).map(|g| {
             let spos = reg
@@ -384,49 +437,18 @@ async fn validate_active_hacking_ship_and_range(
                 "Cannot continue hacking minigame from another solar system",
             ));
         }
-        let Some(sys_handle) = ctx.systems.get_handle(g_sys_id) else {
-            return Ok(());
-        };
-        if sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|cs| cs.is_cloaked)
-        {
-            return Err(hacking_client_err(
-                "CannotHackWhileCloaked",
-                "Cannot continue hacking minigame while cloaked",
-            ));
-        }
-        if let Ok(Some((_, sb))) = sys_handle.get_ball_snapshot(ship_id).await {
-            let max_range = resolve_fitted_analyzer_virus_stats(ctx, session, char_id, g_is_relic)
-                .map(|v| v.3)
-                .unwrap_or(5_000.0);
-            let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
-                cb.position
-            } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
-                glam::DVec3::from_array(pos)
-            } else {
-                glam::DVec3::from_array(site_pos)
-            };
-            let can_radius = sys_handle
-                .get_ball_snapshot(container_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.radius)
-                .unwrap_or(0.0);
-            let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
-            if dist > max_range {
-                return Err(hacking_client_err(
-                    "OutOfRange",
-                    format!(
-                        "Target container is {dist:.1} m away (analyzer max range is {max_range:.1} m)"
-                    ),
-                ));
-            }
-        }
+        let _ = check_ship_in_space_uncloaked_and_range(
+            ctx,
+            session,
+            char_id,
+            ship_id,
+            g_sys_id,
+            container_id,
+            site_pos,
+            g_is_relic,
+            "Cannot continue hacking minigame while cloaked",
+        )
+        .await?;
     }
     Ok(())
 }
@@ -585,55 +607,23 @@ pub async fn handle_pve_hacking(
                 _ => return Some(Err(hacking_client_err("NoActiveShip", "Session has no active ship"))),
             };
 
-            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
-                return Some(Err(hacking_client_err(
-                    "ShipNotInSpace",
-                    format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
-                )));
-            };
-            let sb = match sys_handle.get_ball_snapshot(ship_id).await {
-                Ok(Some((_, ball))) => ball,
-                _ => {
-                    return Some(Err(hacking_client_err(
-                        "ShipNotInSpace",
-                        format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
-                    )));
-                }
-            };
-            if sys_handle
-                .get_combat_state(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|cs| cs.is_cloaked)
-            {
-                return Some(Err(hacking_client_err(
-                    "CannotHackWhileCloaked",
+            let (virus_coh, virus_str, utility_slots, _analyzer_max_range) =
+                match check_ship_in_space_uncloaked_and_range(
+                    ctx,
+                    session,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    container_id,
+                    site_pos,
+                    is_relic,
                     "Cannot initiate hacking minigame while cloaked",
-                )));
-            }
-
-            let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
-                match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
+                )
+                .await
+                {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-
-            let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
-                cb.position
-            } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
-                glam::DVec3::from_array(pos)
-            } else {
-                glam::DVec3::from_array(site_pos)
-            };
-            let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
-            let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
-            if dist > analyzer_max_range {
-                return Some(Err(hacking_client_err(
-                    "OutOfRange",
-                    format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
-                )));
-            }
 
             if is_ghost {
                 let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
@@ -815,15 +805,21 @@ pub async fn handle_pve_hacking(
         // parity: feat:pve.hacking-minigame, feat:pve.loot-spew, feat:pve.ghost-sites, feat:pve.sleeper-caches
         ("hackingMgr", "ClickedOnTile") => {
             let (char_id, _sys_id, _ship_id) =
-                match require_undocked_hacking_space_with_ctx(Some(ctx), session) {
+                match require_undocked_hacking_space(ctx, session) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
             let (container_id, raw_tile_idx) = if args.len() >= 2 {
-                (
-                    args[0].as_i64().unwrap_or(1_870_000_000),
-                    extract_tile_index(args.get(1)).unwrap_or(1),
-                )
+                let Some(cid) = args[0].as_i64() else {
+                    return Some(Err(hacking_client_err(
+                        "TargetNotFound",
+                        "Target container not specified",
+                    )));
+                };
+                let Some(coord) = extract_tile_index(args.get(1)) else {
+                    return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
+                };
+                (cid, coord)
             } else {
                 let Some(cid) = find_active_hacking_container(ctx, char_id) else {
                     return Some(Err(hacking_client_err(
@@ -831,7 +827,9 @@ pub async fn handle_pve_hacking(
                         "No active hacking session for character",
                     )));
                 };
-                let coord = extract_tile_index(args.first()).unwrap_or(1);
+                let Some(coord) = extract_tile_index(args.first()) else {
+                    return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
+                };
                 (cid, coord)
             };
             let Ok(tile_idx) = u32::try_from(raw_tile_idx) else {
@@ -1128,7 +1126,7 @@ pub async fn handle_pve_hacking(
         // parity: feat:pve.hacking-minigame, feat:exploration.hack-failure-container-explosion
         ("hackingMgr", "QuitHackingAttempt") => {
             let (char_id, sys_id, _) =
-                match require_undocked_hacking_space_with_ctx(Some(ctx), session) {
+                match require_undocked_hacking_space(ctx, session) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
@@ -1273,7 +1271,7 @@ async fn handle_hacking_used_utility_on_virus(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, _, _) = require_undocked_hacking_space_with_ctx(Some(ctx), session)?;
+    let (char_id, _, _) = require_undocked_hacking_space(ctx, session)?;
     let (container_id, raw_slot) = match args {
         [PyRep::Integer(a), PyRep::Integer(b), ..] => {
             if *a > 1000 { (*a, *b) } else { (*b, *a) }
@@ -1336,7 +1334,7 @@ fn handle_hacking_values(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, sys_id, _) = require_undocked_hacking_space(session)?;
+    let (char_id, sys_id, _) = require_undocked_hacking_space(ctx, session)?;
     let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(hacking_client_err(
             "TargetNotFound",
@@ -1434,13 +1432,24 @@ async fn handle_hacking_used_utility(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, _, _) = require_undocked_hacking_space_with_ctx(Some(ctx), session)?;
+    let (char_id, _, _) = require_undocked_hacking_space(ctx, session)?;
     let (container_id, raw_slot, raw_tile_idx) = if args.len() >= 3 {
-        (
-            args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000),
-            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-            extract_tile_index(args.get(2)).unwrap_or(0),
-        )
+        let Some(cid) = args.first().and_then(|a| a.as_i64()) else {
+            return Err(hacking_client_err(
+                "TargetNotFound",
+                "Target container not specified",
+            ));
+        };
+        let Some(slot) = args.get(1).and_then(|a| a.as_i64()) else {
+            return Err(hacking_client_err(
+                "UtilitySlotEmpty",
+                "Utility slot not specified",
+            ));
+        };
+        let Some(tile) = extract_tile_index(args.get(2)) else {
+            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+        };
+        (cid, slot, tile)
     } else {
         let Some(cid) = find_active_hacking_container(ctx, char_id) else {
             return Err(hacking_client_err(
@@ -1448,8 +1457,18 @@ async fn handle_hacking_used_utility(
                 "No active hacking session for character",
             ));
         };
-        let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-        let tile = extract_tile_index(args.get(1)).unwrap_or(0);
+        let Some(slot) = args.first().and_then(|a| a.as_i64()) else {
+            return Err(hacking_client_err(
+                "UtilitySlotEmpty",
+                "Utility slot not specified",
+            ));
+        };
+        let tile = match args.get(1) {
+            Some(arg) => extract_tile_index(Some(arg))
+                .ok_or_else(|| BridgeRpcError::user_error("InvalidTileIndex"))?,
+            // V24 1-arg UsedUtilityElement([slot]) omits target tile for self-targeted utilities.
+            None => 0,
+        };
         (cid, slot, tile)
     };
     let Ok(slot_idx) = usize::try_from(raw_slot) else {
@@ -1524,7 +1543,7 @@ fn handle_hacking_get_progress(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (char_id, sys_id, _) = require_undocked_hacking_space(session)?;
+    let (char_id, sys_id, _) = require_undocked_hacking_space(ctx, session)?;
     let explicit_cid = args.first().and_then(|a| a.as_i64());
     if let Some(container_id) = explicit_cid {
         let active_opt = read_pve_exploration_reg(ctx, |reg| {
