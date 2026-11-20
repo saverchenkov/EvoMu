@@ -1495,10 +1495,11 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
         .await
         .unwrap();
 
+    let initial_cargo = if ctx.sde.types.contains_key(&32880) { 48_400 } else { 49_200 };
     director.register_convoy(LivingWorldConvoy {
         convoy_id, archetype: NpcArchetype::MiningOp, ship_type_id: 32880,
         origin_system_id: system_id, current_system_id: system_id, destination_system_id: system_id,
-        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: 49_200,
+        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: initial_cargo,
         lod_level: 1, destroyed: false,
     });
 
@@ -1514,7 +1515,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     assert!(step_result.remaining_asteroid_units > 0);
     assert!(!step_result.hauled_to_station);
     assert_eq!(step_result.convoy_cargo_units, 0);
-    assert!(director.hauler_cargo_units(&ctx.db, convoy_id) >= 50_000);
+    assert_eq!(director.hauler_cargo_units(&ctx.db, convoy_id), 50_000);
 
     ctx.advance_secs(60);
     let deliver_result = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("deliver_result");

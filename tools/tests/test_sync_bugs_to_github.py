@@ -1372,6 +1372,344 @@ class SyncBugsTriageDedupTests(unittest.TestCase):
         self.assertEqual(len(fresh_gh.created_issues), 2)
         self.assertIn("**Client Stack Hash:** `0x0000000056508076`", fresh_gh.created_issues[0]["body"])
 
+    def test_tt08_extra_bundle_preserved_when_post_comment_fails_under_archive_and_delete(self) -> None:
+        tb_primary = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/ui/mod_a.py", line 10, in Open\n'
+            'RuntimeError: primary crash\n'
+        )
+        tb_extra_ok = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/ui/mod_b.py", line 20, in Open\n'
+            'RuntimeError: extra comment ok\n'
+        )
+        tb_extra_fail = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/ui/mod_c.py", line 30, in Open\n'
+            'RuntimeError: extra comment fail\n'
+        )
+
+        for delete_mode in (False, True):
+            with self.subTest(delete=delete_mode), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                qdir = root / "queue"
+                udir = root / "uploaded"
+                qdir.mkdir(parents=True)
+                attach_dir = qdir / "attachments" / "playtester_step999_extra_fail"
+                attach_dir.mkdir(parents=True)
+                (attach_dir / "screenshot.png").write_bytes(b"PNG")
+
+                (qdir / "01_primary.json").write_text(
+                    json.dumps(_make_crash_bundle(stack_hash=-9101, trace=tb_primary, session={}, extra={"server_request_count": 0})),
+                    encoding="utf-8",
+                )
+                (qdir / "02_extra_ok.json").write_text(
+                    json.dumps(_make_crash_bundle(stack_hash=-9102, trace=tb_extra_ok, session={}, extra={"server_request_count": 0})),
+                    encoding="utf-8",
+                )
+                extra_fail_bundle = _make_crash_bundle(
+                    stack_hash=-9103,
+                    trace=tb_extra_fail,
+                    session={},
+                    extra={
+                        "server_request_count": 0,
+                        "manual_report": {"report_key": "playtester_step999_extra_fail", "category_id": "client-python"},
+                    },
+                )
+                (qdir / "03_extra_fail.json").write_text(json.dumps(extra_fail_bundle), encoding="utf-8")
+
+                comment_calls = {"n": 0}
+                fake_gh = FakeGitHubCLI()
+
+                def _gh_comment_fails_on_second(cmd, **kwargs):  # type: ignore[no-untyped-def]
+                    if cmd[:3] == ["gh", "issue", "comment"]:
+                        comment_calls["n"] += 1
+                        if comment_calls["n"] == 2:
+                            raise subprocess.CalledProcessError(1, cmd, stderr="HTTP 502 rate limited")
+                    return fake_gh(cmd, **kwargs)
+
+                argv = ["--queue-dir", str(qdir), "--uploaded-dir", str(udir)]
+                if delete_mode:
+                    argv.append("--delete")
+                with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                    sync_mod.subprocess, "run", side_effect=_gh_comment_fails_on_second
+                ):
+                    rc = sync_mod.main(argv)
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(len(fake_gh.created_issues), 1)
+                self.assertEqual(len(fake_gh.comments), 1)
+                remaining = sorted(p.name for p in qdir.glob("*.json"))
+                self.assertEqual(remaining, ["03_extra_fail.json"])
+                self.assertTrue((attach_dir / "screenshot.png").exists())
+                if not delete_mode:
+                    archived = sorted(p.name for p in udir.glob("*.json"))
+                    self.assertEqual(archived, ["01_primary.json", "02_extra_ok.json"])
+                else:
+                    self.assertFalse((udir / "01_primary.json").exists())
+                    self.assertFalse((udir / "02_extra_ok.json").exists())
+
+    def test_tt18_find_existing_issue_fails_closed_on_gh_search_errors(self) -> None:
+        bundle = _make_crash_bundle(
+            stack_hash=-9201,
+            trace='Traceback (most recent call last):\n  File "ship.py", line 12, in Board\nKeyError: 42\n',
+            flight_recorder=[{"service": "ship", "method": "Board", "status": "OK", "duration_micros": 100}],
+        )
+        created_called = {"n": 0}
+
+        def _failing_search(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd[:3] == ["gh", "issue", "list"]:
+                raise subprocess.CalledProcessError(1, cmd, stderr="API rate limit exceeded")
+            if cmd[:3] == ["gh", "issue", "create"]:
+                created_called["n"] += 1
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=_failing_search
+        ):
+            with self.assertRaises(sync_mod.IssueLookupError):
+                sync_mod.find_existing_issue("saverchenkov/EvoMu", -9201, dry_run=False)
+            with self.assertRaises(sync_mod.IssueLookupError):
+                sync_mod.create_or_update_issue("saverchenkov/EvoMu", bundle, dry_run=False)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+            (qdir / "bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=_failing_search
+            ):
+                rc = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc, 1)
+            self.assertEqual([p.name for p in qdir.glob("*.json")], ["bundle.json"])
+        self.assertEqual(created_called["n"], 0)
+
+    def test_tt19_persistent_cache_dedups_through_github_search_indexing_lag_and_updates_closed_state(self) -> None:
+        tb = (
+            'Traceback (most recent call last):\n'
+            '  File "eve/client/script/ui/fitting.py", line 88, in SwapShip\n'
+            'KeyError: 1897898652\n'
+        )
+        auto_bundle = _make_crash_bundle(
+            stack_hash=-9301,
+            trace=tb,
+            flight_recorder=[{"service": "ship", "method": "Board", "status": "OK", "duration_micros": 100}],
+        )
+        manual_bundle = _make_crash_bundle(
+            stack_hash=-9302,
+            stack_key="playtester:client-python:client_traceback",
+            trace=tb,
+            flight_recorder=[{"service": "dogmaIM", "method": "GetAllInfo", "status": "OK", "duration_micros": 100}],
+            extra={
+                "report_source": "f12_manual",
+                "manual_report": {"category_id": "client-python", "title": "KeyError: 1897898652"},
+            },
+        )
+        self.assertEqual(sync_mod._effective_bundle_hash(auto_bundle), sync_mod._effective_bundle_hash(manual_bundle))
+
+        class _LaggingSearchGH(FakeGitHubCLI):
+            def __init__(self) -> None:
+                super().__init__()
+                self._next_num = 1409
+                self.lag_search = True
+                self.override_state: dict[int, str] = {}
+
+            def __call__(self, cmd, **kwargs):  # type: ignore[no-untyped-def]
+                if cmd[:3] == ["gh", "issue", "list"]:
+                    if self.lag_search:
+                        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+                    res = super().__call__(cmd, **kwargs)
+                    rows = json.loads(res.stdout or "[]")
+                    for r in rows:
+                        if r["number"] in self.override_state:
+                            r["state"] = self.override_state[r["number"]]
+                    return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows), stderr="")
+                return super().__call__(cmd, **kwargs)
+
+        lag_gh = _LaggingSearchGH()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+
+            # Run 1: creates #1410 and persists hash -> #1410 to local issue_cache.json
+            (qdir / "01_auto.json").write_text(json.dumps(auto_bundle), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=lag_gh
+            ):
+                rc1 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc1, 0)
+            self.assertEqual(len(lag_gh.created_issues), 1)
+            self.assertTrue((root / "issue_cache.json").exists())
+
+            # Run 2 (1s later while GitHub Search still returns []): must comment on #1410, NOT create #1411!
+            (qdir / "02_manual.json").write_text(json.dumps(manual_bundle), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=lag_gh
+            ):
+                rc2 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc2, 0)
+            self.assertEqual(len(lag_gh.created_issues), 1)
+            self.assertEqual(len(lag_gh.comments), 1)
+            self.assertEqual(lag_gh.comments[0]["number"], 1410)
+
+            # Run 3: once GitHub indexes #1410 and reports it CLOSED, live CLOSED state overrides stale OPEN cache & reopens #1410.
+            lag_gh.lag_search = False
+            lag_gh.override_state[1410] = "CLOSED"
+            (qdir / "03_retest.json").write_text(json.dumps(auto_bundle), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=lag_gh
+            ):
+                rc3 = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc3, 0)
+            self.assertEqual(lag_gh.reopened, [1410])
+            self.assertEqual(len(lag_gh.comments), 2)
+
+    def test_tt20_prefer_open_over_closed_legacy_hashes_no_literal_1_and_1439_non_collapse(self) -> None:
+        # 1. Prefer OPEN over CLOSED even when CLOSED comes first or matches primary while OPEN matches legacy/later row.
+        primary_h = -777001
+        alias_h = 888002
+        closed_then_open = [
+            {"number": 1314, "title": "Old closed", "state": "CLOSED"},
+            {"number": 1505, "title": "Active open", "state": "OPEN"},
+        ]
+
+        def _gh_multi_state(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            term = cmd[cmd.index("--search") + 1]
+            if f"(or `{alias_h}`)" in term:
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(closed_then_open), stderr="")
+            if f"(or `{primary_h}`)" in term:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps([{"number": 1200, "title": "Closed primary", "state": "CLOSED"}]), stderr=""
+                )
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=_gh_multi_state
+        ):
+            found = sync_mod.find_existing_issue("saverchenkov/EvoMu", primary_h, alias_hashes=[alias_h])
+        self.assertEqual(found, (1505, "OPEN"))
+
+        # 2. Unparsed `gh issue create` output must raise (never return literal `1`).
+        bundle = _make_crash_bundle(
+            stack_hash=-9401,
+            trace='Traceback (most recent call last):\n  File "foo.py", line 9, in Run\nValueError: bad url test\n',
+            flight_recorder=[{"service": "charMgr", "method": "GetInfo", "status": "OK", "duration_micros": 50}],
+        )
+
+        def _gh_bad_create_url(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd[:3] == ["gh", "label", "create"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="Created successfully (no URL)", stderr="")
+            raise AssertionError(f"Should not post comment or reopen: {cmd}")
+
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+            sync_mod.subprocess, "run", side_effect=_gh_bad_create_url
+        ):
+            with self.assertRaises(RuntimeError):
+                sync_mod.create_or_update_issue("saverchenkov/EvoMu", bundle, dry_run=False)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+            (qdir / "01_bad_url.json").write_text(json.dumps(bundle), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=_gh_bad_create_url
+            ):
+                rc = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc, 1)
+            self.assertEqual([p.name for p in qdir.glob("*.json")], ["01_bad_url.json"])
+
+        # 3. Authenticated world session (even with 0 step requests & no char_id) must NOT collapse onto env:zero_server_requests (#1439/#1369).
+        autopilot_1439_bundle = _make_crash_bundle(
+            stack_hash=-9402,
+            trace='File "eve/client/script/parklife/autopilot.py", line 559, in AP_ApproachDestID\nUserError: ShipAlreadyInWarp',
+            session={"solar_system_id": 30002801},
+            extra={"server_request_count": 0},
+        )
+        self.assertIsNone(sync_mod.classify_environment_fault(autopilot_1439_bundle))
+        self.assertNotEqual(
+            sync_mod._effective_bundle_hash(autopilot_1439_bundle),
+            sync_mod._fnv1a_i64("env:zero_server_requests"),
+        )
+
+    def test_bf1483a_01_and_02_shared_raw_hash_cache_isolation_and_non_fcntl_locks(self) -> None:
+        # 1. Shared raw client stack_hash must NOT poison persistent issue_cache.json across distinct crashes.
+        bundle_a = _make_crash_bundle(
+            stack_hash=1448116342,
+            trace='Traceback (most recent call last):\n  File "alpha_shared.py", line 10, in Foo\nValueError: alpha failed\n',
+            flight_recorder=[{"service": "alpha", "method": "Get", "status": "OK", "duration_micros": 100}],
+        )
+        bundle_b = _make_crash_bundle(
+            stack_hash=1448116342,
+            trace='Traceback (most recent call last):\n  File "beta_shared.py", line 20, in Bar\nTypeError: beta failed\n',
+            flight_recorder=[{"service": "beta", "method": "Get", "status": "OK", "duration_micros": 100}],
+        )
+        fake_gh = FakeGitHubCLI()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            qdir = root / "queue"
+            udir = root / "uploaded"
+            qdir.mkdir(parents=True)
+            (qdir / "01_a.json").write_text(json.dumps(bundle_a), encoding="utf-8")
+            (qdir / "02_b.json").write_text(json.dumps(bundle_b), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                rc = sync_mod.main(["--queue-dir", str(qdir), "--uploaded-dir", str(udir)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(fake_gh.created_issues), 2)
+            self.assertEqual(len(fake_gh.comments), 0)
+            cache_data = json.loads((root / "issue_cache.json").read_text(encoding="utf-8"))
+            repo_cache = cache_data["repos"]["saverchenkov/EvoMu"]
+            raw_key = sync_mod._issue_cache_key(1448116342)
+            self.assertNotIn(raw_key, repo_cache)
+            self.assertIn(sync_mod._issue_cache_key(sync_mod._effective_bundle_hash(bundle_a)), repo_cache)
+            self.assertIn(sync_mod._issue_cache_key(sync_mod._effective_bundle_hash(bundle_b)), repo_cache)
+
+            # Even when --delete + custom queue dir is used without --uploaded-dir, cache lives next to queue dir.
+            custom_q = root / "custom_q"
+            custom_q.mkdir(parents=True)
+            (custom_q / "03_a.json").write_text(json.dumps(bundle_a), encoding="utf-8")
+            with mock.patch.object(sync_mod, "check_gh_installed", return_value=True), mock.patch.object(
+                sync_mod.subprocess, "run", side_effect=fake_gh
+            ):
+                rc_del = sync_mod.main(["--delete", "--queue-dir", str(custom_q)])
+            self.assertEqual(rc_del, 0)
+            self.assertTrue((root / ".custom_q_issue_cache.json").exists())
+
+        # 2. check_gh_installed() == False fails closed with IssueLookupError.
+        with mock.patch.object(sync_mod, "check_gh_installed", return_value=False):
+            with self.assertRaises(sync_mod.IssueLookupError):
+                sync_mod.find_existing_issue("saverchenkov/EvoMu", -9500, dry_run=False)
+
+        # 3. _sync_lock works without fcntl via msvcrt and via O_CREAT|O_EXCL fallback.
+        with tempfile.TemporaryDirectory() as td:
+            lock_p = Path(td) / "sync.lock"
+            fake_msvcrt = mock.Mock()
+            fake_msvcrt.LK_LOCK = 1
+            fake_msvcrt.LK_UNLCK = 0
+            with mock.patch.object(sync_mod, "fcntl", None), mock.patch.object(sync_mod, "msvcrt", fake_msvcrt):
+                with sync_mod._sync_lock(lock_p):
+                    self.assertTrue(lock_p.exists())
+            self.assertEqual(fake_msvcrt.locking.call_count, 2)
+            self.assertEqual(fake_msvcrt.locking.call_args_list[0].args[1:], (1, 1))
+            self.assertEqual(fake_msvcrt.locking.call_args_list[1].args[1:], (0, 1))
+
+            excl_lock = Path(td) / "excl.lock"
+            with mock.patch.object(sync_mod, "fcntl", None), mock.patch.object(sync_mod, "msvcrt", None):
+                with sync_mod._sync_lock(excl_lock):
+                    self.assertTrue(excl_lock.exists())
+            self.assertFalse(excl_lock.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
