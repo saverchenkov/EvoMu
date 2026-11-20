@@ -203,7 +203,7 @@ pub fn handle(
                 ("difficulty", DbColumnType::I4),
                 ("dungeonName", DbColumnType::WStr),
             ]);
-            let mut rows: Vec<Vec<PyRep>> = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+            let mut rows: Vec<Vec<PyRep>> = crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
                 reg.sites_by_system
                     .values()
                     .flatten()
@@ -560,7 +560,7 @@ fn handle_get_deadspace_agents_map(
     let rows: Vec<Vec<PyRep>> = session
         .character_id
         .map(|char_id| {
-            crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+            crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
                 reg.escalations_by_char
                     .get(&char_id)
                     .into_iter()
@@ -581,31 +581,36 @@ fn handle_get_deadspace_agents_map(
 }
 
 fn handle_get_edencom_fortress_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.edencom_fortress_systems
-            .iter()
-            .map(|&s| PyRep::Integer(i64::from(s)))
-            .collect::<Vec<_>>()
-    });
+    let list = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        if reg.edencom_fortress_systems.is_empty() {
+            crate::services::pve_special_sites::edencom_fortress_systems()
+        } else {
+            reg.edencom_fortress_systems.clone()
+        }
+    })
+    .into_iter()
+    .map(|s| PyRep::Integer(i64::from(s)))
+    .collect::<Vec<_>>();
     Ok(PyRep::List(list))
 }
 
 fn handle_get_edencom_minor_victory_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.edencom_minor_victory_systems
-            .iter()
-            .map(|&s| PyRep::Integer(i64::from(s)))
-            .collect::<Vec<_>>()
-    });
+    let list = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        if reg.edencom_minor_victory_systems.is_empty() {
+            crate::services::pve_special_sites::edencom_minor_victory_systems()
+        } else {
+            reg.edencom_minor_victory_systems.clone()
+        }
+    })
+    .into_iter()
+    .map(|s| PyRep::Integer(i64::from(s)))
+    .collect::<Vec<_>>();
     Ok(PyRep::List(list))
 }
 
 fn handle_get_incursion_global_report(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    let list = crate::services::pve_special_sites::with_readonly_pve_special_reg(ctx, |reg| {
         let now_sec = crate::services::pve_special_sites::spec_now_sec(reg);
         reg.incursions
             .values()
@@ -650,8 +655,7 @@ fn handle_get_incursion_global_report(ctx: &ServerContext) -> Result<PyRep, Brid
 }
 
 fn handle_get_systems_in_incursions(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    let list = crate::services::pve_special_sites::with_readonly_pve_special_reg(ctx, |reg| {
         let mut out = Vec::new();
         for inc in reg.incursions.values() {
             if inc.state == "Ended" {
@@ -700,18 +704,20 @@ fn handle_get_systems_in_incursions(ctx: &ServerContext) -> Result<PyRep, Bridge
 }
 
 fn handle_get_triglavian_minor_victory_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
-    let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        reg.triglavian_minor_victory_systems
-            .iter()
-            .map(|&s| PyRep::Integer(i64::from(s)))
-            .collect::<Vec<_>>()
-    });
+    let list = crate::services::pve_special_sites::read_pve_special_reg(ctx, |reg| {
+        if reg.triglavian_minor_victory_systems.is_empty() {
+            crate::services::pve_special_sites::triglavian_minor_victory_systems()
+        } else {
+            reg.triglavian_minor_victory_systems.clone()
+        }
+    })
+    .into_iter()
+    .map(|s| PyRep::Integer(i64::from(s)))
+    .collect::<Vec<_>>();
     Ok(PyRep::List(list))
 }
 
 fn handle_get_all_roaming_weather_systems(ctx: &ServerContext) -> Result<PyRep, BridgeRpcError> {
-    crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
     let list = crate::services::pve_special_sites::get_all_roaming_weather_systems(ctx);
     Ok(PyRep::List(list))
 }

@@ -713,6 +713,8 @@ async fn rpc_handlers_triglavian_signatures_and_drifter_hive_progression() {
     assert_eq!(unknown_sys.code, "UnknownSolarSystem");
 
     // Drifter hive room progression: clear room 1 -> room 2 -> room 3 -> cleared
+    // (explicitly seed/spawn the system since GetSignatureInstances is read-pure)
+    crate::services::pve_special_sites::ensure_special_sites_spawned_for_system(&ctx, hive_sys).await;
     let sys_handle = ctx.systems.get_or_spawn(hive_sys);
     for expected_next_room in [2_i64, 3_i64] {
         let npc_ids = read_pve_special_reg(&ctx, |reg| {
