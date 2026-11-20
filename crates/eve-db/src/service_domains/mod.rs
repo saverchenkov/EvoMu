@@ -1607,9 +1607,11 @@ fn migrate_legacy_container_ship_state(snap: &mut WorldStateSnapshot) {
         .collect();
     for sid in ship_ids {
         let mut cfg = legacy.ship_configs.get(&sid).cloned().unwrap_or_default();
-        if let Some(pw) = legacy.ship_passwords.get(&sid) {
-            if !pw.is_empty() {
-                cfg.password = Some(pw.clone());
+        if cfg.password.as_deref().is_none_or(str::is_empty) {
+            if let Some(pw) = legacy.ship_passwords.get(&sid) {
+                if !pw.is_empty() {
+                    cfg.password = Some(pw.clone());
+                }
             }
         }
         migrate_kv_if_absent(snap, Ns::ShipAccessConfig, sid, "", &cfg, updated_unix);

@@ -9,8 +9,10 @@ use std::collections::HashSet;
 
 pub(crate) use eve_db::{
     AlscLogEntryRecord as AlscLogEntry, ContainerConfigRecord as ContainerConfig,
-    ShipAccessConfigRecord as ShipAccessConfig, MAX_ALSC_LOGS_PER_CONTAINER,
+    ShipAccessConfigRecord as ShipAccessConfig,
 };
+#[cfg(test)]
+pub(crate) use eve_db::MAX_ALSC_LOGS_PER_CONTAINER;
 
 #[inline]
 pub(crate) fn map_kv_err(err: String) -> BridgeRpcError {
@@ -105,14 +107,6 @@ pub(crate) fn clear_container_unlocks_snap(
 ) -> usize {
     snap.kv_mut(eve_db::Ns::ContainerUnlockedChar)
         .clear_entity(target_id)
-}
-
-#[inline]
-pub(crate) fn is_alsc_item_locked_snap(
-    snap: &eve_db::WorldStateSnapshot,
-    item_id: i64,
-) -> bool {
-    snap.is_item_in_alsc_lock(item_id)
 }
 
 pub(crate) fn set_alsc_item_locked_snap(
@@ -319,7 +313,7 @@ mod legacy_container_ship_test_shim {
             }
         }
         for (k, row) in snap.kv(eve_db::Ns::ContainerUnlockedChar).iter_ns() {
-            if serde_json::from_str::<bool>(&row.value_json) == Ok(true) {
+            if matches!(serde_json::from_str::<bool>(&row.value_json), Ok(true)) {
                 if let Ok(char_id) = k.sub_key.parse::<i64>() {
                     let is_ship_only = st.ship_configs.contains_key(&k.entity_id)
                         && !st.container_passwords.contains_key(&k.entity_id)
@@ -385,9 +379,11 @@ mod legacy_container_ship_test_shim {
             .collect();
         for sid in ship_ids {
             let mut cfg = state.ship_configs.get(&sid).cloned().unwrap_or_default();
-            if let Some(pw) = state.ship_passwords.get(&sid) {
-                if !pw.is_empty() {
-                    cfg.password = Some(pw.clone());
+            if cfg.password.as_deref().is_none_or(str::is_empty) {
+                if let Some(pw) = state.ship_passwords.get(&sid) {
+                    if !pw.is_empty() {
+                        cfg.password = Some(pw.clone());
+                    }
                 }
             }
             let _ = set_ship_access_config_snap(snap, sid, &cfg, now_unix);

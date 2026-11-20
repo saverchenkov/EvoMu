@@ -1895,7 +1895,7 @@ async fn container_ship_per_entity_concurrent_ops_and_sqlite_reload_preserve_all
 
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let mut sess_a = make_station_session(&ctx1, 91_601, char_id, ship_a);
-    let mut sess_b = make_station_session(&ctx1, 91_602, char_id, ship_a);
+    let sess_b = make_station_session(&ctx1, 91_602, char_id, ship_a);
     let mut sess_c = make_station_session(&ctx1, 91_603, char_id, ship_a);
 
     let ctx_a = ctx1.clone();
@@ -1944,7 +1944,7 @@ async fn container_ship_per_entity_concurrent_ops_and_sqlite_reload_preserve_all
     let task_c = tokio::spawn(async move {
         let kw = HashMap::new();
         b_c.wait().await;
-        let res = super::fitting_saved_multifit::handle_ships_and_services(
+        let res = crate::services::inventory_fitting::fitting_saved_multifit::handle_ships_and_services(
             &ctx_c,
             &mut sess_c,
             None,
@@ -2213,7 +2213,6 @@ async fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_via_sqlite()
             "legacy owner_notes[-8_400_000_000_000] must be removed on load"
         );
         assert!(snap.is_item_in_alsc_lock(locked_item_id));
-        assert!(is_alsc_item_locked_snap(snap, locked_item_id));
         assert_eq!(
             container_password_snap(snap, container_id, 1).as_deref(),
             Some("legacy-pw")

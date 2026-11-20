@@ -735,7 +735,7 @@ impl WorldStateSnapshot {
         self.kv(crate::service_domains::Ns::AlscLockedItem)
             .iter_ns()
             .filter_map(|(k, row)| {
-                if k.sub_key.is_empty() && serde_json::from_str::<bool>(&row.value_json) == Ok(true) {
+                if k.sub_key.is_empty() && matches!(serde_json::from_str::<bool>(&row.value_json), Ok(true)) {
                     Some(k.entity_id)
                 } else {
                     None

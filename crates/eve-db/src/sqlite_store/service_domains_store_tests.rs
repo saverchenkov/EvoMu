@@ -1118,7 +1118,7 @@ fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_and_caps_alsc_logs
     };
 
     let path = temp_db_path("legacy_container_ship_migration");
-    let conn = Connection::open(&path).expect("open");
+    let mut conn = Connection::open(&path).expect("open");
     apply_migrations(&conn).expect("migrate");
 
     let mut legacy_snap = WorldStateSnapshot::default();
@@ -1179,7 +1179,7 @@ fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_and_caps_alsc_logs
             timestamp_unix: 1_700_001_000,
         },
     );
-    replace_sqlite_from_snapshot(&conn, &legacy_snap).expect("seed legacy sqlite");
+    replace_sqlite_from_snapshot(&mut conn, &legacy_snap).expect("seed legacy sqlite");
     drop(conn);
 
     // Loading via WorldRepository::open_sqlite runs one-time migration and commits the
