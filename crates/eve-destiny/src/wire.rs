@@ -958,8 +958,10 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             is_active,
         } => {
             let fx_meta = park.and_then(|p| {
+                let key = (*ball_id, *module_id, guid.clone());
                 p.special_fx_meta
-                    .get(&(*ball_id, *module_id, guid.clone()))
+                    .get(&key)
+                    .or_else(|| p.pending_pruned_fx_meta.get(&key).map(|(_, m)| m))
             });
             PyRep::Tuple(vec![
                 PyRep::String("OnSpecialFX".into()),

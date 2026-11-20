@@ -432,11 +432,18 @@ async fn test_journey_market_trade() {
     assert!(tx_rows.iter().any(|r| {
         matches!(r.dbrow_get("typeID").and_then(|v| v.as_i64()), Some(34 | 36))
     }));
-    let hist = call_rpc(&ctx, &mut sess1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)])
+    let old_hist = call_rpc(&ctx, &mut sess1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)])
         .await
         .expect("GetOldPriceHistory");
-    let PyRep::ObjectEx { list: hist_rows, .. } = hist else {
+    let PyRep::ObjectEx { list: old_hist_rows, .. } = old_hist else {
         panic!("expected ObjectEx CRowset from GetOldPriceHistory");
+    };
+    assert!(old_hist_rows.is_empty(), "same-day trades must not appear in GetOldPriceHistory");
+    let hist = call_rpc(&ctx, &mut sess1, "marketProxy", "GetNewPriceHistory", &[PyRep::Integer(34)])
+        .await
+        .expect("GetNewPriceHistory");
+    let PyRep::ObjectEx { list: hist_rows, .. } = hist else {
+        panic!("expected ObjectEx CRowset from GetNewPriceHistory");
     };
     assert!(!hist_rows.is_empty(), "market price history must contain matched trade row");
     assert!(hist_rows.iter().any(|r| format!("{r:?}").contains("avgPrice")));

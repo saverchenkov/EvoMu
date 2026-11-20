@@ -32,6 +32,16 @@ pub const SEEDED_GAMEPLAY_CATEGORIES: &[u32] = &[
     87, 2143,
 ];
 
+pub const CONCORD_CORP_ID: i64 = 1_000_125;
+pub const DED_CORP_ID: i64 = 1_000_137;
+
+/// Returns `true` when `station` is a selected NPC station owned by CONCORD or DED that hosts
+/// permanent Sleeper blue loot buy orders (`feat:market.npc-buy-orders-sleeper-loot`).
+#[inline]
+pub fn is_sleeper_buy_station(station: &eve_sde::StationInfo) -> bool {
+    matches!(station.owner_corporation_id, CONCORD_CORP_ID | DED_CORP_ID)
+}
+
 #[inline]
 fn is_seeded_gameplay_category(category_id: u32) -> bool {
     SEEDED_GAMEPLAY_CATEGORIES.contains(&category_id)
@@ -189,6 +199,9 @@ pub fn seed_dual_anchor_markets(db: &WorldRepository, sde: &SdeRegistry) -> usiz
         }
     });
     if already_seeded {
+        if db.with_snapshot(|snap| needs_sleeper_blue_loot_seed(snap, sde)) {
+            return db.with_mut_snapshot(|snap| seed_sleeper_blue_loot_buy_orders_in_snap(snap, sde, None));
+        }
         return 0;
     }
     seed_market_catalog_internal(db, sde, is_persistent)
@@ -290,6 +303,12 @@ fn seed_market_catalog_internal(
                 baseline_type_ids.as_slice()
             };
             for &type_id in station_types {
+                if crate::services::market_contracts::SLEEPER_BLUE_LOOT_ORDERS
+                    .iter()
+                    .any(|&(loot_tid, _)| loot_tid == type_id)
+                {
+                    continue;
+                }
                 let Some(inv_type) = sde.types.get(&type_id) else {
                     continue;
                 };
@@ -372,9 +391,89 @@ fn seed_market_catalog_internal(
             }
         }
         inserted += seed_npc_skillbooks_and_faction_items(snap, sde, bom_map, &mut existing);
+        inserted += seed_sleeper_blue_loot_buy_orders_in_snap(snap, sde, Some(&mut existing));
         Ok(inserted)
     })
     .unwrap_or(0)
+}
+
+/// Returns `true` when any selected CONCORD/DED NPC station lacks an active permanent Sleeper buy order.
+pub(crate) fn needs_sleeper_blue_loot_seed(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &SdeRegistry,
+) -> bool {
+    let active: std::collections::HashSet<(i64, TypeId)> = snap
+        .market_orders
+        .values()
+        .filter(|o| {
+            crate::services::market_contracts::is_permanent_npc_sleeper_buy_order(o)
+                && o.vol_remaining > 0
+        })
+        .map(|o| (o.station_id, o.type_id))
+        .collect();
+    sde.stations
+        .values()
+        .filter(|st| is_sleeper_buy_station(st))
+        .any(|st| {
+            crate::services::market_contracts::SLEEPER_BLUE_LOOT_ORDERS
+                .iter()
+                .any(|&(tid, _)| !active.contains(&(st.station_id, tid)))
+        })
+}
+
+/// Seeds permanent NPC buy orders for Sleeper components (`30_744..=30_747`) at selected
+/// CONCORD (`1_000_125`) and DED (`1_000_137`) NPC stations (`feat:market.npc-buy-orders-sleeper-loot`).
+pub(crate) fn seed_sleeper_blue_loot_buy_orders_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde: &SdeRegistry,
+    mut existing: Option<&mut std::collections::HashSet<(i64, i64, TypeId, bool)>>,
+) -> usize {
+    let mut stations: Vec<&eve_sde::StationInfo> = sde
+        .stations
+        .values()
+        .filter(|st| is_sleeper_buy_station(st))
+        .collect();
+    stations.sort_by_key(|st| st.station_id);
+    let mut active: std::collections::HashSet<(i64, TypeId)> = snap
+        .market_orders
+        .values()
+        .filter(|o| {
+            crate::services::market_contracts::is_permanent_npc_sleeper_buy_order(o)
+                && o.vol_remaining > 0
+        })
+        .map(|o| (o.station_id, o.type_id))
+        .collect();
+    let mut inserted = 0usize;
+    for st in stations {
+        for &(loot_tid, price_isk) in crate::services::market_contracts::SLEEPER_BLUE_LOOT_ORDERS {
+            if !active.insert((st.station_id, loot_tid)) {
+                continue;
+            }
+            if let Some(ex) = existing.as_deref_mut() {
+                ex.insert((st.owner_corporation_id, st.station_id, loot_tid, true));
+            }
+            let new_oid = snap.alloc_entity_id();
+            snap.market_orders.insert(
+                new_oid,
+                MarketOrderRecord {
+                    order_id: new_oid,
+                    owner_id: st.owner_corporation_id,
+                    station_id: st.station_id,
+                    region_id: st.region_id,
+                    type_id: loot_tid,
+                    is_bid: true,
+                    price: IskCents::from_isk(price_isk),
+                    vol_entered: 1_000_000,
+                    vol_remaining: 1_000_000,
+                    min_volume: 1,
+                    is_npc: true,
+                    escrow: IskCents(0),
+                },
+            );
+            inserted += 1;
+        }
+    }
+    inserted
 }
 
 /// Tier 1b: every published, market-listed skillbook (SDE categoryID 16) is sold by the hub station's

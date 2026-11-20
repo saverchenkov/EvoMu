@@ -27,6 +27,15 @@ pub const SLEEPER_BLUE_LOOT_ORDERS: &[(TypeId, i64)] = &[
     (30_747, 5_000_000), // Sleeper Drone AI Nexus
 ];
 
+/// Returns `true` when `order` is one of the permanent NPC buy orders for Sleeper blue loot.
+pub(crate) fn is_permanent_npc_sleeper_buy_order(order: &MarketOrderRecord) -> bool {
+    order.is_npc
+        && order.is_bid
+        && SLEEPER_BLUE_LOOT_ORDERS
+            .iter()
+            .any(|&(loot_tid, _)| loot_tid == order.type_id)
+}
+
 use super::market_trading::{
     load_market_order_meta, resolve_station_solar_system, save_market_order_meta,
     unix_to_filetime, MarketOrderMeta,
@@ -145,24 +154,33 @@ pub fn compute_relist_fee_cents(
 }
 
 
+/// Returns `true` when `o` is a non-NPC active order whose duration has elapsed as of `now_unix`.
+pub(crate) fn is_order_expired(
+    snap: &eve_db::WorldStateSnapshot,
+    o: &MarketOrderRecord,
+    now_unix: u64,
+) -> bool {
+    if o.is_npc || o.vol_remaining <= 0 {
+        return false;
+    }
+    let has_meta = snap.market_order_meta.contains_key(&o.order_id)
+        || snap
+            .owner_notes
+            .contains_key(&-(4_000_000_000_000_i64.saturating_add(o.order_id.abs())));
+    if !has_meta {
+        return false;
+    }
+    let meta = load_market_order_meta(snap, o, now_unix);
+    let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
+    meta.issue_unix.saturating_add(dur_secs) <= now_unix
+}
+
 /// Sweeps expired non-NPC orders (`issue_unix + duration * 86_400 <= now_unix`), refunding buy
 /// order escrow or returning sell order items to hangar/deliveries (`feat:market.order-expiry-history`).
 pub(crate) fn has_expired_orders(snap: &eve_db::WorldStateSnapshot, now_unix: u64) -> bool {
-    snap.market_orders.values().any(|o| {
-        if o.is_npc || o.vol_remaining <= 0 {
-            return false;
-        }
-        let has_meta = snap.market_order_meta.contains_key(&o.order_id)
-            || snap
-                .owner_notes
-                .contains_key(&-(4_000_000_000_000_i64.saturating_add(o.order_id.abs())));
-        if !has_meta {
-            return false;
-        }
-        let meta = load_market_order_meta(snap, o, now_unix);
-        let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
-        meta.issue_unix.saturating_add(dur_secs) <= now_unix
-    })
+    snap.market_orders
+        .values()
+        .any(|o| is_order_expired(snap, o, now_unix))
 }
 
 pub(crate) fn sweep_expired_orders(
@@ -178,16 +196,14 @@ pub(crate) fn sweep_expired_orders_filtered(
     owner_filter: Option<(i64, Option<i64>)>,
 ) -> Vec<(i64, i64, bool, TypeId, i64)> {
     let candidate_ids: Vec<i64> = snap.market_orders.values().filter(|o| {
-        !o.is_npc && o.vol_remaining > 0
-            && (snap.market_order_meta.contains_key(&o.order_id) || snap.owner_notes.contains_key(&-(4_000_000_000_000_i64.saturating_add(o.order_id.abs()))))
+        is_order_expired(snap, o, now_unix)
             && owner_filter.is_none_or(|(cid, corp_opt)| o.owner_id == cid || corp_opt == Some(o.owner_id))
     }).map(|o| o.order_id).collect();
     let mut expired = Vec::new();
     for oid in candidate_ids {
         let Some(order) = snap.market_orders.get(&oid).cloned() else { continue; };
         let mut meta = load_market_order_meta(snap, &order, now_unix);
-        let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
-        if meta.issue_unix.saturating_add(dur_secs) > now_unix { continue; }
+        if !is_order_expired(snap, &order, now_unix) { continue; }
         if order.is_bid {
             if order.escrow.0 > 0 {
                 if let Some(ch) = snap.characters.get_mut(&order.owner_id) {
@@ -377,6 +393,233 @@ pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(
     }
 }
 
+struct ValidatedModifyOrder {
+    order: MarketOrderRecord,
+    meta: MarketOrderMeta,
+    is_corp_order: bool,
+    caller_corp_id: i64,
+    broker_lvl: u8,
+    adv_broker_lvl: u8,
+    daytrading_lvl: u8,
+    procurement_lvl: u8,
+    marketing_lvl: u8,
+    visibility_lvl: u8,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_modify_order_preconditions(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    method: &str,
+    order_id: i64,
+    char_id: i64,
+    now_unix: u64,
+    docked_station_opt: Option<i64>,
+    caller_sys_opt: Option<u32>,
+    caller_reg_opt: Option<u32>,
+    new_range_opt: Option<i64>,
+    account_key_opt: Option<u16>,
+    check_upwell_readonly: bool,
+) -> Result<ValidatedModifyOrder, BridgeRpcError> {
+    let Some(order) = snap.market_orders.get(&order_id).cloned() else {
+        return Err(rpc_err("OrderNotFound", format!("Market order {order_id} not found")));
+    };
+    if method == "ModifyPlexCharOrder" && order.type_id != PLEX_TYPE_ID {
+        return Err(rpc_err("InvalidPlexOrder", format!("Order {order_id} is not a PLEX order")));
+    }
+    if order.vol_remaining <= 0 || order.is_npc || is_order_expired(snap, &order, now_unix) {
+        return Err(rpc_err("OrderAlreadyFilled", format!("Order {order_id} is no longer active")));
+    }
+    let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+    let is_corp_order = order.owner_id == caller_corp_id && order.owner_id != char_id;
+    if order.owner_id != char_id && !is_corp_order {
+        return Err(rpc_err("OrderOwnershipViolation", format!("Order {order_id} does not belong to character {char_id}")));
+    }
+    let mut meta = load_market_order_meta(snap, &order, 0);
+    if is_corp_order {
+        if !snap.corporations.contains_key(&caller_corp_id) {
+            return Err(rpc_err("CorporationNotFound", "Corporation not found"));
+        }
+        let is_original_placer = snap
+            .market_order_meta
+            .get(&order_id)
+            .and_then(|m| m.issued_by)
+            == Some(char_id);
+        if !is_original_placer {
+            crate::services::market_trading::market_orders_corp_auth::require_corp_market_order_role(
+                snap,
+                caller_corp_id,
+                char_id,
+                meta.account_key.unwrap_or(1000),
+                now_unix,
+            )?;
+        }
+    }
+
+    if now_unix < meta.issue_unix.saturating_add(300) {
+        return Err(rpc_err("OrderModificationCooldown", "Orders cannot be modified within 5 minutes (300 seconds) of creation or last modification"));
+    }
+
+    let sk = snap.skills.get(&char_id);
+    let broker_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
+    let adv_broker_lvl = sk.and_then(|m| m.get(&16597)).map(|s| s.level).unwrap_or(0);
+    let daytrading_lvl = sk.and_then(|m| m.get(&16595)).map(|s| s.level).unwrap_or(0);
+    let procurement_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
+    let marketing_lvl = sk.and_then(|m| m.get(&16598)).map(|s| s.level).unwrap_or(0);
+    let visibility_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
+
+    // Remote order modification range check (`Daytrading` `16595`)
+    if docked_station_opt != Some(order.station_id) {
+        let max_jumps = max_remote_jumps_for_skill_level(daytrading_lvl);
+        if max_jumps < 0 {
+            return Err(rpc_err("DaytradingSkillRequired", "Daytrading skill is required to modify market orders remotely"));
+        }
+        if caller_reg_opt != Some(order.region_id) && order.type_id != PLEX_TYPE_ID {
+            return Err(rpc_err("DaytradingSkillRequired", "Cannot modify market orders outside current region"));
+        }
+        let order_sys = resolve_station_solar_system(ctx, snap, order.station_id);
+        let jumps = match (caller_sys_opt, order_sys) {
+            (Some(cs), Some(os)) if cs == os => 0,
+            (Some(cs), Some(os)) => {
+                let c_const = ctx.sde.solar_systems.get(&cs).map(|s| s.constellation_id);
+                let o_const = ctx.sde.solar_systems.get(&os).map(|s| s.constellation_id);
+                if c_const.is_some() && c_const == o_const { 3 } else { 10 }
+            }
+            _ => 0,
+        };
+        if jumps > max_jumps {
+            return Err(rpc_err("DaytradingSkillRequired", format!(
+                "Daytrading level {daytrading_lvl} allows max {max_jumps} jumps, order station is {jumps} jumps away"
+            )));
+        }
+    }
+
+    // Remote buy order `Visibility` (`3447`) check if updating buy range remotely
+    if let Some(new_r) = new_range_opt {
+        if order.is_bid && docked_station_opt != Some(order.station_id) && new_r >= 0 {
+            let max_vis_range = max_remote_jumps_for_skill_level(visibility_lvl);
+            if new_r > max_vis_range {
+                return Err(rpc_err("VisibilitySkillRequired", format!(
+                    "Visibility level {visibility_lvl} allows max buy range {max_vis_range}, requested {new_r}"
+                )));
+            }
+        }
+        meta.range = new_r;
+    }
+    if meta.account_key.is_none() {
+        if let Some(ak) = account_key_opt {
+            meta.account_key = Some(ak);
+        }
+    }
+    if check_upwell_readonly {
+        let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+            ctx, snap, order.station_id, char_id, now_unix, "MarketHubOffline",
+        )?;
+    }
+    Ok(ValidatedModifyOrder {
+        order,
+        meta,
+        is_corp_order,
+        caller_corp_id,
+        broker_lvl,
+        adv_broker_lvl,
+        daytrading_lvl,
+        procurement_lvl,
+        marketing_lvl,
+        visibility_lvl,
+    })
+}
+
+fn find_sellable_plex_hangar_stack(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    station_id: i64,
+    qty_i32: i32,
+) -> Option<i64> {
+    snap.items
+        .values()
+        .find(|i| {
+            i.owner_id == char_id
+                && i.location_id == station_id
+                && i.flag == InventoryFlag::Hangar
+                && i.type_id == PLEX_TYPE_ID
+                && i.quantity >= qty_i32
+                && !i.singleton
+                && i.flag != InventoryFlag::Locked
+                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+        })
+        .map(|i| i.item_id)
+}
+
+fn insufficient_plex_balance_error(vault_plex: i64, quantity: i64) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "InsufficientPlexBalance".into(),
+        message: format!(
+            "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
+        ),
+        client_error: None,
+    }
+}
+
+fn resolve_plex_sell_source_checked(
+    snap: &eve_db::WorldStateSnapshot,
+    station_id: i64,
+    char_id: i64,
+    quantity: i64,
+    qty_i32: i32,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let vault_plex = snap.plex_vault_balance(char_id);
+    if vault_plex >= quantity {
+        return Ok(None);
+    }
+    find_sellable_plex_hangar_stack(snap, char_id, station_id, qty_i32)
+        .map(Some)
+        .ok_or_else(|| insufficient_plex_balance_error(vault_plex, quantity))
+}
+
+pub(crate) fn pending_expired_personal_plex_sell_refund(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) -> i64 {
+    if snap.corporations.contains_key(&char_id) {
+        return 0;
+    }
+    snap.market_orders
+        .values()
+        .filter(|o| {
+            !o.is_bid
+                && o.owner_id == char_id
+                && o.type_id == PLEX_TYPE_ID
+                && o.vol_remaining > 0
+                && is_order_expired(snap, o, now_unix)
+        })
+        .map(|o| o.vol_remaining as i64)
+        .sum()
+}
+
+fn validate_plex_sell_preconditions(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    station_id: i64,
+    char_id: i64,
+    quantity: i64,
+    qty_i32: i32,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let _ = crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+        ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
+    )?;
+    if resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32).is_err() {
+        let vault_plex = snap.plex_vault_balance(char_id);
+        let pending_refund = pending_expired_personal_plex_sell_refund(snap, char_id, now_unix);
+        if vault_plex.saturating_add(pending_refund) < quantity {
+            return Err(insufficient_plex_balance_error(vault_plex, quantity));
+        }
+    }
+    Ok(())
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -398,41 +641,14 @@ pub fn handle(
                     return Some(Err(e));
                 }
                 let now_unix = ctx.now_unix();
-                let station_id = session.station_id.unwrap_or(JITA_STATION_ID);
-                let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
                 let (needs_mutation, cached_npc_count) = ctx.db.with_snapshot(|snap| {
                     let has_depleted_npc = snap
                         .market_orders
                         .values()
                         .any(|o| o.is_npc && o.vol_remaining < o.vol_entered);
-                    let needs_sleeper_seed = SLEEPER_BLUE_LOOT_ORDERS.iter().any(|&(loot_tid, _)| {
-                        [(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)]
-                            .iter()
-                            .any(|&(st_id, _)| {
-                                !snap.market_orders.values().any(|o| {
-                                    o.is_npc
-                                        && o.is_bid
-                                        && o.type_id == loot_tid
-                                        && o.station_id == st_id
-                                        && o.vol_remaining > 0
-                                })
-                            })
-                    });
-                    let has_expired = snap.market_orders.values().any(|o| {
-                        if o.is_npc || o.vol_remaining <= 0 {
-                            return false;
-                        }
-                        if !snap.market_order_meta.contains_key(&o.order_id)
-                            && !snap.owner_notes.contains_key(
-                                &-(4_000_000_000_000_i64.saturating_add(o.order_id.abs())),
-                            )
-                        {
-                            return false;
-                        }
-                        let meta = load_market_order_meta(snap, o, now_unix);
-                        let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
-                        meta.issue_unix.saturating_add(dur_secs) <= now_unix
-                    });
+                    let needs_sleeper_seed =
+                        crate::world_seeder::needs_sleeper_blue_loot_seed(snap, &ctx.sde);
+                    let has_expired = has_expired_orders(snap, now_unix);
                     let npc_count = snap.market_orders.values().filter(|o| o.is_npc).count() as i64;
                     (has_depleted_npc || needs_sleeper_seed || has_expired, npc_count)
                 });
@@ -442,6 +658,7 @@ pub fn handle(
                     let (npc_count, swept_list) = ctx.db.with_mut_snapshot(|snap| {
                         // 1. Replenish depleted NPC seeded orders (`feat:market.npc-seeded-orders`)
                         let npc_meta = MarketOrderMeta { range: 32767, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
+                        let sleeper_meta = MarketOrderMeta { range: -1, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
                         let npc_ids: Vec<i64> = snap
                             .market_orders
                             .values()
@@ -449,27 +666,21 @@ pub fn handle(
                             .map(|o| o.order_id)
                             .collect();
                         for oid in npc_ids {
+                            let mut is_sleeper = false;
                             if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
                                 o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
+                                is_sleeper = is_permanent_npc_sleeper_buy_order(o_mut);
                             }
-                            save_market_order_meta(snap, oid, npc_meta);
+                            save_market_order_meta(
+                                snap,
+                                oid,
+                                if is_sleeper { sleeper_meta } else { npc_meta },
+                            );
                         }
-                        // 2. Seed permanent NPC buy orders for Sleeper blue loot (`feat:market.npc-buy-orders-sleeper-loot`)
-                        for &(loot_tid, price_isk) in SLEEPER_BLUE_LOOT_ORDERS {
-                            for &(st_id, reg_id) in &[(JITA_STATION_ID, THE_FORGE_REGION_ID), (station_id, region_id)] {
-                                let exists = snap.market_orders.values().any(|o| o.is_npc && o.is_bid && o.type_id == loot_tid && o.station_id == st_id && o.vol_remaining > 0);
-                                if !exists {
-                                    snap.next_entity_id += 1;
-                                    let new_oid = snap.next_entity_id;
-                                    snap.market_orders.insert(new_oid, MarketOrderRecord {
-                                        order_id: new_oid, owner_id: 1_000_125, station_id: st_id, region_id: reg_id,
-                                        type_id: loot_tid, is_bid: true, price: IskCents::from_isk(price_isk),
-                                        vol_entered: 1_000_000, vol_remaining: 1_000_000, min_volume: 1, is_npc: true, escrow: IskCents(0),
-                                    });
-                                    save_market_order_meta(snap, new_oid, npc_meta);
-                                }
-                            }
-                        }
+                        // 2. Replenish permanent NPC buy orders for Sleeper blue loot at selected CONCORD/DED stations
+                        let _ = crate::world_seeder::seed_sleeper_blue_loot_buy_orders_in_snap(
+                            snap, &ctx.sde, None,
+                        );
                         let swept = sweep_expired_orders(snap, now_unix);
                         let total_npc = snap.market_orders.values().filter(|o| o.is_npc).count() as i64;
                         (total_npc, swept)
@@ -497,12 +708,12 @@ pub fn handle(
                     return Some(Err(rpc_err("NoSolarSystem", "GetSystemAsks requires an active solarSystemID")));
                 };
                 let now_unix = ctx.now_unix();
-                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
                 let rows = ctx.db.with_snapshot(|snap| {
                     crate::services::market_trading::best_asks_to_summary_rows(
                         snap.market_orders.values().filter(|o| {
                             !o.is_bid
                                 && o.vol_remaining > 0
+                                && !is_order_expired(snap, o, now_unix)
                                 && resolve_station_solar_system(ctx, snap, o.station_id)
                                     == Some(solar_system_id)
                                 && crate::services::market_trading::can_caller_view_upwell_market_orders(
@@ -524,16 +735,36 @@ pub fn handle(
                     return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list or set of typeIDs")));
                 };
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
                     let mut out = Vec::with_capacity(tids.len());
                     for tid in tids {
-                        let rows = crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id);
+                        let parsed_tid = TypeId::try_from(tid).ok();
                         let val = if is_python_set {
-                            PyRep::Tuple(vec![hdr.build_crowset(Vec::new()), hdr.build_crowset(rows)])
+                            let (old_rows, new_rows) = match parsed_tid {
+                                Some(type_id) if type_id == PLEX_TYPE_ID => {
+                                    crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                                        snap, PLEX_TYPE_ID, now_unix,
+                                    )
+                                }
+                                Some(type_id) => {
+                                    crate::services::market_price_history::build_partitioned_price_history_rows(
+                                        snap, type_id, region_id, now_unix,
+                                    )
+                                }
+                                None => (Vec::new(), Vec::new()),
+                            };
+                            PyRep::Tuple(vec![hdr.build_crowset(old_rows), hdr.build_crowset(new_rows)])
                         } else {
+                            let rows = match parsed_tid {
+                                Some(type_id) if type_id == PLEX_TYPE_ID => {
+                                    crate::services::market_price_history::build_global_price_history_rows(snap, PLEX_TYPE_ID)
+                                }
+                                Some(type_id) => {
+                                    crate::services::market_price_history::build_price_history_rows(snap, type_id, region_id)
+                                }
+                                None => Vec::new(),
+                            };
                             hdr.build_crowset(rows)
                         };
                         out.push((PyRep::Integer(tid), val));
@@ -561,13 +792,17 @@ pub fn handle(
                     }
                 }
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let rows = ctx.db.with_snapshot(|snap| {
                     let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&v| v > 0)
                         .unwrap_or(caller_corp_id);
                     let mut orders: Vec<&MarketOrderRecord> = snap.market_orders.values()
-                        .filter(|o| o.owner_id == corp_id && !o.is_npc && o.vol_remaining > 0).collect();
+                        .filter(|o| {
+                            o.owner_id == corp_id
+                                && !o.is_npc
+                                && o.vol_remaining > 0
+                                && !is_order_expired(snap, o, now_unix)
+                        })
+                        .collect();
                     orders.sort_by_key(|o| o.order_id);
                     orders.into_iter().map(|o| {
                             let meta = load_market_order_meta(snap, o, now_unix);
@@ -609,24 +844,40 @@ pub fn handle(
                     Err(e) => return Some(Err(e)),
                 };
                 let now_unix = ctx.now_unix();
-                let (swept_list, rows) = ctx.db.with_mut_snapshot(|snap| {
-                    let swept = sweep_expired_orders(snap, now_unix);
+                let rows = ctx.db.with_snapshot(|snap| {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    let mut orders: Vec<MarketOrderRecord> = snap.market_orders.values().filter(|o| {
+                    let mut orders: Vec<MarketOrderRecord> = snap
+                        .market_orders
+                        .values()
+                        .filter(|o| {
                             !o.is_npc
-                                && o.vol_remaining == 0
-                                && (o.owner_id == char_id
-                                    || (include_corp && o.owner_id == corp_id))
-                        }).cloned().collect();
+                                && (o.owner_id == char_id || (include_corp && o.owner_id == corp_id))
+                                && (o.vol_remaining == 0 || is_order_expired(snap, o, now_unix))
+                        })
+                        .cloned()
+                        .collect();
                     orders.sort_by_key(|o| o.order_id);
-                    let out = orders.into_iter().filter_map(|o| {
+                    orders
+                        .into_iter()
+                        .filter_map(|o| {
                             let meta = load_market_order_meta(snap, &o, now_unix);
-                            if meta.closed_unix.is_some_and(|c| now_unix.saturating_sub(c) > 90 * 86_400) {
+                            let unswept_expired =
+                                o.vol_remaining > 0 && is_order_expired(snap, &o, now_unix);
+                            if meta
+                                .closed_unix
+                                .is_some_and(|c| now_unix.saturating_sub(c) > 90 * 86_400)
+                            {
                                 return None;
                             }
-                            let state_code = if let Some(st) = meta.order_state {
+                            let expired_at = meta
+                                .issue_unix
+                                .saturating_add((meta.duration.max(1) as u64).saturating_mul(86_400));
+                            let state_code = if unswept_expired {
+                                4
+                            } else if let Some(st) = meta.order_state {
                                 st as i64
-                            } else { let oid_tag = format!("order {}", o.order_id);
+                            } else {
+                                let oid_tag = format!("order {}", o.order_id);
                                 let was_cancelled = snap.wallet_journal.iter().any(|j| {
                                     j.character_id == o.owner_id
                                         && j.entry_type == "MarketOrderCancelRefund"
@@ -639,24 +890,30 @@ pub fn handle(
                                 });
                                 if was_expired { 4 } else if was_cancelled { 3 } else { 2 }
                             };
+                            let final_vol = if unswept_expired {
+                                meta.final_vol_remaining.unwrap_or(o.vol_remaining)
+                            } else {
+                                meta.final_vol_remaining.unwrap_or(0)
+                            };
                             let is_corp = o.owner_id != char_id;
                             let acct_key = meta.account_key.unwrap_or(1000) as i64;
-                            let last_change = unix_to_filetime(meta.closed_unix.unwrap_or(now_unix));
+                            let last_change = unix_to_filetime(
+                                meta.closed_unix
+                                    .unwrap_or(if unswept_expired { expired_at } else { now_unix }),
+                            );
                             let (sys_id, const_id) = crate::services::market_price_history::resolve_station_solar_and_constellation(ctx, snap, o.station_id);
                             Some(vec![
                                 PyRep::Integer(o.order_id), PyRep::Integer(o.type_id as i64), PyRep::Integer(char_id),
                                 PyRep::Integer(o.region_id as i64), PyRep::Integer(o.station_id), PyRep::Integer(meta.range),
                                 PyRep::Bool(o.is_bid), PyRep::Real(o.price.to_wire_f64()), PyRep::Integer(o.vol_entered as i64),
-                                PyRep::Integer(meta.final_vol_remaining.unwrap_or(0) as i64),
+                                PyRep::Integer(final_vol as i64),
                                 PyRep::Integer(unix_to_filetime(meta.issue_unix)), PyRep::Integer(state_code),
                                 PyRep::Integer(o.min_volume as i64), PyRep::Bool(false), PyRep::Integer(acct_key),
                                 PyRep::Integer(meta.duration), PyRep::Bool(is_corp), PyRep::Integer(sys_id as i64),
                                 PyRep::Real(0.0), PyRep::Integer(last_change), PyRep::Integer(acct_key), PyRep::Integer(const_id as i64),
                             ])
-                        }).collect();
-                    (swept, out)
+                        }).collect()
                 });
-                emit_expired_order_notifications(ctx, &swept_list);
                 return Some(Ok(PyRep::rowset(
                     vec![
                         "orderID", "typeID", "charID", "regionID", "stationID", "range", "bid", "price",
@@ -691,103 +948,57 @@ pub fn handle(
                     .map(|v| v as u16);
 
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let docked_station_opt = session.station_id.or(session.structure_id);
                 let caller_sys_opt = session.solar_system_id;
                 let caller_reg_opt = session.region_id;
 
+                if let Err(e) = ctx.db.with_snapshot(|snap| {
+                    validate_modify_order_preconditions(
+                        ctx,
+                        snap,
+                        method,
+                        order_id,
+                        char_id,
+                        now_unix,
+                        docked_station_opt,
+                        caller_sys_opt,
+                        caller_reg_opt,
+                        new_range_opt,
+                        account_key_opt,
+                        true,
+                    )
+                    .map(|_| ())
+                }) {
+                    return Some(Err(e));
+                }
+                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
+
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let Some(order) = snap.market_orders.get(&order_id).cloned() else {
-                        return Err(rpc_err("OrderNotFound", format!("Market order {order_id} not found")));
-                    };
-                    if method == "ModifyPlexCharOrder" && order.type_id != PLEX_TYPE_ID {
-                        return Err(rpc_err("InvalidPlexOrder", format!("Order {order_id} is not a PLEX order")));
-                    }
-                    if order.vol_remaining <= 0 || order.is_npc {
-                        return Err(rpc_err("OrderAlreadyFilled", format!("Order {order_id} is no longer active")));
-                    }
-                    let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    let is_corp_order = order.owner_id == caller_corp_id && order.owner_id != char_id;
-                    if order.owner_id != char_id && !is_corp_order {
-                        return Err(rpc_err("OrderOwnershipViolation", format!("Order {order_id} does not belong to character {char_id}")));
-                    }
-                    let mut meta = load_market_order_meta(snap, &order, 0);
-                    if is_corp_order {
-                        if !snap.corporations.contains_key(&caller_corp_id) {
-                            return Err(rpc_err("CorporationNotFound", "Corporation not found"));
-                        }
-                        let is_original_placer = snap
-                            .market_order_meta
-                            .get(&order_id)
-                            .and_then(|m| m.issued_by)
-                            == Some(char_id);
-                        if !is_original_placer {
-                            crate::services::market_trading::market_orders_corp_auth::require_corp_market_order_role(
-                                snap,
-                                caller_corp_id,
-                                char_id,
-                                meta.account_key.unwrap_or(1000),
-                                now_unix,
-                            )?;
-                        }
-                    }
-
-                    if now_unix < meta.issue_unix.saturating_add(300) {
-                        return Err(rpc_err("OrderModificationCooldown", "Orders cannot be modified within 5 minutes (300 seconds) of creation or last modification"));
-                    }
-
-                    let sk = snap.skills.get(&char_id);
-                    let broker_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
-                    let adv_broker_lvl = sk.and_then(|m| m.get(&16597)).map(|s| s.level).unwrap_or(0);
-                    let daytrading_lvl = sk.and_then(|m| m.get(&16595)).map(|s| s.level).unwrap_or(0);
-                    let procurement_lvl = sk.and_then(|m| m.get(&16594)).map(|s| s.level).unwrap_or(0);
-                    let marketing_lvl = sk.and_then(|m| m.get(&16598)).map(|s| s.level).unwrap_or(0);
-                    let visibility_lvl = sk.and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
-
-                    // Remote order modification range check (`Daytrading` `16595`)
-                    if docked_station_opt != Some(order.station_id) {
-                        let max_jumps = max_remote_jumps_for_skill_level(daytrading_lvl);
-                        if max_jumps < 0 {
-                            return Err(rpc_err("DaytradingSkillRequired", "Daytrading skill is required to modify market orders remotely"));
-                        }
-                        if caller_reg_opt != Some(order.region_id) && order.type_id != PLEX_TYPE_ID {
-                            return Err(rpc_err("DaytradingSkillRequired", "Cannot modify market orders outside current region"));
-                        }
-                        let order_sys = resolve_station_solar_system(ctx, snap, order.station_id);
-                        let jumps = match (caller_sys_opt, order_sys) {
-                            (Some(cs), Some(os)) if cs == os => 0,
-                            (Some(cs), Some(os)) => {
-                                let c_const = ctx.sde.solar_systems.get(&cs).map(|s| s.constellation_id);
-                                let o_const = ctx.sde.solar_systems.get(&os).map(|s| s.constellation_id);
-                                if c_const.is_some() && c_const == o_const { 3 } else { 10 }
-                            }
-                            _ => 0,
-                        };
-                        if jumps > max_jumps {
-                            return Err(rpc_err("DaytradingSkillRequired", format!(
-                                    "Daytrading level {daytrading_lvl} allows max {max_jumps} jumps, order station is {jumps} jumps away"
-                                )));
-                        }
-                    }
-
-                    // Remote buy order `Visibility` (`3447`) check if updating buy range remotely
-                    if let Some(new_r) = new_range_opt {
-                        if order.is_bid && docked_station_opt != Some(order.station_id) && new_r >= 0 {
-                            let max_vis_range = max_remote_jumps_for_skill_level(visibility_lvl);
-                            if new_r > max_vis_range {
-                                return Err(rpc_err("VisibilitySkillRequired", format!(
-                                        "Visibility level {visibility_lvl} allows max buy range {max_vis_range}, requested {new_r}"
-                                    )));
-                            }
-                        }
-                        meta.range = new_r;
-                    }
-                    if meta.account_key.is_none() {
-                        if let Some(ak) = account_key_opt {
-                            meta.account_key = Some(ak);
-                        }
-                    }
+                    let ValidatedModifyOrder {
+                        order,
+                        mut meta,
+                        is_corp_order,
+                        caller_corp_id,
+                        broker_lvl,
+                        adv_broker_lvl,
+                        daytrading_lvl,
+                        procurement_lvl,
+                        marketing_lvl,
+                        visibility_lvl,
+                    } = validate_modify_order_preconditions(
+                        ctx,
+                        snap,
+                        method,
+                        order_id,
+                        char_id,
+                        now_unix,
+                        docked_station_opt,
+                        caller_sys_opt,
+                        caller_reg_opt,
+                        new_range_opt,
+                        account_key_opt,
+                        false,
+                    )?;
 
                     // Resolve station vs Upwell structure broker rate & per-ACL-group market access
                     let structure_info = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
@@ -996,63 +1207,61 @@ pub fn handle(
             }
 
             "GetPlexBest" => {
-                if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+                let (_, char_id) = match ServerContext::require_character(session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
                 let now_unix = ctx.now_unix();
-                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
-                let (best_ask, best_bid, ask_vol, bid_vol, summary_rows) =
-                    ctx.db.with_snapshot(|snap| {
-                        let mut min_ask: Option<&MarketOrderRecord> = None;
-                        let mut max_bid: Option<&MarketOrderRecord> = None;
-                        let mut total_ask_vol = 0_i64;
-                        let mut total_bid_vol = 0_i64;
-                        for o in snap.market_orders.values()
-                            .filter(|o| o.type_id == PLEX_TYPE_ID && o.vol_remaining > 0)
-                        {
-                            if o.is_bid {
-                                total_bid_vol += o.vol_remaining as i64;
-                                if max_bid.map(|b| o.price.0 > b.price.0).unwrap_or(true) { max_bid = Some(o); }
-                            } else { total_ask_vol += o.vol_remaining as i64;
-                                if min_ask.map(|a| o.price.0 < a.price.0).unwrap_or(true) { min_ask = Some(o); }
-                            }
+                let summary_rows = ctx.db.with_snapshot(|snap| {
+                    let mut min_ask: Option<&MarketOrderRecord> = None;
+                    for o in snap.market_orders.values().filter(|o| {
+                        o.type_id == PLEX_TYPE_ID
+                            && !o.is_bid
+                            && o.vol_remaining > 0
+                            && !is_order_expired(snap, o, now_unix)
+                            && crate::services::market_trading::can_caller_view_upwell_market_orders(
+                                ctx, snap, char_id, o.station_id, now_unix,
+                            )
+                    }) {
+                        if min_ask.map(|a| o.price.0 < a.price.0).unwrap_or(true) {
+                            min_ask = Some(o);
                         }
-                        let rows = if let Some(a) = min_ask {
-                            vec![vec![
-                                PyRep::Real(a.price.to_wire_f64()),
-                                PyRep::Real(a.vol_remaining as f64),
-                                PyRep::Integer(PLEX_TYPE_ID as i64),
-                                PyRep::Integer(a.station_id),
-                            ]]
-                        } else { Vec::new()
-                        };
-                        (
-                            min_ask.map(|a| a.price.to_wire_f64()).unwrap_or(0.0),
-                            max_bid.map(|b| b.price.to_wire_f64()).unwrap_or(0.0),
-                            total_ask_vol,
-                            total_bid_vol,
-                            rows,
-                        )
-                    });
-                let summary = DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", summary_rows);
-                return Some(Ok(PyRep::keyval([
-                    ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)),
-                    ("bestAskPrice", PyRep::Real(best_ask)),
-                    ("bestBidPrice", PyRep::Real(best_bid)),
-                    ("totalAskVolume", PyRep::Integer(ask_vol)),
-                    ("totalBidVolume", PyRep::Integer(bid_vol)),
-                    ("summary", summary),
-                ])));
+                    }
+                    if let Some(a) = min_ask {
+                        vec![vec![
+                            PyRep::Real(a.price.to_wire_f64()),
+                            PyRep::Real(a.vol_remaining as f64),
+                            PyRep::Integer(PLEX_TYPE_ID as i64),
+                            PyRep::Integer(a.station_id),
+                        ]]
+                    } else {
+                        Vec::new()
+                    }
+                });
+                return Some(Ok(
+                    DBRowDescriptor::market_summary_header().build_cindexed_rowset("typeID", summary_rows)
+                ));
             }
 
             "GetPlexOrders" => {
-                if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+                let (_, char_id) = match ServerContext::require_character(session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let (sell_rows, buy_rows) = ctx.db.with_snapshot(|snap| {
                     let mut sells = Vec::new();
                     let mut buys = Vec::new();
                     let mut matching: Vec<&MarketOrderRecord> = snap.market_orders.values()
-                        .filter(|o| o.type_id == PLEX_TYPE_ID && o.vol_remaining > 0).collect();
+                        .filter(|o| {
+                            o.type_id == PLEX_TYPE_ID
+                                && o.vol_remaining > 0
+                                && !is_order_expired(snap, o, now_unix)
+                                && crate::services::market_trading::can_caller_view_upwell_market_orders(
+                                    ctx, snap, char_id, o.station_id, now_unix,
+                                )
+                        })
+                        .collect();
                     matching.sort_by_key(|o| o.order_id);
                     for o in matching {
                         let cells = crate::services::market_price_history::order_to_packed_cells_with_ctx(ctx, snap, o, now_unix);
@@ -1064,13 +1273,34 @@ pub fn handle(
                 return Some(Ok(PyRep::Tuple(vec![hdr.build_crowset(sell_rows), hdr.build_crowset(buy_rows),])));
             }
 
-            "GetPlexHistory" | "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
-                let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
+            "GetPlexHistory" => {
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
-                let rows = ctx.db
-                    .with_snapshot(|snap| crate::services::market_price_history::build_price_history_rows(snap, PLEX_TYPE_ID, region_id));
+                let (old_rows, new_rows) = ctx.db.with_snapshot(|snap| {
+                    crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                        snap,
+                        PLEX_TYPE_ID,
+                        now_unix,
+                    )
+                });
+                let hdr = DBRowDescriptor::market_history_header();
+                return Some(Ok(PyRep::Dict(vec![(
+                    PyRep::Integer(PLEX_TYPE_ID as i64),
+                    PyRep::Tuple(vec![hdr.build_crowset(old_rows), hdr.build_crowset(new_rows)]),
+                )])));
+            }
+
+            "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
+                let now_unix = ctx.now_unix();
+                let is_old = method == "GetPlexOldPriceHistory";
+                let rows = ctx.db.with_snapshot(|snap| {
+                    let (old_rows, new_rows) =
+                        crate::services::market_price_history::build_partitioned_global_price_history_rows(
+                            snap,
+                            PLEX_TYPE_ID,
+                            now_unix,
+                        );
+                    if is_old { old_rows } else { new_rows }
+                });
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(rows)));
             }
 
@@ -1123,8 +1353,14 @@ pub fn handle(
                 let qty_i32 = quantity as i32;
                 let order_price = IskCents::from_f64_isk(price_isk);
                 let now_unix = ctx.now_unix();
-                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
-                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
+                if let Err(e) = ctx.db.with_snapshot(|snap| {
+                    validate_plex_sell_preconditions(
+                        ctx, snap, station_id, char_id, quantity, qty_i32, now_unix,
+                    )
+                }) {
+                    return Some(Err(e));
+                }
+                let _ = sweep_expired_orders_and_notify(ctx, now_unix);
                 let tax_collector = super::wallet_serverops::tax_collector_id(ctx);
 
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1141,56 +1377,32 @@ pub fn handle(
 
                     // Consume PLEX from character's PLEX Vault (`plex_balance`) or station hangar item (`44992`)
                     let vault_plex = snap.plex_vault_balance(char_id);
-                    if vault_plex >= quantity {
-                        let _ = snap.adjust_plex_vault(char_id, -quantity);
-                    } else {
-                        let hangar_item_id = snap
-                            .items
-                            .values()
-                            .find(|i| {
-                                i.owner_id == char_id
-                                    && i.location_id == station_id
-                                    && i.flag == InventoryFlag::Hangar
-                                    && i.type_id == PLEX_TYPE_ID
-                                    && i.quantity >= qty_i32
-                                    && !i.singleton
-                                    && i.flag != InventoryFlag::Locked
-                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                            })
-                            .map(|i| i.item_id);
-                        let Some(hid) = hangar_item_id else {
-                            return Err(BridgeRpcError {
-                                code: "InsufficientPlexBalance".into(),
-                                message: format!(
-                                    "Insufficient PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
-                                ),
-                                client_error: None,
-                            });
-                        };
-                        let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
-                        opts.required_location_id = Some(station_id);
-                        opts.required_flag = Some(InventoryFlag::Hangar);
-                        snap.consume_exact_item_quantity(hid, qty_i32, opts)
-                            .map_err(|_| BridgeRpcError {
-                                code: "InsufficientPlexBalance".into(),
-                                message: format!(
-                                    "Insufficient unlocked PLEX in vault ({vault_plex}) or hangar to sell {quantity} PLEX"
-                                ),
-                                client_error: None,
-                            })?;
+                    match resolve_plex_sell_source_checked(snap, station_id, char_id, quantity, qty_i32)? {
+                        None => {
+                            let _ = snap.adjust_plex_vault(char_id, -quantity);
+                        }
+                        Some(hid) => {
+                            let mut opts = eve_db::ConsumeExactOptions::for_character_stack(char_id);
+                            opts.required_location_id = Some(station_id);
+                            opts.required_flag = Some(InventoryFlag::Hangar);
+                            snap.consume_exact_item_quantity(hid, qty_i32, opts)
+                                .map_err(|_| insufficient_plex_balance_error(vault_plex, quantity))?;
+                        }
                     }
 
                     // Match globally against any resting PLEX buy orders across all regions
                     let mut candidate_bids: Vec<(i64, i64)> = snap.market_orders.values().filter(|o| {
-                            let struct_ok = if o.station_id == station_id {
-                                true
-                            } else {
-                                crate::services::market_trading::is_structure_market_online(snap, o.station_id)
-                            };
+                            let struct_ok = o.station_id == station_id
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                                )
+                                .is_ok();
                             o.type_id == PLEX_TYPE_ID
                                 && struct_ok
                                 && o.is_bid
                                 && o.vol_remaining > 0
+                                && !is_order_expired(snap, o, now_unix)
                                 && o.price.0 >= order_price.0
                         }).map(|o| (o.order_id, o.price.0)).collect();
                     candidate_bids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

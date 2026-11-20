@@ -2,8 +2,8 @@
 
 use crate::{
     Ball, BallId, Ballpark, CombatState, DamageVector, DestinyEvent, GridBubble, MovementMode,
-    SlimItemMeta, StargateActivationState, WarpBubble, WarpBubbleMgr, WarpPhase,
-    BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
+    SlimItemMeta, SpecialFxWireMeta, StargateActivationState, WarpBubble, WarpBubbleMgr,
+    WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS, DECLOAK_DISTANCE_METERS,
     GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
     STARGATE_ACTIVATION_STATE_ACTIVATING, STARGATE_ACTIVATION_STATE_CLOSED,
     STARGATE_ACTIVATION_STATE_OPEN,
@@ -98,6 +98,7 @@ impl Ballpark {
             registered_observers: None,
             static_epoch: 0,
             special_fx_meta: BTreeMap::new(),
+            pending_pruned_fx_meta: BTreeMap::new(),
             same_tick_owner_goto_tick: BTreeMap::new(),
             last_acquired_tick_by_ball: BTreeMap::new(),
             warp_align_ticks: BTreeMap::new(),
@@ -818,12 +819,15 @@ impl Ballpark {
     }
 
     /// Moves any scheduled per-observer events with `deliver_tick <= self.current_tick`
-    /// into `self.observer_events` for live observers still in `self.balls`.
+    /// into `self.observer_events` for live observers still in `self.balls`, and expires
+    /// deferred `OnSpecialFX` wire metadata once `current_tick > emit_tick + 1`.
     pub(crate) fn flush_due_scheduled_observer_events(&mut self) {
+        let current_tick = self.current_tick;
+        self.pending_pruned_fx_meta
+            .retain(|_, (emit_tick, _)| current_tick <= emit_tick.saturating_add(1));
         if self.scheduled_observer_events.is_empty() {
             return;
         }
-        let current_tick = self.current_tick;
         let mut remaining = Vec::new();
         let scheduled = std::mem::take(&mut self.scheduled_observer_events);
         for (deliver_tick, obs_id, ev) in scheduled {
@@ -933,8 +937,34 @@ impl Ballpark {
         self.non_free_ball_ids.remove(&ball_id);
         self.ball_group_ids.remove(&ball_id);
         self.ball_slim_meta.remove(&ball_id);
-        self.special_fx_meta
-            .retain(|(bid, _, _), meta| *bid != ball_id && meta.target_id != Some(ball_id));
+        if !self.special_fx_meta.is_empty() {
+            let mut kept = BTreeMap::new();
+            for ((bid, mid, guid), meta) in std::mem::take(&mut self.special_fx_meta) {
+                if bid != ball_id && meta.target_id != Some(ball_id) {
+                    kept.insert((bid, mid, guid), meta);
+                } else if self
+                    .pending_events
+                    .iter()
+                    .chain(self.observer_events.values().flatten())
+                    .chain(self.scheduled_observer_events.iter().map(|(_, _, ev)| ev))
+                    .any(|ev| {
+                        matches!(
+                            ev,
+                            DestinyEvent::OnSpecialFX {
+                                ball_id: eb,
+                                module_id: em,
+                                guid: eg,
+                                ..
+                            } if *eb == bid && *em == mid && *eg == guid
+                        )
+                    })
+                {
+                    self.pending_pruned_fx_meta
+                        .insert((bid, mid, guid), (self.current_tick, meta));
+                }
+            }
+            self.special_fx_meta = kept;
+        }
         self.combat_states.remove(&ball_id);
         self.mushroom_states.remove(&ball_id);
         self.troll_states.remove(&ball_id);
@@ -1653,6 +1683,16 @@ impl Ballpark {
             }
         }
         was_cloaked
+    }
+
+    /// Inserts V24 `OnSpecialFX` wire metadata and removes any stale deferred-prune entry for `key`.
+    pub fn insert_special_fx_meta(
+        &mut self,
+        key: (BallId, Option<i64>, String),
+        meta: SpecialFxWireMeta,
+    ) {
+        self.pending_pruned_fx_meta.remove(&key);
+        self.special_fx_meta.insert(key, meta);
     }
 
     /// Emits an explicit [`DestinyEvent`] into `pending_events` and queues it for grid observers of `ball_id` (`P-7`).

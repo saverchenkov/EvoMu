@@ -1007,7 +1007,46 @@ pub(crate) mod market_modify_relist_tick_size {
         };
         assert_eq!(hist_entries.len(), 2);
 
-        // 2. StartupCheck & Sleeper Blue Loot NPC buy orders (`30744` @ 200k, `30745` @ 500k, `30746` @ 1.5M, `30747` @ 5M ISK)
+        // 2. Sleeper Blue Loot NPC buy orders (`30744` @ 200k, `30745` @ 500k, `30746` @ 1.5M, `30747` @ 5M ISK)
+        // Selected CONCORD/DED stations are already seeded by `world_seeder` on startup; Jita 4-4 (`60003760`) is NOT.
+        const CONCORD_SLEEPER_STATION_ID: i64 = 60_012_310; // Mastakomon V - CONCORD Bureau (The Forge)
+        const CONCORD_SLEEPER_SYSTEM_ID: u32 = 30_000_202;
+        const DED_FORGE_STATION_ID: i64 = 60_013_048; // Mastakomon XI - Moon 2 - DED Assembly Plant
+        const CONCORD_YULAI_STATION_ID: i64 = 60_012_256; // Yulai IX - CONCORD Bureau (Genesis)
+        const DED_DOMAIN_STATION_ID: i64 = 60_012_934; // Ruchy I - DED Testing Facilities (Domain)
+        let sleeper_cases: &[(TypeId, i64, i32)] = &[
+            (30_744, 200_000, 2),   // Neural Network Analyzer: 400k gross -> 30k tax -> 370k net
+            (30_745, 500_000, 3),   // Sleeper Data Library: 1.5M gross -> 112.5k tax -> 1.3875M net
+            (30_746, 1_500_000, 2), // Ancient Coordinates Database: 3M gross -> 225k tax -> 2.775M net
+            (30_747, 5_000_000, 1), // Sleeper Drone AI Nexus: 5M gross -> 375k tax -> 4.625M net
+        ];
+        ctx.db.with_snapshot(|snap| {
+            for st_id in [
+                CONCORD_SLEEPER_STATION_ID,
+                DED_FORGE_STATION_ID,
+                CONCORD_YULAI_STATION_ID,
+                DED_DOMAIN_STATION_ID,
+            ] {
+                for &(tid, price_isk, _) in sleeper_cases {
+                    let ord = snap
+                        .market_orders
+                        .values()
+                        .find(|o| o.is_npc && o.is_bid && o.station_id == st_id && o.type_id == tid)
+                        .unwrap_or_else(|| {
+                            panic!("Expected world_seeder Sleeper NPC buy order for {tid} at CONCORD/DED station {st_id}")
+                        });
+                    assert_eq!(ord.price, IskCents::from_isk(price_isk));
+                    assert_eq!(ord.vol_remaining, ord.vol_entered);
+                }
+            }
+            assert!(
+                snap.market_orders
+                    .values()
+                    .all(|o| !(o.station_id == JITA_STATION_ID && (30_744..=30_747).contains(&o.type_id))),
+                "Jita 4-4 must NOT carry seeded Sleeper loot orders before StartupCheck"
+            );
+        });
+
         let startup = rpc(&ctx, &mut s1, "marketProxy", "StartupCheck", &[])
             .await
             .expect("StartupCheck");
@@ -1016,58 +1055,188 @@ pub(crate) mod market_modify_relist_tick_size {
         };
         assert_eq!(st_kv.get("sleeperBuyOrdersSeeded"), Some(&PyRep::Bool(true)));
 
-        // Give Pilot 1 a Sleeper Neural Network Analyzer (`30744`) and sell into the seeded 200,000 ISK NPC buy order
-        let sleeper_item_id = ctx.db.with_mut_snapshot(|snap| {
-            snap.skills.entry(90_000_001).or_default().remove(&16622); // Accounting 0 -> 7.5% sales tax
-            snap.next_entity_id += 1;
-            let id = snap.next_entity_id;
-            snap.items.insert(
-                id,
-                InventoryItemRecord {
-                    item_id: id,
-                    type_id: 30_744,
-                    owner_id: 90_000_001,
-                    location_id: JITA_STATION_ID,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 2,
-                    singleton: false,
-                    version: 1,
-                    ..Default::default()
-                },
+        // Verify all 4 Sleeper buy orders at Mastakomon CONCORD station (and still NONE at Jita)
+        let sleeper_order_ids: Vec<(TypeId, i64, i32)> = ctx.db.with_snapshot(|snap| {
+            assert!(
+                snap.market_orders
+                    .values()
+                    .all(|o| !(o.station_id == JITA_STATION_ID && (30_744..=30_747).contains(&o.type_id))),
+                "Jita 4-4 must NOT carry seeded Sleeper loot orders after StartupCheck"
             );
-            id
+            sleeper_cases
+                .iter()
+                .map(|&(tid, price_isk, _)| {
+                    let ord = snap
+                        .market_orders
+                        .values()
+                        .find(|o| o.is_npc && o.is_bid && o.station_id == CONCORD_SLEEPER_STATION_ID && o.type_id == tid)
+                        .unwrap_or_else(|| panic!("Missing NPC buy order for Sleeper loot {tid} at CONCORD station"));
+                    assert_eq!(ord.price, IskCents::from_isk(price_isk));
+                    assert_eq!(ord.vol_remaining, ord.vol_entered);
+                    (tid, ord.order_id, ord.vol_entered)
+                })
+                .collect()
         });
-        let s1_bal_before_sleeper = ctx.db.get_character(90_000_001).unwrap().balance;
-        let sell_sleeper = rpc(
-            &ctx,
-            &mut s1,
-            "marketProxy",
-            "PlaceMultiSellOrder",
-            &[
-                PyRep::List(vec![PyRep::keyval([
-                    ("stationID", PyRep::Integer(JITA_STATION_ID)),
-                    ("typeID", PyRep::Integer(30_744)),
-                    ("itemID", PyRep::Integer(sleeper_item_id)),
-                    ("price", PyRep::Real(200_000.0)),
-                    ("quantity", PyRep::Integer(2)),
-                ])]),
-                PyRep::Bool(false),
-                PyRep::Integer(0),
-                PyRep::Real(0.0),
-            ],
-        )
-        .await
-        .expect("Sell Sleeper blue loot to NPC buy order");
-        let PyRep::KeyVal(sl_kv) = sell_sleeper else {
-            panic!("Expected KeyVal");
-        };
-        assert_eq!(sl_kv.get("filledImmediately"), Some(&PyRep::Bool(true)));
-        // 2 * 200,000 = 400,000 ISK gross; minus 7.5% sales tax (30,000 ISK) = 370,000 ISK net
-        let s1_bal_after_sleeper = ctx.db.get_character(90_000_001).unwrap().balance;
-        assert_eq!(
-            s1_bal_after_sleeper.0 - s1_bal_before_sleeper.0,
-            37_000_000
-        );
+
+        // Dock Pilot 1 in DB and session at Mastakomon V - CONCORD Bureau (dispatch_rpc reloads char location from DB).
+        s1.station_id = Some(CONCORD_SLEEPER_STATION_ID);
+        s1.solar_system_id = Some(CONCORD_SLEEPER_SYSTEM_ID);
+        s1.region_id = Some(THE_FORGE_REGION_ID);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = Some(CONCORD_SLEEPER_STATION_ID);
+                ch.solar_system_id = CONCORD_SLEEPER_SYSTEM_ID;
+                ch.region_id = THE_FORGE_REGION_ID;
+            }
+            snap.skills.entry(90_000_001).or_default().remove(&16622); // Accounting 0 -> 7.5% sales tax
+        });
+
+        // Sell each of the 4 Sleeper component types into the permanent NPC buy orders through normal matching + sales tax
+        for &(tid, price_isk, qty) in sleeper_cases {
+            let item_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.items.insert(
+                    id,
+                    InventoryItemRecord {
+                        item_id: id,
+                        type_id: tid,
+                        owner_id: 90_000_001,
+                        location_id: CONCORD_SLEEPER_STATION_ID,
+                        flag: InventoryFlag::Hangar,
+                        quantity: qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                id
+            });
+            let orders_book = rpc(&ctx, &mut s1, "marketProxy", "GetOrders", &[PyRep::Integer(tid as i64)])
+                .await
+                .expect("GetOrders for Sleeper loot");
+            let PyRep::Tuple(book_parts) = orders_book else {
+                panic!("Expected Tuple from GetOrders");
+            };
+            let buy_rows = book_parts[1].crowset_rows().expect("buy crowset rows");
+            assert!(
+                buy_rows.iter().any(|r| {
+                    r.dbrow_get("stationID").and_then(|v| v.as_i64()) == Some(CONCORD_SLEEPER_STATION_ID)
+                        && (r.dbrow_get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) - (price_isk as f64)).abs() < 1e-6
+                }),
+                "GetOrders({tid}) must expose permanent NPC buy order at CONCORD station {CONCORD_SLEEPER_STATION_ID} @ {price_isk} ISK"
+            );
+            assert!(
+                buy_rows.iter().all(|r| r.dbrow_get("stationID").and_then(|v| v.as_i64()) != Some(JITA_STATION_ID)),
+                "GetOrders({tid}) must not expose a Sleeper NPC buy order at Jita 4-4"
+            );
+
+            let bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
+            let sell_res = rpc(
+                &ctx,
+                &mut s1,
+                "marketProxy",
+                "PlaceMultiSellOrder",
+                &[
+                    PyRep::List(vec![PyRep::keyval([
+                        ("stationID", PyRep::Integer(CONCORD_SLEEPER_STATION_ID)),
+                        ("typeID", PyRep::Integer(tid as i64)),
+                        ("itemID", PyRep::Integer(item_id)),
+                        ("price", PyRep::Real(price_isk as f64)),
+                        ("quantity", PyRep::Integer(qty as i64)),
+                    ])]),
+                    PyRep::Bool(false),
+                    PyRep::Integer(0),
+                    PyRep::Real(0.0),
+                ],
+            )
+            .await
+            .expect("Sell Sleeper blue loot to NPC buy order");
+            let PyRep::KeyVal(sl_kv) = sell_res else {
+                panic!("Expected KeyVal");
+            };
+            assert_eq!(sl_kv.get("filledImmediately"), Some(&PyRep::Bool(true)));
+            let gross_cents = price_isk * (qty as i64) * 100;
+            let expected_tax_cents = (gross_cents * 75) / 1_000;
+            let expected_net_cents = gross_cents - expected_tax_cents;
+            let reported_tax = sl_kv.get("salesTaxISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            assert!(
+                (reported_tax - (expected_tax_cents as f64) / 100.0).abs() < 0.01,
+                "Expected 7.5% sales tax for {tid}, got {reported_tax}"
+            );
+            let bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
+            assert_eq!(bal_after.0 - bal_before.0, expected_net_cents);
+        }
+
+        // Repeat sells WITHOUT calling StartupCheck again and verify permanent NPC buy orders NEVER deplete
+        for &(tid, price_isk, rep_qty) in &[(30_744_u32, 200_000_i64, 5_i32), (30_747_u32, 5_000_000_i64, 2_i32)] {
+            let rep_item_id = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.items.insert(
+                    id,
+                    InventoryItemRecord {
+                        item_id: id,
+                        type_id: tid,
+                        owner_id: 90_000_001,
+                        location_id: CONCORD_SLEEPER_STATION_ID,
+                        flag: InventoryFlag::Hangar,
+                        quantity: rep_qty,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+                id
+            });
+            let bal_before = ctx.db.get_character(90_000_001).unwrap().balance;
+            let rep_res = rpc(
+                &ctx,
+                &mut s1,
+                "marketProxy",
+                "PlaceMultiSellOrder",
+                &[
+                    PyRep::List(vec![PyRep::keyval([
+                        ("stationID", PyRep::Integer(CONCORD_SLEEPER_STATION_ID)),
+                        ("typeID", PyRep::Integer(tid as i64)),
+                        ("itemID", PyRep::Integer(rep_item_id)),
+                        ("price", PyRep::Real(price_isk as f64)),
+                        ("quantity", PyRep::Integer(rep_qty as i64)),
+                    ])]),
+                    PyRep::Bool(false),
+                    PyRep::Integer(0),
+                    PyRep::Real(0.0),
+                ],
+            )
+            .await
+            .expect("Repeated Sleeper loot sell without StartupCheck");
+            assert_eq!(rep_res.dict_get("filledImmediately"), Some(&PyRep::Bool(true)));
+            let gross_cents = price_isk * (rep_qty as i64) * 100;
+            let expected_net_cents = gross_cents - ((gross_cents * 75) / 1_000);
+            let bal_after = ctx.db.get_character(90_000_001).unwrap().balance;
+            assert_eq!(bal_after.0 - bal_before.0, expected_net_cents);
+        }
+        ctx.db.with_snapshot(|snap| {
+            for &(tid, oid, full_vol) in &sleeper_order_ids {
+                let ord = snap.market_orders.get(&oid).expect("Sleeper NPC buy order must remain present");
+                assert_eq!(
+                    ord.vol_remaining, full_vol,
+                    "Permanent NPC buy order {oid} for Sleeper loot {tid} must never deplete"
+                );
+            }
+        });
+
+        // Restore Pilot 1 to Jita 4-4 (`60_003_760`, `30_000_142`) before remaining steps.
+        s1.station_id = Some(JITA_STATION_ID);
+        s1.solar_system_id = Some(JITA_SYSTEM_ID);
+        s1.region_id = Some(THE_FORGE_REGION_ID);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.station_id = Some(JITA_STATION_ID);
+                ch.solar_system_id = JITA_SYSTEM_ID;
+                ch.region_id = THE_FORGE_REGION_ID;
+            }
+        });
 
         // 3. 4-Significant-Figure Tick Size (`feat:market.tick-size-4-sig-figs`) & 5-Minute Cooldown + Relist Fee (`feat:market.order-modify-relist-fee`)
         let buy_res = rpc(
@@ -1311,12 +1480,37 @@ pub(crate) mod market_modify_relist_tick_size {
             .expect("Expired order must appear in GetMarketOrderHistory");
         assert_eq!(expired_row.get(11), Some(&PyRep::Integer(4))); // orderState 4 = Expired
 
-        // 7. Global PLEX (`44992`) Market (`feat:plex.market-trading`)
+        // 7. Global PLEX (`44992`) Market (`feat:market.plex-market`)
+        const AMARR_STATION_ID: i64 = 60_008_494;
+        const AMARR_SYSTEM_ID: u32 = 30_002_187;
+        const DOMAIN_REGION_ID: u32 = 10_000_043;
+        const SINQ_LAISON_REGION_ID: u32 = 10_000_032;
+        const JITA_SYSTEM_ID: u32 = 30_000_142;
+        const THE_FORGE_REGION_ID: u32 = 10_000_002;
+
         ctx.db.with_mut_snapshot(|snap| {
+            snap.market_orders.retain(|_, o| o.type_id != PLEX_TYPE_ID);
+            snap.market_history.retain(|(_, tid), _| *tid != PLEX_TYPE_ID);
+            snap.market_transactions.retain(|_, tx| tx.type_id != PLEX_TYPE_ID);
             let cur = snap.plex_vault_balance(90_000_001);
             snap.adjust_plex_vault(90_000_001, 500 - cur).expect("account PLEX vault");
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.balance = IskCents::from_isk(1_000_000_000);
+            }
+            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+                ch.station_id = Some(AMARR_STATION_ID);
+                ch.solar_system_id = AMARR_SYSTEM_ID;
+                ch.region_id = DOMAIN_REGION_ID;
+                ch.balance = IskCents::from_isk(1_000_000_000);
+            }
+            let cur2 = snap.plex_vault_balance(90_000_002);
+            snap.adjust_plex_vault(90_000_002, -cur2).expect("account PLEX vault");
         });
-        // Place global PLEX sell order for 100 PLEX at 5,100,000 ISK (4 sig figs)
+        s2.station_id = Some(AMARR_STATION_ID);
+        s2.solar_system_id = Some(AMARR_SYSTEM_ID);
+        s2.region_id = Some(DOMAIN_REGION_ID);
+
+        // Pilot 1 in The Forge places global PLEX sell order for 100 PLEX at 5,100,000 ISK (4 sig figs)
         let plex_sell = rpc(
             &ctx,
             &mut s1,
@@ -1336,26 +1530,38 @@ pub(crate) mod market_modify_relist_tick_size {
         let plex_oid = ps_kv.get("orderID").and_then(|v| v.as_i64()).unwrap();
         assert_eq!(ps_kv.get("plexRemainingVault"), Some(&PyRep::Integer(400)));
 
+        // Pilot 2 in Domain sees Pilot 1's The Forge PLEX order globally via GetPlexBest & GetPlexOrders
         let plex_best = rpc(&ctx, &mut s2, "marketProxy", "GetPlexBest", &[])
             .await
             .expect("GetPlexBest");
-        let PyRep::KeyVal(pb_kv) = plex_best else {
-            panic!("Expected KeyVal");
-        };
-        assert_eq!(pb_kv.get("typeID"), Some(&PyRep::Integer(PLEX_TYPE_ID as i64)));
-        assert!(pb_kv.get("bestAskPrice").and_then(|v| v.as_f64()).unwrap() > 0.0);
+        assert!(plex_best.is_cindexed_rowset(), "GetPlexBest must return CIndexedRowset");
+        let pb_entries = plex_best
+            .cindexed_rowset_entries()
+            .expect("GetPlexBest CIndexedRowset entries");
+        let pb_row = pb_entries
+            .iter()
+            .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+            .map(|(_, v)| v)
+            .expect("GetPlexBest must index by integer typeID 44992");
+        assert_eq!(pb_row.dbrow_get("typeID"), Some(&PyRep::Integer(PLEX_TYPE_ID as i64)));
+        assert_eq!(pb_row.dbrow_get("price"), Some(&PyRep::Real(5_100_000.0)));
+        assert_eq!(pb_row.dbrow_get("volRemaining"), Some(&PyRep::Real(100.0)));
+        assert_eq!(pb_row.dbrow_get("stationID"), Some(&PyRep::Integer(JITA_STATION_ID)));
 
         let plex_orders = rpc(&ctx, &mut s2, "marketProxy", "GetPlexOrders", &[])
             .await
             .expect("GetPlexOrders");
-        assert!(matches!(plex_orders, PyRep::Tuple(_)));
-
-        let plex_hist = rpc(&ctx, &mut s2, "marketProxy", "GetPlexHistory", &[])
-            .await
-            .expect("GetPlexHistory");
-        assert!(plex_hist.is_crowset());
-        let _ = rpc(&ctx, &mut s2, "marketProxy", "GetPlexNewPriceHistory", &[]).await.unwrap();
-        let _ = rpc(&ctx, &mut s2, "marketProxy", "GetPlexOldPriceHistory", &[]).await.unwrap();
+        let PyRep::Tuple(po_parts) = plex_orders else {
+            panic!("Expected Tuple from GetPlexOrders");
+        };
+        let po_sells = po_parts[0].crowset_rows().expect("GetPlexOrders sell rows");
+        let forge_ask = po_sells
+            .iter()
+            .find(|r| r.dbrow_get("orderID").and_then(|v| v.as_i64()) == Some(plex_oid))
+            .expect("Cross-region PLEX sell order must appear in GetPlexOrders");
+        assert_eq!(forge_ask.dbrow_get("stationID"), Some(&PyRep::Integer(JITA_STATION_ID)));
+        assert_eq!(forge_ask.dbrow_get("regionID"), Some(&PyRep::Integer(THE_FORGE_REGION_ID as i64)));
+        assert_eq!(forge_ask.dbrow_get("volRemaining"), Some(&PyRep::Integer(100)));
 
         // Backdate PLEX order issue_unix and modify via ModifyPlexCharOrder
         let plex_meta_nid = -(4_000_000_000_000_i64.saturating_add(plex_oid.abs()));
@@ -1381,20 +1587,11 @@ pub(crate) mod market_modify_relist_tick_size {
         };
         assert_eq!(mp_kv.get("newPrice"), Some(&PyRep::Real(5_200_000.0)));
 
-        // Global PLEX buy order from another station (`60_003_766`) matches globally and credits buyer's PLEX Vault
-        s2.station_id = Some(60_003_766);
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-                ch.station_id = Some(60_003_766);
-                ch.balance = IskCents::from_isk(1_000_000_000);
-            }
-            let cur = snap.plex_vault_balance(90_000_002);
-            snap.adjust_plex_vault(90_000_002, -cur).expect("account PLEX vault");
-        });
+        // Trade 1: Pilot 2 in Domain (Amarr) buys 40 PLEX matching Pilot 1's Jita sell order (`The Forge`)
         let plex_buy = rpc(&ctx, &mut s2, "marketProxy", "PlaceBuyOrder", &[
-            PyRep::Integer(60_003_766), PyRep::Integer(PLEX_TYPE_ID as i64), PyRep::Real(5_200_000.0),
+            PyRep::Integer(AMARR_STATION_ID), PyRep::Integer(PLEX_TYPE_ID as i64), PyRep::Real(5_200_000.0),
             PyRep::Integer(40), PyRep::Integer(32767), PyRep::Integer(1), PyRep::Integer(0), PyRep::Bool(false),
-        ]).await.expect("Global PLEX buy order");
+        ]).await.expect("Cross-region PLEX buy order from Domain");
         let PyRep::KeyVal(pbuy_kv) = plex_buy else { panic!("Expected KeyVal"); };
         assert_eq!(pbuy_kv.get("filledImmediately"), Some(&PyRep::Bool(true)));
         assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_002)), 40);
@@ -1403,9 +1600,207 @@ pub(crate) mod market_modify_relist_tick_size {
         });
         assert!(!plex_in_hangar, "Bought PLEX settles into the PLEX Vault, not the item hangar");
 
-        // Cancelling remaining 60 PLEX sell order returns 60 PLEX to seller's PLEX Vault (400 + 60 = 460)
+        // Trade 2: Pilot 2 places resting PLEX buy order in Domain (Amarr) and Pilot 1 fills it from The Forge (Jita) via PlacePlexSellOrder
+        let bid_res = rpc(&ctx, &mut s2, "marketProxy", "PlaceBuyOrder", &[
+            PyRep::Integer(AMARR_STATION_ID), PyRep::Integer(PLEX_TYPE_ID as i64), PyRep::Real(5_000_000.0),
+            PyRep::Integer(10), PyRep::Integer(32767), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false),
+        ]).await.expect("Resting PLEX buy order in Domain");
+        assert_eq!(bid_res.dict_get("filledImmediately"), Some(&PyRep::Bool(false)));
+
+        let best_with_bid = rpc(&ctx, &mut s1, "marketProxy", "GetPlexBest", &[])
+            .await
+            .expect("GetPlexBest with cross-region bid");
+        assert!(best_with_bid.is_cindexed_rowset());
+        let ask_row = best_with_bid
+            .cindexed_rowset_entries()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k == &PyRep::Integer(PLEX_TYPE_ID as i64))
+            .map(|(_, v)| v)
+            .expect("active PLEX ask still keyed by 44992");
+        assert_eq!(ask_row.dbrow_get("price"), Some(&PyRep::Real(5_200_000.0)));
+        assert_eq!(ask_row.dbrow_get("volRemaining"), Some(&PyRep::Real(60.0)));
+        let plex_orders_with_bid = rpc(&ctx, &mut s1, "marketProxy", "GetPlexOrders", &[])
+            .await
+            .expect("GetPlexOrders with cross-region bid");
+        let PyRep::Tuple(pwb_parts) = plex_orders_with_bid else { panic!("Expected Tuple"); };
+        let bid_rows = pwb_parts[1].crowset_rows().expect("PLEX bid rows");
+        assert_eq!(bid_rows.len(), 1);
+        assert_eq!(bid_rows[0].dbrow_get("price"), Some(&PyRep::Real(5_000_000.0)));
+        assert_eq!(bid_rows[0].dbrow_get("volRemaining"), Some(&PyRep::Integer(10)));
+
+        let sell_into_domain_bid = rpc(
+            &ctx,
+            &mut s1,
+            "marketProxy",
+            "PlacePlexSellOrder",
+            &[PyRep::Real(5_000_000.0), PyRep::Integer(10), PyRep::Integer(90)],
+        )
+        .await
+        .expect("PlacePlexSellOrder filling cross-region Domain bid");
+        assert_eq!(sell_into_domain_bid.dict_get("filledImmediately"), Some(&PyRep::Bool(true)));
+        assert_eq!(sell_into_domain_bid.dict_get("plexRemainingVault"), Some(&PyRep::Integer(390)));
+        assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_002)), 50);
+
+        // Query GetPlexHistory, GetPlexNewPriceHistory, GetPlexOldPriceHistory, and GetOld/NewPriceHistory(PLEX)
+        // AFTER trades across The Forge, Domain, a persisted 3rd character in Sinq Laison (0 local PLEX trades),
+        // and an authenticated session with region=None (`character_id == None`).
+        let (sinq_station_id, sinq_system_id) = ctx
+            .sde
+            .stations
+            .values()
+            .find(|st| st.region_id == SINQ_LAISON_REGION_ID)
+            .map(|st| (st.station_id, st.solar_system_id))
+            .expect("Sinq Laison station in SDE");
+        let uid3 = ctx.db.provision_player_account("pilot3", "pilot3-secret");
+        let _uid_noreg = ctx.db.provision_player_account("pilot_noreg", "pilot_noreg-secret");
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut ch3 = snap.characters[&90_000_001].clone();
+            ch3.character_id = 90_000_003;
+            ch3.user_id = uid3;
+            ch3.name = "Sinq Laison Trader".into();
+            ch3.station_id = Some(sinq_station_id);
+            ch3.home_station_id = sinq_station_id;
+            ch3.solar_system_id = sinq_system_id;
+            ch3.region_id = SINQ_LAISON_REGION_ID;
+            ch3.active_ship_id = 100_000_003;
+            snap.characters.insert(90_000_003, ch3);
+            snap.items.insert(
+                100_000_003,
+                InventoryItemRecord {
+                    item_id: 100_000_003,
+                    type_id: 670, // Capsule
+                    owner_id: 90_000_003,
+                    location_id: sinq_station_id,
+                    flag: InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        let mut s_third = setup_pilot(&ctx, 103, "pilot3", "pilot3-secret", 90_000_003).await;
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
+
+        let mut s_no_reg = SessionState::new(104);
+        common::login_pilot(&ctx, &mut s_no_reg, "pilot_noreg", "pilot_noreg-secret").await;
+        assert_eq!(s_no_reg.character_id, None);
+        assert_eq!(s_no_reg.region_id, None);
+
+        let expected_avg_plex = ((40.0 * 5_200_000.0) + (10.0 * 5_000_000.0)) / 50.0; // 5_160_000.0
+        for caller in [&mut s1, &mut s2, &mut s_third, &mut s_no_reg] {
+            for method in [
+                "GetPlexOldPriceHistory",
+                "GetOldPriceHistory",
+            ] {
+                let args: Vec<PyRep> = if method == "GetOldPriceHistory" {
+                    vec![PyRep::Integer(PLEX_TYPE_ID as i64)]
+                } else {
+                    vec![]
+                };
+                let old_rep = rpc(&ctx, caller, "marketProxy", method, &args)
+                    .await
+                    .unwrap_or_else(|e| panic!("{method} must succeed globally: {e:?}"));
+                assert!(old_rep.is_crowset(), "{method} must return CRowset");
+                assert!(
+                    old_rep.crowset_rows().expect("old PLEX rows").is_empty(),
+                    "{method} must not return same-day trades"
+                );
+            }
+            for method in [
+                "GetPlexHistory",
+                "GetPlexNewPriceHistory",
+                "GetNewPriceHistory",
+            ] {
+                let args: Vec<PyRep> = if method == "GetNewPriceHistory" {
+                    vec![PyRep::Integer(PLEX_TYPE_ID as i64)]
+                } else {
+                    vec![]
+                };
+                let hist_rep = rpc(&ctx, caller, "marketProxy", method, &args)
+                    .await
+                    .unwrap_or_else(|e| panic!("{method} must succeed globally: {e:?}"));
+                let hist_crowset = if method == "GetPlexHistory" {
+                    let PyRep::Dict(entries) = hist_rep else {
+                        panic!("GetPlexHistory must return Dict {{typeID: (old, new)}}");
+                    };
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].0, PyRep::Integer(PLEX_TYPE_ID as i64));
+                    let PyRep::Tuple(mut parts) = entries.into_iter().next().unwrap().1 else {
+                        panic!("GetPlexHistory entry must be (old, new) Tuple");
+                    };
+                    assert_eq!(parts.len(), 2);
+                    assert!(parts[0].crowset_rows().expect("old crowset").is_empty());
+                    parts.swap_remove(1)
+                } else {
+                    assert!(hist_rep.is_crowset(), "{method} must return CRowset");
+                    hist_rep
+                };
+                let h_rows = hist_crowset.crowset_rows().expect("PLEX history rows");
+                assert_eq!(
+                    h_rows.len(),
+                    1,
+                    "{method} must aggregate global PLEX trades across regions into 1 daily row"
+                );
+                let row = &h_rows[0];
+                assert!(row.dbrow_get("historyDate").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+                assert_eq!(row.dbrow_get("lowPrice"), Some(&PyRep::Real(5_000_000.0)));
+                assert_eq!(row.dbrow_get("highPrice"), Some(&PyRep::Real(5_200_000.0)));
+                let avg = row.dbrow_get("avgPrice").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                assert!(
+                    (avg - expected_avg_plex).abs() < 1e-4,
+                    "{method} avgPrice expected {expected_avg_plex}, got {avg}"
+                );
+                assert_eq!(row.dbrow_get("volume"), Some(&PyRep::Integer(50)));
+                assert_eq!(row.dbrow_get("orders"), Some(&PyRep::Integer(2)));
+            }
+        }
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
+        assert_eq!(s_no_reg.region_id, None);
+        let non_plex_noreg_err = rpc(
+            &ctx,
+            &mut s_no_reg,
+            "marketProxy",
+            "GetOldPriceHistory",
+            &[PyRep::Integer(TRITANIUM_TYPE_ID as i64)],
+        )
+        .await
+        .expect_err("GetOldPriceHistory(Tritanium) with region=None must fail with NoRegion");
+        assert_eq!(non_plex_noreg_err.code, "NoRegion");
+
+        let many_plex = rpc(
+            &ctx,
+            &mut s_third,
+            "marketProxy",
+            "GetHistoryForManyTypeIDs",
+            &[PyRep::List(vec![PyRep::Integer(PLEX_TYPE_ID as i64)])],
+        )
+        .await
+        .expect("GetHistoryForManyTypeIDs for PLEX from Sinq Laison");
+        assert_eq!(s_third.region_id, Some(SINQ_LAISON_REGION_ID));
+        let PyRep::Dict(many_entries) = many_plex else { panic!("Expected Dict"); };
+        let plex_many_rows = many_entries
+            .iter()
+            .find(|(k, _)| k.as_i64() == Some(PLEX_TYPE_ID as i64))
+            .and_then(|(_, v)| v.crowset_rows())
+            .expect("PLEX global history rows in GetHistoryForManyTypeIDs");
+        assert_eq!(plex_many_rows.len(), 1);
+        assert_eq!(plex_many_rows[0].dbrow_get("volume"), Some(&PyRep::Integer(50)));
+
+        // Restore Pilot 2 to Jita for subsequent steps and cancel remaining 60 PLEX sell order (390 + 60 = 450)
+        s2.station_id = Some(JITA_STATION_ID);
+        s2.solar_system_id = Some(JITA_SYSTEM_ID);
+        s2.region_id = Some(THE_FORGE_REGION_ID);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+                ch.station_id = Some(JITA_STATION_ID);
+                ch.solar_system_id = JITA_SYSTEM_ID;
+                ch.region_id = THE_FORGE_REGION_ID;
+            }
+        });
         rpc(&ctx, &mut s1, "marketProxy", "CancelCharOrder", &[PyRep::Integer(plex_oid)]).await.expect("Cancel PLEX sell order");
-        assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 460);
+        assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 450);
         assert!(
             !ctx.db.with_snapshot(|snap| snap.items.values().any(|i| i.owner_id == 90_000_001 && i.type_id == PLEX_TYPE_ID)),
             "Cancelled PLEX returns only to the PLEX Vault, not the hangar"
@@ -1753,42 +2148,32 @@ pub(crate) mod market_price_history_aggregates_empty {
             assert!((day.close_isk() - 6.00).abs() < 1e-4, "Close price must be latest trade price (6.00)");
         });
 
-        // 5. Verify marketProxy.GetOldPriceHistory returns authentic daily OHLC aggregate
+        // 5. Verify marketProxy.GetOldPriceHistory omits same-day trades (disjoint partition)
         let old_hist_after = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(TRITANIUM as i64)], &empty_kw, None)
             .await
             .expect("GetOldPriceHistory after trades");
         assert!(old_hist_after.is_crowset());
-        let rows_after = old_hist_after.crowset_rows().expect("crowset rows");
-        assert_eq!(rows_after.len(), 1, "Expected exactly 1 daily aggregate row");
-        let row = &rows_after[0];
-        let low_price = row.dbrow_get("lowPrice").and_then(|v| v.as_f64()).expect("lowPrice");
-        let high_price = row.dbrow_get("highPrice").and_then(|v| v.as_f64()).expect("highPrice");
-        let avg_price = row.dbrow_get("avgPrice").and_then(|v| v.as_f64()).expect("avgPrice");
-        let vol = row.dbrow_get("volume").and_then(|v| v.as_i64()).expect("volume");
-        let orders = row.dbrow_get("orders").and_then(|v| v.as_i64()).expect("orders");
+        assert!(
+            old_hist_after.crowset_rows().expect("crowset rows").is_empty(),
+            "Same-day trades must not appear in GetOldPriceHistory"
+        );
 
-        assert!((low_price - 4.00).abs() < 1e-4, "lowPrice must match executed low");
-        assert!((high_price - 6.00).abs() < 1e-4, "highPrice must match executed high");
+        // 6. Verify marketProxy.GetNewPriceHistory returns authentic today daily OHLC aggregate
         let expected_avg = 2800.0 / 600.0;
-        assert!((avg_price - expected_avg).abs() < 1e-4, "avgPrice must match volume-weighted average");
-        assert_eq!(vol, 600, "volume must match executed units");
-        assert_eq!(orders, 2, "orders must match executed order count");
-
-        // 6. Verify marketProxy.GetNewPriceHistory returns identical authentic aggregate
         let new_hist_after = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(TRITANIUM as i64)], &empty_kw, None)
             .await
             .expect("GetNewPriceHistory after trades");
         assert!(new_hist_after.is_crowset());
         let new_rows = new_hist_after.crowset_rows().expect("crowset rows");
-        assert_eq!(new_rows.len(), 1);
+        assert_eq!(new_rows.len(), 1, "Expected exactly 1 daily aggregate row");
         let new_row = &new_rows[0];
-        assert!((new_row.dbrow_get("lowPrice").unwrap().as_f64().unwrap() - 4.00).abs() < 1e-4);
-        assert!((new_row.dbrow_get("highPrice").unwrap().as_f64().unwrap() - 6.00).abs() < 1e-4);
-        assert!((new_row.dbrow_get("avgPrice").unwrap().as_f64().unwrap() - expected_avg).abs() < 1e-4);
-        assert_eq!(new_row.dbrow_get("volume").unwrap().as_i64().unwrap(), 600);
-        assert_eq!(new_row.dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
+        assert!((new_row.dbrow_get("lowPrice").unwrap().as_f64().unwrap() - 4.00).abs() < 1e-4, "lowPrice must match executed low");
+        assert!((new_row.dbrow_get("highPrice").unwrap().as_f64().unwrap() - 6.00).abs() < 1e-4, "highPrice must match executed high");
+        assert!((new_row.dbrow_get("avgPrice").unwrap().as_f64().unwrap() - expected_avg).abs() < 1e-4, "avgPrice must match volume-weighted average");
+        assert_eq!(new_row.dbrow_get("volume").unwrap().as_i64().unwrap(), 600, "volume must match executed units");
+        assert_eq!(new_row.dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "orders must match executed order count");
 
         // 7. Verify marketProxy.GetHistoryForManyTypeIDs
         let many_hist_after = ctx
@@ -1903,12 +2288,18 @@ pub(crate) mod market_price_history_aggregates_empty {
         assert_eq!(bm_kv.get("purchasedCount").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(bm_kv.get("totalQuantity").and_then(|v| v.as_i64()), Some(300));
 
-        // 3. Verify price history and market transactions after BuyMultipleItems
+        // 3. Verify price history and market transactions after BuyMultipleItems (today -> GetNewPriceHistory)
         let old_hist_bm = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
             .await
             .expect("GetOldPriceHistory after BuyMultipleItems");
-        let rows_bm = old_hist_bm.crowset_rows().expect("crowset rows");
+        assert!(old_hist_bm.crowset_rows().expect("old crowset rows").is_empty());
+
+        let new_hist_bm = ctx
+            .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
+            .await
+            .expect("GetNewPriceHistory after BuyMultipleItems");
+        let rows_bm = new_hist_bm.crowset_rows().expect("crowset rows");
         assert_eq!(rows_bm.len(), 1, "Expected 1 row after BuyMultipleItems");
         assert_eq!(rows_bm[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 300);
         assert_eq!(rows_bm[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 1);
@@ -1969,26 +2360,23 @@ pub(crate) mod market_price_history_aggregates_empty {
         let PyRep::KeyVal(mo_kv) = mod_res else { panic!("Expected KeyVal"); };
         assert_eq!(mo_kv.get("orderID").and_then(|v| v.as_i64()), Some(buy_oid));
 
-        // 6. Verify combined price history in GetOldPriceHistory and GetNewPriceHistory:
+        // 6. Verify partitioned price history in GetOldPriceHistory (empty today) and GetNewPriceHistory:
         // Volume was 300, now + 500 = 800; Orders was 1, now + 1 = 2; Average = 10.00 ISK
         let old_hist_mod = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
             .await
             .expect("GetOldPriceHistory after ModifyCharOrder");
-        let rows_mod = old_hist_mod.crowset_rows().expect("crowset rows");
-        assert_eq!(rows_mod.len(), 1, "Expected 1 aggregate row");
-        assert_eq!(rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800, "Volume must reflect BuyMultipleItems + ModifyCharOrder fills");
-        assert_eq!(rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "Orders count must be 2");
-        assert!((rows_mod[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
+        assert!(old_hist_mod.crowset_rows().expect("old crowset rows").is_empty());
 
         let new_hist_mod = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
             .await
             .expect("GetNewPriceHistory after ModifyCharOrder");
         let new_rows_mod = new_hist_mod.crowset_rows().expect("crowset rows");
-        assert_eq!(new_rows_mod.len(), 1);
-        assert_eq!(new_rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800);
-        assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
+        assert_eq!(new_rows_mod.len(), 1, "Expected 1 aggregate row");
+        assert_eq!(new_rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800, "Volume must reflect BuyMultipleItems + ModifyCharOrder fills");
+        assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "Orders count must be 2");
+        assert!((new_rows_mod[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
 
         ctx.db.with_snapshot(|snap| {
             let has_mod_tx = snap.market_transactions.values().any(|t| t.type_id == PYERITE && t.quantity == 500 && t.price.0 == 1_000);
@@ -2082,11 +2470,17 @@ pub(crate) mod market_price_history_aggregates_empty {
         assert_eq!(mso_kv.get("orderID").and_then(|v| v.as_i64()), Some(sell_oid));
         assert_eq!(mso_kv.get("escrowISK").and_then(|v| v.as_f64()), Some(0.0));
 
-        // Verify price history recorded fill @ 50.00 ISK for 400 units
-        let hist = ctx
+        // Verify price history recorded today's fill @ 50.00 ISK for 400 units in GetNewPriceHistory (and empty GetOldPriceHistory)
+        let old_hist = ctx
             .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(MEXALLON as i64)], &empty_kw, None)
             .await
             .expect("GetOldPriceHistory after sell order crossing");
+        assert!(old_hist.crowset_rows().expect("old crowset rows").is_empty());
+
+        let hist = ctx
+            .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(MEXALLON as i64)], &empty_kw, None)
+            .await
+            .expect("GetNewPriceHistory after sell order crossing");
         let rows = hist.crowset_rows().expect("crowset rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 400);
