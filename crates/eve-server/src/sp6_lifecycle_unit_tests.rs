@@ -853,3 +853,217 @@ async fn bf04_reconnect_stops_outbound_emergency_warp_and_delivers_set_state() {
         post_ball.mode
     );
 }
+
+fn decode_set_state_ship_ball(pyrep: &PyRep, ship_id: i64) -> eve_destiny::wire::DecodedBall {
+    let PyRep::List(entries) = pyrep else {
+        panic!("expected DoDestinyUpdate PyRep::List, got {pyrep:?}");
+    };
+    for entry in entries {
+        let PyRep::Tuple(stamped) = entry else {
+            continue;
+        };
+        let Some(PyRep::Tuple(action)) = stamped.get(1) else {
+            continue;
+        };
+        if action.first() != Some(&PyRep::String("SetState".into())) {
+            continue;
+        }
+        let Some(PyRep::Tuple(args)) = action.get(1) else {
+            panic!("expected SetState args tuple, got {action:?}");
+        };
+        let Some(PyRep::KeyVal(kv)) = args.first() else {
+            panic!("expected SetState KeyVal, got {args:?}");
+        };
+        let Some((_, PyRep::Bytes(state_bytes))) = kv.iter().find(|(k, _)| *k == "state") else {
+            panic!("expected SetState state bytes");
+        };
+        let (_, _, decoded) =
+            eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState state bytes");
+        return decoded
+            .into_iter()
+            .find(|b| b.id == ship_id)
+            .expect("ship ball present in SetState bytes");
+    }
+    panic!("SetState action missing from DoDestinyUpdate: {pyrep:?}");
+}
+
+#[tokio::test]
+async fn reconnect_mid_outbound_warp_redirects_cleanly_and_encodes_return_warp_set_state() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let orig_pos = DVec3::new(15_000_000_000.0, 0.0, 0.0);
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        snap.item_positions.insert(ch.active_ship_id, orig_pos.to_array());
+        ch.active_ship_id
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: orig_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    let _ = handle_character_logoff_or_disconnect_sync(&ctx, char_id)
+        .expect("disconnected ship hold");
+
+    // Step until outbound emergency warp leaves WarpPhase::Aligning (> 10 km from orig_pos),
+    // which previously caused set_mode() to fail with ShipAlreadyInWarp (#1454 / #1458).
+    let mut left_aligning = false;
+    for _ in 0..30 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(
+            b.mode,
+            MovementMode::Warp { phase, .. } if phase != eve_destiny::WarpPhase::Aligning
+        ) && b.position.distance(orig_pos) > 10_000.0
+        {
+            left_aligning = true;
+            break;
+        }
+    }
+    assert!(left_aligning, "outbound emergency warp must advance past Aligning phase");
+
+    reconnect_character_in_space_sync(&ctx, char_id).expect("reconnect mid-outbound emergency warp");
+
+    let (_, obs_evs, pyrep) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(
+        obs_evs.first(),
+        Some(&eve_destiny::DestinyEvent::SetState {
+            observer_ball_id: ship_id
+        }),
+        "reconnect must emit SetState at index 0 after clearing prior events and setting mode (#1458), got {obs_evs:?}"
+    );
+    assert_eq!(
+        obs_evs
+            .iter()
+            .filter(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !obs_evs
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { .. })),
+        "reconnect must not emit stale Stop before SetState (#1458), got {obs_evs:?}"
+    );
+    let wire_ball = decode_set_state_ship_ball(&pyrep, ship_id);
+    assert_eq!(
+        wire_ball.mode,
+        eve_destiny::wire::DST_BALL_WARP,
+        "SetState must encode DST_BALL_WARP return warp, never stale Stop (#1458)"
+    );
+    assert!(
+        wire_ball
+            .warp_destination
+            .is_some_and(|dest| dest.distance(orig_pos) < 1.0),
+        "SetState return warp must target orig_pos, got {:?}",
+        wire_ball.warp_destination
+    );
+    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert_eq!(
+        sys_handle.warp_provenance(ship_id),
+        Some(crate::system_actor::WarpProvenance::ReconnectReturnWarp)
+    );
+    let (_, post_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(
+        post_ball.mode,
+        MovementMode::Warp {
+            destination,
+            phase: eve_destiny::WarpPhase::Aligning,
+            ..
+        } if destination.distance(orig_pos) < 1.0
+    ));
+}
+
+#[tokio::test]
+async fn reconnect_without_existing_ball_queues_set_state_after_return_warp_mode() {
+    let ctx = test_ctx();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+    let orig_pos = DVec3::new(15_000_000_000.0, 0.0, 0.0);
+    let displaced_pos = orig_pos + DVec3::new(250_000.0, 0.0, 0.0);
+    let outbound_dest = orig_pos + DVec3::new(1_000_000_000.0, 0.0, 0.0);
+    let now_unix = ctx.now_unix();
+
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        let sid = ch.active_ship_id;
+        snap.item_positions.insert(sid, displaced_pos.to_array());
+        snap.sp6_lifecycle
+            .as_inner_mut()
+            .disconnected_ships
+            .insert(
+                char_id,
+                DisconnectedShipEntry {
+                    char_id,
+                    ship_id: sid,
+                    ship_type_id: 606,
+                    solar_system_id: sys_id,
+                    disconnected_at_unix: now_unix,
+                    remove_at_unix: now_unix + 60,
+                    emergency_warp_dest: Some(outbound_dest.to_array()),
+                    last_position: displaced_pos.to_array(),
+                    last_velocity: [0.0, 0.0, 0.0],
+                    removed_from_space: false,
+                    pre_warp_position: Some(orig_pos.to_array()),
+                },
+            );
+        sid
+    });
+
+    reconnect_character_in_space_sync(&ctx, char_id)
+        .expect("reconnect spawning missing ball must succeed");
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, obs_evs, pyrep) = sys_handle.drain_observer_updates(ship_id).await.unwrap();
+    assert_eq!(
+        obs_evs.first(),
+        Some(&eve_destiny::DestinyEvent::SetState {
+            observer_ball_id: ship_id
+        }),
+        "existing_ball == false reconnect must emit SetState at index 0 after return warp set_mode (#1458), got {obs_evs:?}"
+    );
+    assert_eq!(
+        obs_evs
+            .iter()
+            .filter(|e| matches!(e, eve_destiny::DestinyEvent::SetState { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        !obs_evs
+            .iter()
+            .any(|e| matches!(e, eve_destiny::DestinyEvent::Stop { .. })),
+        "existing_ball == false reconnect must not emit stale Stop (#1458), got {obs_evs:?}"
+    );
+    let wire_ball = decode_set_state_ship_ball(&pyrep, ship_id);
+    assert_eq!(wire_ball.mode, eve_destiny::wire::DST_BALL_WARP);
+    assert!(wire_ball
+        .warp_destination
+        .is_some_and(|dest| dest.distance(orig_pos) < 1.0));
+    assert!(ctx.return_warps.lock().unwrap().contains(&ship_id));
+    assert_eq!(
+        sys_handle.warp_provenance(ship_id),
+        Some(crate::system_actor::WarpProvenance::ReconnectReturnWarp)
+    );
+}
+

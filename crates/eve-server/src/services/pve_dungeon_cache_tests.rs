@@ -941,3 +941,635 @@ async fn unseeded_pochven_and_wormhole_mining_warp_validation() {
         })
     }));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agency_get_content_data_and_warp_prechecks_are_fail_closed_and_read_pure() {
+    let sde = shared_sde();
+    let ice_sys: SolarSystemId = 30_000_180;
+
+    let db = Arc::new(WorldRepository::new_empty());
+    let char_id = 90_099_180_i64;
+    db.provision_gm_account("agency_precheck", "pw", char_id, "AgencyPrecheck");
+    let (uid, ship_id) = db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).expect("char");
+        ch.solar_system_id = ice_sys;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let uid = ch.user_id;
+        let ship_id = ch.active_ship_id;
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = i64::from(ice_sys);
+        }
+        (uid, ship_id)
+    });
+
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde.clone(), db));
+    let ore_did = *ore_anomaly_instances_readonly(&ctx, ice_sys)
+        .keys()
+        .next()
+        .expect("ore anomaly dungeon for 30000180");
+    let sys_h = ctx.systems.get_or_spawn(ice_sys);
+    sys_h
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::ZERO,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await
+        .expect("spawn ball");
+
+    let kw = HashMap::new();
+    let mut unauth = SessionState::new(9910);
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut unauth,
+            "custom_agency_provider",
+            "get_content_data",
+            &[],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+    assert_eq!(
+        handle(
+            &ctx,
+            &mut unauth,
+            "custom_agency_provider",
+            "warp_to_content",
+            &[PyRep::keyval([(
+                "dungeonID",
+                PyRep::Integer(i64::from(ore_did)),
+            )])],
+            &kw,
+        )
+        .await
+        .expect("handled")
+        .unwrap_err()
+        .code,
+        "Unauthorized"
+    );
+
+    let mut sess = SessionState::new(9911);
+    sess.user_id = Some(uid);
+    sess.character_id = Some(char_id);
+    sess.solar_system_id = Some(ice_sys);
+    sess.ship_id = Some(ship_id);
+
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    let unseeded_content = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "get_content_data",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("unseeded get_content_data");
+    let PyRep::List(unseeded_items) = &unseeded_content else {
+        panic!("expected content list");
+    };
+    assert!(!unseeded_items.is_empty());
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
+    }));
+
+    let target = unseeded_items[0].clone();
+    let mining_target = PyRep::keyval([("dungeonID", PyRep::Integer(i64::from(ore_did)))]);
+
+    async fn assert_agency_warp_err_pure(
+        ctx: &ServerContext,
+        sess: &mut SessionState,
+        kw: &HashMap<String, PyRep>,
+        arg: PyRep,
+        expected_code: &str,
+    ) {
+        let (ep, cm) = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+        let err = handle(
+            ctx,
+            sess,
+            "custom_agency_provider",
+            "warp_to_content",
+            &[arg],
+            kw,
+        )
+        .await
+        .expect("handled")
+        .unwrap_err();
+        assert_eq!(err.code, expected_code);
+        assert_eq!(ctx.db.state_epoch(), ep);
+        assert_eq!(ctx.db.tx_commit_count(), cm);
+    }
+
+    // 1. Warp scrambler fails closed with zero DB seeding/mutation on both PvE and mining unseeded targets.
+    sys_h.set_warp_scramble_strength(ship_id, 2).await.unwrap();
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "WarpScrambled").await;
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, mining_target.clone(), "WarpScrambled")
+        .await;
+    sys_h.set_warp_scramble_strength(ship_id, 0).await.unwrap();
+
+    // 2. Warp disruption bubble fails closed with zero DB seeding/mutation.
+    sys_h
+        .add_warp_bubble(990_001, glam::DVec3::ZERO, 20_000.0)
+        .await
+        .unwrap();
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "WarpScrambled").await;
+    sys_h.remove_warp_bubble(990_001).await.unwrap();
+
+    // 3. Non-covert cloak fails closed with zero DB seeding/mutation.
+    sys_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = true;
+            cs.is_covert_cloak = false;
+            cs.gate_cloak_remaining_ticks = 0;
+        })
+        .await
+        .unwrap();
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "CloakedCannotWarp").await;
+    sys_h
+        .modify_combat_state(ship_id, |cs| {
+            cs.is_cloaked = false;
+        })
+        .await
+        .unwrap();
+
+    // 4. Active warp fails closed with zero DB seeding/mutation.
+    sys_h
+        .set_movement_mode(
+            ship_id,
+            eve_destiny::MovementMode::Warp {
+                origin: glam::DVec3::ZERO,
+                destination: glam::DVec3::new(1_000_000_000.0, 0.0, 0.0),
+                warp_speed_au_s: 5.0,
+                total_distance: 1_000_000_000.0,
+                phase: eve_destiny::WarpPhase::Accelerating,
+                elapsed_warp_time: 1.0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "ShipAlreadyInWarp").await;
+    let mut taken_ship = sys_h.take_ball(ship_id).await.expect("taken ship ball");
+    taken_ship.ball.mode = eve_destiny::MovementMode::Stop;
+    sys_h.restore_ball(taken_ship).await.unwrap();
+
+    // 5. Insufficient capacitor for minimum 150 km warp fails closed before DB seeding.
+    sys_h.set_capacitor(ship_id, 0.0).await.unwrap();
+    assert_agency_warp_err_pure(&ctx, &mut sess, &kw, target.clone(), "NotEnoughCapacitor").await;
+    sys_h.set_capacitor(ship_id, 300.0).await.unwrap();
+
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
+    }));
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.cosmic_anomalies.contains_key(&ice_sys)));
+
+    // 6. Active immobilizing module (Bastion 33400) fails closed before DB seeding.
+    let bastion_mod_id = 99_180_334_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            bastion_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: bastion_mod_id,
+                type_id: 33_400,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(bastion_mod_id);
+    });
+    assert_agency_warp_err_pure(
+        &ctx,
+        &mut sess,
+        &kw,
+        target.clone(),
+        eve_proto::UserErrorKey::WarpDisrupted.as_str(),
+    )
+    .await;
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        !reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
+    }));
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !s.cosmic_anomalies.contains_key(&ice_sys)));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.remove(&bastion_mod_id);
+        snap.items.remove(&bastion_mod_id);
+    });
+
+    // 7. Clearing all guards allows warp_to_content to seed and initiate warp, while get_content_data preserves output.
+    let warp_ok = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[target],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("warp_to_content succeeds once warpable");
+    assert_eq!(warp_ok, PyRep::None);
+    assert!(read_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.get(&ice_sys).copied().unwrap_or(false)
+    }));
+
+    let epoch_after_seed = ctx.db.state_epoch();
+    let commits_after_seed = ctx.db.tx_commit_count();
+    let seeded_content = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "get_content_data",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("seeded get_content_data");
+    assert_eq!(seeded_content, unseeded_content);
+    assert_eq!(ctx.db.state_epoch(), epoch_after_seed);
+    assert_eq!(ctx.db.tx_commit_count(), commits_after_seed);
+
+    sys_h
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await
+        .unwrap();
+    sys_h.set_capacitor(ship_id, 300.0).await.unwrap();
+    let mining_ok = handle(
+        &ctx,
+        &mut sess,
+        "custom_agency_provider",
+        "warp_to_content",
+        &[mining_target],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("mining warp_to_content succeeds once warpable");
+    assert_eq!(mining_ok, PyRep::None);
+    assert!(ctx.db.with_snapshot(|s| {
+        s.cosmic_anomalies
+            .get(&ice_sys)
+            .is_some_and(|list| list.iter().any(|a| a.anomaly_type == "OreAnomaly"))
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dungeon_instance_cache_mgr_docked_and_range_reads_are_read_pure_and_fail_closed() {
+    let sde = shared_sde();
+    let ice_sys: SolarSystemId = 30_000_180;
+    let fw_sys: SolarSystemId = 30_002_055;
+    let db = Arc::new(WorldRepository::new_empty());
+    db.with_mut_snapshot(|snap| {
+        snap.fw_system_occupations.insert(
+            fw_sys,
+            eve_db::snapshot_ext::FwSystemOccupationRecord {
+                solar_system_id: fw_sys,
+                owner_faction_id: 500_002,
+                occupier_faction_id: 500_002,
+                victory_points: 0,
+                victory_points_threshold: 75_000,
+            },
+        );
+    });
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    let kw = HashMap::new();
+
+    // Unauthenticated callers fail closed with zero DB writes on every getter including FW battlefield.
+    let mut unauth = SessionState::new(9920);
+    unauth.solar_system_id = Some(fw_sys);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    for meth in [
+        "GetFactionWarfareBattlefieldInstances",
+        "GetCombatAnomalyInstances",
+        "GetOreAnomalyInstances",
+        "GetIceBeltInstances",
+        "GetFactionWarfareInstances",
+        "GetSignatureInstances",
+    ] {
+        let err = handle(&ctx, &mut unauth, "dungeonInstanceCacheMgr", meth, &[], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, "Unauthorized", "{meth}");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes.is_empty()));
+
+    // Docked reads stay strictly read-pure while returning SDE-derived counts and instances.
+    let mut docked = SessionState::new(9921);
+    docked.user_id = Some(91);
+    docked.character_id = Some(90_099_181);
+    docked.solar_system_id = Some(ice_sys);
+    docked.station_id = Some(60_003_760);
+
+    let docked_combat = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetCombatAnomalyInstances");
+    let docked_combat_cnt = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomaliesCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetCombatAnomaliesCount");
+    let docked_ore = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetOreAnomalyInstances");
+    let docked_ore_cnt = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomaliesCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetOreAnomaliesCount");
+    let docked_ice = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetIceBeltInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetIceBeltInstances");
+    let docked_ice_cnt = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetIceBeltsCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetIceBeltsCount");
+    let PyRep::Dict(ref ice_cnt_entries) = docked_ice_cnt else {
+        panic!("expected dict for GetIceBeltsCount");
+    };
+    assert_eq!(
+        ice_cnt_entries.first().and_then(|(_, v)| v.as_i64()),
+        Some(1)
+    );
+    let _ = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetBulwarkMiningSiteCounts",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetBulwarkMiningSiteCounts");
+    let _ = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetSignatureInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetSignatureInstances");
+
+    // Docked FW / Homefront queries in occupied FW system must not materialize complexes.
+    docked.solar_system_id = Some(fw_sys);
+    let _ = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetFactionWarfareInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetFactionWarfareInstances");
+    assert!(handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetFactionWarfareBattlefieldInstances",
+        &[PyRep::Integer(i64::from(fw_sys))],
+        &kw,
+    )
+    .await
+    .is_none());
+    let _ = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetHomefrontSiteInstances",
+        &[PyRep::Integer(i64::from(fw_sys))],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("docked GetHomefrontSiteInstances");
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.db.with_snapshot(|s| s.fw_runtime.fw_complexes.is_empty()));
+
+    // Undocked GetOreAnomaliesCountInRange stays strictly read-pure across BFS neighbors.
+    let mut undocked = docked.clone();
+    undocked.station_id = None;
+    undocked.solar_system_id = Some(ice_sys);
+    let range_res = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomaliesCountInRange",
+        &[PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetOreAnomaliesCountInRange");
+    assert!(matches!(range_res, PyRep::Dict(ref d) if !d.is_empty()));
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.db.with_snapshot(|s| s.cosmic_anomalies.is_empty()));
+
+    // Undocked counts/instances match the read-only docked view.
+    let undocked_combat = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetCombatAnomalyInstances");
+    let undocked_combat_cnt = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetCombatAnomaliesCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetCombatAnomaliesCount");
+    let undocked_ore = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetOreAnomalyInstances");
+    let undocked_ore_cnt = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomaliesCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetOreAnomaliesCount");
+    let undocked_ice = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetIceBeltInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetIceBeltInstances");
+    let undocked_ice_cnt = handle(
+        &ctx,
+        &mut undocked,
+        "dungeonInstanceCacheMgr",
+        "GetIceBeltsCount",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("undocked GetIceBeltsCount");
+    assert_eq!(docked_combat, undocked_combat);
+    assert_eq!(docked_combat_cnt, undocked_combat_cnt);
+    assert_eq!(docked_ore_cnt, undocked_ore_cnt);
+    assert_eq!(docked_ice_cnt, undocked_ice_cnt);
+    let shape = |rep: &PyRep| -> std::collections::BTreeMap<i64, std::collections::BTreeMap<i64, usize>> {
+        let PyRep::Dict(systems) = rep else {
+            panic!("expected outer dict, got {rep:?}");
+        };
+        systems
+            .iter()
+            .map(|(sk, sv)| {
+                let PyRep::Dict(dungeons) = sv else {
+                    panic!("expected inner dict, got {sv:?}");
+                };
+                let inner = dungeons
+                    .iter()
+                    .map(|(dk, dv)| {
+                        let PyRep::List(ids) = dv else {
+                            panic!("expected id list, got {dv:?}");
+                        };
+                        (dk.as_i64().expect("dungeon id"), ids.len())
+                    })
+                    .collect();
+                (sk.as_i64().expect("system id"), inner)
+            })
+            .collect()
+    };
+    assert_eq!(shape(&docked_ore), shape(&undocked_ore));
+    assert_eq!(shape(&docked_ice), shape(&undocked_ice));
+
+    // Once seeded by in-space calls, subsequent docked reads return identical DB instance IDs purely.
+    let epoch_seeded = ctx.db.state_epoch();
+    let commits_seeded = ctx.db.tx_commit_count();
+    docked.solar_system_id = Some(ice_sys);
+    let docked_ore_seeded = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomalyInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("seeded docked GetOreAnomalyInstances");
+    let docked_ice_seeded = handle(
+        &ctx,
+        &mut docked,
+        "dungeonInstanceCacheMgr",
+        "GetIceBeltInstances",
+        &[],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("seeded docked GetIceBeltInstances");
+    assert_eq!(docked_ore_seeded, undocked_ore);
+    assert_eq!(docked_ice_seeded, undocked_ice);
+    assert_eq!(ctx.db.state_epoch(), epoch_seeded);
+    assert_eq!(ctx.db.tx_commit_count(), commits_seeded);
+}

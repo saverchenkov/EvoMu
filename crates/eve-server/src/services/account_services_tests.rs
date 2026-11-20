@@ -695,6 +695,267 @@ fn subscription_and_create_date_reads_do_not_mutate_db() {
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
 }
 
+#[test]
+fn subscription_get_subscription_time_is_read_pure_with_quasar_or_lapsed_state() {
+    let ctx = test_ctx();
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(
+        1_800_000_000,
+    )));
+    let kw = HashMap::new();
+
+    // Unauthenticated callers fail closed with zero DB mutations on account/subscription reads.
+    let mut unauth = SessionState::default();
+    let unauth_epoch = ctx.db.state_epoch();
+    let unauth_commits = ctx.db.tx_commit_count();
+    for (svc, meth) in [
+        ("userSvc", "GetCreateDate"),
+        ("subscriptionMgr", "GetSubscriptionTime"),
+        ("subscriptionMgr", "GetCloneGrade"),
+    ] {
+        let err = handle_inner(&ctx, &mut unauth, svc, meth, &[], &kw).unwrap_err();
+        assert_eq!(err.code, "Unauthorized", "{svc}.{meth}");
+    }
+    assert_eq!(ctx.db.state_epoch(), unauth_epoch);
+    assert_eq!(ctx.db.tx_commit_count(), unauth_commits);
+
+    let uid = 777_u64;
+    let cid = 90_777_001_i64;
+    let now = ctx.now_unix();
+    let future_exp = now + 7_200;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap
+            .characters
+            .get(&90_000_001)
+            .expect("base char")
+            .clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.name = "QuasarReadonly".into();
+        ch.clone_grade = 1;
+        ch.create_date_unix = 0;
+        snap.characters.insert(cid, ch);
+        snap.accounts.insert(
+            "quasar_readonly".into(),
+            AccountRecord {
+                user_id: uid,
+                username: "quasar_readonly".into(),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut qstore = crate::services::quasar_auth_user::QuasarIdentityStore::default();
+        qstore.omega_subscriptions.insert(uid, future_exp);
+        snap.owner_notes.insert(
+            -8_500_000_000_000_i64,
+            OwnerNoteRecord {
+                note_id: -8_500_000_000_000_i64,
+                character_id: 0,
+                item_id: 0,
+                label: "quasar".into(),
+                note: serde_json::to_string(&qstore).unwrap(),
+                timestamp_unix: now,
+            },
+        );
+    });
+
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    let _ = ctx.drain_notifications_for_char(cid);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    let expected_fallback_dt =
+        PyRep::Integer((1_700_000_000_i64 + 11_644_473_600) * 10_000_000);
+    assert_eq!(
+        handle_inner(&ctx, &mut sess, "userSvc", "GetCreateDate", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        expected_fallback_dt
+    );
+    assert_eq!(
+        handle_inner(&ctx, &mut sess, "userSvc", "GetCreateDate", &[], &kw)
+            .unwrap()
+            .unwrap(),
+        expected_fallback_dt
+    );
+
+    let expected_future_ft =
+        PyRep::Integer(((future_exp as i64) + 11_644_473_600) * 10_000_000);
+    assert_eq!(
+        handle_inner(
+            &ctx,
+            &mut sess,
+            "subscriptionMgr",
+            "GetSubscriptionTime",
+            &[],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        expected_future_ft
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.characters.get(&cid).expect("char").clone_grade,
+            1
+        );
+        let st = load_store(snap);
+        assert!(!st.subscription_expiry.contains_key(&uid));
+        assert!(!st.account_create_date.contains_key(&uid));
+    });
+
+    // Lapsed Omega in Quasar store with un-synced grade-2 DB char must still read Alpha without mutating DB.
+    let past_exp = now.saturating_sub(60);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&cid) {
+            ch.clone_grade = 2;
+        }
+        let mut qstore = crate::services::quasar_auth_user::QuasarIdentityStore::default();
+        qstore.omega_subscriptions.insert(uid, past_exp);
+        snap.owner_notes.insert(
+            -8_500_000_000_000_i64,
+            OwnerNoteRecord {
+                note_id: -8_500_000_000_000_i64,
+                character_id: 0,
+                item_id: 0,
+                label: "quasar".into(),
+                note: serde_json::to_string(&qstore).unwrap(),
+                timestamp_unix: now,
+            },
+        );
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let epoch1 = ctx.db.state_epoch();
+    let commits1 = ctx.db.tx_commit_count();
+    assert_eq!(
+        handle_inner(
+            &ctx,
+            &mut sess,
+            "subscriptionMgr",
+            "GetSubscriptionTime",
+            &[],
+            &kw
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::None
+    );
+    assert_eq!(ctx.db.state_epoch(), epoch1);
+    assert_eq!(ctx.db.tx_commit_count(), commits1);
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|snap| snap.characters.get(&cid).expect("char").clone_grade),
+        2
+    );
+}
+
+#[test]
+fn trash_and_reverse_redeem_tokens_precheck_before_mutating_store() {
+    let ctx = test_ctx();
+    let uid = 1_u64;
+    let cid = 90_000_001_i64;
+    let mut sess = auth_session(uid, cid, 98_000_001, 30_000_142);
+    let kw = HashMap::new();
+
+    let (tok1, tok2) = ctx.db.with_mut_snapshot(|snap| {
+        let t1 = enqueue_redeem_token_in_snapshot(
+            snap,
+            uid,
+            587,
+            1,
+            "Rifter".into(),
+            None,
+            None,
+        );
+        let t2 = enqueue_redeem_token_in_snapshot(
+            snap,
+            uid,
+            34,
+            100,
+            "Tritanium".into(),
+            None,
+            None,
+        );
+        (t1, t2)
+    });
+    let _ = ctx.drain_notifications_for_char(cid);
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    for meth in ["TrashRedeemTokens", "ReverseRedeem"] {
+        assert_eq!(
+            handle_inner(&ctx, &mut sess, "userSvc", meth, &[PyRep::List(vec![])], &kw)
+                .unwrap()
+                .unwrap(),
+            PyRep::Bool(false)
+        );
+        assert_eq!(
+            handle_inner(
+                &ctx,
+                &mut sess,
+                "userSvc",
+                meth,
+                &[PyRep::List(vec![PyRep::Integer(tok1 + 99_999)])],
+                &kw,
+            )
+            .unwrap()
+            .unwrap(),
+            PyRep::Bool(false)
+        );
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx.drain_notifications_for_char(cid).is_empty());
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| load_store(s).redeem_tokens.get(&uid).map(|v| v.len())),
+        Some(2)
+    );
+
+    assert_eq!(
+        handle_inner(
+            &ctx,
+            &mut sess,
+            "userSvc",
+            "TrashRedeemTokens",
+            &[PyRep::List(vec![PyRep::Integer(tok1)])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| load_store(s).redeem_tokens.get(&uid).map(|v| v.len())),
+        Some(1)
+    );
+
+    assert_eq!(
+        handle_inner(
+            &ctx,
+            &mut sess,
+            "userSvc",
+            "ReverseRedeem",
+            &[PyRep::List(vec![PyRep::Integer(tok2)])],
+            &kw,
+        )
+        .unwrap()
+        .unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        ctx.db
+            .with_snapshot(|s| load_store(s).redeem_tokens.get(&uid).map(|v| v.len())),
+        Some(0)
+    );
+}
+
 #[cfg(test)]
 #[path = "account_services_extra_unit_tests.rs"]
 mod account_services_extra_unit_tests;

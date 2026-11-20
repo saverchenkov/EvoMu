@@ -696,6 +696,17 @@ pub(crate) struct SystemActorState {
     pub(crate) broadcast_seq_gate: Arc<std::sync::Mutex<u64>>,
 }
 
+/// Pre-cleanup runtime `CombatState` flags preserved across DB-preserving `TakeBall`
+/// so `RestoreBall` restores exact origin-actor state (`#1237`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TakenBallPreCleanupCombatFlags {
+    pub rah_armor_resonance: Option<[f64; 4]>,
+    pub is_covert_cloak: bool,
+    pub cloak_stabilization_remaining_s: f64,
+    pub decloak_targeting_delay_remaining_s: f64,
+    pub cloak_velocity_multiplier: Option<f64>,
+}
+
 /// Atomic snapshot of a ball removed from a solar system (`#842`, `#917` E-2).
 #[derive(Debug, Clone)]
 pub struct TakenBall {
@@ -704,6 +715,8 @@ pub struct TakenBall {
     pub combat_state: Option<CombatState>,
     pub slim_meta: Option<SlimItemMeta>,
     pub cycles_cleared: usize,
+    pub removed_own_cycles: Vec<ActiveModuleCycle>,
+    pub pre_cleanup_combat_flags: Option<TakenBallPreCleanupCombatFlags>,
 }
 
 /// Result of non-blocking [`SystemHandle::try_repair_combat_state_sync`] (`#1167`).
@@ -734,6 +747,13 @@ pub enum SystemCommand {
         ball: Ball,
         combat_state: CombatState,
         slim_meta: SlimItemMeta,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    SpawnBallWithMetaTagged {
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+        spawn_token: u64,
         reply: oneshot::Sender<Result<u64, String>>,
     },
     ChangeSlimItem {
@@ -788,6 +808,12 @@ pub enum SystemCommand {
         ball_id: BallId,
         reply: oneshot::Sender<Option<Ball>>,
     },
+    /// Atomically removes `ball_id` only when its active spawn token matches `spawn_token`.
+    RemoveBallIfToken {
+        ball_id: BallId,
+        spawn_token: u64,
+        reply: oneshot::Sender<Option<Ball>>,
+    },
     AcceptDocking {
         ship_id: BallId,
         station_id: BallId,
@@ -797,9 +823,15 @@ pub enum SystemCommand {
     TakeBall {
         ball_id: BallId,
         accept_docking_target: Option<(BallId, DVec3)>,
+        preserve_db_active_states: bool,
         reply: oneshot::Sender<Option<TakenBall>>,
     },
     RestoreBall {
+        taken: TakenBall,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
+    /// Atomically restores `taken` only when `taken.ball.id` is absent from `ballpark.balls`.
+    RestoreBallIfAbsent {
         taken: TakenBall,
         reply: oneshot::Sender<Result<u64, String>>,
     },
