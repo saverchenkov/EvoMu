@@ -1519,7 +1519,7 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
     session.solar_system_id = Some(30_000_142);
     session.ship_id = Some(100_000_001);
 
-    let mut sys_rx = ctx.systems.get_or_spawn(30_000_142).subscribe();
+    let mut sys_rx = Some(ctx.systems.get_or_spawn(30_000_142).subscribe());
     let mut notify_rx = ctx.notify_tx.subscribe();
     let mut subscribed_sys_id = Some(30_000_142);
     let mut wire_state = crate::outbound_sequencer::SessionWireState::new(sid, 1_000_000_000_001);
@@ -1957,7 +1957,8 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
     stale_session.character_id = Some(char_id);
     stale_session.solar_system_id = Some(30_000_142);
 
-    let (_sys_tx, mut sys_rx) = tokio::sync::broadcast::channel(4);
+    let (_sys_tx, raw_sys_rx) = tokio::sync::broadcast::channel(4);
+    let mut sys_rx = Some(raw_sys_rx);
     let mut notify_rx = ctx.notify_tx.subscribe();
     let mut subscribed_sys_id = Some(30_000_142);
     let mut wire_state = crate::outbound_sequencer::SessionWireState::new(stale_sid, 1_000_000_000_001);
@@ -1971,7 +1972,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
         ctx: &ServerContext,
         char_id: i64,
         session: &mut SessionState,
-        sys_rx: &mut tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>,
+        sys_rx: &mut Option<tokio::sync::broadcast::Receiver<crate::system_actor::TickBroadcast>>,
         notify_rx: &mut tokio::sync::broadcast::Receiver<(
             i64,
             crate::router::PendingMachoNotification,
@@ -3355,4 +3356,478 @@ async fn test_1434_self_gm_advance_clock_wire_delivers_safe_logoff_without_remov
     )
     .await;
     assert_eq!(charsel_rsp.packet_type, MachoPacketType::CallRsp);
+}
+
+async fn test_1237_ping_sync(s: &mut TcpStream, client_id: u64, user_id: u64, call_id: u64) -> Vec<MachoPacket> {
+    write_framed_pyrep(s, &test_1386_make_ping(client_id, user_id, call_id).to_pyrep())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(s))
+            .await
+            .expect("timed out waiting for PingRsp")
+            .expect("read error waiting for PingRsp")
+            .expect("socket closed before PingRsp");
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode packet during Ping sync");
+        if pkt.packet_type == MachoPacketType::PingRsp {
+            return seen;
+        }
+        seen.push(pkt);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1237_preauth_and_charsel_connections_do_not_load_or_subscribe_jita() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx.db.provision_player_account("preauth_u1", "pw1");
+    ctx.db.provision_player_account("preauth_u2", "pw2");
+    let jita_id = 30_000_142_u32;
+
+    assert!(
+        !ctx.systems.is_system_loaded(jita_id),
+        "fresh ServerContext must not pre-load Jita"
+    );
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+
+    // 1. Pre-auth TCP connection advancing into the main select! loop must NOT load Jita.
+    let mut preauth_s = TcpStream::connect(addr).await.unwrap();
+    let _hello = read_framed_pyrep(&mut preauth_s).await.unwrap().unwrap();
+    write_framed_pyrep(&mut preauth_s, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(&mut preauth_s, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let cc = read_framed_pyrep(&mut preauth_s).await.unwrap().unwrap();
+    assert_eq!(cc.as_str(), Some("OK CC"));
+    assert!(
+        !ctx.systems.is_system_loaded(jita_id),
+        "HP-10: pre-auth Macho TCP connection must NOT spawn or subscribe to Jita"
+    );
+
+    // 2. Authenticated connection at character selection must NOT load Jita.
+    let (mut charsel_s, client_id, user_id) =
+        connect_and_authenticate(addr, "preauth_u1", "pw1").await;
+    let _ = test_1237_ping_sync(&mut charsel_s, client_id, user_id, 1).await;
+    assert!(
+        !ctx.systems.is_system_loaded(jita_id),
+        "HP-10: authenticated charsel connection must NOT spawn or subscribe to Jita"
+    );
+
+    // 3. Once Jita IS loaded and hibernated, new pre-auth & charsel connections keep
+    //    receiver_count() == 0 and do not wake Jita from LOD-0 hibernation.
+    let jita = ctx.systems.get_or_spawn(jita_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert_eq!(jita.event_tx.receiver_count(), 0);
+    assert!(
+        jita.is_hibernated(),
+        "empty Jita with zero subscribers must hibernate after step"
+    );
+
+    let mut preauth_s2 = TcpStream::connect(addr).await.unwrap();
+    let _hello2 = read_framed_pyrep(&mut preauth_s2).await.unwrap().unwrap();
+    write_framed_pyrep(&mut preauth_s2, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(&mut preauth_s2, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let cc2 = read_framed_pyrep(&mut preauth_s2).await.unwrap().unwrap();
+    assert_eq!(cc2.as_str(), Some("OK CC"));
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: pre-auth socket must not increment Jita tick receiver_count"
+    );
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: pre-auth socket must not wake hibernated Jita"
+    );
+
+    let (mut charsel_s2, client_id2, user_id2) =
+        connect_and_authenticate(addr, "preauth_u2", "pw2").await;
+    let _ = test_1237_ping_sync(&mut charsel_s2, client_id2, user_id2, 1).await;
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: charsel connection must not increment Jita tick receiver_count"
+    );
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: charsel connection must not wake hibernated Jita"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1237_selecting_docked_character_keeps_zero_subscribers_and_hibernated() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let jita_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let jita = ctx.systems.get_or_spawn(jita_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert_eq!(jita.event_tx.receiver_count(), 0);
+    assert!(jita.is_hibernated());
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+
+    let (sel_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: selecting a docked character must keep Jita tick receiver_count == 0"
+    );
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: selecting a docked character must keep Jita hibernated"
+    );
+
+    // Docked RPC and async character notification (`notify_rx`) must also keep receiver_count == 0.
+    let (cash_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "account",
+        "GetCashBalance",
+        vec![PyRep::Integer(0)],
+    )
+    .await;
+    assert_eq!(cash_rsp.packet_type, MachoPacketType::CallRsp);
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnAccountChange",
+        "charid",
+        vec![
+            PyRep::String("cash".into()),
+            PyRep::Integer(char_id),
+            PyRep::Real(1234.0),
+        ],
+    );
+    let _ = test_1237_ping_sync(&mut s, client_id, user_id, 3).await;
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: docked RPCs and notify_rx events must not attach a tick receiver"
+    );
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: docked session activity must not wake hibernated Jita"
+    );
+
+    // Keep 5 simultaneous docked sessions open in Jita and confirm receiver_count == 0 and LOD-0 hibernation.
+    let mut extra_docked_sessions = Vec::new();
+    for idx in 2_i64..=5_i64 {
+        let user = format!("docked_u{idx}");
+        let pass = format!("docked_pw{idx}");
+        let cid = 90_000_100 + idx;
+        let cname = format!("Docked Pilot {idx}");
+        ctx.db.provision_gm_account(&user, &pass, cid, &cname);
+        let (mut es, ecid, euid) = connect_and_authenticate(addr, &user, &pass).await;
+        let (esel_rsp, _) = test_1386_call_rpc(
+            &mut es,
+            ecid,
+            euid,
+            1,
+            "charUnboundMgr",
+            "SelectCharacterID",
+            vec![PyRep::Integer(cid)],
+        )
+        .await;
+        assert_eq!(esel_rsp.packet_type, MachoPacketType::CallRsp);
+        let (ecash_rsp, _) = test_1386_call_rpc(
+            &mut es,
+            ecid,
+            euid,
+            2,
+            "account",
+            "GetCashBalance",
+            vec![PyRep::Integer(0)],
+        )
+        .await;
+        assert_eq!(ecash_rsp.packet_type, MachoPacketType::CallRsp);
+        let _ = test_1237_ping_sync(&mut es, ecid, euid, 3).await;
+        extra_docked_sessions.push((es, ecid, euid));
+    }
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: 5 concurrent docked sessions in Jita must leave receiver_count == 0"
+    );
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: 5 concurrent docked sessions in Jita must keep LOD-0 hibernation engaged"
+    );
+    drop((s, extra_docked_sessions));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1237_undock_attaches_delivers_ticks_and_dock_immediately_detaches_for_hibernation() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let gm_char_id = 90_000_003_i64;
+    let jita_id = 30_000_142_u32;
+    ctx.db
+        .provision_gm_account("admin", "admin-secret", gm_char_id, "ISD Polaris");
+
+    let jita = ctx.systems.get_or_spawn(jita_id);
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert_eq!(jita.event_tx.receiver_count(), 0);
+    assert!(jita.is_hibernated());
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "admin", "admin-secret").await;
+
+    let (sel_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(gm_char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "docked GM character must have zero tick receivers before undock"
+    );
+
+    // Undocking attaches the solar-system tick receiver immediately.
+    let (undock_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        1,
+        "HP-10: undocking must attach tick receiver (receiver_count == 1)"
+    );
+    assert!(!jita.is_hibernated());
+
+    // Bind ballpark and verify live DoDestinyUpdate tick broadcast delivery on TCP wire.
+    let (bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(jita_id as i64), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        bind_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "MachoBindObject must deliver initial SetState DoDestinyUpdate"
+    );
+    assert_eq!(jita.event_tx.receiver_count(), 1);
+
+    let active_ship_id = ctx.db.get_character(gm_char_id).unwrap().active_ship_id;
+    jita.set_movement_mode(active_ship_id, eve_destiny::MovementMode::Stop)
+        .await
+        .unwrap();
+    let _ = jita.step_manual(1.0).await.unwrap();
+    let tick_packets = test_1237_ping_sync(&mut s, client_id, user_id, 4).await;
+    assert!(
+        tick_packets
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "HP-10: attached in-space session must receive live DoDestinyUpdate tick broadcasts"
+    );
+
+    // Advance past undock session-change timer and dock back at Jita 4-4.
+    let (adv_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        5,
+        "timeControl",
+        "AdvanceClock",
+        vec![PyRep::Integer(11)],
+    )
+    .await;
+    assert_eq!(adv_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (dock_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        6,
+        "stationSvc",
+        "Dock",
+        vec![PyRep::Integer(60_003_760)],
+    )
+    .await;
+    assert_eq!(dock_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: docking must immediately drop tick receiver (receiver_count == 0)"
+    );
+
+    // Next empty step in Jita must transition cleanly into LOD-0 hibernation.
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: Jita must hibernate after last in-space pilot docks"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1237_safe_logoff_to_charsel_from_space_immediately_drops_tick_receiver() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let gm_char_id = 90_000_003_i64;
+    let jita_id = 30_000_142_u32;
+    ctx.db
+        .provision_gm_account("admin", "admin-secret", gm_char_id, "ISD Polaris");
+
+    let jita = ctx.systems.get_or_spawn(jita_id);
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "admin", "admin-secret").await;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(gm_char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(jita_id as i64), PyRep::None],
+    )
+    .await;
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        1,
+        "in-space session must hold 1 tick receiver before SafeLogoff"
+    );
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "ship",
+        "SafeLogoff",
+        Vec::new(),
+    )
+    .await;
+    let _ = jita.step_manual(1.0).await.unwrap();
+    let _ = test_1237_ping_sync(&mut s, client_id, user_id, 5).await;
+
+    // Complete SafeLogoff via AdvanceClock(30) and wait for CallRsp + OnSafeLogoffActivated.
+    let adv_req = make_call_req(
+        client_id,
+        user_id,
+        6,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        vec![PyRep::Integer(30)],
+    );
+    write_framed_pyrep(&mut s, &adv_req.to_pyrep()).await.unwrap();
+    let mut got_call_rsp = false;
+    let mut got_safe_logoff = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(got_call_rsp && got_safe_logoff) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for SafeLogoff completion")
+            .expect("read error")
+            .expect("unexpected EOF");
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode packet");
+        match pkt.packet_type {
+            MachoPacketType::CallRsp => got_call_rsp = true,
+            MachoPacketType::Notification => {
+                if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                    if broadcast_id == "OnSafeLogoffActivated" {
+                        got_safe_logoff = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Synchronize with server loop (ensuring SafeLogoffCharsel teardown has completed).
+    let _ = test_1237_ping_sync(&mut s, client_id, user_id, 7).await;
+    assert_eq!(
+        jita.event_tx.receiver_count(),
+        0,
+        "HP-10: SafeLogoff to charsel from space must immediately drop tick receiver (receiver_count == 0)"
+    );
+
+    let _ = jita.step_manual(1.0).await.unwrap();
+    assert!(
+        jita.is_hibernated(),
+        "HP-10: Jita must hibernate once last in-space pilot completes SafeLogoff to charsel"
+    );
+
+    let (charsel_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        8,
+        "charUnboundMgr",
+        None,
+        "GetCharacterSelectionData",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(charsel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(jita.event_tx.receiver_count(), 0);
+    assert!(jita.is_hibernated());
 }
