@@ -2790,24 +2790,27 @@ def _stale_module_button_reason(node, sm=None):
 
 _BR_TAG_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
 _STR_VALUE_TYPES = (str, type(u""))
-_EXPLICIT_MODULE_SLOT_PREFIXES = (
-    "ModuleButton_",
-    "inFlightHighSlot",
-    "inFlightMediumSlot",
-    "inFlightLowSlot",
-    "hiSlot",
-    "medSlot",
-    "lowSlot",
+_EXPLICIT_MODULE_SLOT_PREFIXES_LOWER = (
+    "modulebutton_",
+    "inflighthighslot",
+    "inflightmediumslot",
+    "inflightlowslot",
+    "hislot",
+    "medslot",
+    "lowslot",
 )
 
 
 def _is_explicit_module_slot_or_id(token):
-    """Return True if token names a HUD slot key, ModuleButton_* widget, or numeric ID."""
+    """Return True if token names a HUD slot path/key, ModuleButton_* widget, or numeric ID."""
     if not token or len(token.split()) > 1:
         return False
-    if token.isdigit():
+    leaf = token.rsplit("/", 1)[-1].strip()
+    if not leaf:
+        return False
+    if leaf.isdigit():
         return True
-    return token.startswith(_EXPLICIT_MODULE_SLOT_PREFIXES)
+    return leaf.lower().startswith(_EXPLICIT_MODULE_SLOT_PREFIXES_LOWER)
 
 
 def _module_button_display_name(node):
@@ -5921,22 +5924,29 @@ def _execute_action(sm, action):
                         mb_cand = "ModuleButton_%s" % mod_target
                         if mb_cand not in candidates:
                             candidates.append(mb_cand)
+                    _leaf_target = mod_target.rsplit("/", 1)[-1].strip()
+                    _leaf_low = _leaf_target.lower()
                     _slot_prefixes = (
                         ("hiSlot", "inFlightHighSlot"),
                         ("medSlot", "inFlightMediumSlot"),
                         ("lowSlot", "inFlightLowSlot"),
                     )
                     for _short_p, _hud_p in _slot_prefixes:
-                        if mod_target.startswith(_short_p) and mod_target[len(_short_p):].isdigit():
-                            _hud_cand = "%s%d" % (_hud_p, int(mod_target[len(_short_p):]) + 1)
-                            if _hud_cand not in candidates:
-                                candidates.append(_hud_cand)
-                        elif mod_target.startswith(_hud_p) and mod_target[len(_hud_p):].isdigit():
-                            _idx = int(mod_target[len(_hud_p):])
+                        _short_low = _short_p.lower()
+                        _hud_low = _hud_p.lower()
+                        if _leaf_low.startswith(_short_low) and _leaf_low[len(_short_low):].isdigit():
+                            _idx = int(_leaf_low[len(_short_low):])
+                            for _cand in ("%s%d" % (_short_p, _idx), "%s%d" % (_hud_p, _idx + 1)):
+                                if _cand not in candidates:
+                                    candidates.append(_cand)
+                        elif _leaf_low.startswith(_hud_low) and _leaf_low[len(_hud_low):].isdigit():
+                            _idx = int(_leaf_low[len(_hud_low):])
+                            _cands = ["%s%d" % (_hud_p, _idx)]
                             if _idx >= 1:
-                                _short_cand = "%s%d" % (_short_p, _idx - 1)
-                                if _short_cand not in candidates:
-                                    candidates.append(_short_cand)
+                                _cands.append("%s%d" % (_short_p, _idx - 1))
+                            for _cand in _cands:
+                                if _cand not in candidates:
+                                    candidates.append(_cand)
                 elif mod_name_raw:
                     # Module display names (single- or multi-word, e.g. "Afterburner",
                     # "5MN Microwarpdrive I") are resolved via tiered hud_slot_buttons
@@ -5982,14 +5992,19 @@ def _execute_action(sm, action):
                             for ch in list(getattr(first_node, "children", []) or []):
                                 if hasattr(ch, "moduleinfo") or _safe_str(getattr(ch, "name", ""), 64).startswith("ModuleButton_"):
                                     matched_buttons.append(ch)
+                    cand_low = cand_name.lower()
                     for s_key, ch in hud_slot_buttons:
                         ch_name = _safe_str(getattr(ch, "name", ""), 64)
+                        ch_low = ch_name.lower()
+                        s_low = s_key.lower()
+                        rel_slot_btn = ("%s/%s" % (s_low, ch_low)) if ch_low else ""
                         minfo = getattr(ch, "moduleinfo", None)
                         m_type = str(getattr(minfo, "typeID", "") or "") if minfo is not None else ""
                         m_item = str(getattr(minfo, "itemID", "") or "") if minfo is not None else ""
                         if (
-                            ch_name == cand_name
-                            or s_key == cand_name
+                            ch_low == cand_low
+                            or s_low == cand_low
+                            or (rel_slot_btn and (cand_low == rel_slot_btn or cand_low.endswith("/" + rel_slot_btn)))
                             or (mod_target and (m_type == mod_target or m_item == mod_target))
                         ) and ch not in matched_buttons:
                             matched_buttons.append(ch)
@@ -6011,7 +6026,7 @@ def _execute_action(sm, action):
                     for s_key, ch in hud_slot_buttons:
                         ch_name = _safe_str(getattr(ch, "name", ""), 64)
                         disp_norm = " ".join(_module_button_display_name(ch).lower().split())
-                        if disp_norm == query_norm or ch_name.lower() == query_norm:
+                        if disp_norm == query_norm or ch_name.lower() == query_norm or s_key.lower() == query_norm:
                             tiered[0].append((s_key, ch))
                         elif len(query_norm) >= 3 and disp_norm.startswith(query_norm):
                             tiered[1].append((s_key, ch))

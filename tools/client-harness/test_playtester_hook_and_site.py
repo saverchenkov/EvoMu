@@ -2695,6 +2695,23 @@ class TestHookExecutionAndInclientHelpers(unittest.TestCase):
         self.assertTrue(btn_miner_offline.online)
         godma_lm.SetModuleOnline.assert_called_once_with(9001, 5006)
 
+        # /-qualified scene-graph HUD widget paths and lowercase slot keys must still resolve (REV-04).
+        res_full_path = run_activate("inflight/l_shipui/slotsContainer/inFlightMediumSlot1/ModuleButton_434")
+        self.assertTrue(res_full_path.get("ok"), res_full_path)
+        self.assertEqual(res_full_path.get("activated_slot"), "ModuleButton_434")
+
+        res_slot_path = run_activate("l_shipui/slotsContainer/inFlightHighSlot1")
+        self.assertTrue(res_slot_path.get("ok"), res_slot_path)
+        self.assertEqual(res_slot_path.get("activated_slot"), "ModuleButton_562")
+
+        res_lower_hud = run_activate("inflighthighslot1")
+        self.assertTrue(res_lower_hud.get("ok"), res_lower_hud)
+        self.assertEqual(res_lower_hud.get("activated_slot"), "ModuleButton_562")
+
+        res_lower_short = run_activate("medslot0")
+        self.assertTrue(res_lower_short.get("ok"), res_lower_short)
+        self.assertEqual(res_lower_short.get("activated_slot"), "ModuleButton_434")
+
     def test_type_text_on_quick_filter_waits_for_debounce_settle(self):
         hook = _load_hook_with_py2_stubs()
         captured_settle = []
