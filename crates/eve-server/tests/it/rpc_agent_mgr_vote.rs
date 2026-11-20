@@ -320,6 +320,12 @@ async fn test_vote_manager_cases_and_actions() {
                 if __mw.0 != 0 { __corp.set_division_balance(1, __mw); } else { __corp.ensure_wallet_divisions(); }
                 __corp },
         );
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&CANDIDATE_CEO) {
+            ch.corporation_id = corp_id;
+        }
     });
     sess.corporation_id = Some(corp_id);
 
@@ -562,8 +568,28 @@ async fn test_vote_manager_cases_and_actions() {
     );
 
     // Cross-corporation InsertVote & ActivateSanctionedAction must fail with CorpAccessDenied
-    let mut outsider_sess = setup_pilot(&ctx, 506, "other", "other-secret", CANDIDATE_CEO).await;
-    outsider_sess.corporation_id = Some(98_999_999);
+    const OUTSIDER_CHAR: i64 = 90_000_999;
+    const OUTSIDER_CORP: i64 = 98_999_999;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut outsider = snap.characters[&CANDIDATE_CEO].clone();
+        outsider.character_id = OUTSIDER_CHAR;
+        outsider.user_id = 999;
+        outsider.name = "Outsider Voter".into();
+        outsider.corporation_id = OUTSIDER_CORP;
+        snap.characters.insert(OUTSIDER_CHAR, outsider);
+        let mut ocorp = CorporationRecord::default();
+        ocorp.corporation_id = OUTSIDER_CORP;
+        ocorp.name = "Outsider Corp".into();
+        ocorp.ticker = "OUTS".into();
+        ocorp.ceo_id = OUTSIDER_CHAR;
+        ocorp.members = HashSet::from([OUTSIDER_CHAR]);
+        ocorp.member_roles = HashMap::from([(OUTSIDER_CHAR, u64::MAX)]);
+        snap.corporations.insert(OUTSIDER_CORP, ocorp);
+    });
+    let mut outsider_sess = SessionState::new(506);
+    outsider_sess.user_id = Some(999);
+    outsider_sess.character_id = Some(OUTSIDER_CHAR);
+    outsider_sess.corporation_id = Some(OUTSIDER_CORP);
     outsider_sess.corp_role = u64::MAX;
     let cross_vote_err = rpc(
         &ctx,
@@ -756,6 +782,12 @@ async fn test_r3_track4_agents_skills_corp_and_clones_regressions() {
         );
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.ensure_wallet_divisions();
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&CANDIDATE_CEO) {
+            ch.corporation_id = corp_id;
         }
         let gov = snap.corp_governance.entry(corp_id).or_default();
         gov.company_shares = 500;

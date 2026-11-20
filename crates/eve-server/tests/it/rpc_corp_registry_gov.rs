@@ -210,6 +210,16 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     assert!(!sh_list.contains(&PyRep::Integer(corp_id)), "corp treasury must be excluded");
 
     // 5b. Share-weighted voting: verify vote weighting uses transferred share distribution (PILOT_2 has 200 shares)
+    let p2_prev_corp = ctx.db.with_mut_snapshot(|snap| {
+        let prev = snap.characters.get(&PILOT_2).map(|c| c.corporation_id).unwrap_or(1_000_044);
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.insert(PILOT_2);
+        }
+        prev
+    });
     let opt_rows = vec![
         vec![PyRep::Integer(1), PyRep::String("Elect PILOT_2".into()), PyRep::Integer(PILOT_2)],
         vec![PyRep::Integer(2), PyRep::String("Reject".into()), PyRep::Integer(0)],
@@ -227,6 +237,14 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     sess_p2.corporation_id = Some(corp_id);
     let v_res = rpc(&ctx, &mut sess_p2, "voteManager", "InsertVote", &[PyRep::Integer(case_id), PyRep::Integer(1)]).await.expect("InsertVote");
     assert_eq!(field(&v_res, "weight"), PyRep::Integer(200), "vote weight must match shareholder's 200 shares");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.corporation_id = p2_prev_corp;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.members.remove(&PILOT_2);
+        }
+    });
 
     // 5c. Negative and zero share creation votes rejected
     let err_neg_shares = rpc(&ctx, &mut sess1, "voteManager", "InsertVoteCase", &[
@@ -313,8 +331,8 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
 
     // 6e. Negative test: Missing CEO/Director role fails with CorpRoleDenied
     let mut sess_unauth = SessionState::new(61_097);
-    sess_unauth.user_id = Some(3);
-    sess_unauth.character_id = Some(PILOT_3);
+    sess_unauth.user_id = Some(2);
+    sess_unauth.character_id = Some(PILOT_2);
     sess_unauth.corporation_id = Some(corp_id);
     let err_role = rpc(&ctx, &mut sess_unauth, "corpRegistry", "PayoutDividend", &[PyRep::Bool(true), PyRep::Real(10_000.0)]).await.unwrap_err();
     assert_eq!(err_role.code, "CorpRoleDenied");

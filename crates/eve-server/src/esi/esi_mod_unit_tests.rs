@@ -129,7 +129,27 @@ fn format_http_date_formats_epoch_and_leap_dates() {
     assert_eq!(format_http_date(1_700_000_000), "Tue, 14 Nov 2023 22:13:20 GMT");
 }
 
-#[tokio::test]
+async fn connect_esi_tcp(addr: std::net::SocketAddr) -> TcpStream {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return s,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+                ) && attempt < 4 =>
+            {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("TcpStream::connect({addr}) failed on attempt {attempt}: {e}"),
+        }
+    }
+    panic!("TcpStream::connect({addr}) timed out after retries: {last_err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
     let ctx = Arc::new(ServerContext::with_repository(Arc::new(
         eve_db::WorldRepository::with_demo_seed(),
@@ -150,13 +170,13 @@ async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
 
     // 2. Empty EOF connection returns cleanly
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         s.shutdown().await.unwrap();
     }
 
     // 3. Chunked Transfer-Encoding request body decoding
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         let raw_req = concat!(
             "POST /latest/universe/ids/ HTTP/1.1\r\n",
             "Host: 127.0.0.1\r\n",
@@ -177,7 +197,7 @@ async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
 
     // 4. Oversized Content-Length (> 2 MiB) returns 413 Payload Too Large
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         let raw_req = concat!(
             "POST /latest/universe/ids/ HTTP/1.1\r\n",
             "Host: 127.0.0.1\r\n",
@@ -193,7 +213,7 @@ async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
 
     // 5. Invalid Content-Length header returns 400 Bad Request
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         let raw_req = concat!(
             "POST /latest/universe/ids/ HTTP/1.1\r\n",
             "Host: 127.0.0.1\r\n",
@@ -209,7 +229,7 @@ async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
 
     // 6. Invalid chunk size returns 400 Bad Request
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         let raw_req = concat!(
             "POST /latest/universe/ids/ HTTP/1.1\r\n",
             "Host: 127.0.0.1\r\n",
@@ -226,7 +246,7 @@ async fn esi_server_tcp_roundtrip_chunked_and_error_guards() {
 
     // 7. Excessive header count (> 64) returns 400 Bad Request
     {
-        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut s = connect_esi_tcp(addr).await;
         let mut raw_req = String::from("GET /latest/status/ HTTP/1.1\r\n");
         for i in 0..70 {
             raw_req.push_str(&format!("X-Hdr-{i}: val\r\n"));

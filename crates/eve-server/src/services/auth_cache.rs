@@ -1394,6 +1394,9 @@ fn reconcile_skill_queue_after_set_skill(
         .get(&target_cid)
         .is_some_and(|q| !q.is_empty())
     {
+        if snap.skill_queues.contains_key(&target_cid) {
+            snap.skill_queues.remove(&target_cid);
+        }
         return false;
     }
     let train_mult = ctx.skill_training_multiplier();
@@ -1412,80 +1415,86 @@ fn reconcile_skill_queue_after_set_skill(
         .map(|m| m.iter().map(|(&k, v)| (k, v.level)).collect())
         .unwrap_or_default();
     let paused = snap.paused_skill_queues.contains(&target_cid);
-    let Some(queue) = snap.skill_queues.get_mut(&target_cid) else {
-        return false;
-    };
-    let prev_queue = queue.clone();
-    let prev_head = prev_queue.first().map(|e| (e.type_id, e.target_level));
-    queue.retain_mut(|q| {
-        if q.type_id == skill_id && lvl == 0 {
+    let (changed, remove_empty_queue) = {
+        let Some(queue) = snap.skill_queues.get_mut(&target_cid) else {
             return false;
-        }
-        if let Some(st) = ctx.sde.types.get(&q.type_id) {
-            for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
-                .into_iter()
-                .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
-            {
-                if let Some(&req_tid_f) = st.default_attributes.get(&req_attr) {
-                    let req_tid = req_tid_f as u32;
-                    if req_tid > 0 {
-                        let req_lvl = st
-                            .default_attributes
-                            .get(&req_lvl_attr)
-                            .copied()
-                            .unwrap_or(1.0)
-                            .max(1.0) as u8;
-                        let have_lvl = valid_next_lvl.get(&req_tid).copied().unwrap_or(0);
-                        if have_lvl < req_lvl {
-                            return false;
+        };
+        let prev_queue = queue.clone();
+        let prev_head = prev_queue.first().map(|e| (e.type_id, e.target_level));
+        queue.retain_mut(|q| {
+            if q.type_id == skill_id && lvl == 0 {
+                return false;
+            }
+            if let Some(st) = ctx.sde.types.get(&q.type_id) {
+                for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                    .into_iter()
+                    .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                {
+                    if let Some(&req_tid_f) = st.default_attributes.get(&req_attr) {
+                        let req_tid = req_tid_f as u32;
+                        if req_tid > 0 {
+                            let req_lvl = st
+                                .default_attributes
+                                .get(&req_lvl_attr)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(1.0) as u8;
+                            let have_lvl = valid_next_lvl.get(&req_tid).copied().unwrap_or(0);
+                            if have_lvl < req_lvl {
+                                return false;
+                            }
                         }
                     }
                 }
             }
-        }
-        if q.type_id == skill_id {
-            let expected_prev = valid_next_lvl.get(&skill_id).copied().unwrap_or(0);
-            if q.target_level <= lvl || q.target_level != expected_prev + 1 {
-                return false;
-            }
-            if q.target_level == lvl + 1 {
-                let new_start_sp = target_sp.min(q.end_sp);
-                if (q.start_sp - new_start_sp).abs() > 1e-6 {
-                    let old_needed = (q.end_sp - q.start_sp).max(1.0);
-                    q.start_sp = new_start_sp;
-                    q.duration_seconds = if let Some(attrs) = eff_attrs {
-                        crate::services::jump_clone_names::skill_queue_entry_duration_with_attrs(
-                            ctx,
-                            q.type_id,
-                            q.start_sp,
-                            q.end_sp,
-                            clone_grade,
-                            attrs,
-                            q.duration_seconds,
-                        )
-                    } else {
-                        q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
-                    };
-                    if q.started_at_unix.is_some() {
-                        q.started_at_unix = Some(now_unix);
+            if q.type_id == skill_id {
+                let expected_prev = valid_next_lvl.get(&skill_id).copied().unwrap_or(0);
+                if q.target_level <= lvl || q.target_level != expected_prev + 1 {
+                    return false;
+                }
+                if q.target_level == lvl + 1 {
+                    let new_start_sp = target_sp.min(q.end_sp);
+                    if (q.start_sp - new_start_sp).abs() > 1e-6 {
+                        let old_needed = (q.end_sp - q.start_sp).max(1.0);
+                        q.start_sp = new_start_sp;
+                        q.duration_seconds = if let Some(attrs) = eff_attrs {
+                            crate::services::jump_clone_names::skill_queue_entry_duration_with_attrs(
+                                ctx,
+                                q.type_id,
+                                q.start_sp,
+                                q.end_sp,
+                                clone_grade,
+                                attrs,
+                                q.duration_seconds,
+                            )
+                        } else {
+                            q.duration_seconds * (((q.end_sp - q.start_sp).max(0.0)) / old_needed)
+                        };
+                        if q.started_at_unix.is_some() {
+                            q.started_at_unix = Some(now_unix);
+                        }
                     }
                 }
             }
+            valid_next_lvl.insert(q.type_id, q.target_level);
+            true
+        });
+        let new_head = queue.first().map(|e| (e.type_id, e.target_level));
+        if new_head != prev_head {
+            if let Some(head) = queue.first_mut() {
+                head.started_at_unix = if paused { None } else { Some(now_unix) };
+            }
+        } else if !paused {
+            if let Some(head) = queue.first_mut() {
+                head.started_at_unix.get_or_insert(now_unix);
+            }
         }
-        valid_next_lvl.insert(q.type_id, q.target_level);
-        true
-    });
-    let new_head = queue.first().map(|e| (e.type_id, e.target_level));
-    if new_head != prev_head {
-        if let Some(head) = queue.first_mut() {
-            head.started_at_unix = if paused { None } else { Some(now_unix) };
-        }
-    } else if !paused {
-        if let Some(head) = queue.first_mut() {
-            head.started_at_unix.get_or_insert(now_unix);
-        }
+        (*queue != prev_queue, queue.is_empty())
+    };
+    if remove_empty_queue {
+        snap.skill_queues.remove(&target_cid);
     }
-    *queue != prev_queue
+    changed
 }
 
 /// Parses an optional `[me|self|<characterID>]` prefix token, validating explicit numeric

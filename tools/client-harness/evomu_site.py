@@ -1967,8 +1967,194 @@ def _install_inventory_transition_guard():
     return changed
 
 
+_FITTING_INT_TYPES = (
+    (int, getattr(__builtin__, "long")) if hasattr(__builtin__, "long") else (int,)
+)
+
+
+def _as_positive_ship_id(val):
+    if isinstance(val, _FITTING_INT_TYPES) and not isinstance(val, bool) and val > 0:
+        return val
+    return None
+
+
+def _is_simulated_fitting_controller(controller):
+    if controller is None:
+        return False
+    is_sim = getattr(controller, "IsSimulated", None)
+    if callable(is_sim):
+        try:
+            return bool(is_sim())
+        except Exception:
+            return False
+    return False
+
+
+def _resolve_fitting_dogma_location(controller=None):
+    if controller is not None:
+        get_dl = getattr(controller, "GetDogmaLocation", None)
+        if callable(get_dl):
+            try:
+                dl = get_dl()
+                if dl is not None:
+                    return dl
+            except Exception:
+                pass
+        dl = getattr(controller, "dogmaLocation", None)
+        if dl is not None:
+            return dl
+    sm = getattr(__builtin__, "sm", None)
+    if sm is not None and callable(getattr(sm, "IsServiceRunning", None)):
+        try:
+            if sm.IsServiceRunning("clientDogmaIM"):
+                cdi = sm.GetService("clientDogmaIM")
+                get_dl = getattr(cdi, "GetDogmaLocation", None)
+                if callable(get_dl):
+                    return get_dl()
+        except Exception:
+            pass
+    return None
+
+
+def _fitting_controller_ship_id(controller):
+    if controller is None:
+        return None
+    get_id = getattr(controller, "GetItemID", None)
+    if callable(get_id):
+        try:
+            ship_id = _as_positive_ship_id(get_id())
+            if ship_id is not None:
+                return ship_id
+        except Exception:
+            pass
+    return _as_positive_ship_id(getattr(controller, "_itemID", None))
+
+
+def _dogma_location_current_ship_id(dogma_loc):
+    if dogma_loc is None:
+        return None
+    get_cur = getattr(dogma_loc, "GetCurrentShipID", None)
+    if callable(get_cur):
+        try:
+            ship_id = _as_positive_ship_id(get_cur())
+            if ship_id is not None:
+                return ship_id
+        except Exception:
+            pass
+    return _as_positive_ship_id(getattr(dogma_loc, "shipID", None))
+
+
+def _snapshot_fitting_ship_ids(controller=None):
+    ship_ids = set()
+    if _is_simulated_fitting_controller(controller):
+        return ship_ids
+    dl = _resolve_fitting_dogma_location(controller)
+    for candidate in (
+        _fitting_controller_ship_id(controller),
+        _dogma_location_current_ship_id(dl),
+        _as_positive_ship_id(getattr(dl, "shipIDBeingDisembarked", None)) if dl is not None else None,
+        _as_positive_ship_id(_session_ship_id()),
+    ):
+        if candidate is not None:
+            ship_ids.add(candidate)
+    return ship_ids
+
+
+def _is_stale_ship_dogma_key_error(exc, controller=None, initial_ship_ids=None):
+    """Return True iff *exc* is a KeyError for an unloaded ship ID during a live ship swap (#1410)."""
+    if not isinstance(exc, KeyError) or not getattr(exc, "args", None):
+        return False
+    missing_key = _as_positive_ship_id(exc.args[0])
+    if missing_key is None:
+        return False
+    if _is_simulated_fitting_controller(controller):
+        return False
+
+    dl = _resolve_fitting_dogma_location(controller)
+    if dl is not None:
+        dogma_items = getattr(dl, "dogmaItems", None)
+        if dogma_items is not None and hasattr(dogma_items, "__contains__"):
+            try:
+                if missing_key in dogma_items:
+                    return False
+            except Exception:
+                pass
+
+    ctrl_ship = _fitting_controller_ship_id(controller)
+    dl_ship = _dogma_location_current_ship_id(dl)
+    disembarking_ship = (
+        _as_positive_ship_id(getattr(dl, "shipIDBeingDisembarked", None))
+        if dl is not None
+        else None
+    )
+    embarking_ship = (
+        _as_positive_ship_id(getattr(dl, "shipIDBeingEmbarked", None))
+        if dl is not None
+        else None
+    )
+    sess = getattr(__builtin__, "session", None)
+    sess_ship = _as_positive_ship_id(getattr(sess, "shipid", None)) if sess is not None else None
+
+    known_ship_ids = set(initial_ship_ids) if initial_ship_ids else set()
+    for cid in (ctrl_ship, disembarking_ship):
+        if cid is not None:
+            known_ship_ids.add(cid)
+
+    if missing_key not in known_ship_ids:
+        return False
+
+    is_switching = False
+    if dl is not None:
+        is_sw_fn = getattr(dl, "IsSwitchingShips", None)
+        if callable(is_sw_fn):
+            try:
+                is_switching = bool(is_sw_fn())
+            except Exception:
+                is_switching = False
+        if disembarking_ship is not None or embarking_ship is not None:
+            is_switching = True
+
+    if is_switching:
+        return True
+    if sess is not None and sess_ship != missing_key:
+        return True
+    if dl_ship is not None and dl_ship != missing_key:
+        return True
+    if ctrl_ship is not None and ctrl_ship != missing_key:
+        return True
+    return False
+
+
+def _make_fitting_panel_stale_ship_guard(orig_fn, controller_attr="controller"):
+    """Guard fitting panel stat refresh methods against unloaded stale ship KeyErrors (#1410)."""
+    orig_func = getattr(orig_fn, "__func__", orig_fn)
+
+    def _wrapped_fitting_panel_update(self, *args, **kwargs):
+        if getattr(self, "destroyed", False):
+            return None
+        controller = getattr(self, controller_attr, None)
+        initial_ship_ids = _snapshot_fitting_ship_ids(controller)
+        try:
+            return orig_func(self, *args, **kwargs)
+        except KeyError as exc:
+            live_controller = getattr(self, controller_attr, None) or controller
+            if _is_stale_ship_dogma_key_error(
+                exc,
+                controller=live_controller,
+                initial_ship_ids=initial_ship_ids,
+            ):
+                return None
+            raise
+
+    _wrapped_fitting_panel_update.__name__ = getattr(
+        orig_func, "__name__", "_wrapped_fitting_panel_update"
+    )
+    _wrapped_fitting_panel_update._evomu_camera_guard = True
+    return _wrapped_fitting_panel_update
+
+
 def _install_fitting_active_ship_guard():
-    """Guard fittingSvc/fittingWarnings against session.shipid=None during dock (#1254)."""
+    """Guard fittingSvc/fittingWarnings/StatsPanel/DronePanel against dock & ship-swap races (#1254, #1410)."""
     changed = False
     fsvc_mod = sys.modules.get("eve.client.script.environment.fittingSvc")
     fsvc_cls = None
@@ -2003,11 +2189,20 @@ def _install_fitting_active_ship_guard():
         orig_eval = getattr(fw_mod, "EvaluateFit", None)
         if callable(orig_eval) and not getattr(orig_eval, "_evomu_camera_guard", False):
             def _wrapped_evaluate_fit(fittingController):
+                initial_ship_ids = _snapshot_fitting_ship_ids(fittingController)
                 try:
                     return orig_eval(fittingController)
                 except IndexError as exc:
                     sess = getattr(__builtin__, "session", None)
                     if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                        return None
+                    raise
+                except KeyError as exc:
+                    if _is_stale_ship_dogma_key_error(
+                        exc,
+                        controller=fittingController,
+                        initial_ship_ids=initial_ship_ids,
+                    ):
                         return None
                     raise
 
@@ -2025,14 +2220,27 @@ def _install_fitting_active_ship_guard():
     ):
         orig_thread = getattr(wic_cls, "_WarningIconCont__UpdateIcon_thread", None)
         if callable(orig_thread) and not getattr(orig_thread, "_evomu_camera_guard", False):
+            orig_thread_func = getattr(orig_thread, "__func__", orig_thread)
+
             def _wrapped_update_icon_thread(self):
                 if getattr(self, "destroyed", False):
                     return None
+                controller = getattr(self, "fittingController", None)
+                initial_ship_ids = _snapshot_fitting_ship_ids(controller)
                 try:
-                    return orig_thread(self)
+                    return orig_thread_func(self)
                 except IndexError as exc:
                     sess = getattr(__builtin__, "session", None)
                     if getattr(sess, "shipid", None) is None or "None" in str(exc):
+                        return None
+                    raise
+                except KeyError as exc:
+                    live_controller = getattr(self, "fittingController", None) or controller
+                    if _is_stale_ship_dogma_key_error(
+                        exc,
+                        controller=live_controller,
+                        initial_ship_ids=initial_ship_ids,
+                    ):
                         return None
                     raise
 
@@ -2040,6 +2248,26 @@ def _install_fitting_active_ship_guard():
             wic_cls._WarningIconCont__UpdateIcon_thread = _wrapped_update_icon_thread
         _HOOKED_CAMERA_GUARD_TARGETS.add("warningIconCont")
         changed = True
+
+    if _wrap_cls_methods_table(
+        "statsPanel",
+        "eve.client.script.ui.shared.fittingScreen.statsPanel",
+        "StatsPanel",
+        (
+            ("UpdateStats", _make_fitting_panel_stale_ship_guard),
+            ("UpdateDroneStats", _make_fitting_panel_stale_ship_guard),
+        ),
+    ):
+        changed = True
+
+    if _wrap_cls_methods_table(
+        "dronePanel",
+        "eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel",
+        "DronePanel",
+        (("UpdateDroneStats", _make_fitting_panel_stale_ship_guard),),
+    ):
+        changed = True
+
     return changed
 
 
@@ -2852,7 +3080,7 @@ def _install_probe_tracker_guard():
 
 
 def _install_live_client_sync_guards():
-    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332, #1333, #1334, #1340)."""
+    """Install all live-client transition/sync guards (#1267, #1254, #1218, #1217, #1252, #1286, #1292, #1293, #1318, #1332, #1333, #1334, #1340, #1410)."""
     _install_base_space_camera_guard()
     _install_inventory_transition_guard()
     _install_fitting_active_ship_guard()
@@ -2913,6 +3141,10 @@ class _EvomuMetaHook(object):
             ("eve.client.script.ui.skillPlan.skillPlanPanel", "skillPlanPanel", _install_skill_plan_panel_signal_guard),
             ("eve.client.script.environment.invCache", "invCacheContainer", _install_inventory_transition_guard),
             ("probescanning.probeTracker", "probeTracker", _install_probe_tracker_guard),
+            ("shipfitting.fittingWarnings", "fittingWarnings", _install_fitting_active_ship_guard),
+            ("eve.client.script.ui.shared.fittingScreen.warningIconCont", "warningIconCont", _install_fitting_active_ship_guard),
+            ("eve.client.script.ui.shared.fittingScreen.statsPanel", "statsPanel", _install_fitting_active_ship_guard),
+            ("eve.client.script.ui.shared.fittingScreen.fittingPanels.dronePanel", "dronePanel", _install_fitting_active_ship_guard),
         ):
             if fullname == target_mod and target_key not in _HOOKED_CAMERA_GUARD_TARGETS:
                 uthread_mod = sys.modules.get("uthread")
