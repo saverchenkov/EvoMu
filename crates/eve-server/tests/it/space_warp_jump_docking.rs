@@ -5161,12 +5161,23 @@ async fn zarzakh_toll_rejections_never_load_lazy_zarzakh_gh_1429() {
         .systems
         .get_handle(gate.from_solar_system_id)
         .expect("source system loaded");
+    // Align ship ball mass with Rifter's SDE hull mass (<= 1.5M kg -> 10,000 ISK floor).
+    if let Some(rifter_mass) = ctx.sde.types.get(&587).map(|t| t.mass).filter(|&m| m > 0.0) {
+        if let Some(ball) = src_h.ballpark.write().unwrap().balls.get_mut(&ship_id) {
+            ball.mass = rifter_mass;
+        }
+    }
     let v24_args = [
         PyRep::Integer(gate.stargate_id),
         PyRep::Integer(gate.destination_stargate_id),
         PyRep::Integer(ship_id),
     ];
     let empty_kw = HashMap::new();
+    // Warm up lazy crimewatch entry creation once so baseline `epoch_0` measures only RPC read-purity.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let _ = cw.get_or_create(char_id);
+    }
     let epoch_0 = ctx.db.state_epoch();
     let journal_len_0 = ctx.db.with_snapshot(|s| s.wallet_journal.len());
 
