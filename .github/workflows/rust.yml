@@ -18,5 +18,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
+    - name: Clippy (large_futures)
+      run: cargo clippy -p eve-server --all-targets -- -A clippy::all -D clippy::large_futures
     - name: Run tests
       run: cargo test --verbose

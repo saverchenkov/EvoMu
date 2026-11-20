@@ -894,10 +894,31 @@ fn t() {
             _write(
                 os.path.join(tmp, "crates/eve-server/tests/it/demo.rs"),
                 "// parity: feat:old.untouched\n#[test]\nfn old_t() { assert_eq!(1, 1); }\n\n"
-                "// parity: rpc:marketProxy.PlaceBuyOrder, feat:new.row\n#[test]\nfn new_t() { assert_eq!(2, 2); }\n",
+                "// parity: rpc:marketProxy.PlaceBuyOrder, feat:new.row\n#[test]\nfn new_t() { assert_eq!(2, 2); }\n\n"
+                "// parity: feat:async.row\n#[tokio::test]\nasync fn new_async_t() { assert_eq!(3, 3); }\n",
+            )
+            # Moving/adding `// parity:` comments on non-test production module headers or `pub async fn`
+            # (e.g. during monolith splits like pve_exploration.rs -> pve_exploration_sites.rs) must NOT enter
+            # `_collect_diff_parity_rows`.
+            _write(
+                os.path.join(tmp, "crates/eve-server/src/services/pve_exploration_sites.rs"),
+                "//! Exploration site helpers.\n"
+                "// parity: feat:pve.wormhole-sites\n\n"
+                "// parity: feat:pve.combat-anomalies\n"
+                "pub async fn advance_site_wave() -> bool { true }\n",
             )
             got_rows = run_review._collect_diff_parity_rows(tmp, base_sha)
-            self.assertEqual(got_rows, {"rpc:marketProxy.PlaceBuyOrder", "feat:new.row"})
+            self.assertEqual(got_rows, {"rpc:marketProxy.PlaceBuyOrder", "feat:new.row", "feat:async.row"})
+            self.assertNotIn("feat:pve.wormhole-sites", got_rows)
+            self.assertNotIn("feat:pve.combat-anomalies", got_rows)
+            # Also verify committed diffs (`head != "HEAD"`) exclude production comments and include test blocks
+            subprocess.run(["git", "add", "."], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "split"], cwd=tmp, check=True)
+            head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp, capture_output=True, text=True, check=True).stdout.strip()
+            got_committed = run_review._collect_diff_parity_rows(tmp, base_sha, head=head_sha)
+            self.assertEqual(got_committed, {"rpc:marketProxy.PlaceBuyOrder", "feat:new.row", "feat:async.row"})
+            self.assertNotIn("feat:pve.wormhole-sites", got_committed)
+            self.assertNotIn("feat:pve.combat-anomalies", got_committed)
 
     def test_tt03_core_services_df_over_45_and_no_direct_truncation(self):
         # 1. Core EVE service token (df > 45, e.g. charUnboundMgr / invbroker / corpRegistry) must NOT get dropped

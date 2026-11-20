@@ -1,0 +1,4 @@
+# Ceiling for async future stack frames in crates/eve-server (Refs #1487).
+# Tightened to the lowest clean ceiling above execute_pending_cycle_actions_list
+# in locked fitting_module_cycles_helpers.rs; Track 2 will ratchet down to 16384.
+future-size-threshold = 17664

@@ -1,6 +1,7 @@
 //! `eve-server` — Library exports for the `EvoMu` EVE Online server emulator.
 
 #![forbid(unsafe_code)]
+#![deny(clippy::large_futures)]
 
 pub mod bug_reporting;
 pub mod combat;

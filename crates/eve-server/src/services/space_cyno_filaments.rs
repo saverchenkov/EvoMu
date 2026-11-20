@@ -6,6 +6,7 @@ use crate::router::{BoundObjectEntry, ServerContext};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::SolarSystemId;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -66,11 +67,57 @@ pub(crate) async fn handle(
     }
 }
 
+struct PreparedWormholeJumpCaller {
+    char_id: i64,
+    old_sys: SolarSystemId,
+    ship_id: i64,
+    old_handle: crate::system_actor::SystemHandle,
+    current_ball: Ball,
+    now_unix: u64,
+}
+
 async fn handle_wormhole_jump(
     ctx: &ServerContext,
     session: &mut SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
+    let prep = prepare_wormhole_jump_caller(ctx, session).await?;
+    let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
+    let wh_arg_str = args.first().and_then(|a| a.as_str());
+    if wh_arg_i64 != Some(750_000_001) {
+        if let Some(res) = execute_cosmic_wormhole_jump(
+            ctx,
+            session,
+            prep.char_id,
+            prep.old_sys,
+            prep.ship_id,
+            prep.current_ball.clone(),
+            wh_arg_i64,
+            wh_arg_str,
+        )
+        .await
+        {
+            return res;
+        }
+    }
+    execute_legacy_wormhole_jump(
+        ctx,
+        session,
+        prep.char_id,
+        prep.old_sys,
+        prep.old_handle,
+        prep.ship_id,
+        prep.current_ball,
+        prep.now_unix,
+        wh_arg_i64,
+    )
+    .await
+}
+
+async fn prepare_wormhole_jump_caller(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PreparedWormholeJumpCaller, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
@@ -148,17 +195,28 @@ async fn handle_wormhole_jump(
     )
     .await?;
 
-    let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
-    let wh_arg_str = args.first().and_then(|a| a.as_str());
-    if wh_arg_i64 != Some(750_000_001) {
-        if let Some(res) = execute_cosmic_wormhole_jump(
-            ctx, session, char_id, old_sys, ship_id, current_ball.clone(), wh_arg_i64, wh_arg_str,
-        )
-        .await
-        {
-            return res;
-        }
-    }
+    Ok(PreparedWormholeJumpCaller {
+        char_id,
+        old_sys,
+        ship_id,
+        old_handle,
+        current_ball,
+        now_unix,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_legacy_wormhole_jump(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    old_sys: SolarSystemId,
+    old_handle: crate::system_actor::SystemHandle,
+    ship_id: i64,
+    current_ball: Ball,
+    now_unix: u64,
+    wh_arg_i64: Option<i64>,
+) -> Result<PyRep, BridgeRpcError> {
     crate::services::combat_crimewatch::check_crimewatch_action_restriction(
         ctx, char_id, ship_id, old_sys, "wh_jump", now_unix,
     )?;
