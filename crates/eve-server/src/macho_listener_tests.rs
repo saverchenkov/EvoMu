@@ -1525,6 +1525,7 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
     let mut wire_state = crate::outbound_sequencer::SessionWireState::new(sid, 1_000_000_000_001);
     let mut deferred_ship_id = None;
     let mut pending_dock = None;
+    let mut safe_logoff_teardown = None;
     let (_client_rd, mut server_wr) = tokio::io::duplex(4096);
 
     // 1. Mismatched character id reason is ignored.
@@ -1537,6 +1538,7 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
             wire_state: &mut wire_state,
             deferred_ship_id: &mut deferred_ship_id,
             pending_dock: &mut pending_dock,
+            safe_logoff_teardown: &mut safe_logoff_teardown,
         };
         handle_safe_logoff_to_charsel(
             &ctx,
@@ -1550,6 +1552,7 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
     }
     assert_eq!(session.character_id, Some(active_char_id));
     assert_eq!(subscribed_sys_id, Some(30_000_142));
+    assert!(safe_logoff_teardown.is_none());
 
     // 2. Late SafeLogoff signal after online lock was already re-acquired for active_char_id is ignored.
     {
@@ -1561,6 +1564,7 @@ async fn test_1360_safe_logoff_stale_closer_does_not_clobber_active_character() 
             wire_state: &mut wire_state,
             deferred_ship_id: &mut deferred_ship_id,
             pending_dock: &mut pending_dock,
+            safe_logoff_teardown: &mut safe_logoff_teardown,
         };
         handle_safe_logoff_to_charsel(
             &ctx,
@@ -1959,6 +1963,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
     let mut wire_state = crate::outbound_sequencer::SessionWireState::new(stale_sid, 1_000_000_000_001);
     let mut deferred_ship_id = None;
     let mut pending_dock = None;
+    let mut safe_logoff_teardown = None;
     let (mut client_rd, mut server_wr) = tokio::io::duplex(4096);
 
     #[allow(clippy::too_many_arguments)]
@@ -1975,6 +1980,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
         wire_state: &mut crate::outbound_sequencer::SessionWireState,
         deferred_ship_id: &mut Option<PendingDeferredShipId>,
         pending_dock: &mut Option<PendingDockCall>,
+        safe_logoff_teardown: &mut Option<SafeLogoffTeardownGrace>,
         server_wr: &mut tokio::io::DuplexStream,
     ) -> bool {
         let mut wire = SafeLogoffWireContext {
@@ -1985,6 +1991,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
             wire_state,
             deferred_ship_id,
             pending_dock,
+            safe_logoff_teardown,
         };
         handle_session_closer_event(
             ctx,
@@ -2010,6 +2017,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
             &mut wire_state,
             &mut deferred_ship_id,
             &mut pending_dock,
+            &mut safe_logoff_teardown,
             &mut server_wr,
         )
         .await
@@ -2027,6 +2035,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
             wire_state: &mut wire_state,
             deferred_ship_id: &mut deferred_ship_id,
             pending_dock: &mut pending_dock,
+            safe_logoff_teardown: &mut safe_logoff_teardown,
         };
         handle_safe_logoff_to_charsel(
             &ctx,
@@ -2051,6 +2060,7 @@ async fn test_1386_displaced_safe_logoff_charsel_preserves_live_session_notifica
             &mut wire_state,
             &mut deferred_ship_id,
             &mut pending_dock,
+            &mut safe_logoff_teardown,
             &mut server_wr,
         )
         .await
@@ -2352,4 +2362,545 @@ async fn test_bf1344_03_macho_handshake_telemetry_upgrade_and_disconnect_cleanup
         }
     }
     assert!(cleaned, "disconnect did not clear session telemetry for {active_sid}");
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn test_1386_call_rpc_raw(
+    stream: &mut TcpStream,
+    client_id: u64,
+    user_id: u64,
+    call_id: u64,
+    service: &str,
+    bound_id: Option<i64>,
+    method: &str,
+    args: Vec<PyRep>,
+) -> (MachoPacket, Vec<MachoPacket>) {
+    let req = make_call_req(client_id, user_id, call_id, service, bound_id, method, args);
+    write_framed_pyrep(stream, &req.to_pyrep()).await.unwrap();
+    let mut notifs = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(stream))
+            .await
+            .expect("timed out waiting for CallRsp/ErrorResponse")
+            .expect("read error")
+            .expect("unexpected EOF waiting for CallRsp/ErrorResponse");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "unexpected GPSTransportClosed during {service}.{method}: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode MachoPacket");
+        if matches!(
+            pkt.packet_type,
+            MachoPacketType::CallRsp | MachoPacketType::ErrorResponse
+        ) {
+            return (pkt, notifs);
+        }
+        notifs.push(pkt);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1386_advance_clock_rpc_delivers_safe_logoff_activated_and_unskewed_timer() {
+    let base_unix = 1_800_000_000_u64;
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(base_unix)));
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(sys_id as i64), PyRep::None],
+    )
+    .await;
+
+    // 1. Advance server virtual clock by +447s via `timeControl.AdvanceClock` (without sim rebase)
+    //    from a separate GM session (matching playtester harness).
+    let mut gm_sess = SessionState::new(99_138_601);
+    gm_sess.user_id = Some(2);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    let empty = HashMap::new();
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(447)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("GM AdvanceClock +447s");
+    assert_eq!(ctx.unrebased_clock_offset_secs(), 447);
+
+    // 2. Start ship.SafeLogoff: server expiry tracks `now_unix + 30`, while `OnSafeLogoffTimerStarted`
+    //    subtracts `unrebased_clock_offset_secs` so V24 `SafeLogoffTimer2` shows 30.0s instead of 477s.
+    let (_safe_rsp, safe_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "ship",
+        "SafeLogoff",
+        Vec::new(),
+    )
+    .await;
+    let extract_timer_ft = |pkt: &MachoPacket| -> Option<i64> {
+        if pkt.packet_type != MachoPacketType::Notification {
+            return None;
+        }
+        let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination else {
+            return None;
+        };
+        if broadcast_id != "OnSafeLogoffTimerStarted" {
+            return None;
+        }
+        let PyRep::Tuple(outer) = &pkt.payload else {
+            return None;
+        };
+        let PyRep::Tuple(inner) = outer.first()? else {
+            return None;
+        };
+        let PyRep::SubStream(sub) = inner.get(1)? else {
+            return None;
+        };
+        let PyRep::Tuple(sub_t) = sub.as_ref() else {
+            return None;
+        };
+        let PyRep::Tuple(body_t) = sub_t.get(1)? else {
+            return None;
+        };
+        let PyRep::Tuple(args) = body_t.get(1)? else {
+            return None;
+        };
+        args.first()?.as_i64()
+    };
+    let mut timer_started_ft = safe_notifs.iter().find_map(extract_timer_ft);
+    if timer_started_ft.is_none() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while timer_started_ft.is_none() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+                .await
+                .expect("timed out waiting for OnSafeLogoffTimerStarted")
+                .expect("read error waiting for OnSafeLogoffTimerStarted")
+                .expect("EOF waiting for OnSafeLogoffTimerStarted");
+            let pkt = MachoPacket::from_pyrep(&rep).expect("decode OnSafeLogoffTimerStarted");
+            timer_started_ft = extract_timer_ft(&pkt);
+        }
+    }
+    let expected_client_ft = crate::sp6_lifecycle::unix_to_filetime(base_unix + 30);
+    assert_eq!(
+        timer_started_ft,
+        Some(expected_client_ft),
+        "OnSafeLogoffTimerStarted must anchor to client sim clock (base+30s), not skewed base+477s"
+    );
+    let stored_complete_at = crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+        st.safe_logoffs.get(&char_id).map(|e| e.complete_at_unix)
+    });
+    assert_eq!(stored_complete_at, Some(base_unix + 447 + 30));
+
+    // 3. Complete SafeLogoff via `timeControl.AdvanceClock(30)` inside `dispatch_rpc`
+    //    (`with_staged_dispatch_notifications`): player's live TCP socket MUST still receive
+    //    `OnSafeLogoffActivated` cleanly before transitioning to charsel (Root Cause 1).
+    ctx.dispatch_rpc(
+        &mut gm_sess,
+        "timeControl",
+        None,
+        "AdvanceClock",
+        &[PyRep::Integer(30)],
+        &empty,
+        None,
+    )
+    .await
+    .expect("GM AdvanceClock +30s");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for OnSafeLogoffActivated after AdvanceClock RPC")
+            .expect("read error waiting for OnSafeLogoffActivated")
+            .expect("TCP closed instead of clean SafeLogoff");
+        assert!(
+            GPSTransportClosed::from_pyrep(&rep).is_none(),
+            "SafeLogoff must not send GPSTransportClosed: {rep:?}"
+        );
+        let pkt = MachoPacket::from_pyrep(&rep).expect("decode post-AdvanceClock frame");
+        assert_ne!(
+            pkt.packet_type,
+            MachoPacketType::SessionChangeNotification,
+            "SafeLogoff must not emit SessionChangeNotification before OnSafeLogoffActivated"
+        );
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnSafeLogoffActivated" {
+                    break;
+                }
+            }
+        }
+    }
+    let online = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock preserved at charsel");
+    assert!(online.character_id.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1386_safe_logoff_teardown_grace_serves_v24_logoff_rpcs_and_rejects_mutations() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_000_142_u32;
+
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "stationSvc",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(sys_id as i64), PyRep::None],
+    )
+    .await;
+    let _ = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "ship",
+        "SafeLogoff",
+        Vec::new(),
+    )
+    .await;
+
+    ctx.advance_secs(30);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let rep = tokio::time::timeout(remaining, read_framed_pyrep(&mut s))
+            .await
+            .expect("timed out waiting for OnSafeLogoffActivated")
+            .expect("read error")
+            .expect("EOF");
+        let pkt = MachoPacket::from_pyrep(&rep).unwrap();
+        if pkt.packet_type == MachoPacketType::Notification {
+            if let MachoAddress::Broadcast { broadcast_id, .. } = &pkt.destination {
+                if broadcast_id == "OnSafeLogoffActivated" {
+                    break;
+                }
+            }
+        }
+    }
+    let session_id = ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock at charsel")
+        .session_id;
+
+    // 1. All 3 V24 GameUI.DoCharacterLogoff teardown RPCs (plus bound skillMgr2.GetSkills and
+    //    charUnboundMgr.GetCharacterSelectionData) succeed with CallRsp and zero CharacterNotSelected.
+    let (skill_rsp, skill_notifs) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        10,
+        "skillMgr2",
+        None,
+        "GetMySkillHandler",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(skill_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        skill_rsp.named_payload.contains_key("OID+"),
+        "skillMgr2.GetMySkillHandler must include OID+ header"
+    );
+    assert!(
+        skill_notifs
+            .iter()
+            .all(|p| p.packet_type != MachoPacketType::SessionChangeNotification)
+    );
+    let temp_skill_bid = ctx
+        .bound_objects
+        .read()
+        .unwrap()
+        .values()
+        .find(|e| e.session_id == session_id && e.service == "skillMgr2")
+        .map(|e| e.bound_id)
+        .expect("temporary skillMgr2 bound object created");
+
+    let (bound_skills_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        11,
+        "machoNet",
+        Some(temp_skill_bid as i64),
+        "GetSkills",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(bound_skills_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (cash_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        12,
+        "account",
+        None,
+        "GetCashBalance",
+        vec![PyRep::Integer(0)],
+    )
+    .await;
+    assert_eq!(cash_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (bm_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        13,
+        "accessGroupBookmarkMgr",
+        None,
+        "GetMyActiveBookmarks",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(bm_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (charsel_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        14,
+        "charUnboundMgr",
+        None,
+        "GetCharacterSelectionData",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(charsel_rsp.packet_type, MachoPacketType::CallRsp);
+
+    // 2. Disallowed / corp / mutating RPCs during teardown grace MUST still fail with CharacterNotSelected.
+    let (corp_cash_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        15,
+        "account",
+        None,
+        "GetCashBalance",
+        vec![PyRep::Integer(1)],
+    )
+    .await;
+    assert_eq!(corp_cash_rsp.packet_type, MachoPacketType::ErrorResponse);
+    assert!(test_1386_packet_contains_ascii(
+        &corp_cash_rsp.to_pyrep(),
+        "CharacterNotSelected"
+    ));
+
+    let (save_q_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        16,
+        "machoNet",
+        Some(temp_skill_bid as i64),
+        "SaveSkillQueue",
+        vec![PyRep::List(Vec::new())],
+    )
+    .await;
+    assert_eq!(save_q_rsp.packet_type, MachoPacketType::ErrorResponse);
+
+    let (undock_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        17,
+        "ship",
+        None,
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::ErrorResponse);
+    assert!(test_1386_packet_contains_ascii(
+        &undock_rsp.to_pyrep(),
+        "CharacterNotSelected"
+    ));
+
+    // Online lock remained at charsel throughout teardown grace.
+    assert!(ctx
+        .db
+        .get_online_session(user_id)
+        .expect("online lock still present")
+        .character_id
+        .is_none());
+
+    // 3. Re-entering via SelectCharacterID clears the temporary teardown skillMgr2 binding cleanly.
+    let (reenter_rsp, _) = test_1386_call_rpc_raw(
+        &mut s,
+        client_id,
+        user_id,
+        18,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(reenter_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !ctx.bound_objects.read().unwrap().contains_key(&temp_skill_bid),
+        "SelectCharacterID must clear temporary teardown skillMgr2 binding"
+    );
+}
+
+#[tokio::test]
+async fn test_1386_safe_logoff_teardown_grace_expires_and_clears_temp_bindings() {
+    let ctx = ServerContext::new();
+    let now_unix = 1_800_000_000_u64;
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(now_unix)));
+    let user_id = 1_u64;
+    let sid = 88_138_699_u64;
+    let char_id = 90_000_001_i64;
+    ctx.db
+        .acquire_online_lock(user_id, sid, None, true, now_unix)
+        .unwrap();
+
+    let mut session = SessionState::new(sid);
+    session.user_id = Some(user_id);
+    session.character_id = None;
+
+    let skill_bid = 555_001_u64;
+    let other_bid = 555_002_u64;
+    {
+        let mut bound = ctx.bound_objects.write().unwrap();
+        bound.insert(
+            skill_bid,
+            crate::router::BoundObjectEntry {
+                bound_id: skill_bid,
+                session_id: sid,
+                user_id,
+                character_id: char_id,
+                service: "skillMgr2".into(),
+                object_id: char_id,
+                oid_str: "555001".into(),
+                ref_id: 0,
+            },
+        );
+        bound.insert(
+            other_bid,
+            crate::router::BoundObjectEntry {
+                bound_id: other_bid,
+                session_id: sid,
+                user_id,
+                character_id: 0,
+                service: "publicGatewaySvc".into(),
+                object_id: 0,
+                oid_str: "555002".into(),
+                ref_id: 0,
+            },
+        );
+    }
+
+    // 1. Expired grace clears itself, rejects read-only RPC, purges temp skillMgr2 binding,
+    //    and preserves unrelated charsel bindings.
+    let mut expired = Some(SafeLogoffTeardownGrace {
+        char_id,
+        deadline: tokio::time::Instant::now(),
+        temp_bindings_created: true,
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    assert!(resolve_safe_logoff_teardown_grace(
+        &ctx,
+        &session,
+        &mut expired,
+        "account",
+        None,
+        "GetCashBalance",
+        &[PyRep::Integer(0)],
+        &HashMap::new(),
+    )
+    .is_none());
+    assert!(expired.is_none());
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&skill_bid));
+    assert!(ctx.bound_objects.read().unwrap().contains_key(&other_bid));
+
+    // 2. Active grace fails closed if another session displaces the account's online lock.
+    ctx.db
+        .acquire_online_lock(user_id, sid + 1, Some(char_id), true, now_unix + 1)
+        .unwrap();
+    let mut displaced = Some(SafeLogoffTeardownGrace {
+        char_id,
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        temp_bindings_created: false,
+    });
+    assert!(resolve_safe_logoff_teardown_grace(
+        &ctx,
+        &session,
+        &mut displaced,
+        "accessGroupBookmarkMgr",
+        None,
+        "GetMyActiveBookmarks",
+        &[],
+        &HashMap::new(),
+    )
+    .is_none());
+    assert!(displaced.is_none());
 }

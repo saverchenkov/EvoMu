@@ -1652,7 +1652,9 @@ pub fn safe_logoff_blocking_space_conditions(
 ///   or under an active Weapons, NPC, PvP, or Criminal timer:
 ///   emits `OnSafeLogoffFailed` with `vec![PyRep::List(failed_conditions)]` (`arity = 1`) and returns `PyRep::List(failed_conditions)`.
 /// - Otherwise starts a 30s countdown (`now_unix + 30`), emits `OnSafeLogoffTimerStarted` with
-///   `vec![PyRep::Integer(unix_to_filetime(complete_at_unix))]` (`arity = 1`), and returns `PyRep::List(vec![])`.
+///   `vec![PyRep::Integer(unix_to_filetime(complete_at_unix.saturating_sub(unrebased_offset_secs)))]`
+///   (`arity = 1`) anchored to the client's `blue.os.GetSimTime()` baseline across `AdvanceClock`
+///   offsets, and returns `PyRep::List(vec![])`.
 // parity: feat:character.safe-logoff
 pub async fn handle_safe_logoff(
     ctx: &ServerContext,
@@ -1660,6 +1662,7 @@ pub async fn handle_safe_logoff(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
+    let unrebased_offset_secs = ctx.unrebased_clock_offset_secs();
     let mut failed_conditions: Vec<String> = Vec::new();
 
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -1762,7 +1765,10 @@ pub async fn handle_safe_logoff(
         );
     });
 
-    let safe_logoff_ft = unix_to_filetime(complete_at_unix);
+    // Subtract un-rebased `/advancetime` lead so V24 `SafeLogoffTimer2.UpdateLogoffTime`
+    // compares against client `blue.os.GetSimTime()` while server-side expiry in
+    // `SafeLogoffEntry.complete_at_unix` still tracks `now_unix + 30` (#1360, #1386).
+    let safe_logoff_ft = unix_to_filetime(complete_at_unix.saturating_sub(unrebased_offset_secs));
     let started_notif = OnSafeLogoffTimerStarted {
         safe_logoff_time: safe_logoff_ft,
     };

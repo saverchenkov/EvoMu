@@ -872,3 +872,66 @@ async fn flush_bounties_safe_logoff_and_pocket_entry_mission_edge_paths() {
     });
 }
 
+#[tokio::test]
+async fn finalize_safe_logoff_flushes_staged_dispatch_notifications_before_charsel_signal() {
+    let ctx = seeded_downtime_ctx();
+    let now_unix = 1_800_000_000u64;
+    ctx.set_clock(Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        now_unix,
+    )));
+    let char_id = 90_000_001i64;
+    let sid = 88_138_601u64;
+    ctx.db
+        .acquire_online_lock(1, sid, Some(char_id), true, now_unix)
+        .expect("acquire online lock");
+    let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(sid, live_tx);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // Run inside `with_staged_dispatch_notifications` (matching `timeControl.AdvanceClock`
+    // inside `dispatch_rpc`) and assert that `OnSafeLogoffActivated` is ALREADY visible in
+    // `pending_notifications` and `notify_tx` BEFORE the staged dispatch scope exits.
+    crate::router::cache_notifications::with_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+        async {
+            super::finalize_safe_logoff_sessions_with_hook(&ctx, char_id, |emit_activation| {
+                assert!(emit_activation, "expected online character activation hook");
+                crate::router::notify_registry::emit_typed_char_with_db(
+                    &ctx.db,
+                    Some(&*ctx.pending_notifications),
+                    Some(&ctx.notify_tx),
+                    char_id,
+                    crate::router::notify_registry::OnSafeLogoffActivated,
+                );
+            });
+
+            // Still inside the enclosing staged dispatch scope (before outer flush runs):
+            let (code, reason) = live_rx
+                .try_recv()
+                .expect("SafeLogoffCharsel must be delivered to live closer");
+            assert_eq!(code, "SafeLogoffCharsel");
+            assert_eq!(reason, char_id.to_string());
+
+            let queued = ctx.drain_notifications_for_char(char_id);
+            assert!(
+                queued.iter().any(|n| n.event == "OnSafeLogoffActivated"),
+                "OnSafeLogoffActivated must be flushed into pending_notifications before SafeLogoffCharsel: {queued:?}"
+            );
+
+            let mut saw_tx_activated = false;
+            while let Ok((target_cid, notif)) = notify_rx.try_recv() {
+                if target_cid == char_id && notif.event == "OnSafeLogoffActivated" {
+                    saw_tx_activated = true;
+                }
+            }
+            assert!(
+                saw_tx_activated,
+                "OnSafeLogoffActivated must be broadcast on notify_tx before SafeLogoffCharsel"
+            );
+        },
+    )
+    .await;
+}
+

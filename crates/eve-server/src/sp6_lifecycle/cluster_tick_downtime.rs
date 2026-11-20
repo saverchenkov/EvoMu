@@ -562,7 +562,9 @@ pub fn disconnect_safe_logoff_sessions(ctx: &crate::router::ServerContext, char_
 
 /// Clears `online_lock.character_id` and executes character-logoff side effects BEFORE
 /// running `before_charsel_signal(had_online_char)` (removing the ship ball and emitting
-/// `OnSafeLogoffActivated`), then delivers `"SafeLogoffCharsel"` on the live closer channel.
+/// `OnSafeLogoffActivated`), flushes any notifications staged inside an enclosing `dispatch_rpc`
+/// scope (e.g. `timeControl.AdvanceClock`), and then delivers `"SafeLogoffCharsel"` on the live
+/// closer channel.
 pub(super) fn finalize_safe_logoff_sessions_with_hook<F>(
     ctx: &crate::router::ServerContext,
     char_id: i64,
@@ -654,6 +656,15 @@ fn finalize_safe_logoff_sessions_inner<F>(
     }
 
     before_charsel_signal(had_online_char);
+
+    // Flush notifications staged inside an enclosing `dispatch_rpc` scope (e.g.
+    // `timeControl.AdvanceClock`) BEFORE sending `"SafeLogoffCharsel"` on `session_closers` so
+    // the player's `macho_listener` observes `OnSafeLogoffActivated` in `pending_notifications`
+    // and `notify_tx` before clearing `session.character_id = None` (#1360, #1386).
+    crate::router::cache_notifications::flush_staged_dispatch_notifications(
+        &*ctx.pending_notifications,
+        &ctx.notify_tx,
+    );
 
     if let Some((uid, rec_sid, tx)) = live_charsel {
         if tx
