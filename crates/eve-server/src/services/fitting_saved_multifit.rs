@@ -849,8 +849,7 @@ pub(crate) async fn handle_ships_and_services(
                     client_error: None,
                 }));
             };
-            let cs_state = fitting_containers_ships::read_container_ship_state(ctx);
-            if cs_state.alsc_locked_items.contains(&item_id) {
+            if ctx.db.with_snapshot(|snap| snap.is_item_in_alsc_lock(item_id)) {
                 return Some(Err(BridgeRpcError {
                     code: "ItemLocked".into(),
                     message: format!("Item {item_id} is locked in an Audit Log Secure Container"),

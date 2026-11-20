@@ -1955,8 +1955,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .station_id
                 .or(session.structure_id)
                 .filter(|&id| id > 0);
-            let alsc_locked = read_container_ship_state(ctx)
-                .alsc_locked_items;
             let now_unix = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -2006,7 +2004,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     if is_fitted {
                         return Err(BridgeRpcError { code: "CannotTrashFittedItem".into(), message: format!("Cannot trash fitted item {item_id}"), client_error: None });
                     }
-                    if item.flag == InventoryFlag::Locked || alsc_locked.contains(&item_id) || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
+                    if item.flag == InventoryFlag::Locked || snap.is_item_in_alsc_lock(item_id) || snap.is_item_or_ancestor_locked_or_impounded(item_id) {
                         return Err(BridgeRpcError { code: "ItemLocked".into(), message: format!("Item {item_id} is locked by an active contract, industry job, or container"), client_error: None });
                     }
                     if fitting_containers_ships::container_has_active_audit_log_snap(snap, item_id, now_unix) {

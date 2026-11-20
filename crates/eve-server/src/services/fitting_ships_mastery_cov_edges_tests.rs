@@ -1,10 +1,10 @@
 //! Edge-case, ACL, boundary, and error-path tests for `fitting_ships_mastery`.
 
 use super::*;
-use crate::services::fitting_containers_ships::{AlscLogEntry, ContainerShipRuntimeState};
+use crate::services::fitting_containers_ships::AlscLogEntry;
 use crate::services::space_destiny::SessionChangeTimerState;
 use eve_db::{
-    InventoryFlag, InventoryItemRecord, OwnerNoteRecord, StarbaseDetailSettings,
+    InventoryFlag, InventoryItemRecord, StarbaseDetailSettings,
     UpwellStructureRecord, WorldRepository,
 };
 use eve_destiny::{Ball, DVec3, MovementMode};
@@ -645,29 +645,20 @@ async fn ships_mastery_launch_corvette_trash_mastery_killcounter_dirt_edge_paths
                 ..Default::default()
             },
         );
-        let mut cs_state = ContainerShipRuntimeState::default();
-        cs_state.alsc_logs.insert(
+        fitting_containers_ships::append_alsc_log_snap(
+            snap,
             audit_container,
-            vec![AlscLogEntry {
+            AlscLogEntry {
                 timestamp_unix: ctx.now_unix(),
                 actor_id: char_id,
                 action: "Lock".into(),
                 item_id: audit_container,
                 item_type_id: 17_366,
                 quantity: 1,
-            }],
-        );
-        snap.owner_notes.insert(
-            -8_400_000_000_000,
-            OwnerNoteRecord {
-                note_id: -8_400_000_000_000,
-                character_id: -84,
-                item_id: 0,
-                label: "container_ship".into(),
-                note: serde_json::to_string(&cs_state).unwrap(),
-                timestamp_unix: 0,
             },
-        );
+            0,
+        )
+        .unwrap();
     });
 
     // 1. LaunchFromContainer error paths & item_positions fallback

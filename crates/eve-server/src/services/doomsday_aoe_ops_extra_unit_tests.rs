@@ -677,7 +677,7 @@ async fn test_doomsday_r9_capacitor_pos_forcefield_and_cloak_protections() {
 async fn test_doomsday_cancel_locked_fuel_multi_stack_zero_vel_and_arg_forms() {
     use crate::services::doomsday_aoe_ops::cancel_aoe_superweapon_cycles_for_ship;
     use crate::services::doomsday_aoe_tick::mutate_superweapon_runtime;
-    use eve_db::{OwnerNoteRecord, PersistedSuperweaponCycle, SuperweaponCycleKind};
+    use eve_db::{PersistedSuperweaponCycle, SuperweaponCycleKind};
 
     // 1. cancel_aoe_superweapon_cycles_for_ship: empty no-op and ship-scoped filter
     let (ctx, _sess, char_id, ship_id, sys_id, _mod_id, _fuel_id) = build_titan_test_env();
@@ -747,18 +747,10 @@ async fn test_doomsday_cancel_locked_fuel_multi_stack_zero_vel_and_arg_forms() {
     let stack_a_id = 551_900_003_i64;
     let stack_b_id = 551_900_004_i64;
     ctx2.db.with_mut_snapshot(|snap| {
-        // Lock original 500-isotope stack via ALSC owner note and reduce available unlocked fuel to 200
-        snap.owner_notes.insert(
-            -8_400_000_000_000,
-            OwnerNoteRecord {
-                note_id: -8_400_000_000_000,
-                character_id: 0,
-                item_id: 0,
-                label: "container".into(),
-                note: format!("{{\"alsc_locked_items\":[{fuel2}]}}"),
-                timestamp_unix: 0,
-            },
-        );
+        // Lock original 500-isotope stack via ALSC entity_kv and reduce available unlocked fuel to 200
+        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+            .set_with_unix(fuel2, "", &true, 0)
+            .unwrap();
         snap.items.insert(
             non_fuel_id,
             make_fighter_item(non_fuel_id, 34, c2, ship2, InventoryFlag::Cargo, 10_000),

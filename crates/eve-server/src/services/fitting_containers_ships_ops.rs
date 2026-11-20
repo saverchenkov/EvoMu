@@ -639,14 +639,13 @@ pub(crate) async fn handle_ext_tail(
         ("itemLocking", "GetLockedItemLocations") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let alsc_locked = read_container_ship_state(ctx).alsc_locked_items;
             let locs: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
                 let mut set = std::collections::BTreeSet::new();
                 for item in snap.items.values() {
                     let in_job = snap.industry_jobs.values().any(|j| j.status == "Active" && j.blueprint_item_id == item.item_id);
                     let vote_locked = corp_id > 0 && item.owner_id == corp_id && item.flag == InventoryFlag::Locked && !in_job;
                     let container_or_escrow = (item.owner_id == char_id || (corp_id > 0 && item.owner_id == corp_id))
-                        && (alsc_locked.contains(&item.item_id) || snap.contracts.contains_key(&item.location_id));
+                        && (snap.is_item_in_alsc_lock(item.item_id) || snap.contracts.contains_key(&item.location_id));
                     if vote_locked || container_or_escrow {
                         set.insert(item.location_id);
                     }
@@ -660,7 +659,6 @@ pub(crate) async fn handle_ext_tail(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
             let loc_id = args.first().and_then(|a| a.as_i64());
-            let alsc_locked = read_container_ship_state(ctx).alsc_locked_items;
             let locked_entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
@@ -671,7 +669,7 @@ pub(crate) async fn handle_ext_tail(
                         let in_job = snap.industry_jobs.values().any(|j| j.status == "Active" && j.blueprint_item_id == item.item_id);
                         let vote_locked = corp_id > 0 && item.owner_id == corp_id && item.flag == InventoryFlag::Locked && !in_job;
                         let container_or_escrow = (item.owner_id == char_id || (corp_id > 0 && item.owner_id == corp_id))
-                            && (alsc_locked.contains(&item.item_id) || snap.contracts.contains_key(&item.location_id));
+                            && (snap.is_item_in_alsc_lock(item.item_id) || snap.contracts.contains_key(&item.location_id));
                         vote_locked || container_or_escrow
                     })
                     .map(|item| (
@@ -1490,10 +1488,9 @@ fn handle_has_existing_password_set(
         container_id,
         true,
     )?;
-    let st = read_container_ship_state(ctx);
-    let has_pw = st
-        .get_container_password(container_id, which)
-        .is_some_and(|p| !p.is_empty());
+    let has_pw = ctx.db.with_snapshot(|snap| {
+        container_password_snap(snap, container_id, which).is_some()
+    });
     Ok(PyRep::Bool(has_pw))
 }
 
@@ -1593,23 +1590,23 @@ fn handle_retrieve_password(
             });
         }
 
-        let mut st = read_container_ship_state_snap(snap);
-        let pw = st
-            .get_container_password(container_id, which)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string);
+        let pw = container_password_snap(snap, container_id, which);
         if which == 1 && pw.is_some() {
-            st.unlocked_containers.insert((container_id, char_id));
+            set_container_unlocked_snap(snap, container_id, char_id, true, now_unix)?;
         }
-        st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-            timestamp_unix: now_unix,
-            actor_id: char_id,
-            action: "ALSCActionRetrievePassword".into(),
-            item_id: container_id,
-            item_type_id: item_tid,
-            quantity: 1,
-        });
-        save_container_ship_state_snap(snap, now_unix, &st);
+        append_alsc_log_snap(
+            snap,
+            container_id,
+            AlscLogEntry {
+                timestamp_unix: now_unix,
+                actor_id: char_id,
+                action: "ALSCActionRetrievePassword".into(),
+                item_id: container_id,
+                item_type_id: item_tid,
+                quantity: 1,
+            },
+            now_unix,
+        )?;
         if let Some((log_corp_id, _, loc_id, loc_flag)) =
             resolve_corp_container_log_target(snap, container_id)
         {

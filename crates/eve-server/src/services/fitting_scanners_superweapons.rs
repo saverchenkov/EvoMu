@@ -62,11 +62,16 @@ pub fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target
             entry.unlocked = true;
         }
     }
-    write_container_ship_state(ctx, |st| {
-        st.unlocked_containers.insert((target_id, char_id));
-    });
+    let now_unix = ctx.now_unix_secs();
     let _ = crate::services::station_structure::structure_lifecycle::record_structure_hack_reveal(ctx, char_id, target_id);
     ctx.db.with_mut_snapshot(|snap| {
+        let _ = crate::services::inventory_fitting::fitting_containers_ships::set_container_unlocked_snap(
+            snap,
+            target_id,
+            char_id,
+            true,
+            now_unix,
+        );
         let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
         if let Some(cont) = snap.items.get_mut(&target_id) {
             if !locked_by_job

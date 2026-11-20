@@ -1254,7 +1254,6 @@ pub fn handle(
                     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
                 }
             }
-            let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if !is_valid_contract_location(ctx, snap, start_station_id)
@@ -1378,7 +1377,7 @@ pub fn handle(
                             format!("Cannot escrow item {iid} while it contains items"),
                         ));
                     }
-                    if cs_state.alsc_locked_items.contains(&iid) {
+                    if snap.is_item_in_alsc_lock(iid) {
                         return Err(rpc_err(
                             "ContractItemLocked",
                             format!("Item {iid} is locked inside an Audit Log Secure Container"),
@@ -1459,7 +1458,7 @@ pub fn handle(
                                 "Cannot escrow the currently boarded active ship into a contract",
                             ));
                         }
-                        if cs_state.alsc_locked_items.contains(&child_id) {
+                        if snap.is_item_in_alsc_lock(child_id) {
                             return Err(rpc_err(
                                 "ContractItemLocked",
                                 format!("Contained item {child_id} is locked inside an Audit Log Secure Container"),
@@ -1593,7 +1592,6 @@ pub fn handle(
             {
                 crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
             }
-            let cs_state = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
 
             let expired_resolved = ctx.db.try_with_mut_snapshot(|snap| {
                 Ok::<_, std::convert::Infallible>(snap.resolve_expired_contract(cid, now_unix))
@@ -1695,7 +1693,7 @@ pub fn handle(
                                 && it.dynamic_attributes.get(&3).copied().unwrap_or(0.0) <= 0.0
                                 && it.source_mutaplasmid_id.is_none()
                                 && Some(it.item_id) != active_ship
-                                && !cs_state.alsc_locked_items.contains(&it.item_id)
+                                && !snap.is_item_in_alsc_lock(it.item_id)
                                 && !is_item_in_asset_safety_wrap(&ext, it.item_id, it.location_id, it.type_id)
                                 && !snap.is_item_locked_in_contract_or_job(it.item_id)
                                 && !snap.items.values().any(|child| child.item_id != it.item_id && child.location_id == it.item_id && child.quantity > 0)

@@ -411,7 +411,7 @@ fn service_state_blobs_enforces_size_and_key_limits() {
 #[test]
 fn entity_kv_sqlite_roundtrip_per_row_diff_and_cascade() {
     // 1. Registry completeness & key serialization roundtrip
-    assert_eq!(Ns::ALL.len(), 21);
+    assert_eq!(Ns::ALL.len(), 28);
     for &ns in Ns::ALL {
         let name = ns.as_str();
         assert_eq!(Ns::from_str_name(name), Some(ns));
@@ -1106,6 +1106,153 @@ fn load_service_domains_checked_fails_closed_without_mutating_snapshot() {
     assert_eq!(snap.pve_special_sites.sim_clock_sec, 42);
     assert_eq!(snap.node_graph_state.client_node_graph_seq, 77);
     assert_eq!(snap.fleet_and_social_ops.contract_deposits.get(&1), Some(&500));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn legacy_container_ship_owner_note_migrates_to_per_entity_kv_and_caps_alsc_logs() {
+    use crate::service_domains::{
+        AlscLogEntryRecord, ContainerConfigRecord, ShipAccessConfigRecord,
+        MAX_ALSC_LOGS_PER_CONTAINER,
+    };
+
+    let path = temp_db_path("legacy_container_ship_migration");
+    let conn = Connection::open(&path).expect("open");
+    apply_migrations(&conn).expect("migrate");
+
+    let mut legacy_snap = WorldStateSnapshot::default();
+    let container_a = 800_001_i64;
+    let ship_b = 800_002_i64;
+    let locked_item = 800_003_i64;
+    let flagged_item = 800_004_i64;
+    let char_id = 90_000_001_i64;
+
+    let oversized_logs: Vec<serde_json::Value> = (0..(MAX_ALSC_LOGS_PER_CONTAINER + 60))
+        .map(|i| {
+            json!({
+                "timestamp_unix": 1_700_000_000_u64 + i as u64,
+                "actor_id": char_id,
+                "action": "ALSCActionPasswordFailure",
+                "item_id": container_a,
+                "item_type_id": 17_366_u32,
+                "quantity": 1_i32
+            })
+        })
+        .collect();
+
+    let legacy_json = json!({
+        "container_passwords": { container_a.to_string(): "open-pw" },
+        "container_config_passwords": { container_a.to_string(): "cfg-pw" },
+        "unlocked_containers": [[container_a, char_id], [char_id, ship_b]],
+        "alsc_locked_items": [locked_item],
+        "alsc_logs": { container_a.to_string(): oversized_logs },
+        "ship_configs": {
+            ship_b.to_string(): {
+                "allow_fleet_smb": false,
+                "allow_corp_smb": true,
+                "allow_fleet_hangar": true,
+                "allow_corp_hangar": false,
+                "password": null
+            }
+        },
+        "ship_passwords": { ship_b.to_string(): "ship-pw" },
+        "custom_item_flags": { flagged_item.to_string(): 155_u16 },
+        "container_configs": {
+            container_a.to_string(): {
+                "lock_by_default": true,
+                "password_per_action": true,
+                "config_bitmask": 3_u32
+            }
+        }
+    })
+    .to_string();
+
+    legacy_snap.owner_notes.insert(
+        -8_400_000_000_000,
+        OwnerNoteRecord {
+            note_id: -8_400_000_000_000,
+            character_id: -84,
+            item_id: 0,
+            label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
+            note: legacy_json,
+            timestamp_unix: 1_700_001_000,
+        },
+    );
+    replace_sqlite_from_snapshot(&conn, &legacy_snap).expect("seed legacy sqlite");
+    drop(conn);
+
+    // Loading via WorldRepository::open_sqlite runs one-time migration and commits the
+    // migrated per-entity `entity_kv` rows while removing the legacy `-8_400_000_000_000` note.
+    let repo = crate::persistence::WorldRepository::open_sqlite(&path).expect("open_sqlite");
+    repo.with_snapshot(|snap| {
+        assert!(!snap.owner_notes.contains_key(&-8_400_000_000_000));
+        assert_eq!(
+            snap.kv(Ns::ContainerPassword).get::<String>(container_a, "1"),
+            Some("open-pw".into())
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerPassword).get::<String>(container_a, "2"),
+            Some("cfg-pw".into())
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerUnlockedChar)
+                .get::<bool>(container_a, &char_id.to_string()),
+            Some(true)
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerUnlockedChar)
+                .get::<bool>(ship_b, &char_id.to_string()),
+            Some(true)
+        );
+        assert!(snap.is_item_in_alsc_lock(locked_item));
+        assert_eq!(
+            snap.kv(Ns::CustomItemFlag).get::<u16>(flagged_item, ""),
+            Some(155)
+        );
+        assert_eq!(
+            snap.kv(Ns::ContainerConfig)
+                .get::<ContainerConfigRecord>(container_a, ""),
+            Some(ContainerConfigRecord {
+                lock_by_default: true,
+                password_per_action: true,
+                config_bitmask: 3,
+            })
+        );
+        assert_eq!(
+            snap.kv(Ns::ShipAccessConfig)
+                .get::<ShipAccessConfigRecord>(ship_b, ""),
+            Some(ShipAccessConfigRecord {
+                allow_fleet_smb: false,
+                allow_corp_smb: true,
+                allow_fleet_hangar: true,
+                allow_corp_hangar: false,
+                password: Some("ship-pw".into()),
+            })
+        );
+        let logs = snap
+            .kv(Ns::ContainerAlscLogs)
+            .get::<Vec<AlscLogEntryRecord>>(container_a, "")
+            .expect("migrated logs");
+        assert_eq!(logs.len(), MAX_ALSC_LOGS_PER_CONTAINER);
+        assert_eq!(logs.first().map(|e| e.timestamp_unix), Some(1_700_000_060));
+        assert_eq!(
+            logs.last().map(|e| e.timestamp_unix),
+            Some(1_700_000_000 + (MAX_ALSC_LOGS_PER_CONTAINER + 59) as u64)
+        );
+    });
+    drop(repo);
+
+    // Verify reopened DB still has migrated entity_kv and zero legacy note in SQLite.
+    let reloaded = load_snapshot_from_sqlite(&Connection::open(&path).expect("reopen")).expect("load");
+    assert!(!reloaded.owner_notes.contains_key(&-8_400_000_000_000));
+    assert_eq!(
+        reloaded
+            .kv(Ns::ContainerPassword)
+            .get::<String>(container_a, "1"),
+        Some("open-pw".into())
+    );
+    assert!(reloaded.is_item_in_alsc_lock(locked_item));
 
     let _ = std::fs::remove_file(&path);
 }

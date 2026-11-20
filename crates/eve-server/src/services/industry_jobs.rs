@@ -682,8 +682,6 @@ pub fn handle_industry_jobs(
                     });
                 }
 
-                let cs_state =
-                    crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state_snap(snap);
                 let ext =
                     crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
 
@@ -727,7 +725,7 @@ pub fn handle_industry_jobs(
                     it.type_id == 60
                         || !is_usable_industry_flag(it.flag)
                         || s.is_item_locked_in_contract_or_job(it.item_id)
-                        || cs_state.alsc_locked_items.contains(&it.item_id)
+                        || s.is_item_in_alsc_lock(it.item_id)
                         || ext.asset_safety_wraps.values().any(|w| {
                             !w.retrieval_fee_paid
                                 && (w.wrap_id == it.item_id
@@ -790,14 +788,10 @@ pub fn handle_industry_jobs(
                             if cont.type_id == 3_468 || is_item_blocked(snap, cont) {
                                 return false;
                             }
-                            if let Some(req_pw) = cs_state.container_passwords.get(&cont.item_id) {
-                                if !req_pw.is_empty()
-                                    && !cs_state
-                                        .unlocked_containers
-                                        .contains(&(cont.item_id, char_id))
-                                {
-                                    return false;
-                                }
+                            if crate::services::inventory_fitting::fitting_containers_ships::container_password_snap(snap, cont.item_id, 1).is_some()
+                                && !crate::services::inventory_fitting::fitting_containers_ships::is_container_unlocked_snap(snap, cont.item_id, char_id)
+                            {
+                                return false;
                             }
                             if top_container.is_some()
                                 && !matches!(
@@ -1272,10 +1266,8 @@ pub fn handle_industry_jobs(
                     let Some(cont) = snap.items.get(&cid) else {
                         return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} does not exist"), client_error: None });
                     };
-                    let pw_locked = cs_state
-                        .container_passwords
-                        .get(&cid)
-                        .is_some_and(|pw| !pw.is_empty() && !cs_state.unlocked_containers.contains(&(cid, char_id)));
+                    let pw_locked = crate::services::inventory_fitting::fitting_containers_ships::container_password_snap(snap, cid, 1).is_some()
+                        && !crate::services::inventory_fitting::fitting_containers_ships::is_container_unlocked_snap(snap, cid, char_id);
                     if is_item_blocked(snap, cont)
                         || cont.type_id == 3_468
                         || pw_locked

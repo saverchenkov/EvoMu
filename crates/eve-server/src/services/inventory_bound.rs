@@ -489,8 +489,8 @@ fn is_foreign_ship_bay_or_nested_container_reachable_in_snap(
                 snap, char_id, host_ship.item_id, host_ship.owner_id, false, None,
             ))
         || (it.item_id == host_ship.item_id && {
-            let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-            st.ship_configs.get(&host_ship.item_id).is_some_and(|cfg| {
+            let cfg = crate::services::fitting_containers_ships::ship_access_config_snap(snap, host_ship.item_id);
+            cfg.password.as_deref().is_some_and(|p| !p.is_empty()) && {
                 let in_same_fleet = snap
                     .fleets
                     .values()
@@ -502,11 +502,10 @@ fn is_foreign_ship_bay_or_nested_container_reachable_in_snap(
                         .then_some(host_ship.owner_id)
                 });
                 let same_corp = c1.is_some_and(|cid| cid > 0 && (cid == host_ship.owner_id || c2 == Some(cid)));
-                cfg.password.as_deref().is_some_and(|p| !p.is_empty())
-                    && ((check_sma && ((in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)))
-                        || (check_fh
-                            && ((in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar))))
-            })
+                (check_sma && ((in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)))
+                    || (check_fh
+                        && ((in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar)))
+            }
         });
     if !acl_ok {
         return false;
@@ -1392,8 +1391,7 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
         new_loc,
         flag as u16,
     )?;
-    let st = crate::services::fitting_containers_ships::read_container_ship_state_snap(snap);
-    if st.alsc_locked_items.contains(&orig_item.item_id) {
+    if snap.is_item_in_alsc_lock(orig_item.item_id) {
         return Err(BridgeRpcError {
             code: "ALSCItemLocked".into(),
             message: format!("Item {} is locked in an Audit Log Secure Container", orig_item.item_id),
@@ -1526,11 +1524,8 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
             let src_grp = ctx.sde.types.get(&src_cont.type_id).map(|t| t.group_id).unwrap_or(0);
             if crate::services::fitting_containers_ships::is_container_group(src_grp, src_cont.type_id) {
                 if src_cont.owner_id != char_id && !session.has_gm_role() {
-                    if let Some(req_pw) = st.container_passwords.get(&src_cont.item_id) {
-                        if !req_pw.is_empty()
-                            && !st.unlocked_containers.contains(&(src_cont.item_id, char_id))
-                            && !st.unlocked_containers.contains(&(char_id, src_cont.item_id))
-                        {
+                    if let Some(req_pw) = crate::services::fitting_containers_ships::container_password_snap(snap, src_cont.item_id, 1) {
+                        if !crate::services::fitting_containers_ships::is_container_unlocked_snap(snap, src_cont.item_id, char_id) {
                             let supplied_pw = kwargs
                                 .get("password")
                                 .and_then(|v| v.as_str())
@@ -1709,21 +1704,18 @@ pub(crate) fn recheck_invbroker_add_auth_in_snap(
         let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
         let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
         if dest.owner_id != char_id && !session.has_gm_role() {
-            if let Some(req_pw) = st.container_passwords.get(&dest.item_id) {
-                if !req_pw.is_empty()
-                    && !st.unlocked_containers.contains(&(dest.item_id, char_id))
-                    && !st.unlocked_containers.contains(&(char_id, dest.item_id))
+            if let Some(req_pw) = crate::services::fitting_containers_ships::container_password_snap(snap, dest.item_id, 1) {
+                if !crate::services::fitting_containers_ships::is_container_unlocked_snap(snap, dest.item_id, char_id)
+                    && supplied_pw != Some(req_pw.as_str())
                 {
-                    if supplied_pw != Some(req_pw.as_str()) {
-                        return Err(BridgeRpcError {
-                            code: "ALSCPasswordRequired".into(),
-                            message: format!(
-                                "Password required to move items into container {}",
-                                dest.item_id
-                            ),
-                            client_error: None,
-                        });
-                    }
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordRequired".into(),
+                        message: format!(
+                            "Password required to move items into container {}",
+                            dest.item_id
+                        ),
+                        client_error: None,
+                    });
                 }
             }
             let in_space_container = (30_000_000..=39_999_999).contains(&dest.location_id);

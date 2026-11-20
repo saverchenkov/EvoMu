@@ -1294,12 +1294,11 @@ async fn handle_invbroker_add(
                     let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
                     if is_storage_auth_and_near(parent.item_id) {
                         if parent.owner_id != char_id && !session.has_gm_role() {
-                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
-                            if let Some(req_pw) = st.container_passwords.get(&parent.item_id).cloned() {
-                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(parent.item_id, char_id)) {
-                                    if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id), client_error: None });
-                                    }
+                            if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, parent.item_id, 1) {
+                                if !fitting_containers_ships::is_container_unlocked_snap(snap, parent.item_id, char_id)
+                                    && supplied_pw != Some(req_pw.as_str())
+                                {
+                                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id), client_error: None });
                                 }
                             }
                         }
@@ -1366,12 +1365,11 @@ async fn handle_invbroker_add(
                         is_loc_colocated(new_loc)
                     } else if is_storage_auth_and_near(dest.item_id) {
                         if dest.owner_id != char_id && !session.has_gm_role() {
-                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
-                            if let Some(req_pw) = st.container_passwords.get(&dest.item_id).cloned() {
-                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(dest.item_id, char_id)) {
-                                    if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id), client_error: None });
-                                    }
+                            if let Some(req_pw) = fitting_containers_ships::container_password_snap(snap, dest.item_id, 1) {
+                                if !fitting_containers_ships::is_container_unlocked_snap(snap, dest.item_id, char_id)
+                                    && supplied_pw != Some(req_pw.as_str())
+                                {
+                                    return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id), client_error: None });
                                 }
                             }
                         }
@@ -2197,9 +2195,10 @@ async fn handle_invbroker_add(
                     }
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
                     if let Some((cid, entry)) = pending_alsc_take {
-                        fitting_containers_ships::write_container_ship_state(ctx, |st| {
-                            st.alsc_logs.entry(cid).or_default().push(entry);
-                        });
+                        let now_unix = ctx.now_unix_secs();
+                        ctx.db.try_with_mut_snapshot(|snap| {
+                            fitting_containers_ships::append_alsc_log_snap(snap, cid, entry, now_unix)
+                        })?;
                     } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
                         crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
@@ -2378,22 +2377,50 @@ async fn handle_invbroker_add(
                             );
                         }
                     }
-                    write_container_ship_state(ctx, |st| {
-                        if let Some((cid, entry)) = pending_alsc_take {
-                            st.alsc_logs.entry(cid).or_default().push(entry);
-                        }
-                        if matches!(flag_u16, 90 | 155) {
-                            st.custom_item_flags.insert(item_id, flag_u16);
-                            for (_, post_c) in &unfitted_charges {
-                                st.custom_item_flags.insert(post_c.item_id, flag_u16);
+                    let needs_flag_clear = !matches!(flag_u16, 90 | 155)
+                        && ctx.db.with_snapshot(|snap| {
+                            fitting_containers_ships::custom_item_flag_snap(snap, item_id).is_some()
+                                || unfitted_charges.iter().any(|(_, post_c)| {
+                                    fitting_containers_ships::custom_item_flag_snap(snap, post_c.item_id)
+                                        .is_some()
+                                })
+                        });
+                    if pending_alsc_take.is_some() || matches!(flag_u16, 90 | 155) || needs_flag_clear {
+                        let now_unix = ctx.now_unix_secs();
+                        ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                            if let Some((cid, entry)) = pending_alsc_take {
+                                fitting_containers_ships::append_alsc_log_snap(
+                                    snap, cid, entry, now_unix,
+                                )?;
                             }
-                        } else {
-                            st.custom_item_flags.remove(&item_id);
-                            for (_, post_c) in &unfitted_charges {
-                                st.custom_item_flags.remove(&post_c.item_id);
+                            let flag_opt = matches!(flag_u16, 90 | 155).then_some(flag_u16);
+                            if flag_opt.is_some()
+                                || fitting_containers_ships::custom_item_flag_snap(snap, item_id)
+                                    .is_some()
+                            {
+                                fitting_containers_ships::set_custom_item_flag_snap(
+                                    snap, item_id, flag_opt, now_unix,
+                                )?;
                             }
-                        }
-                    });
+                            for (_, post_c) in &unfitted_charges {
+                                if flag_opt.is_some()
+                                    || fitting_containers_ships::custom_item_flag_snap(
+                                        snap,
+                                        post_c.item_id,
+                                    )
+                                    .is_some()
+                                {
+                                    fitting_containers_ships::set_custom_item_flag_snap(
+                                        snap,
+                                        post_c.item_id,
+                                        flag_opt,
+                                        now_unix,
+                                    )?;
+                                }
+                            }
+                            Ok(())
+                        })?;
+                    }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
                     }

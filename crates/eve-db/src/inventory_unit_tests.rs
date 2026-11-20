@@ -359,14 +359,9 @@ fn centralized_consumption_and_transfer_enforce_all_six_invariants() {
             version: 1,
             ..InventoryItemRecord::default()
         });
-        snap.owner_notes.insert(-8_400_000_000_000, OwnerNoteRecord {
-            note_id: -8_400_000_000_000,
-            character_id: 0,
-            item_id: 0,
-            label: "S:CONTAINER_SHIP_RUNTIME_STATE".into(),
-            note: serde_json::json!({ "alsc_locked_items": [alsc_item_id] }).to_string(),
-            timestamp_unix: 100,
-        });
+        snap.kv_mut(crate::Ns::AlscLockedItem)
+            .set(alsc_item_id, "", &true)
+            .expect("lock alsc item");
 
         let opts = ConsumeExactOptions::for_character_stack(cid);
         assert!(matches!(
@@ -1015,22 +1010,22 @@ fn alsc_lock_asset_safety_wrap_war_hq_and_ancestor_lock_checks() {
     let mut snap = WorldStateSnapshot::default();
     let station_id = 60_003_760_i64;
 
-    // 1. is_item_in_alsc_lock: absent -> false, corrupt JSON -> false, array check true/false.
+    // 1. is_item_in_alsc_lock: absent -> false, corrupt JSON -> false, entity_kv check true/false.
     assert!(!snap.is_item_in_alsc_lock(500_001));
-    snap.owner_notes.insert(
-        -8_400_000_000_000,
-        OwnerNoteRecord {
-            note_id: -8_400_000_000_000,
-            character_id: 0,
-            item_id: -8_400_000_000_000,
-            label: "corrupt".into(),
-            note: "{not-json".into(),
-            timestamp_unix: 1,
+    snap.entity_kv.insert(
+        crate::EntityKvKey::new(crate::Ns::AlscLockedItem, 500_001, ""),
+        crate::EntityKvRow {
+            value_json: "{not-json".into(),
+            updated_unix: 1,
         },
     );
     assert!(!snap.is_item_in_alsc_lock(500_001));
-    snap.owner_notes.get_mut(&-8_400_000_000_000).unwrap().note =
-        serde_json::json!({"alsc_locked_items": [500_001, 500_002]}).to_string();
+    snap.kv_mut(crate::Ns::AlscLockedItem)
+        .set(500_001, "", &true)
+        .expect("lock 500_001");
+    snap.kv_mut(crate::Ns::AlscLockedItem)
+        .set(500_002, "", &true)
+        .expect("lock 500_002");
     assert!(snap.is_item_in_alsc_lock(500_001));
     assert!(!snap.is_item_in_alsc_lock(500_003));
 
@@ -3152,21 +3147,13 @@ fn stack_all_items_preserves_eligibility_guards_tiebreak_and_overflow() {
             },
         );
 
-        // ALSC lock note (-8_400_000_000_000)
-        snap.owner_notes.insert(
-            CONTAINER_SHIP_NOTE_ID,
-            OwnerNoteRecord {
-                note_id: CONTAINER_SHIP_NOTE_ID,
-                character_id: CONTAINER_SHIP_NOTE_ID,
-                item_id: 1,
-                label: "alsc".into(),
-                note: serde_json::json!({
-                    "alsc_locked_items": [id_alsc, box_alsc]
-                })
-                .to_string(),
-                timestamp_unix: 1,
-            },
-        );
+        // ALSC lock records (`Ns::AlscLockedItem`)
+        snap.kv_mut(crate::Ns::AlscLockedItem)
+            .set(id_alsc, "", &true)
+            .expect("lock id_alsc");
+        snap.kv_mut(crate::Ns::AlscLockedItem)
+            .set(box_alsc, "", &true)
+            .expect("lock box_alsc");
 
         // Unpaid vs paid Asset Safety wraps (-7_700_001)
         snap.item_custom_names.insert(
