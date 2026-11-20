@@ -292,8 +292,11 @@ pub fn resolve_deadspace_or_escalation_warp_target(
                 if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
                     continue;
                 }
-                let matches_inst = inst.instance_id == target_id
-                    || i64::from(inst.dungeon_id) == target_id
+                if inst.owner_char_id > 0 && inst.owner_char_id != char_id {
+                    continue;
+                }
+                let matches_inst = (target_id > 0
+                    && (inst.instance_id == target_id || i64::from(inst.dungeon_id) == target_id))
                     || target_str_opt == Some(format!("DNG-INST-{}", inst.instance_id).as_str());
                 if matches_inst {
                     if let Some(entry_pos) = inst.entry_gate_pos {
@@ -306,11 +309,13 @@ pub fn resolve_deadspace_or_escalation_warp_target(
                         return Ok(Some(DVec3::from_array(first_room.position)));
                     }
                 }
-                if let Some(room) = inst.rooms.iter().find(|r| r.room_id == target_id) {
-                    if room.gated {
-                        return Err(BridgeRpcError::user_error("NaturalPhenomenaDisruptingWarp"));
+                if target_id > 0 {
+                    if let Some(room) = inst.rooms.iter().find(|r| r.room_id == target_id) {
+                        if room.gated {
+                            return Err(BridgeRpcError::user_error("NaturalPhenomenaDisruptingWarp"));
+                        }
+                        return Ok(Some(DVec3::from_array(room.position)));
                     }
-                    return Ok(Some(DVec3::from_array(room.position)));
                 }
             }
             Ok(None)
@@ -319,17 +324,57 @@ pub fn resolve_deadspace_or_escalation_warp_target(
             return Ok(res);
         }
 
-        let site_pos = with_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system.get(&sys_id).and_then(|sites| {
-                sites
-                    .iter()
-                    .find(|s| {
-                        !s.cleared
-                            && (i64::from(s.dungeon_id) == target_id
-                                || target_str_opt == Some(s.site_id.as_str()))
+        let candidate_sites: Vec<(String, bool, DVec3)> =
+            crate::services::pve_exploration::read_pve_exploration_reg(ctx, |reg| {
+                let owned_exp_ids: std::collections::HashSet<i64> = reg
+                    .escalations_by_char
+                    .get(&char_id)
+                    .map(|list| list.iter().map(|e| e.instance_id).collect())
+                    .unwrap_or_default();
+                reg.sites_by_system
+                    .get(&sys_id)
+                    .map(|sites| {
+                        sites
+                            .iter()
+                            .filter(|s| {
+                                if s.cleared {
+                                    return false;
+                                }
+                                let matches = (target_id > 0 && i64::from(s.dungeon_id) == target_id)
+                                    || target_str_opt == Some(s.site_id.as_str());
+                                if !matches {
+                                    return false;
+                                }
+                                if let Some(exp_id) = s.expedition_instance_id {
+                                    if !owned_exp_ids.contains(&exp_id) {
+                                        return false;
+                                    }
+                                } else if s.site_category == "Expedition" {
+                                    return false;
+                                }
+                                true
+                            })
+                            .map(|s| (s.site_id.clone(), s.probe_required, DVec3::from_array(s.position)))
+                            .collect()
                     })
-                    .map(|s| DVec3::from_array(s.position))
-            })
+                    .unwrap_or_default()
+            });
+        let site_pos = candidate_sites.into_iter().find_map(|(site_id, probe_required, pos)| {
+            if !probe_required {
+                return Some(pos);
+            }
+            let scanned = ctx.db.with_snapshot(|snap| {
+                snap.cosmic_signatures
+                    .get(&sys_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|sig| {
+                        sig.signature_id == site_id
+                            && !sig.collapsed
+                            && ctx.effective_signature_signal_strength(char_id, sys_id, sig) >= 1.0
+                    })
+            });
+            scanned.then_some(pos)
         });
         if site_pos.is_some() {
             return Ok(site_pos);
