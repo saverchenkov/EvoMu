@@ -604,6 +604,61 @@ fn decode_set_state_ball_it(pyrep: &PyRep, ship_id: i64) -> eve_destiny::wire::D
     panic!("SetState action missing from DoDestinyUpdate: {pyrep:?}");
 }
 
+/// Steps `sys_handle` until `ship_id` exits warp into `MovementMode::Stop` and verifies CCP
+/// subwarp coast clamping, monotonic decay below `0.5 m/s`, and negligible post-coast drift.
+async fn assert_warp_lands_with_ccp_coast(
+    sys_handle: &eve_server::system_actor::SystemHandle,
+    ship_id: i64,
+    label: &str,
+) {
+    let mut exit_speed = None;
+    for _ in 0..240 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(b.mode, MovementMode::Stop) {
+            let speed = b.velocity.length();
+            assert!(
+                speed <= b.max_velocity + 1e-6,
+                "{label}: warp exit coast speed {speed} exceeds max_velocity {}",
+                b.max_velocity
+            );
+            assert_eq!(b.speed_fraction, 0.0, "{label}: warp exit speed_fraction");
+            exit_speed = Some(speed);
+            break;
+        }
+    }
+    let mut prev_speed = exit_speed.unwrap_or_else(|| panic!("{label}: warp must land cleanly"));
+    for _ in 0..120 {
+        let _ = sys_handle.step_manual(1.0).await;
+        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        let speed = b.velocity.length();
+        if prev_speed > 1e-6 {
+            assert!(
+                speed < prev_speed,
+                "{label}: post-warp velocity must decay monotonically (prev={prev_speed}, cur={speed})"
+            );
+        }
+        prev_speed = speed;
+        if prev_speed < 0.05 {
+            break;
+        }
+    }
+    assert!(
+        prev_speed < 0.5,
+        "{label}: post-warp coast must decay below 0.5 m/s, got {prev_speed}"
+    );
+    let (_, settled_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    for _ in 0..10 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let (_, post_drift_ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        post_drift_ball.position.distance(settled_ball.position) < 0.5,
+        "{label}: negligible residual drift after warp coast settles, moved {} m",
+        post_drift_ball.position.distance(settled_ball.position)
+    );
+}
+
 #[tokio::test]
 async fn test_sp6_bonused_venture_hp_and_mid_warp_restart_recovery_across_sqlite_reopen() {
     let char_id = 90_000_001_i64;
@@ -793,27 +848,7 @@ async fn test_sp6_bonused_venture_hp_and_mid_warp_restart_recovery_across_sqlite
     .await
     .expect("UpdateStateRequest on reconnect");
 
-    let mut landed = false;
-    for _ in 0..240 {
-        let _ = sys_handle2.step_manual(1.0).await;
-        let (_, b) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-        if matches!(b.mode, MovementMode::Stop) {
-            landed = true;
-            assert_eq!(b.velocity, DVec3::ZERO, "warp exit must zero velocity (#1454)");
-            assert_eq!(b.speed_fraction, 0.0);
-            break;
-        }
-    }
-    assert!(landed, "resumed mid-warp must land cleanly");
-    let (_, landed_ball) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    for _ in 0..10 {
-        let _ = sys_handle2.step_manual(1.0).await;
-    }
-    let (_, post_drift_ball) = sys_handle2.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    assert_eq!(
-        post_drift_ball.position, landed_ball.position,
-        "zero residual drift after warp exit (#1454)"
-    );
+    assert_warp_lands_with_ccp_coast(&sys_handle2, ship_id, "resumed mid-warp").await;
     assert!(ctx2.pending_warp_finished.lock().unwrap().contains(&ship_id));
 
     ctx2.dispatch_rpc(
@@ -844,7 +879,7 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
     let empty = HashMap::new();
 
     // Part 1: Outbound emergency warp in WarpPhase::Cruising redirects cleanly to return warp,
-    // puts return warp in SetState (#1458), lands at zero velocity, and emits OnWarpFinished (#1454).
+    // puts return warp in SetState (#1458), lands with CCP subwarp coast, and emits OnWarpFinished (#1454).
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let (mut sess, sys_id, ship_id) = setup_pilot_in_space(&ctx, char_id).await;
@@ -922,18 +957,7 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
 
     let beyonce_oid = ctx.bind_object(&sess_re, "beyonce", sys_id as i64).unwrap();
     let _ = ctx.drain_notifications_for_char(char_id);
-    let mut return_landed = false;
-    for _ in 0..240 {
-        let _ = sys_handle.step_manual(1.0).await;
-        let (_, b) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-        if matches!(b.mode, MovementMode::Stop) {
-            return_landed = true;
-            assert_eq!(b.velocity, DVec3::ZERO);
-            assert_eq!(b.speed_fraction, 0.0);
-            break;
-        }
-    }
-    assert!(return_landed, "return warp must land cleanly");
+    assert_warp_lands_with_ccp_coast(&sys_handle, ship_id, "reconnect return warp").await;
     ctx.dispatch_rpc(
         &mut sess_re,
         "beyonce",
@@ -1038,17 +1062,7 @@ async fn test_sp6_emergency_warp_cruising_redirect_on_warp_finished_and_cold_sol
     assert!(ctx_cold.active_warps.lock().unwrap().contains_key(&ship_id));
     let beyonce_cold = ctx_cold.bind_object(&sess_cold, "beyonce", sys_id as i64).unwrap();
     let _ = ctx_cold.drain_notifications_for_char(char_id);
-    let mut cold_landed = false;
-    for _ in 0..240 {
-        let _ = sys_cold.step_manual(1.0).await;
-        let (_, b) = sys_cold.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-        if matches!(b.mode, MovementMode::Stop) {
-            cold_landed = true;
-            assert_eq!(b.velocity, DVec3::ZERO);
-            break;
-        }
-    }
-    assert!(cold_landed, "cold-reopened mid-warp must land cleanly");
+    assert_warp_lands_with_ccp_coast(&sys_cold, ship_id, "cold-reopened mid-warp").await;
     ctx_cold
         .dispatch_rpc(
             &mut sess_cold,

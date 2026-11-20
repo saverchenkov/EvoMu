@@ -4,21 +4,41 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 6172 / 6340 ledger rows closed (97.35%)**, 2367 NA, 1754 tagged tests, 7869 passing tests. Flagged fake by the gap auditor: 131.
+**Parity: 6176 / 6340 ledger rows closed (97.41%)**, 2367 NA, 1762 tagged tests, 8117 passing tests. Flagged fake by the gap auditor: 131.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 193 | 0 | 4 |
-| feat | 1618 | 1448 | 94 | 76 |
+| feat | 1618 | 1449 | 94 | 75 |
 | notify | 1311 | 489 | 811 | 11 |
-| plan | 120 | 93 | 0 | 27 |
+| plan | 120 | 95 | 0 | 25 |
 | quasar | 1455 | 104 | 1327 | 24 |
 | rpc | 1373 | 1263 | 85 | 25 |
-| sde | 213 | 171 | 41 | 1 |
+| sde | 213 | 172 | 41 | 0 |
 
 **Real-client journeys (supervisor scoreboard, stage `interim_smoke`, build `3698585`):** **0 / 29 verified** (core smoke: **0 / 7**) (8 parked `Phase LW` row(s) excluded from completeness).
+
+## Active Execution Priority: Foundation-First Wave (2026-11-20 User Directive)
+
+> [!IMPORTANT]
+> **Top Strategic Priority (`Wave F1 -> Wave F2`):** Following the `2026-11-20` architectural review, the **Foundation-First Wave (`Wave F1 -> Wave F2`)** takes top priority ahead of all feature, content, and parity expansion.
+> - **Paused until `Wave F1` and `Wave F2` land:** Feature/content/parity expansion (`#1398`–`#1400`, `#1236`, `#1499`, `#1205`, `#1243`).
+> - **Remains strictly `PARKED`:** `Phase LW` (`LW-1`..`LW-8`, post-Phase-Z, pending spec sign-off).
+> - **Closed milestone:** `#922` (`[RFC-1 E-5] Fit as a derived cache`) is **CLOSED** (`633586b99`, `bc9c9f8c5`, and `#1363`–`#1444`).
+
+### WIP Slot Allocation (8 Committed WIP Slots Max)
+| Lane | Slots | Active Scope |
+|---|---|---|
+| **Fast-Lane (`<= 8` files)** | **2 slots** | P0 exploits/crashes/CI/tooling (`#1478`–`#1483`), `#1378` (`assert_eq!(fixed_count, 0)` + baseline regen), `#1498` (legacy NPC-corp `1000170` test fixture helper & weak parity tests), live-client regressions, and small P1 guards (`#1484`–`#1500` targeted guards). |
+| **Regular WIP — Wave F1 (FIRST)** | **6 slots** | Strictly foundational tracks: (1) `#1194` (DB-only `CorpActor::resolve`, declarative RPC access policy & `ReadCtx`), (2) `#1486` (atomic module activation actor commands, single cloak/invuln owner & ESS `set_combat_state` race), (3) `#1487` (split oversized async handlers & `#![deny(clippy::large_futures)]`), (4) `#1180` + `#1480` (decompose `ContainerShipRuntimeState` & cluster-wide exploration JSON blobs + gate loot dup P0), (5) `#1190` (scene epochs for session transitions), (6) `#931` (`DeltaProjection` / `ChangeSet` production wiring). |
+| **Regular WIP — Wave F2 (NEXT)** | **6 slots** | Follows `Wave F1` as slots open: (1) `#1342` / `#1170` / `#1173` (`SystemActor` ballpark ownership, batched `SystemView`, no sync actor SQLite commits, RwLock poison recovery), (2) `#1396` (ordinary NPC factory, SDE weapon/hit formulas, unified NPC death/wreck/loot path), (3) `#1186` / `#1497` (checked `ItemQty`/money primitives & consolidated Store/FastCheckout path), (4) `#1195` / `#1196` / `#1488` (typed `RpcFault`, compile-time clock-domain types/`ClientFileTime`, unified war/ally store), (5) `#933` (typed replies replacing `client_compat` & `outbound_sequencer` rewrites), (6) `#1495` / `#1496` / `#1494` (Phase PVE prerequisites: `DungeonRuntimeInstance` upgrade `#1495`, persisted typed Mission Instance `#1496`, `#1395` importer contract gaps G1–G5 `#1494`). |
+| **Post-F2 Resumption** | — | Resume `Phase PVE` content tracks (`#1398` → `#1399` → `#1400`) on the upgraded runtime/mission/importer prerequisites, then paused parity/probe/coverage expansion (`#1236`, `#1499`, `#1205`, `#1243`). |
+
+### Active `2026-11-20` Arch-Review Issue Tracking (`#1478`–`#1500`)
+- **P0 Exploits, Crashes & Tooling (`#1478`–`#1483`):** `#1478` (Contracts corp auction multi-div ISK dup/ACL), `#1479` (Pre-auth marshal `PySavedStreamElement` depth stack overflow), `#1480` (Exploration JSON blob lost-update & gate loot dup), `#1481` (Triglavian check-await-mark-pay dup & remote zero-ball seeding), `#1482` (Seasonal boss instant respawn faucet & non-atomic completion), `#1483` (Playtester `wait_until` timeout / bug-sync crash deletion / harness error swallowing / `combat_aftermath` assertions).
+- **P1 Foundations, Correctness & PvE Prerequisites (`#1484`–`#1500`):** `#1484` (ESS Reserve Bank / 20m bounty flush / Incursion), `#1485` (Homefront Ops correctness & lifecycle), `#1486` (Atomic module activation / single cloak owner / ESS race), `#1487` (Async frame budget & `clippy::large_futures`), `#1488` (Unified war/ally store & FILETIME), `#1489` (Drone/fighter concurrency & scoop), `#1490` (Exhaustive `impl_decomposed_domain_struct!`), `#1491` (Remove PI client fallback & unify depletion), `#1492` (Industry corp hangar bitmask `128 << d`), `#1493` (Fleet warp `validate_ship_movement` & typed `WarpTarget`), `#1494` (`#1395` importer gaps G1–G5), `#1495` (`DungeonRuntimeInstance` upgrade before `#1398`), `#1496` (Persisted typed Mission Instance before `#1399`), `#1497` (Store/FastCheckout consolidation), `#1498` (Legacy NPC-corp `1000170` fixture helper & weak parity tests), `#1499` (Project Discovery synthetic tasks & 102 `fake_done` triage — paused until post-F2), `#1500` (`SetModuleOnline`/`TakeModuleOffline` & `SetPassword` authz).
 
 ## Feature progress by area
 
@@ -29,7 +49,7 @@ Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows who
 | Flying and navigation | 121 | 122 | 99% | 0 |
 | Ships, fitting and modules | 264 | 266 | 99% | 0 |
 | Combat | 119 | 122 | 98% | 0 |
-| Accounts, characters and skills | 102 | 105 | 97% | 0 |
+| Accounts, characters and skills | 103 | 105 | 98% | 0 |
 | Inventory, markets and contracts | 81 | 85 | 95% | 0 |
 | Industry and resources | 125 | 129 | 97% | 0 |
 | PvE | 97 | 126 | 77% | 0 |
@@ -39,7 +59,7 @@ Game features (`feat:` rows) grouped as in `README.md`. **Done** counts rows who
 | Quasar gateway services | 19 | 32 | 59% | 94 |
 | Game-master mode and commands | 22 | 22 | 100% | 0 |
 | Sessions and server operations | 108 | 120 | 90% | 0 |
-| **All areas** | **1448** | **1524** | **95%** | 94 |
+| **All areas** | **1449** | **1524** | **95%** | 94 |
 
 Features not yet done, by area:
 
@@ -49,7 +69,7 @@ Features not yet done, by area:
 
 - **Combat:** `feat:combat.bomb-damage-void-lockbreaker (FLAGGED_FAKE)`, `feat:npc.static-weapon-hit-formulas (MISSING)`, `feat:npc.static-wreck-loot-and-abilities (MISSING)`
 
-- **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`, `feat:standings.npc-kill-standing-loss (MISSING)`, `feat:standings.standing-loss (FLAGGED_FAKE)`
+- **Accounts, characters and skills:** `feat:skills.omega-weekly-free-sp (FLAGGED_FAKE)`, `feat:standings.standing-loss (FLAGGED_FAKE)`
 
 - **Inventory, markets and contracts:** `feat:inventory.freight-container-space-rules (FLAGGED_FAKE)`, `feat:market.npc-buy-orders-sleeper-loot (FLAGGED_FAKE)`, `feat:market.plex-market (FLAGGED_FAKE)`, `feat:wallet.nes-store (FLAGGED_FAKE)`
 
@@ -101,7 +121,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 9275b57f4 2026-11-11 |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | BLOCKED_BY_FEATURES | 0/0 | test_plan_t2_z4_sde_and_dogma_effect_attestation | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Raw-client FSD and SQLite sweeps verify all SDE static data and Dogma effect rows against V24 client files. | 6adf21085 2026-11-03 |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | DONE | 0/0 | test_plan_t2_z4_sde_and_dogma_effect_attestation | DONE | Raw-client FSD and SQLite sweeps verify all SDE static data and Dogma effect rows against V24 client files. | 77855bfed 2026-11-20 |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | eec1a36ac 2026-11-12 |
 | T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a5503691 2026-10-18 |
 | T-5 | Coverage tooling. Install cargo-llvm-cov and verify workspace coverage runs clea… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added QA coverage and mutation verification harness enforcing >= 85% thresholds. | 5f79f226e 2026-11-06 |
@@ -134,7 +154,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SP-3 | Beyonce command set | DONE | 19/19 | test_sp3_cloaking_prototype_covert_decloak_and_stabilization, test_sp3_propulsion_agility_mjd_mjfg_and_approach, test_sp | DONE | Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested. | 9923bff61 2026-10-20 |
 | SP-4 | Stargate jump polish | DONE | 7/7 | test_destiny_collision_bounce_physics_and_gate_cloak, test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, t | DONE | Stargate jump arrival at destination gate position, session change notification, gate cloak, and no jump fatigue on stargates partially implemented. | 5a5503691 2026-10-18 |
 | SP-5 | Dock / undock | DONE | 4/4 | test_sp5_docking_and_undocking_station_structure_and_boarding, test_sp5_stargate_jumping_session_handoff_and_gate_cloak_ | DONE | Station and Upwell structure docking perimeter checks, dock delay, undock along orientation vector, and ship boarding tested. | 7af241d43 2026-10-21 |
-| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | DONE | 0/0 | test_sp6_safe_logoff_refusals_aborts_and_30s_completion, test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewa | DONE | — | 996cd6d2d 2026-11-12 |
+| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | DONE | 0/0 | test_sp6_safe_logoff_refusals_aborts_and_30s_completion, test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewa | DONE | — | ab6dcd135 2026-11-20 |
 | SP-7 | Background cluster scheduler, unobserved systems & ballpark reload (user-added 2… | DONE | 5/5 | test_sp7_unobserved_system_simulation_and_background_cluster_tick | DONE | — | 9f6870a41 2026-10-30 |
 
 ## Phase 4: Dogma and fitting
@@ -242,18 +262,18 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | DONE | 0/0 | test_plan_esi4_character_skills_clones_assets_mail | DONE | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes implemented and verified. | 958987363 2026-11-06 |
 | ESI-5 | Corporation, Alliance. | DONE | 0/0 | test_esi_corp_blueprints_projects_and_structure_markets_live, test_plan_esi5_corp_structures_timers_and_starbase_detail, | DONE | Alliance and Corporation ESI routes and governance features implemented and verified. | 3ed24678b 2026-11-03 |
 | ESI-6 | Market, Contracts, Industry, Planetary Interaction. | DONE | 0/0 | test_esi_planetary_interaction_planets_and_customs_offices, test_esi_planetary_interaction_schematics_and_colonies | DONE | Market, Contracts, Industry, and Planetary Interaction ESI routes implemented and verified. | 958987363 2026-11-06 |
-| ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | BLOCKED_BY_FEATURES | 0/0 | test_plan_esi7_fleets_and_ui_navigation | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | All 24 Fleets and User Interface ESI routes implemented and verified end-to-end. | bb5c2427e 2026-11-09 |
+| ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | BLOCKED_BY_FEATURES | 0/0 | test_plan_esi7_fleets_and_ui_navigation | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | All 24 Fleets and User Interface ESI routes implemented and verified end-to-end. | 55f17e3a7 2026-11-19 |
 
 ## Phase PVE: PvE Content & NPC Combat (ACTIVE — `#1395`–`#1400`)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| PVE-1 | Wiki PvE content importer (#1395, 1 track, tools only, no deps). Deterministic t… | MISSING | 0/1 | — | PARTIAL | Landed in b53ce3e65 (#1395): tools/import_wiki_pve.py + 17 passing unit tests in tools/tests/test_import_wiki_pve.py (dual >=85%/90% floors); awaiting parity_status Python-test or Rust hook closure. | 3005ab1e4 2026-11-19 |
-| PVE-2 | Ordinary NPC weapons, hit rules, wreck & loot (#1396, 2 tracks, no deps; land be… | MISSING | 0/2 | — | NOT STARTED | Active (#1396, 2 tracks, closes #1391): ordinary NPCs use static SDE weapon stats, turret/missile hit formulas, weapon FX, wreck_type_id, size-scaled loot, and zero invented EWAR abilities. | — |
-| PVE-3 | Faction NPC kill standing loss (#1397, 1 small track, no deps). Destroying an NP… | MISSING | 0/1 | — | NOT STARTED | Active (#1397, 1 small track): destroying standing-bearing faction NPCs applies standing loss and derived ally/enemy shifts via apply_faction_standing_with_derived once per system per 10 minutes. | — |
-| PVE-4 | Combat anomalies, complexes, expeditions & chemical labs content (#1398, 2 track… | MISSING | 0/1 | — | NOT STARTED | Active (#1398, 2 tracks, needs #1395, after #1396): startup wiki-content loader for combat anomalies, rated/unrated complexes, expeditions, and chemical labs with hand-written test fixtures. | 2550c2e53 2026-10-21 |
-| PVE-5 | Security, storyline, courier, trade & mining mission content (#1399, 2–3 tracks;… | MISSING | 0/2 | — | NOT STARTED | Active (#1399, 2-3 tracks, needs #1395+#1398, after #1396): content-driven security/storyline waves and objectives plus record-driven courier, trade, and mining mission cargo/goods/ore. | — |
-| PVE-6 | COSMOS, epic arcs, wormhole sites, incursion layouts & small site families (#140… | MISSING | 0/1 | — | NOT STARTED | Active (#1400, 2-3 tracks, needs #1395+#1398, lowest priority): content-driven COSMOS chains/sites, epic arcs, Sleeper wormhole waves, incursion constellation layouts, and small site families. | 3005ab1e4 2026-11-19 |
+| PVE-1 | Wiki PvE content importer (#1395 CLOSED b53ce3e65; gaps G1–G5 in #1494, Wave F2)… | MISSING | 0/1 | — | PARTIAL | CLOSED (#1395, b53ce3e65): tools/import_wiki_pve.py + 17 unit tests (>=85%/90% floors); contract gaps G1-G5 tracked in #1494 (Wave F2) and awaiting parity row hook. | 55f17e3a7 2026-11-19 |
+| PVE-2 | Ordinary NPC weapons, hit rules, wreck & loot (#1396, 2 tracks, Wave F2; land be… | MISSING | 0/2 | — | NOT STARTED | Active Wave F2 (#1396, 2 tracks): unified NPC factory/death path, SDE weapon stats & hit formulas, wreck_type_id, size-scaled loot, zero invented EWAR; prerequisite for #1398/#1399. | — |
+| PVE-3 | Faction NPC kill standing loss (#1397 CLOSED d3d33f66d; follow-up #1452). Destro… | DONE | 1/1 | npc_destruction_paths_apply_faction_standing_loss_ticks_and_emit_client_socket_notifications, npc_kill_faction_standing_ | DONE | CLOSED (#1397, d3d33f66d; follow-up #1452): faction NPC kills apply derived standing loss once per system/10m with notifications; feat:standings.standing-loss awaits gap-audit clear. | — |
+| PVE-4 | Combat anomalies, complexes, expeditions & chemical labs content (#1398, 2 track… | MISSING | 0/1 | — | NOT STARTED | Paused during Foundation-First Wave F1/F2 (#1398): resumes after #1494+#1396 -> #1495+#1480 prerequisites land; loads anomalies, complexes, expeditions & chemical labs. | 2550c2e53 2026-10-21 |
+| PVE-5 | Security, storyline, courier, trade & mining mission content (#1399, 2–3 tracks;… | MISSING | 0/2 | — | NOT STARTED | Paused during Foundation-First Wave F1/F2 (#1399): resumes after #1398 + #1496 persisted typed Mission Instance land; drives security, storyline, courier, trade & mining missions. | — |
+| PVE-6 | COSMOS, epic arcs, wormhole sites, incursion layouts & small site families (#140… | MISSING | 0/1 | — | NOT STARTED | Paused during Foundation-First Wave F1/F2 (#1400, lowest PvE priority): resumes after #1396 + #1398/#1495; COSMOS, epic arcs, Sleeper wormhole sites, incursions & small site families. | 3005ab1e4 2026-11-19 |
 
 ## Phase Z: Ledger closure and final acceptance
 

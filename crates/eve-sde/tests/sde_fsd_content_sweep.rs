@@ -733,6 +733,167 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     let gids = sde.load_graphic_ids().expect("load_graphic_ids");
     assert_eq!(gid_raw.records.len(), 6_200);
     assert_eq!(gids.len(), 6_200);
+    assert_eq!(sde.graphics.len(), gids.len());
+    let raw_dict_entries = |pos: usize, expected_len: usize| -> Vec<(String, usize)> {
+        let rel = u64_at(&gid_raw.raw, pos);
+        if rel == 0 {
+            assert_eq!(expected_len, 0);
+            return Vec::new();
+        }
+        assert_eq!(cfsd_dict_len(&gid_raw.raw, rel), expected_len);
+        let abs = cfsd_abs(rel);
+        let buckets = u64_at(&gid_raw.raw, abs - 8) as usize;
+        let mut entries = Vec::with_capacity(expected_len);
+        for b in 0..buckets {
+            let boff = u64_at(&gid_raw.raw, abs + b * 8);
+            if boff == 0 {
+                continue;
+            }
+            let babs = cfsd_abs(boff);
+            let bn = u64_at(&gid_raw.raw, babs - 8) as usize;
+            for j in 0..bn {
+                let e = babs + j * 16;
+                let k = cfsd_str(&gid_raw.raw, u64_at(&gid_raw.raw, e)).expect("dict key");
+                entries.push((k, e + 8));
+            }
+        }
+        assert_eq!(entries.len(), expected_len);
+        entries
+    };
+    let mut decoded_glocs = std::collections::HashMap::new();
+    for &rec in &gid_raw.records {
+        let gid = u64_at(&gid_raw.raw, rec) as u32;
+        let info = &gids[&gid];
+        assert_eq!(sde.graphics.get(&gid), Some(info));
+        let mask = u32_at(&gid_raw.raw, rec + 156);
+        assert_eq!(mask & !0x3fff, 0, "unexpected mask {mask:#x} on graphic_id {gid}");
+        let bit8 = (mask >> 8) & 1;
+        assert_eq!(u32_at(&gid_raw.raw, rec + 56), bit8, "iconInfo inner mask {gid}");
+        assert_eq!(u32_at(&gid_raw.raw, rec + 60), 0, "iconInfo tail padding {gid}");
+        let raw_str_if = |cond: bool, off: usize| -> Option<String> {
+            cond.then(|| {
+                cfsd_str(&gid_raw.raw, u64_at(&gid_raw.raw, rec + off))
+                    .filter(|s| !s.is_empty())
+            })
+            .flatten()
+        };
+        assert_eq!(info.graphic_file, raw_str_if(mask & (1 << 6) != 0, 40), "graphicFile {gid}");
+        assert_eq!(info.icon_folder, raw_str_if(bit8 != 0, 48), "iconInfo.folder {gid}");
+        assert_eq!(info.sof_faction_name, raw_str_if(mask & (1 << 9) != 0, 64), "sofFactionName {gid}");
+        assert_eq!(info.sof_hull_name, raw_str_if(mask & (1 << 10) != 0, 72), "sofHullName {gid}");
+        assert_eq!(info.sof_race_name, raw_str_if(mask & (1 << 13) != 0, 88), "sofRaceName {gid}");
+        for opt in [
+            info.graphic_file.as_deref(),
+            info.icon_folder.as_deref(),
+            info.sof_faction_name.as_deref(),
+            info.sof_hull_name.as_deref(),
+            info.sof_race_name.as_deref(),
+        ] {
+            assert_ne!(opt, Some(""), "empty string leaked on graphic_id {gid}");
+        }
+        let raw_u32_if = |bit: u32, off: usize| (mask & bit != 0).then(|| u32_at(&gid_raw.raw, rec + off));
+        assert_eq!(info.explosion_bucket_id, raw_u32_if(1 << 5, 144), "explosionBucketID {gid}");
+        assert_eq!(info.graphic_location_id, raw_u32_if(1 << 7, 148), "graphicLocationID {gid}");
+        assert_eq!(info.sof_material_set_id, raw_u32_if(1 << 12, 152), "sofMaterialSetID {gid}");
+        if let Some(glid) = info.graphic_location_id {
+            decoded_glocs.insert(gid, glid);
+        }
+        let raw_f4_if = |bit: u32, off: usize| {
+            (mask & bit != 0).then(|| {
+                [
+                    u32_at(&gid_raw.raw, rec + off),
+                    u32_at(&gid_raw.raw, rec + off + 4),
+                    u32_at(&gid_raw.raw, rec + off + 8),
+                    u32_at(&gid_raw.raw, rec + off + 12),
+                ]
+            })
+        };
+        assert_eq!(info.albedo_color.map(|c| c.map(f32::to_bits)), raw_f4_if(1 << 0, 96), "albedoColor {gid}");
+        assert_eq!(info.ammo_color.map(|c| c.map(f32::to_bits)), raw_f4_if(1 << 1, 112), "ammoColor {gid}");
+        assert_eq!(info.emissive_color.map(|c| c.map(f32::to_bits)), raw_f4_if(1 << 4, 128), "emissiveColor {gid}");
+        let expected_layout: Vec<String> = if mask & (1 << 11) != 0 {
+            let (pos, cnt) = cfsd_list(&gid_raw.raw, u64_at(&gid_raw.raw, rec + 80));
+            (0..cnt)
+                .map(|j| cfsd_str(&gid_raw.raw, u64_at(&gid_raw.raw, pos + j * 8)).unwrap_or_default())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(info.sof_layout, expected_layout, "sofLayout {gid}");
+        if mask & (1 << 2) != 0 {
+            let len = u64_at(&gid_raw.raw, rec + 16) as usize;
+            let expected: std::collections::HashMap<String, String> = raw_dict_entries(rec + 8, len)
+                .into_iter()
+                .map(|(k, vpos)| {
+                    (k, cfsd_str(&gid_raw.raw, u64_at(&gid_raw.raw, vpos)).expect("anim val"))
+                })
+                .collect();
+            assert_eq!(info.animation_state_objects, expected, "animationStateObjects {gid}");
+        } else {
+            assert!(info.animation_state_objects.is_empty(), "animationStateObjects {gid}");
+        }
+        if mask & (1 << 3) != 0 {
+            let len = u64_at(&gid_raw.raw, rec + 32) as usize;
+            let expected: std::collections::HashMap<String, u32> = raw_dict_entries(rec + 24, len)
+                .into_iter()
+                .map(|(k, vpos)| (k, u32_at(&gid_raw.raw, vpos)))
+                .collect();
+            let actual: std::collections::HashMap<String, u32> = info
+                .controller_variable_overrides
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_bits()))
+                .collect();
+            assert_eq!(actual, expected, "controllerVariableOverrides {gid}");
+        } else {
+            assert!(info.controller_variable_overrides.is_empty(), "controllerVariableOverrides {gid}");
+        }
+    }
+    assert_eq!(decoded_glocs, sde.load_graphic_location_ids().expect("load_graphic_location_ids"));
+    assert_eq!(
+        gids[&10].graphic_file.as_deref(),
+        Some("res:/dx9/model/worldobject/planet/moon.red")
+    );
+    assert_eq!(gids[&10].icon_folder, None);
+    assert_eq!(gids[&10].sof_dna(), None);
+    assert!(gids[&10].albedo_color.is_some());
+    assert_eq!(gids[&46].graphic_file, None);
+    assert_eq!(
+        gids[&46].icon_folder.as_deref(),
+        Some("res:/dx9/model/ship/minmatar/frigate/mf4/icons")
+    );
+    assert_eq!(gids[&46].sof_hull_name.as_deref(), Some("mf4_t1"));
+    assert_eq!(gids[&46].sof_faction_name.as_deref(), Some("minmatarbase"));
+    assert_eq!(gids[&46].sof_race_name.as_deref(), Some("minmatar"));
+    assert_eq!(gids[&46].explosion_bucket_id, Some(18));
+    assert_eq!(gids[&46].sof_material_set_id, None);
+    assert_eq!(
+        gids[&46].sof_dna().as_deref(),
+        Some("mf4_t1:minmatarbase:minmatar")
+    );
+    assert_eq!(gids[&24978].sof_material_set_id, Some(2734));
+    assert_eq!(gids[&24978].sof_hull_name.as_deref(), Some("m2xfe"));
+    assert_eq!(gids[&24978].sof_faction_name.as_deref(), Some("caldaristorm"));
+    assert_eq!(gids[&235].graphic_location_id, Some(50));
+    assert_eq!(
+        gids[&1011].graphic_file.as_deref(),
+        Some("res:/fisfx/lensflare/blue.red")
+    );
+    assert_eq!(
+        gids[&1011].icon_folder.as_deref(),
+        Some("res:/fisfx/lensflare/icons")
+    );
+    assert!(gids[&21456].emissive_color.is_some());
+    assert_eq!(
+        gids[&24800]
+            .animation_state_objects
+            .get("triglavianOwned")
+            .map(String::as_str),
+        Some("tgstate_large:triglaviansvarog_caldari:triglavian")
+    );
+    assert!(!gids[&25148].controller_variable_overrides.is_empty());
+    assert!(gids.values().any(|g| !g.sof_layout.is_empty()));
+    assert!(gids.values().any(|g| g.ammo_color.is_some()));
+    assert!(gids.values().any(|g| g.explosion_bucket_id.is_some()));
 
     let iid_raw = load(&sde, ICON_IDS, 32);
     let iids = sde.load_icon_ids().expect("load_icon_ids");
