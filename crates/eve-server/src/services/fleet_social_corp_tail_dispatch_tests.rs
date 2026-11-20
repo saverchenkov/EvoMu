@@ -674,3 +674,203 @@ fn corp_gov_tail_rejects_npc_corp_even_if_corp_record_seeded() {
         "CorpRoleDenied"
     );
 }
+
+#[test]
+fn corp_gov_tail_rejects_cross_corp_args_for_assets_and_applications_and_zero_ceo_update_attributes() {
+    let (ctx, _clock) = test_ctx_and_clock(1_700_000_000);
+    let corp_a = 98_600_951_i64;
+    let corp_b = 98_600_952_i64;
+    let corp_zero_ceo = 98_600_953_i64;
+    let char_a = 91_600_951_i64;
+    let gm_char = 91_600_952_i64;
+    let plain_zero = 91_600_953_i64;
+    let dir_zero = 91_600_954_i64;
+    let station_id = *ctx.sde.stations.keys().next().unwrap_or(&60_003_760);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ca = CorporationRecord::default();
+        ca.corporation_id = corp_a;
+        ca.name = "CrossCorpA".into();
+        ca.ticker = "CCA".into();
+        ca.ceo_id = char_a;
+        ca.members.insert(char_a);
+        ca.ensure_wallet_divisions();
+        snap.corporations.insert(corp_a, ca);
+
+        let mut cb = CorporationRecord::default();
+        cb.corporation_id = corp_b;
+        cb.name = "CrossCorpB".into();
+        cb.ticker = "CCB".into();
+        cb.ceo_id = char_a;
+        cb.members.insert(char_a);
+        cb.member_roles.insert(
+            char_a,
+            corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER,
+        );
+        cb.applications.insert(
+            901,
+            CorpApplicationRecord {
+                application_id: 901,
+                corporation_id: corp_b,
+                character_id: plain_zero,
+                message: "hello".into(),
+                status: "Applied".into(),
+                created_unix: 1_700_000_000,
+            },
+        );
+        cb.ensure_wallet_divisions();
+        snap.corporations.insert(corp_b, cb);
+
+        let mut zero_ceo = CorporationRecord::default();
+        zero_ceo.corporation_id = corp_zero_ceo;
+        zero_ceo.name = "ZeroCeoGuardCorp".into();
+        zero_ceo.ticker = "ZCG".into();
+        zero_ceo.ceo_id = 0;
+        zero_ceo.members.extend([plain_zero, dir_zero]);
+        zero_ceo
+            .member_roles
+            .insert(dir_zero, corp_roles::ROLE_DIRECTOR);
+        zero_ceo.ensure_wallet_divisions();
+        snap.corporations.insert(corp_zero_ceo, zero_ceo);
+
+        for (cid, coid) in [
+            (char_a, corp_a),
+            (gm_char, corp_a),
+            (plain_zero, corp_zero_ceo),
+            (dir_zero, corp_zero_ceo),
+        ] {
+            snap.characters.insert(
+                cid,
+                eve_db::CharacterRecord {
+                    character_id: cid,
+                    corporation_id: coid,
+                    ..Default::default()
+                },
+            );
+        }
+        snap.items.insert(
+            990_951,
+            InventoryItemRecord {
+                item_id: 990_951,
+                type_id: 34,
+                owner_id: corp_b,
+                location_id: station_id,
+                flag: InventoryFlag::CorpSAG1,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. F-01: char_a (DB corp_a, even with stale session corp_b and stale corp_b roles) cannot inspect corp_b assets/applications via args[0].
+    let denied_code = "CorpRoleDenied";
+    let mut cross_sess = make_session(char_a, corp_b);
+    for (method, args) in [
+        (
+            "GetAssetInventory",
+            vec![PyRep::Integer(corp_b), PyRep::String("offices".into())],
+        ),
+        (
+            "GetAssetInventoryForLocation",
+            vec![
+                PyRep::Integer(corp_b),
+                PyRep::Integer(station_id),
+                PyRep::String("offices".into()),
+            ],
+        ),
+        (
+            "SearchAssets",
+            vec![
+                PyRep::Integer(corp_b),
+                PyRep::String("offices".into()),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Integer(34),
+            ],
+        ),
+    ] {
+        assert_eq!(
+            handle_corp_gov_tail(&ctx, &mut cross_sess, "corpmgr", method, &args, corp_a, char_a, 1000)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            denied_code,
+            "corpmgr.{method} must reject explicit cross-corp args[0]"
+        );
+    }
+    for is_old in [false, true] {
+        assert_eq!(
+            handle_get_corp_applications_rpc(&ctx, &cross_sess, &[PyRep::Integer(corp_b)], is_old)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            denied_code,
+            "handle_get_corp_applications_rpc(is_old={is_old}) must reject explicit cross-corp args[0]"
+        );
+    }
+
+    // GM is still allowed to inspect corp_b assets and applications across corps.
+    let mut gm_sess = make_session(gm_char, corp_a);
+    gm_sess.corp_role = 0;
+    gm_sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut gm_sess,
+        "corpmgr",
+        "GetAssetInventory",
+        &[PyRep::Integer(corp_b), PyRep::String("offices".into())],
+        corp_a,
+        gm_char,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+    assert!(
+        handle_get_corp_applications_rpc(&ctx, &gm_sess, &[PyRep::Integer(corp_b)], false)
+            .unwrap()
+            .is_ok()
+    );
+
+    // 2. F-03: UpdateAttributes and UpdateCorporationAbilities deny roleless members even when corp.ceo_id == 0.
+    let mut plain_zero_sess = make_session(plain_zero, corp_zero_ceo);
+    plain_zero_sess.corp_role = u64::MAX;
+    for method in ["UpdateAttributes", "UpdateCorporationAbilities"] {
+        assert_eq!(
+            handle_corp_gov_tail(
+                &ctx,
+                &mut plain_zero_sess,
+                "corpRegistry",
+                method,
+                &[],
+                corp_zero_ceo,
+                plain_zero,
+                1000,
+            )
+            .unwrap()
+            .unwrap_err()
+            .code,
+            denied_code,
+            "{method} must deny roleless member when corp.ceo_id == 0"
+        );
+    }
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.corp_member_limits.contains_key(&corp_zero_ceo));
+    });
+
+    let mut dir_zero_sess = make_session(dir_zero, corp_zero_ceo);
+    dir_zero_sess.corp_role = 0;
+    assert!(handle_corp_gov_tail(
+        &ctx,
+        &mut dir_zero_sess,
+        "corpRegistry",
+        "UpdateAttributes",
+        &[],
+        corp_zero_ceo,
+        dir_zero,
+        1000,
+    )
+    .unwrap()
+    .is_ok());
+}

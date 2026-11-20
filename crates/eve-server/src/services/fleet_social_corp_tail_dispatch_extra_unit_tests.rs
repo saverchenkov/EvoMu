@@ -431,7 +431,7 @@ fn mutants_cov_corp_gov_tail_assets_aggression_and_hq_edges() {
     // - CEO without ROLE_DIRECTOR in session/member_roles still succeeds
     // - non-CEO Director succeeds
     // - plain member in corp with ceo_id != 0 fails CorpRoleDenied
-    // - plain member in corp with ceo_id == 0 succeeds (kills `corp.ceo_id != 0` -> `==`)
+    // - plain member in corp with ceo_id == 0 also fails CorpRoleDenied (F-03)
     let mut ceo_no_dir_sess = make_session(ceo_id, corp_id, 0);
     let r_ceo = call_reg(&ctx, &mut ceo_no_dir_sess, "UpdateAttributes", &[], corp_id, ceo_id, now_unix)
         .unwrap()
@@ -451,10 +451,12 @@ fn mutants_cov_corp_gov_tail_assets_aggression_and_hq_edges() {
             .code,
         "CorpRoleDenied"
     );
-    assert!(
+    assert_eq!(
         call_reg(&ctx, &mut plain_sess, "UpdateAttributes", &[], corp_no_ceo, plain_id, now_unix)
             .unwrap()
-            .is_ok()
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
     );
 
     // 2. MoveCorpHQHere: non-CEO Director and CEO succeed with real office; plain_sess rejected

@@ -1472,6 +1472,73 @@ fn industry_facilities_bps_db_first_roles_and_corp_facility_locations() {
     );
 }
 
+#[test]
+fn set_facility_taxes_rejects_seeded_npc_corp_with_ceo_and_director() {
+    let ctx = test_ctx();
+    let kw = HashMap::new();
+    let st_id = 60_003_760_i64;
+    let npc_corp_id = 1_000_009_i64;
+    let npc_char_id = 2_900_991_i64;
+    let npc_struct_id = 1_040_999_991_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            npc_char_id,
+            eve_db::CharacterRecord {
+                character_id: npc_char_id,
+                corporation_id: npc_corp_id,
+                ..Default::default()
+            },
+        );
+        let mut npc_corp = CorporationRecord::default();
+        npc_corp.corporation_id = npc_corp_id;
+        npc_corp.name = "Seeded NPC Tax Corp".into();
+        npc_corp.ticker = "SNTC".into();
+        npc_corp.ceo_id = npc_char_id;
+        npc_corp.members.insert(npc_char_id);
+        npc_corp.member_roles.insert(
+            npc_char_id,
+            corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER,
+        );
+        snap.corporations.insert(npc_corp_id, npc_corp);
+        snap.structures.insert(
+            npc_struct_id,
+            UpwellStructureRecord {
+                structure_id: npc_struct_id,
+                type_id: 35832,
+                owner_corp_id: npc_corp_id,
+                solar_system_id: 30_000_142,
+                name: "NPC Seeded Citadel".into(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                ..Default::default()
+            },
+        );
+    });
+
+    let mut npc_sess = char_session(npc_char_id, st_id);
+    npc_sess.corporation_id = Some(npc_corp_id);
+    npc_sess.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER;
+
+    let err = handle_industry_facilities_bps(
+        &ctx,
+        &mut npc_sess,
+        "facilityManager",
+        "SetFacilityTaxes",
+        &[PyRep::Integer(npc_struct_id), PyRep::Real(0.01)],
+        &kw,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.code, "FacilityPermissionDenied");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.owner_notes.contains_key(&facility_tax_note_id(npc_struct_id)));
+    });
+}
+
 #[cfg(test)]
 #[path = "industry_facilities_bps_extra_unit_tests.rs"]
 mod extra_unit_tests;
