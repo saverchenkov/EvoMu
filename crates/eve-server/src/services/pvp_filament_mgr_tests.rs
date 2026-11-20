@@ -444,3 +444,240 @@ fn event_schedule_reads_do_not_mutate_db() {
     assert_eq!(ctx.db.state_epoch(), epoch_before);
     assert_eq!(ctx.db.tx_commit_count(), commits_before);
 }
+
+#[test]
+fn pvp_filament_reads_and_leave_queue_guards_preserve_values_without_mutating_empty_db() {
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let sde = Arc::new(SdeRegistry::default());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let kw = HashMap::new();
+
+    // Unauthenticated callers fail closed with zero DB mutation across all getters and LeavePVPQueue.
+    let mut unauth = SessionState::default();
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+    for meth in [
+        "GetAllEvents",
+        "GetActiveEvents",
+        "GetMostRecentEvent",
+        "GetNextEventDate",
+        "GetLeaderboard",
+        "GetCharacterStatistics",
+        "LeavePVPQueue",
+    ] {
+        let err = rt
+            .block_on(handle(&ctx, &mut unauth, "pvpFilamentMgr", meth, &[], &kw))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, "Unauthorized", "{meth}");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    let cid = 90_099_777_i64;
+    let mut sess = SessionState::default();
+    sess.user_id = Some(99);
+    sess.character_id = Some(cid);
+    sess.solar_system_id = Some(30_000_142);
+
+    // LeavePVPQueue when not queued must fail before opening any mutating transaction.
+    let not_queued_err = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "LeavePVPQueue",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(not_queued_err.code, "NotInPvpQueue");
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // All read getters succeed on unseeded DB without flipping seeded_default_events or committing.
+    let unseeded_all = rt
+        .block_on(handle(&ctx, &mut sess, "pvpFilamentMgr", "GetAllEvents", &[], &kw))
+        .unwrap()
+        .expect("GetAllEvents");
+    assert!(matches!(unseeded_all, PyRep::Dict(ref d) if !d.is_empty()));
+    let unseeded_active = rt
+        .block_on(handle(&ctx, &mut sess, "pvpFilamentMgr", "GetActiveEvents", &[], &kw))
+        .unwrap()
+        .expect("GetActiveEvents");
+    let unseeded_recent = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetMostRecentEvent",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .expect("GetMostRecentEvent");
+    let unseeded_next = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetNextEventDate",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .expect("GetNextEventDate");
+    let unseeded_lb = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetLeaderboard",
+            &[PyRep::Integer(171)],
+            &kw,
+        ))
+        .unwrap()
+        .expect("GetLeaderboard");
+    let unseeded_stats = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetCharacterStatistics",
+            &[PyRep::Integer(171), PyRep::Integer(cid)],
+            &kw,
+        ))
+        .unwrap()
+        .expect("GetCharacterStatistics");
+
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !load_pvp_store(s).seeded_default_events));
+
+    // Seed events explicitly + enqueue a pilot; verify read values match and wrong filament ID fails closed.
+    let fil_id = 777_001_i64;
+    let ship_id = 777_002_i64;
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        ensure_events_from_sde(&ctx.sde, &mut store);
+        store.queue.insert(
+            cid,
+            PvpQueueCharacterEntry {
+                item_id: fil_id,
+                type_id: 56_088,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo as u16,
+                solar_system_id: 30_000_142,
+                joined_unix: now,
+            },
+        );
+        save_pvp_store(snap, &store);
+    });
+    let epoch1 = ctx.db.state_epoch();
+    let commits1 = ctx.db.tx_commit_count();
+
+    assert_eq!(
+        rt.block_on(handle(&ctx, &mut sess, "pvpFilamentMgr", "GetAllEvents", &[], &kw))
+            .unwrap()
+            .unwrap(),
+        unseeded_all
+    );
+    assert_eq!(
+        rt.block_on(handle(&ctx, &mut sess, "pvpFilamentMgr", "GetActiveEvents", &[], &kw))
+            .unwrap()
+            .unwrap(),
+        unseeded_active
+    );
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetMostRecentEvent",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        unseeded_recent
+    );
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetNextEventDate",
+            &[],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        unseeded_next
+    );
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetLeaderboard",
+            &[PyRep::Integer(171)],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        unseeded_lb
+    );
+    assert_eq!(
+        rt.block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "GetCharacterStatistics",
+            &[PyRep::Integer(171), PyRep::Integer(cid)],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap(),
+        unseeded_stats
+    );
+
+    let wrong_fil_err = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "LeavePVPQueue",
+            &[PyRep::Integer(999_999)],
+            &kw,
+        ))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(wrong_fil_err.code, "FilamentNotFound");
+    assert_eq!(ctx.db.state_epoch(), epoch1);
+    assert_eq!(ctx.db.tx_commit_count(), commits1);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| load_pvp_store(s).queue.get(&cid).map(|e| e.item_id))
+        == Some(fil_id));
+
+    let leave_ok = rt
+        .block_on(handle(
+            &ctx,
+            &mut sess,
+            "pvpFilamentMgr",
+            "LeavePVPQueue",
+            &[PyRep::Integer(fil_id)],
+            &kw,
+        ))
+        .unwrap()
+        .expect("matching LeavePVPQueue succeeds");
+    assert_eq!(leave_ok, PyRep::None);
+    assert!(ctx
+        .db
+        .with_snapshot(|s| !load_pvp_store(s).queue.contains_key(&cid)));
+}
