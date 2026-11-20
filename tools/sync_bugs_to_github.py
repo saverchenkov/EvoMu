@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import glob
 import json
 import os
@@ -30,13 +31,29 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 # GitHub enforces a hard 65,536-character maximum on issue and comment bodies.
 MAX_GITHUB_BODY_CHARS = 62_000
 _FNV1A_OFFSET = 0xCBF29CE484222325
 _FNV1A_PRIME = 0x100000001B3
+
+
+class IssueLookupError(RuntimeError):
+    """Raised when querying GitHub for existing issues fails (fail-closed)."""
 
 
 LABEL_SPECS: Dict[str, Tuple[str, str]] = {
@@ -576,12 +593,31 @@ def _is_positive_identity(val: Any) -> bool:
     return False
 
 
+_AUTH_SESSION_IDENTITY_KEYS: Tuple[str, ...] = (
+    "user_id",
+    "userid",
+    "character_id",
+    "charid",
+    "char_id",
+    "solar_system_id",
+    "solarsystemid",
+    "solarsystemid2",
+    "station_id",
+    "stationid",
+    "structure_id",
+    "structureid",
+    "ship_id",
+    "shipid",
+    "corporation_id",
+    "corpid",
+)
+
+
 def _has_authenticated_session_evidence(bundle: Dict[str, Any]) -> bool:
     """Returns True when bundle session/ledger/destiny state proves the client reached eve-server."""
-    session = bundle.get("session")
-    if isinstance(session, dict):
-        for key in ("user_id", "userid", "character_id", "charid"):
-            if _is_positive_identity(session.get(key)):
+    for scope in _iter_bundle_scopes(bundle):
+        for key in _AUTH_SESSION_IDENTITY_KEYS:
+            if _is_positive_identity(scope.get(key)):
                 return True
     outbound = bundle.get("outbound_ledger")
     if isinstance(outbound, list) and len(outbound) > 0:
@@ -1325,45 +1361,281 @@ def ensure_github_labels(repo: str, labels: List[str], ensured_cache: Set[str]) 
         ensured_cache.add(label)
 
 
+def _issue_cache_key(stack_hash: int) -> str:
+    return f"0x{(int(stack_hash) & 0xFFFFFFFFFFFFFFFF):016x}"
+
+
+def resolve_issue_cache_path(
+    queue_dir: Optional[str] = None,
+    uploaded_dir: Optional[str] = None,
+    cache_file: Optional[Union[str, os.PathLike[str]]] = None,
+) -> Optional[Path]:
+    """Resolves the persistent local hash->issue cache path for `sync_bugs_to_github.py`."""
+    if cache_file is not None:
+        raw = str(cache_file).strip()
+        return Path(raw) if raw else None
+    if queue_dir:
+        q_abs = Path(os.path.abspath(queue_dir))
+        if q_abs.name == "queue":
+            return q_abs.parent / "issue_cache.json"
+    if uploaded_dir:
+        u_abs = Path(os.path.abspath(uploaded_dir))
+        if u_abs.name == "uploaded":
+            return u_abs.parent / "issue_cache.json"
+        return u_abs / "issue_cache.json"
+    if queue_dir:
+        q_abs = Path(os.path.abspath(queue_dir))
+        return q_abs.parent / f".{q_abs.name}_issue_cache.json"
+    return None
+
+
+def _load_issue_cache(cache_file: Optional[Union[str, os.PathLike[str]]]) -> Dict[str, Any]:
+    if not cache_file:
+        return {"repos": {}}
+    path = Path(cache_file)
+    if not path.exists():
+        return {"repos": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("repos"), dict):
+            return data
+    except Exception as e:
+        print(f"[warn] Ignoring unreadable issue cache '{path}': {e}", file=sys.stderr)
+    return {"repos": {}}
+
+
+def _save_issue_cache(cache_file: Optional[Union[str, os.PathLike[str]]], cache_data: Dict[str, Any]) -> None:
+    if not cache_file:
+        return
+    path = Path(cache_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(cache_data, fh, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _record_issue_cache(
+    cache_file: Optional[Union[str, os.PathLike[str]]],
+    repo: str,
+    hashes: Sequence[int],
+    issue_number: int,
+    state: str,
+) -> None:
+    if not cache_file or not hashes or int(issue_number) <= 0:
+        return
+    data = _load_issue_cache(cache_file)
+    repos = data.setdefault("repos", {})
+    repo_map = repos.setdefault(repo, {})
+    norm_state = str(state or "OPEN").upper()
+    now = time.time()
+    for h in hashes:
+        repo_map[_issue_cache_key(h)] = {
+            "number": int(issue_number),
+            "state": norm_state,
+            "updated_at": now,
+        }
+    _save_issue_cache(cache_file, data)
+
+
+def _lookup_issue_cache(
+    cache_file: Optional[Union[str, os.PathLike[str]]],
+    repo: str,
+    ordered_hashes: Sequence[int],
+) -> Dict[int, Tuple[int, str, int]]:
+    """Returns `{issue_number: (issue_number, state, hash_rank)}` from persistent local cache."""
+    if not cache_file:
+        return {}
+    data = _load_issue_cache(cache_file)
+    repo_map = (data.get("repos") or {}).get(repo) or {}
+    hits: Dict[int, Tuple[int, str, int]] = {}
+    for rank, h in enumerate(ordered_hashes):
+        entry = repo_map.get(_issue_cache_key(h))
+        if not isinstance(entry, dict):
+            continue
+        try:
+            num = int(entry["number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if num <= 0:
+            continue
+        state = str(entry.get("state", "OPEN")).upper()
+        if num not in hits:
+            hits[num] = (num, state, rank)
+        else:
+            prev_num, prev_state, prev_rank = hits[num]
+            best_state = "OPEN" if ("OPEN" in (prev_state, state)) else state
+            hits[num] = (prev_num, best_state, min(prev_rank, rank))
+    return hits
+
+
+@contextlib.contextmanager
+def _sync_lock(lock_path: Optional[Path]) -> Iterator[None]:
+    """Cross-platform advisory file lock (POSIX fcntl, Windows msvcrt, or exclusive lockfile)."""
+    if lock_path is None:
+        yield
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is not None:
+        with open(lock_path, "a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        with open(lock_path, "a+b") as lock_fh:
+            lock_fh.seek(0, os.SEEK_END)
+            if lock_fh.tell() == 0:
+                lock_fh.write(b"\0")
+                lock_fh.flush()
+            lock_fh.seek(0)
+            msvcrt.locking(lock_fh.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_fh.seek(0)
+                msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    # Pure-Python atomic O_CREAT|O_EXCL fallback if neither fcntl nor msvcrt is available.
+    deadline = time.monotonic() + 60.0
+    fd: Optional[int] = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, f"{os.getpid()}\n".encode("ascii", "replace"))
+            os.close(fd)
+            fd = None
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for sync lock '{lock_path}'")
+            try:
+                st = os.stat(lock_path)
+                if (time.time() - st.st_mtime) > 300.0:
+                    os.remove(lock_path)
+                    continue
+            except OSError:
+                pass
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+
 def find_existing_issue(
     repo: str,
     stack_hash: int,
     dry_run: bool = False,
     alias_hashes: Optional[Sequence[int]] = None,
+    cache_file: Optional[Union[str, os.PathLike[str]]] = None,
+    cache_hashes: Optional[Sequence[int]] = None,
 ) -> Optional[Tuple[int, str]]:
-    """Queries GitHub CLI to check if an issue for this stack_hash or legacy client hash already exists."""
-    if dry_run or not check_gh_installed():
-        return None
+    """
+    Queries GitHub CLI (and local cache for search-lag resilience) to check if an
+    issue for `stack_hash` or any legacy alias hash already exists.
 
-    unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
-    search_terms = [
-        f'"**Signature Hash:** `0x{unsigned_hash:016x}`" in:body',
-        f'"(or `{stack_hash}`)" in:body',
-    ]
-    seen_hashes: Set[int] = {stack_hash}
-    for alias in alias_hashes or ():
-        if alias in seen_hashes:
-            continue
-        seen_hashes.add(alias)
-        alias_unsigned = alias & 0xFFFFFFFFFFFFFFFF
-        search_terms.append(f'"**Signature Hash:** `0x{alias_unsigned:016x}`" in:body')
-    for term in search_terms:
+    Only canonical signature hashes (`[stack_hash]` by default, or explicit `cache_hashes`)
+    are read from or written to `cache_file` so non-unique raw client `stack_hash` aliases
+    can never poison persistent cache lookups across unrelated crashes.
+
+    Fails closed (`IssueLookupError`) when `gh` is unavailable or `gh issue list` errors,
+    and always prefers `OPEN` issues over `CLOSED` issues.
+    """
+    if dry_run:
+        return None
+    if not check_gh_installed():
+        raise IssueLookupError("GitHub CLI ('gh') is not available; failing closed to avoid duplicate issues.")
+
+    ordered_hashes = [stack_hash, *_merge_unique_hashes(alias_hashes, exclude=stack_hash)]
+    search_specs: List[Tuple[int, str]] = []
+    for rank, h in enumerate(ordered_hashes):
+        h_unsigned = h & 0xFFFFFFFFFFFFFFFF
+        search_specs.append((rank, f'"**Signature Hash:** `0x{h_unsigned:016x}`" in:body'))
+        search_specs.append((rank, f'"(or `{h}`)" in:body'))
+
+    lookup_hashes = list(cache_hashes) if cache_hashes is not None else [stack_hash]
+    if stack_hash not in lookup_hashes:
+        lookup_hashes.insert(0, stack_hash)
+    cached_by_num = _lookup_issue_cache(cache_file, repo, lookup_hashes)
+    github_candidates: Dict[int, Tuple[int, str, int, int]] = {}
+    seq = 0
+    for rank, term in search_specs:
         cmd = [
             "gh", "issue", "list",
             "--repo", repo,
             "--state", "all",
             "--search", term,
             "--json", "number,title,state",
-            "--limit", "1",
+            "--limit", "20",
         ]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             issues = json.loads(res.stdout.strip() or "[]")
-            if issues:
-                return int(issues[0]["number"]), str(issues[0].get("state", "OPEN")).upper()
+            if not isinstance(issues, list):
+                raise ValueError(f"Expected JSON list from gh issue list, got {type(issues).__name__}")
         except Exception as e:
-            print(f"[warn] Failed to query gh for {term}: {e}", file=sys.stderr)
-    return None
+            raise IssueLookupError(f"Failed to query gh for {term}: {e}") from e
+
+        found_open = False
+        for issue in issues:
+            if not isinstance(issue, dict) or "number" not in issue:
+                continue
+            num = int(issue["number"])
+            state = str(issue.get("state", "OPEN")).upper()
+            if state == "OPEN":
+                found_open = True
+            if num not in github_candidates:
+                github_candidates[num] = (num, state, rank, seq)
+                seq += 1
+            else:
+                prev_num, prev_state, prev_rank, prev_seq = github_candidates[num]
+                merged_state = "OPEN" if ("OPEN" in (prev_state, state)) else state
+                github_candidates[num] = (prev_num, merged_state, min(prev_rank, rank), prev_seq)
+        # Once we have an OPEN GitHub match and no higher-priority primary cache entry could beat it,
+        # we can stop issuing additional legacy alias searches.
+        if found_open and (
+            rank == 0 or not any(c_state == "OPEN" and c_rank < rank for _, c_state, c_rank in cached_by_num.values())
+        ):
+            break
+
+    merged: List[Tuple[int, int, int, int, str]] = []
+    seen_nums: Set[int] = set()
+    for num, state, rank, cseq in github_candidates.values():
+        seen_nums.add(num)
+        state_pri = 0 if state == "OPEN" else 1
+        merged.append((state_pri, rank, cseq, num, state))
+    for num, (_, state, rank) in cached_by_num.items():
+        if num in seen_nums:
+            continue
+        state_pri = 0 if state == "OPEN" else 1
+        merged.append((state_pri, rank, 1_000_000 + num, num, state))
+
+    if not merged:
+        return None
+    merged.sort()
+    _, _, _, best_num, best_state = merged[0]
+    if cache_file and best_num in github_candidates:
+        _record_issue_cache(cache_file, repo, lookup_hashes, best_num, best_state)
+    return best_num, best_state
 
 
 def _effective_bundle_hash(bundle: Dict[str, Any]) -> int:
@@ -1393,22 +1665,92 @@ def _legacy_client_stack_hashes(
     bundle: Dict[str, Any],
     effective_hash: Optional[int] = None,
 ) -> List[int]:
-    """Returns distinct non-generic raw client stack hashes for dedup against legacy issues."""
+    """Returns distinct legacy hashes for dedup against issues opened under older hash schemes."""
     if classify_environment_fault(bundle) is not None:
         return []
+    eff = effective_hash if effective_hash is not None else _effective_bundle_hash(bundle)
     stack_key = str(bundle.get("stack_key", ""))
-    if "MollycoddledUthread" in stack_key:
-        return []
+    trace = _get_bundle_trace(bundle)
+    aliases: List[int] = []
+
+    raw_hash: Optional[int]
     try:
         raw_hash = int(bundle.get("stack_hash", 0))
     except (TypeError, ValueError):
-        return []
-    if raw_hash in (0, -1040548311):
-        return []
-    eff = effective_hash if effective_hash is not None else _effective_bundle_hash(bundle)
-    if raw_hash == eff:
-        return []
-    return [raw_hash]
+        raw_hash = None
+
+    if "MollycoddledUthread" not in stack_key and raw_hash is not None and raw_hash not in (0, -1040548311):
+        aliases.append(raw_hash)
+
+    if _is_client_python_exception_bundle(bundle):
+        exc_class, msg, location = parse_traceback_summary(trace, stack_key)
+        if exc_class != "UnknownException":
+            norm_msg = _normalize_exception_message(msg)
+            if msg != norm_msg:
+                aliases.append(_fnv1a_i64(f"client-python-exc:{exc_class}:{location}:{msg}"))
+    if "MollycoddledUthread" in stack_key and raw_hash is not None and raw_hash not in (0, -1040548311):
+        exc_class, msg, location = parse_traceback_summary(trace, stack_key)
+        aliases.append(_fnv1a_i64(f"{raw_hash}:{location}:{exc_class}:{msg}"))
+
+    for extra_key in ("legacy_stack_hashes", "alias_hashes"):
+        extra_vals = bundle.get(extra_key)
+        if isinstance(extra_vals, list):
+            for v in extra_vals:
+                try:
+                    iv = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if iv not in (0, -1040548311):
+                    aliases.append(iv)
+
+    return _merge_unique_hashes(aliases, exclude=eff)
+
+
+def _post_issue_comment_with_state(
+    repo: str,
+    issue_number: int,
+    existing_state: str,
+    comment_body: str,
+    dry_run: bool = False,
+) -> Tuple[bool, str]:
+    """Posts an occurrence comment to an existing issue (reopening if closed). Returns `(ok, resultant_state)`."""
+    if dry_run:
+        if existing_state == "CLOSED":
+            print(f"[dry-run] Would reopen closed issue #{issue_number}")
+        preview = comment_body if len(comment_body) <= 2000 else comment_body[:2000] + "..."
+        print(f"[dry-run] Would post comment to #{issue_number}:\n{preview}\n")
+        return True, "OPEN" if existing_state == "CLOSED" else str(existing_state or "OPEN").upper()
+
+    result_state = str(existing_state or "OPEN").upper()
+    if result_state == "CLOSED":
+        try:
+            subprocess.run(
+                ["gh", "issue", "reopen", str(issue_number), "--repo", repo],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            result_state = "OPEN"
+            print(f"[+] Reopened closed issue #{issue_number} due to new occurrence")
+        except Exception as e:
+            err_msg = getattr(e, "stderr", None) or str(e)
+            print(f"[warn] Failed to reopen issue #{issue_number}: {err_msg}", file=sys.stderr)
+
+    cmd = [
+        "gh", "issue", "comment",
+        str(issue_number),
+        "--repo", repo,
+    ]
+    try:
+        _run_gh_with_body_file(cmd, comment_body)
+        print(f"[+] Added incident occurrence comment to issue #{issue_number}")
+        return True, result_state
+    except Exception as e:
+        err_msg = getattr(e, "stderr", None) or str(e)
+        print(f"[error] Failed to comment on issue #{issue_number}: {err_msg}", file=sys.stderr)
+        return False, result_state
 
 
 def _post_issue_comment(
@@ -1419,39 +1761,8 @@ def _post_issue_comment(
     dry_run: bool = False,
 ) -> bool:
     """Posts an occurrence comment to an existing issue (reopening if closed)."""
-    if dry_run:
-        if existing_state == "CLOSED":
-            print(f"[dry-run] Would reopen closed issue #{issue_number}")
-        preview = comment_body if len(comment_body) <= 2000 else comment_body[:2000] + "..."
-        print(f"[dry-run] Would post comment to #{issue_number}:\n{preview}\n")
-        return True
-
-    if existing_state == "CLOSED":
-        try:
-            subprocess.run(
-                ["gh", "issue", "reopen", str(issue_number), "--repo", repo],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=True,
-            )
-            print(f"[+] Reopened closed issue #{issue_number} due to new occurrence")
-        except subprocess.CalledProcessError as e:
-            print(f"[warn] Failed to reopen issue #{issue_number}: {e.stderr}", file=sys.stderr)
-
-    cmd = [
-        "gh", "issue", "comment",
-        str(issue_number),
-        "--repo", repo,
-    ]
-    try:
-        _run_gh_with_body_file(cmd, comment_body)
-        print(f"[+] Added incident occurrence comment to issue #{issue_number}")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[error] Failed to comment on issue #{issue_number}: {e.stderr}", file=sys.stderr)
-        return False
+    ok, _ = _post_issue_comment_with_state(repo, issue_number, existing_state, comment_body, dry_run=dry_run)
+    return ok
 
 
 def _merge_unique_hashes(*hash_groups: Optional[Sequence[int]], exclude: Optional[int] = None) -> List[int]:
@@ -1476,6 +1787,7 @@ def create_or_update_issue(
     ensured_labels: Optional[Set[str]] = None,
     dry_run: bool = False,
     alias_hashes: Optional[Sequence[int]] = None,
+    cache_file: Optional[Union[str, os.PathLike[str]]] = None,
 ) -> Optional[int]:
     """Creates a new issue or comments on an existing one (reopening if closed)."""
     if is_benign_client_traceback_bundle(bundle):
@@ -1489,6 +1801,7 @@ def create_or_update_issue(
         alias_hashes,
         exclude=stack_hash,
     )
+    canonical_hashes = [stack_hash]
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
 
@@ -1497,13 +1810,20 @@ def create_or_update_issue(
         stack_hash,
         dry_run=dry_run,
         alias_hashes=resolved_aliases,
+        cache_file=None if dry_run else cache_file,
+        cache_hashes=canonical_hashes,
     )
 
     if existing:
         existing_number, existing_state = existing
         print(f"[*] Found existing issue #{existing_number} (state={existing_state}) for hash 0x{unsigned_hash:016x}")
         comment_body = format_occurrence_comment(bundle, occurrences)
-        if _post_issue_comment(repo, existing_number, existing_state, comment_body, dry_run=dry_run):
+        comment_ok, result_state = _post_issue_comment_with_state(
+            repo, existing_number, existing_state, comment_body, dry_run=dry_run
+        )
+        if comment_ok:
+            if not dry_run and cache_file:
+                _record_issue_cache(cache_file, repo, canonical_hashes, existing_number, result_state)
             return existing_number
         return None
     else:
@@ -1538,7 +1858,12 @@ def create_or_update_issue(
         output = res.stdout.strip()
         print(f"[+] Created issue: {output}")
         m = re.search(r"/issues/(\d+)", output)
-        return int(m.group(1)) if m else 1
+        if not m:
+            raise RuntimeError(f"Could not parse created issue number from gh issue create output: {output!r}")
+        issue_number = int(m.group(1))
+        if cache_file:
+            _record_issue_cache(cache_file, repo, canonical_hashes, issue_number, "OPEN")
+        return issue_number
 
 
 def is_safe_report_key(key: str) -> bool:
@@ -1614,6 +1939,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--queue-dir", default=".evomu-bugs/queue", help="Path to bug reports queue directory")
     parser.add_argument("--uploaded-dir", default=".evomu-bugs/uploaded", help="Path to archive uploaded bug reports")
     parser.add_argument("--repo", default="saverchenkov/EvoMu", help="GitHub repository (owner/name)")
+    parser.add_argument("--cache-file", default=None, help="Path to local persistent hash->issue cache JSON ('' disables)")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without modifying GitHub or files")
     parser.add_argument("--delete", action="store_true", help="Delete report files and attachments instead of archiving")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
@@ -1624,26 +1950,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[*] Queue directory '{args.queue_dir}' does not exist or is empty. No bugs to report.")
         return 0
 
-    json_files = sorted(glob.glob(os.path.join(args.queue_dir, "*.json")))
-    if not json_files:
+    initial_files = sorted(glob.glob(os.path.join(args.queue_dir, "*.json")))
+    if not initial_files:
         print(f"[*] No pending bug reports in '{args.queue_dir}'.")
         return 0
 
-    print(f"[*] Discovered {len(json_files)} queued incident report(s) in '{args.queue_dir}'.")
+    eff_uploaded_dir: Optional[str] = None
+    if not args.delete and not (
+        args.queue_dir != parser.get_default("queue_dir")
+        and args.uploaded_dir == parser.get_default("uploaded_dir")
+    ):
+        eff_uploaded_dir = args.uploaded_dir
 
-    groups: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
-    suppressed_benign: List[Tuple[str, Dict[str, Any]]] = []
-    for filepath in json_files:
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                bundle = json.load(f)
-            if is_benign_client_traceback_bundle(bundle):
-                suppressed_benign.append((filepath, bundle))
-                continue
-            h = _effective_bundle_hash(bundle)
-            groups.setdefault(h, []).append((filepath, bundle))
-        except Exception as e:
-            print(f"[warn] Skipping corrupt or unreadable file '{filepath}': {e}", file=sys.stderr)
+    cache_path = (
+        None
+        if args.dry_run
+        else resolve_issue_cache_path(
+            queue_dir=args.queue_dir,
+            uploaded_dir=eff_uploaded_dir,
+            cache_file=args.cache_file,
+        )
+    )
+    lock_path = (
+        None
+        if args.dry_run
+        else (
+            cache_path.with_suffix(".lock")
+            if cache_path is not None
+            else Path(os.path.abspath(args.queue_dir)) / ".sync.lock"
+        )
+    )
 
     if not args.dry_run and not args.delete:
         os.makedirs(args.uploaded_dir, exist_ok=True)
@@ -1671,54 +2007,101 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     ensured_labels: Set[str] = set()
     success_count = 0
-    for path, benign_bundle in suppressed_benign:
-        print(f"[info] Suppressing known benign client UI traceback '{os.path.basename(path)}'.")
-        _dispose_processed_bundle(path, benign_bundle)
-        success_count += 1
+    failed_count = 0
 
-    for stack_hash, files in groups.items():
-        total_occurrences = len(files)
-        unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
-        (_, primary_bundle), extra_files = _select_primary_and_extras(files)
-        env_fault = classify_environment_fault(primary_bundle)
-        group_aliases = _merge_unique_hashes(
-            *(_legacy_client_stack_hashes(b, effective_hash=stack_hash) for _, b in files),
-            exclude=stack_hash,
-        )
-        alias_suffix = (
-            " [client hash: " + ", ".join(f"0x{(a & 0xFFFFFFFFFFFFFFFF):016x}" for a in group_aliases) + "]"
-            if group_aliases
-            else ""
-        )
-        print(f"[*] Processing error group 0x{unsigned_hash:016x} ({total_occurrences} occurrence(s)){alias_suffix}...")
+    with _sync_lock(lock_path):
+        json_files = sorted(glob.glob(os.path.join(args.queue_dir, "*.json")))
+        if not json_files:
+            print(f"[*] No pending bug reports in '{args.queue_dir}'.")
+            return 0
+        print(f"[*] Discovered {len(json_files)} queued incident report(s) in '{args.queue_dir}'.")
 
-        issue_id = create_or_update_issue(
-            args.repo,
-            primary_bundle,
-            total_occurrences,
-            ensured_labels=ensured_labels,
-            dry_run=args.dry_run,
-            alias_hashes=group_aliases,
-        )
-        if issue_id:
-            for occ_idx, (_, extra_bundle) in enumerate(extra_files, start=2):
+        groups: Dict[int, List[Tuple[str, Dict[str, Any]]]] = {}
+        suppressed_benign: List[Tuple[str, Dict[str, Any]]] = []
+        for filepath in json_files:
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    bundle = json.load(f)
+                if is_benign_client_traceback_bundle(bundle):
+                    suppressed_benign.append((filepath, bundle))
+                    continue
+                h = _effective_bundle_hash(bundle)
+                groups.setdefault(h, []).append((filepath, bundle))
+            except Exception as e:
+                print(f"[warn] Skipping corrupt or unreadable file '{filepath}': {e}", file=sys.stderr)
+
+        for path, benign_bundle in suppressed_benign:
+            print(f"[info] Suppressing known benign client UI traceback '{os.path.basename(path)}'.")
+            _dispose_processed_bundle(path, benign_bundle)
+            success_count += 1
+
+        for stack_hash, files in groups.items():
+            total_occurrences = len(files)
+            unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
+            (primary_path, primary_bundle), extra_files = _select_primary_and_extras(files)
+            env_fault = classify_environment_fault(primary_bundle)
+            group_aliases = _merge_unique_hashes(
+                *(_legacy_client_stack_hashes(b, effective_hash=stack_hash) for _, b in files),
+                exclude=stack_hash,
+            )
+            alias_suffix = (
+                " [client hash: " + ", ".join(f"0x{(a & 0xFFFFFFFFFFFFFFFF):016x}" for a in group_aliases) + "]"
+                if group_aliases
+                else ""
+            )
+            print(f"[*] Processing error group 0x{unsigned_hash:016x} ({total_occurrences} occurrence(s)){alias_suffix}...")
+
+            try:
+                issue_id = create_or_update_issue(
+                    args.repo,
+                    primary_bundle,
+                    total_occurrences,
+                    ensured_labels=ensured_labels,
+                    dry_run=args.dry_run,
+                    alias_hashes=group_aliases,
+                    cache_file=cache_path,
+                )
+            except Exception as e:
+                print(
+                    f"[error] Failed creating/updating issue for group 0x{unsigned_hash:016x}: {e}",
+                    file=sys.stderr,
+                )
+                failed_count += len(files)
+                continue
+
+            if not issue_id:
+                print(
+                    f"[error] Retaining {len(files)} bundle(s) for group 0x{unsigned_hash:016x} because issue sync did not succeed.",
+                    file=sys.stderr,
+                )
+                failed_count += len(files)
+                continue
+
+            _dispose_processed_bundle(primary_path, primary_bundle)
+            success_count += 1
+
+            for occ_idx, (extra_path, extra_bundle) in enumerate(extra_files, start=2):
                 if _should_comment_extra_bundle(primary_bundle, extra_bundle, env_fault):
                     comment_body = format_occurrence_comment(extra_bundle, occ_idx)
-                    _post_issue_comment(
+                    comment_ok = _post_issue_comment(
                         args.repo,
                         issue_id,
                         "OPEN",
                         comment_body,
                         dry_run=args.dry_run,
                     )
-
-        if issue_id or args.dry_run:
-            success_count += len(files)
-            for path, file_bundle in files:
-                _dispose_processed_bundle(path, file_bundle)
+                    if not comment_ok:
+                        print(
+                            f"[error] Retaining '{os.path.basename(extra_path)}' in queue because commenting on #{issue_id} failed.",
+                            file=sys.stderr,
+                        )
+                        failed_count += 1
+                        continue
+                _dispose_processed_bundle(extra_path, extra_bundle)
+                success_count += 1
 
     print(f"[✓] Processed {success_count}/{len(json_files)} incident file(s).")
-    return 0
+    return 1 if failed_count > 0 else 0
 
 
 if __name__ == "__main__":
