@@ -1559,6 +1559,17 @@ impl ServerContext {
         self.clear_pending_structure_view_outside_set_state_for_char(char_id);
     }
 
+    pub fn clear_space_ballpark_bootstrapped_for_session(&self, session_id: u64, char_id: i64) {
+        {
+            let mut m = self
+                .space_ballpark_bootstrapped
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            m.remove(&(session_id, char_id));
+        }
+        self.clear_pending_structure_view_outside_set_state(session_id, char_id);
+    }
+
     pub(crate) fn set_pending_structure_view_outside_set_state(
         &self,
         session_id: u64,
@@ -1615,6 +1626,28 @@ impl ServerContext {
         m.retain(|&(_, cid), _| cid != char_id);
     }
 
+    /// Removes all bound objects for `(session_id, service)` without emitting
+    /// `OnMachoObjectDisconnect` and purges matching transition-grace entries (`#1477`).
+    pub(crate) fn prune_bound_service_without_notify(
+        &self,
+        session_id: u64,
+        service: &str,
+    ) -> usize {
+        let target_bids: Vec<u64> = self
+            .bound_objects
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(&bid, e)| {
+                (e.session_id == session_id && e.service == service).then_some(bid)
+            })
+            .collect();
+        for &bid in &target_bids {
+            self.remove_bound_object_without_notify(session_id, bid);
+        }
+        target_bids.len()
+    }
+
     /// Clears docked structure View Outside state when Quasar telemetry reports the client
     /// activated a non-space, non-structure primary UI view (`"hangar"`, `"station"`, etc.).
     /// CCP's `ObjectCallGPCS.__ReleaseObjectHelper` delays `OID-` / `ClientHasReleasedTheseObjects`
@@ -1632,35 +1665,33 @@ impl ServerContext {
         if !clears_ballpark {
             return;
         }
-        let cid = session.character_id.or_else(|| {
-            let uid = session.user_id?;
-            self.db
-                .get_online_session(uid)
-                .and_then(|os| os.character_id)
-        });
-        let Some(cid) = cid else {
+        let Some(uid) = session.user_id else {
             return;
         };
-        if let Some(uid) = session.user_id {
-            if self
-                .db
-                .with_snapshot(|s| s.characters.get(&cid).is_some_and(|c| c.user_id != uid))
-            {
-                return;
-            }
+        let Some(os) = self.db.get_online_session(uid) else {
+            return;
+        };
+        let Some(cid) = os.character_id else {
+            return;
+        };
+        if session.character_id.is_some_and(|scid| scid != cid) {
+            return;
         }
-        self.clear_space_ballpark_bootstrapped(cid);
-        if let Some(uid) = session.user_id {
-            if let Some(os) = self.db.get_online_session(uid) {
-                if os.character_id == Some(cid) {
-                    crate::services::space_destiny::reset_update_state_rate_limit(
-                        self,
-                        os.session_id,
-                        cid,
-                    );
-                }
-            }
+        let docked_in_structure = self.db.with_snapshot(|s| {
+            s.characters.get(&cid).is_some_and(|c| {
+                c.user_id == uid && c.station_id.is_none() && c.structure_id.is_some()
+            })
+        });
+        if !docked_in_structure {
+            return;
         }
+        self.clear_space_ballpark_bootstrapped_for_session(os.session_id, cid);
+        self.prune_bound_service_without_notify(os.session_id, "beyonce");
+        crate::services::space_destiny::reset_update_state_rate_limit(
+            self,
+            os.session_id,
+            cid,
+        );
     }
 
     /// Marks `(session_id, char_id)` as having received its initial `OnServerBrainUpdated`;

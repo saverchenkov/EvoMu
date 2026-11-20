@@ -1378,6 +1378,7 @@ fn detach_structure_view_outside_on_beyonce_release(
     ctx.systems
         .clear_explicit_update_state_guards_for_session(session_id);
     ctx.clear_pending_structure_view_outside_set_state_for_session(session_id);
+    ctx.prune_bound_service_without_notify(session_id, "beyonce");
     if let Some(cid) = char_id {
         ctx.clear_space_ballpark_bootstrapped(cid);
         crate::services::space_destiny::reset_update_state_rate_limit(ctx, session_id, cid);
