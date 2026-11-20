@@ -619,8 +619,50 @@ pub async fn activate_aoe_or_defender_module_with_cap(
     mod_type: &eve_sde::InvType,
     attacker_ball: &eve_destiny::Ball,
     target_id_opt: Option<i64>,
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
     deduct_capacitor: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    activate_aoe_or_defender_module_with_options(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        sys_sec,
+        now_unix,
+        module_id,
+        m,
+        mod_type,
+        attacker_ball,
+        target_id_opt,
+        kwargs,
+        deduct_capacitor,
+        true,
+    )
+    .await
+}
+
+/// Evaluates Smartbomb (`72`), Bomb Launcher (`862`), or Defender Launcher (`512`) activation.
+///
+/// When called as an internal pre-notify pulse helper from `fitting_module_cycles` (which already
+/// deducted capacitor in `add_module_cycle` and owns the single post-commit
+/// `commit_space_action_cloak_and_invuln_break` call), callers pass `deduct_capacitor = false`
+/// and `commit_space_break = false` so `OnInvulnCancelled` is never emitted twice (`#1441`).
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_aoe_or_defender_module_with_options(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_sec: f64,
+    now_unix: u64,
+    module_id: i64,
+    m: &eve_dogma::FittedModule,
+    mod_type: &eve_sde::InvType,
+    attacker_ball: &eve_destiny::Ball,
+    target_id_opt: Option<i64>,
+    kwargs: &HashMap<String, PyRep>,
+    deduct_capacitor: bool,
+    commit_space_break: bool,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let needs_space_guard = matches!(mod_type.group_id, 72 | 80 | 353 | 842 | 1154);
@@ -646,11 +688,11 @@ pub async fn activate_aoe_or_defender_module_with_cap(
         mod_type,
         attacker_ball,
         target_id_opt,
-        _kwargs,
+        kwargs,
         deduct_capacitor,
     )
     .await;
-    if needs_space_guard && matches!(res, Some(Ok(_))) {
+    if commit_space_break && needs_space_guard && matches!(res, Some(Ok(_))) {
         crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
             ctx, &sys_handle, char_id, ship_id,
         )

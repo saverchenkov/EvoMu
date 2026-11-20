@@ -2634,9 +2634,18 @@ impl SystemRegistry {
                                 projection,
                                 reply,
                             } => {
-                                let applied = apply_fit_projection_in_actor(
+                                let deact_guard = module_deactivation_hook_actor
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone();
+                                let applied = apply_fit_projection_with_cycles_in_actor(
                                     &mut ballpark,
                                     fit_projections,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
                                     ship_id,
                                     projection,
                                 );
@@ -3196,9 +3205,43 @@ impl SystemRegistry {
 /// Applies an immutable [`eve_dogma::FitProjection`] onto `ship_id` inside the system actor,
 /// enforcing monotonic [`eve_dogma::FitRev`] ordering and recomputing derived `Ball` / `CombatState`
 /// attributes from the new baselines without overwriting actor-managed multipliers (`#922`, `#834`).
+#[cfg(test)]
 pub(crate) fn apply_fit_projection_in_actor(
     ballpark: &mut Ballpark,
     fit_projections: &mut HashMap<BallId, eve_dogma::FitProjection>,
+    ship_id: BallId,
+    projection: eve_dogma::FitProjection,
+) -> bool {
+    let mut empty_cycles = Vec::new();
+    let empty_scram = HashMap::new();
+    let empty_core = HashMap::new();
+    apply_fit_projection_with_cycles_in_actor(
+        ballpark,
+        fit_projections,
+        &mut empty_cycles,
+        &empty_scram,
+        &empty_core,
+        &None,
+        None,
+        ship_id,
+        projection,
+    )
+}
+
+/// Applies an immutable [`eve_dogma::FitProjection`] onto `ship_id` inside the system actor,
+/// re-syncs active cycles whose overload state just converged via `SyncOverloadState` or whose
+/// active propulsion projection matches `(module_id, is_overloaded)`, and reconciles ship
+/// kinematics (`prop_velocity_multiplier`, `Ball::max_velocity`, `Ball::mass`, `signature_radius`)
+/// (`#922`, `#1364`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_fit_projection_with_cycles_in_actor(
+    ballpark: &mut Ballpark,
+    fit_projections: &mut HashMap<BallId, eve_dogma::FitProjection>,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
     ship_id: BallId,
     projection: eve_dogma::FitProjection,
 ) -> bool {
@@ -3208,156 +3251,186 @@ pub(crate) fn apply_fit_projection_in_actor(
     {
         return false;
     }
-    let prev_baseline = fit_projections.get(&ship_id).map(|p| p.baseline);
-    let hull_changed = fit_projections
-        .get(&ship_id)
+    let prev_proj = fit_projections.get(&ship_id).cloned();
+    let prev_baseline = prev_proj.as_ref().map(|p| p.baseline);
+    let hull_changed = prev_proj
+        .as_ref()
         .is_some_and(|p| p.ship_type_id != projection.ship_type_id);
     let baseline = projection.baseline;
     fit_projections.insert(ship_id, projection);
-    let prev_max_vel = ballpark.balls.get(&ship_id).map(|b| b.max_velocity);
-    let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else {
-        return false;
-    };
-    let shield_regen_disabled =
-        cs.shield_recharge_time_ms <= 0.0 || cs.shield_recharge_time_ms >= 1.0e12;
-    let cap_regen_disabled = cs.capacitor_recharge_time_ms <= 0.0
-        || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0)
-        || cs.capacitor_recharge_time_ms >= 1.0e12;
-    let keep_prev_or_override = |cur_base: Option<f64>, prev_val: Option<f64>, new_val: f64| -> bool {
-        !hull_changed
-            && prev_val.is_some_and(|pv| {
-                (new_val - pv).abs() <= 1e-2
-                    && cur_base.is_some_and(|cb| (cb - pv).abs() > 1e-2)
-            })
-    };
-    if !keep_prev_or_override(
-        cs.base_max_velocity,
-        prev_baseline.map(|p| p.max_velocity),
-        baseline.max_velocity,
-    ) {
-        cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
-    }
-    if !keep_prev_or_override(cs.base_mass, prev_baseline.map(|p| p.mass), baseline.mass) {
-        cs.base_mass = Some(baseline.mass.max(1.0));
-    }
-    if !keep_prev_or_override(
-        cs.base_inertia,
-        prev_baseline.map(|p| p.agility),
-        baseline.agility,
-    ) {
-        cs.base_inertia = Some(baseline.agility.max(0.001));
-    }
-    if !keep_prev_or_override(
-        cs.base_signature_radius,
-        prev_baseline.map(|p| p.signature_radius),
-        baseline.signature_radius,
-    ) {
-        cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
-    }
-    if !shield_regen_disabled {
-        let env_s = cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6);
-        let shield_overridden = prev_baseline.is_some_and(|pb| {
+    let shield_boost_mult = {
+        let Some(cs) = ballpark.combat_states.get_mut(&ship_id) else {
+            return false;
+        };
+        let shield_regen_disabled =
+            cs.shield_recharge_time_ms <= 0.0 || cs.shield_recharge_time_ms >= 1.0e12;
+        let cap_regen_disabled = cs.capacitor_recharge_time_ms <= 0.0
+            || cs.base_capacitor_recharge_time_ms.is_some_and(|b| b <= 0.0)
+            || cs.capacitor_recharge_time_ms >= 1.0e12;
+        let keep_prev_or_override = |cur_base: Option<f64>, prev_val: Option<f64>, new_val: f64| -> bool {
             !hull_changed
-                && (baseline.max_shield_hp - pb.max_shield_hp).abs() <= 1e-2
-                && (cs.max_shield_hp / env_s - pb.max_shield_hp).abs() > 1e-2
-        });
-        if shield_overridden {
-            cs.base_max_shield_hp = Some((cs.max_shield_hp / env_s).max(0.0));
-        } else if !(prev_baseline.is_none()
-            && cs
-                .base_max_shield_hp
-                .is_some_and(|cb| cb > baseline.max_shield_hp + 1e-2))
-        {
-            cs.base_max_shield_hp = Some(baseline.max_shield_hp.max(0.0));
+                && prev_val.is_some_and(|pv| {
+                    (new_val - pv).abs() <= 1e-2
+                        && cur_base.is_some_and(|cb| (cb - pv).abs() > 1e-2)
+                })
+        };
+        if !keep_prev_or_override(
+            cs.base_max_velocity,
+            prev_baseline.map(|p| p.max_velocity),
+            baseline.max_velocity,
+        ) {
+            cs.base_max_velocity = Some(baseline.max_velocity.max(0.0));
         }
-        let env_a = cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6);
-        let armor_overridden = prev_baseline.is_some_and(|pb| {
-            !hull_changed
-                && (baseline.max_armor_hp - pb.max_armor_hp).abs() <= 1e-2
-                && (cs.max_armor_hp / env_a - pb.max_armor_hp).abs() > 1e-2
-        });
-        if armor_overridden {
-            cs.base_max_armor_hp = Some((cs.max_armor_hp / env_a).max(0.0));
-        } else if !(prev_baseline.is_none()
-            && cs
-                .base_max_armor_hp
-                .is_some_and(|cb| cb > baseline.max_armor_hp + 1e-2))
-        {
-            cs.base_max_armor_hp = Some(baseline.max_armor_hp.max(0.0));
+        if !keep_prev_or_override(cs.base_mass, prev_baseline.map(|p| p.mass), baseline.mass) {
+            cs.base_mass = Some(baseline.mass.max(1.0));
         }
-        let struct_overridden = prev_baseline.is_some_and(|pb| {
-            !hull_changed
-                && (baseline.max_structure_hp - pb.max_structure_hp).abs() <= 1e-2
-                && (cs.max_structure_hp - pb.max_structure_hp).abs() > 1e-2
-        });
-        if struct_overridden {
-            cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
-        } else if !(prev_baseline.is_none()
-            && cs
-                .base_max_structure_hp
-                .is_some_and(|cb| cb > baseline.max_structure_hp + 1e-2))
-        {
-            cs.base_max_structure_hp = Some(baseline.max_structure_hp.max(0.0));
+        if !keep_prev_or_override(
+            cs.base_inertia,
+            prev_baseline.map(|p| p.agility),
+            baseline.agility,
+        ) {
+            cs.base_inertia = Some(baseline.agility.max(0.001));
         }
-        cs.shield_recharge_time_ms = baseline.shield_recharge_time_ms.max(1.0);
-    }
-    if !cap_regen_disabled {
-        let env_c = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
-        let prev_cap_overridden = prev_baseline.is_some_and(|pb| {
-            !hull_changed
-                && (baseline.max_capacitor - pb.max_capacitor).abs() <= 1e-2
-                && ((cs.max_capacitor / env_c - pb.max_capacitor).abs() > 1e-2
-                    || cs
-                        .base_max_capacitor
-                        .is_some_and(|cur_b| (cur_b - pb.max_capacitor).abs() > 1e-2))
-        });
-        if prev_cap_overridden {
-            if (cs.max_capacitor / env_c - prev_baseline.map(|p| p.max_capacitor).unwrap_or(0.0))
-                .abs()
-                > 1e-2
+        if !keep_prev_or_override(
+            cs.base_signature_radius,
+            prev_baseline.map(|p| p.signature_radius),
+            baseline.signature_radius,
+        ) {
+            cs.base_signature_radius = Some(baseline.signature_radius.max(0.0));
+        }
+        if !shield_regen_disabled {
+            let env_s = cs.env_max_shield_multiplier.unwrap_or(1.0).max(1e-6);
+            let shield_overridden = prev_baseline.is_some_and(|pb| {
+                !hull_changed
+                    && (baseline.max_shield_hp - pb.max_shield_hp).abs() <= 1e-2
+                    && (cs.max_shield_hp / env_s - pb.max_shield_hp).abs() > 1e-2
+            });
+            if shield_overridden {
+                cs.base_max_shield_hp = Some((cs.max_shield_hp / env_s).max(0.0));
+            } else if !(prev_baseline.is_none()
+                && cs
+                    .base_max_shield_hp
+                    .is_some_and(|cb| cb > baseline.max_shield_hp + 1e-2))
+            {
+                cs.base_max_shield_hp = Some(baseline.max_shield_hp.max(0.0));
+            }
+            let env_a = cs.env_max_armor_multiplier.unwrap_or(1.0).max(1e-6);
+            let armor_overridden = prev_baseline.is_some_and(|pb| {
+                !hull_changed
+                    && (baseline.max_armor_hp - pb.max_armor_hp).abs() <= 1e-2
+                    && (cs.max_armor_hp / env_a - pb.max_armor_hp).abs() > 1e-2
+            });
+            if armor_overridden {
+                cs.base_max_armor_hp = Some((cs.max_armor_hp / env_a).max(0.0));
+            } else if !(prev_baseline.is_none()
+                && cs
+                    .base_max_armor_hp
+                    .is_some_and(|cb| cb > baseline.max_armor_hp + 1e-2))
+            {
+                cs.base_max_armor_hp = Some(baseline.max_armor_hp.max(0.0));
+            }
+            let struct_overridden = prev_baseline.is_some_and(|pb| {
+                !hull_changed
+                    && (baseline.max_structure_hp - pb.max_structure_hp).abs() <= 1e-2
+                    && (cs.max_structure_hp - pb.max_structure_hp).abs() > 1e-2
+            });
+            if struct_overridden {
+                cs.base_max_structure_hp = Some(cs.max_structure_hp.max(0.0));
+            } else if !(prev_baseline.is_none()
+                && cs
+                    .base_max_structure_hp
+                    .is_some_and(|cb| cb > baseline.max_structure_hp + 1e-2))
+            {
+                cs.base_max_structure_hp = Some(baseline.max_structure_hp.max(0.0));
+            }
+            cs.shield_recharge_time_ms = baseline.shield_recharge_time_ms.max(1.0);
+        }
+        if !cap_regen_disabled {
+            let env_c = cs.env_max_cap_multiplier.unwrap_or(1.0).max(1e-6);
+            let prev_cap_overridden = prev_baseline.is_some_and(|pb| {
+                !hull_changed
+                    && (baseline.max_capacitor - pb.max_capacitor).abs() <= 1e-2
+                    && ((cs.max_capacitor / env_c - pb.max_capacitor).abs() > 1e-2
+                        || cs
+                            .base_max_capacitor
+                            .is_some_and(|cur_b| (cur_b - pb.max_capacitor).abs() > 1e-2))
+            });
+            if prev_cap_overridden {
+                if (cs.max_capacitor / env_c - prev_baseline.map(|p| p.max_capacitor).unwrap_or(0.0))
+                    .abs()
+                    > 1e-2
+                {
+                    cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
+                }
+            } else if prev_baseline.is_none()
+                && cs.base_max_capacitor.is_some_and(|cur_b| {
+                    (cs.max_capacitor / env_c - cur_b).abs() > 1e-2
+                        && cs.max_capacitor / env_c > baseline.max_capacitor + 1e-2
+                })
             {
                 cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
+            } else {
+                let init_cap_overridden = prev_baseline.is_none()
+                    && cs.base_max_capacitor.is_some_and(|cur_b| {
+                        (cur_b - baseline.max_capacitor).abs() > 1e-2
+                            && (cur_b > baseline.max_capacitor + 1e-2
+                                || ((cs.capacitor_recharge_time_ms - 120_000.0).abs() < 1e-2
+                                    && (baseline.capacitor_recharge_time_ms - 120_000.0).abs() > 1e-2
+                                    && (cur_b - 250.0).abs() > 1e-2))
+                    });
+                if !init_cap_overridden {
+                    let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
+                    cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
+                }
             }
-        } else if prev_baseline.is_none()
-            && cs.base_max_capacitor.is_some_and(|cur_b| {
-                (cs.max_capacitor / env_c - cur_b).abs() > 1e-2
-                    && cs.max_capacitor / env_c > baseline.max_capacitor + 1e-2
-            })
-        {
-            cs.base_max_capacitor = Some((cs.max_capacitor / env_c).max(0.0));
-        } else {
-            let init_cap_overridden = prev_baseline.is_none()
-                && cs.base_max_capacitor.is_some_and(|cur_b| {
-                    (cur_b - baseline.max_capacitor).abs() > 1e-2
-                        && (cur_b > baseline.max_capacitor + 1e-2
-                            || ((cs.capacitor_recharge_time_ms - 120_000.0).abs() < 1e-2
-                                && (baseline.capacitor_recharge_time_ms - 120_000.0).abs() > 1e-2
-                                && (cur_b - 250.0).abs() > 1e-2))
-                });
-            if !init_cap_overridden {
-                let cap_floor = if hull_changed { cs.capacitor } else { 0.0 };
-                cs.base_max_capacitor = Some(baseline.max_capacitor.max(cap_floor).max(0.0));
+            cs.base_capacitor_recharge_time_ms = Some(baseline.capacitor_recharge_time_ms.max(1.0));
+        }
+        cs.base_shield_resonance = Some(baseline.shield_resonance);
+        cs.base_armor_resonance = Some(baseline.armor_resonance);
+        cs.base_structure_resonance = Some(baseline.structure_resonance);
+        cs.shield_boost_multiplier
+    };
+
+    let mut synced_any_cycle = false;
+    if let Some(new_proj) = fit_projections.get(&ship_id) {
+        for cycle in active_module_cycles.iter_mut() {
+            if cycle.ship_id != ship_id {
+                continue;
+            }
+            let overload_synced = prev_proj
+                .as_ref()
+                .and_then(|p| p.modules.get(&cycle.module_id))
+                .is_some_and(|old_cp| old_cp.is_overloaded != cycle.is_overloaded)
+                && new_proj
+                    .modules
+                    .get(&cycle.module_id)
+                    .is_some_and(|new_cp| new_cp.is_overloaded == cycle.is_overloaded);
+            let active_prop_matches = new_proj.propulsion.as_ref().is_some_and(|prop| {
+                prop.module_id == cycle.module_id && prop.is_overloaded == cycle.is_overloaded
+            });
+            if (overload_synced || active_prop_matches)
+                && cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(
+                    cycle,
+                    fit_projections,
+                    shield_boost_mult,
+                )
+            {
+                synced_any_cycle = true;
             }
         }
-        cs.base_capacitor_recharge_time_ms = Some(baseline.capacitor_recharge_time_ms.max(1.0));
     }
-    cs.base_shield_resonance = Some(baseline.shield_resonance);
-    cs.base_armor_resonance = Some(baseline.armor_resonance);
-    cs.base_structure_resonance = Some(baseline.structure_resonance);
+
+    if synced_any_cycle {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+        );
+    }
     ballpark.recompute_ball_attributes(ship_id);
-    if let (Some(prev), Some(new_v)) =
-        (prev_max_vel, ballpark.balls.get(&ship_id).map(|b| b.max_velocity))
-    {
-        if (prev - new_v).abs() > 1e-6 {
-            ballpark.emit_event(
-                Some(ship_id),
-                DestinyEvent::SetMaxSpeed {
-                    ball_id: ship_id,
-                    max_speed: new_v,
-                },
-            );
-        }
-    }
     true
 }
 

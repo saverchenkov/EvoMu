@@ -2548,3 +2548,851 @@ async fn gh890_rejects_reactivating_active_cycle_and_defers_paid_end_of_cycle_de
     assert!((cs_after.structure_hp - 240.0).abs() < 1e-3);
     assert!((cs_after.capacitor - 450.0).abs() < 1e-6);
 }
+
+#[test]
+fn propulsion_overload_transition_respects_t3d_propulsion_mode_stacking_penalty_1364() {
+    // Regression test for #1364: Confessor Propulsion Mode (34323) applies a stacking-penalized
+    // PostDiv 0.6 (+66.67%) bonus to attribute 20 (`speedFactor`) on 1MN Afterburner I (439).
+    // Toggling Overload (+50% attr 1223) ON/OFF at cycle boundary must apply Dogma's rank-1
+    // stacking penalty (`1 + 0.50 * exp(-1/7.1289)`) rather than raw 1.50x.
+    let ship_id: BallId = 1_364_001;
+    let ab_id: i64 = 1_364_010;
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.effects.insert(
+        3175,
+        eve_sde::DogmaEffectType {
+            effect_id: 3175,
+            name: "overloadSelfSpeedBonus".into(),
+            effect_category: 5,
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        6801,
+        eve_sde::DogmaEffectType {
+            effect_id: 6801,
+            name: "modeMWDandABBoostPostDiv".into(),
+            effect_category: 0,
+            modifiers: vec![
+                eve_sde::EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationRequiredSkillModifier".into(),
+                    modified_attribute_id: 20,
+                    modifying_attribute_id: 2003,
+                    operator: 5,
+                    group_id: None,
+                    skill_type_id: Some(3454),
+                    effect_id: None,
+                },
+                eve_sde::EffectModifierSpec {
+                    domain: "shipID".into(),
+                    func: "LocationRequiredSkillModifier".into(),
+                    modified_attribute_id: 20,
+                    modifying_attribute_id: 2003,
+                    operator: 5,
+                    group_id: None,
+                    skill_type_id: Some(3450),
+                    effect_id: None,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    sde.types.insert(
+        439,
+        make_inv_type(
+            439,
+            46,
+            7,
+            "1MN Afterburner I",
+            HashMap::from([(20u16, 115.0), (182u16, 3450.0), (1223u16, 50.0)]),
+            vec![3175],
+        ),
+    );
+    sde.types.insert(
+        34_323,
+        make_inv_type(
+            34_323,
+            1306,
+            7,
+            "Confessor Propulsion Mode",
+            HashMap::from([(2003u16, 0.6)]),
+            vec![6801],
+        ),
+    );
+    let sde_opt = Some(Arc::new(sde));
+
+    let base_vel = 312.5;
+    let base_boost = 1.50;
+    let stacked_ovl_mult = 1.0 + 0.50 * eve_dogma::stacking_penalty_factor(1);
+    let overloaded_boost = base_boost * stacked_ovl_mult;
+
+    let mut bp = Ballpark::new(30_002_423);
+    let mut ball = make_tackle_ball(ship_id, 34_317, DVec3::ZERO);
+    ball.max_velocity = base_vel;
+    bp.add_ball(ball);
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            base_max_velocity: Some(base_vel),
+            prop_velocity_multiplier: 1.0 + overloaded_boost,
+            ..CombatState::default()
+        },
+    );
+    bp.recompute_ball_attributes(ship_id);
+
+    let proj_prop_mode = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(1),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: Some(34_323),
+        last_stance_switch_ms: None,
+        baseline: eve_dogma::CombatBaseline {
+            max_velocity: base_vel,
+            mass: 1_800_000.0,
+            agility: 2.0,
+            signature_radius: 50.0,
+            max_shield_hp: 500.0,
+            max_armor_hp: 1_000.0,
+            max_structure_hp: 800.0,
+            max_capacitor: 600.0,
+            shield_recharge_time_ms: 100_000.0,
+            capacitor_recharge_time_ms: 100_000.0,
+            shield_resonance: [1.0; 4],
+            armor_resonance: [1.0; 4],
+            structure_resonance: [1.0; 4],
+            warp_speed_au_s: 4.5,
+            max_locked_targets: 6,
+            max_target_range: 45_000.0,
+            scan_resolution: 400.0,
+        },
+        propulsion: None,
+        modules: HashMap::new(),
+    };
+
+    let mut cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: ab_id,
+        module_type_id: 439,
+        effect_name: "moduleBonusAfterburner".into(),
+        duration_s: 7.5,
+        is_overloaded: true,
+        speed_boost_factor: overloaded_boost,
+        ..ActiveModuleCycle::default()
+    };
+
+    // StopOverload (true -> false) under Confessor Propulsion Mode must restore exact 1.50 boost
+    // and 781.25 m/s (NOT 760.799997 m/s from dividing by unstacked 1.50).
+    apply_overload_transition_to_cycle_with_projection(
+        &mut cycle,
+        false,
+        &mut bp,
+        &sde_opt,
+        Some(&proj_prop_mode),
+    );
+    assert!(!cycle.is_overloaded);
+    assert!(
+        (cycle.speed_boost_factor - base_boost).abs() < 1e-12,
+        "StopOverload under Propulsion Mode must restore exact boost {base_boost}, got {}",
+        cycle.speed_boost_factor
+    );
+    assert!((bp.combat_states[&ship_id].prop_velocity_multiplier - 2.50).abs() < 1e-12);
+    assert!(
+        (bp.balls[&ship_id].max_velocity - 781.25).abs() < 1e-9,
+        "StopOverload under Propulsion Mode must restore exact 781.25 m/s, got {}",
+        bp.balls[&ship_id].max_velocity
+    );
+
+    // Overload (false -> true) under Confessor Propulsion Mode must apply stacked multiplier.
+    apply_overload_transition_to_cycle_with_projection(
+        &mut cycle,
+        true,
+        &mut bp,
+        &sde_opt,
+        Some(&proj_prop_mode),
+    );
+    assert!(cycle.is_overloaded);
+    assert!(
+        (cycle.speed_boost_factor - overloaded_boost).abs() < 1e-12,
+        "Overload under Propulsion Mode must apply stacked boost {overloaded_boost}, got {}",
+        cycle.speed_boost_factor
+    );
+    assert!(
+        (bp.balls[&ship_id].max_velocity - base_vel * (1.0 + overloaded_boost)).abs() < 1e-9
+    );
+
+    // Without a speedFactor-modifying stance, full unstacked 1.50x overload multiplier applies.
+    let mut proj_no_stance = proj_prop_mode;
+    proj_no_stance.active_stance_type_id = None;
+    let mut cycle_plain = ActiveModuleCycle {
+        ship_id,
+        module_id: ab_id,
+        module_type_id: 439,
+        effect_name: "moduleBonusAfterburner".into(),
+        duration_s: 7.5,
+        is_overloaded: false,
+        speed_boost_factor: base_boost,
+        ..ActiveModuleCycle::default()
+    };
+    bp.combat_states.get_mut(&ship_id).unwrap().prop_velocity_multiplier = 1.0 + base_boost;
+    apply_overload_transition_to_cycle_with_projection(
+        &mut cycle_plain,
+        true,
+        &mut bp,
+        &sde_opt,
+        Some(&proj_no_stance),
+    );
+    assert!((cycle_plain.speed_boost_factor - (base_boost * 1.50)).abs() < 1e-12);
+}
+
+#[test]
+fn apply_fit_projection_with_cycles_resyncs_propulsion_and_reconciles_max_velocity_1364() {
+    // Regression test for #1364: when SyncOverloadState (or an active propulsion fit/stance change)
+    // pushes a fresh FitProjection, apply_fit_projection_with_cycles_in_actor must re-sync active
+    // propulsion cycles, reconcile CombatState::prop_velocity_multiplier & Ball::max_velocity, and
+    // emit DestinyEvent::SetMaxSpeed while leaving unrelated mid-cycle weapons untouched.
+    let ship_id: BallId = 1_364_101;
+    let ab_id: i64 = 1_364_110;
+    let turret_id: i64 = 1_364_111;
+    let base_vel = 312.5;
+    let stacked_ovl_boost = 1.50 * (1.0 + 0.50 * eve_dogma::stacking_penalty_factor(1));
+    let drifted_boost = stacked_ovl_boost / 1.50;
+
+    let mut bp = Ballpark::new(30_002_423);
+    let mut ball = make_tackle_ball(ship_id, 34_317, DVec3::ZERO);
+    ball.max_velocity = base_vel;
+    bp.add_ball(ball);
+    bp.combat_states.insert(
+        ship_id,
+        CombatState {
+            base_max_velocity: Some(base_vel),
+            base_mass: Some(1_800_000.0),
+            base_inertia: Some(2.0),
+            base_signature_radius: Some(50.0),
+            prop_velocity_multiplier: 1.0 + drifted_boost,
+            module_mass_addition: 500_000.0,
+            ..CombatState::default()
+        },
+    );
+    bp.recompute_ball_attributes(ship_id);
+    bp.pending_events.clear();
+    assert!((bp.balls[&ship_id].max_velocity - base_vel * (1.0 + drifted_boost)).abs() < 1e-6);
+
+    let mk_cp = |module_id: i64, module_type_id: u32, is_overloaded: bool, prop_speed_boost: f64, optimal_range_m: f64, is_turret: bool, is_afterburner: bool| {
+        eve_dogma::CycleParams {
+            module_id,
+            module_type_id,
+            flag_id: 19,
+            state: if is_overloaded {
+                eve_dogma::ModuleState::Overloaded
+            } else {
+                eve_dogma::ModuleState::Active
+            },
+            is_overloaded,
+            charge_type_id: None,
+            duration_ms: 7_500.0,
+            capacitor_need: 10.0,
+            is_turret,
+            is_missile: false,
+            damage: [0.0; 4],
+            damage_multiplier: 1.0,
+            optimal_range_m,
+            falloff_m: 1_000.0,
+            tracking_speed: 0.4,
+            sig_resolution_m: 40.0,
+            missile_explosion_radius_m: 0.0,
+            missile_explosion_velocity_ms: 0.0,
+            missile_drf: 0.0,
+            missile_flight_time_ms: 0.0,
+            missile_max_velocity_ms: 0.0,
+            shield_boost_amount: 0.0,
+            armor_repair_amount: 0.0,
+            hull_repair_amount: 0.0,
+            speed_factor: 115.0 / 0.6,
+            speed_boost_factor: 1_500_000.0,
+            mass_addition: if is_afterburner { 500_000.0 } else { 0.0 },
+            sig_radius_bonus_pct: 0.0,
+            prop_speed_boost,
+            is_mwd: false,
+            is_afterburner,
+            is_cloak: false,
+            cloak_velocity_bonus_pct: 0.0,
+            is_hic_wdfg: false,
+        }
+    };
+    let baseline = eve_dogma::CombatBaseline {
+        max_velocity: base_vel,
+        mass: 1_800_000.0,
+        agility: 2.0,
+        signature_radius: 50.0,
+        max_shield_hp: 500.0,
+        max_armor_hp: 1_000.0,
+        max_structure_hp: 800.0,
+        max_capacitor: 600.0,
+        shield_recharge_time_ms: 100_000.0,
+        capacitor_recharge_time_ms: 100_000.0,
+        shield_resonance: [1.0; 4],
+        armor_resonance: [1.0; 4],
+        structure_resonance: [1.0; 4],
+        warp_speed_au_s: 4.5,
+        max_locked_targets: 6,
+        max_target_range: 45_000.0,
+        scan_resolution: 400.0,
+    };
+
+    // Prior FitProjection (rev 1): AB still Overloaded before SyncOverloadState ran.
+    let prev_proj = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(1),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: Some(34_323),
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: Some(eve_dogma::PropulsionParams {
+            module_id: ab_id,
+            module_type_id: 439,
+            is_mwd: false,
+            is_overloaded: true,
+            speed_factor: (115.0 / 0.6) * (1.0 + 0.50 * eve_dogma::stacking_penalty_factor(1)),
+            speed_boost_factor: 1_500_000.0,
+            mass_addition: 500_000.0,
+            signature_radius_bonus_pct: 0.0,
+            speed_boost: stacked_ovl_boost,
+        }),
+        modules: HashMap::from([
+            (ab_id, mk_cp(ab_id, 439, true, stacked_ovl_boost, 0.0, false, true)),
+            (turret_id, mk_cp(turret_id, 3_041, false, 0.0, 4_000.0, true, false)),
+        ]),
+    };
+    let mut projections = HashMap::from([(ship_id, prev_proj)]);
+
+    // Active cycles after StopOverload cycle boundary with drifted AB speed_boost_factor.
+    let mut cycles = vec![
+        ActiveModuleCycle {
+            ship_id,
+            module_id: ab_id,
+            module_type_id: 439,
+            effect_name: "moduleBonusAfterburner".into(),
+            duration_s: 7.5,
+            is_overloaded: false,
+            speed_boost_factor: drifted_boost,
+            hic_mass_addition: Some(500_000.0),
+            ..ActiveModuleCycle::default()
+        },
+        ActiveModuleCycle {
+            ship_id,
+            module_id: turret_id,
+            module_type_id: 3_041,
+            effect_name: "targetHostile".into(),
+            duration_s: 3.0,
+            is_overloaded: false,
+            weapon_is_turret: true,
+            weapon_optimal_m: 4_000.0,
+            ..ActiveModuleCycle::default()
+        },
+    ];
+
+    // SyncOverloadState delivers rev 2 (AB un-overloaded with authoritative prop_speed_boost=1.50;
+    // turret optimal reduced by mid-cycle TD which must NOT take effect mid-cycle).
+    let next_proj = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(2),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: Some(34_323),
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: Some(eve_dogma::PropulsionParams {
+            module_id: ab_id,
+            module_type_id: 439,
+            is_mwd: false,
+            is_overloaded: false,
+            speed_factor: 115.0 / 0.6,
+            speed_boost_factor: 1_500_000.0,
+            mass_addition: 500_000.0,
+            signature_radius_bonus_pct: 0.0,
+            speed_boost: 1.50,
+        }),
+        modules: HashMap::from([
+            (ab_id, mk_cp(ab_id, 439, false, 1.50, 0.0, false, true)),
+            (turret_id, mk_cp(turret_id, 3_041, false, 0.0, 1_200.0, true, false)),
+        ]),
+    };
+
+    let applied = crate::system_actor::apply_fit_projection_with_cycles_in_actor(
+        &mut bp,
+        &mut projections,
+        &mut cycles,
+        &HashMap::new(),
+        &HashMap::new(),
+        &None,
+        None,
+        ship_id,
+        next_proj,
+    );
+    assert!(applied);
+    assert!((cycles[0].speed_boost_factor - 1.50).abs() < 1e-12);
+    assert!((bp.combat_states[&ship_id].prop_velocity_multiplier - 2.50).abs() < 1e-12);
+    assert!(
+        (bp.balls[&ship_id].max_velocity - 781.25).abs() < 1e-9,
+        "ApplyFitProjection after SyncOverloadState must reconcile Ball::max_velocity to 781.25, got {}",
+        bp.balls[&ship_id].max_velocity
+    );
+    assert!(
+        bp.pending_events.iter().any(|ev| matches!(
+            ev,
+            DestinyEvent::SetMaxSpeed { ball_id, max_speed }
+                if *ball_id == ship_id && (*max_speed - 781.25).abs() < 1e-9
+        )),
+        "ApplyFitProjection reconciling propulsion velocity must emit SetMaxSpeed(781.25)"
+    );
+    assert!(
+        (cycles[1].weapon_optimal_m - 4_000.0).abs() < 1e-6,
+        "unrelated mid-cycle turret must defer FitProjection sync until its next cycle boundary"
+    );
+
+    // Active propulsion stance change (rev 3, Defense Mode -> prop_speed_boost = 0.90) reconciles immediately.
+    bp.pending_events.clear();
+    let stance_proj = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(3),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: Some(34_319),
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: Some(eve_dogma::PropulsionParams {
+            module_id: ab_id,
+            module_type_id: 439,
+            is_mwd: false,
+            is_overloaded: false,
+            speed_factor: 115.0,
+            speed_boost_factor: 1_500_000.0,
+            mass_addition: 500_000.0,
+            signature_radius_bonus_pct: 0.0,
+            speed_boost: 0.90,
+        }),
+        modules: HashMap::from([
+            (ab_id, mk_cp(ab_id, 439, false, 0.90, 0.0, false, true)),
+            (turret_id, mk_cp(turret_id, 3_041, false, 0.0, 1_200.0, true, false)),
+        ]),
+    };
+    assert!(crate::system_actor::apply_fit_projection_with_cycles_in_actor(
+        &mut bp,
+        &mut projections,
+        &mut cycles,
+        &HashMap::new(),
+        &HashMap::new(),
+        &None,
+        None,
+        ship_id,
+        stance_proj,
+    ));
+    assert!((cycles[0].speed_boost_factor - 0.90).abs() < 1e-12);
+    assert!((bp.combat_states[&ship_id].prop_velocity_multiplier - 1.90).abs() < 1e-12);
+    assert!((bp.balls[&ship_id].max_velocity - (base_vel * 1.90)).abs() < 1e-9);
+}
+
+#[test]
+fn sync_cycle_prefers_mass_recomputed_propulsion_speed_boost_over_cycle_params_1444() {
+    // Regression test for #1444 F-01: when build_fit_projection recomputes
+    // FitProjection::propulsion.speed_boost against dbuff/system-effect-adjusted mass,
+    // sync_cycle_from_fit_projection_with_shield_boost_mult must prefer matching
+    // proj.propulsion.speed_boost over stale pre-dbuff CycleParams::prop_speed_boost,
+    // while keeping both fallbacks (modules-omitted and propulsion-absent/mismatched).
+    let ship_id: BallId = 1_444_001;
+    let ab_id: i64 = 1_444_010;
+    let pre_dbuff_boost = 1.50;
+    let post_dbuff_boost = 1.85;
+
+    let baseline = eve_dogma::CombatBaseline {
+        max_velocity: 300.0,
+        mass: 1_400_000.0,
+        agility: 2.0,
+        signature_radius: 50.0,
+        max_shield_hp: 500.0,
+        max_armor_hp: 1_000.0,
+        max_structure_hp: 800.0,
+        max_capacitor: 600.0,
+        shield_recharge_time_ms: 100_000.0,
+        capacitor_recharge_time_ms: 100_000.0,
+        shield_resonance: [1.0; 4],
+        armor_resonance: [1.0; 4],
+        structure_resonance: [1.0; 4],
+        warp_speed_au_s: 4.5,
+        max_locked_targets: 6,
+        max_target_range: 45_000.0,
+        scan_resolution: 400.0,
+    };
+    let cp = eve_dogma::CycleParams {
+        module_id: ab_id,
+        module_type_id: 439,
+        flag_id: 19,
+        state: eve_dogma::ModuleState::Active,
+        is_overloaded: false,
+        charge_type_id: None,
+        duration_ms: 7_500.0,
+        capacitor_need: 10.0,
+        is_turret: false,
+        is_missile: false,
+        damage: [0.0; 4],
+        damage_multiplier: 1.0,
+        optimal_range_m: 0.0,
+        falloff_m: 0.0,
+        tracking_speed: 0.0,
+        sig_resolution_m: 0.0,
+        missile_explosion_radius_m: 0.0,
+        missile_explosion_velocity_ms: 0.0,
+        missile_drf: 0.0,
+        missile_flight_time_ms: 0.0,
+        missile_max_velocity_ms: 0.0,
+        shield_boost_amount: 0.0,
+        armor_repair_amount: 0.0,
+        hull_repair_amount: 0.0,
+        speed_factor: 115.0,
+        speed_boost_factor: 1_500_000.0,
+        mass_addition: 500_000.0,
+        sig_radius_bonus_pct: 0.0,
+        prop_speed_boost: pre_dbuff_boost,
+        is_mwd: false,
+        is_afterburner: true,
+        is_cloak: false,
+        cloak_velocity_bonus_pct: 0.0,
+        is_hic_wdfg: false,
+    };
+    let prop = eve_dogma::PropulsionParams {
+        module_id: ab_id,
+        module_type_id: 439,
+        is_mwd: false,
+        is_overloaded: false,
+        speed_factor: 115.0,
+        speed_boost_factor: 1_500_000.0,
+        mass_addition: 500_000.0,
+        signature_radius_bonus_pct: 0.0,
+        speed_boost: post_dbuff_boost,
+    };
+
+    // Case 1: Both proj.modules[&ab_id] (pre-dbuff 1.50) and matching proj.propulsion (post-dbuff 1.85)
+    // are present -> must prefer proj.propulsion.speed_boost (1.85).
+    let proj_both = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(1),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: Some(prop.clone()),
+        modules: HashMap::from([(ab_id, cp.clone())]),
+    };
+    let projections = HashMap::from([(ship_id, proj_both)]);
+    let mut cycle = ActiveModuleCycle {
+        ship_id,
+        module_id: ab_id,
+        module_type_id: 439,
+        effect_name: "moduleBonusAfterburner".into(),
+        duration_s: 7.5,
+        is_overloaded: false,
+        speed_boost_factor: 1.0,
+        ..ActiveModuleCycle::default()
+    };
+    assert!(
+        crate::system_actor::cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(
+            &mut cycle,
+            &projections,
+            1.0,
+        )
+    );
+    assert!(
+        (cycle.speed_boost_factor - post_dbuff_boost).abs() < 1e-12,
+        "expected mass-recomputed FitProjection::propulsion.speed_boost {post_dbuff_boost}, got {}",
+        cycle.speed_boost_factor
+    );
+
+    // Case 2: proj.modules omits ab_id while matching proj.propulsion is present -> fallback still works.
+    let proj_prop_only = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(2),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: Some(prop),
+        modules: HashMap::new(),
+    };
+    let projections_prop_only = HashMap::from([(ship_id, proj_prop_only)]);
+    let mut cycle_prop_only = ActiveModuleCycle {
+        ship_id,
+        module_id: ab_id,
+        module_type_id: 439,
+        effect_name: "moduleBonusAfterburner".into(),
+        duration_s: 7.5,
+        is_overloaded: false,
+        speed_boost_factor: 1.0,
+        ..ActiveModuleCycle::default()
+    };
+    assert!(
+        crate::system_actor::cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(
+            &mut cycle_prop_only,
+            &projections_prop_only,
+            1.0,
+        )
+    );
+    assert!((cycle_prop_only.speed_boost_factor - post_dbuff_boost).abs() < 1e-12);
+    assert_eq!(cycle_prop_only.hic_mass_addition, Some(500_000.0));
+
+    // Case 3: proj.propulsion is absent -> falls back to CycleParams::prop_speed_boost (1.50).
+    let proj_mod_only = eve_dogma::FitProjection {
+        rev: eve_dogma::FitRev(3),
+        ship_id,
+        ship_type_id: 34_317,
+        active_stance_type_id: None,
+        last_stance_switch_ms: None,
+        baseline,
+        propulsion: None,
+        modules: HashMap::from([(ab_id, cp)]),
+    };
+    let projections_mod_only = HashMap::from([(ship_id, proj_mod_only)]);
+    let mut cycle_mod_only = ActiveModuleCycle {
+        ship_id,
+        module_id: ab_id,
+        module_type_id: 439,
+        effect_name: "moduleBonusAfterburner".into(),
+        duration_s: 7.5,
+        is_overloaded: false,
+        speed_boost_factor: 1.0,
+        ..ActiveModuleCycle::default()
+    };
+    assert!(
+        crate::system_actor::cycles::sync_cycle_from_fit_projection_with_shield_boost_mult(
+            &mut cycle_mod_only,
+            &projections_mod_only,
+            1.0,
+        )
+    );
+    assert!((cycle_mod_only.speed_boost_factor - pre_dbuff_boost).abs() < 1e-12);
+}
+
+#[test]
+fn propulsion_overload_skips_pre_group_and_stacking_exempt_sources_1444() {
+    // Regression test for #1444 F-02:
+    // - PreMul (op 0) / PreDiv (op 1) modifiers run in Dogma's pre-group pass and must NOT
+    //   stack-penalize against overloadSelfSpeedBonus (PostPercent, op 6).
+    // - Stacking-exempt source categories (e.g., category_id = 6 Ship) must NOT stack-penalize.
+    // - When attribute 20 (speedFactor) is marked stackable=true, no stacking penalty applies.
+    // - Real non-exempt Confessor Propulsion Mode (34323, category_id = 7, PostDiv op 5) DOES
+    //   apply exact Dogma rank-1 stacking penalty.
+    let ship_id: BallId = 1_444_101;
+    let ab_id: i64 = 1_444_110;
+    let base_boost = 1.50;
+    let unstacked_ovl_mult = 1.50;
+    let stacked_ovl_mult = 1.0 + 0.50 * eve_dogma::stacking_penalty_factor(1);
+
+    let mut sde = SdeRegistry::with_canonical_seed();
+    sde.types.insert(
+        439,
+        make_inv_type(
+            439,
+            46,
+            7,
+            "1MN Afterburner I",
+            HashMap::from([(20u16, 115.0), (182u16, 3450.0), (1223u16, 50.0)]),
+            vec![3175],
+        ),
+    );
+    // Synthetic PreMul (op 0) and PreDiv (op 1) effects on attr 20.
+    sde.effects.insert(
+        60_001,
+        eve_sde::DogmaEffectType {
+            effect_id: 60_001,
+            name: "syntheticPreMulSpeedFactor".into(),
+            effect_category: 0,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "LocationRequiredSkillModifier".into(),
+                modified_attribute_id: 20,
+                modifying_attribute_id: 2003,
+                operator: 0,
+                group_id: None,
+                skill_type_id: Some(3450),
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        60_002,
+        eve_sde::DogmaEffectType {
+            effect_id: 60_002,
+            name: "syntheticPreDivSpeedFactor".into(),
+            effect_category: 0,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "LocationRequiredSkillModifier".into(),
+                modified_attribute_id: 20,
+                modifying_attribute_id: 2003,
+                operator: 1,
+                group_id: None,
+                skill_type_id: Some(3450),
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    sde.effects.insert(
+        6801,
+        eve_sde::DogmaEffectType {
+            effect_id: 6801,
+            name: "modeMWDandABBoostPostDiv".into(),
+            effect_category: 0,
+            modifiers: vec![eve_sde::EffectModifierSpec {
+                domain: "shipID".into(),
+                func: "LocationRequiredSkillModifier".into(),
+                modified_attribute_id: 20,
+                modifying_attribute_id: 2003,
+                operator: 5,
+                group_id: None,
+                skill_type_id: Some(3450),
+                effect_id: None,
+            }],
+            ..Default::default()
+        },
+    );
+    // Non-exempt stance with PreMul (op 0, 1.6x).
+    sde.types.insert(
+        990_101,
+        make_inv_type(
+            990_101,
+            1306,
+            7,
+            "Synthetic PreMul Mode",
+            HashMap::from([(2003u16, 1.6)]),
+            vec![60_001],
+        ),
+    );
+    // Non-exempt stance with PreDiv (op 1, /0.6).
+    sde.types.insert(
+        990_102,
+        make_inv_type(
+            990_102,
+            1306,
+            7,
+            "Synthetic PreDiv Mode",
+            HashMap::from([(2003u16, 0.6)]),
+            vec![60_002],
+        ),
+    );
+    // Stacking-exempt source (category_id = 6 Ship) with PostDiv (op 5, /0.6).
+    sde.types.insert(
+        990_103,
+        make_inv_type(
+            990_103,
+            1306,
+            6,
+            "Synthetic Exempt Ship Source",
+            HashMap::from([(2003u16, 0.6)]),
+            vec![6801],
+        ),
+    );
+    // Real non-exempt Confessor Propulsion Mode (category_id = 7 Module) with PostDiv (op 5, /0.6).
+    sde.types.insert(
+        34_323,
+        make_inv_type(
+            34_323,
+            1306,
+            7,
+            "Confessor Propulsion Mode",
+            HashMap::from([(2003u16, 0.6)]),
+            vec![6801],
+        ),
+    );
+
+    let baseline = eve_dogma::CombatBaseline {
+        max_velocity: 312.5,
+        mass: 1_800_000.0,
+        agility: 2.0,
+        signature_radius: 50.0,
+        max_shield_hp: 500.0,
+        max_armor_hp: 1_000.0,
+        max_structure_hp: 800.0,
+        max_capacitor: 600.0,
+        shield_recharge_time_ms: 100_000.0,
+        capacitor_recharge_time_ms: 100_000.0,
+        shield_resonance: [1.0; 4],
+        armor_resonance: [1.0; 4],
+        structure_resonance: [1.0; 4],
+        warp_speed_au_s: 4.5,
+        max_locked_targets: 6,
+        max_target_range: 45_000.0,
+        scan_resolution: 400.0,
+    };
+
+    let run_overload = |sde_arc: &Option<Arc<SdeRegistry>>, stance_tid: u32| -> f64 {
+        let mut bp = Ballpark::new(30_002_423);
+        let mut ball = make_tackle_ball(ship_id, 34_317, DVec3::ZERO);
+        ball.max_velocity = 312.5;
+        bp.add_ball(ball);
+        bp.combat_states.insert(
+            ship_id,
+            CombatState {
+                base_max_velocity: Some(312.5),
+                prop_velocity_multiplier: 1.0 + base_boost,
+                ..CombatState::default()
+            },
+        );
+        let proj = eve_dogma::FitProjection {
+            rev: eve_dogma::FitRev(1),
+            ship_id,
+            ship_type_id: 34_317,
+            active_stance_type_id: Some(stance_tid),
+            last_stance_switch_ms: None,
+            baseline,
+            propulsion: None,
+            modules: HashMap::new(),
+        };
+        let mut cycle = ActiveModuleCycle {
+            ship_id,
+            module_id: ab_id,
+            module_type_id: 439,
+            effect_name: "moduleBonusAfterburner".into(),
+            duration_s: 7.5,
+            is_overloaded: false,
+            speed_boost_factor: base_boost,
+            ..ActiveModuleCycle::default()
+        };
+        apply_overload_transition_to_cycle_with_projection(
+            &mut cycle,
+            true,
+            &mut bp,
+            sde_arc,
+            Some(&proj),
+        );
+        cycle.speed_boost_factor / base_boost
+    };
+
+    let sde_non_stackable = Some(Arc::new(sde.clone()));
+    assert!(
+        (run_overload(&sde_non_stackable, 990_101) - unstacked_ovl_mult).abs() < 1e-12,
+        "PreMul (op 0) must not stack-penalize against PostPercent overloadSelfSpeedBonus"
+    );
+    assert!(
+        (run_overload(&sde_non_stackable, 990_102) - unstacked_ovl_mult).abs() < 1e-12,
+        "PreDiv (op 1) must not stack-penalize against PostPercent overloadSelfSpeedBonus"
+    );
+    assert!(
+        (run_overload(&sde_non_stackable, 990_103) - unstacked_ovl_mult).abs() < 1e-12,
+        "stacking-exempt category_id=6 source must not stack-penalize against overloadSelfSpeedBonus"
+    );
+    assert!(
+        (run_overload(&sde_non_stackable, 34_323) - stacked_ovl_mult).abs() < 1e-12,
+        "non-exempt Confessor Propulsion Mode (category_id=7, PostDiv op 5) must apply exact rank-1 stacking penalty"
+    );
+
+    // If attribute 20 is marked stackable=true, even a non-exempt PostDiv stance must not stack-penalize.
+    let mut sde_stackable_attr20 = sde;
+    if let Some(attr20) = sde_stackable_attr20.attributes.get_mut(&20) {
+        attr20.stackable = true;
+    }
+    let sde_stackable_opt = Some(Arc::new(sde_stackable_attr20));
+    assert!(
+        (run_overload(&sde_stackable_opt, 34_323) - unstacked_ovl_mult).abs() < 1e-12,
+        "stackable attribute 20 must bypass stacking penalty"
+    );
+}

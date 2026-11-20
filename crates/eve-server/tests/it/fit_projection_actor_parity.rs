@@ -801,7 +801,23 @@ async fn fit_projection_actor_parity_differential_in_space_mutations() {
 
     rpc_ok(&ctx, &mut sess, "dogmaIM", None, "StopOverload", &[PyRep::Integer(ab_id)]).await;
     rpc_ok(&ctx, &mut sess, "dogmaIM", None, "StopOverload", &[PyRep::Integer(hardener_id)]).await;
-    for _ in 0..12 {
+    // Step just past the first AB cycle boundary (4s > 3.0s remaining in the 7.5s cycle, well
+    // before a second cycle boundary) to assert immediate stacking-penalized parity (#1364).
+    for _ in 0..4 {
+        ctx.advance_secs(1);
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let proj_stop_ab = assert_actor_matches_fresh_fit(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        "stop_overload_ab_cycle_boundary",
+    )
+    .await;
+    assert!(proj_stop_ab.propulsion.as_ref().is_some_and(|p| !p.is_overloaded));
+
+    for _ in 0..8 {
         ctx.advance_secs(1);
         sys.step_manual(1.0).await.unwrap();
     }
@@ -1623,4 +1639,151 @@ async fn fit_projection_actor_parity_5mn_mwd_on_battleship_mass_scaled() {
     let (_, off_ball) = sys.get_ball_snapshot(raven_id).await.unwrap().unwrap();
     assert_close(off_ball.max_velocity, base_vmax, 1e-3, "deactivating 5MN MWD restores base max_velocity");
     assert_close(off_ball.mass, base_mass, 1e-3, "deactivating 5MN MWD restores base hull mass");
+}
+
+#[tokio::test]
+async fn fit_projection_actor_parity_propulsion_overload_stacking_1364() {
+    // Regression test for #1364: Confessor (34317) in Propulsion Mode (34323) with 1MN Afterburner I (439).
+    // Verifies exact Dogma stacking-penalized velocity parity immediately after a single cycle
+    // boundary in both Overload and StopOverload directions (no 760.799997 vs 781.25 desync),
+    // and immediate velocity reconciliation on stance switch while the afterburner is cycling.
+    let ctx = ServerContext::new();
+    let _guard = common::teardown_guard(&ctx);
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 922_500_001_i64;
+    let ab_id = 922_500_010_i64;
+
+    grant_required_skills_recursive(&ctx, char_id, &[CONFESSOR, ONE_MN_AB_I]);
+    set_skills(
+        &ctx,
+        char_id,
+        &[
+            (3413, 5),  // Power Grid Management V
+            (3417, 5),  // Capacitor Systems Operation V
+            (3418, 5),  // Capacitor Management V
+            (3426, 5),  // CPU Management V
+            (3449, 5),  // Navigation V -> base max_velocity = 250 * 1.25 = 312.5 m/s
+            (3450, 5),  // Afterburner V -> duration = 10s * 0.75 = 7.5s
+            (3455, 4),  // Acceleration Control IV -> +20% speedFactor -> un-overloaded boost = 1.50
+            (28_164, 5), // Thermodynamics V
+        ],
+    );
+
+    let mut sess = login_and_board_new_ship(
+        &ctx,
+        922_501,
+        "demo",
+        "demo-secret",
+        char_id,
+        NULL_SYS,
+        NULL_STATION,
+        ship_id,
+        CONFESSOR,
+    )
+    .await;
+    seed_item(&ctx, ab_id, ONE_MN_AB_I, char_id, NULL_STATION, InventoryFlag::Hangar, 1);
+    rpc_ok(&ctx, &mut sess, "invbroker", None, "Add", &[
+        PyRep::Integer(ab_id),
+        PyRep::Integer(ship_id),
+        PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+    ]).await;
+
+    let (sys, beyonce_id) = undock_and_settle(&ctx, &mut sess, NULL_SYS).await;
+    rpc_ok(&ctx, &mut sess, "beyonce", Some(beyonce_id), "CmdStop", &[]).await;
+
+    // Switch to Propulsion Mode (34323) and activate 1MN AB I un-overloaded.
+    rpc_ok(&ctx, &mut sess, "shipStanceMgr", None, "SetShipStance", &[
+        PyRep::Integer(ship_id),
+        PyRep::Integer(STANCE_PROPULSION),
+    ]).await;
+    rpc_ok(&ctx, &mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(ab_id)]).await;
+
+    let proj_base_ab = assert_actor_matches_fresh_fit(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        "confessor_prop_ab_active_base",
+    )
+    .await;
+    assert!(proj_base_ab.propulsion.as_ref().is_some_and(|p| !p.is_overloaded));
+    let (_, ball_base_ab) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_close(
+        ball_base_ab.max_velocity,
+        781.25,
+        1e-6,
+        "Confessor Propulsion Mode + 1MN AB I un-overloaded Ball::max_velocity",
+    );
+
+    // 1. Mid-cycle Overload -> cross ONLY the first 7.5s cycle boundary (8s < 15s).
+    rpc_ok(&ctx, &mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(ab_id)]).await;
+    for _ in 0..8 {
+        ctx.advance_secs(1);
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let proj_ovl_ab = assert_actor_matches_fresh_fit(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        "confessor_prop_ab_overload_single_boundary",
+    )
+    .await;
+    assert!(proj_ovl_ab.propulsion.as_ref().is_some_and(|p| p.is_overloaded));
+    let expected_stacked_ovl_vmax =
+        312.5 * (1.0 + 1.50 * (1.0 + 0.50 * eve_dogma::stacking_penalty_factor(1)));
+    let (_, ball_ovl_ab) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_close(
+        ball_ovl_ab.max_velocity,
+        expected_stacked_ovl_vmax,
+        1e-6,
+        "Overload cycle boundary must apply rank-1 stacking penalty (not unstacked 1015.625)",
+    );
+
+    // 2. Mid-cycle StopOverload -> cross ONLY the next 7.5s cycle boundary (8s < 15s).
+    rpc_ok(&ctx, &mut sess, "dogmaIM", None, "StopOverload", &[PyRep::Integer(ab_id)]).await;
+    for _ in 0..8 {
+        ctx.advance_secs(1);
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let proj_stop_ovl = assert_actor_matches_fresh_fit(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        "confessor_prop_ab_stop_overload_single_boundary",
+    )
+    .await;
+    assert!(proj_stop_ovl.propulsion.as_ref().is_some_and(|p| !p.is_overloaded));
+    let (_, ball_stop_ovl) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert_close(
+        ball_stop_ovl.max_velocity,
+        781.25,
+        1e-6,
+        "StopOverload cycle boundary must restore exact 781.25 m/s (not 760.799997)",
+    );
+
+    // 3. Stance switch (Propulsion -> Defense) while AB is still cycling reconciles Ball::max_velocity immediately.
+    ctx.advance_secs(12);
+    rpc_ok(&ctx, &mut sess, "shipStanceMgr", None, "SetShipStance", &[
+        PyRep::Integer(ship_id),
+        PyRep::Integer(STANCE_DEFENSE),
+    ]).await;
+    let proj_def_ab = assert_actor_matches_fresh_fit(
+        &ctx,
+        &sys,
+        char_id,
+        ship_id,
+        "confessor_defense_ab_active_mid_cycle",
+    )
+    .await;
+    assert_eq!(proj_def_ab.active_stance_type_id, Some(STANCE_DEFENSE as u32));
+    let (_, ball_def_ab) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        ball_def_ab.max_velocity < 781.25 - 100.0,
+        "Switching out of Propulsion Mode while AB is active must drop Ball::max_velocity immediately (got {})",
+        ball_def_ab.max_velocity
+    );
 }

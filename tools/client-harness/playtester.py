@@ -4099,6 +4099,8 @@ def _canonicalize_action_type(act_type: str, has_target: bool) -> str:
         return "drag_widget"
     if norm in ("type", "input_text", "enter_text"):
         return "type_text"
+    if norm in ("key_press", "hotkey", "press_hotkey", "shortcut"):
+        return "press_key"
     return norm
 
 

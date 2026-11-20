@@ -1502,3 +1502,953 @@ async fn agent_warp_guards_reject_docked_cloaked_and_scrambled_without_mutating_
     let (_, ball_after) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!(matches!(ball_after.mode, eve_destiny::MovementMode::Warp { .. }));
 }
+
+#[tokio::test]
+async fn mission_dungeon_warp_target_rejects_zarzakh_mission_and_bookmark() {
+    const LOC_DUNGEON: &str = "dungeon";
+    const ERR_ZARZAKH_WARP_BAN: &str = "DunBlacklistCannotWarp";
+
+    let ctx = test_ctx();
+    let zarzakh_sys = crate::services::space_warp_jump::SOLAR_SYSTEM_ZARZAKH;
+    let jita_sys = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 951_100_001_i64;
+    let zz_bm_id = 951_100_010_i64;
+    let kw = HashMap::new();
+
+    // Case 1: Accepted mission & bookmark inside Zarzakh must reject with DunBlacklistCannotWarp.
+    let zz_origin = glam::DVec3::new(500_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: zarzakh_sys as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = zarzakh_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.bookmarks.insert(
+            zz_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: zz_bm_id,
+                owner_id: char_id,
+                solar_system_id: zarzakh_sys,
+                label: "Zarzakh Mission Pocket".into(),
+                x: 2_500_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: "Mission Pocket".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, 1_901),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 1_901,
+                agent_id: 3_012_050,
+                solar_system_id: zarzakh_sys,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(zz_bm_id),
+            },
+        );
+    });
+    let zz_handle = ctx.systems.get_or_spawn(zarzakh_sys);
+    zz_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: zz_origin,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sess = docked_session(char_id, zarzakh_sys, None);
+    sess.ship_id = Some(ship_id);
+    let err_zz = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_DUNGEON.into()), PyRep::Integer(1_901)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_zz.code, ERR_ZARZAKH_WARP_BAN);
+    let (_, zz_ball) = zz_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(zz_ball.mode, eve_destiny::MovementMode::Stop));
+
+    // Case 2: Mission in Jita whose attached bookmark points into Zarzakh must also reject with DunBlacklistCannotWarp.
+    let jita_handle = ctx.systems.get_or_spawn(jita_sys);
+    let jita_origin = deterministic_mission_site_origin(&ctx, jita_sys, 1_902)
+        + glam::DVec3::new(300_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = jita_sys;
+        }
+        snap.active_missions.insert(
+            (char_id, 1_902),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: 1_902,
+                agent_id: 3_012_050,
+                solar_system_id: jita_sys,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(zz_bm_id),
+            },
+        );
+    });
+    jita_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: jita_origin,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+    sess.solar_system_id = Some(jita_sys);
+    let err_bm_zz = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[PyRep::String(LOC_DUNGEON.into()), PyRep::Integer(1_902)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_bm_zz.code, ERR_ZARZAKH_WARP_BAN);
+    let (_, jita_ball) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(jita_ball.mode, eve_destiny::MovementMode::Stop));
+}
+
+#[tokio::test]
+async fn agent_mgr_dungeon_warp_rejects_unprobed_ded_and_private_escalation_without_mission() {
+    const LOC_DUNGEON: &str = "dungeon";
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let other_char = 90_999_888_i64;
+    let ship_id = 951_200_001_i64;
+    let kw = HashMap::new();
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::new(0.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    // Seed an unscanned DED combat signature, another pilot's private escalation, and a Drifter Hive.
+    crate::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(sys_id).or_default().extend([
+            crate::services::pve_exploration::PveSiteInstance {
+                site_id: "DED-UNPROBED-1".into(),
+                solar_system_id: sys_id,
+                site_category: "CombatSignature".into(),
+                dungeon_id: 5_101,
+                dungeon_name: "Unprobed DED".into(),
+                position: [20_000_000.0, 0.0, 0.0],
+                probe_required: true,
+                signal_strength: 0.0,
+                cleared: false,
+                ..Default::default()
+            },
+            crate::services::pve_exploration::PveSiteInstance {
+                site_id: "EXP-88901-1".into(),
+                solar_system_id: sys_id,
+                site_category: "Expedition".into(),
+                dungeon_id: 5_102,
+                dungeon_name: "Private Escalation".into(),
+                position: [25_000_000.0, 0.0, 0.0],
+                probe_required: false,
+                signal_strength: 1.0,
+                expedition_instance_id: Some(88_901),
+                cleared: false,
+                ..Default::default()
+            },
+        ]);
+        reg.escalations_by_char
+            .entry(other_char)
+            .or_default()
+            .push(crate::services::pve_exploration::EscalatingPathEntry {
+                instance_id: 88_901,
+                character_id: other_char,
+                source_dungeon_id: 5_100,
+                expedition_dungeon_id: 5_102,
+                expedition_name: "Private Escalation".into(),
+                destination_solar_system_id: sys_id,
+                step_index: 1,
+                total_steps: 4,
+                journal_text: String::new(),
+                created_at_sec: ctx.now_unix(),
+                expires_at_sec: ctx.now_unix() + 86_400,
+                dungeons_entered: Vec::new(),
+                journal_entry_template_id: 0,
+            });
+    });
+    crate::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.drifter_hives.insert(
+            sys_id,
+            crate::services::pve_special_sites::DrifterHiveRecord {
+                site_id: "HIVE-JITA-TEST".into(),
+                dungeon_id: 5_103,
+                dungeon_name: "Sentinel".into(),
+                solar_system_id: sys_id,
+                element_type_id: 34_575,
+                element_name: "Antikythera".into(),
+                current_room: 1,
+                total_rooms: 3,
+                warden_npc_ball_id: 9_900_001,
+                cleared: false,
+                rooms: Vec::new(),
+            },
+        );
+    });
+
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+    for forbidden_id in [5_101_i64, 5_102_i64, 5_103_i64] {
+        let err = handle(
+            &ctx,
+            &mut sess,
+            "agentMgr",
+            "WarpToLocation",
+            &[
+                PyRep::String(LOC_DUNGEON.into()),
+                PyRep::Integer(forbidden_id),
+            ],
+            &kw,
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            err.code, ERR_INVALID_MISSION_LOCATION,
+            "agentMgr must not allow non-mission dungeon warp to {forbidden_id}"
+        );
+    }
+    let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(ball.mode, eve_destiny::MovementMode::Stop));
+}
+
+#[tokio::test]
+async fn v24_warp_to_location_ordinal_bookmark_referring_agent_fleet_and_p2_fixes() {
+    const LOC_DUNGEON: &str = "dungeon";
+    const LOC_BOOKMARK: &str = "bookmark";
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_fc = 90_000_001_i64;
+    let char_wing_yes = 90_000_202_i64;
+    let char_wing_no = 90_000_203_i64;
+    let ship_fc = 951_300_001_i64;
+    let ship_yes = 951_300_002_i64;
+    let ship_no = 951_300_003_i64;
+    let bm0_id = 951_300_010_i64;
+    let bm1_id = 951_300_011_i64;
+    let zero_st_bm_id = 951_300_012_i64;
+    let mission_id = 1_910_u32;
+    let kw = HashMap::new();
+
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| {
+            a.solar_system_id == Some(sys_id)
+                && a.station_id
+                    .and_then(|st_id| ctx.sde.stations.get(&st_id))
+                    .is_some()
+        })
+        .expect("system must have at least one SDE station agent");
+    let st_id = agent.station_id.expect("agent station verified");
+    let st_pos = ctx.sde.stations.get(&st_id).expect("SDE station").position;
+    let start_pos = st_pos + glam::DVec3::new(-2_000_000.0, 0.0, 0.0);
+    let bm0_pos = start_pos + glam::DVec3::new(0.0, 600_000.0, 0.0);
+    let bm1_pos = start_pos + glam::DVec3::new(0.0, 0.0, 900_000.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_fc);
+        let template_ch = snap.characters[&char_fc].clone();
+        for (cid, sid) in [
+            (char_fc, ship_fc),
+            (char_wing_yes, ship_yes),
+            (char_wing_no, ship_no),
+        ] {
+            snap.items.insert(
+                sid,
+                eve_db::InventoryItemRecord {
+                    item_id: sid,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            let mut ch = snap
+                .characters
+                .get(&cid)
+                .cloned()
+                .unwrap_or_else(|| template_ch.clone());
+            ch.character_id = cid;
+            ch.active_ship_id = sid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            snap.characters.insert(cid, ch);
+        }
+        snap.bookmarks.insert(
+            bm0_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm0_id,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "Pocket 0".into(),
+                x: bm0_pos.x,
+                y: bm0_pos.y,
+                z: bm0_pos.z,
+                item_id: None,
+                memo: "Mission Pocket".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            bm1_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: bm1_id,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "Pocket 1".into(),
+                x: bm1_pos.x,
+                y: bm1_pos.y,
+                z: bm1_pos.z,
+                item_id: None,
+                memo: "Mission Pocket".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        // Zeroed station bookmark to verify SDE station coordinate fallback (Minor P2 note 2).
+        snap.bookmarks.insert(
+            zero_st_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: zero_st_bm_id,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "Zeroed Station BM".into(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: Some(st_id),
+                memo: "Station".into(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.active_missions.insert(
+            (char_fc, mission_id),
+            ActiveMissionRecord {
+                character_id: char_fc,
+                mission_id,
+                agent_id: agent.agent_id,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 0,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: Some(bm0_id),
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for (sid, offset) in [
+        (ship_fc, glam::DVec3::ZERO),
+        (ship_yes, glam::DVec3::new(1_000.0, 0.0, 0.0)),
+        (ship_no, glam::DVec3::new(2_000.0, 0.0, 0.0)),
+    ] {
+        sys_handle
+            .spawn_ball_with_combat(
+                eve_destiny::Ball {
+                    id: sid,
+                    type_id: 587,
+                    position: start_pos + offset,
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 1_000_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                eve_destiny::CombatState::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut sess = docked_session(char_fc, sys_id, None);
+    sess.ship_id = Some(ship_fc);
+    let bound = bound_agent(char_fc, agent.agent_id);
+
+    // 1. GetMyJournalDetails emits ordinal locationNumber 0 and 1 for the two mission bookmarks.
+    let journal = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "GetMyJournalDetails",
+        &[],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::Tuple(j_parts) = journal else {
+        panic!("expected journal tuple");
+    };
+    let PyRep::List(m_rows) = &j_parts[0] else {
+        panic!("expected mission list");
+    };
+    assert_eq!(m_rows.len(), 1);
+    let PyRep::Tuple(m_tuple) = &m_rows[0] else {
+        panic!("expected mission tuple");
+    };
+    let PyRep::List(bm_rows) = &m_tuple[6] else {
+        panic!("expected bookmark list");
+    };
+    assert_eq!(bm_rows.len(), 2);
+    assert_eq!(
+        bm_rows[0].dict_get("locationNumber").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert_eq!(
+        bm_rows[1].dict_get("locationNumber").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+
+    // 2. V24 5-arg WarpToLocation("dungeon", 1, 0.0, false, referringAgentID) resolves ordinal bookmark #1!
+    let res_ref = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_DUNGEON.into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_ref, PyRep::Bool(true));
+    let (_, ball1) = sys_handle.get_ball_snapshot(ship_fc).await.unwrap().unwrap();
+    match ball1.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(bm1_pos) < 1.0,
+                "locationNumber=1 must warp to bm1 ({bm1_pos:?}), got {destination:?}"
+            );
+        }
+        other => panic!("expected Warp to bm1, got {other:?}"),
+    }
+
+    // 3. Bound agent moniker with locationNumber=1 also resolves bookmark #1.
+    let _ = sys_handle
+        .set_movement_mode(ship_fc, eve_destiny::MovementMode::Stop)
+        .await;
+    let res_bound = handle_with_bound(
+        &ctx,
+        &mut sess,
+        Some(&bound),
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_DUNGEON.into()),
+            PyRep::Integer(1),
+            PyRep::Real(0.0),
+            PyRep::Bool(false),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_bound, PyRep::Bool(true));
+
+    // 4. Truthy args[3] (`fleet = true`) rejects NotInFleet when solo, and fleet-warps eligible members when FC.
+    let _ = sys_handle
+        .set_movement_mode(ship_fc, eve_destiny::MovementMode::Stop)
+        .await;
+    let err_no_fleet = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_DUNGEON.into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Bool(true),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err_no_fleet.code, "NotInFleet");
+
+    let fleet_id = 777_901_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut member_details = HashMap::new();
+        member_details.insert(
+            char_fc,
+            eve_db::FleetMemberRecord {
+                character_id: char_fc,
+                role: eve_db::FleetRole::FleetCommander,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        member_details.insert(
+            char_wing_yes,
+            eve_db::FleetMemberRecord {
+                character_id: char_wing_yes,
+                role: eve_db::FleetRole::SquadMember,
+                takes_fleet_warp: true,
+                ..Default::default()
+            },
+        );
+        member_details.insert(
+            char_wing_no,
+            eve_db::FleetMemberRecord {
+                character_id: char_wing_no,
+                role: eve_db::FleetRole::SquadMember,
+                takes_fleet_warp: false,
+                ..Default::default()
+            },
+        );
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: char_fc,
+                members: vec![char_fc, char_wing_yes, char_wing_no],
+                member_details,
+                ..Default::default()
+            },
+        );
+    });
+    sess.fleet_id = Some(fleet_id);
+    let res_fleet = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_DUNGEON.into()),
+            PyRep::Integer(0),
+            PyRep::Real(0.0),
+            PyRep::Bool(true),
+            PyRep::Integer(agent.agent_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_fleet, PyRep::Bool(true));
+    let (_, fc_ball) = sys_handle.get_ball_snapshot(ship_fc).await.unwrap().unwrap();
+    let (_, yes_ball) = sys_handle
+        .get_ball_snapshot(ship_yes)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, no_ball) = sys_handle
+        .get_ball_snapshot(ship_no)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(fc_ball.mode, eve_destiny::MovementMode::Warp { .. }));
+    assert!(matches!(yes_ball.mode, eve_destiny::MovementMode::Warp { .. }));
+    assert!(matches!(no_ball.mode, eve_destiny::MovementMode::Stop));
+
+    // 5. Zeroed station bookmark falls back to SDE station coordinates (Minor P2 note 2).
+    sess.fleet_id = None;
+    let _ = sys_handle
+        .set_movement_mode(ship_fc, eve_destiny::MovementMode::Stop)
+        .await;
+    let res_st_bm = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_BOOKMARK.into()),
+            PyRep::Integer(zero_st_bm_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_st_bm, PyRep::Bool(true));
+    let (_, st_ball) = sys_handle.get_ball_snapshot(ship_fc).await.unwrap().unwrap();
+    match st_ball.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            assert!(
+                destination.distance(st_pos) < 100_000.0,
+                "zeroed station bookmark must fall back to SDE station coords ({st_pos:?}), got {destination:?}"
+            );
+        }
+        other => panic!("expected Warp to station coords, got {other:?}"),
+    }
+
+    // 6. Capacitor-shortened warp staying inside the same dungeon pocket passes adjusted dest_pos
+    //    to `on_warp_start_leave_dungeon_if_needed` and does NOT emit `OnExitingDungeon` (Minor P2 note 1).
+    let entry_pos = glam::DVec3::new(840_000.0, 0.0, 0.0);
+    let room1_pos = glam::DVec3::new(1_000_000.0, 0.0, 0.0);
+    let far_out_bm_id = 951_300_013_i64;
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        store.instances.insert(
+            958_001,
+            eve_db::DungeonRuntimeInstance {
+                instance_id: 958_001,
+                dungeon_id: 9_801,
+                dungeon_name: "CapClamp Pocket".into(),
+                category: "Combat".into(),
+                archetype: "Deadspace".into(),
+                solar_system_id: sys_id,
+                owner_char_id: char_fc,
+                base_position: room1_pos.to_array(),
+                disallow_mwd: false,
+                entry_gate_ball_id: None,
+                entry_gate_pos: Some(entry_pos.to_array()),
+                entry_gate_locked: false,
+                current_room_index: 1,
+                rooms: vec![eve_db::DungeonRuntimeRoom {
+                    room_index: 1,
+                    room_id: 9_801_01,
+                    room_name: "Room 1".into(),
+                    position: room1_pos.to_array(),
+                    gate_destination_pos: room1_pos.to_array(),
+                    gated: false,
+                    disallow_mwd: None,
+                    gate_ball_id: None,
+                    gate_locked: false,
+                    objects: Vec::new(),
+                    npc_groups: Vec::new(),
+                    triggers: Vec::new(),
+                    spawned: false,
+                    cleared: false,
+                }],
+                completed: false,
+                despawned: false,
+                active_objective_id: 0,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
+                created_unix: ctx.now_unix(),
+            },
+        );
+    });
+    let base_wcn = ctx
+        .sde
+        .types
+        .get(&587)
+        .and_then(|t| t.default_attributes.get(&153).copied())
+        .unwrap_or(1.24e-6);
+    let wdo_lvl = ctx.db.with_snapshot(|snap| {
+        snap.skills
+            .get(&char_fc)
+            .and_then(|m| m.get(&3455))
+            .map(|s| s.level.min(5))
+            .unwrap_or(0)
+    });
+    let eff_wcn = base_wcn * (1.0 - 0.10 * (wdo_lvl as f64));
+    let cap_for_160km = (eff_wcn * 1_000_000.0 / 149_597_870_700.0) * 160_000.0;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            far_out_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: far_out_bm_id,
+                owner_id: char_fc,
+                solar_system_id: sys_id,
+                label: "Far Outside".into(),
+                x: 10_000_000.0,
+                y: 0.0,
+                z: 0.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+    sys_handle.try_remove_ball(ship_fc);
+    let mut low_cap_cs = eve_destiny::CombatState::default();
+    low_cap_cs.max_capacitor = 500.0;
+    low_cap_cs.capacitor = cap_for_160km;
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_fc,
+                type_id: 587,
+                position: entry_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            low_cap_cs,
+        )
+        .await
+        .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_fc);
+    let res_cap_clamp = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_BOOKMARK.into()),
+            PyRep::Integer(far_out_bm_id),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res_cap_clamp, PyRep::Bool(true));
+    let notes = ctx.drain_notifications_for_char(char_fc);
+    assert!(
+        !notes.iter().any(|n| n.event == "OnExitingDungeon"),
+        "capacitor-clamped warp landing inside same dungeon must not emit OnExitingDungeon"
+    );
+}
+
+#[tokio::test]
+async fn mission_pocket_wave_respawn_is_scoped_to_warped_mission_and_preserves_npcs_remaining() {
+    const LOC_DUNGEON: &str = "dungeon";
+
+    let ctx = test_ctx();
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 951_400_001_i64;
+    let mid_a = 1_881_u32;
+    let mid_b = 1_882_u32;
+    let kw = HashMap::new();
+
+    let origin_a = deterministic_mission_site_origin(&ctx, sys_id, mid_a);
+    let start_pos = origin_a + glam::DVec3::new(350_000.0, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_missions.retain(|(cid, _), _| *cid != char_id);
+        snap.items.insert(
+            ship_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = ship_id;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.active_missions.insert(
+            (char_id, mid_a),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: mid_a,
+                agent_id: 3_012_050,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 2,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        snap.active_missions.insert(
+            (char_id, mid_b),
+            ActiveMissionRecord {
+                character_id: char_id,
+                mission_id: mid_b,
+                agent_id: 3_012_051,
+                solar_system_id: sys_id,
+                state: "Accepted".into(),
+                current_room_id: 1,
+                npcs_remaining: 3,
+                spawned_npc_ball_ids: Vec::new(),
+                bookmark_id: None,
+            },
+        );
+        snap.sp6_lifecycle
+            .missions_awaiting_downtime_respawn
+            .push((char_id, mid_b));
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: start_pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sess = docked_session(char_id, sys_id, None);
+    sess.ship_id = Some(ship_id);
+
+    let res = handle(
+        &ctx,
+        &mut sess,
+        "agentMgr",
+        "WarpToLocation",
+        &[
+            PyRep::String(LOC_DUNGEON.into()),
+            PyRep::Integer(i64::from(mid_a)),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(res, PyRep::Bool(true));
+
+    ctx.db.with_snapshot(|snap| {
+        let m_a = &snap.active_missions[&(char_id, mid_a)];
+        assert_eq!(
+            m_a.npcs_remaining, 2,
+            "warping to mission A must preserve cur_npcs (2) instead of inflating to .max(4)"
+        );
+        assert_eq!(m_a.spawned_npc_ball_ids.len(), 2);
+
+        let m_b = &snap.active_missions[&(char_id, mid_b)];
+        assert_eq!(m_b.npcs_remaining, 3);
+        assert!(
+            m_b.spawned_npc_ball_ids.is_empty(),
+            "warping to mission A must NOT spawn mission B's wave at mission A's anchor_pos"
+        );
+        assert!(
+            snap.sp6_lifecycle
+                .missions_awaiting_downtime_respawn
+                .contains(&(char_id, mid_b)),
+            "mission B must remain awaiting downtime respawn until pilot warps to mission B"
+        );
+    });
+}
