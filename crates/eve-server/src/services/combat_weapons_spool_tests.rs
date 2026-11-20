@@ -1165,3 +1165,55 @@ async fn handle_link_all_weapons_atomic_guards_state_and_preserves_existing_bank
         assert!(snap.weapon_banks.get(&ship_id).is_none_or(std::collections::HashMap::is_empty));
     });
 }
+
+#[tokio::test]
+async fn handle_link_all_weapons_atomic_excludes_offline_weapons() {
+    let (ctx, session, char_id, ship_id, sys_id) = make_spool_test_ctx();
+    let mod1 = 749_301i64;
+    let mod2 = 749_302i64;
+    let mod3 = 749_303i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            mod1,
+            make_fighter_item(mod1, 47_240, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.items.insert(
+            mod2,
+            make_fighter_item(mod2, 47_240, char_id, ship_id, InventoryFlag::HiSlot1, 1),
+        );
+        snap.items.insert(
+            mod3,
+            make_fighter_item(mod3, 47_240, char_id, ship_id, InventoryFlag::HiSlot2, 1),
+        );
+        snap.module_online_states.insert(mod1, true);
+        snap.module_online_states.insert(mod2, false);
+        snap.module_online_states.insert(mod3, false);
+    });
+    let _ = spawn_spool_ball(&ctx, sys_id, ship_id, 47_271, DVec3::ZERO, 1_000.0, 1_000.0, 1_000.0, 1_000.0).await;
+
+    // Only 1 online weapon -> require_linkable_pair=true rejects; require_linkable_pair=false stays empty.
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    assert_eq!(
+        handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+            .unwrap_err()
+            .code,
+        "InvalidWeaponGroup"
+    );
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    let empty = handle_link_all_weapons(&ctx, char_id, ship_id).unwrap();
+    assert_eq!(empty, eve_proto::PyRep::Dict(Vec::new()));
+
+    // Bringing mod2 online links only [mod1, mod2] and excludes offline mod3.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mod2, true);
+    });
+    handle_link_all_weapons_atomic(&ctx, Some(&session), char_id, ship_id, true)
+        .expect("two online identical weapons link");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&std::collections::HashMap::from([(mod1, vec![mod1, mod2])]))
+        );
+    });
+}

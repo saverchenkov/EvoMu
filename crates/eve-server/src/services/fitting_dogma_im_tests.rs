@@ -3033,6 +3033,506 @@ async fn r2_p1_2_link_weapons_peel_merge_and_link_all_enforce_guards_atomically(
 }
 
 #[tokio::test]
+async fn r2_p1_2_disjoint_weapon_banks_and_offline_weapon_rejection() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let char_id = 96_399_701i64;
+    let sys_id = 30_000_142u32;
+    let ship_id = 96_399_710i64;
+    let g1 = 96_399_721i64;
+    let g2 = 96_399_722i64;
+    let g3 = 96_399_723i64;
+    let g4 = 96_399_724i64;
+    let g5 = 96_399_725i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "user_96399701".into(),
+            AccountRecord {
+                user_id: 96_399_701,
+                username: "user_96399701".into(),
+                password_token: String::new(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        let mut ch = snap.characters.values().next().cloned().expect("seed char");
+        ch.character_id = char_id;
+        ch.user_id = 96_399_701;
+        ch.name = "DisjointBankPilot".into();
+        ch.corporation_id = 1_000_009;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = sys_id;
+        ch.active_ship_id = ship_id;
+        snap.characters.insert(char_id, ch);
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        for (gid, flag) in [
+            (g1, InventoryFlag::HiSlot0),
+            (g2, InventoryFlag::HiSlot1),
+            (g3, InventoryFlag::HiSlot2),
+            (g4, InventoryFlag::HiSlot3),
+            (g5, InventoryFlag::HiSlot4),
+        ] {
+            snap.items.insert(
+                gid,
+                InventoryItemRecord {
+                    item_id: gid,
+                    type_id: 484,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(gid, true);
+        }
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_350_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+            SlimItemMeta {
+                group_id: 25,
+                category_id: 6,
+                owner_id: char_id,
+                corp_id: 1_000_009,
+                char_id: Some(char_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let mut sess = SessionState::new(96_399_701);
+    sess.user_id = Some(96_399_701);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    ctx.db
+        .acquire_online_lock(96_399_701, 96_399_701, Some(char_id), true, ctx.now_unix_secs())
+        .expect("online lock");
+    let kw = HashMap::new();
+    let svc = "dogmaIM";
+
+    // 1. LinkWeapons(g1, g2) then LinkWeapons(g2, g1) must preserve a single disjoint bank {g1: [g1, g2]}.
+    handle_dogma_im(&ctx, &mut sess, None, svc, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g2)], &kw)
+        .await
+        .expect("handled")
+        .expect("LinkWeapons(g1, g2)");
+    handle_dogma_im(&ctx, &mut sess, None, svc, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(g2), PyRep::Integer(g1)], &kw)
+        .await
+        .expect("handled")
+        .expect("LinkWeapons(g2, g1)");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&HashMap::from([(g1, vec![g1, g2])]))
+        );
+    });
+
+    // 2. PeelAndLink(g2, g3) peels g2 out of g1's bank, dissolves g1's 1-member remnant, and emits OnWeaponGroupDestroyed(g1).
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_dogma_im(&ctx, &mut sess, None, svc, "PeelAndLink", &[PyRep::Integer(ship_id), PyRep::Integer(g2), PyRep::Integer(g3)], &kw)
+        .await
+        .expect("handled")
+        .expect("PeelAndLink(g2, g3)");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&HashMap::from([(g3, vec![g3, g2])]))
+        );
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnWeaponGroupDestroyed" && n.args == vec![PyRep::Integer(ship_id), PyRep::Integer(g1)]),
+        "dissolved bank master g1 must emit OnWeaponGroupDestroyed, got {notifs:?}"
+    );
+
+    // 3. Build 3-gun bank {g1: [g1, g4, g5]}, peel master g1 into g3's bank -> remnant re-keys to g4 & emits OnWeaponGroupDestroyed(g1).
+    handle_dogma_im(&ctx, &mut sess, None, svc, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g4)], &kw)
+        .await
+        .expect("handled")
+        .expect("LinkWeapons(g1, g4)");
+    handle_dogma_im(&ctx, &mut sess, None, svc, "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g5)], &kw)
+        .await
+        .expect("handled")
+        .expect("LinkWeapons(g1, g5)");
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_dogma_im(&ctx, &mut sess, None, svc, "PeelAndLink", &[PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g3)], &kw)
+        .await
+        .expect("handled")
+        .expect("PeelAndLink(g1, g3)");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&HashMap::from([(g3, vec![g3, g2, g1]), (g4, vec![g4, g5])]))
+        );
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnWeaponGroupDestroyed" && n.args == vec![PyRep::Integer(ship_id), PyRep::Integer(g1)]),
+        "re-keyed master g1 must emit OnWeaponGroupDestroyed, got {notifs:?}"
+    );
+
+    // 4. MergeModuleGroups(g5, g2) resolves slave args to masters g4 and g3, merges disjointly, and emits OnWeaponGroupDestroyed(g3).
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_dogma_im(&ctx, &mut sess, None, svc, "MergeModuleGroups", &[PyRep::Integer(ship_id), PyRep::Integer(g5), PyRep::Integer(g2)], &kw)
+        .await
+        .expect("handled")
+        .expect("MergeModuleGroups(g5, g2)");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&HashMap::from([(g4, vec![g4, g5, g3, g2, g1])]))
+        );
+    });
+    let notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnWeaponGroupDestroyed" && n.args == vec![PyRep::Integer(ship_id), PyRep::Integer(g3)]),
+        "merged bank master g3 must emit OnWeaponGroupDestroyed, got {notifs:?}"
+    );
+
+    // 5. Offline high-slot weapon is rejected across LinkWeapons, PeelAndLink, MergeModuleGroups, and LinkAllWeapons.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.weapon_banks.remove(&ship_id);
+        snap.module_online_states.insert(g2, false);
+    });
+    let expected_err = "InvalidWeaponGroup";
+    let before = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    for (meth, args) in [
+        ("LinkWeapons", vec![PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g2)]),
+        ("PeelAndLink", vec![PyRep::Integer(ship_id), PyRep::Integer(g2), PyRep::Integer(g1)]),
+        ("MergeModuleGroups", vec![PyRep::Integer(ship_id), PyRep::Integer(g1), PyRep::Integer(g2)]),
+        ("LinkAllWeapons", vec![PyRep::Integer(ship_id)]),
+    ] {
+        // Need only 1 online gun if testing LinkAllWeapons rejection with 1 online + 1 offline,
+        // so test LinkAllWeapons specifically below while verifying pair calls fail here.
+        if meth == "LinkAllWeapons" {
+            continue;
+        }
+        let err = handle_dogma_im(&ctx, &mut sess, None, svc, meth, &args, &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected_err, "{meth} must reject offline module");
+        assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before);
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for off_id in [g3, g4, g5] {
+            snap.module_online_states.insert(off_id, false);
+        }
+    });
+    let before_all = (ctx.db.state_epoch(), ctx.db.tx_commit_count());
+    let link_all_err = handle_dogma_im(&ctx, &mut sess, None, svc, "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw)
+        .await
+        .expect("handled")
+        .unwrap_err();
+    assert_eq!(link_all_err.code, expected_err);
+    assert_eq!((ctx.db.state_epoch(), ctx.db.tx_commit_count()), before_all);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(g3, true);
+    });
+    handle_dogma_im(&ctx, &mut sess, None, svc, "LinkAllWeapons", &[PyRep::Integer(ship_id)], &kw)
+        .await
+        .expect("handled")
+        .expect("LinkAllWeapons links two online weapons while excluding offline ones");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.weapon_banks.get(&ship_id),
+            Some(&HashMap::from([(g1, vec![g1, g3])]))
+        );
+    });
+}
+
+#[tokio::test]
+async fn r2_p1_3_structure_gunner_defense_acl_and_starbase_operator_can_inspect_combat_slots() {
+    let ctx = ServerContext::with_sde_and_repository(
+        shared_sde(),
+        Arc::new(WorldRepository::with_demo_seed()),
+    );
+    let corp_id = 98_201_001i64;
+    let allied_corp_id = 98_201_002i64;
+    let sys_id = 30_000_142u32;
+    let structure_id = 10_000_982_101i64;
+
+    let ceo_id = 982_201i64;
+    let starbase_op_id = 982_202i64;
+    let allied_gunner_id = 982_203i64;
+    let outsider_id = 982_204i64;
+
+    let hi_launcher_id = 982_220_001i64;
+    let hi_charge_id = 982_220_002i64;
+    let ammo_hold_item_id = 982_220_003i64;
+    let fighter_tube_item_id = 982_220_004i64;
+    let service_mod_id = 982_220_005i64;
+    let rig_mod_id = 982_220_006i64;
+    let core_item_id = 982_220_007i64;
+    let sag1_item_id = 982_220_008i64;
+    let deliveries_item_id = 982_220_009i64;
+    let fuel_item_id = 982_220_010i64;
+    let charge_tid = 24_533u32;
+    let launcher_tid = 35_894u32;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let base_char = snap.characters.values().next().cloned().expect("seed char");
+        let mut corp = eve_db::CorporationRecord::new(corp_id, "Citadel Defense", "CDEF", ceo_id);
+        corp.members.insert(ceo_id);
+        corp.members.insert(starbase_op_id);
+        corp.member_roles
+            .insert(starbase_op_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        snap.corporations.insert(corp_id, corp);
+
+        let mut allied_corp =
+            eve_db::CorporationRecord::new(allied_corp_id, "Allied Gunners", "ALLY", allied_gunner_id);
+        allied_corp.members.insert(allied_gunner_id);
+        allied_corp.members.insert(outsider_id);
+        snap.corporations.insert(allied_corp_id, allied_corp);
+
+        for (cid, cid_corp) in [
+            (ceo_id, corp_id),
+            (starbase_op_id, corp_id),
+            (allied_gunner_id, allied_corp_id),
+            (outsider_id, allied_corp_id),
+        ] {
+            let mut ch = base_char.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.corporation_id = cid_corp;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = Some(structure_id);
+            ch.active_ship_id = 0;
+            snap.characters.insert(cid, ch);
+        }
+
+        snap.structures.insert(
+            structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id,
+                type_id: 35832,
+                owner_corp_id: corp_id,
+                solar_system_id: sys_id,
+                name: "Gunner Authz Fortizar".into(),
+                position: [15_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+
+        let mut prof = crate::services::station_structure::structure_upwell_ops::StructureAccessProfile::default();
+        prof.profile_id = 982_101;
+        prof.owner_corp_id = corp_id;
+        prof.defense_allowed_characters.insert(allied_gunner_id);
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.profiles_by_id.insert(prof.profile_id, prof.clone());
+        ext.structure_profile_id.insert(structure_id, prof.profile_id);
+        ext.access_profiles.insert(structure_id, prof);
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+
+        for (iid, tid, flag, qty) in [
+            (hi_launcher_id, launcher_tid, InventoryFlag::HiSlot0, 1),
+            (hi_charge_id, charge_tid, InventoryFlag::HiSlot0, 20),
+            (ammo_hold_item_id, charge_tid, InventoryFlag::SpecializedAmmoHold, 100),
+            (fighter_tube_item_id, 23_057, InventoryFlag::FighterBay, 6),
+            (service_mod_id, 35_879, InventoryFlag::ServiceSlot0, 1),
+            (rig_mod_id, 37_148, InventoryFlag::RigSlot0, 1),
+            (core_item_id, 56_201, InventoryFlag::QuantumCoreRoom, 1),
+            (sag1_item_id, 34, InventoryFlag::CorpSAG1, 50),
+            (deliveries_item_id, 34, InventoryFlag::Deliveries, 50),
+            (fuel_item_id, 4247, InventoryFlag::StructureFuel, 200),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: corp_id,
+                    location_id: structure_id,
+                    flag,
+                    quantity: qty,
+                    singleton: qty == 1,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mk_sess = |cid: i64, cid_corp: i64| {
+        let mut s = SessionState::new(cid as u64);
+        s.user_id = Some(cid as u64);
+        s.character_id = Some(cid);
+        s.corporation_id = Some(cid_corp);
+        s.solar_system_id = Some(sys_id);
+        s.structure_id = Some(structure_id);
+        s
+    };
+
+    let mut allied_sess = mk_sess(allied_gunner_id, allied_corp_id);
+    let mut op_sess = mk_sess(starbase_op_id, corp_id);
+    let mut outsider_sess = mk_sess(outsider_id, allied_corp_id);
+    let kw = HashMap::new();
+    let svc = "dogmaIM";
+    let expected_denied = "AccessDenied";
+
+    let hi_subloc = PyRep::Tuple(vec![
+        PyRep::Integer(structure_id),
+        PyRep::Integer(i64::from(InventoryFlag::HiSlot0 as u16)),
+        PyRep::Integer(i64::from(charge_tid)),
+    ]);
+    let svc_subloc = PyRep::Tuple(vec![
+        PyRep::Integer(structure_id),
+        PyRep::Integer(i64::from(InventoryFlag::ServiceSlot0 as u16)),
+        PyRep::Integer(35_879),
+    ]);
+    let rig_subloc = PyRep::Tuple(vec![
+        PyRep::Integer(structure_id),
+        PyRep::Integer(i64::from(InventoryFlag::RigSlot0 as u16)),
+        PyRep::Integer(37_148),
+    ]);
+    let core_subloc = PyRep::Tuple(vec![
+        PyRep::Integer(structure_id),
+        PyRep::Integer(i64::from(InventoryFlag::QuantumCoreRoom as u16)),
+        PyRep::Integer(56_201),
+    ]);
+
+    // Allied Defense-ACL gunner takes control and inspects HiSlot0 sublocation, fitted weapons, ammo hold, and tubes.
+    crate::services::structure_control_ops::handle_take_control(
+        &ctx,
+        &mut allied_sess,
+        &[PyRep::Integer(structure_id)],
+    )
+    .await
+    .expect("allied Defense-ACL gunner TakeControl");
+
+    for arg in [
+        hi_subloc.clone(),
+        PyRep::Integer(hi_launcher_id),
+        PyRep::Integer(ammo_hold_item_id),
+        PyRep::Integer(fighter_tube_item_id),
+    ] {
+        handle_dogma_im(&ctx, &mut allied_sess, None, svc, "ItemGetInfo", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect("active Defense-ACL gunner inspects combat slots");
+    }
+    for forbidden in [
+        svc_subloc.clone(),
+        rig_subloc.clone(),
+        core_subloc.clone(),
+        PyRep::Integer(service_mod_id),
+        PyRep::Integer(rig_mod_id),
+        PyRep::Integer(core_item_id),
+        PyRep::Integer(sag1_item_id),
+        PyRep::Integer(deliveries_item_id),
+        PyRep::Integer(fuel_item_id),
+    ] {
+        let err = handle_dogma_im(&ctx, &mut allied_sess, None, svc, "ItemGetInfo", &[forbidden], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected_denied);
+    }
+
+    // Release control, take control as ROLE_STARBASE_OPERATOR owning-corp gunner, verify combat slots OK
+    // while non-gunnery corp flags (ServiceSlot0, RigSlot0, QuantumCoreRoom, CorpSAG1, Deliveries) stay denied.
+    crate::services::structure_control_ops::handle_release_control(
+        &ctx,
+        &mut allied_sess,
+        &[PyRep::Integer(structure_id)],
+    )
+    .expect("allied ReleaseControl");
+    crate::services::structure_control_ops::handle_take_control(
+        &ctx,
+        &mut op_sess,
+        &[PyRep::Integer(structure_id)],
+    )
+    .await
+    .expect("ROLE_STARBASE_OPERATOR TakeControl");
+
+    for arg in [
+        hi_subloc.clone(),
+        PyRep::Integer(hi_launcher_id),
+        PyRep::Integer(ammo_hold_item_id),
+        PyRep::Integer(fighter_tube_item_id),
+    ] {
+        handle_dogma_im(&ctx, &mut op_sess, None, svc, "ItemGetInfo", &[arg], &kw)
+            .await
+            .expect("handled")
+            .expect("ROLE_STARBASE_OPERATOR gunner inspects combat slots");
+    }
+    for forbidden in [
+        svc_subloc,
+        rig_subloc,
+        core_subloc,
+        PyRep::Integer(service_mod_id),
+        PyRep::Integer(rig_mod_id),
+        PyRep::Integer(core_item_id),
+        PyRep::Integer(sag1_item_id),
+        PyRep::Integer(deliveries_item_id),
+    ] {
+        let err = handle_dogma_im(&ctx, &mut op_sess, None, svc, "ItemGetInfo", &[forbidden], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected_denied);
+    }
+
+    // Allied outsider without Defense ACL remains denied on HiSlot0 sublocation and fitted weapon.
+    for arg in [hi_subloc, PyRep::Integer(hi_launcher_id)] {
+        let err = handle_dogma_im(&ctx, &mut outsider_sess, None, svc, "ItemGetInfo", &[arg], &kw)
+            .await
+            .expect("handled")
+            .unwrap_err();
+        assert_eq!(err.code, expected_denied);
+    }
+}
+
+#[tokio::test]
 async fn r2_p1_3_structure_sublocation_authz_allows_gunners_and_denies_unauthorized() {
     let sde = shared_sde();
     let ctx = ServerContext::with_sde_and_repository(

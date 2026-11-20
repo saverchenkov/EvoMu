@@ -131,6 +131,36 @@ fn is_gm_session(session: &SessionState) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn is_structure_combat_gunnery_flag(flag: InventoryFlag, flag_u16: u16) -> bool {
+    matches!(flag_u16, 11..=34 | 158..=163)
+        || matches!(flag, InventoryFlag::SpecializedAmmoHold)
+}
+
+fn can_gunner_access_structure_combat(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    st: &eve_db::UpwellStructureRecord,
+    char_id: i64,
+) -> bool {
+    if st.state == "Destroyed" {
+        return false;
+    }
+    let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+    if ext.active_pilot_by_structure.get(&st.structure_id) == Some(&char_id) {
+        return true;
+    }
+    let now_unix = ctx.now_unix();
+    let prof_opt = crate::services::structure_profile_services::effective_profile_for_structure(
+        &ext,
+        st.structure_id,
+        Some(now_unix),
+    );
+    crate::services::structure_control_ops::verify_control_acl_or_role_with_profile_at(
+        snap, &ext, st, prof_opt, char_id, now_unix,
+    )
+    .is_ok()
+}
+
 fn authorize_corp_flag_access(
     ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
@@ -196,10 +226,10 @@ fn authorize_corp_flag_access(
             | eve_db::corp_roles::ROLE_TRADER;
         return (role_mask & deliveries_roles) != 0;
     }
-    if snap
+    if let Some(st) = snap
         .structures
         .get(&root_loc)
-        .is_some_and(|st| st.owner_corp_id == caller_corp)
+        .filter(|st| st.owner_corp_id == caller_corp)
     {
         let is_structure_equipment_flag =
             matches!(flag_num, 11..=34 | 92..=94 | 158..=171 | 180)
@@ -213,6 +243,11 @@ fn authorize_corp_flag_access(
             if (role_mask & equip_roles) != 0 {
                 return true;
             }
+        }
+        if is_structure_combat_gunnery_flag(root_flag, root_flag_u16)
+            && can_gunner_access_structure_combat(ctx, snap, st, char_id)
+        {
+            return true;
         }
         if matches!(
             root_flag,
@@ -305,7 +340,7 @@ fn authorize_item_info_access(
                     root_loc = st_id;
                 }
             }
-            return authorize_corp_flag_access(
+            if authorize_corp_flag_access(
                 ctx,
                 snap,
                 session,
@@ -314,7 +349,39 @@ fn authorize_item_info_access(
                 root_loc,
                 root_flag,
                 root_flag as u16,
-            );
+            ) {
+                return true;
+            }
+        }
+
+        // 2b. Active structure controllers and Defense-ACL / structure-operator gunners may inspect
+        // fitted structure combat equipment, tubes, and specialized ammo holds (never services/rigs/corp hangars).
+        if item.owner_id > 0 && !is_npc_corporation_id(ctx, item.owner_id) {
+            let (mut root_loc, mut root_flag) = (item.location_id, item.flag);
+            for _ in 0..8 {
+                if (60_000_000..=69_999_999).contains(&root_loc)
+                    || root_loc >= 1_000_000_000_000
+                    || snap.structures.contains_key(&root_loc)
+                {
+                    break;
+                }
+                let Some(parent) = snap.items.get(&root_loc) else {
+                    break;
+                };
+                if parent.owner_id != item.owner_id || parent.location_id == root_loc {
+                    break;
+                }
+                root_loc = parent.location_id;
+                root_flag = parent.flag;
+            }
+            if let Some(st) = snap.structures.get(&root_loc) {
+                if st.owner_corp_id == item.owner_id
+                    && is_structure_combat_gunnery_flag(root_flag, root_flag as u16)
+                    && can_gunner_access_structure_combat(ctx, snap, st, char_id)
+                {
+                    return true;
+                }
+            }
         }
         false
     });
@@ -376,6 +443,16 @@ fn validate_linkable_weapon_pair(
         .types
         .get(&second_it.type_id)
         .is_some_and(crate::services::combat_crimewatch::combat_weapons_spool::is_linkable_weapon_type);
+    let first_online = snap
+        .module_online_states
+        .get(&first_id)
+        .copied()
+        .unwrap_or(true);
+    let second_online = snap
+        .module_online_states
+        .get(&second_id)
+        .copied()
+        .unwrap_or(true);
     if first_it.location_id != ship_id
         || second_it.location_id != ship_id
         || !matches!(first_it.flag as u16, 27..=34)
@@ -383,14 +460,57 @@ fn validate_linkable_weapon_pair(
         || first_it.type_id != second_it.type_id
         || !first_linkable
         || !second_linkable
+        || !first_online
+        || !second_online
     {
         return Err(BridgeRpcError {
             code: "InvalidWeaponGroup".into(),
-            message: "Only identical high-slot weapons fitted to the ship can be grouped".into(),
+            message: "Only identical online high-slot weapons fitted to the ship can be grouped".into(),
             client_error: None,
         });
     }
     Ok(())
+}
+
+fn find_weapon_bank_master(
+    banks: &std::collections::HashMap<i64, Vec<i64>>,
+    module_id: i64,
+) -> Option<i64> {
+    if banks.contains_key(&module_id) {
+        return Some(module_id);
+    }
+    banks
+        .iter()
+        .find_map(|(&master, members)| members.contains(&module_id).then_some(master))
+}
+
+fn peel_module_from_weapon_banks(
+    banks: &mut std::collections::HashMap<i64, Vec<i64>>,
+    module_id: i64,
+    destroyed: &mut Vec<i64>,
+) {
+    let Some(owner_master) = find_weapon_bank_master(banks, module_id) else {
+        return;
+    };
+    let Some(mut members) = banks.remove(&owner_master) else {
+        return;
+    };
+    members.retain(|&id| id != module_id);
+    if members.len() <= 1 {
+        if !destroyed.contains(&owner_master) {
+            destroyed.push(owner_master);
+        }
+        return;
+    }
+    if owner_master == module_id {
+        let new_master = members[0];
+        if !destroyed.contains(&owner_master) {
+            destroyed.push(owner_master);
+        }
+        banks.insert(new_master, members);
+    } else {
+        banks.insert(owner_master, members);
+    }
 }
 
 fn run_weapon_pair_mutation<F>(
@@ -432,23 +552,27 @@ where
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        crate::services::combat_crimewatch::combat_weapons_spool::validate_weapon_link_context_in_snapshot(
-            ctx,
-            snap,
-            Some(session),
-            char_id,
-            ship_id,
-        )?;
-        validate_linkable_weapon_pair(ctx, snap, ship_id, first_id, second_id)?;
-        let banks = snap.weapon_banks.entry(ship_id).or_default();
-        let destroyed = mutate(banks, first_id, second_id);
-        let info =
-            crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(
-                snap, ship_id,
-            );
-        Ok((destroyed, info))
-    });
+    let mut mutate_opt = Some(mutate);
+    let res = crate::services::combat_crimewatch::combat_weapons_spool::run_with_weapon_link_context(
+        ctx,
+        Some(session),
+        char_id,
+        ship_id,
+        |snap| {
+            validate_linkable_weapon_pair(ctx, snap, ship_id, first_id, second_id)?;
+            let banks = snap.weapon_banks.entry(ship_id).or_default();
+            let destroyed = if let Some(mutate_fn) = mutate_opt.take() {
+                mutate_fn(banks, first_id, second_id)
+            } else {
+                Vec::new()
+            };
+            let info =
+                crate::services::combat_crimewatch::combat_weapons_spool::build_weapon_banks_dict(
+                    snap, ship_id,
+                );
+            Ok((destroyed, info))
+        },
+    );
     Some(res.map(|(destroyed, info)| {
         crate::services::combat_crimewatch::combat_weapons_spool::notify_weapon_banks_updated(
             ctx, char_id, ship_id, &destroyed, &info,
@@ -470,8 +594,13 @@ fn handle_item_get_info(
     let subloc_tuple = match args.first() {
         Some(PyRep::Tuple(parts)) if parts.len() == 3 => {
             match (parts[0].as_i64(), parts[1].as_i64(), parts[2].as_i64()) {
-                (Some(loc_id), Some(flag_id), Some(tid)) if loc_id > 0 && flag_id > 0 && tid > 0 => {
-                    Some((loc_id, flag_id as u16, tid as u32))
+                (Some(loc_id), Some(flag_id), Some(tid)) if loc_id > 0 => {
+                    match (u16::try_from(flag_id), u32::try_from(tid)) {
+                        (Ok(flag_u16), Ok(type_id)) if flag_u16 > 0 && type_id > 0 => {
+                            Some((loc_id, flag_u16, type_id))
+                        }
+                        _ => None,
+                    }
                 }
                 _ => None,
             }
@@ -522,6 +651,7 @@ fn handle_item_get_info(
     let mut info_access = ItemInfoAccess::Full;
     if let Some((_, loc_id, flag_u16, _)) = subloc_key_opt.as_ref() {
         let is_gm = is_gm_session(session);
+        let flag = InventoryFlag::from_u16(*flag_u16);
         let struct_authorized = ctx.db.with_snapshot(|snap| {
             snap.structures.get(loc_id).map(|st| {
                 is_gm
@@ -532,9 +662,11 @@ fn handle_item_get_info(
                         char_id,
                         st.owner_corp_id,
                         *loc_id,
-                        InventoryFlag::from_u16(*flag_u16),
+                        flag,
                         *flag_u16,
                     )
+                    || (is_structure_combat_gunnery_flag(flag, *flag_u16)
+                        && can_gunner_access_structure_combat(ctx, snap, st, char_id))
             })
         });
         if let Some(allowed) = struct_authorized {
@@ -1871,11 +2003,23 @@ pub(crate) async fn handle_dogma_im(
                 "slaveID",
                 true,
                 |banks, master_id, slave_id| {
-                    let bank = banks.entry(master_id).or_insert_with(|| vec![master_id]);
-                    if !bank.contains(&slave_id) {
-                        bank.push(slave_id);
+                    let mut destroyed = Vec::new();
+                    let target_master = find_weapon_bank_master(banks, master_id).unwrap_or(master_id);
+                    if find_weapon_bank_master(banks, slave_id) != Some(target_master) {
+                        peel_module_from_weapon_banks(banks, slave_id, &mut destroyed);
+                        let target_master =
+                            find_weapon_bank_master(banks, master_id).unwrap_or(master_id);
+                        let bank = banks
+                            .entry(target_master)
+                            .or_insert_with(|| vec![target_master]);
+                        if !bank.contains(&target_master) {
+                            bank.insert(0, target_master);
+                        }
+                        if !bank.contains(&slave_id) {
+                            bank.push(slave_id);
+                        }
                     }
-                    Vec::new()
+                    destroyed
                 },
             )
         }
@@ -1889,19 +2033,25 @@ pub(crate) async fn handle_dogma_im(
                 "targetBankModID",
                 false,
                 |banks, new_mod_id, target_bank_mod_id| {
-                    let mut found_master = None;
-                    for (&m, list) in banks.iter() {
-                        if m == target_bank_mod_id || list.contains(&target_bank_mod_id) {
-                            found_master = Some(m);
-                            break;
-                        }
+                    let mut destroyed = Vec::new();
+                    let target_before = find_weapon_bank_master(banks, target_bank_mod_id);
+                    let src_before = find_weapon_bank_master(banks, new_mod_id);
+                    if target_before.is_some() && src_before == target_before {
+                        return destroyed;
                     }
-                    let master = found_master.unwrap_or(target_bank_mod_id);
-                    let list = banks.entry(master).or_insert_with(|| vec![master]);
+                    peel_module_from_weapon_banks(banks, new_mod_id, &mut destroyed);
+                    let target_master =
+                        find_weapon_bank_master(banks, target_bank_mod_id).unwrap_or(target_bank_mod_id);
+                    let list = banks
+                        .entry(target_master)
+                        .or_insert_with(|| vec![target_master]);
+                    if !list.contains(&target_master) {
+                        list.insert(0, target_master);
+                    }
                     if !list.contains(&new_mod_id) {
                         list.push(new_mod_id);
                     }
-                    Vec::new()
+                    destroyed
                 },
             )
         }
@@ -1915,22 +2065,33 @@ pub(crate) async fn handle_dogma_im(
                 "otherMasterID",
                 false,
                 |banks, master_id, other_master_id| {
-                    let had_other =
-                        banks.contains_key(&other_master_id) && other_master_id != master_id;
-                    let other_modules = banks
-                        .remove(&other_master_id)
-                        .unwrap_or_else(|| vec![other_master_id]);
-                    let master_list = banks.entry(master_id).or_insert_with(|| vec![master_id]);
+                    let target_master = find_weapon_bank_master(banks, master_id).unwrap_or(master_id);
+                    let other_before = find_weapon_bank_master(banks, other_master_id);
+                    if other_before == Some(target_master) {
+                        return Vec::new();
+                    }
+                    let mut destroyed = Vec::new();
+                    let other_modules = match other_before {
+                        Some(other_master) => {
+                            destroyed.push(other_master);
+                            banks
+                                .remove(&other_master)
+                                .unwrap_or_else(|| vec![other_master_id])
+                        }
+                        None => vec![other_master_id],
+                    };
+                    let master_list = banks
+                        .entry(target_master)
+                        .or_insert_with(|| vec![target_master]);
+                    if !master_list.contains(&target_master) {
+                        master_list.insert(0, target_master);
+                    }
                     for id in other_modules {
                         if !master_list.contains(&id) {
                             master_list.push(id);
                         }
                     }
-                    if had_other {
-                        vec![other_master_id]
-                    } else {
-                        Vec::new()
-                    }
+                    destroyed
                 },
             )
         }
