@@ -731,6 +731,7 @@ fn step_mmju_spools_in_actor(
                     entry.char_id,
                     entry.ship_id,
                     &[ship_ball.position, dest_pos],
+                    now_unix,
                 )
             {
                 return None;

@@ -392,7 +392,6 @@ mod clock_domain_unit_tests {
     use crate::clock::{FILETIME_TICKS_PER_MS, FILETIME_UNIX_EPOCH_DIFF_MS};
     use crate::{
         DestinyStamp, SimDilatedMs, SimFileTime, SolarSystemSimClock, WallFileTime, WallUnixMs,
-        WorldStateSnapshot,
     };
     use std::any::TypeId;
 
@@ -617,29 +616,33 @@ mod clock_domain_unit_tests {
     }
 
     #[test]
-    fn snapshot_now_unix_secs_parses_virtual_clock_blob() {
-        let mut snap = WorldStateSnapshot::default();
-        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
-        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+    fn solar_system_sim_clock_serde_roundtrip_and_invalid_state_rejection() {
+        let wall_0 = WallUnixMs::from_millis(1_760_000_000_000);
+        let mut clock =
+            SolarSystemSimClock::new(wall_0, -30_000, DestinyStamp::from_ticks(77), 0.35)
+                .expect("valid clock");
+        let _ = clock.advance_wall_ms(1_500).expect("advance");
+        let encoded = serde_json::to_string(&clock).expect("serialize SolarSystemSimClock");
+        let decoded: SolarSystemSimClock =
+            serde_json::from_str(&encoded).expect("valid serialized clock round-trips");
+        assert_eq!(decoded, clock);
 
-        snap.service_state_blobs
-            .insert("__server_now_unix".into(), "1760000123".into());
-        assert_eq!(snap.checked_snapshot_now_unix_secs(), Some(1_760_000_123));
-        assert_eq!(snap.snapshot_now_unix_secs(), 1_760_000_123);
+        let base_val: serde_json::Value = serde_json::from_str(&encoded).expect("parse json");
 
-        snap.service_state_blobs
-            .insert("__server_now_unix".into(), " 2000.75 ".into());
-        assert_eq!(snap.checked_snapshot_now_unix_secs(), Some(2_000));
-        assert_eq!(snap.snapshot_now_unix_secs(), 2_000);
+        let mut zero_ppb = base_val.clone();
+        zero_ppb["tidi_ppb"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<SolarSystemSimClock>(zero_ppb).is_err());
 
-        snap.service_state_blobs
-            .insert("__server_now_unix".into(), "-5".into());
-        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
-        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+        let mut bad_rem = base_val.clone();
+        bad_rem["stamp_remainder_ms"] = serde_json::json!(1_000);
+        assert!(serde_json::from_value::<SolarSystemSimClock>(bad_rem).is_err());
 
-        snap.service_state_blobs
-            .insert("__server_now_unix".into(), "NaN".into());
-        assert_eq!(snap.checked_snapshot_now_unix_secs(), None);
-        assert_eq!(snap.snapshot_now_unix_secs(), 0);
+        let mut bad_sub = base_val.clone();
+        bad_sub["sub_ms_ppb"] = serde_json::json!(1_000_000_000);
+        assert!(serde_json::from_value::<SolarSystemSimClock>(bad_sub).is_err());
+
+        let mut bad_factor = base_val;
+        bad_factor["tidi_factor"] = serde_json::json!(0.01);
+        assert!(serde_json::from_value::<SolarSystemSimClock>(bad_factor).is_err());
     }
 }

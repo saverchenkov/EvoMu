@@ -83,16 +83,6 @@ pub fn can_enter_forcefield_in_snap_at(
     false
 }
 
-pub fn can_enter_forcefield_in_snap(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-    ship_id: i64,
-    tower_id: i64,
-) -> bool {
-    let now = snap.snapshot_now_unix_secs();
-    can_enter_forcefield_in_snap_at(snap, char_id, ship_id, tower_id, now)
-}
-
 pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tower_id: i64) -> bool {
     let now = ctx.now_unix();
     ctx.db
@@ -251,8 +241,8 @@ pub fn is_pos_forcefield_blocked_in_snap(
     char_id: i64,
     ship_id: i64,
     positions: &[DVec3],
+    now_unix: u64,
 ) -> bool {
-    let now_unix = snap.snapshot_now_unix_secs();
     for item in snap.items.values() {
         if item.location_id == sys_id as i64
             && item.singleton

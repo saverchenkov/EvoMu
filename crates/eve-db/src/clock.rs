@@ -413,6 +413,7 @@ impl DestinyStamp {
 /// drift (such as `100.0 * 0.29 = 28.999999999999996`) while keeping `(sim_time - wallclock_time)`
 /// offsets exact across TiDi step transitions.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "SolarSystemSimClockRepr")]
 pub struct SolarSystemSimClock {
     last_wall_ms: WallUnixMs,
     sim_dilated_ms: SimDilatedMs,
@@ -422,6 +423,60 @@ pub struct SolarSystemSimClock {
     sub_ms_ppb: u64,
     destiny_stamp: DestinyStamp,
     stamp_remainder_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct SolarSystemSimClockRepr {
+    last_wall_ms: WallUnixMs,
+    sim_dilated_ms: SimDilatedMs,
+    sim_filetime: SimFileTime,
+    tidi_factor: f64,
+    tidi_ppb: u64,
+    sub_ms_ppb: u64,
+    destiny_stamp: DestinyStamp,
+    stamp_remainder_ms: u64,
+}
+
+impl TryFrom<SolarSystemSimClockRepr> for SolarSystemSimClock {
+    type Error = &'static str;
+
+    fn try_from(raw: SolarSystemSimClockRepr) -> Result<Self, Self::Error> {
+        if !raw.tidi_factor.is_finite()
+            || !(MIN_TIDI_FACTOR..=MAX_TIDI_FACTOR).contains(&raw.tidi_factor)
+        {
+            return Err("SolarSystemSimClock tidi_factor must be finite and within [0.10, 1.00]");
+        }
+        let expected_ppb = Self::factor_to_ppb(raw.tidi_factor);
+        if raw.tidi_ppb < MIN_TIDI_PPB
+            || raw.tidi_ppb > TIDI_PPB_SCALE
+            || raw.tidi_ppb != expected_ppb
+        {
+            return Err("SolarSystemSimClock tidi_ppb invariant mismatch");
+        }
+        if raw.sub_ms_ppb >= TIDI_PPB_SCALE {
+            return Err("SolarSystemSimClock sub_ms_ppb must be < TIDI_PPB_SCALE");
+        }
+        if raw.stamp_remainder_ms >= DESTINY_TICK_MS {
+            return Err("SolarSystemSimClock stamp_remainder_ms must be < DESTINY_TICK_MS");
+        }
+        let expected_ft = raw
+            .sim_dilated_ms
+            .to_sim_filetime()
+            .ok_or("SolarSystemSimClock sim_dilated_ms overflows SimFileTime")?;
+        if raw.sim_filetime != expected_ft {
+            return Err("SolarSystemSimClock sim_filetime invariant mismatch");
+        }
+        Ok(Self {
+            last_wall_ms: raw.last_wall_ms,
+            sim_dilated_ms: raw.sim_dilated_ms,
+            sim_filetime: raw.sim_filetime,
+            tidi_factor: raw.tidi_factor,
+            tidi_ppb: raw.tidi_ppb,
+            sub_ms_ppb: raw.sub_ms_ppb,
+            destiny_stamp: raw.destiny_stamp,
+            stamp_remainder_ms: raw.stamp_remainder_ms,
+        })
+    }
 }
 
 impl SolarSystemSimClock {
@@ -1008,31 +1063,6 @@ impl crate::WorldRepository {
         f(&mut writer.working);
         *self.published.write().unwrap_or_else(|e| e.into_inner()) =
             std::sync::Arc::new(writer.working.clone());
-    }
-}
-
-impl crate::WorldStateSnapshot {
-    /// Reads the snapshot-mirrored virtual clock seconds (`__server_now_unix`), if present
-    /// and valid, avoiding host `SystemTime::now()` queries in snapshot-only helpers.
-    #[must_use]
-    pub fn checked_snapshot_now_unix_secs(&self) -> Option<u64> {
-        let raw = self.service_state_blobs.get("__server_now_unix")?.trim();
-        if let Ok(secs) = raw.parse::<u64>() {
-            return Some(secs);
-        }
-        let float_secs = raw.parse::<f64>().ok()?;
-        if float_secs.is_finite() && float_secs >= 0.0 && float_secs <= u64::MAX as f64 {
-            Some(float_secs.floor() as u64)
-        } else {
-            None
-        }
-    }
-
-    /// Reads the snapshot-mirrored virtual clock seconds (`__server_now_unix`), defaulting to
-    /// `0` when absent or unparseable (matching `EntityKvWriter::default_now_unix`).
-    #[must_use]
-    pub fn snapshot_now_unix_secs(&self) -> u64 {
-        self.checked_snapshot_now_unix_secs().unwrap_or(0)
     }
 }
 
