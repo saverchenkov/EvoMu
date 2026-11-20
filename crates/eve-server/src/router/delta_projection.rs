@@ -318,9 +318,41 @@ pub trait DeltaProjection {
     fn project(&self, input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSink);
 }
 
+/// Domain toggles controlling which state categories [`DefaultDeltaProjection`] projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaProjectionDomains {
+    pub items: bool,
+    pub wallets: bool,
+    pub skills: bool,
+    pub market_orders: bool,
+}
+
+impl Default for DeltaProjectionDomains {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl DeltaProjectionDomains {
+    pub const ALL: Self = Self {
+        items: true,
+        wallets: true,
+        skills: true,
+        market_orders: true,
+    };
+
+    pub const WALLETS_ONLY: Self = Self {
+        items: false,
+        wallets: true,
+        skills: false,
+        market_orders: false,
+    };
+}
+
 /// Standard V24.01 delta projector covering inventory items, blueprints, wallets (personal ISK
 /// and corp divisions 1..7), skills/queues, market orders, and registered fit/custom hooks.
 pub struct DefaultDeltaProjection {
+    pub domains: DeltaProjectionDomains,
     hooks: Vec<Box<dyn DeltaProjectionHook>>,
 }
 
@@ -334,13 +366,31 @@ impl DefaultDeltaProjection {
     /// Creates a projector pre-configured with [`DefaultGodmaFitHook`].
     pub fn new() -> Self {
         Self {
+            domains: DeltaProjectionDomains::ALL,
             hooks: vec![Box::new(DefaultGodmaFitHook)],
         }
     }
 
     /// Creates a projector with zero extra hooks (core `ChangeSet` projection only).
     pub fn without_hooks() -> Self {
-        Self { hooks: Vec::new() }
+        Self {
+            domains: DeltaProjectionDomains::ALL,
+            hooks: Vec::new(),
+        }
+    }
+
+    /// Creates a projector restricted to wallet & PLEX changes without extra hooks.
+    pub fn wallets_only() -> Self {
+        Self {
+            domains: DeltaProjectionDomains::WALLETS_ONLY,
+            hooks: Vec::new(),
+        }
+    }
+
+    /// Replaces the active domain mask on this projector.
+    pub fn with_domains(mut self, domains: DeltaProjectionDomains) -> Self {
+        self.domains = domains;
+        self
     }
 
     /// Registers an additional domain projection hook.
@@ -368,10 +418,18 @@ impl DefaultDeltaProjection {
 
 impl DeltaProjection for DefaultDeltaProjection {
     fn project(&self, input: &DeltaProjectionInput<'_>, sink: &mut dyn DeltaSink) {
-        project_item_changes(input, sink);
-        project_wallet_changes(input, &self.hooks, sink);
-        project_skill_changes(input, sink);
-        project_market_order_changes(input, sink);
+        if self.domains.items {
+            project_item_changes(input, sink);
+        }
+        if self.domains.wallets {
+            project_wallet_changes(input, &self.hooks, sink);
+        }
+        if self.domains.skills {
+            project_skill_changes(input, sink);
+        }
+        if self.domains.market_orders {
+            project_market_order_changes(input, sink);
+        }
         for hook in &self.hooks {
             hook.on_project(input, sink);
         }
@@ -473,18 +531,20 @@ impl DeltaStateCache {
                 .paused_skill_queues
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let mut newly_paused: Vec<i64> = after
-                .paused_skill_queues
-                .iter()
-                .filter(|cid| !paused_guard.contains(cid))
-                .copied()
-                .collect();
-            newly_paused.sort_unstable();
-            for char_id in newly_paused {
-                out.push(ProjectedNotification::from_typed(
-                    ProjectedTarget::Character(char_id),
-                    OnSkillQueuePausedServer { paused: None },
-                ));
+            if projector.domains.skills {
+                let mut newly_paused: Vec<i64> = after
+                    .paused_skill_queues
+                    .iter()
+                    .filter(|cid| !paused_guard.contains(cid))
+                    .copied()
+                    .collect();
+                newly_paused.sort_unstable();
+                for char_id in newly_paused {
+                    out.push(ProjectedNotification::from_typed(
+                        ProjectedTarget::Character(char_id),
+                        OnSkillQueuePausedServer { paused: None },
+                    ));
+                }
             }
             *paused_guard = (&*after.paused_skill_queues).clone();
         }

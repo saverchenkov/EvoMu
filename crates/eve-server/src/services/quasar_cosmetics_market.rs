@@ -135,19 +135,6 @@ impl CosmeticsMarketState {
         state
     }
 
-    fn emit_account_change(&self, char_id: i64, new_bal: IskCents) {
-        let sink = self
-            .macho_notify_sink
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(sink) = sink {
-            sink(crate::router::NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![
-                eve_proto::PyRep::String("cash".into()), eve_proto::PyRep::Integer(char_id), eve_proto::PyRep::Real(new_bal.to_wire_f64()),
-            ]);
-        }
-    }
-
     fn save(&self) {
         if self.db.is_write_locked_by_current_thread() {
             return;
@@ -797,7 +784,7 @@ fn component_initiate_purchase(
             }],
         );
     }
-    if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }
+    let _ = debited_bal;
     if let Some((uid, tx_id, delta, rem)) = plex_notice {
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, rem, "Paragon Hub component purchase", now);
     }
@@ -1137,7 +1124,7 @@ fn skin_initiate_create(
             .to_any()
             .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()));
     };
-    if broker_fee.0 > 0 { st.emit_account_change(cid as i64, new_bal); }
+    let _ = (broker_fee, new_bal);
     st.skinr.save();
     record_tx(st, tx_uuid, now, true, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
     queue_transaction_notice(cid, &tx_uuid, true, now);
@@ -1444,10 +1431,7 @@ fn skin_initiate_purchase(
         }
         true
     });
-    if let Some((b_bal, s_id, s_bal_opt)) = isk_balances {
-        st.emit_account_change(cid as i64, b_bal);
-        if let Some(s_bal) = s_bal_opt { if s_id != cid as i64 { st.emit_account_change(s_id, s_bal); } }
-    }
+    let _ = isk_balances;
     for (uid, tx_id, delta, bal, desc) in plex_notices {
         super::quasar_payment_store_types::queue_plex_balance_changed_notice(uid, tx_id, delta, bal, desc, now);
     }

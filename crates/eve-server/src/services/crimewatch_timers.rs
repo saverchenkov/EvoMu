@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::router::notify_registry::{
-    OnAccountChange, OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
+    OnCrimewatchEngagementCreated, OnCrimewatchEngagementUpdated,
     OnDisapprovalTimerUpdate, OnDuelChallenge, OnKillRightActivated, OnKillRightForYouSold,
     OnKillRightSold, OnKillRightUsed, OnNpcTimerUpdate, OnSafetyLevelChanged,
     OnSecurityStatusUpdate,
@@ -928,26 +928,10 @@ pub async fn handle_crimewatch(
                 Ok((fee.to_wire_f64(), kr.owner_id, kr.target_id, new_caller_bal.to_wire_f64(), new_owner_bal.to_wire_f64()))
             });
             match res {
-                Ok((fee_paid, owner_id, target_id, caller_bal, owner_bal)) => {
+                Ok((fee_paid, owner_id, target_id, _caller_bal, _owner_bal)) => {
                     let now_unix = ctx.now_unix();
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
-                    ctx.emit_typed(
-                        NotificationTarget::Character(char_id),
-                        OnAccountChange {
-                            account_key: "cash".into(),
-                            owner_id: char_id,
-                            balance: caller_bal,
-                        },
-                    );
-                    ctx.emit_typed(
-                        NotificationTarget::Character(owner_id),
-                        OnAccountChange {
-                            account_key: "cash".into(),
-                            owner_id,
-                            balance: owner_bal,
-                        },
-                    );
                     emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
                     ctx.emit_typed(
                         NotificationTarget::Character(owner_id),

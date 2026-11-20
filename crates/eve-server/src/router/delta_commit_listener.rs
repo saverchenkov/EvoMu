@@ -1,0 +1,647 @@
+//! Commit-time wallet & PLEX Vault delta projection bridge (`#931` Track 1).
+//!
+//! Wires [`DeltaStateCache`] + [`DefaultDeltaProjection::wallets_only`] into
+//! `WorldRepository::register_post_commit_listener` so committed `ChangeSet` deltas on
+//! personal ISK (`"cash"`), corp divisions `1..=7` (`"cash"` / `"cash2".."cash7"`), and PLEX
+//! (`"plex"`) automatically materialize `OnAccountChange` notifications without hand-written emitters.
+
+#![forbid(unsafe_code)]
+
+use crate::router::cache_notifications::{
+    assemble_pending_notification, enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
+    insert_before_staged_seq_or_stage, is_active_dispatch_char,
+    is_staging_dispatch_notifications, pending_notifications_ptr, push_pending_notification_capped,
+    try_stage_dispatch_notification, NotificationTarget, PendingMachoNotification,
+    MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+};
+use crate::router::context::ServerContext;
+use crate::router::delta_projection::{
+    materialize_pending_notifications, resolve_all_notifications, DefaultDeltaProjection,
+    DeltaProjectionHook, DeltaSink, DeltaStateCache, OnlineCharacterLookup, PlexDelta,
+    ProjectedNotification, ProjectedTarget, ResolvedNotification,
+};
+use crate::router::notify_registry::OnAccountChange;
+use eve_db::{
+    ChangeSet, Effects, TxNotificationEffect, TxNotificationTarget, WorldRepository,
+    WorldStateSnapshot,
+};
+use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+type BridgeKey = (u64, usize);
+
+#[derive(Debug, Clone)]
+struct ProjectedAccountRecord {
+    char_id: i64,
+    account_key: String,
+    owner_id: i64,
+    balance: f64,
+    seq_id: u64,
+    was_staged: bool,
+}
+
+#[derive(Debug, Default)]
+struct EpochLedger {
+    epoch: u64,
+    records: Vec<ProjectedAccountRecord>,
+}
+
+struct DeltaCommitBridgeState {
+    recent_epoch: Mutex<EpochLedger>,
+}
+
+static COMMIT_BRIDGES: OnceLock<Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>>> =
+    OnceLock::new();
+
+fn commit_bridges() -> &'static Mutex<HashMap<BridgeKey, Weak<DeltaCommitBridgeState>>> {
+    COMMIT_BRIDGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct PlexAccountChangeHook {
+    resolve_user_char: Box<dyn Fn(u64) -> Option<i64> + Send + Sync>,
+}
+
+impl DeltaProjectionHook for PlexAccountChangeHook {
+    fn on_plex_delta(&self, delta: PlexDelta, sink: &mut dyn DeltaSink) {
+        let Some(cid) = delta.char_id.or_else(|| (self.resolve_user_char)(delta.user_id)) else {
+            return;
+        };
+        sink.push(ProjectedNotification::from_typed(
+            ProjectedTarget::Character(cid),
+            OnAccountChange {
+                account_key: "plex".into(),
+                owner_id: cid,
+                balance: delta.new_plex as f64,
+            },
+        ));
+    }
+}
+
+struct AllCharactersOnline;
+
+impl OnlineCharacterLookup for AllCharactersOnline {
+    fn is_character_online(&self, _char_id: i64, _user_id: u64) -> bool {
+        true
+    }
+}
+
+fn extract_account_key_only(payload_args: &[PyRep]) -> Option<String> {
+    match payload_args {
+        [PyRep::String(key) | PyRep::Token(key), ..] => Some(key.clone()),
+        _ => None,
+    }
+}
+
+fn extract_account_change_fields(payload_args: &[PyRep]) -> Option<(String, i64, f64)> {
+    match payload_args {
+        [PyRep::String(key) | PyRep::Token(key), PyRep::Integer(owner_id), bal_rep, ..] => {
+            let bal = match bal_rep {
+                PyRep::Real(v) => *v,
+                PyRep::Integer(v) => *v as f64,
+                _ => return None,
+            };
+            Some((key.clone(), *owner_id, bal))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_tx_effect_recipients(
+    db: &WorldRepository,
+    snap: &WorldStateSnapshot,
+    effect: &TxNotificationEffect,
+) -> Vec<(i64, Option<u64>)> {
+    let mut candidates: Vec<(i64, u64)> = Vec::new();
+    match effect.target {
+        TxNotificationTarget::Character(cid) => {
+            if let Some(c) = snap.characters.get(&cid) {
+                candidates.push((cid, c.user_id));
+            }
+        }
+        TxNotificationTarget::Corporation(corp_id) => {
+            for c in snap.characters.values() {
+                if c.corporation_id == corp_id {
+                    candidates.push((c.character_id, c.user_id));
+                }
+            }
+        }
+        TxNotificationTarget::Alliance(ally_id) => {
+            for c in snap.characters.values() {
+                if c.alliance_id == Some(ally_id) {
+                    candidates.push((c.character_id, c.user_id));
+                }
+            }
+        }
+        TxNotificationTarget::SolarSystem(sys_id) => {
+            for c in snap.characters.values() {
+                if c.solar_system_id == sys_id {
+                    candidates.push((c.character_id, c.user_id));
+                }
+            }
+        }
+    }
+    let mut recipients: Vec<(i64, Option<u64>)> = candidates
+        .into_iter()
+        .filter(|&(cid, uid)| {
+            db.get_online_session(uid)
+                .is_some_and(|os| os.character_id == Some(cid))
+        })
+        .map(|(cid, uid)| (cid, Some(uid)))
+        .collect();
+    recipients.sort_by_key(|(cid, _)| *cid);
+    recipients.dedup_by_key(|(cid, _)| *cid);
+    recipients
+}
+
+fn dispatch_tx_effects(
+    db: &WorldRepository,
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    snap: &WorldStateSnapshot,
+    effects: &Effects,
+    now_ft: i64,
+    stage_in_dispatch: bool,
+) -> (HashSet<(i64, Option<String>)>, Vec<ProjectedAccountRecord>) {
+    let mut emitted_account_effects = HashSet::new();
+    let mut records = Vec::new();
+    let mut built = Vec::new();
+
+    for effect in &effects.notifications {
+        let recipients = resolve_tx_effect_recipients(db, snap, effect);
+        if recipients.is_empty() {
+            continue;
+        }
+        let key_opt = if effect.event == "OnAccountChange" {
+            Some(extract_account_key_only(&effect.args))
+        } else {
+            None
+        };
+        let fields_opt = if effect.event == "OnAccountChange" {
+            extract_account_change_fields(&effect.args)
+        } else {
+            None
+        };
+        for (cid, uid) in recipients {
+            let notif = assemble_pending_notification(
+                cid,
+                uid,
+                &effect.event,
+                &effect.id_type,
+                effect.args.clone(),
+                now_ft,
+            );
+            if let Some(ref key) = key_opt {
+                emitted_account_effects.insert((cid, key.clone()));
+            }
+            if let Some((ref account_key, owner_id, balance)) = fields_opt {
+                records.push(ProjectedAccountRecord {
+                    char_id: cid,
+                    account_key: account_key.clone(),
+                    owner_id,
+                    balance,
+                    seq_id: notif.seq_id,
+                    was_staged: stage_in_dispatch,
+                });
+            }
+            built.push(notif);
+        }
+    }
+
+    if !built.is_empty() {
+        enqueue_or_stage_pending_batch(pend, notify_tx, &built);
+    }
+    (emitted_account_effects, records)
+}
+
+fn dedup_resolved_account_changes(resolved: Vec<ResolvedNotification>) -> Vec<ResolvedNotification> {
+    let mut out: Vec<Option<ResolvedNotification>> = Vec::with_capacity(resolved.len());
+    let mut seen: HashMap<(i64, String, i64), usize> = HashMap::new();
+    for notif in resolved {
+        if let Some((account_key, owner_id, _)) = extract_account_change_fields(&notif.args) {
+            let dedup_key = (notif.recipient_char_id, account_key, owner_id);
+            if let Some(&prev_idx) = seen.get(&dedup_key) {
+                out[prev_idx] = None;
+            }
+            seen.insert(dedup_key, out.len());
+        }
+        out.push(Some(notif));
+    }
+    out.into_iter().flatten().collect()
+}
+
+fn project_wallet_notifs_for_commit(
+    cache: &DeltaStateCache,
+    projector: &DefaultDeltaProjection,
+    snap: &WorldStateSnapshot,
+    changes: &ChangeSet,
+    sde: &SdeRegistry,
+    now_unix: u64,
+    online: &impl OnlineCharacterLookup,
+) -> Vec<ResolvedNotification> {
+    let projected = cache.project_with_cache(projector, None, snap, changes, sde, now_unix, &[]);
+    let resolved = resolve_all_notifications(projected, snap, None, online);
+    dedup_resolved_account_changes(resolved)
+}
+
+/// Registers the authoritative DB post-commit listener on `ctx.db`, dispatching explicit
+/// `TxNotificationEffect`s and projecting committed wallet / corp-division / PLEX Vault deltas
+/// from each `ChangeSet` (`#931` Track 1).
+pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
+    let pend_ptr = pending_notifications_ptr(&*ctx.pending_notifications);
+    let bridge_key = (ctx.db.instance_id(), pend_ptr);
+    let bridge = {
+        let mut map = commit_bridges().lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, w| w.strong_count() > 0);
+        if map.get(&bridge_key).and_then(Weak::upgrade).is_some() {
+            return;
+        }
+        let state = Arc::new(DeltaCommitBridgeState {
+            recent_epoch: Mutex::new(EpochLedger::default()),
+        });
+        map.insert(bridge_key, Arc::downgrade(&state));
+        state
+    };
+
+    let cache = Arc::new(DeltaStateCache::new());
+    ctx.db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
+
+    let db_hook_w = Arc::downgrade(&ctx.db);
+    let mut projector = DefaultDeltaProjection::wallets_only();
+    projector.add_hook(Box::new(PlexAccountChangeHook {
+        resolve_user_char: Box::new(move |user_id| {
+            db_hook_w
+                .upgrade()
+                .and_then(|db| db.get_online_session(user_id))
+                .and_then(|os| os.character_id)
+        }),
+    }));
+
+    let db_w = Arc::downgrade(&ctx.db);
+    let pend_w = Arc::downgrade(&ctx.pending_notifications);
+    let notify_tx = ctx.notify_tx.clone();
+    let sde = Arc::clone(&ctx.sde);
+
+    ctx.db.register_post_commit_listener(Arc::new(
+        move |snap, changes, effects| {
+            let (Some(db), Some(pend)) = (db_w.upgrade(), pend_w.upgrade()) else {
+                return;
+            };
+            let now_ft = db.clock().now_blueos_filetime_ticks();
+            let now_unix = db.now_unix_secs();
+            let stage_in_dispatch =
+                is_staging_dispatch_notifications(Some(&*pend), Some(&notify_tx));
+
+            let (emitted_account_effects, mut committed_records) = if effects.notifications.is_empty()
+            {
+                (HashSet::new(), Vec::new())
+            } else {
+                dispatch_tx_effects(
+                    &db,
+                    &*pend,
+                    &notify_tx,
+                    snap,
+                    effects,
+                    now_ft,
+                    stage_in_dispatch,
+                )
+            };
+
+            if !changes.is_empty() {
+                let resolved = project_wallet_notifs_for_commit(
+                    &cache,
+                    &projector,
+                    snap,
+                    changes,
+                    &sde,
+                    now_unix,
+                    &*db,
+                );
+                let filtered: Vec<ResolvedNotification> = resolved
+                    .into_iter()
+                    .filter(|r| {
+                        if emitted_account_effects.contains(&(r.recipient_char_id, None)) {
+                            return false;
+                        }
+                        if let Some(key) = extract_account_key_only(&r.args) {
+                            if emitted_account_effects.contains(&(r.recipient_char_id, Some(key))) {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .collect();
+                let materialized = materialize_pending_notifications(filtered, now_ft);
+                if !materialized.is_empty() {
+                    enqueue_or_stage_pending_batch(&*pend, &notify_tx, &materialized);
+                    for notif in materialized {
+                        if let Some((account_key, owner_id, balance)) =
+                            extract_account_change_fields(&notif.args)
+                        {
+                            committed_records.push(ProjectedAccountRecord {
+                                char_id: notif.recipient_char_id,
+                                account_key,
+                                owner_id,
+                                balance,
+                                seq_id: notif.seq_id,
+                                was_staged: stage_in_dispatch,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let commit_epoch = db.state_epoch();
+            let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+            if ledger.epoch != commit_epoch {
+                ledger.epoch = commit_epoch;
+                ledger.records.clear();
+            }
+            ledger.records.extend(committed_records);
+        },
+    ));
+}
+
+/// Registers a post-commit listener projecting committed wallet / corp-division / PLEX Vault
+/// deltas into a `PublicGatewayRouter` Macho notify sink callback (used by router unit tests
+/// that instantiate `WorldRepository` without a full `ServerContext`).
+pub fn install_wallet_delta_sink_listener<F>(
+    db: &Arc<WorldRepository>,
+    sde: &Arc<SdeRegistry>,
+    online_only: bool,
+    sink: F,
+) -> u64
+where
+    F: Fn(NotificationTarget, &str, &str, Vec<PyRep>) + Send + Sync + 'static,
+{
+    let cache = Arc::new(DeltaStateCache::new());
+    db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
+
+    let user_char_fallback: Arc<Mutex<BTreeMap<u64, i64>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let db_hook_w = Arc::downgrade(db);
+    let fallback_map = Arc::clone(&user_char_fallback);
+    let mut projector = DefaultDeltaProjection::wallets_only();
+    projector.add_hook(Box::new(PlexAccountChangeHook {
+        resolve_user_char: Box::new(move |user_id| {
+            db_hook_w
+                .upgrade()
+                .and_then(|repo| repo.get_online_session(user_id))
+                .and_then(|os| os.character_id)
+                .or_else(|| {
+                    (!online_only)
+                        .then(|| {
+                            fallback_map
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get(&user_id)
+                                .copied()
+                        })
+                        .flatten()
+                })
+        }),
+    }));
+
+    let db_w = Arc::downgrade(db);
+    let sde = Arc::clone(sde);
+    let fallback_writer = Arc::clone(&user_char_fallback);
+    db.register_post_commit_listener(Arc::new(move |snap, changes, _effects| {
+        if changes.is_empty() {
+            return;
+        }
+        let Some(db) = db_w.upgrade() else {
+            return;
+        };
+        if !online_only {
+            let mut guard = fallback_writer.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clear();
+            for ch in snap.characters.values() {
+                guard
+                    .entry(ch.user_id)
+                    .and_modify(|cid| {
+                        if ch.character_id < *cid {
+                            *cid = ch.character_id;
+                        }
+                    })
+                    .or_insert(ch.character_id);
+            }
+        }
+        let now_unix = db.now_unix_secs();
+        let resolved = if online_only {
+            project_wallet_notifs_for_commit(&cache, &projector, snap, changes, &sde, now_unix, &*db)
+        } else {
+            project_wallet_notifs_for_commit(
+                &cache,
+                &projector,
+                snap,
+                changes,
+                &sde,
+                now_unix,
+                &AllCharactersOnline,
+            )
+        };
+        for notif in resolved {
+            sink(
+                NotificationTarget::Character(notif.recipient_char_id),
+                notif.event,
+                notif.id_type,
+                notif.args,
+            );
+        }
+    }))
+}
+
+fn insert_before_pos_with_cap(
+    queue: &mut Vec<PendingMachoNotification>,
+    mut pos: usize,
+    notif: PendingMachoNotification,
+) {
+    let cap = if is_active_dispatch_char(notif.recipient_char_id) {
+        MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR
+    } else {
+        MAX_PENDING_NOTIFICATIONS_PER_CHAR
+    };
+    while queue.len() >= cap && queue.len() > 1 {
+        if pos > 0 {
+            queue.remove(0);
+            pos -= 1;
+        } else {
+            queue.remove(1);
+        }
+    }
+    queue.insert(pos, notif);
+}
+
+/// Coordinates remaining unlocked manual `OnAccountChange` calls with same-epoch commit-projected
+/// `OnAccountChange` notifications: deduplicates identical committed balances and preserves
+/// pre-settlement intermediate balances ahead of the committed final balance.
+pub(crate) fn try_handle_legacy_account_change_emit(
+    ctx: &ServerContext,
+    recipients: &[(i64, Option<u64>)],
+    id_type: &str,
+    payload_args: &[PyRep],
+    now_ft: i64,
+) -> Option<Vec<PendingMachoNotification>> {
+    if recipients.is_empty() {
+        return None;
+    }
+    let (account_key, owner_id, manual_bal) = extract_account_change_fields(payload_args)?;
+    let bridge_key = (
+        ctx.db.instance_id(),
+        pending_notifications_ptr(&*ctx.pending_notifications),
+    );
+    let bridge = commit_bridges()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&bridge_key)
+        .and_then(Weak::upgrade)?;
+    let current_epoch = ctx.db.state_epoch();
+    let matching: Vec<ProjectedAccountRecord> = {
+        let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
+        if ledger.epoch != current_epoch {
+            return None;
+        }
+        ledger
+            .records
+            .iter()
+            .filter(|r| r.account_key == account_key && r.owner_id == owner_id)
+            .cloned()
+            .collect()
+    };
+    if matching.is_empty() {
+        return None;
+    }
+
+    let stage_in_dispatch = is_staging_dispatch_notifications(
+        Some(&*ctx.pending_notifications),
+        Some(&ctx.notify_tx),
+    );
+    let mut queues = (!stage_in_dispatch).then(|| {
+        ctx.pending_notifications
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    });
+    let mut emitted = Vec::with_capacity(recipients.len());
+
+    for &(cid, uid) in recipients {
+        let make_notif = || {
+            assemble_pending_notification(
+                cid,
+                uid,
+                "OnAccountChange",
+                id_type,
+                payload_args.to_vec(),
+                now_ft,
+            )
+        };
+        let rec_opt = matching.iter().rfind(|r| r.char_id == cid);
+        match (rec_opt, queues.as_mut()) {
+            (Some(rec), Some(queues)) => {
+                let queue = queues.entry(cid).or_default();
+                if let Some(pos) = queue.iter().position(|n| n.seq_id == rec.seq_id) {
+                    if (rec.balance - manual_bal).abs() < 1e-6 {
+                        emitted.push(queue[pos].clone());
+                    } else {
+                        let notif = make_notif();
+                        insert_before_pos_with_cap(queue, pos, notif.clone());
+                        let _ = ctx.notify_tx.send((cid, notif.clone()));
+                        emitted.push(notif);
+                    }
+                    continue;
+                }
+                let notif = make_notif();
+                push_pending_notification_capped(queue, notif.clone());
+                let _ = ctx.notify_tx.send((cid, notif.clone()));
+                emitted.push(notif);
+            }
+            (None, Some(queues)) => {
+                let notif = make_notif();
+                push_pending_notification_capped(queues.entry(cid).or_default(), notif.clone());
+                let _ = ctx.notify_tx.send((cid, notif.clone()));
+                emitted.push(notif);
+            }
+            (Some(rec), None) if rec.was_staged && (rec.balance - manual_bal).abs() < 1e-6 => {
+                let existing =
+                    find_staged_notification_by_seq(&*ctx.pending_notifications, rec.seq_id)
+                        .unwrap_or_else(make_notif);
+                emitted.push(existing);
+            }
+            (Some(rec), None) if rec.was_staged => {
+                let notif = make_notif();
+                insert_before_staged_seq_or_stage(
+                    &*ctx.pending_notifications,
+                    &ctx.notify_tx,
+                    rec.seq_id,
+                    &notif,
+                );
+                emitted.push(notif);
+            }
+            (_, None) => {
+                let notif = make_notif();
+                let _ = try_stage_dispatch_notification(
+                    Some(&*ctx.pending_notifications),
+                    Some(&ctx.notify_tx),
+                    &notif,
+                    None,
+                );
+                emitted.push(notif);
+            }
+        }
+    }
+
+    Some(emitted)
+}
+
+impl ServerContext {
+    /// Emits an `OnAccountChange` notification (`accountKey`, `ownerID`, `balance`).
+    pub fn notify_account_change(
+        &self,
+        char_id: i64,
+        account_key: &str,
+        owner_id: i64,
+        new_balance_isk: f64,
+    ) -> Vec<PendingMachoNotification> {
+        self.emit_typed_with_id_type(
+            NotificationTarget::Character(char_id),
+            "charid",
+            OnAccountChange {
+                account_key: account_key.into(),
+                owner_id,
+                balance: new_balance_isk,
+            },
+        )
+    }
+
+    /// Emits `OnAccountChange` for personal (`cash`) or corporate division (`cash` / `cash2..cash7`) wallets.
+    pub fn notify_wallet_balance(
+        &self,
+        is_corp: bool,
+        owner_id: i64,
+        div_id: u8,
+        balance: eve_db::IskCents,
+    ) -> Vec<PendingMachoNotification> {
+        let (target, id_type, key) = if is_corp {
+            let key = if div_id <= 1 {
+                "cash".to_string()
+            } else {
+                format!("cash{div_id}")
+            };
+            (NotificationTarget::Corporation(owner_id), "corpid", key)
+        } else {
+            (
+                NotificationTarget::Character(owner_id),
+                "charid",
+                "cash".to_string(),
+            )
+        };
+        self.emit_typed_with_id_type(
+            target,
+            id_type,
+            OnAccountChange {
+                account_key: key,
+                owner_id,
+                balance: balance.to_wire_f64(),
+            },
+        )
+    }
+}

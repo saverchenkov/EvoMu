@@ -249,7 +249,7 @@ tokio::task_local! {
 }
 
 #[inline]
-fn pending_notifications_ptr(
+pub(crate) fn pending_notifications_ptr(
     pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
 ) -> usize {
     pend as *const dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>
@@ -337,6 +337,96 @@ pub(crate) fn clear_staged_notifications_for_char(
                 .retain(|item| item.notif.recipient_char_id != char_id);
         }
     });
+}
+
+pub(crate) fn find_staged_notification_by_seq(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    seq_id: u64,
+) -> Option<PendingMachoNotification> {
+    let pend_ptr = pending_notifications_ptr(pend);
+    DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let stage = cell.borrow();
+            (stage.target_pend_ptr == pend_ptr)
+                .then(|| {
+                    stage
+                        .staged
+                        .iter()
+                        .find(|item| item.notif.seq_id == seq_id)
+                        .map(|item| item.notif.clone())
+                })
+                .flatten()
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn insert_before_staged_seq_or_stage(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    seq_id: u64,
+    notif: &PendingMachoNotification,
+) {
+    let pend_ptr = pending_notifications_ptr(pend);
+    let inserted = DISPATCH_STAGED_NOTIFICATIONS
+        .try_with(|cell| {
+            let mut stage = cell.borrow_mut();
+            if stage.target_pend_ptr != pend_ptr {
+                return false;
+            }
+            if let Some(pos) = stage.staged.iter().position(|i| i.notif.seq_id == seq_id) {
+                stage.staged.insert(
+                    pos,
+                    StagedDispatchNotification {
+                        write_queue: true,
+                        send_tx: true,
+                        notif: notif.clone(),
+                        explicit_queue_cap: None,
+                    },
+                );
+                return true;
+            }
+            false
+        })
+        .unwrap_or(false);
+    if !inserted {
+        let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), notif, None);
+    }
+}
+
+pub(crate) fn assemble_pending_notification(
+    cid: i64,
+    uid: Option<u64>,
+    event: &str,
+    id_type: &str,
+    args: Vec<PyRep>,
+    now_ft: i64,
+) -> PendingMachoNotification {
+    let (packet, marshaled_packet) =
+        ServerContext::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
+    PendingMachoNotification::new(cid, event, id_type, args, packet, marshaled_packet, now_ft)
+}
+
+pub(crate) fn enqueue_or_stage_pending_batch(
+    pend: &dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    notifs: &[PendingMachoNotification],
+) {
+    if notifs.is_empty() {
+        return;
+    }
+    if is_staging_dispatch_notifications(Some(pend), Some(notify_tx)) {
+        for notif in notifs {
+            let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), notif, None);
+        }
+        return;
+    }
+    let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
+    for notif in notifs {
+        let q = queues.entry(notif.recipient_char_id).or_default();
+        push_pending_notification_capped(q, notif.clone());
+        let _ = notify_tx.send((notif.recipient_char_id, notif.clone()));
+    }
 }
 
 fn has_staged_notification_for_char_and_id(
@@ -1003,11 +1093,7 @@ impl ServerContext {
         ])]);
         let pkt = MachoPacket {
             packet_type: MachoPacketType::Notification,
-            source: MachoAddress::Node {
-                node_id: 888_444,
-                service: None,
-                call_id: 0,
-            },
+            source: MachoAddress::Node { node_id: 888_444, service: None, call_id: 0 },
             destination: MachoAddress::Broadcast {
                 broadcast_id: event.to_string(),
                 id_type: id_type.to_string(),
@@ -1031,16 +1117,8 @@ impl ServerContext {
     ) -> (MachoPacket, Vec<u8>) {
         let pkt = MachoPacket {
             packet_type: MachoPacketType::CallRsp,
-            source: MachoAddress::Node {
-                node_id: 888_444,
-                service: source_service.map(str::to_string),
-                call_id,
-            },
-            destination: MachoAddress::Client {
-                client_id: dest_client_id,
-                call_id,
-                service: None,
-            },
+            source: MachoAddress::Node { node_id: 888_444, service: source_service.map(str::to_string), call_id },
+            destination: MachoAddress::Client { client_id: dest_client_id, call_id, service: None },
             user_id,
             payload: PyRep::Tuple(vec![PyRep::SubStream(Box::new(value))]),
             named_payload: HashMap::new(),
@@ -1060,16 +1138,8 @@ impl ServerContext {
     ) -> (MachoPacket, Vec<u8>) {
         let pkt = MachoPacket {
             packet_type: MachoPacketType::ErrorResponse,
-            source: MachoAddress::Node {
-                node_id: 888_444,
-                service: source_service.map(str::to_string),
-                call_id,
-            },
-            destination: MachoAddress::Client {
-                client_id: dest_client_id,
-                call_id,
-                service: None,
-            },
+            source: MachoAddress::Node { node_id: 888_444, service: source_service.map(str::to_string), call_id },
+            destination: MachoAddress::Client { client_id: dest_client_id, call_id, service: None },
             user_id,
             payload: PyRep::Tuple(vec![
                 PyRep::Integer(MachoPacketType::CallReq as i64),
@@ -1095,16 +1165,14 @@ impl ServerContext {
     ) -> Vec<PendingMachoNotification> {
         let recipients = self.resolve_notification_recipients(&target);
         let now_ft = self.now_blueos_filetime_ticks();
+        if event == "OnAccountChange" {
+            if let Some(emitted) = super::delta_commit_listener::try_handle_legacy_account_change_emit(
+                self, &recipients, id_type, &args, now_ft,
+            ) {
+                return emitted;
+            }
+        }
         let mut emitted = Vec::with_capacity(recipients.len());
-        let stage_in_dispatch = is_staging_dispatch_notifications(
-            Some(&*self.pending_notifications),
-            Some(&self.notify_tx),
-        );
-        let mut queues = (!stage_in_dispatch).then(|| {
-            self.pending_notifications
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-        });
         for (cid, uid) in recipients {
             let mut recipient_args = args.clone();
             if event == "OnModuleAttributeChanges" {
@@ -1130,30 +1198,27 @@ impl ServerContext {
                     Some(&self.sde),
                 );
             }
-            let (packet, marshaled_packet) =
-                Self::build_macho_notification_packet(cid, uid, event, id_type, recipient_args.clone());
-            let notif = PendingMachoNotification::new(
+            emitted.push(assemble_pending_notification(
                 cid,
+                uid,
                 event,
                 id_type,
                 recipient_args,
-                packet,
-                marshaled_packet,
                 now_ft,
-            );
-            if let Some(queues) = queues.as_mut() {
-                let q = queues.entry(cid).or_default();
-                push_pending_notification_capped(q, notif.clone());
-                let _ = self.notify_tx.send((cid, notif.clone()));
+            ));
+        }
+        if !emitted.is_empty() {
+            if is_staging_dispatch_notifications(Some(&*self.pending_notifications), Some(&self.notify_tx)) {
+                for n in &emitted {
+                    let _ = try_stage_dispatch_notification(Some(&*self.pending_notifications), Some(&self.notify_tx), n, None);
+                }
             } else {
-                let _ = try_stage_dispatch_notification(
-                    Some(&*self.pending_notifications),
-                    Some(&self.notify_tx),
-                    &notif,
-                    None,
-                );
+                let mut queues = self.pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+                for n in &emitted {
+                    push_pending_notification_capped(queues.entry(n.recipient_char_id).or_default(), n.clone());
+                    let _ = self.notify_tx.send((n.recipient_char_id, n.clone()));
+                }
             }
-            emitted.push(notif);
         }
         emitted
     }
@@ -1224,26 +1289,6 @@ impl ServerContext {
         )
     }
 
-    /// Emits an `OnAccountChange` notification (`accountKey`, `ownerID`, `balance`).
-    pub fn notify_account_change(
-        &self,
-        char_id: i64,
-        account_key: &str,
-        owner_id: i64,
-        new_balance_isk: f64,
-    ) -> Vec<PendingMachoNotification> {
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnAccountChange",
-            "charid",
-            vec![
-                PyRep::String(account_key.into()),
-                PyRep::Integer(owner_id),
-                PyRep::Real(new_balance_isk),
-            ],
-        )
-    }
-
     /// Emits an `OnItemChange` notification (`itemRow` packed `DBRow`, `changeDict`).
     pub fn notify_item_change(
         &self,
@@ -1257,12 +1302,7 @@ impl ServerContext {
                 .map(|(col_ix, old_val)| (PyRep::Integer(col_ix as i64), old_val))
                 .collect(),
         );
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnItemChange",
-            "charid",
-            vec![item_row, change_dict],
-        )
+        self.notify(NotificationTarget::Character(char_id), "OnItemChange", "charid", vec![item_row, change_dict])
     }
 
     /// Emits an `OnSkillTrained` notification (`skillItemID`, `skillTypeID`, `level`).
@@ -1277,32 +1317,18 @@ impl ServerContext {
             NotificationTarget::Character(char_id),
             "OnSkillTrained",
             "charid",
-            vec![
-                PyRep::Integer(skill_item_id),
-                PyRep::Integer(skill_type_id as i64),
-                PyRep::Integer(level as i64),
-            ],
+            vec![PyRep::Integer(skill_item_id), PyRep::Integer(skill_type_id as i64), PyRep::Integer(level as i64)],
         )
     }
 
     /// Emits an `OnSkillQueuePaused` notification to character (`feat:skills.queue-pause`).
     pub fn notify_skill_queue_paused(&self, char_id: i64) -> Vec<PendingMachoNotification> {
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnSkillQueuePaused",
-            "charid",
-            vec![],
-        )
+        self.notify(NotificationTarget::Character(char_id), "OnSkillQueuePaused", "charid", vec![])
     }
 
     /// Emits an `OnSkillQueueChanged` notification to character.
     pub fn notify_skill_queue_changed(&self, char_id: i64) -> Vec<PendingMachoNotification> {
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnSkillQueueChanged",
-            "charid",
-            vec![],
-        )
+        self.notify(NotificationTarget::Character(char_id), "OnSkillQueueChanged", "charid", vec![])
     }
 
     /// Creates a persistent notification in `self.notification_records` and pushes an `OnNotificationReceived`
@@ -1328,21 +1354,10 @@ impl ServerContext {
             .with_mut_snapshot(|snap| snap.allocate_notification_id_above(max_in_mem));
         let created = self.now_blueos_filetime_ticks();
         let rec = NotificationRecord {
-            notification_id,
-            type_id,
-            group_id,
-            sender_id,
-            receiver_id,
-            processed: false,
-            created,
-            data: data.to_string(),
-            deleted: false,
-            interacted: false,
+            notification_id, type_id, group_id, sender_id, receiver_id,
+            processed: false, created, data: data.to_string(), deleted: false, interacted: false,
         };
-        self.notification_records
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(rec.clone());
+        self.notification_records.write().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
         self.persist_notification_record(&rec);
         let _ = self.notify(
             NotificationTarget::Character(receiver_id),
@@ -1463,6 +1478,7 @@ impl ServerContext {
     }
 
     /// Emits an `OnDamageStateChange` notification (`itemID`, `(shield, armor, structure)`) (`Z-2`).
+    /// Emits an `OnDamageStateChange` notification for `item_id` (`R33-2`).
     pub fn notify_damage_state_change(
         &self,
         target: NotificationTarget,
@@ -1474,12 +1490,7 @@ impl ServerContext {
         let dmg = crate::services::notify_emitters_space_dungeons::build_damage_state_tuple(
             self, item_id, shield, armor, structure,
         );
-        self.notify(
-            target,
-            "OnDamageStateChange",
-            "itemid",
-            vec![PyRep::Integer(item_id), dmg],
-        )
+        self.notify(target, "OnDamageStateChange", "itemid", vec![PyRep::Integer(item_id), dmg])
     }
 
     /// Emits an `OnGodmaShipEffect` notification for active module cycle events (`Z-2`).
@@ -1504,30 +1515,19 @@ impl ServerContext {
         };
         let now_ticks = self.now_system_sim_filetime_ticks(sys_opt);
         let flag = if active { 1 } else { 0 };
+        let env = PyRep::Tuple(vec![
+            PyRep::Integer(item_id), PyRep::None, PyRep::Integer(item_id),
+            PyRep::None, PyRep::None, PyRep::List(Vec::new()), PyRep::Integer(effect_id as i64),
+        ]);
         self.notify(
             target,
             "OnGodmaShipEffect",
             "charid",
             vec![
-                PyRep::Integer(item_id),
-                PyRep::Integer(effect_id as i64),
-                PyRep::Integer(now_ticks),
-                PyRep::Integer(flag),
-                PyRep::Integer(flag),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(item_id),
-                    PyRep::None,
-                    PyRep::Integer(item_id),
-                    PyRep::None,
-                    PyRep::None,
-                    PyRep::List(Vec::new()),
-                    PyRep::Integer(effect_id as i64),
-                ]),
-                PyRep::Integer(now_ticks),
-                PyRep::Real((duration_ms.max(0)) as f64),
-                PyRep::Integer(repeat as i64),
-                PyRep::Integer(0),
-                PyRep::None,
+                PyRep::Integer(item_id), PyRep::Integer(effect_id as i64), PyRep::Integer(now_ticks),
+                PyRep::Integer(flag), PyRep::Integer(flag), env, PyRep::Integer(now_ticks),
+                PyRep::Real((duration_ms.max(0)) as f64), PyRep::Integer(repeat as i64),
+                PyRep::Integer(0), PyRep::None,
             ],
         )
     }
@@ -1561,20 +1561,11 @@ impl ServerContext {
         _sender_id: i64,
         _text: &str,
     ) -> Vec<PendingMachoNotification> {
-        self.notify(
-            target,
-            "OnClientEvent_ChatMessageSent",
-            "channelid",
-            Vec::new(),
-        )
+        self.notify(target, "OnClientEvent_ChatMessageSent", "channelid", Vec::new())
     }
 
     /// Emits an `OnWarpToAsteroidBelt` notification (`charID`, `beltID`) (`Z-2`).
-    pub fn notify_warp_to_asteroid_belt(
-        &self,
-        char_id: i64,
-        belt_id: i64,
-    ) -> Vec<PendingMachoNotification> {
+    pub fn notify_warp_to_asteroid_belt(&self, char_id: i64, belt_id: i64) -> Vec<PendingMachoNotification> {
         self.notify(
             NotificationTarget::Character(char_id),
             "OnWarpToAsteroidBelt",
@@ -1584,17 +1575,8 @@ impl ServerContext {
     }
 
     /// Emits an `OnAsteroidTerminated` notification (`asteroidID`) to the solar system (`Z-2`).
-    pub fn notify_asteroid_terminated(
-        &self,
-        sys_id: u32,
-        asteroid_id: i64,
-    ) -> Vec<PendingMachoNotification> {
-        self.notify(
-            NotificationTarget::SolarSystem(sys_id),
-            "OnAsteroidTerminated",
-            "solarsystemid",
-            vec![PyRep::Integer(asteroid_id)],
-        )
+    pub fn notify_asteroid_terminated(&self, sys_id: u32, asteroid_id: i64) -> Vec<PendingMachoNotification> {
+        self.notify(NotificationTarget::SolarSystem(sys_id), "OnAsteroidTerminated", "solarsystemid", vec![PyRep::Integer(asteroid_id)])
     }
 
     /// Emits an `OnMiningLedgerGraphSettingChanged` notification (`settingKey`, `settingValue`) (`Z-2`).
@@ -1772,16 +1754,8 @@ impl ServerContext {
         effect_name: Option<&str>,
         target_id: Option<i64>,
     ) -> Vec<PendingMachoNotification> {
-        self.notify_module_effect_started_with_cycle_and_charge(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_name,
-            target_id,
-            None,
-            None,
-            None,
+        self.notify_module_effect_started_with_cycle_impl(
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, None, None, None, true,
         )
     }
 
@@ -1797,16 +1771,8 @@ impl ServerContext {
         repeat_opt: Option<i32>,
         duration_ms_opt: Option<f64>,
     ) -> Vec<PendingMachoNotification> {
-        self.notify_module_effect_started_with_cycle_and_charge(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_name,
-            target_id,
-            repeat_opt,
-            duration_ms_opt,
-            None,
+        self.notify_module_effect_started_with_cycle_impl(
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id, repeat_opt, duration_ms_opt, None, true,
         )
     }
 
@@ -1824,16 +1790,8 @@ impl ServerContext {
         charge_type_id_override: Option<u32>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_name,
-            target_id,
-            repeat_opt,
-            duration_ms_opt,
-            charge_type_id_override,
-            true,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id,
+            repeat_opt, duration_ms_opt, charge_type_id_override, true,
         )
     }
 
@@ -1852,16 +1810,8 @@ impl ServerContext {
         duration_ms_opt: Option<f64>,
     ) -> Vec<PendingMachoNotification> {
         self.notify_module_effect_started_with_cycle_impl(
-            char_id,
-            ship_id,
-            module_id,
-            module_type_id,
-            effect_name,
-            target_id,
-            repeat_opt,
-            duration_ms_opt,
-            None,
-            false,
+            char_id, ship_id, module_id, module_type_id, effect_name, target_id,
+            repeat_opt, duration_ms_opt, None, false,
         )
     }
 
@@ -2021,36 +1971,16 @@ impl ServerContext {
                         .and_then(|f| f.modules.get(&module_id).and_then(|fm| fm.charge_type_id))
                 });
             let sfx_args = vec![
-                PyRep::Integer(ship_id),
-                PyRep::Integer(module_id),
-                PyRep::Integer(module_type_id as i64),
+                PyRep::Integer(ship_id), PyRep::Integer(module_id), PyRep::Integer(module_type_id as i64),
                 target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                charge_type_id
-                    .map(|tid| PyRep::Integer(i64::from(tid)))
-                    .unwrap_or(PyRep::None),
-                PyRep::String(sfx_guid),
-                PyRep::Bool(is_offensive),
-                PyRep::Integer(1),
-                PyRep::Integer(1),
-                PyRep::Real(duration_ms),
-                PyRep::Integer(i64::from(repeat)),
-                PyRep::Integer(now),
-                PyRep::Real(0.0),
-                PyRep::None,
+                charge_type_id.map(|tid| PyRep::Integer(i64::from(tid))).unwrap_or(PyRep::None),
+                PyRep::String(sfx_guid), PyRep::Bool(is_offensive), PyRep::Integer(1), PyRep::Integer(1),
+                PyRep::Real(duration_ms), PyRep::Integer(i64::from(repeat)), PyRep::Integer(now),
+                PyRep::Real(0.0), PyRep::None,
             ];
-            self.notify(
-                NotificationTarget::Character(char_id),
-                "OnSpecialFX",
-                "charid",
-                sfx_args.clone(),
-            );
+            self.notify(NotificationTarget::Character(char_id), "OnSpecialFX", "charid", sfx_args.clone());
             for (obs_cid, _) in self.space_observer_chars_for_ship(ship_id, char_id) {
-                self.notify(
-                    NotificationTarget::Character(obs_cid),
-                    "OnSpecialFX",
-                    "charid",
-                    sfx_args.clone(),
-                );
+                self.notify(NotificationTarget::Character(obs_cid), "OnSpecialFX", "charid", sfx_args.clone());
             }
         }
     }
@@ -2068,12 +1998,7 @@ impl ServerContext {
                 .get(&module_id)
                 .map(|m| m.location_id)
                 .filter(|&id| id > 0)
-                .or_else(|| {
-                    s.characters
-                        .get(&char_id)
-                        .map(|c| c.active_ship_id)
-                        .filter(|&id| id > 0)
-                });
+                .or_else(|| s.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&id| id > 0));
             let char_sys = s
                 .characters
                 .get(&char_id)
@@ -2086,21 +2011,10 @@ impl ServerContext {
             .or(char_sys_opt);
         let now = self.now_system_sim_filetime_ticks(sys_opt);
         let entry = PyRep::Tuple(vec![
-            PyRep::String("OnModuleAttributeChange".into()),
-            PyRep::Integer(char_id),
-            PyRep::Integer(module_id),
-            PyRep::Integer(2),
-            PyRep::Integer(now),
-            PyRep::Real(new_v),
-            PyRep::Real(old_v),
-            PyRep::None,
+            PyRep::String("OnModuleAttributeChange".into()), PyRep::Integer(char_id), PyRep::Integer(module_id),
+            PyRep::Integer(2), PyRep::Integer(now), PyRep::Real(new_v), PyRep::Real(old_v), PyRep::None,
         ]);
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnModuleAttributeChanges",
-            "charid",
-            vec![PyRep::List(vec![entry])],
-        )
+        self.notify(NotificationTarget::Character(char_id), "OnModuleAttributeChanges", "charid", vec![PyRep::List(vec![entry])])
     }
 
     /// Emits `OnModuleAttributeChanges` for ship `cpuLoad` (49) and `powerLoad` (15) changes.
@@ -2116,32 +2030,17 @@ impl ServerContext {
         let now = self.now_system_sim_filetime_ticks_for_ship(char_id, ship_id);
         let changes = vec![
             PyRep::Tuple(vec![
-                PyRep::String("OnModuleAttributeChange".into()),
-                PyRep::Integer(char_id),
-                PyRep::Integer(ship_id),
-                PyRep::Integer(i64::from(eve_sde::attr_ids::CPU_LOAD)),
-                PyRep::Integer(now),
-                PyRep::Real(new_cpu),
-                PyRep::Real(old_cpu),
-                PyRep::None,
+                PyRep::String("OnModuleAttributeChange".into()), PyRep::Integer(char_id), PyRep::Integer(ship_id),
+                PyRep::Integer(i64::from(eve_sde::attr_ids::CPU_LOAD)), PyRep::Integer(now),
+                PyRep::Real(new_cpu), PyRep::Real(old_cpu), PyRep::None,
             ]),
             PyRep::Tuple(vec![
-                PyRep::String("OnModuleAttributeChange".into()),
-                PyRep::Integer(char_id),
-                PyRep::Integer(ship_id),
-                PyRep::Integer(i64::from(eve_sde::attr_ids::POWER_LOAD)),
-                PyRep::Integer(now),
-                PyRep::Real(new_pg),
-                PyRep::Real(old_pg),
-                PyRep::None,
+                PyRep::String("OnModuleAttributeChange".into()), PyRep::Integer(char_id), PyRep::Integer(ship_id),
+                PyRep::Integer(i64::from(eve_sde::attr_ids::POWER_LOAD)), PyRep::Integer(now),
+                PyRep::Real(new_pg), PyRep::Real(old_pg), PyRep::None,
             ]),
         ];
-        self.notify(
-            NotificationTarget::Character(char_id),
-            "OnModuleAttributeChanges",
-            "charid",
-            vec![PyRep::List(changes)],
-        )
+        self.notify(NotificationTarget::Character(char_id), "OnModuleAttributeChanges", "charid", vec![PyRep::List(changes)])
     }
 
     /// Builds a V24 `OnModuleAttributeChange` entry for `CHARGE` (attr 18 — current capacitor GJ)
@@ -2154,14 +2053,8 @@ impl ServerContext {
         old_cap: f64,
     ) -> PyRep {
         PyRep::Tuple(vec![
-            PyRep::String("OnModuleAttributeChange".into()),
-            PyRep::Integer(char_id),
-            PyRep::Integer(ship_id),
-            PyRep::Integer(18), // dogma attribute 18 (`charge` / current capacitor GJ)
-            PyRep::Integer(now_filetime),
-            PyRep::Real(new_cap),
-            PyRep::Real(old_cap),
-            PyRep::None,
+            PyRep::String("OnModuleAttributeChange".into()), PyRep::Integer(char_id), PyRep::Integer(ship_id),
+            PyRep::Integer(18), PyRep::Integer(now_filetime), PyRep::Real(new_cap), PyRep::Real(old_cap), PyRep::None,
         ])
     }
 
@@ -2470,20 +2363,12 @@ impl ServerContext {
             (None, Some(new_item)) => {
                 // Signal prior locationID = 0 (`ixLocationID` = 3) so V24 `invCache` / open `InvCont`
                 // windows insert the newly created row immediately instead of only updating capacity (#1026).
-                self.emit_item_change_routed(
-                    fallback_char_id,
-                    new_item,
-                    vec![(3, PyRep::Integer(0))],
-                );
-                if is_bp(new_item) {
-                    emit_bp_update(new_item);
-                }
+                self.emit_item_change_routed(fallback_char_id, new_item, vec![(3, PyRep::Integer(0))]);
+                if is_bp(new_item) { emit_bp_update(new_item); }
             }
             (Some(old_item), None) => {
                 self.emit_item_deleted_routed(fallback_char_id, old_item);
-                if is_bp(old_item) {
-                    emit_bp_update(old_item);
-                }
+                if is_bp(old_item) { emit_bp_update(old_item); }
             }
             (Some(old_item), Some(new_item)) => {
                 let changes = Self::compute_item_change_dict(old_item, new_item);
@@ -2497,72 +2382,27 @@ impl ServerContext {
                     return;
                 }
                 if !changes.is_empty() {
-                    let (old_target, old_id_type) =
-                        self.resolve_item_notification_target(fallback_char_id, old_item);
-                    let (new_target, new_id_type) =
-                        self.resolve_item_notification_target(fallback_char_id, new_item);
+                    let (old_target, old_id_type) = self.resolve_item_notification_target(fallback_char_id, old_item);
+                    let (new_target, new_id_type) = self.resolve_item_notification_target(fallback_char_id, new_item);
                     let mut targets = Vec::with_capacity(2);
                     targets.push((new_target.clone(), new_id_type));
-                    if old_target != new_target {
-                        targets.push((old_target, old_id_type));
-                    }
+                    if old_target != new_target { targets.push((old_target, old_id_type)); }
                     self.emit_item_change_with_industry_refresh(
                         &targets,
                         new_item,
                         changes,
                         &[
-                            (
-                                old_item.owner_id,
-                                old_item.location_id,
-                                old_item.flag as i64,
-                                old_item.type_id,
-                            ),
-                            (
-                                new_item.owner_id,
-                                new_item.location_id,
-                                new_item.flag as i64,
-                                new_item.type_id,
-                            ),
+                            (old_item.owner_id, old_item.location_id, old_item.flag as i64, old_item.type_id),
+                            (new_item.owner_id, new_item.location_id, new_item.flag as i64, new_item.type_id),
                         ],
                     );
                 }
                 if bp_involved {
                     emit_bp_update(new_item);
-                    if old_item.owner_id != new_item.owner_id {
-                        emit_bp_update(old_item);
-                    }
+                    if old_item.owner_id != new_item.owner_id { emit_bp_update(old_item); }
                 }
             }
             (None, None) => {}
-        }
-    }
-
-    /// Emits `OnAccountChange` for personal (`cash`) or corporate division (`cash` / `cash2..cash7`) wallets.
-    pub fn notify_wallet_balance(
-        &self,
-        is_corp: bool,
-        owner_id: i64,
-        div_id: u8,
-        balance: eve_db::IskCents,
-    ) -> Vec<PendingMachoNotification> {
-        if is_corp {
-            let key = if div_id <= 1 {
-                "cash".to_string()
-            } else {
-                format!("cash{div_id}")
-            };
-            self.notify(
-                NotificationTarget::Corporation(owner_id),
-                "OnAccountChange",
-                "corpid",
-                vec![
-                    PyRep::String(key),
-                    PyRep::Integer(owner_id),
-                    PyRep::Real(balance.to_wire_f64()),
-                ],
-            )
-        } else {
-            self.notify_account_change(owner_id, "cash", owner_id, balance.to_wire_f64())
         }
     }
 
@@ -2641,102 +2481,10 @@ impl ServerContext {
     }
 
     /// Registers a post-commit listener on `self.db` so `TxNotificationEffect` entries pushed to
-    /// `WorldTx::effects` dispatch to online recipients right after SQLite `COMMIT` + publish,
-    /// and vanish on any abort/panic/SQLite error (`RFC-2 §3.2`, `#915`).
+    /// `WorldTx::effects` and committed wallet/PLEX deltas dispatch right after SQLite `COMMIT`
+    /// + snapshot publication, and vanish on any abort/panic/SQLite error (`RFC-2 §3.2`, `#915`, `#931`).
     pub fn install_tx_post_commit_listener(&self) {
-        let db_w = std::sync::Arc::downgrade(&self.db);
-        let pend_w = std::sync::Arc::downgrade(&self.pending_notifications);
-        let notify_tx = self.notify_tx.clone();
-        self.db.register_post_commit_listener(std::sync::Arc::new(
-            move |snap, _changes, effects| {
-                if effects.notifications.is_empty() {
-                    return;
-                }
-                let (Some(db), Some(pend)) = (db_w.upgrade(), pend_w.upgrade()) else {
-                    return;
-                };
-                let now_ft = db.clock().now_blueos_filetime_ticks();
-                for effect in &effects.notifications {
-                    let mut candidates: Vec<(i64, u64)> = Vec::new();
-                    match effect.target {
-                        eve_db::TxNotificationTarget::Character(cid) => {
-                            if let Some(c) = snap.characters.get(&cid) {
-                                candidates.push((cid, c.user_id));
-                            }
-                        }
-                        eve_db::TxNotificationTarget::Corporation(corp_id) => {
-                            for c in snap.characters.values() {
-                                if c.corporation_id == corp_id {
-                                    candidates.push((c.character_id, c.user_id));
-                                }
-                            }
-                        }
-                        eve_db::TxNotificationTarget::Alliance(ally_id) => {
-                            for c in snap.characters.values() {
-                                if c.alliance_id == Some(ally_id) {
-                                    candidates.push((c.character_id, c.user_id));
-                                }
-                            }
-                        }
-                        eve_db::TxNotificationTarget::SolarSystem(sys_id) => {
-                            for c in snap.characters.values() {
-                                if c.solar_system_id == sys_id {
-                                    candidates.push((c.character_id, c.user_id));
-                                }
-                            }
-                        }
-                    }
-                    let mut recipients: Vec<(i64, Option<u64>)> = candidates
-                        .into_iter()
-                        .filter(|&(cid, uid)| {
-                            db.get_online_session(uid)
-                                .is_some_and(|os| os.character_id == Some(cid))
-                        })
-                        .map(|(cid, uid)| (cid, Some(uid)))
-                        .collect();
-                    recipients.sort_by_key(|(cid, _)| *cid);
-                    recipients.dedup_by_key(|(cid, _)| *cid);
-                    if recipients.is_empty() {
-                        continue;
-                    }
-                    let stage_in_dispatch =
-                        is_staging_dispatch_notifications(Some(&*pend), Some(&notify_tx));
-                    let mut queues = (!stage_in_dispatch)
-                        .then(|| pend.write().unwrap_or_else(|e| e.into_inner()));
-                    for (cid, uid) in recipients {
-                        let recipient_args = effect.args.clone();
-                        let (packet, marshaled_packet) = Self::build_macho_notification_packet(
-                            cid,
-                            uid,
-                            &effect.event,
-                            &effect.id_type,
-                            recipient_args.clone(),
-                        );
-                        let notif = PendingMachoNotification::new(
-                            cid,
-                            &effect.event,
-                            &effect.id_type,
-                            recipient_args,
-                            packet,
-                            marshaled_packet,
-                            now_ft,
-                        );
-                        if let Some(queues) = queues.as_mut() {
-                            let q = queues.entry(cid).or_default();
-                            push_pending_notification_capped(q, notif.clone());
-                            let _ = notify_tx.send((cid, notif));
-                        } else {
-                            let _ = try_stage_dispatch_notification(
-                                Some(&*pend),
-                                Some(&notify_tx),
-                                &notif,
-                                None,
-                            );
-                        }
-                    }
-                }
-            },
-        ));
+        super::delta_commit_listener::install_tx_post_commit_listener(self);
     }
 }
 

@@ -1429,10 +1429,7 @@ pub fn handle(
                 Ok(new_bal)
             });
             match res {
-                Ok(bal) => {
-                    let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
-                    Some(Ok(PyRep::Bool(true)))
-                }
+                Ok(_bal) => Some(Ok(PyRep::Bool(true))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1699,13 +1696,7 @@ fn handle_give_cash(
         });
         Ok((new_sender_bal, recipient_bal, target_is_char))
     })?;
-    let (sender_bal, recipient_bal, target_is_char) = res;
-    let _ = ctx.notify_account_change(char_id, CASH_ACCOUNT_KEY, char_id, sender_bal.to_wire_f64());
-    if target_is_char {
-        let _ = ctx.notify_account_change(to_id, CASH_ACCOUNT_KEY, to_id, recipient_bal.to_wire_f64());
-    } else {
-        ctx.notify_wallet_balance(true, to_id, 1, recipient_bal);
-    }
+    let (sender_bal, _recipient_bal, _target_is_char) = res;
     Ok(PyRep::Real(sender_bal.to_wire_f64()))
 }
 

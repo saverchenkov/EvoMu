@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::notify_registry::{OnAccountChange, OnDroneControlLost, OnDroneStateChange};
+use crate::router::notify_registry::{OnDroneControlLost, OnDroneStateChange};
 use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
@@ -1381,33 +1381,18 @@ pub(crate) fn execute_death_pipeline_sync_with_guard(
         sys_handle.try_handoff_in_space_observer(victim_ship_id, cid, &[wreck_item_id, cid]);
     }
 
-    if let Some((ins_corp, owner_id, bal_wire, mid_opt, subject)) = ins_notify {
-        if ins_corp {
-            let _ = ctx.emit_typed_with_id_type(
-                NotificationTarget::Corporation(owner_id),
-                "corpid",
-                OnAccountChange {
-                    account_key: "cash".into(),
-                    owner_id,
-                    balance: bal_wire,
-                },
-            );
-        } else {
-            let _ = ctx.notify_account_change(owner_id, "cash", owner_id, bal_wire);
-        }
+    if let Some((_ins_corp, _owner_id, _bal_wire, Some(mid), subject)) = ins_notify {
         if victim_char_id > 0 {
-            if let Some(mid) = mid_opt {
-                let sent = crate::services::mail_notify::SentMail {
-                    message_id: mid,
-                    sender_id: 1_000_132,
-                    to_character_ids: &[victim_char_id],
-                    to_list_id: None,
-                    to_corp_or_alliance_id: None,
-                    title: &subject,
-                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
-                };
-                crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
-            }
+            let sent = crate::services::mail_notify::SentMail {
+                message_id: mid,
+                sender_id: 1_000_132,
+                to_character_ids: &[victim_char_id],
+                to_list_id: None,
+                to_corp_or_alliance_id: None,
+                title: &subject,
+                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+            };
+            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
         }
     }
 

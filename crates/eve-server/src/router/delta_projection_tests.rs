@@ -1077,3 +1077,143 @@ fn account_plex_vault_domain_rows_and_negative_no_op_mutations_behave_cleanly() 
         .is_none()
     );
 }
+
+#[test]
+fn wallets_only_domain_filter_projects_only_wallet_and_plex_deltas() {
+    let sde = shared_sde();
+    let db = WorldRepository::with_demo_seed();
+    let pilot_id = 90_000_001_i64;
+    let uid = db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+    let corp_id = 98_000_771_i64;
+    let station_id = 60_003_760_i64;
+
+    db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord::new(corp_id, "Wallets Only Corp", "WLT", pilot_id),
+        );
+        if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(station_id);
+        }
+        snap.account_plex_vault.insert(uid, 100);
+    });
+
+    struct TestPlexHook(i64);
+    impl DeltaProjectionHook for TestPlexHook {
+        fn on_plex_delta(&self, delta: PlexDelta, sink: &mut dyn DeltaSink) {
+            sink.push(ProjectedNotification::from_typed(
+                ProjectedTarget::Character(self.0),
+                crate::router::notify_registry::OnAccountChange {
+                    account_key: "plex".into(),
+                    owner_id: self.0,
+                    balance: delta.new_plex as f64,
+                },
+            ));
+        }
+    }
+
+    let mut projector = DefaultDeltaProjection::wallets_only();
+    projector.add_hook(Box::new(TestPlexHook(pilot_id)));
+
+    let cache = DeltaStateCache::new();
+    db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
+
+    let (before, after, changes) = capture_diff(&db, 1, |snap| {
+        if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+            ch.balance = IskCents::from_isk(9_000);
+            ch.free_skill_points += 10_000.0;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.set_division_balance(1, IskCents::from_isk(12_000));
+            corp.set_division_balance(4, IskCents::from_isk(34_000));
+            corp.set_division_balance(7, IskCents::from_isk(56_000));
+        }
+        snap.account_plex_vault.insert(uid, 450);
+        snap.items.insert(
+            990_771_001,
+            InventoryItemRecord {
+                item_id: 990_771_001,
+                type_id: 34,
+                owner_id: pilot_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(pilot_id).or_default().insert(
+            3300,
+            TrainedSkillRecord {
+                type_id: 3300,
+                level: 3,
+                skill_points: 8_000.0,
+            },
+        );
+        snap.paused_skill_queues.insert(pilot_id);
+        snap.market_orders.insert(
+            880_771_001,
+            MarketOrderRecord {
+                order_id: 880_771_001,
+                owner_id: pilot_id,
+                station_id,
+                region_id: 10_000_002,
+                type_id: 34,
+                is_bid: false,
+                price: IskCents::from_isk(5),
+                vol_entered: 10,
+                vol_remaining: 10,
+                min_volume: 1,
+                is_npc: false,
+                escrow: IskCents(0),
+            },
+        );
+    });
+
+    let direct = projector.project_to_vec(&DeltaProjectionInput::new(
+        Some(&before),
+        &after,
+        &changes,
+        &sde,
+        1_700_000_000,
+    ));
+    let cached =
+        cache.project_with_cache(&projector, None, &after, &changes, &sde, 1_700_000_000, &[]);
+
+    for notifs in [&direct, &cached] {
+        assert!(!notifs.is_empty());
+        assert!(notifs.iter().all(|n| n.event == "OnAccountChange"));
+        assert_eq!(notifs.len(), 5);
+        assert!(notifs.iter().any(|n| {
+            n.target == ProjectedTarget::Character(pilot_id)
+                && matches!(
+                    n.args.as_slice(),
+                    [PyRep::String(k), PyRep::Integer(o), PyRep::Real(b)]
+                        if k == "cash" && *o == pilot_id && (*b - 9_000.0).abs() < 1e-6
+                )
+        }));
+        assert!(notifs.iter().any(|n| {
+            n.target == ProjectedTarget::Character(pilot_id)
+                && matches!(
+                    n.args.as_slice(),
+                    [PyRep::String(k), PyRep::Integer(o), PyRep::Real(b)]
+                        if k == "plex" && *o == pilot_id && (*b - 450.0).abs() < 1e-6
+                )
+        }));
+        for (expected_key, expected_isk) in [
+            ("cash", 12_000.0),
+            ("cash4", 34_000.0),
+            ("cash7", 56_000.0),
+        ] {
+            assert!(notifs.iter().any(|n| {
+                n.target == ProjectedTarget::Corporation(corp_id)
+                    && matches!(
+                        n.args.as_slice(),
+                        [PyRep::String(k), PyRep::Integer(o), PyRep::Real(b)]
+                            if k == expected_key && *o == corp_id && (*b - expected_isk).abs() < 1e-6
+                    )
+            }));
+        }
+    }
+}

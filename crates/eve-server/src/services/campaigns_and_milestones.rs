@@ -1198,7 +1198,7 @@ fn handle_milestone_claim_rewards(
         Ok((bal_after.0, add_cents))
     })?;
 
-    playtime::emit_account_change_isk(ctx, session, char_id, bal_after_cents);
+    let _ = (bal_after_cents, add_cents);
     crate::services::notify_emitters_character_services::emit_login_milestone_achieved(
         ctx,
         char_id,

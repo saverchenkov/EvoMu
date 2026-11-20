@@ -2248,20 +2248,11 @@ pub fn claim_player_bounty_on_kill(
     if killer_char_id <= 0 || victim_char_id <= 0 || killer_char_id == victim_char_id {
         return 0.0;
     }
-    let (claimed_isk, new_bal) = ctx.db.with_mut_snapshot(|snap| {
-        claim_player_bounty_on_kill_in_snap(
-            snap,
-            &ctx.sde,
-            killer_char_id,
-            victim_char_id,
-            victim_ship_type_id,
-        )
+    let (claimed_isk, _new_bal) = ctx.db.with_mut_snapshot(|snap| {
+        claim_player_bounty_on_kill_in_snap(snap, &ctx.sde, killer_char_id, victim_char_id, victim_ship_type_id)
     });
     if claimed_isk > 0.0 {
         sync_combat_runtime_from_db(ctx);
-        if let Some(bal) = new_bal {
-            let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
-        }
         let now_ft = ctx.now_blueos_filetime_ticks();
         ctx.emit_typed(
             NotificationTarget::Character(killer_char_id),
@@ -2269,10 +2260,7 @@ pub fn claim_player_bounty_on_kill(
                 data_dict: PyRep::Dict(vec![
                     (PyRep::String("amount".into()), PyRep::Real(claimed_isk)),
                     (PyRep::String("payoutTime".into()), PyRep::Integer(now_ft)),
-                    (
-                        PyRep::String("enemyTypeID".into()),
-                        PyRep::Integer(i64::from(victim_ship_type_id)),
-                    ),
+                    (PyRep::String("enemyTypeID".into()), PyRep::Integer(i64::from(victim_ship_type_id))),
                     (PyRep::String("isModified".into()), PyRep::Bool(false)),
                 ]),
             },
@@ -2450,63 +2438,31 @@ pub(crate) fn validate_kill_right_live_preconditions(
     caller_id: i64,
     target_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let expired = match snap
-        .combat_crimewatch_state
-        .kill_right_expires_unix
-        .get(&kr_id)
-        .copied()
-    {
+    let expired = match snap.combat_crimewatch_state.kill_right_expires_unix.get(&kr_id).copied() {
         Some(exp) => ctx.now_unix() >= exp,
         None => !snap.kill_rights.contains_key(&kr_id),
     };
     if expired {
-        return Err(BridgeRpcError {
-            code: "KillRightExpired".into(),
-            message: format!("Kill right {kr_id} has expired (30-day lifetime)"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError { code: "KillRightExpired".into(), message: format!("Kill right {kr_id} has expired (30-day lifetime)"), client_error: None });
     }
     let Some(caller) = snap.characters.get(&caller_id) else {
-        return Err(BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {caller_id} not found"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {caller_id} not found"), client_error: None });
     };
     if caller.station_id.is_some() || caller.structure_id.is_some() {
-        return Err(BridgeRpcError {
-            code: "KillRightCannotActivateDocked".into(),
-            message: "Cannot activate or buy a kill right while docked".into(),
-            client_error: None,
-        });
+        return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate or buy a kill right while docked".into(), client_error: None });
     }
     let Some(target) = snap.characters.get(&target_id) else {
-        return Err(BridgeRpcError {
-            code: "TargetNotFound".into(),
-            message: format!("Kill right target {target_id} not found"),
-            client_error: None,
-        });
+        return Err(BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {target_id} not found"), client_error: None });
     };
-    if target.station_id.is_some()
-        || target.structure_id.is_some()
-        || caller.solar_system_id != target.solar_system_id
-    {
-        return Err(BridgeRpcError {
-            code: "KillRightTargetNotInSystem".into(),
-            message: "Target pilot must be undocked in the same solar system".into(),
-            client_error: None,
-        });
+    if target.station_id.is_some() || target.structure_id.is_some() || caller.solar_system_id != target.solar_system_id {
+        return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Target pilot must be undocked in the same solar system".into(), client_error: None });
     }
     let sys_id = caller.solar_system_id;
     let c_pos = ctx.systems.get_ball_position_sync(sys_id, caller.active_ship_id);
     let t_pos = ctx.systems.get_ball_position_sync(sys_id, target.active_ship_id);
     if let (Some(cp), Some(tp)) = (c_pos, t_pos) {
         if (cp - tp).length() > 8_000_000.0 {
-            return Err(BridgeRpcError {
-                code: "KillRightTargetNotOnGrid".into(),
-                message: "Target pilot is not on grid with caller".into(),
-                client_error: None,
-            });
+            return Err(BridgeRpcError { code: "KillRightTargetNotOnGrid".into(), message: "Target pilot is not on grid with caller".into(), client_error: None });
         }
     }
     Ok(())
@@ -2515,26 +2471,13 @@ pub(crate) fn validate_kill_right_live_preconditions(
 /// Emits limited engagement timeout start/stop and end notifications to `char_id`.
 pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
     let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnCrimewatchEngagementStartTimeout {
-            other_char_id,
-            timeout: timeout_ft,
-        },
-    );
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id },
-    );
+    let t = NotificationTarget::Character(char_id);
+    ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementStartTimeout { other_char_id, timeout: timeout_ft });
+    ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id });
     with_mut_combat_runtime(ctx, |rt| {
-        if let Some(m) = rt.limited_engagements.get_mut(&char_id) {
-            m.remove(&other_char_id);
-        }
+        if let Some(m) = rt.limited_engagements.get_mut(&char_id) { m.remove(&other_char_id); }
     });
-    ctx.emit_typed(
-        NotificationTarget::Character(char_id),
-        crate::router::notify_registry::OnCrimewatchEngagementEnded { other_char_id },
-    );
+    ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementEnded { other_char_id });
 }
 
 #[cfg(test)]

@@ -1457,10 +1457,6 @@ fn handle_buy_offer(
             ctx.now_unix(),
         );
     }
-    if let Some(char_id) = active_char_id {
-        let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
-    }
-
     let status_str = if matches!(billing, FastCheckoutBilling::Free) {
         "COMPLETED"
     } else {

@@ -1546,37 +1546,7 @@ pub fn register_economy_planetary_industry_handlers(
                     "failed to encode GrantCommanded notice"
                 ),
             }
-            let sink = isk_macho_sink
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .cloned();
-            if let Some(sink) = sink {
-                let emit_acct = |owner: WalletOwnerId, bal: IskCents| match owner {
-                    WalletOwnerId::Character(id) => sink(
-                        NotificationTarget::Character(id),
-                        "OnAccountChange",
-                        "charid",
-                        vec![
-                            PyRep::String("cash".into()),
-                            PyRep::Integer(id),
-                            PyRep::Real(bal.to_wire_f64()),
-                        ],
-                    ),
-                    WalletOwnerId::Corporation(id) => sink(
-                        NotificationTarget::Corporation(id),
-                        "OnAccountChange",
-                        "corpid",
-                        vec![
-                            PyRep::String("cash".into()),
-                            PyRep::Integer(id),
-                            PyRep::Real(bal.to_wire_f64()),
-                        ],
-                    ),
-                };
-                emit_acct(src_owner, src_bal);
-                emit_acct(dst_owner, dst_bal);
-            }
+            let _ = &isk_macho_sink;
             pb::message("eve.isk.wallet.api.TransferByOwnerResponse")
                 .to_any()
                 .map_err(|e| (STATUS_INTERNAL_ERROR, e.to_string()))

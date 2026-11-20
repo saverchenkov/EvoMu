@@ -707,9 +707,21 @@ fn resolve_campaign_error_cached_mods_sde_none_notifications_and_removed_fallbac
     let p_zero = 40_101i64;
     let p_win = 40_102i64;
     let sys_a = 30_004_201u32;
-    let res = ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.with_mut_snapshot(|snap| {
         seed_pilot(snap, p_zero, Some(FACTION_ANGEL_CARTEL), sys_a);
         seed_pilot(snap, p_win, Some(FACTION_ANGEL_CARTEL), sys_a);
+        let win_uname = format!("ins_user_{p_win}");
+        snap.accounts.insert(
+            win_uname.clone(),
+            eve_db::AccountRecord {
+                user_id: p_win as u64,
+                username: win_uname,
+                password_token: "hash".into(),
+                role: 0,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
         snap.insurgency_runtime.campaigns.insert(
             cid,
             PersistedInsurgencyCampaign {
@@ -732,6 +744,11 @@ fn resolve_campaign_error_cached_mods_sde_none_notifications_and_removed_fallbac
             cid,
             vec![(p_zero, FACTION_ANGEL_CARTEL, 0), (p_win, FACTION_ANGEL_CARTEL, 100)],
         );
+    });
+    ctx.db
+        .acquire_online_lock(p_win as u64, p_win as u64, Some(p_win), true, now)
+        .expect("p_win online");
+    let res = ctx.db.with_mut_snapshot(|snap| {
         let eff = resolve_insurgency_campaign_in_snap(snap, None, cid, Some("PirateWin"), now).unwrap();
         let camp = &snap.insurgency_runtime.campaigns[&cid];
         assert_eq!(camp.active_end_unix, now - 100);

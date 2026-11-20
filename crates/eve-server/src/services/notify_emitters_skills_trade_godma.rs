@@ -464,7 +464,6 @@ pub fn handle_rnd_buy_datacores(
         );
         Ok((item_id, dc_type_id, rem_rp, bal_wire))
     })?;
-    let _ = ctx.notify_account_change(char_id, "cash", char_id, bal_after_isk);
     emit_datacore_bought(ctx, char_id, agent_id, bal_after_isk);
     Ok(PyRep::keyval([
         ("agentID", PyRep::Integer(agent_id)),

@@ -12,6 +12,7 @@ pub mod client_wire;
 pub mod context;
 mod context_charges;
 mod context_runtime_persistence;
+pub mod delta_commit_listener;
 pub mod delta_projection;
 pub mod destiny_delivery_policy;
 pub mod dispatch;

@@ -503,3 +503,252 @@ fn issue_804_notify_module_effect_started_emits_on_special_fx_for_turrets_ewar_p
     assert_eq!(custom_ret[0].args.get(7), Some(&PyRep::Real(6_000.0)));
     assert_eq!(custom_ret[0].args.get(8), Some(&PyRep::Integer(0)));
 }
+
+fn account_change_summary(notif: &PendingMachoNotification) -> Option<(String, i64, f64, &str)> {
+    if notif.event != "OnAccountChange" {
+        return None;
+    }
+    match notif.args.as_slice() {
+        [PyRep::String(k), PyRep::Integer(owner), PyRep::Real(bal)] => {
+            Some((k.clone(), *owner, *bal, notif.id_type.as_str()))
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn commit_projects_personal_corp_divisions_and_plex_vault_and_rollback_emits_zero() {
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let corp_id = 98_000_772_i64;
+    let now = 1_700_000_000_u64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+
+    ctx.db
+        .acquire_online_lock(uid, 701, Some(pilot_id), true, now)
+        .expect("online lock");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "Commit Wallet Corp", "CWC", pilot_id),
+        );
+        if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+            ch.corporation_id = corp_id;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Committed mutation across personal ISK, all 7 corp divisions, and PLEX Vault projects OnAccountChange.
+    let start_isk = ctx.db.with_snapshot(|s| s.characters[&pilot_id].balance);
+    let committed_isk = eve_db::IskCents(start_isk.0 + 125_000);
+    ctx.db
+        .try_with_mut_snapshot(|snap| -> Result<(), String> {
+            if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+                ch.balance = committed_isk;
+            }
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                for div_id in 1..=7_u8 {
+                    corp.set_division_balance(div_id, eve_db::IskCents::from_isk(1_000 * i64::from(div_id)));
+                }
+            }
+            snap.account_plex_vault.insert(uid, 320);
+            Ok(())
+        })
+        .expect("commit ok");
+
+    let committed = ctx.drain_notifications_for_char(pilot_id);
+    let summaries: Vec<_> = committed.iter().filter_map(account_change_summary).collect();
+    assert_eq!(summaries.len(), 9, "expected personal + 7 corp divs + plex: {summaries:?}");
+    assert!(summaries.iter().any(|(k, owner, bal, id_type)| {
+        k == "cash"
+            && *owner == pilot_id
+            && (*bal - committed_isk.to_wire_f64()).abs() < 1e-6
+            && *id_type == "charid"
+    }));
+    assert!(summaries.iter().any(|(k, owner, bal, id_type)| {
+        k == "plex" && *owner == pilot_id && (*bal - 320.0).abs() < 1e-6 && *id_type == "charid"
+    }));
+    for div_id in 1..=7_u8 {
+        let expected_key = if div_id == 1 {
+            "cash".to_string()
+        } else {
+            format!("cash{div_id}")
+        };
+        let expected_bal = 1_000.0 * f64::from(div_id);
+        assert!(summaries.iter().any(|(k, owner, bal, id_type)| {
+            *k == expected_key
+                && *owner == corp_id
+                && (*bal - expected_bal).abs() < 1e-6
+                && *id_type == "corpid"
+        }));
+    }
+
+    // 2. Rolled-back mutation emits zero OnAccountChange and leaves DeltaStateCache baseline intact.
+    let err = ctx
+        .db
+        .try_with_mut_snapshot(|snap| -> Result<(), String> {
+            if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+                ch.balance = eve_db::IskCents(committed_isk.0 + 9_999_900);
+            }
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.set_division_balance(2, eve_db::IskCents::from_isk(999_999));
+            }
+            snap.account_plex_vault.insert(uid, 9_999);
+            Err("intentional rollback".into())
+        })
+        .expect_err("rollback");
+    assert_eq!(err, "intentional rollback");
+    assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
+
+    // Subsequent identical balance write matches preserved baseline (zero spurious deltas), while div 2 delta works.
+    ctx.db
+        .try_with_mut_snapshot(|snap| -> Result<(), String> {
+            if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+                corp.set_division_balance(2, eve_db::IskCents::from_isk(2_500));
+            }
+            Ok(())
+        })
+        .expect("div 2 commit");
+    let post_rollback = ctx.drain_notifications_for_char(pilot_id);
+    let post_summaries: Vec<_> = post_rollback.iter().filter_map(account_change_summary).collect();
+    assert_eq!(
+        post_summaries,
+        vec![("cash2".to_string(), corp_id, 2_500.0, "corpid")]
+    );
+}
+
+#[tokio::test]
+async fn staged_dispatch_tx_effects_dedup_and_legacy_same_epoch_ordering() {
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let now = 1_700_000_000_u64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+
+    ctx.db
+        .acquire_online_lock(uid, 702, Some(pilot_id), true, now)
+        .expect("online lock");
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // 1. Within-tx TxNotificationEffect suppresses duplicate OnAccountChange from commit projection.
+    let tx_bal = eve_db::IskCents::from_isk(55_000);
+    ctx.db
+        .tx("test_tx_effect_dedup", |wtx| -> Result<(), String> {
+            if let Some(ch) = wtx.snap.characters.get_mut(&pilot_id) {
+                ch.balance = tx_bal;
+            }
+            wtx.effects.notify_character(
+                pilot_id,
+                "OnAccountChange",
+                "charid",
+                vec![
+                    PyRep::String("cash".into()),
+                    PyRep::Integer(pilot_id),
+                    PyRep::Real(tx_bal.to_wire_f64()),
+                ],
+            );
+            Ok(())
+        })
+        .expect("tx commit");
+    let after_tx = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(
+        after_tx.iter().filter_map(account_change_summary).collect::<Vec<_>>(),
+        vec![("cash".to_string(), pilot_id, 55_000.0, "charid")]
+    );
+
+    // Empty-args OnAccountChange marker effect also suppresses duplicate commit projection.
+    ctx.db
+        .tx("test_empty_marker_effect", |wtx| -> Result<(), String> {
+            if let Some(ch) = wtx.snap.characters.get_mut(&pilot_id) {
+                ch.balance = eve_db::IskCents::from_isk(56_000);
+            }
+            wtx.effects
+                .notify_character(pilot_id, "OnAccountChange", "charid", Vec::new());
+            Ok(())
+        })
+        .expect("marker tx");
+    let marker_notifs = ctx.drain_notifications_for_char(pilot_id);
+    assert_eq!(marker_notifs.len(), 1);
+    assert!(marker_notifs[0].args.is_empty());
+
+    // 2. Staged dispatch scope holds commit OnAccountChange until flushed, and drops on un-flushed abort.
+    let mut rx = ctx.notify_tx.subscribe();
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db
+            .try_with_mut_snapshot(|snap| -> Result<(), String> {
+                if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+                    ch.balance = eve_db::IskCents::from_isk(60_000);
+                }
+                Ok(())
+            })
+            .expect("staged commit");
+        // Not delivered before flush; same-epoch duplicate manual notify deduplicates,
+        // while pre-settlement intermediate balance is inserted ahead of final committed balance.
+        assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
+        let dup = ctx.notify_account_change(pilot_id, "cash", pilot_id, 60_000.0);
+        assert_eq!(dup.len(), 1);
+        let pre = ctx.notify_account_change(pilot_id, "cash", pilot_id, 58_000.0);
+        assert_eq!(pre.len(), 1);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+    })
+    .await;
+
+    let flushed: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .iter()
+        .filter_map(account_change_summary)
+        .collect();
+    assert_eq!(
+        flushed,
+        vec![
+            ("cash".to_string(), pilot_id, 58_000.0, "charid"),
+            ("cash".to_string(), pilot_id, 60_000.0, "charid"),
+        ]
+    );
+    let mut rx_bals = Vec::new();
+    while let Ok((_, notif)) = rx.try_recv() {
+        if let Some((_, _, bal, _)) = account_change_summary(&notif) {
+            rx_bals.push(bal);
+        }
+    }
+    assert_eq!(rx_bals, vec![58_000.0, 60_000.0]);
+
+    // Unflushed staged rollback (failed RPC after a prior balance write would abort) delivers 0 on exit.
+    with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let _ = ctx
+            .db
+            .try_with_mut_snapshot(|snap| -> Result<(), String> {
+                if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+                    ch.balance = eve_db::IskCents::from_isk(61_000);
+                }
+                Err("aborted".into())
+            });
+    })
+    .await;
+    assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
+    assert!(rx.try_recv().is_err());
+
+    // 3. Unstaged same-epoch manual coordination deduplicates identical and prepends intermediate balance.
+    ctx.db
+        .try_with_mut_snapshot(|snap| -> Result<(), String> {
+            if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+                ch.balance = eve_db::IskCents::from_isk(70_000);
+            }
+            Ok(())
+        })
+        .expect("unstaged commit");
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 70_000.0);
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 65_000.0);
+    let unstaged: Vec<_> = ctx
+        .drain_notifications_for_char(pilot_id)
+        .iter()
+        .filter_map(account_change_summary)
+        .collect();
+    assert_eq!(
+        unstaged,
+        vec![
+            ("cash".to_string(), pilot_id, 65_000.0, "charid"),
+            ("cash".to_string(), pilot_id, 70_000.0, "charid"),
+        ]
+    );
+}
