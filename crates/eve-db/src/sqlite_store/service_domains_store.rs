@@ -281,6 +281,7 @@ impl_service_domain_persist!(
         ess_reserve_pulses,
         phased_asteroid_fields,
         mining_ledger_waste,
+        belt_respawn_due_unix,
     ],
     sets: [],
     scalars: [

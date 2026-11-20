@@ -1066,4 +1066,5 @@ pub struct MiningAndEssRuntimeStore {
     pub moon_fractured_fields: Vec<(i64, u32, u64, Vec<i64>)>,
     pub mining_ledger_waste: BTreeMap<usize, i64>,
     pub metenox_last_tick_unix: u64,
+    pub belt_respawn_due_unix: HashMap<i64, u64>,
 }

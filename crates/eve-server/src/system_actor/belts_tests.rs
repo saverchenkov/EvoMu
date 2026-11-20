@@ -1,5 +1,6 @@
 use super::*;
 use crate::system_actor::{AsteroidState, DEFAULT_DOWNTIME_UTC_SECS_OF_DAY};
+use eve_db::ServerClock;
 use eve_destiny::{Ball, Ballpark, DestinyEvent, MovementMode, SlimItemMeta};
 use eve_sde::{InvType, SdeRegistry, SolarSystem, StargateJump, StationInfo};
 use glam::DVec3;
@@ -1117,4 +1118,172 @@ fn belt_asteroid_seeding_uses_portion_aligned_units_finite_mass_and_belt_coordin
     let min_v = volumes_m3.iter().copied().fold(f64::INFINITY, f64::min);
     let max_v = volumes_m3.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(max_v > min_v, "deterministic rock volumes must vary across rocks");
+}
+
+#[test]
+fn belt_respawn_due_persists_across_reloads_and_downtime_clears_entry() {
+    let sde_opt = Some(make_test_belt_sde());
+    let db = Arc::new(eve_db::WorldRepository::new_empty());
+    let clock = Arc::new(eve_db::clock::VirtualServerClock::with_fixed_base(
+        1_760_000_000,
+    ));
+    db.set_clock(clock.clone());
+    let db_opt = Some(db.clone());
+    let rng = crate::rng::MechanicRng::seeded(11);
+    let interval_atomic = AtomicU64::new(86_400);
+    let downtime_atomic = AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY);
+    let belt_id = 40_999_100_i64;
+
+    let seed_pair = || {
+        let mut bp = Ballpark::new(30_009_999);
+        let mut states = Vec::new();
+        let mut asteroids = HashMap::new();
+        let mut templates = HashMap::new();
+        for (aid, x) in [(8101_i64, 100.0_f64), (8102_i64, 250.0_f64)] {
+            let ast = AsteroidState {
+                asteroid_id: aid,
+                belt_id,
+                type_id: 1230,
+                initial_units: 100,
+                remaining_units: 100,
+                unit_volume: 0.1,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let ball = Ball {
+                id: aid,
+                type_id: 1230,
+                position: DVec3::new(x, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 1.0e8,
+                radius: 80.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Rigid,
+            };
+            bp.add_ball(ball.clone());
+            ensure_default_slim_meta(&mut bp, &ball, &sde_opt);
+            asteroids.insert(aid, ast.clone());
+            templates.insert(aid, (ast.clone(), ball));
+            states.push(ast);
+        }
+        (bp, states, asteroids, templates)
+    };
+
+    // 1. Deplete belt via handle_mine_asteroid -> persists `belt_respawn_due_unix` in DB.
+    let (mut bp1, states1, _, mut templates1) = seed_pair();
+    let mut asteroids1 = HashMap::new();
+    let _ = reconcile_spawned_belt_asteroids(
+        &mut bp1,
+        30_009_999,
+        states1,
+        &mut asteroids1,
+        &mut templates1,
+        &db_opt,
+        86_400,
+        DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    );
+    for aid in [8101_i64, 8102_i64] {
+        let ext = handle_mine_asteroid(
+            30_009_999,
+            aid,
+            100,
+            0.0,
+            true,
+            &mut bp1,
+            &mut asteroids1,
+            &rng,
+            &db_opt,
+            &interval_atomic,
+            &downtime_atomic,
+        )
+        .expect("mine to zero");
+        assert!(ext.depleted);
+    }
+    let persisted_due = db
+        .with_snapshot(|s| s.mining_and_ess_state.belt_respawn_due_unix.get(&belt_id).copied())
+        .expect("empty belt must persist respawn due timestamp");
+    assert!(persisted_due > clock.now_unix_secs());
+
+    // 2. Simulate actor reload/restart BEFORE downtime -> stays empty and preserves `persisted_due`!
+    clock.advance_secs(60);
+    let (mut bp2, states2, mut asteroids2, mut templates2) = seed_pair();
+    let _ = reconcile_spawned_belt_asteroids(
+        &mut bp2,
+        30_009_999,
+        states2,
+        &mut asteroids2,
+        &mut templates2,
+        &db_opt,
+        86_400,
+        DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    );
+    assert!(asteroids2[&8101].depleted);
+    assert_eq!(asteroids2[&8101].respawn_at_tick, Some(persisted_due));
+    assert!(!bp2.balls.contains_key(&8101));
+    assert_eq!(
+        db.with_snapshot(|s| s.mining_and_ess_state.belt_respawn_due_unix.get(&belt_id).copied()),
+        Some(persisted_due)
+    );
+
+    // 3. Simulate restart AFTER downtime (`now_unix >= persisted_due`) -> immediately restores belt and clears DB entry!
+    let jump = persisted_due.saturating_sub(clock.now_unix_secs()) + 1;
+    clock.advance_secs(jump);
+    let (mut bp3, states3, mut asteroids3, mut templates3) = seed_pair();
+    let out3 = reconcile_spawned_belt_asteroids(
+        &mut bp3,
+        30_009_999,
+        states3,
+        &mut asteroids3,
+        &mut templates3,
+        &db_opt,
+        86_400,
+        DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
+    );
+    assert_eq!(out3.len(), 2);
+    assert_eq!(asteroids3[&8101].remaining_units, 100);
+    assert!(!asteroids3[&8101].depleted);
+    assert_eq!(asteroids3[&8101].respawn_at_tick, None);
+    assert!(bp3.balls.contains_key(&8101));
+    assert!(bp3.balls.contains_key(&8102));
+    db.with_snapshot(|s| {
+        assert_eq!(s.asteroids[&8101].quantity, 100);
+        assert_eq!(s.asteroids[&8102].quantity, 100);
+        assert!(!s.mining_and_ess_state.belt_respawn_due_unix.contains_key(&belt_id));
+    });
+
+    // 4. Deplete again, then trigger downtime helper -> clears `belt_respawn_due_unix` as well.
+    for aid in [8101_i64, 8102_i64] {
+        handle_mine_asteroid(
+            30_009_999,
+            aid,
+            100,
+            0.0,
+            true,
+            &mut bp3,
+            &mut asteroids3,
+            &rng,
+            &db_opt,
+            &interval_atomic,
+            &downtime_atomic,
+        )
+        .expect("mine again");
+    }
+    assert!(db.with_snapshot(|s| s
+        .mining_and_ess_state
+        .belt_respawn_due_unix
+        .contains_key(&belt_id)));
+    let restored = respawn_depleted_belts_on_downtime_inner(
+        &mut bp3,
+        &mut asteroids3,
+        &templates3,
+        &sde_opt,
+        &db_opt,
+    );
+    assert_eq!(restored, 2);
+    assert!(!db.with_snapshot(|s| s
+        .mining_and_ess_state
+        .belt_respawn_due_unix
+        .contains_key(&belt_id)));
 }

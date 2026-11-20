@@ -268,6 +268,12 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
             },
         );
         snap.fw_runtime.pending_downtime_captures.insert(30_045_307, 500_004);
+        snap.mining_and_ess_state
+            .belt_respawn_due_unix
+            .insert(40_000_001, dt_base + 86_400);
+        snap.mining_and_ess_state
+            .belt_respawn_due_unix
+            .insert(40_000_002, dt_base + 86_400);
     });
 
     let report = execute_daily_maintenance_jobs(&ctx);
@@ -304,6 +310,16 @@ fn daily_maintenance_jobs_asteroids_market_ohlcv_contracts_sov_ess_and_declines(
             .mining_and_ess_state
             .ess_reserve_pulses
             .contains_key(&30_004_760));
+        assert!(!snap
+            .mining_and_ess_state
+            .belt_respawn_due_unix
+            .contains_key(&40_000_001));
+        assert_eq!(
+            snap.mining_and_ess_state
+                .belt_respawn_due_unix
+                .get(&40_000_002),
+            Some(&(dt_base + 86_400))
+        );
         assert!(!snap.last_mission_decline_times.contains_key(&90_000_001));
         assert!(snap.last_mission_decline_times.contains_key(&90_000_002));
         assert_eq!(snap.char_lp_logs[&90_000_001].len(), 500);
