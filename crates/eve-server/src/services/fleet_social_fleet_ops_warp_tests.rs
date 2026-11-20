@@ -823,3 +823,412 @@ async fn fleet_warp_tracks_members_in_active_warps_preserves_mid_tunnel_update_s
     assert!(!ctx.pending_warp_finished.lock().unwrap().contains(&100_000_002));
 }
 
+#[tokio::test]
+async fn fleet_warp_enforces_gated_dungeon_mjd_crimewatch_cloak_and_tourney_restrictions() {
+    let ctx = test_ctx_with_clock(1_800_001_000);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let kw = HashMap::new();
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    // 1. Deadspace gated room target blocks FleetWarp with NaturalPhenomenaDisruptingWarp, and
+    //    ungated interior room (`r_idx > 0`, `r.gated == false`) blocks with WarpBlockedByDeadspacePocket.
+    let dungeon_base = [2_000_000_000.0_f64, 0.0, 0.0];
+    let rooms_py = PyRep::List(vec![
+        PyRep::keyval([("roomName", PyRep::String("Entry".into()))]),
+        PyRep::keyval([("roomName", PyRep::String("Deep Chamber".into()))]),
+    ]);
+    let mut d_kw = HashMap::new();
+    d_kw.insert("solarSystemID".into(), PyRep::Integer(i64::from(sys_id)));
+    d_kw.insert(
+        "dungeonID".into(),
+        PyRep::Integer(i64::from(ctx.sde.dungeons.keys().next().copied().unwrap_or(2001))),
+    );
+    d_kw.insert("dungeonName".into(), PyRep::String("Fleet Gate Test".into()));
+    d_kw.insert("hasEntryGate".into(), PyRep::Bool(true));
+    d_kw.insert(
+        "position".into(),
+        PyRep::List(vec![
+            PyRep::Real(dungeon_base[0]),
+            PyRep::Real(dungeon_base[1]),
+            PyRep::Real(dungeon_base[2]),
+        ]),
+    );
+    d_kw.insert("rooms".into(), rooms_py);
+    let _ = crate::services::pve_dungeon_runtime_rpc::spawn_dungeon_instance(
+        &ctx,
+        90_000_001,
+        Some(sys_id),
+        &[],
+        &d_kw,
+    )
+    .await
+    .expect("spawn gated dungeon");
+
+    let ds_err = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dungeon_base[0] + 500_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(ds_err.code, "NaturalPhenomenaDisruptingWarp");
+
+    crate::services::pve_dungeon_runtime::with_dungeon_runtime_store(&ctx, |store| {
+        for inst in store.instances.values_mut() {
+            for r in &mut inst.rooms {
+                r.gated = false;
+            }
+        }
+    });
+
+    let gated_err = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dungeon_base[0] + 500_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(gated_err.code, "WarpBlockedByDeadspacePocket");
+
+    // 2. Per-member MJD spool, high-sec criminal timer, and DB non-covert cloak skip only those members.
+    sys.modify_combat_state(100_000_002, |cs| {
+        cs.mjfg_spool_remaining_s = 5.0;
+    })
+    .await
+    .unwrap();
+    {
+        let now = ctx.now_unix();
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(90_000_003).criminal_flag_until_unix = now + 900;
+    }
+    let cloak_mod_id = 911_370_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            cloak_mod_id,
+            eve_db::InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: 11370,
+                owner_id: 90_000_004,
+                location_id: 100_000_004,
+                flag: eve_db::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_active_states.insert(cloak_mod_id);
+    });
+
+    let open_dest = DVec3::new(10_000_000_000.0, 0.0, 0.0);
+    let partial_res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(open_dest.x),
+            PyRep::Real(open_dest.y),
+            PyRep::Real(open_dest.z),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(partial_kv) = partial_res else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(partial_kv.get("warpCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(
+        partial_kv.get("warpedMemberIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(90_000_001)]))
+    );
+
+    // 3. Covert Ops cloak (even with stale CombatState.is_covert_cloak = false) and gate cloak still warp.
+    sys.modify_combat_state(100_000_002, |cs| {
+        cs.mjfg_spool_remaining_s = 0.0;
+    })
+    .await
+    .unwrap();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(90_000_003).criminal_flag_until_unix = 0;
+    }
+    sys.modify_combat_state(100_000_003, |cs| {
+        cs.gate_cloak_remaining_ticks = 30;
+        cs.is_cloaked = true;
+    })
+    .await
+    .unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&cloak_mod_id).unwrap().type_id = 11578;
+    });
+    sys.modify_combat_state(100_000_004, |cs| {
+        cs.is_cloaked = true;
+        cs.is_covert_cloak = false;
+    })
+    .await
+    .unwrap();
+
+    let open_dest_2 = DVec3::new(12_000_000_000.0, 0.0, 0.0);
+    let covert_res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(open_dest_2.x),
+            PyRep::Real(open_dest_2.y),
+            PyRep::Real(open_dest_2.z),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(covert_kv) = covert_res else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(covert_kv.get("warpCount").and_then(|v| v.as_i64()), Some(4));
+    let cs4 = sys.get_combat_state(100_000_004).await.unwrap().unwrap();
+    assert!(cs4.is_covert_cloak);
+    let cs3 = sys.get_combat_state(100_000_003).await.unwrap().unwrap();
+    assert_eq!(cs3.gate_cloak_remaining_ticks, 0);
+
+    // 4. Tourney warp restriction rejects FleetWarp when FC is restricted, and skips restricted wingmates.
+    let ref_cid = 90_000_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters[&90_000_001].clone();
+        let mut gm_ch = base;
+        gm_ch.character_id = ref_cid;
+        gm_ch.name = "TourneyRef".into();
+        gm_ch.solar_system_id = sys_id;
+        snap.characters.insert(ref_cid, gm_ch);
+    });
+    let mut gm = SessionState::new(99);
+    gm.user_id = Some(1);
+    gm.character_id = Some(ref_cid);
+    gm.solar_system_id = Some(sys_id);
+    gm.role = eve_db::service_roles::ROLE_GMH | eve_db::service_roles::ROLE_ADMIN;
+
+    let match_id = 7_001_i64;
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm,
+        "tourneyMgr",
+        "CreateMatch",
+        &[
+            PyRep::Integer(1),
+            PyRep::Integer(match_id),
+            PyRep::Integer(50),
+            PyRep::Integer(600),
+            PyRep::Integer(120),
+            PyRep::Integer(0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("CreateMatch");
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm,
+        "tourneyMgr",
+        "AddPlayer",
+        &[PyRep::Integer(match_id), PyRep::Integer(0), PyRep::Integer(90_000_002)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("AddPlayer red wingmate");
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm,
+        "tourneyMgr",
+        "AddPlayer",
+        &[PyRep::Integer(match_id), PyRep::Integer(1), PyRep::Integer(90_000_005)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("AddPlayer blue");
+    crate::services::tourney_service::handle(
+        &ctx,
+        &mut gm,
+        "tourneyMgr",
+        "StartCountdown",
+        &[PyRep::Integer(match_id), PyRep::Integer(60)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("StartCountdown");
+
+    let wing_tourney_res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(14_000_000_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(wt_kv) = wing_tourney_res else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(wt_kv.get("warpCount").and_then(|v| v.as_i64()), Some(3));
+    if let Some(PyRep::List(ids)) = wt_kv.get("warpedMemberIDs") {
+        assert!(!ids.contains(&PyRep::Integer(90_000_002)));
+    } else {
+        panic!("expected warpedMemberIDs list");
+    }
+
+    // FC restricted inside a tourney arena rejects FleetWarp directly.
+    let mut wing_fc_sess = SessionState::new(98);
+    wing_fc_sess.user_id = Some(90_000_002);
+    wing_fc_sess.character_id = Some(90_000_002);
+    wing_fc_sess.solar_system_id = Some(sys_id);
+    wing_fc_sess.ship_id = Some(100_000_002);
+    wing_fc_sess.fleet_id = Some(_fleet_id);
+    let fc_tourney_err = handle_fleet_ops(
+        &ctx,
+        &mut wing_fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(15_000_000_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(fc_tourney_err.code, "WarpRestrictedInTourney");
+}
+
+#[tokio::test]
+async fn fleet_warp_enforces_capacitor_short_warp_clamp_and_pilot_warp_speed() {
+    let ctx = test_ctx_with_clock(1_800_001_100);
+    let (_fleet_id, mut fc_sess) = seed_multi_member_fleet(&ctx).await;
+    let sys_id = 30_000_142_u32;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let kw = HashMap::new();
+
+    // Wingmate 90_000_003 (100_000_003) has 0 GJ capacitor -> skipped.
+    sys.set_capacitor(100_000_003, 0.0).await.unwrap();
+
+    // Wingmate 90_000_004 (100_000_004, type 590, mass 1_000_000) has cap for 500 km only -> short warp clamp.
+    let wcn_590 = ctx
+        .sde
+        .types
+        .get(&590)
+        .and_then(|t| t.default_attributes.get(&153).copied())
+        .unwrap_or(1.24e-6);
+    let cap_per_m_590 = (wcn_590 * 1_000_000.0) / crate::services::space_destiny::AU_IN_METERS;
+    sys.set_capacitor(100_000_004, cap_per_m_590 * 500_000.0)
+        .await
+        .unwrap();
+
+    let cs1_before = sys.get_combat_state(100_000_001).await.unwrap().unwrap();
+    let dest = DVec3::new(100_000_000_000.0, 0.0, 0.0);
+    let res = handle_fleet_ops(
+        &ctx,
+        &mut fc_sess,
+        "fleetObjectHandler",
+        "FleetWarp",
+        &[
+            PyRep::Real(dest.x),
+            PyRep::Real(dest.y),
+            PyRep::Real(dest.z),
+            PyRep::Real(0.0),
+        ],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let PyRep::KeyVal(kv) = res else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(kv.get("warpCount").and_then(|v| v.as_i64()), Some(3));
+    if let Some(PyRep::List(ids)) = kv.get("warpedMemberIDs") {
+        assert!(!ids.contains(&PyRep::Integer(90_000_003)));
+        assert!(ids.contains(&PyRep::Integer(90_000_001)));
+        assert!(ids.contains(&PyRep::Integer(90_000_002)));
+        assert!(ids.contains(&PyRep::Integer(90_000_004)));
+    } else {
+        panic!("expected warpedMemberIDs");
+    }
+
+    // 90_000_001 flies Rifter (587) -> uses pilot warp speed != hardcoded 3.0 AU/s and deducts capacitor.
+    let expected_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+        &ctx,
+        90_000_001,
+        sys_id,
+        587,
+    );
+    assert!(expected_speed > 3.0, "Rifter warp speed should exceed 3.0 AU/s");
+    let (_, b1) = sys.get_ball_snapshot(100_000_001).await.unwrap().unwrap();
+    match b1.mode {
+        eve_destiny::MovementMode::Warp {
+            warp_speed_au_s, ..
+        } => {
+            assert!((warp_speed_au_s - expected_speed).abs() < 1e-6);
+        }
+        other => panic!("expected Warp mode for Rifter, got {other:?}"),
+    }
+    let cs1_after = sys.get_combat_state(100_000_001).await.unwrap().unwrap();
+    assert!(
+        cs1_after.capacitor < cs1_after.max_capacitor
+            && (cs1_after.capacitor < cs1_before.capacitor
+                || cs1_after.max_capacitor > cs1_before.max_capacitor),
+        "capacitor must be deducted (and SDE max_cap repaired if synthetic default)"
+    );
+
+    // 90_000_004 clamped short warp >= 150 km and drained remaining cap to 0.0.
+    let (_, b4) = sys.get_ball_snapshot(100_000_004).await.unwrap().unwrap();
+    match b4.mode {
+        eve_destiny::MovementMode::Warp { destination, .. } => {
+            let clamped_dist = b4.position.distance(destination);
+            assert!(
+                (150_000.0..=1_000_000.0).contains(&clamped_dist),
+                "expected ~500 km clamped warp, got {clamped_dist}"
+            );
+        }
+        other => panic!("expected clamped Warp mode, got {other:?}"),
+    }
+    let cs4_after = sys.get_combat_state(100_000_004).await.unwrap().unwrap();
+    assert!(cs4_after.capacitor.abs() < 1e-9);
+}
+
