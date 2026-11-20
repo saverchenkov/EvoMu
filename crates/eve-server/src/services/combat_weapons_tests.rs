@@ -4403,4 +4403,264 @@ async fn bf3_bf4_rapid_launchers_fw_upwell_tether_and_location_invuln_deferral()
     }
 }
 
+#[tokio::test]
+async fn smartbomb_handle_module_cycles_commit_emits_single_invuln_cancelled_1441() {
+    use crate::services::combat_crimewatch::{
+        activate_aoe_or_defender_module_with_cap, activate_aoe_or_defender_module_with_options,
+        with_mut_combat_runtime, SafetyLevel,
+    };
+    use crate::services::inventory_fitting::fitting_module_cycles::handle_module_cycles;
+    use crate::services::space_destiny::{
+        grant_location_change_invulnerability, is_location_change_invulnerable,
+    };
+
+    let (mut ctx, mut session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    let kwargs = HashMap::new();
+
+    let mut sde = (*ctx.sde).clone();
+    if let Some(hull) = sde.types.get_mut(&23_915) {
+        hull.default_attributes.insert(14, 8.0); // hiSlots
+        hull.default_attributes.insert(11, 1_000_000.0); // powerOutput
+        hull.default_attributes.insert(48, 10_000.0); // cpuOutput
+        hull.default_attributes.insert(482, 500.0); // capacitorCapacity
+    }
+    let sb_tid = 72_001_u32;
+    let mut sb_t = make_fighter_type(
+        sb_tid,
+        72,
+        7,
+        5.0,
+        vec![(6, 25.0), (73, 5_000.0), (99, 5_000.0), (114, 100.0)],
+    );
+    sb_t.effect_ids = vec![12, 16];
+    sde.types.insert(sb_tid, sb_t);
+    ctx.sde = std::sync::Arc::new(sde);
+    ctx.db
+        .acquire_online_lock(
+            session.user_id.unwrap_or(1),
+            999_441,
+            Some(char_id),
+            true,
+            ctx.now_unix(),
+        )
+        .unwrap();
+
+    let sb_id = 846_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        // Ensure zero Upwell structures in `sys_id` so `is_upwell_weapon_or_aoe == false`
+        // and `handle_module_cycles` takes the local cycle-commit path (`#1441`).
+        snap.structures.retain(|_, st| st.solar_system_id != sys_id);
+        snap.items.insert(
+            sb_id,
+            make_fighter_item(sb_id, sb_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1),
+        );
+        snap.module_online_states.insert(sb_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 23_915,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState::default(),
+        )
+        .await
+        .unwrap();
+
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.modified_system_securities.insert(sys_id, 0.9);
+    });
+
+    let reset_ship_state = |cloaked: bool, gate_ticks: u32, undock_ticks: u32| {
+        let sys_c = sys_handle.clone();
+        let ctx_c = ctx.clone();
+        async move {
+            let _ = sys_c.remove_module_cycle(ship_id, sb_id).await;
+            ctx_c.db.with_mut_snapshot(|snap| {
+                snap.module_active_states.remove(&sb_id);
+            });
+            ctx_c.invalidate_ship_fitting(ship_id);
+            ctx_c.module_reactivation_cooldowns.write().unwrap().clear();
+            sys_c
+                .set_combat_state(
+                    ship_id,
+                    CombatState {
+                        shield_hp: 50_000.0,
+                        max_shield_hp: 50_000.0,
+                        armor_hp: 50_000.0,
+                        max_armor_hp: 50_000.0,
+                        structure_hp: 50_000.0,
+                        max_structure_hp: 50_000.0,
+                        capacitor: 500.0,
+                        max_capacitor: 500.0,
+                        signature_radius: 100.0,
+                        base_signature_radius: Some(100.0),
+                        is_tethered: false,
+                        is_cloaked: cloaked,
+                        gate_cloak_remaining_ticks: gate_ticks,
+                        undock_invulnerable_remaining_ticks: undock_ticks,
+                        ..CombatState::default()
+                    },
+                )
+                .await
+                .unwrap();
+            grant_location_change_invulnerability(&ctx_c, char_id, ctx_c.now_unix() + 60);
+            let _ = ctx_c.drain_notifications_for_char(char_id);
+        }
+    };
+
+    // 1. Rejected Smartbomb via `handle_module_cycles` (Green safety in highsec) preserves all cloak/invuln flags and emits zero cancellation notifications.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Green);
+    });
+    reset_ship_state(true, 30, 15).await;
+    let err = handle_module_cycles(
+        &ctx,
+        &mut session,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(sb_id)],
+        &kwargs,
+    )
+    .await
+    .unwrap()
+    .expect_err("Green safety highsec Smartbomb via handle_module_cycles must reject");
+    assert_eq!(err.code, "CantDoInCurrentSafetyLevel");
+    let cs_rej = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_rej.is_cloaked);
+    assert_eq!(cs_rej.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_rej.undock_invulnerable_remaining_ticks, 15);
+    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    // 2. Core #1441 regression: Smartbomb (`72`) commit via `handle_module_cycles` in a system
+    //    without Upwell structures with BOTH `undock_invulnerable_remaining_ticks > 0` and
+    //    `location_change_invuln` active (both with and without gate cloak) must emit exactly ONE
+    //    `OnInvulnCancelled`, clear both invuln flags, and break gate cloak when present.
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, SafetyLevel::Red);
+    });
+    for (cloaked, gate_ticks, label) in [
+        (true, 30_u32, "gate-cloaked + undock_invuln + location_change_invuln"),
+        (false, 0_u32, "non-gate undock_invuln + location_change_invuln"),
+    ] {
+        reset_ship_state(cloaked, gate_ticks, 15).await;
+        let ok = handle_module_cycles(
+            &ctx,
+            &mut session,
+            None,
+            "dogmaIM",
+            "Activate",
+            &[PyRep::Integer(sb_id)],
+            &kwargs,
+        )
+        .await
+        .unwrap()
+        .unwrap_or_else(|e| panic!("Smartbomb commit via handle_module_cycles ({label}) must succeed, got {e:?}"));
+        assert_eq!(ok.dict_get("moduleID"), Some(&PyRep::Integer(sb_id)), "{label}");
+        assert!(sys_handle.has_module_cycle(ship_id, sb_id).await, "{label}: cycle must be registered locally");
+        let cs_ok = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!(!cs_ok.is_cloaked, "{label}: must uncloak");
+        assert_eq!(cs_ok.gate_cloak_remaining_ticks, 0, "{label}: must clear gate cloak");
+        assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0, "{label}: must clear undock invuln");
+        assert!(
+            !is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()),
+            "{label}: must clear location_change_invuln"
+        );
+        let notes = ctx.drain_notifications_for_char(char_id);
+        assert_eq!(
+            notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(),
+            1,
+            "{label}: must emit exactly one OnInvulnCancelled"
+        );
+        assert_eq!(
+            notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(),
+            usize::from(gate_ticks > 0),
+            "{label}: OnJumpCloakCancelled count"
+        );
+    }
+
+    // 3. Direct `activate_aoe_or_defender_module_with_cap` caller still owns cloak/invuln break
+    //    and emits a single `OnInvulnCancelled` + `OnJumpCloakCancelled`.
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    let sb_fm = fit.modules[&sb_id].clone();
+    let sb_type = ctx.sde.types[&sb_tid].clone();
+    let attacker_ball = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+
+    reset_ship_state(true, 30, 15).await;
+    activate_aoe_or_defender_module_with_cap(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        0.9,
+        ctx.now_unix(),
+        sb_id,
+        &sb_fm,
+        &sb_type,
+        &attacker_ball,
+        None,
+        &kwargs,
+        true,
+    )
+    .await
+    .unwrap()
+    .expect("direct activate_aoe_or_defender_module_with_cap must succeed");
+    let cs_direct = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_direct.is_cloaked);
+    assert_eq!(cs_direct.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs_direct.undock_invulnerable_remaining_ticks, 0);
+    assert!(!is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    let direct_notes = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(direct_notes.iter().filter(|n| n.event == "OnJumpCloakCancelled").count(), 1);
+    assert_eq!(direct_notes.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+
+    // 4. Explicit `activate_aoe_or_defender_module_with_options(..., false, false)` defers cloak/invuln
+    //    break to the outer cycle commit owner (`fitting_module_cycles`).
+    reset_ship_state(true, 30, 15).await;
+    activate_aoe_or_defender_module_with_options(
+        &ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        0.9,
+        ctx.now_unix(),
+        sb_id,
+        &sb_fm,
+        &sb_type,
+        &attacker_ball,
+        None,
+        &kwargs,
+        false,
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("deferred-break activate_aoe_or_defender_module_with_options must succeed");
+    let cs_deferred = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_deferred.is_cloaked);
+    assert_eq!(cs_deferred.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_deferred.undock_invulnerable_remaining_ticks, 15);
+    assert!(is_location_change_invulnerable(&ctx, char_id, ctx.now_unix()));
+    assert!(!ctx
+        .drain_notifications_for_char(char_id)
+        .iter()
+        .any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+}
+
 
