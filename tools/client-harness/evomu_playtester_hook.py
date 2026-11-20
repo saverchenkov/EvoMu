@@ -3575,6 +3575,81 @@ def _resolve_ball_surface_dist(bp, sid, bid, ball=None, now_sim=None, ego_ball=N
     return 0.0
 
 
+_STARGATE_SEC_SUFFIX_RE = re.compile(r"\s+-?[01]\.\d$")
+_STARGATE_PAREN_RE = re.compile(r"\(([^()]+)\)")
+
+
+def _extract_stargate_dest(slim, bname):
+    """Extract lowercase destination name(s) and destination solarSystemID string for a stargate."""
+    dest_names = []
+    dst_sys_id = ""
+    bname_s = _to_utf8(bname or "").strip()
+    m = _STARGATE_PAREN_RE.search(bname_s)
+    if m:
+        inner = m.group(1).strip().lower()
+        if inner and inner not in dest_names:
+            dest_names.append(inner)
+    try:
+        cfg_g = getattr(__builtin__, "cfg", None)
+        jumps_l = getattr(slim, "jumps", None) if slim is not None else None
+        if jumps_l and len(jumps_l) > 0:
+            dst_loc = getattr(jumps_l[0], "locationID", None) or getattr(jumps_l[0], "toCelestialID", None)
+            if dst_loc:
+                dst_sys_id = str(int(dst_loc))
+                if cfg_g is not None and hasattr(cfg_g, "evelocations"):
+                    dloc_o = cfg_g.evelocations.GetIfExists(int(dst_loc))
+                    dname = (getattr(dloc_o, "name", None) or getattr(dloc_o, "locationName", "")) if dloc_o is not None else ""
+                    dname_lc = _to_utf8(dname or "").strip().lower()
+                    if dname_lc and dname_lc not in dest_names:
+                        dest_names.append(dname_lc)
+    except Exception:
+        pass
+    return dest_names, dst_sys_id
+
+
+def _match_stargate_target_tier(slim, gname, q_lc, raw_lc=""):
+    """Rank a stargate candidate against query text without matching substrings of the literal 'Stargate' prefix."""
+    gname_lc = _to_utf8(gname or "").strip().lower()
+    q_lc = _to_utf8(q_lc or "").strip().lower()
+    raw_lc = _to_utf8(raw_lc or "").strip().lower()
+    if not q_lc:
+        return None
+    if gname_lc and (gname_lc == q_lc or (raw_lc and gname_lc == raw_lc)):
+        return 0
+
+    dest_names, dst_sys_id = _extract_stargate_dest(slim, gname_lc)
+    q_cands = [q_lc]
+    q_no_sec = _STARGATE_SEC_SUFFIX_RE.sub("", q_lc).strip()
+    if q_no_sec and q_no_sec not in q_cands:
+        q_cands.append(q_no_sec)
+    exact_only_dest = q_lc.startswith("stargate (") and q_lc.endswith(")")
+    if q_lc.startswith("stargate ("):
+        inner_q = q_lc[len("stargate ("):].rstrip(")").strip()
+        if inner_q and inner_q not in q_cands:
+            q_cands.append(inner_q)
+        # An explicit 'stargate (<dest>...)' query should match <dest>, not the generic prefix or wrong destinations.
+        q_cands = [c for c in q_cands if not c.startswith("stargate (")]
+
+    for idx, qc in enumerate(q_cands):
+        if dst_sys_id and qc == dst_sys_id:
+            return 0 if idx == 0 else 1
+        if qc and any(d == qc for d in dest_names):
+            return 0 if idx == 0 else 1
+    if exact_only_dest:
+        return None
+    for qc in q_cands:
+        if qc and any(d.startswith(qc) for d in dest_names):
+            return 2
+    for qc in q_cands:
+        if qc and any(qc in d for d in dest_names):
+            return 3
+    if not dest_names and gname_lc and (q_lc in gname_lc or (raw_lc and raw_lc in gname_lc)):
+        return 4
+    if ("stargate" in q_lc or "gate" in q_lc) and not q_lc.startswith("stargate (") and gname_lc and q_lc in gname_lc:
+        return 4
+    return None
+
+
 def _resolve_space_command_item_id(bp, sid, sub, query_target):
     q_raw = _to_utf8(query_target or "").strip()
     slims = getattr(bp, "slimItems", {}) or {}
@@ -3612,9 +3687,16 @@ def _resolve_space_command_item_id(bp, sid, sub, query_target):
         bname = _resolve_ball_name(slim, bid)
         bname_lc = bname.lower()
         btype = str(int(getattr(slim, "typeID", 0) or 0))
+        bgroup = int(getattr(slim, "groupID", 0) or 0)
         bcat = int(getattr(slim, "categoryID", 0) or 0)
         tier = None
-        if bname_lc and (bname_lc == q_lc or bname_lc == raw_lc):
+        if bgroup == 10 or bname_lc.startswith("stargate ("):
+            st_tier = _match_stargate_target_tier(slim, bname, q_lc, raw_lc)
+            if st_tier is not None:
+                tier = 0 if st_tier <= 1 else st_tier
+            elif q_type_str and btype == q_type_str:
+                tier = 1
+        elif bname_lc and (bname_lc == q_lc or bname_lc == raw_lc):
             tier = 0
         elif q_type_str and btype == q_type_str:
             tier = 1
@@ -5480,6 +5562,8 @@ def _execute_action(sm, action):
         target = "align_to" if raw_atype in ("align", "align_to") else raw_atype
         if raw_target.isdigit():
             action = dict(action)
+            if not action.get("item_id"):
+                action["_inferred_item_id"] = True
             action["item_id"] = int(raw_target)
     elif raw_atype in ("cleanup_windows", "cleanup_utility_windows"):
         atype = "cleanup_utility_windows"
@@ -7025,30 +7109,44 @@ def _execute_action(sm, action):
                             or getattr(sess_j, "solarsystemid", None)
                         )
                         gate_id = int(item_id or 0)
+                        slims_j = getattr(bp, "slimItems", {}) if bp is not None else {}
+                        if (
+                            gate_id
+                            and action.get("_inferred_item_id")
+                            and isinstance(slims_j, dict)
+                            and slims_j
+                            and gate_id not in slims_j
+                        ):
+                            gate_id = 0
                         if not gate_id and bp is not None:
                             q_low = _to_utf8(action.get("target") or "").strip().lower()
-                            slims_j = getattr(bp, "slimItems", {}) or {}
+                            slims_j = slims_j or {}
+                            is_generic_q = q_low in ("", "stargate", "gate", "nearest", "any")
                             cands = []
+                            unmatched = []
                             for bid, slim in slims_j.items():
                                 if int(bid) == sid_j or int(getattr(slim, "groupID", 0) or 0) != 10:
                                     continue
                                 gname = _safe_str(_resolve_ball_name(slim, bid), 64)
                                 b_j = bp.GetBall(bid)
-                                bdist = float(getattr(b_j, "surfaceDist", 0.0) or 0.0) if b_j is not None else 0.0
-                                if q_low and q_low in gname.lower():
-                                    cands.insert(0, (0, bdist, int(bid), gname))
+                                bdist = _resolve_ball_surface_dist(bp, sid_j, bid, ball=b_j)
+                                if is_generic_q:
+                                    cands.append((0, bdist, int(bid), gname))
                                 else:
-                                    cands.append((1, bdist, int(bid), gname))
+                                    st_tier = _match_stargate_target_tier(slim, gname, q_low)
+                                    if st_tier is not None:
+                                        cands.append((st_tier, bdist, int(bid), gname))
+                                    else:
+                                        unmatched.append((bdist, gname))
                             if cands:
-                                cands.sort(key=lambda t: (t[0], t[1]))
-                                is_generic_q = q_low in ("", "stargate", "gate", "nearest", "any")
-                                if cands[0][0] == 0 or is_generic_q:
-                                    gate_id = cands[0][2]
-                                    result["resolved_gate_name"] = cands[0][3]
-                                else:
-                                    avail = ", ".join(t[3] for t in cands[:6])
-                                    result["ok"] = False
-                                    result["error"] = "no Stargate matching %r (available: %s)" % (action.get("target"), avail)
+                                cands.sort(key=lambda t: (t[0], t[1], t[2]))
+                                gate_id = cands[0][2]
+                                result["resolved_gate_name"] = cands[0][3]
+                            elif unmatched:
+                                unmatched.sort(key=lambda t: t[0])
+                                avail = ", ".join(t[1] for t in unmatched[:6])
+                                result["ok"] = False
+                                result["error"] = "no Stargate matching %r (available: %s)" % (action.get("target"), avail)
                         if not gate_id and not result.get("error"):
                             result["ok"] = False
                             result["error"] = "no Stargate (groupID=10) found in solar system ballpark"
@@ -7346,6 +7444,7 @@ def _execute_action(sm, action):
                     # Try OverviewWindow visible entries first
                     reg_ov = getattr(uicore, "registry", None) if uicore is not None else None
                     wins_ov = list(reg_ov.GetWindows() or []) if (reg_ov is not None and hasattr(reg_ov, "GetWindows")) else []
+                    best_ov = None
                     for ov_w in wins_ov:
                         if getattr(ov_w, "destroyed", False) or not _is_visible(ov_w):
                             continue
@@ -7362,23 +7461,35 @@ def _execute_action(sm, action):
                             if bid_nd is None or int(bid_nd) == sid_ov:
                                 continue
                             nm_nd = _strip_tags(_safe_str(getattr(nd, "label", "") or getattr(nd, "name", "") or _resolve_ball_name(slim_nd, bid_nd), 64))
+                            nm_nd_lc = nm_nd.lower()
                             gid_nd = int(getattr(slim_nd, "groupID", 0) or 0) if slim_nd is not None else 0
-                            matched_nd = (
-                                (req_iid and int(bid_nd) == req_iid)
-                                or (not q_low)
-                                or (q_low in nm_nd.lower())
+                            ov_tier = None
+                            if req_iid and int(bid_nd) == req_iid:
+                                ov_tier = 0
+                            elif not q_low:
+                                ov_tier = 1
+                            elif (gid_nd == 10 or nm_nd_lc.startswith("stargate (")) and q_low not in ("stargate", "gate", "celestial"):
+                                st_tier = _match_stargate_target_tier(slim_nd, nm_nd, q_low)
+                                if st_tier is not None:
+                                    ov_tier = st_tier
+                            elif nm_nd_lc == q_low:
+                                ov_tier = 0
+                            elif (
+                                (q_low in nm_nd_lc)
                                 or (q_low == "planet" and gid_nd == 7)
                                 or (q_low == "stargate" and gid_nd == 10)
                                 or (q_low == "station" and gid_nd == 15)
                                 or (q_low == "celestial" and gid_nd in (6, 7, 8, 10, 15))
-                            )
-                            if matched_nd:
-                                chosen_id = int(bid_nd)
-                                chosen_name = nm_nd
-                                chosen_node = (sc_ov, nd)
-                                break
-                        if chosen_id:
+                            ):
+                                ov_tier = 2
+                            if ov_tier is not None and (best_ov is None or ov_tier < best_ov[0]):
+                                best_ov = (ov_tier, int(bid_nd), nm_nd, (sc_ov, nd))
+                                if ov_tier == 0:
+                                    break
+                        if best_ov is not None and best_ov[0] == 0:
                             break
+                    if best_ov is not None:
+                        _, chosen_id, chosen_name, chosen_node = best_ov
                     if not chosen_id and bp_ov is not None:
                         chosen_id, r_err = _resolve_space_command_item_id(bp_ov, sid_ov, "approach", raw_target or "planet")
                         if r_err:
