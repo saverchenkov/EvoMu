@@ -588,11 +588,24 @@ impl BugIncidentBundle {
 }
 
 /// Dispatches asynchronous incident capture with a trailing log collection window.
+///
+/// Known benign CCP V24 client-only UI layout tracebacks are logged and skipped
+/// from `.evomu-bugs/queue/` persistence so they do not generate noisy GitHub issues,
+/// while preserving upstream RPC responses and session alert telemetry.
 pub fn schedule_incident_capture(
     mut bundle: BugIncidentBundle,
     queue_dir: Option<PathBuf>,
     trailing_duration: Option<Duration>,
 ) {
+    if is_benign_client_traceback(&bundle.stack_key, &bundle.trace) {
+        info!(
+            incident_id = %bundle.incident_id,
+            stack_hash = bundle.stack_hash,
+            "Suppressing known benign client UI traceback from bug report queue"
+        );
+        return;
+    }
+
     let qdir = queue_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_BUG_QUEUE_DIR));
     let trailing = trailing_duration.unwrap_or(DEFAULT_TRAILING_CAPTURE_DURATION);
     let incident_millis = bundle.timestamp_millis;
@@ -651,6 +664,400 @@ fn fnv1a_i64(input: &str) -> i64 {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash as i64
+}
+
+struct BenignClientTracebackRule {
+    file_stem: &'static str,
+    func_name: &'static str,
+    error_substr: &'static str,
+}
+
+const BENIGN_CLIENT_TRACEBACK_RULES: &[BenignClientTracebackRule] = &[
+    BenignClientTracebackRule {
+        file_stem: "marketbase",
+        func_name: "_OnResize",
+        error_substr: "'NoneType' object has no attribute 'max'",
+    },
+    BenignClientTracebackRule {
+        file_stem: "minimap",
+        func_name: "_ResizeSlider",
+        error_substr: "'MapSlider' object has no attribute 'minimumWidth'",
+    },
+];
+
+const CLIENT_FRAME_WRAPPER_STEMS: &[&str] = &[
+    "moniker",
+    "machonettransport",
+    "servicecallgpcs",
+    "gpcs",
+    "retry",
+    "__init__",
+    "evomu_site",
+    "evomu_playtester_hook",
+    "logmodule",
+    "log",
+    "bluepyimpl",
+];
+
+fn extract_python_file_stem(path: &str) -> Option<&str> {
+    let base = path.trim().rsplit(['/', '\\']).next()?.trim();
+    let dot = base.rfind('.')?;
+    let stem = &base[..dot];
+    let ext = &base[dot + 1..];
+    if stem.is_empty()
+        || stem
+            .bytes()
+            .any(|b| b.is_ascii_control() || matches!(b, b'<' | b'>' | b'"' | b'\''))
+    {
+        return None;
+    }
+    if ext.len() >= 2
+        && ext.is_char_boundary(2)
+        && ext[..2].eq_ignore_ascii_case("py")
+        && ext[2..].bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        Some(stem)
+    } else {
+        None
+    }
+}
+
+fn parse_frame_func_name(s: &str) -> Option<&str> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Accept synthetic Python frame names such as `<lambda>`, `<genexpr>`, `<listcomp>`, `<module>`.
+    if trimmed.starts_with('<') {
+        if let Some(close_idx) = trimmed.find('>') {
+            let inner = &trimmed[1..close_idx];
+            let tail = &trimmed[close_idx + 1..];
+            if !inner.is_empty()
+                && !inner.bytes().any(|b| b.is_ascii_whitespace() || b == b'<')
+                && tail.is_empty()
+            {
+                return Some(&trimmed[..=close_idx]);
+            }
+        }
+        return None;
+    }
+    if trimmed.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn is_valid_eve_frame_path(path: &str, has_pre: bool) -> bool {
+    let p = path.trim();
+    if p.is_empty() || p.contains("args=") || p.contains(['<', '>']) {
+        return false;
+    }
+    if has_pre {
+        return true;
+    }
+    if p.contains(['"', '\'', '=']) {
+        return false;
+    }
+    let bytes = p.as_bytes();
+    if p.starts_with('/') {
+        return !p.contains(':');
+    }
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return !p[2..].contains(':');
+    }
+    !p.bytes().any(|b| b.is_ascii_whitespace() || b == b':')
+}
+
+fn is_non_frame_header_line(line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "EXCEPTION END",
+        "EXCEPTION #",
+        "STACKTRACE #",
+        "Reported from:",
+        "Stackhash:",
+        "Thread Locals:",
+        "Common path prefix",
+        "CALLSTACK:",
+        "Thrown at:",
+        "Traced at:",
+        "Caught at:",
+        "Formatted exception info:",
+        "Traceback (most recent call last):",
+        "logmodule.LogException Traceback",
+    ];
+    PREFIXES.iter().any(|p| line.starts_with(p))
+}
+
+fn is_log_call_args_line(line: &str) -> bool {
+    let Some((prefix, _)) = line.split_once(" args=") else {
+        return false;
+    };
+    let head = prefix.trim_end();
+    let method = head.rsplit('.').next().unwrap_or(head);
+    matches!(
+        method,
+        "LogException" | "_LogException" | "LogTraceback" | "_LogTraceback"
+    ) && head
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+}
+
+fn is_exception_noise_line(line: &str) -> bool {
+    is_non_frame_header_line(line)
+        || is_log_call_args_line(line)
+        || matches!(line, "None" | "NoneType: None" | "{" | "}")
+}
+
+fn parse_traceback_frame_line(raw_line: &str) -> Option<(&str, &str)> {
+    let mut line = raw_line.trim();
+    let mut has_pre = false;
+    if let Some(stripped) = line.strip_prefix("<pre>") {
+        line = stripped.trim();
+        has_pre = true;
+    }
+    if let Some(stripped) = line.strip_suffix("</pre>") {
+        line = stripped.trim();
+    }
+    if line.is_empty() || is_non_frame_header_line(line) {
+        return None;
+    }
+
+    // Standard Python traceback frame: `File ".../minimap.py", line 111, in _ResizeSlider`
+    if let Some(after_file) = line.strip_prefix("File ") {
+        let trimmed = after_file.trim_start();
+        let quote = trimmed.as_bytes().first().copied()?;
+        if quote == b'"' || quote == b'\'' {
+            let inner = &trimmed[1..];
+            if let Some((path_part, after_quote)) = inner.split_once(quote as char) {
+                let stem = extract_python_file_stem(path_part)?;
+                let after_comma = after_quote.trim_start().strip_prefix(',')?.trim_start();
+                let after_line = after_comma.strip_prefix("line ")?.trim_start();
+                let (digits, func) = if let Some((digits, after_digits)) = after_line.split_once(',') {
+                    let after_in = after_digits.trim_start().strip_prefix("in ")?.trim_start();
+                    (digits.trim(), parse_frame_func_name(after_in)?)
+                } else {
+                    (after_line.trim(), "")
+                };
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                return Some((stem, func));
+            }
+        }
+        return None;
+    }
+
+    // EVE alert frame: `/path/marketbase.py(3718) _OnResize` (or `<pre>.../marketbase.py(3718) _OnResize</pre>`)
+    if let Some((before_paren, after_open)) = line.rsplit_once('(') {
+        if is_valid_eve_frame_path(before_paren, has_pre) {
+            if let Some(stem) = extract_python_file_stem(before_paren) {
+                if let Some((digits, after_close)) = after_open.split_once(')') {
+                    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                        let tail = after_close.trim();
+                        if tail.is_empty() {
+                            return Some((stem, ""));
+                        }
+                        if let Some(func) = parse_frame_func_name(tail) {
+                            return Some((stem, func));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Summary location frame: `marketbase.py:3718 in _OnResize`
+    if let Some((path_part, after_colon)) = line.rsplit_once(':') {
+        if is_valid_eve_frame_path(path_part, has_pre) {
+            if let Some(stem) = extract_python_file_stem(path_part) {
+                let digits_end = after_colon
+                    .bytes()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count();
+                if digits_end > 0 {
+                    let after_digits = &after_colon[digits_end..];
+                    if after_digits.is_empty() {
+                        return Some((stem, ""));
+                    }
+                    if after_digits.starts_with(char::is_whitespace) {
+                        if let Some(after_in) = after_digits.trim_start().strip_prefix("in ") {
+                            if let Some(func) = parse_frame_func_name(after_in) {
+                                return Some((stem, func));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn split_primary_and_callstack_lines(text: &str) -> (Vec<&str>, Vec<&str>) {
+    let mut primary = Vec::new();
+    let mut callstack = Vec::new();
+    let mut in_callstack = false;
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("Thread Locals:") || trimmed.starts_with("EXCEPTION END") {
+            break;
+        }
+        if trimmed == "CALLSTACK:" {
+            in_callstack = true;
+            continue;
+        }
+        if in_callstack {
+            callstack.push(trimmed);
+        } else {
+            primary.push(trimmed);
+        }
+    }
+    (primary, callstack)
+}
+
+fn extract_frames_from_lines<'a>(lines: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+    let mut frames = Vec::new();
+    let mut in_thrown = false;
+    for &line in lines {
+        if line.starts_with("Thrown at:") {
+            in_thrown = true;
+            continue;
+        }
+        if in_thrown
+            && !frames.is_empty()
+            && (line.starts_with("Traced at:")
+                || line.starts_with("Caught at:")
+                || line.starts_with("Common path prefix"))
+        {
+            break;
+        }
+        if let Some(frame) = parse_traceback_frame_line(line) {
+            frames.push(frame);
+        }
+    }
+    frames
+}
+
+fn extract_leaf_frame(text: &str) -> Option<(&str, &str)> {
+    let (primary, callstack) = split_primary_and_callstack_lines(text);
+    let mut frames = extract_frames_from_lines(&primary);
+    if frames.is_empty() && !callstack.is_empty() {
+        frames = extract_frames_from_lines(&callstack);
+    }
+    let last = *frames.last()?;
+    for &(stem, func) in frames.iter().rev() {
+        if !CLIENT_FRAME_WRAPPER_STEMS
+            .iter()
+            .any(|w| stem.eq_ignore_ascii_case(w))
+        {
+            return Some((stem, func));
+        }
+    }
+    Some(last)
+}
+
+fn split_exc_class_msg(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((cls, msg)) = trimmed.split_once(':') {
+        let cls = cls.trim();
+        let msg = msg.trim();
+        if cls.is_empty() {
+            None
+        } else {
+            Some((cls, msg))
+        }
+    } else {
+        Some((trimmed, ""))
+    }
+}
+
+fn extract_exception_from_lines<'a>(lines: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    for (idx, &line) in lines.iter().enumerate() {
+        if let Some(rest) = line.strip_prefix("Formatted exception info:") {
+            let mut rest = rest.trim();
+            if rest.is_empty() {
+                if let Some(&next_line) = lines.get(idx + 1) {
+                    if !is_exception_noise_line(next_line) {
+                        rest = next_line.trim();
+                    }
+                }
+            }
+            return if rest.is_empty() {
+                None
+            } else {
+                split_exc_class_msg(rest)
+            };
+        }
+    }
+
+    let mut candidate_lines: Vec<&str> = Vec::new();
+    let mut skip_next_code_line = false;
+    for &line in lines {
+        if parse_traceback_frame_line(line).is_some() {
+            skip_next_code_line = line.starts_with("File ");
+            continue;
+        }
+        if is_exception_noise_line(line) {
+            skip_next_code_line = false;
+            continue;
+        }
+        if skip_next_code_line && !line.contains(':') {
+            skip_next_code_line = false;
+            continue;
+        }
+        skip_next_code_line = false;
+        candidate_lines.push(line);
+    }
+
+    candidate_lines.last().copied().and_then(split_exc_class_msg)
+}
+
+fn extract_exception_summary(trace: &str) -> Option<(&str, &str)> {
+    let (primary, callstack) = split_primary_and_callstack_lines(trace);
+    extract_exception_from_lines(&primary)
+        .or_else(|| (!callstack.is_empty()).then(|| extract_exception_from_lines(&callstack))?)
+}
+
+fn contains_server_fault_marker(text: &str) -> bool {
+    text.contains("InternalError")
+        || text.contains("DatabasePersistenceError")
+        || text.contains("ServerException")
+        || text.contains("GenericInternalServerError")
+}
+
+/// Returns `true` when `(stack_key, trace)` matches a known benign CCP V24
+/// client-only UI layout race that does not indicate a server or gameplay bug.
+pub fn is_benign_client_traceback(stack_key: &str, trace: &str) -> bool {
+    if contains_server_fault_marker(stack_key) || contains_server_fault_marker(trace) {
+        return false;
+    }
+    let Some((exc_class, exc_msg)) = extract_exception_summary(trace) else {
+        return false;
+    };
+    if exc_class != "AttributeError" {
+        return false;
+    }
+    let leaf = extract_leaf_frame(trace).or_else(|| extract_leaf_frame(stack_key));
+    let Some((stem, func)) = leaf else {
+        return false;
+    };
+    BENIGN_CLIENT_TRACEBACK_RULES.iter().any(|rule| {
+        stem.eq_ignore_ascii_case(rule.file_stem)
+            && func == rule.func_name
+            && exc_msg.contains(rule.error_substr)
+    })
 }
 
 /// Returns `true` when `line` represents a server `InternalError` or

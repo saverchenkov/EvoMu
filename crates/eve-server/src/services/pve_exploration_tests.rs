@@ -3,7 +3,7 @@
 use super::*;
 use crate::router::ServerContext;
 use eve_db::clock::VirtualServerClock;
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{InventoryFlag, InventoryItemRecord, ServerClock, WorldRepository};
 use eve_machonet::SessionState;
 use eve_sde::{SdeRegistry, SolarSystemId};
 use std::collections::HashMap;
@@ -1687,4 +1687,639 @@ async fn activate_acceleration_gate_read_pure_on_invalid_calls_in_seeded_system(
         inc_handle.get_ball_snapshot(inc_npc_ball_id).await.ok().flatten().is_some(),
         "valid active INC-* gate call must spawn incursion NPC ball into system ballpark (#1435)"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleared_preceding_site_does_not_shadow_active_wave2_writeback_or_gate_lookup() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_051_462;
+    let ship_id: i64 = 1_051_462_001;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("hf1462_shadow", "pw", char_id, "Hf1462Shadow");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_776_000_000));
+    ctx.set_clock(clock.clone());
+    let now = 1_776_000_000_u64;
+
+    let mut session = SessionState::new(1462);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let shared_dungeon_id = 1420_u32;
+    let site_pos = [15_000_000.0, 0.0, 0.0];
+    let shared_gate_ball_id = 9_146_201_i64;
+    let cleared_first_id = "EXP-CLEARED-FIRST-1";
+    let expired_second_id = "EXP-EXPIRED-SECOND-1";
+    let active_third_id = "EXP-ACTIVE-THIRD-1";
+    let active_canonical_id = "EXP-ACTIVE-CANONICAL-1";
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+        let sites = reg.sites_by_system.entry(sys_id).or_default();
+        // Cleared site sharing dungeon_id and gate_ball_id placed first.
+        sites.push(PveSiteInstance {
+            site_id: cleared_first_id.into(),
+            dungeon_id: shared_dungeon_id,
+            dungeon_name: "Guristas Scout Outpost [Cleared]".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 2,
+            total_rooms: 2,
+            current_wave: 2,
+            total_waves: 2,
+            active_npc_ball_ids: Vec::new(),
+            cleared: true,
+            created_unix: now.saturating_sub(1_000),
+            lifetime_seconds: 86_400,
+            gate_ball_id: Some(shared_gate_ball_id),
+            ..Default::default()
+        });
+        // Uncleared expired site sharing dungeon_id placed second.
+        sites.push(PveSiteInstance {
+            site_id: expired_second_id.into(),
+            dungeon_id: shared_dungeon_id,
+            dungeon_name: "Guristas Scout Outpost [Expired]".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 2,
+            current_wave: 1,
+            total_waves: 2,
+            active_npc_ball_ids: Vec::new(),
+            cleared: false,
+            created_unix: now.saturating_sub(90_000),
+            lifetime_seconds: 86_400,
+            gate_ball_id: Some(shared_gate_ball_id),
+            ..Default::default()
+        });
+        // Active site sharing dungeon_id and gate_ball_id placed third.
+        sites.push(PveSiteInstance {
+            site_id: active_third_id.into(),
+            dungeon_id: shared_dungeon_id,
+            dungeon_name: "Guristas Scout Outpost [Active]".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 2,
+            current_wave: 1,
+            total_waves: 2,
+            active_npc_ball_ids: Vec::new(),
+            cleared: false,
+            created_unix: now,
+            lifetime_seconds: 86_400,
+            gate_ball_id: Some(shared_gate_ball_id),
+            ..Default::default()
+        });
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: active_third_id.into(),
+                solar_system_id: sys_id,
+                name: "Guristas Scout Outpost [Active]".into(),
+                anomaly_type: "Combat".into(),
+                position: site_pos,
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+        snap.cosmic_signatures
+            .entry(sys_id)
+            .or_default()
+            .push(eve_db::CosmicSignatureRecord {
+                signature_id: active_third_id.into(),
+                solar_system_id: sys_id,
+                type_name: "Combat".into(),
+                sig_group: "Combat".into(),
+                position: site_pos,
+                signal_strength: 1.0,
+                wormhole_type_id: None,
+                destination_system_id: None,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 0.0,
+                remaining_mass_kg: 0.0,
+                max_jump_mass_kg: 0.0,
+                collapsed: false,
+            });
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            eve_destiny::Ball {
+                id: ship_id,
+                type_id: 587,
+                position: glam::DVec3::from_array(site_pos),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 0.5,
+                mass: 1_000_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 587),
+        )
+        .await;
+
+    // 1. Advancing via shared numeric dungeon_id must target active_third_id and write Wave-2 NPCs strictly onto it.
+    let wave2_rep = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "1420")
+        .await
+        .expect("numeric dungeon advance should target active site");
+    assert_eq!(
+        wave2_rep.dict_get("siteID"),
+        Some(&PyRep::String(active_third_id.into()))
+    );
+    assert_eq!(wave2_rep.dict_get("currentWave"), Some(&PyRep::Integer(2)));
+    assert_eq!(
+        wave2_rep.dict_get("completed"),
+        Some(&PyRep::Bool(false))
+    );
+
+    let wave2_balls = read_pve_exploration_reg(&ctx, |reg| {
+        let sites = &reg.sites_by_system[&sys_id];
+        let cleared_site = sites.iter().find(|s| s.site_id == cleared_first_id).unwrap();
+        let expired_site = sites.iter().find(|s| s.site_id == expired_second_id).unwrap();
+        let active_site = sites.iter().find(|s| s.site_id == active_third_id).unwrap();
+        assert!(
+            cleared_site.active_npc_ball_ids.is_empty(),
+            "cleared preceding site must never absorb Wave-2 NPC ball IDs"
+        );
+        assert!(
+            expired_site.active_npc_ball_ids.is_empty(),
+            "expired preceding site must never absorb Wave-2 NPC ball IDs"
+        );
+        assert!(
+            !active_site.active_npc_ball_ids.is_empty(),
+            "active site must retain spawned Wave-2 NPC ball IDs"
+        );
+        assert_eq!(active_site.current_wave, 2);
+        active_site.active_npc_ball_ids.clone()
+    });
+
+    // 2. Immediate repeat gate advance while Wave-2 NPCs are alive must fail with WaveNpcsRemaining (no wave skip).
+    let skip_err = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "1420")
+        .await
+        .expect_err("WaveNpcsRemaining must block immediate second advance");
+    assert_eq!(skip_err.code, "WaveNpcsRemaining");
+
+    // 3. Killing Wave-2 NPCs clears active_third_id + its canonical anomaly and signature.
+    for (idx, bid) in wave2_balls.iter().enumerate() {
+        let _ = sys_handle.remove_ball(*bid).await;
+        let (cleared_opt, _, _) = handle_pve_site_npc_destruction_core(
+            &ctx.systems,
+            &ctx.db,
+            &ctx.sde,
+            &ctx.mechanic_rng,
+            &*ctx.combat_ephemeral,
+            sys_id,
+            *bid,
+            char_id,
+            false,
+        )
+        .await;
+        if idx + 1 == wave2_balls.len() {
+            assert_eq!(cleared_opt.as_deref(), Some(active_third_id));
+        } else {
+            assert!(cleared_opt.is_none());
+        }
+    }
+    read_pve_exploration_reg(&ctx, |reg| {
+        let active_site = reg.sites_by_system[&sys_id]
+            .iter()
+            .find(|s| s.site_id == active_third_id)
+            .unwrap();
+        assert!(active_site.cleared);
+    });
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .find(|a| a.anomaly_id == active_third_id)
+            .unwrap()
+            .cleared);
+        assert!(snap.cosmic_signatures[&sys_id]
+            .iter()
+            .find(|s| s.signature_id == active_third_id)
+            .unwrap()
+            .collapsed);
+    });
+
+    // 4. Seed a second active site sharing dungeon_id & gate_ball_id and advance using canonical site_id directly
+    // (previously line 925 `s.site_id == site_id || s.dungeon_id == dungeon_id` still matched cleared_first_id!).
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system
+            .entry(sys_id)
+            .or_default()
+            .push(PveSiteInstance {
+                site_id: active_canonical_id.into(),
+                dungeon_id: shared_dungeon_id,
+                dungeon_name: "Guristas Scout Outpost [Canonical]".into(),
+                solar_system_id: sys_id,
+                site_category: "CombatAnomaly".into(),
+                position: site_pos,
+                signal_strength: 1.0,
+                current_room: 1,
+                total_rooms: 2,
+                current_wave: 1,
+                total_waves: 2,
+                active_npc_ball_ids: Vec::new(),
+                cleared: false,
+                created_unix: now,
+                lifetime_seconds: 86_400,
+                gate_ball_id: Some(shared_gate_ball_id),
+                ..Default::default()
+            });
+    });
+
+    // Gate lookup by shared integer gate_ball_id must pick active_canonical_id over cleared/expired sites.
+    let kw = HashMap::new();
+    let gate_res = handle_pve_exploration(
+        &ctx,
+        &mut session,
+        "keeper",
+        "ActivateAccelerationGate",
+        &[PyRep::Integer(shared_gate_ball_id)],
+        &kw,
+    )
+    .await
+    .expect("handled")
+    .expect("ActivateAccelerationGate by gate_ball_id must advance active site");
+    assert_eq!(
+        gate_res.dict_get("siteID"),
+        Some(&PyRep::String(active_canonical_id.into()))
+    );
+    assert_eq!(gate_res.dict_get("currentWave"), Some(&PyRep::Integer(2)));
+
+    read_pve_exploration_reg(&ctx, |reg| {
+        let sites = &reg.sites_by_system[&sys_id];
+        let cleared_site = sites.iter().find(|s| s.site_id == cleared_first_id).unwrap();
+        let canonical_site = sites
+            .iter()
+            .find(|s| s.site_id == active_canonical_id)
+            .unwrap();
+        assert!(cleared_site.active_npc_ball_ids.is_empty());
+        assert!(!canonical_site.active_npc_ball_ids.is_empty());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_unpruned_sites_reject_and_prune_on_npc_kill_and_gate_advance() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_052_462;
+    let ship_id: i64 = 1_052_462_001;
+
+    let sde = shared_sde();
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("hf1462_expiry", "pw", char_id, "Hf1462Expiry");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let clock = Arc::new(VirtualServerClock::with_fixed_base(1_776_100_000));
+    ctx.set_clock(clock.clone());
+    let base_now = 1_776_100_000_u64;
+
+    let mut session = SessionState::new(1463);
+    session.user_id = Some(1);
+    session.character_id = Some(char_id);
+    session.solar_system_id = Some(sys_id);
+    session.ship_id = Some(ship_id);
+
+    let site_pos = [20_000_000.0, 0.0, 0.0];
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let spawn_npc = |bid: i64| {
+        let h = sys_handle.clone();
+        let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(
+            &ctx.sde, 23_333,
+        );
+        async move {
+            let _ = h
+                .spawn_ball_with_combat(
+                    eve_destiny::Ball {
+                        id: bid,
+                        type_id: 23_333,
+                        position: glam::DVec3::from_array(site_pos),
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: 200.0,
+                        inertia: 1.0,
+                        mass: 500_000.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    cs,
+                )
+                .await;
+        }
+    };
+
+    let npc_kill_wave1 = 9_146_301_i64;
+    let npc_kill_final = 9_146_302_i64;
+    let npc_gate_expired = 9_146_303_i64;
+    let npc_linked_esc_expired = 9_146_304_i64;
+    for bid in [
+        npc_kill_wave1,
+        npc_kill_final,
+        npc_gate_expired,
+        npc_linked_esc_expired,
+    ] {
+        spawn_npc(bid).await;
+    }
+
+    let linked_inst_id = 888_462_i64;
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+        let sites = reg.sites_by_system.entry(sys_id).or_default();
+        // 1. Multi-wave combat anomaly whose site lifetime has expired.
+        sites.push(PveSiteInstance {
+            site_id: "ANOM-EXP-W1".into(),
+            dungeon_id: 1420,
+            dungeon_name: "Expired Outpost W1".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 1,
+            current_wave: 1,
+            total_waves: 2,
+            active_npc_ball_ids: vec![npc_kill_wave1],
+            cleared: false,
+            created_unix: base_now,
+            lifetime_seconds: 3_600,
+            ..Default::default()
+        });
+        // 2. Final-wave combat anomaly whose site lifetime has expired.
+        sites.push(PveSiteInstance {
+            site_id: "ANOM-EXP-FINAL".into(),
+            dungeon_id: 1420,
+            dungeon_name: "Expired Outpost Final".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 1,
+            current_wave: 1,
+            total_waves: 1,
+            active_npc_ball_ids: vec![npc_kill_final],
+            cleared: false,
+            created_unix: base_now,
+            lifetime_seconds: 3_600,
+            ..Default::default()
+        });
+        // 3. Expired site tested via advance_site_wave_or_complete (no remaining balls in space or unpruned NPC).
+        sites.push(PveSiteInstance {
+            site_id: "SITE-EXP-GATE".into(),
+            dungeon_id: 1430,
+            dungeon_name: "Expired Gate Site".into(),
+            solar_system_id: sys_id,
+            site_category: "CombatAnomaly".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 2,
+            current_wave: 1,
+            total_waves: 2,
+            active_npc_ball_ids: vec![npc_gate_expired],
+            cleared: false,
+            created_unix: base_now,
+            lifetime_seconds: 3_600,
+            ..Default::default()
+        });
+        // 4. Site with lifetime_seconds == 0 whose linked EscalatingPathEntry has expired.
+        sites.push(PveSiteInstance {
+            site_id: format!("EXP-{linked_inst_id}-1"),
+            dungeon_id: 1420,
+            dungeon_name: "Linked Expired Escalation".into(),
+            solar_system_id: sys_id,
+            site_category: "Expedition".into(),
+            position: site_pos,
+            signal_strength: 1.0,
+            current_room: 1,
+            total_rooms: 1,
+            current_wave: 1,
+            total_waves: 1,
+            active_npc_ball_ids: vec![npc_linked_esc_expired],
+            cleared: false,
+            created_unix: base_now,
+            lifetime_seconds: 0,
+            expedition_instance_id: Some(linked_inst_id),
+            ..Default::default()
+        });
+        reg.escalations_by_char
+            .entry(char_id)
+            .or_default()
+            .push(EscalatingPathEntry {
+                instance_id: linked_inst_id,
+                character_id: char_id,
+                source_dungeon_id: 1420,
+                expedition_dungeon_id: 1420,
+                expedition_name: "Linked Expired Escalation".into(),
+                destination_solar_system_id: sys_id,
+                step_index: 1,
+                total_steps: 2,
+                journal_text: "Expired".into(),
+                created_at_sec: base_now,
+                expires_at_sec: base_now + 3_600,
+                dungeons_entered: vec![1420],
+                journal_entry_template_id: 0,
+            });
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: "ANOM-EXP-W1".into(),
+                solar_system_id: sys_id,
+                name: "Expired Outpost W1".into(),
+                anomaly_type: "Combat".into(),
+                position: site_pos,
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: base_now,
+                lifetime_seconds: 3_600,
+                cleared: false,
+            });
+        snap.bookmarks.insert(
+            77_1462,
+            eve_db::BookmarkRecord {
+                bookmark_id: 77_1462,
+                owner_id: char_id,
+                label: "Expired Linked Esc BM".into(),
+                solar_system_id: sys_id,
+                x: site_pos[0],
+                y: site_pos[1],
+                z: site_pos[2],
+                item_id: Some(linked_inst_id),
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    let items_before = ctx.db.with_snapshot(|snap| snap.items.len());
+    clock.advance_secs(4_000);
+
+    // Case 1 & 2: Killing Wave-1 or final-wave NPC in expired site must return None, spawn no Wave 2, drop no loot, and prune site/balls.
+    let res1 = handle_pve_site_npc_destruction_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        &*ctx.combat_ephemeral,
+        sys_id,
+        npc_kill_wave1,
+        char_id,
+        false,
+    )
+    .await;
+    assert!(res1.0.is_none() && res1.1.is_none() && res1.2.is_none());
+
+    let res2 = handle_pve_site_npc_destruction_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        &*ctx.combat_ephemeral,
+        sys_id,
+        npc_kill_final,
+        char_id,
+        false,
+    )
+    .await;
+    assert!(res2.0.is_none() && res2.1.is_none() && res2.2.is_none());
+
+    // Case 3: Gate / wave advance on expired site must reject with SiteExpired and prune site + live NPC ball.
+    let gate_err = advance_site_wave_or_complete(&ctx, &mut session, sys_id, "SITE-EXP-GATE")
+        .await
+        .expect_err("expired site must reject with SiteExpired");
+    assert_eq!(gate_err.code, "SiteExpired");
+
+    // Case 4: Active-lifetime_seconds==0 site linked to an expired EscalatingPathEntry must reject on NPC kill and prune escalation + bookmark + ball.
+    let res4 = handle_pve_site_npc_destruction_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        &*ctx.combat_ephemeral,
+        sys_id,
+        npc_linked_esc_expired,
+        char_id,
+        false,
+    )
+    .await;
+    assert!(res4.0.is_none() && res4.1.is_none() && res4.2.is_none());
+
+    assert_eq!(
+        ctx.db.with_snapshot(|snap| snap.items.len()),
+        items_before,
+        "expired unpruned site kills/advances must drop zero loot items"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.cosmic_anomalies[&sys_id]
+            .iter()
+            .find(|a| a.anomaly_id == "ANOM-EXP-W1")
+            .unwrap()
+            .cleared);
+        assert!(!snap.bookmarks.contains_key(&77_1462));
+    });
+    read_pve_exploration_reg(&ctx, |reg| {
+        for sid in [
+            "ANOM-EXP-W1",
+            "ANOM-EXP-FINAL",
+            "SITE-EXP-GATE",
+            &format!("EXP-{linked_inst_id}-1"),
+        ] {
+            let site = reg.sites_by_system[&sys_id]
+                .iter()
+                .find(|s| s.site_id == sid)
+                .unwrap();
+            assert!(site.cleared, "{sid} must be marked cleared after expiry prune");
+            assert_eq!(site.current_wave, 1, "{sid} must never advance to Wave 2");
+            assert!(site.active_npc_ball_ids.is_empty());
+        }
+        assert!(
+            reg.escalations_by_char
+                .get(&char_id)
+                .is_none_or(|l| l.is_empty()),
+            "expired linked escalation must be pruned"
+        );
+    });
+    for bid in [
+        npc_kill_wave1,
+        npc_kill_final,
+        npc_gate_expired,
+        npc_linked_esc_expired,
+    ] {
+        assert_eq!(
+            sys_handle.get_ball_snapshot(bid).await.unwrap(),
+            None,
+            "expired NPC ball {bid} must be removed from ballpark"
+        );
+    }
 }
