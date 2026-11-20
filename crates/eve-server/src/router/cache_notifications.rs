@@ -239,10 +239,14 @@ struct StagedDispatchNotification {
 }
 
 struct DispatchNotificationStage {
+    scope_id: u64,
     target_pend_ptr: usize,
     target_notify_tx: tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     staged: Vec<StagedDispatchNotification>,
 }
+
+static NEXT_STAGING_SCOPE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 tokio::task_local! {
     static DISPATCH_STAGED_NOTIFICATIONS: std::cell::RefCell<DispatchNotificationStage>;
@@ -254,6 +258,19 @@ pub(crate) fn pending_notifications_ptr(
 ) -> usize {
     pend as *const dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>
         as *const () as usize
+}
+
+#[inline]
+fn stage_matches_target(
+    stage: &DispatchNotificationStage,
+    pend_ptr: Option<usize>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+) -> bool {
+    match (pend_ptr, notify_tx) {
+        (Some(p), _) => p == stage.target_pend_ptr,
+        (None, Some(tx)) => tx.same_channel(&stage.target_notify_tx),
+        (None, None) => false,
+    }
 }
 
 pub(crate) fn has_staged_dispatch_notifications_scope() -> bool {
@@ -269,6 +286,7 @@ where
     F: std::future::Future<Output = R>,
 {
     let stage = DispatchNotificationStage {
+        scope_id: NEXT_STAGING_SCOPE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         target_pend_ptr: pending_notifications_ptr(pend),
         target_notify_tx: notify_tx.clone(),
         staged: Vec::new(),
@@ -278,21 +296,25 @@ where
         .await
 }
 
-pub(crate) fn is_staging_dispatch_notifications(
+pub(crate) fn current_dispatch_staging_scope_id(
     pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
     notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
-) -> bool {
+) -> Option<u64> {
     let pend_ptr = pend.map(pending_notifications_ptr);
     DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let stage = cell.borrow();
-            match (pend_ptr, notify_tx) {
-                (Some(p), _) => p == stage.target_pend_ptr,
-                (None, Some(tx)) => tx.same_channel(&stage.target_notify_tx),
-                (None, None) => false,
-            }
+            stage_matches_target(&stage, pend_ptr, notify_tx).then_some(stage.scope_id)
         })
-        .unwrap_or(false)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn is_staging_dispatch_notifications(
+    pend: Option<&dyn eve_db::lock_rank::AnyRwLock<HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>>,
+) -> bool {
+    current_dispatch_staging_scope_id(pend, notify_tx).is_some()
 }
 
 pub(crate) fn try_stage_dispatch_notification(
@@ -305,12 +327,7 @@ pub(crate) fn try_stage_dispatch_notification(
     DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let mut stage = cell.borrow_mut();
-            let matches_target = match (pend_ptr, notify_tx) {
-                (Some(p), _) => p == stage.target_pend_ptr,
-                (None, Some(tx)) => tx.same_channel(&stage.target_notify_tx),
-                (None, None) => false,
-            };
-            if !matches_target {
+            if !stage_matches_target(&stage, pend_ptr, notify_tx) {
                 return false;
             }
             stage.staged.push(StagedDispatchNotification {
@@ -332,9 +349,7 @@ pub(crate) fn clear_staged_notifications_for_char(
     let _ = DISPATCH_STAGED_NOTIFICATIONS.try_with(|cell| {
         let mut stage = cell.borrow_mut();
         if stage.target_pend_ptr == pend_ptr {
-            stage
-                .staged
-                .retain(|item| item.notif.recipient_char_id != char_id);
+            stage.staged.retain(|item| item.notif.recipient_char_id != char_id);
         }
     });
 }
@@ -347,15 +362,9 @@ pub(crate) fn find_staged_notification_by_seq(
     DISPATCH_STAGED_NOTIFICATIONS
         .try_with(|cell| {
             let stage = cell.borrow();
-            (stage.target_pend_ptr == pend_ptr)
-                .then(|| {
-                    stage
-                        .staged
-                        .iter()
-                        .find(|item| item.notif.seq_id == seq_id)
-                        .map(|item| item.notif.clone())
-                })
-                .flatten()
+            (stage.target_pend_ptr == pend_ptr).then(|| {
+                stage.staged.iter().find(|item| item.notif.seq_id == seq_id).map(|i| i.notif.clone())
+            }).flatten()
         })
         .ok()
         .flatten()
@@ -375,15 +384,12 @@ pub(crate) fn insert_before_staged_seq_or_stage(
                 return false;
             }
             if let Some(pos) = stage.staged.iter().position(|i| i.notif.seq_id == seq_id) {
-                stage.staged.insert(
-                    pos,
-                    StagedDispatchNotification {
-                        write_queue: true,
-                        send_tx: true,
-                        notif: notif.clone(),
-                        explicit_queue_cap: None,
-                    },
-                );
+                stage.staged.insert(pos, StagedDispatchNotification {
+                    write_queue: true,
+                    send_tx: true,
+                    notif: notif.clone(),
+                    explicit_queue_cap: None,
+                });
                 return true;
             }
             false
@@ -402,9 +408,8 @@ pub(crate) fn assemble_pending_notification(
     args: Vec<PyRep>,
     now_ft: i64,
 ) -> PendingMachoNotification {
-    let (packet, marshaled_packet) =
-        ServerContext::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
-    PendingMachoNotification::new(cid, event, id_type, args, packet, marshaled_packet, now_ft)
+    let (pkt, raw) = ServerContext::build_macho_notification_packet(cid, uid, event, id_type, args.clone());
+    PendingMachoNotification::new(cid, event, id_type, args, pkt, raw, now_ft)
 }
 
 pub(crate) fn enqueue_or_stage_pending_batch(
@@ -412,19 +417,14 @@ pub(crate) fn enqueue_or_stage_pending_batch(
     notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
     notifs: &[PendingMachoNotification],
 ) {
-    if notifs.is_empty() {
-        return;
-    }
+    if notifs.is_empty() { return; }
     if is_staging_dispatch_notifications(Some(pend), Some(notify_tx)) {
-        for notif in notifs {
-            let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), notif, None);
-        }
+        for n in notifs { let _ = try_stage_dispatch_notification(Some(pend), Some(notify_tx), n, None); }
         return;
     }
     let mut queues = pend.write().unwrap_or_else(|e| e.into_inner());
     for notif in notifs {
-        let q = queues.entry(notif.recipient_char_id).or_default();
-        push_pending_notification_capped(q, notif.clone());
+        push_pending_notification_capped(queues.entry(notif.recipient_char_id).or_default(), notif.clone());
         let _ = notify_tx.send((notif.recipient_char_id, notif.clone()));
     }
 }

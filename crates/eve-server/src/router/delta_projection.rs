@@ -503,17 +503,31 @@ impl DeltaStateCache {
             None
         };
         let plex_vault_changed = changes_touch_account_plex_vault(changes);
+        let char_plex_changed = before.is_none()
+            && changes.characters.iter().any(|c| {
+                match (c.before.as_deref(), c.after.as_deref()) {
+                    (Some(b), Some(a)) => {
+                        b.plex_balance != a.plex_balance
+                            || (b.user_id != a.user_id
+                                && (b.plex_balance != 0 || a.plex_balance != 0))
+                    }
+                    (None, Some(a)) => a.plex_balance != 0,
+                    (Some(b), None) => b.plex_balance != 0,
+                    (None, None) => false,
+                }
+            });
         let paused_queues_changed = changes_touch_paused_skill_queues(changes);
-        let plex_baseline_snapshot = if before.is_none() && plex_vault_changed {
-            Some(
-                self.plex_vault
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone(),
-            )
-        } else {
-            None
-        };
+        let plex_baseline_snapshot =
+            if before.is_none() && (plex_vault_changed || char_plex_changed) {
+                Some(
+                    self.plex_vault
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone(),
+                )
+            } else {
+                None
+            };
 
         let mut input = DeltaProjectionInput::new(before, after, changes, sde, now_unix)
             .with_fit_diffs(fit_diffs);
@@ -936,31 +950,59 @@ fn project_wallet_changes(
     hooks: &[Box<dyn DeltaProjectionHook>],
     sink: &mut dyn DeltaSink,
 ) {
-    // 1. Personal character ISK wallets & character-level PLEX hook.
+    let mut plex_user_ids = changed_account_plex_vault_users(input.changes);
+    let vault_changed_uids = if plex_user_ids.is_empty() {
+        BTreeSet::new()
+    } else {
+        plex_user_ids.clone()
+    };
+    let mut legacy_before_by_uid: HashMap<u64, i64> = HashMap::new();
+    let mut legacy_after_by_uid: HashMap<u64, i64> = HashMap::new();
+    let mut char_hint_by_uid: HashMap<u64, Option<i64>> = HashMap::new();
+
+    // 1. Personal character ISK wallets & character-level PLEX change collection.
     for change in &input.changes.characters {
-        if let (Some(before), Some(after)) = (change.before.as_deref(), change.after.as_deref()) {
-            let char_id = change.key;
-            if before.balance != after.balance {
-                sink.push(ProjectedNotification::from_typed(
-                    ProjectedTarget::Character(char_id),
-                    OnAccountChange {
-                        account_key: "cash".into(),
-                        owner_id: char_id,
-                        balance: after.balance.to_wire_f64(),
-                    },
-                ));
-            }
-            if before.plex_balance != after.plex_balance {
-                let delta = PlexDelta {
-                    char_id: Some(char_id),
-                    user_id: after.user_id,
-                    old_plex: before.plex_balance,
-                    new_plex: after.plex_balance,
-                };
-                for hook in hooks {
-                    hook.on_plex_delta(delta, sink);
+        let char_id = change.key;
+        match (change.before.as_deref(), change.after.as_deref()) {
+            (Some(before), Some(after)) => {
+                if before.balance != after.balance {
+                    sink.push(ProjectedNotification::from_typed(
+                        ProjectedTarget::Character(char_id),
+                        OnAccountChange {
+                            account_key: "cash".into(),
+                            owner_id: char_id,
+                            balance: after.balance.to_wire_f64(),
+                        },
+                    ));
+                }
+                if before.plex_balance != after.plex_balance
+                    || (before.user_id != after.user_id
+                        && (before.plex_balance != 0 || after.plex_balance != 0))
+                {
+                    plex_user_ids.insert(before.user_id);
+                    plex_user_ids.insert(after.user_id);
+                    *legacy_before_by_uid.entry(before.user_id).or_default() +=
+                        before.plex_balance;
+                    *legacy_after_by_uid.entry(after.user_id).or_default() += after.plex_balance;
+                    char_hint_by_uid
+                        .entry(after.user_id)
+                        .and_modify(|h| *h = None)
+                        .or_insert(Some(char_id));
                 }
             }
+            (None, Some(after)) if after.plex_balance != 0 => {
+                plex_user_ids.insert(after.user_id);
+                *legacy_after_by_uid.entry(after.user_id).or_default() += after.plex_balance;
+                char_hint_by_uid
+                    .entry(after.user_id)
+                    .and_modify(|h| *h = None)
+                    .or_insert(Some(char_id));
+            }
+            (Some(before), None) if before.plex_balance != 0 => {
+                plex_user_ids.insert(before.user_id);
+                *legacy_before_by_uid.entry(before.user_id).or_default() += before.plex_balance;
+            }
+            _ => {}
         }
     }
 
@@ -1000,28 +1042,53 @@ fn project_wallet_changes(
         }
     }
 
-    // 3. Account-level PLEX vault ledger hook (`domain_rows` domain `ledger.account_plex_vault`).
-    let plex_user_ids = changed_account_plex_vault_users(input.changes);
-    if !plex_user_ids.is_empty() && (input.before.is_some() || input.plex_vault_before.is_some()) {
+    // 3. Unified account PLEX balance (`account_plex_vault` + legacy per-character `plex_balance`).
+    if !plex_user_ids.is_empty() {
+        let mut after_legacy_by_uid: HashMap<u64, i64> = HashMap::new();
+        if input.before.is_none() {
+            for c in input.after.characters.values() {
+                if plex_user_ids.contains(&c.user_id) {
+                    *after_legacy_by_uid.entry(c.user_id).or_default() += c.plex_balance;
+                }
+            }
+        }
         for user_id in plex_user_ids {
-            let old_plex = input
-                .before
-                .and_then(|b| b.account_plex_vault.get(&user_id).copied())
-                .or_else(|| {
+            let vault_changed_for_uid = vault_changed_uids.contains(&user_id);
+            let old_plex = if let Some(b) = input.before {
+                b.unified_plex_balance_for_user(user_id)
+            } else {
+                let old_vault = if vault_changed_for_uid {
+                    let Some(pv) = input.plex_vault_before else {
+                        continue;
+                    };
+                    pv.get(&user_id).copied().unwrap_or(0)
+                } else {
                     input
                         .plex_vault_before
-                        .and_then(|m| m.get(&user_id).copied())
-                })
-                .unwrap_or(0);
-            let new_plex = input
-                .after
-                .account_plex_vault
-                .get(&user_id)
-                .copied()
-                .unwrap_or(0);
+                        .and_then(|pv| pv.get(&user_id).copied())
+                        .unwrap_or_else(|| {
+                            input
+                                .after
+                                .account_plex_vault
+                                .get(&user_id)
+                                .copied()
+                                .unwrap_or(0)
+                        })
+                };
+                let after_leg = after_legacy_by_uid.get(&user_id).copied().unwrap_or(0);
+                let delta_before = legacy_before_by_uid.get(&user_id).copied().unwrap_or(0);
+                let delta_after = legacy_after_by_uid.get(&user_id).copied().unwrap_or(0);
+                old_vault.saturating_add(after_leg - delta_after + delta_before)
+            };
+            let new_plex = input.after.unified_plex_balance_for_user(user_id);
             if old_plex != new_plex {
+                let char_id = if vault_changed_for_uid {
+                    None
+                } else {
+                    char_hint_by_uid.get(&user_id).copied().flatten()
+                };
                 let delta = PlexDelta {
-                    char_id: None,
+                    char_id,
                     user_id,
                     old_plex,
                     new_plex,

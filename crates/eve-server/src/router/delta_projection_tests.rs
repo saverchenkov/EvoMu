@@ -853,7 +853,8 @@ fn fit_godma_projection_and_custom_plex_hooks_emit_canonical_notifications() {
 
     let plex_events = captured_plex.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(plex_events.len(), 1);
-    assert_eq!(plex_events[0].new_plex, 500);
+    assert_eq!(plex_events[0].old_plex, 500);
+    assert_eq!(plex_events[0].new_plex, 1000);
 }
 
 #[test]
@@ -1216,4 +1217,100 @@ fn wallets_only_domain_filter_projects_only_wallet_and_plex_deltas() {
             }));
         }
     }
+}
+
+#[test]
+fn legacy_plex_fold_with_unchanged_vault_projects_net_unified_delta_bf04() {
+    let sde = shared_sde();
+    let db = WorldRepository::with_demo_seed();
+    let pilot_id = 90_000_001_i64;
+    let uid = db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 100);
+        snap.characters
+            .get_mut(&pilot_id)
+            .expect("pilot")
+            .plex_balance = 100;
+    });
+
+    struct CapturePlexHook(i64, Arc<Mutex<Vec<PlexDelta>>>);
+    impl DeltaProjectionHook for CapturePlexHook {
+        fn on_plex_delta(&self, delta: PlexDelta, sink: &mut dyn DeltaSink) {
+            self.1
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(delta);
+            sink.push(ProjectedNotification::from_typed(
+                ProjectedTarget::Character(self.0),
+                crate::router::notify_registry::OnAccountChange {
+                    account_key: "plex".into(),
+                    owner_id: self.0,
+                    balance: delta.new_plex as f64,
+                },
+            ));
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut projector = DefaultDeltaProjection::wallets_only();
+    projector.add_hook(Box::new(CapturePlexHook(pilot_id, Arc::clone(&captured))));
+
+    let cache = DeltaStateCache::new();
+    db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
+
+    let (before, after, changes) = capture_diff(&db, 1, |snap| {
+        assert_eq!(snap.adjust_unified_plex_for_user(uid, -100), Some(100));
+    });
+    let direct = projector.project_to_vec(&DeltaProjectionInput::new(
+        Some(&before),
+        &after,
+        &changes,
+        &sde,
+        1_700_000_000,
+    ));
+    let cached =
+        cache.project_with_cache(&projector, None, &after, &changes, &sde, 1_700_000_000, &[]);
+
+    for notifs in [&direct, &cached] {
+        assert_eq!(notifs.len(), 1);
+        assert!(matches!(
+            notifs[0].args.as_slice(),
+            [PyRep::String(k), PyRep::Integer(o), PyRep::Real(b)]
+                if k == "plex" && *o == pilot_id && (*b - 100.0).abs() < 1e-6
+        ));
+    }
+    let deltas = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(deltas.len(), 2);
+    for d in deltas.iter() {
+        assert_eq!(d.user_id, uid);
+        assert_eq!(d.old_plex, 200);
+        assert_eq!(d.new_plex, 100);
+    }
+    drop(deltas);
+
+    // Pure fold of legacy PLEX into vault with zero net change emits 0 notifications.
+    db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 0);
+        snap.characters
+            .get_mut(&pilot_id)
+            .expect("pilot")
+            .plex_balance = 100;
+    });
+    db.with_snapshot(|snap| cache.seed_from_snapshot(snap));
+    let (b_zero, a_zero, c_zero) = capture_diff(&db, 2, |snap| {
+        assert_eq!(snap.adjust_unified_plex_for_user(uid, 0), Some(100));
+    });
+    assert!(projector
+        .project_to_vec(&DeltaProjectionInput::new(
+            Some(&b_zero),
+            &a_zero,
+            &c_zero,
+            &sde,
+            1_700_000_001,
+        ))
+        .is_empty());
+    assert!(cache
+        .project_with_cache(&projector, None, &a_zero, &c_zero, &sde, 1_700_000_001, &[])
+        .is_empty());
 }

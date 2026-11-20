@@ -8,11 +8,12 @@
 #![forbid(unsafe_code)]
 
 use crate::router::cache_notifications::{
-    assemble_pending_notification, enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
-    insert_before_staged_seq_or_stage, is_active_dispatch_char,
-    is_staging_dispatch_notifications, pending_notifications_ptr, push_pending_notification_capped,
-    try_stage_dispatch_notification, NotificationTarget, PendingMachoNotification,
-    MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR, MAX_PENDING_NOTIFICATIONS_PER_CHAR,
+    assemble_pending_notification, current_dispatch_staging_scope_id,
+    enqueue_or_stage_pending_batch, find_staged_notification_by_seq,
+    insert_before_staged_seq_or_stage, is_active_dispatch_char, pending_notifications_ptr,
+    push_pending_notification_capped, try_stage_dispatch_notification, NotificationTarget,
+    PendingMachoNotification, MAX_ACTIVE_RPC_NOTIFICATIONS_PER_CHAR,
+    MAX_PENDING_NOTIFICATIONS_PER_CHAR,
 };
 use crate::router::context::ServerContext;
 use crate::router::delta_projection::{
@@ -27,10 +28,12 @@ use eve_db::{
 };
 use eve_proto::PyRep;
 use eve_sde::SdeRegistry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 type BridgeKey = (u64, usize);
+const MAX_RECENT_COMMIT_EPOCH_LAG: u64 = 32;
+const MAX_RECENT_PROJECTED_RECORDS: usize = 256;
 
 #[derive(Debug, Clone)]
 struct ProjectedAccountRecord {
@@ -39,13 +42,13 @@ struct ProjectedAccountRecord {
     owner_id: i64,
     balance: f64,
     seq_id: u64,
-    was_staged: bool,
+    commit_epoch: u64,
+    staging_scope_id: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 struct EpochLedger {
-    epoch: u64,
-    records: Vec<ProjectedAccountRecord>,
+    records: VecDeque<ProjectedAccountRecord>,
 }
 
 struct DeltaCommitBridgeState {
@@ -65,7 +68,7 @@ struct PlexAccountChangeHook {
 
 impl DeltaProjectionHook for PlexAccountChangeHook {
     fn on_plex_delta(&self, delta: PlexDelta, sink: &mut dyn DeltaSink) {
-        let Some(cid) = delta.char_id.or_else(|| (self.resolve_user_char)(delta.user_id)) else {
+        let Some(cid) = (self.resolve_user_char)(delta.user_id).or(delta.char_id) else {
             return;
         };
         sink.push(ProjectedNotification::from_typed(
@@ -84,13 +87,6 @@ struct AllCharactersOnline;
 impl OnlineCharacterLookup for AllCharactersOnline {
     fn is_character_online(&self, _char_id: i64, _user_id: u64) -> bool {
         true
-    }
-}
-
-fn extract_account_key_only(payload_args: &[PyRep]) -> Option<String> {
-    match payload_args {
-        [PyRep::String(key) | PyRep::Token(key), ..] => Some(key.clone()),
-        _ => None,
     }
 }
 
@@ -162,8 +158,9 @@ fn dispatch_tx_effects(
     snap: &WorldStateSnapshot,
     effects: &Effects,
     now_ft: i64,
-    stage_in_dispatch: bool,
-) -> (HashSet<(i64, Option<String>)>, Vec<ProjectedAccountRecord>) {
+    commit_epoch: u64,
+    staging_scope_id: Option<u64>,
+) -> (HashSet<(i64, Option<(String, i64)>)>, Vec<ProjectedAccountRecord>) {
     let mut emitted_account_effects = HashSet::new();
     let mut records = Vec::new();
     let mut built = Vec::new();
@@ -173,16 +170,15 @@ fn dispatch_tx_effects(
         if recipients.is_empty() {
             continue;
         }
-        let key_opt = if effect.event == "OnAccountChange" {
-            Some(extract_account_key_only(&effect.args))
-        } else {
-            None
-        };
-        let fields_opt = if effect.event == "OnAccountChange" {
+        let is_account_change = effect.event == "OnAccountChange";
+        let fields_opt = if is_account_change {
             extract_account_change_fields(&effect.args)
         } else {
             None
         };
+        let suppression_key = fields_opt
+            .as_ref()
+            .map(|(k, owner_id, _)| (k.clone(), *owner_id));
         for (cid, uid) in recipients {
             let notif = assemble_pending_notification(
                 cid,
@@ -192,8 +188,8 @@ fn dispatch_tx_effects(
                 effect.args.clone(),
                 now_ft,
             );
-            if let Some(ref key) = key_opt {
-                emitted_account_effects.insert((cid, key.clone()));
+            if is_account_change {
+                emitted_account_effects.insert((cid, suppression_key.clone()));
             }
             if let Some((ref account_key, owner_id, balance)) = fields_opt {
                 records.push(ProjectedAccountRecord {
@@ -202,7 +198,8 @@ fn dispatch_tx_effects(
                     owner_id,
                     balance,
                     seq_id: notif.seq_id,
-                    was_staged: stage_in_dispatch,
+                    commit_epoch,
+                    staging_scope_id,
                 });
             }
             built.push(notif);
@@ -290,8 +287,9 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
             };
             let now_ft = db.clock().now_blueos_filetime_ticks();
             let now_unix = db.now_unix_secs();
-            let stage_in_dispatch =
-                is_staging_dispatch_notifications(Some(&*pend), Some(&notify_tx));
+            let commit_epoch = db.state_epoch();
+            let staging_scope_id =
+                current_dispatch_staging_scope_id(Some(&*pend), Some(&notify_tx));
 
             let (emitted_account_effects, mut committed_records) = if effects.notifications.is_empty()
             {
@@ -304,7 +302,8 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                     snap,
                     effects,
                     now_ft,
-                    stage_in_dispatch,
+                    commit_epoch,
+                    staging_scope_id,
                 )
             };
 
@@ -324,8 +323,10 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                         if emitted_account_effects.contains(&(r.recipient_char_id, None)) {
                             return false;
                         }
-                        if let Some(key) = extract_account_key_only(&r.args) {
-                            if emitted_account_effects.contains(&(r.recipient_char_id, Some(key))) {
+                        if let Some((key, owner_id, _)) = extract_account_change_fields(&r.args) {
+                            if emitted_account_effects
+                                .contains(&(r.recipient_char_id, Some((key, owner_id))))
+                            {
                                 return false;
                             }
                         }
@@ -345,20 +346,24 @@ pub(crate) fn install_tx_post_commit_listener(ctx: &ServerContext) {
                                 owner_id,
                                 balance,
                                 seq_id: notif.seq_id,
-                                was_staged: stage_in_dispatch,
+                                commit_epoch,
+                                staging_scope_id,
                             });
                         }
                     }
                 }
             }
 
-            let commit_epoch = db.state_epoch();
             let mut ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-            if ledger.epoch != commit_epoch {
-                ledger.epoch = commit_epoch;
-                ledger.records.clear();
+            ledger.records.retain(|r| {
+                commit_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+            });
+            for rec in committed_records {
+                if ledger.records.len() >= MAX_RECENT_PROJECTED_RECORDS {
+                    ledger.records.pop_front();
+                }
+                ledger.records.push_back(rec);
             }
-            ledger.records.extend(committed_records);
         },
     ));
 }
@@ -496,15 +501,19 @@ pub(crate) fn try_handle_legacy_account_change_emit(
         .get(&bridge_key)
         .and_then(Weak::upgrade)?;
     let current_epoch = ctx.db.state_epoch();
+    let staging_scope_id =
+        current_dispatch_staging_scope_id(Some(&*ctx.pending_notifications), Some(&ctx.notify_tx));
     let matching: Vec<ProjectedAccountRecord> = {
         let ledger = bridge.recent_epoch.lock().unwrap_or_else(|e| e.into_inner());
-        if ledger.epoch != current_epoch {
-            return None;
-        }
         ledger
             .records
             .iter()
-            .filter(|r| r.account_key == account_key && r.owner_id == owner_id)
+            .filter(|r| {
+                r.staging_scope_id == staging_scope_id
+                    && current_epoch.saturating_sub(r.commit_epoch) <= MAX_RECENT_COMMIT_EPOCH_LAG
+                    && r.account_key == account_key
+                    && r.owner_id == owner_id
+            })
             .cloned()
             .collect()
     };
@@ -512,11 +521,7 @@ pub(crate) fn try_handle_legacy_account_change_emit(
         return None;
     }
 
-    let stage_in_dispatch = is_staging_dispatch_notifications(
-        Some(&*ctx.pending_notifications),
-        Some(&ctx.notify_tx),
-    );
-    let mut queues = (!stage_in_dispatch).then(|| {
+    let mut queues = staging_scope_id.is_none().then(|| {
         ctx.pending_notifications
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -544,15 +549,15 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                     } else {
                         let notif = make_notif();
                         insert_before_pos_with_cap(queue, pos, notif.clone());
-                        let _ = ctx.notify_tx.send((cid, notif.clone()));
+                        // Do not re-broadcast stale pre-settlement balance on `notify_tx`
+                        // after `rec.seq_id` (`B_final`) was already sent at commit time.
                         emitted.push(notif);
                     }
                     continue;
                 }
-                let notif = make_notif();
-                push_pending_notification_capped(queue, notif.clone());
-                let _ = ctx.notify_tx.send((cid, notif.clone()));
-                emitted.push(notif);
+                // `rec.seq_id` was already drained to live listeners: do not re-push
+                // duplicates or stale intermediate balances onto the live stream.
+                emitted.push(make_notif());
             }
             (None, Some(queues)) => {
                 let notif = make_notif();
@@ -560,23 +565,27 @@ pub(crate) fn try_handle_legacy_account_change_emit(
                 let _ = ctx.notify_tx.send((cid, notif.clone()));
                 emitted.push(notif);
             }
-            (Some(rec), None) if rec.was_staged && (rec.balance - manual_bal).abs() < 1e-6 => {
-                let existing =
+            (Some(rec), None) => {
+                if let Some(existing) =
                     find_staged_notification_by_seq(&*ctx.pending_notifications, rec.seq_id)
-                        .unwrap_or_else(make_notif);
-                emitted.push(existing);
+                {
+                    if (rec.balance - manual_bal).abs() < 1e-6 {
+                        emitted.push(existing);
+                    } else {
+                        let notif = make_notif();
+                        insert_before_staged_seq_or_stage(
+                            &*ctx.pending_notifications,
+                            &ctx.notify_tx,
+                            rec.seq_id,
+                            &notif,
+                        );
+                        emitted.push(notif);
+                    }
+                } else {
+                    emitted.push(make_notif());
+                }
             }
-            (Some(rec), None) if rec.was_staged => {
-                let notif = make_notif();
-                insert_before_staged_seq_or_stage(
-                    &*ctx.pending_notifications,
-                    &ctx.notify_tx,
-                    rec.seq_id,
-                    &notif,
-                );
-                emitted.push(notif);
-            }
-            (_, None) => {
+            (None, None) => {
                 let notif = make_notif();
                 let _ = try_stage_dispatch_notification(
                     Some(&*ctx.pending_notifications),

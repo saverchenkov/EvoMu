@@ -746,3 +746,140 @@ async fn staged_dispatch_tx_effects_dedup_and_legacy_same_epoch_ordering() {
         ]
     );
 }
+
+#[tokio::test]
+async fn commit_listener_regression_bf01_bf02_bf03_bf04_matrix() {
+    let ctx = test_ctx();
+    let pilot_id = 90_000_001_i64;
+    let corp_id = 98_000_773_i64;
+    let now = 1_700_000_000_u64;
+    let uid = ctx.db.with_snapshot(|s| s.characters[&pilot_id].user_id);
+
+    ctx.db
+        .acquire_online_lock(uid, 703, Some(pilot_id), true, now)
+        .expect("online lock");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord::new(corp_id, "BF Matrix Corp", "BFMC", pilot_id),
+        );
+        if let Some(ch) = snap.characters.get_mut(&pilot_id) {
+            ch.corporation_id = corp_id;
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+
+    // BF-01(b): Intervening non-wallet commit before legacy notify must still deduplicate.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance = eve_db::IskCents::from_isk(80_000);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.quasar_state_blobs.insert("career_goal_fill".into(), "1".into());
+    });
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 80_000.0);
+    let bf01_drain = ctx.drain_notifications_for_char(pilot_id);
+    let bf01: Vec<_> = bf01_drain.iter().filter_map(account_change_summary).collect();
+    assert_eq!(bf01, vec![("cash".to_string(), pilot_id, 80_000.0, "charid")]);
+
+    // BF-02: Personal `"cash"` TxNotificationEffect must NOT suppress corp Div 1 `"cash"` delta.
+    ctx.db
+        .tx("bf02_personal_plus_corp_div1", |wtx| -> Result<(), String> {
+            wtx.snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(81_000);
+            wtx.snap
+                .corporations
+                .get_mut(&corp_id)
+                .expect("corp")
+                .set_division_balance(1, eve_db::IskCents::from_isk(2_500));
+            wtx.effects.notify_character(
+                pilot_id,
+                "OnAccountChange",
+                "charid",
+                vec![
+                    PyRep::String("cash".into()),
+                    PyRep::Integer(pilot_id),
+                    PyRep::Real(81_000.0),
+                ],
+            );
+            Ok(())
+        })
+        .expect("bf02 tx");
+    let bf02_drain = ctx.drain_notifications_for_char(pilot_id);
+    let bf02: Vec<_> = bf02_drain.iter().filter_map(account_change_summary).collect();
+    assert_eq!(bf02.len(), 2, "expected both personal and corp div1: {bf02:?}");
+    assert!(bf02.contains(&("cash".to_string(), pilot_id, 81_000.0, "charid")));
+    assert!(bf02.contains(&("cash".to_string(), corp_id, 2_500.0, "corpid")));
+
+    // BF-03(1): Drained unstaged queue must NOT push duplicates or broadcast stale balances on notify_tx.
+    let mut rx = ctx.notify_tx.subscribe();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance = eve_db::IskCents::from_isk(90_000);
+    });
+    assert_eq!(
+        ctx.drain_notifications_for_char(pilot_id)
+            .iter()
+            .filter_map(account_change_summary)
+            .collect::<Vec<_>>(),
+        vec![("cash".to_string(), pilot_id, 90_000.0, "charid")]
+    );
+    while rx.try_recv().is_ok() {}
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 90_000.0);
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 85_000.0);
+    assert!(ctx.drain_notifications_for_char(pilot_id).is_empty());
+    assert!(rx.try_recv().is_err(), "stale/dup must not hit notify_tx after drain");
+
+    // Undrained unstaged intermediate B_mid must NOT broadcast B_mid onto notify_tx after B_final.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&pilot_id).expect("pilot").balance = eve_db::IskCents::from_isk(92_000);
+    });
+    while rx.try_recv().is_ok() {}
+    let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 91_000.0);
+    assert!(rx.try_recv().is_err(), "unstaged B_mid must not overwrite live B_final on notify_tx");
+    let undrained_raw = ctx.drain_notifications_for_char(pilot_id);
+    let undrained: Vec<_> = undrained_raw.iter().filter_map(account_change_summary).collect();
+    assert_eq!(
+        undrained,
+        vec![
+            ("cash".to_string(), pilot_id, 91_000.0, "charid"),
+            ("cash".to_string(), pilot_id, 92_000.0, "charid"),
+        ]
+    );
+
+    // BF-03(2): Concurrent Task A unflushed staged commit must NOT suppress Task B's staged notify.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let task_a = with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&pilot_id).expect("pilot").balance =
+                eve_db::IskCents::from_isk(95_000);
+        });
+        let _ = ready_tx.send(());
+        let _ = release_rx.await;
+    });
+    let task_b = with_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx, async {
+        let _ = ready_rx.await;
+        let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 95_000.0);
+        flush_staged_dispatch_notifications(&*ctx.pending_notifications, &ctx.notify_tx);
+        let _ = release_tx.send(());
+    });
+    tokio::join!(task_a, task_b);
+    let task_b_raw = ctx.drain_notifications_for_char(pilot_id);
+    let task_b_out: Vec<_> = task_b_raw.iter().filter_map(account_change_summary).collect();
+    assert_eq!(
+        task_b_out,
+        vec![("cash".to_string(), pilot_id, 95_000.0, "charid")]
+    );
+
+    // BF-04: Folding legacy character PLEX with unchanged vault balance still emits OnAccountChange("plex").
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.account_plex_vault.insert(uid, 100);
+        snap.characters.get_mut(&pilot_id).expect("pilot").plex_balance = 100;
+    });
+    let _ = ctx.drain_notifications_for_char(pilot_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        assert_eq!(snap.adjust_unified_plex_for_user(uid, -100), Some(100));
+    });
+    let bf04_raw = ctx.drain_notifications_for_char(pilot_id);
+    let bf04: Vec<_> = bf04_raw.iter().filter_map(account_change_summary).collect();
+    assert_eq!(bf04, vec![("plex".to_string(), pilot_id, 100.0, "charid")]);
+}
