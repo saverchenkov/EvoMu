@@ -757,9 +757,6 @@ pub fn tax_collector_id(ctx: &ServerContext) -> i64 {
         .unwrap_or(0)
 }
 
-/// Personal wallet `accountKey` used in `OnAccountChange` (same key as the `/giveisk` path).
-const CASH_ACCOUNT_KEY: &str = "cash";
-
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,

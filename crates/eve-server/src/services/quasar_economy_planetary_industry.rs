@@ -18,11 +18,10 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
 };
-use crate::router::NotificationTarget;
 use crate::services::industry_pi::{ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE};
 use eve_db::ledger::{ref_types, JournalEntryInput, JournalMeta};
 use eve_db::{IskCents, WorldRepository};
-use eve_proto::{pb, PyRep};
+use eve_proto::pb;
 use eve_proto::quasar::{
     AuthoritativeContext, DynamicQuasarMessage, DynamicValue, QuasarDescriptorRegistry,
 };
@@ -1445,7 +1444,7 @@ pub fn register_economy_planetary_industry_handlers(
             };
             let now_unix = ctx.now_unix();
 
-            let (src_bal, dst_bal) = db_isk_xfer.try_with_mut_snapshot(|snap| {
+            let (_src_bal, _dst_bal) = db_isk_xfer.try_with_mut_snapshot(|snap| {
                 // Preflight recipient capacity before mutating source balance.
                 let dst_next = match dst_owner {
                     WalletOwnerId::Character(id) => {

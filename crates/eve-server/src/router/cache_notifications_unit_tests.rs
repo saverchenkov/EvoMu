@@ -693,11 +693,8 @@ async fn staged_dispatch_tx_effects_dedup_and_legacy_same_epoch_ordering() {
     })
     .await;
 
-    let flushed: Vec<_> = ctx
-        .drain_notifications_for_char(pilot_id)
-        .iter()
-        .filter_map(account_change_summary)
-        .collect();
+    let flushed_raw = ctx.drain_notifications_for_char(pilot_id);
+    let flushed: Vec<_> = flushed_raw.iter().filter_map(account_change_summary).collect();
     assert_eq!(
         flushed,
         vec![
@@ -739,11 +736,8 @@ async fn staged_dispatch_tx_effects_dedup_and_legacy_same_epoch_ordering() {
         .expect("unstaged commit");
     let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 70_000.0);
     let _ = ctx.notify_account_change(pilot_id, "cash", pilot_id, 65_000.0);
-    let unstaged: Vec<_> = ctx
-        .drain_notifications_for_char(pilot_id)
-        .iter()
-        .filter_map(account_change_summary)
-        .collect();
+    let unstaged_raw = ctx.drain_notifications_for_char(pilot_id);
+    let unstaged: Vec<_> = unstaged_raw.iter().filter_map(account_change_summary).collect();
     assert_eq!(
         unstaged,
         vec![

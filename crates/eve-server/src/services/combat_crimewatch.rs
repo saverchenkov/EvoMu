@@ -2472,8 +2472,8 @@ pub(crate) fn validate_kill_right_live_preconditions(
 pub fn update_crimewatch_engagement_timers(ctx: &ServerContext, char_id: i64, other_char_id: i64) {
     let timeout_ft = ctx.now_blueos_filetime_ticks() + 3_000_000_000;
     let t = NotificationTarget::Character(char_id);
-    ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementStartTimeout { other_char_id, timeout: timeout_ft });
-    ctx.emit_typed(t, crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id });
+    ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStartTimeout { other_char_id, timeout: timeout_ft });
+    ctx.emit_typed(t.clone(), crate::router::notify_registry::OnCrimewatchEngagementStopTimeout { other_char_id });
     with_mut_combat_runtime(ctx, |rt| {
         if let Some(m) = rt.limited_engagements.get_mut(&char_id) { m.remove(&other_char_id); }
     });
