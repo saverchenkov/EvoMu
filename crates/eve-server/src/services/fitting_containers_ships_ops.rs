@@ -5,6 +5,199 @@
 
 use super::*;
 
+pub(crate) use eve_db::{
+    AlscLogEntryRecord as AlscLogEntry, ContainerConfigRecord as ContainerConfig,
+    ShipAccessConfigRecord as ShipAccessConfig,
+};
+#[cfg(test)]
+pub(crate) use eve_db::MAX_ALSC_LOGS_PER_CONTAINER;
+
+#[inline]
+pub(crate) fn map_kv_err(err: String) -> BridgeRpcError {
+    <BridgeRpcError as eve_db::FromWalError>::from_wal_error(err)
+}
+
+#[inline]
+pub(crate) fn container_password_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+    which: i64,
+) -> Option<String> {
+    let sub_key = if which == 2 { "2" } else { "1" };
+    snap.kv(eve_db::Ns::ContainerPassword)
+        .get::<String>(container_id, sub_key)
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn set_container_password_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    container_id: i64,
+    which: i64,
+    password: &str,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let sub_key = if which == 2 { "2" } else { "1" };
+    if password.is_empty() {
+        snap.kv_mut(eve_db::Ns::ContainerPassword)
+            .remove(container_id, sub_key);
+        Ok(())
+    } else {
+        snap.kv_mut(eve_db::Ns::ContainerPassword)
+            .set_with_unix(container_id, sub_key, &password, now_unix)
+            .map_err(map_kv_err)
+    }
+}
+
+#[inline]
+pub(crate) fn container_config_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+) -> ContainerConfig {
+    snap.kv(eve_db::Ns::ContainerConfig)
+        .get::<ContainerConfig>(container_id, "")
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_container_config_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    container_id: i64,
+    cfg: &ContainerConfig,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    snap.kv_mut(eve_db::Ns::ContainerConfig)
+        .set_with_unix(container_id, "", cfg, now_unix)
+        .map_err(map_kv_err)
+}
+
+#[inline]
+pub(crate) fn is_container_unlocked_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    target_id: i64,
+    char_id: i64,
+) -> bool {
+    snap.kv(eve_db::Ns::ContainerUnlockedChar)
+        .get::<bool>(target_id, &char_id.to_string())
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_container_unlocked_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    target_id: i64,
+    char_id: i64,
+    unlocked: bool,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let sub_key = char_id.to_string();
+    if unlocked {
+        snap.kv_mut(eve_db::Ns::ContainerUnlockedChar)
+            .set_with_unix(target_id, sub_key, &true, now_unix)
+            .map_err(map_kv_err)
+    } else {
+        snap.kv_mut(eve_db::Ns::ContainerUnlockedChar)
+            .remove(target_id, &sub_key);
+        Ok(())
+    }
+}
+
+pub(crate) fn clear_container_unlocks_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    target_id: i64,
+) -> usize {
+    snap.kv_mut(eve_db::Ns::ContainerUnlockedChar)
+        .clear_entity(target_id)
+}
+
+pub(crate) fn set_alsc_item_locked_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    item_id: i64,
+    locked: bool,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if locked {
+        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+            .set_with_unix(item_id, "", &true, now_unix)
+            .map_err(map_kv_err)
+    } else {
+        snap.kv_mut(eve_db::Ns::AlscLockedItem)
+            .remove(item_id, "");
+        Ok(())
+    }
+}
+
+#[inline]
+pub(crate) fn container_alsc_logs_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    container_id: i64,
+) -> Vec<AlscLogEntry> {
+    snap.kv(eve_db::Ns::ContainerAlscLogs)
+        .get::<Vec<AlscLogEntry>>(container_id, "")
+        .unwrap_or_default()
+}
+
+pub(crate) fn append_alsc_log_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    container_id: i64,
+    entry: AlscLogEntry,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    eve_db::push_alsc_log_in_kv(snap, container_id, entry, now_unix).map_err(map_kv_err)
+}
+
+#[inline]
+pub(crate) fn ship_access_config_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> ShipAccessConfig {
+    snap.kv(eve_db::Ns::ShipAccessConfig)
+        .get::<ShipAccessConfig>(ship_id, "")
+        .unwrap_or_default()
+}
+
+#[inline]
+pub(crate) fn ship_password_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+) -> Option<String> {
+    ship_access_config_snap(snap, ship_id)
+        .password
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn set_ship_access_config_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    cfg: &ShipAccessConfig,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    snap.kv_mut(eve_db::Ns::ShipAccessConfig)
+        .set_with_unix(ship_id, "", cfg, now_unix)
+        .map_err(map_kv_err)
+}
+
+#[inline]
+pub(crate) fn custom_item_flag_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    item_id: i64,
+) -> Option<u16> {
+    snap.kv(eve_db::Ns::CustomItemFlag).get::<u16>(item_id, "")
+}
+
+pub(crate) fn set_custom_item_flag_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    item_id: i64,
+    flag_u16: Option<u16>,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    if let Some(f) = flag_u16 {
+        snap.kv_mut(eve_db::Ns::CustomItemFlag)
+            .set_with_unix(item_id, "", &f, now_unix)
+            .map_err(map_kv_err)
+    } else {
+        snap.kv_mut(eve_db::Ns::CustomItemFlag).remove(item_id, "");
+        Ok(())
+    }
+}
+
 pub(crate) async fn handle_clear_charges(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1632,6 +1825,227 @@ fn handle_retrieve_password(
 
     Ok(pw_opt.map(PyRep::String).unwrap_or(PyRep::None))
 }
+
+/// Temporary `#[cfg(test)]` compatibility view over `entity_kv` (`#1180` Track 1).
+/// Zero non-test code reads or compiles these shims; Track 2 migrates remaining unit tests
+/// directly onto the typed `entity_kv` helpers and deletes this module completely.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod legacy_container_ship_test_shim {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashSet;
+
+    #[derive(Default, Clone, Serialize, Deserialize)]
+    pub(crate) struct ContainerShipRuntimeState {
+        pub container_passwords: HashMap<i64, String>,
+        #[serde(default)]
+        pub container_config_passwords: HashMap<i64, String>,
+        pub unlocked_containers: HashSet<(i64, i64)>,
+        pub alsc_locked_items: HashSet<i64>,
+        pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
+        pub ship_configs: HashMap<i64, ShipAccessConfig>,
+        pub custom_item_flags: HashMap<i64, u16>,
+        #[serde(default)]
+        pub ship_passwords: HashMap<i64, String>,
+        #[serde(default)]
+        pub container_configs: HashMap<i64, ContainerConfig>,
+    }
+
+    impl ContainerShipRuntimeState {
+        pub fn get_container_password(&self, cid: i64, which: i64) -> Option<&str> {
+            (if which == 2 {
+                &self.container_config_passwords
+            } else {
+                &self.container_passwords
+            })
+            .get(&cid)
+            .map(String::as_str)
+        }
+        pub fn set_container_password(&mut self, cid: i64, which: i64, pw: String) {
+            let map = if which == 2 {
+                &mut self.container_config_passwords
+            } else {
+                &mut self.container_passwords
+            };
+            if pw.is_empty() {
+                map.remove(&cid);
+            } else {
+                map.insert(cid, pw);
+            }
+        }
+    }
+
+    pub(crate) fn read_container_ship_state_snap(
+        snap: &eve_db::WorldStateSnapshot,
+    ) -> ContainerShipRuntimeState {
+        let mut st = ContainerShipRuntimeState::default();
+        for (k, row) in snap.kv(eve_db::Ns::ContainerPassword).iter_ns() {
+            if let Ok(pw) = serde_json::from_str::<String>(&row.value_json) {
+                if !pw.is_empty() {
+                    if k.sub_key == "2" {
+                        st.container_config_passwords.insert(k.entity_id, pw);
+                    } else {
+                        st.container_passwords.insert(k.entity_id, pw);
+                    }
+                }
+            }
+        }
+        for (k, row) in snap.kv(eve_db::Ns::ContainerConfig).iter_ns() {
+            if let Ok(cfg) = serde_json::from_str::<ContainerConfig>(&row.value_json) {
+                st.container_configs.insert(k.entity_id, cfg);
+            }
+        }
+        for (k, row) in snap.kv(eve_db::Ns::ShipAccessConfig).iter_ns() {
+            if let Ok(cfg) = serde_json::from_str::<ShipAccessConfig>(&row.value_json) {
+                if let Some(ref pw) = cfg.password {
+                    if !pw.is_empty() {
+                        st.ship_passwords.insert(k.entity_id, pw.clone());
+                    }
+                }
+                st.ship_configs.insert(k.entity_id, cfg);
+            }
+        }
+        for (k, row) in snap.kv(eve_db::Ns::ContainerUnlockedChar).iter_ns() {
+            if matches!(serde_json::from_str::<bool>(&row.value_json), Ok(true)) {
+                if let Ok(char_id) = k.sub_key.parse::<i64>() {
+                    let is_ship_only = st.ship_configs.contains_key(&k.entity_id)
+                        && !st.container_passwords.contains_key(&k.entity_id)
+                        && !st.container_configs.contains_key(&k.entity_id);
+                    if is_ship_only {
+                        st.unlocked_containers.insert((char_id, k.entity_id));
+                    } else {
+                        st.unlocked_containers.insert((k.entity_id, char_id));
+                    }
+                }
+            }
+        }
+        st.alsc_locked_items = snap.alsc_locked_item_ids();
+        for (k, row) in snap.kv(eve_db::Ns::ContainerAlscLogs).iter_ns() {
+            if let Ok(logs) = serde_json::from_str::<Vec<AlscLogEntry>>(&row.value_json) {
+                if !logs.is_empty() {
+                    st.alsc_logs.insert(k.entity_id, logs);
+                }
+            }
+        }
+        for (k, row) in snap.kv(eve_db::Ns::CustomItemFlag).iter_ns() {
+            if let Ok(flag_u16) = serde_json::from_str::<u16>(&row.value_json) {
+                st.custom_item_flags.insert(k.entity_id, flag_u16);
+            }
+        }
+        st
+    }
+
+    pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
+        ctx.db.with_snapshot(read_container_ship_state_snap)
+    }
+
+    pub(crate) fn save_container_ship_state_snap(
+        snap: &mut eve_db::WorldStateSnapshot,
+        now_unix: u64,
+        state: &ContainerShipRuntimeState,
+    ) {
+        for ns in [
+            eve_db::Ns::ContainerPassword,
+            eve_db::Ns::ContainerConfig,
+            eve_db::Ns::ContainerUnlockedChar,
+            eve_db::Ns::ContainerAlscLogs,
+            eve_db::Ns::AlscLockedItem,
+            eve_db::Ns::ShipAccessConfig,
+            eve_db::Ns::CustomItemFlag,
+        ] {
+            snap.kv_mut(ns).clear_ns();
+        }
+        for (&cid, pw) in &state.container_passwords {
+            let _ = set_container_password_snap(snap, cid, 1, pw, now_unix);
+        }
+        for (&cid, pw) in &state.container_config_passwords {
+            let _ = set_container_password_snap(snap, cid, 2, pw, now_unix);
+        }
+        for (&cid, cfg) in &state.container_configs {
+            let _ = set_container_config_snap(snap, cid, cfg, now_unix);
+        }
+        let ship_ids: std::collections::BTreeSet<i64> = state
+            .ship_configs
+            .keys()
+            .chain(state.ship_passwords.keys())
+            .copied()
+            .collect();
+        for sid in ship_ids {
+            let mut cfg = state.ship_configs.get(&sid).cloned().unwrap_or_default();
+            if cfg.password.as_deref().is_none_or(str::is_empty) {
+                if let Some(pw) = state.ship_passwords.get(&sid) {
+                    if !pw.is_empty() {
+                        cfg.password = Some(pw.clone());
+                    }
+                }
+            }
+            let _ = set_ship_access_config_snap(snap, sid, &cfg, now_unix);
+        }
+        for &(a, b) in &state.unlocked_containers {
+            let is_ship_pair = !state.container_passwords.contains_key(&a)
+                && !state.container_configs.contains_key(&a)
+                && (state.ship_configs.contains_key(&b)
+                    || state.ship_passwords.contains_key(&b)
+                    || (snap.characters.contains_key(&a) && !snap.characters.contains_key(&b)));
+            let (target_id, char_id) = if is_ship_pair { (b, a) } else { (a, b) };
+            let _ = set_container_unlocked_snap(snap, target_id, char_id, true, now_unix);
+        }
+        for &iid in &state.alsc_locked_items {
+            let _ = set_alsc_item_locked_snap(snap, iid, true, now_unix);
+        }
+        for (&cid, entries) in &state.alsc_logs {
+            if !entries.is_empty() {
+                let mut bounded = entries.clone();
+                eve_db::trim_alsc_logs_to_budget(&mut bounded);
+                let _ = snap
+                    .kv_mut(eve_db::Ns::ContainerAlscLogs)
+                    .set_with_unix(cid, "", &bounded, now_unix);
+            }
+        }
+        for (&iid, &flag_u16) in &state.custom_item_flags {
+            let _ = set_custom_item_flag_snap(snap, iid, Some(flag_u16), now_unix);
+        }
+    }
+
+    pub(crate) fn write_container_ship_state_snap<R>(
+        snap: &mut eve_db::WorldStateSnapshot,
+        f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
+    ) -> R {
+        let mut state = read_container_ship_state_snap(snap);
+        let out = f(&mut state);
+        save_container_ship_state_snap(snap, 0, &state);
+        out
+    }
+
+    pub(crate) fn save_container_ship_state(ctx: &ServerContext, state: &ContainerShipRuntimeState) {
+        let now_unix = ctx.now_unix();
+        ctx.db
+            .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                save_container_ship_state_snap(snap, now_unix, state);
+                Ok(())
+            })
+            .expect("test entity_kv save");
+    }
+
+    pub(crate) fn write_container_ship_state<R>(
+        ctx: &ServerContext,
+        f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
+    ) -> R {
+        let now_unix = ctx.now_unix();
+        ctx.db
+            .try_with_mut_snapshot(|snap| -> Result<R, BridgeRpcError> {
+                let mut state = read_container_ship_state_snap(snap);
+                let out = f(&mut state);
+                save_container_ship_state_snap(snap, now_unix, &state);
+                Ok(out)
+            })
+            .expect("test entity_kv write")
+    }
+}
+
+#[cfg(test)]
+pub(crate) use legacy_container_ship_test_shim::*;
 
 #[cfg(test)]
 #[path = "fitting_containers_ships_ops_cov_unit_tests.rs"]
