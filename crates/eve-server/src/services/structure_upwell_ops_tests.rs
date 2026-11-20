@@ -1614,6 +1614,7 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
     let other_corp_id = 98_476_002i64;
     let corp_legacy_empty = 98_476_003i64;
     let corp_assign_only = 98_476_004i64;
+    let corp_title_only = 98_476_005i64;
     let registered_npc_corp = 1_000_199i64;
     let unregistered_corp_id = 98_476_099i64;
     let sid = 1_094_760_000_001i64;
@@ -1629,6 +1630,9 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
     let assign_roleless_id = 9_476_009i64;
     let excluded_role_id = 9_476_010i64;
     let excluded_assign_id = 9_476_011i64;
+    let missing_char_id = 9_476_012i64;
+    let title_op_id = 9_476_013i64;
+    let title_roleless_id = 9_476_014i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         let base_char = snap.characters.values().next().cloned().expect("seed char");
@@ -1644,6 +1648,8 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             (assign_roleless_id, corp_assign_only),
             (excluded_role_id, corp_id),
             (excluded_assign_id, corp_id),
+            (title_op_id, corp_title_only),
+            (title_roleless_id, corp_title_only),
         ] {
             snap.characters.insert(
                 cid,
@@ -1656,7 +1662,14 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
         }
 
         let mut corp = CorporationRecord::new(corp_id, "HF1476 Ops Corp", "H76", ceo_id);
-        for cid in [ceo_id, op_id, assigned_op_id, roleless_id, ex_member_id] {
+        for cid in [
+            ceo_id,
+            op_id,
+            assigned_op_id,
+            roleless_id,
+            ex_member_id,
+            missing_char_id,
+        ] {
             corp.members.insert(cid);
         }
         corp.member_roles
@@ -1667,6 +1680,8 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             .insert(ex_member_id, eve_db::corp_roles::ROLE_DIRECTOR);
         corp.member_roles
             .insert(excluded_role_id, eve_db::corp_roles::ROLE_STARBASE_OPERATOR);
+        corp.member_roles
+            .insert(missing_char_id, eve_db::corp_roles::ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);
 
         snap.corp_role_assignments.insert(
@@ -1707,6 +1722,20 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
                 ..Default::default()
             },
         );
+
+        let mut title_corp = CorporationRecord::new(corp_title_only, "Title Only", "TO", 0);
+        title_corp.members.insert(title_op_id);
+        title_corp.members.insert(title_roleless_id);
+        snap.corporations.insert(corp_title_only, title_corp);
+        let gov = snap.corp_governance.entry(corp_title_only).or_default();
+        gov.titles.insert(
+            1,
+            (
+                "Structure Gunner".into(),
+                eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+            ),
+        );
+        gov.member_titles.insert(title_op_id, 1);
     });
 
     let mk_st = |owner_corp_id: i64| UpwellStructureRecord {
@@ -1731,9 +1760,10 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
             ex_member_id,
             excluded_role_id,
             excluded_assign_id,
+            missing_char_id,
         ] {
             let err = require_structure_control_role_at(snap, denied, &st_ok, now)
-                .expect_err("non-member, roleless member, or excluded member with stale roles must be denied");
+                .expect_err("non-member, roleless member, excluded member, or missing character must be denied");
             assert_eq!(err.code, "CorpRoleDenied");
         }
 
@@ -1751,6 +1781,14 @@ fn require_structure_control_role_at_rejects_npc_zero_unregistered_and_non_membe
         assert_eq!(err.code, "CorpRoleDenied");
 
         let st_legacy = mk_st(corp_legacy_empty);
-        assert!(require_structure_control_role_at(snap, legacy_char_id, &st_legacy, now).is_ok());
+        let err = require_structure_control_role_at(snap, legacy_char_id, &st_legacy, now)
+            .expect_err("CEO-less/roleless corp member must fail closed without control role");
+        assert_eq!(err.code, "CorpRoleDenied");
+
+        let st_title = mk_st(corp_title_only);
+        assert!(require_structure_control_role_at(snap, title_op_id, &st_title, now).is_ok());
+        let err = require_structure_control_role_at(snap, title_roleless_id, &st_title, now)
+            .expect_err("roleless member in title-governed corp must fail closed");
+        assert_eq!(err.code, "CorpRoleDenied");
     });
 }

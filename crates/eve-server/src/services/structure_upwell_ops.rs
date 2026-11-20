@@ -1024,20 +1024,12 @@ fn structure_control_role_denial_reason(
             st.structure_id, st.owner_corp_id
         ));
     };
-    let has_role_anchor = corp.member_roles.contains_key(&char_id)
-        || snap
-            .corp_role_assignments
-            .contains_key(&(st.owner_corp_id, char_id));
-    let corp_member_ok = corp.ceo_id == char_id
-        || corp.members.contains(&char_id)
-        || (corp.members.is_empty() && has_role_anchor);
-    let is_member = match snap.characters.get(&char_id) {
-        Some(ch) => {
-            ch.corporation_id == st.owner_corp_id
-                && (corp.members.is_empty() || corp_member_ok)
-        }
-        None => corp_member_ok,
-    };
+    let is_member = snap.characters.get(&char_id).is_some_and(|ch| {
+        ch.corporation_id == st.owner_corp_id
+            && (corp.members.is_empty()
+                || corp.ceo_id == char_id
+                || corp.members.contains(&char_id))
+    });
     if !is_member {
         return Some(format!(
             "Character {char_id} lacks membership in structure {} owner corporation {}",
@@ -1055,13 +1047,7 @@ fn structure_control_role_denial_reason(
         | eve_db::corp_roles::ROLE_STATION_MANAGER
         | eve_db::corp_roles::ROLE_STARBASE_OPERATOR
         | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
-    let has_role_registry = corp.ceo_id != 0
-        || !corp.member_roles.is_empty()
-        || snap
-            .corp_role_assignments
-            .keys()
-            .any(|&(cid, _)| cid == st.owner_corp_id);
-    if has_role_registry && !is_ceo && (eff_roles & CTRL_ROLES) == 0 {
+    if !(corp.ceo_id == char_id || is_ceo) && (eff_roles & CTRL_ROLES) == 0 {
         return Some(format!(
             "Character {char_id} lacks structure defense/control role for structure {}",
             st.structure_id
