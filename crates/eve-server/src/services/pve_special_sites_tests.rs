@@ -739,6 +739,190 @@ async fn special_site_queries_do_not_spawn_unvisited_system_actors() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn special_sites_map_tales_and_interference_queries_are_read_pure_and_authz_gated() {
+    let jita: SolarSystemId = 30_000_142;
+    let (ctx, mut session, _char_id, _ship_id) = make_ctx_and_pilot(jita, true);
+    let kw = HashMap::new();
+
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    // 1. Unauthenticated calls across all special-site, map, interference, and taleMgr RPCs
+    // must reject without initializing the registry or bumping DB epoch/commit counters.
+    let mut unauth = SessionState::new(999);
+    let unauth_calls: &[(&str, &str, Vec<PyRep>)] = &[
+        ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances", vec![]),
+        ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances", vec![PyRep::Integer(30_000_012)]),
+        ("dungeonInstanceCacheMgr", "GetSignatureInstances", vec![PyRep::Integer(31_000_001)]),
+        ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems", vec![]),
+        ("dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", vec![]),
+        ("map", "GetAllRoamingWeatherSystems", vec![]),
+        ("map", "GetEdencomFortressSystems", vec![]),
+        ("map", "GetEdencomMinorVictorySystems", vec![]),
+        ("map", "GetIncursionGlobalReport", vec![]),
+        ("map", "GetSystemsInIncursions", vec![]),
+        ("map", "GetTriglavianMinorVictorySystems", vec![]),
+        ("map", "GetDeadspaceComplexMap", vec![]),
+        ("map", "GetDeadspaceAgentsMap", vec![]),
+        ("map", "GetStationCount", vec![]),
+        ("solarsystemInterferenceMgr", "GetLocalInterferenceState", vec![]),
+        ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand", vec![]),
+        ("solarsystemInterferenceMgr", "GetAllInterferenceBands", vec![]),
+        ("taleMgr", "GetGlobalWorldEventTales", vec![]),
+        ("taleMgr", "get_active_tales_by_template", vec![PyRep::Integer(5158)]),
+    ];
+    for (svc, meth, args) in unauth_calls {
+        let res = ctx.dispatch_rpc(&mut unauth, svc, None, meth, args, &kw, None).await;
+        assert!(res.is_err(), "unauthenticated {svc}.{meth} must reject");
+    }
+    assert!(ctx
+        .dispatch_rpc(&mut unauth, "incursion", None, "GetIncursionLPLog", &[], &kw, None)
+        .await
+        .is_err());
+    assert_eq!(ctx.db.state_epoch(), epoch0, "unauthenticated reads must not bump state_epoch");
+    assert_eq!(ctx.db.tx_commit_count(), commits0, "unauthenticated reads must not bump tx_commit_count");
+    assert!(read_pve_special_reg(&ctx, |reg| !reg.initialized));
+
+    // 2. Authenticated read-only queries on a cold DB must return expected data with ZERO DB writes.
+    let hf = ctx
+        .dispatch_rpc(&mut session, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[], &kw, None)
+        .await
+        .expect("GetHomefrontSiteInstances");
+    assert!(matches!(hf, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let trig_remote = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetTriglavianSiteInstances",
+            &[PyRep::Integer(30_000_012)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetTriglavianSiteInstances remote");
+    let PyRep::Dict(ref trig_d) = trig_remote else { panic!("expected dict") };
+    let PyRep::List(ref trig_items) = trig_d[0].1 else { panic!("expected list") };
+    assert_eq!(trig_items.len(), 2, "cold remote Triglavian query must compute 2 deterministic sites");
+
+    let drifter_sig = ctx
+        .dispatch_rpc(
+            &mut session,
+            "dungeonInstanceCacheMgr",
+            None,
+            "GetSignatureInstances",
+            &[PyRep::Integer(31_000_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetSignatureInstances Drifter Hive");
+    assert!(matches!(drifter_sig, PyRep::Dict(ref d) if !d.is_empty()));
+
+    let mv = ctx
+        .dispatch_rpc(&mut session, "dungeonInstanceCacheMgr", None, "GetTriglavianMinorVictorySystems", &[], &kw, None)
+        .await
+        .expect("GetTriglavianMinorVictorySystems");
+    assert!(matches!(mv, PyRep::List(ref l) if l.len() == 28));
+
+    let storms = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None)
+        .await
+        .expect("map.GetAllRoamingWeatherSystems");
+    assert!(matches!(storms, PyRep::List(ref l) if !l.is_empty()));
+
+    let ef = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetEdencomFortressSystems", &[], &kw, None)
+        .await
+        .expect("map.GetEdencomFortressSystems");
+    assert!(matches!(ef, PyRep::List(ref l) if !l.is_empty()));
+
+    let emv = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetEdencomMinorVictorySystems", &[], &kw, None)
+        .await
+        .expect("map.GetEdencomMinorVictorySystems");
+    assert!(matches!(emv, PyRep::List(ref l) if !l.is_empty()));
+
+    let inc_rep = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetIncursionGlobalReport", &[], &kw, None)
+        .await
+        .expect("map.GetIncursionGlobalReport");
+    assert!(matches!(inc_rep, PyRep::List(_)));
+
+    let inc_sys = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetSystemsInIncursions", &[], &kw, None)
+        .await
+        .expect("map.GetSystemsInIncursions");
+    assert!(matches!(inc_sys, PyRep::List(_)));
+
+    let map_tmv = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None)
+        .await
+        .expect("map.GetTriglavianMinorVictorySystems");
+    assert!(matches!(map_tmv, PyRep::List(ref l) if l.len() == 28));
+
+    let _ = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetDeadspaceComplexMap", &[], &kw, None)
+        .await
+        .expect("map.GetDeadspaceComplexMap");
+    let _ = ctx
+        .dispatch_rpc(&mut session, "map", None, "GetDeadspaceAgentsMap", &[], &kw, None)
+        .await
+        .expect("map.GetDeadspaceAgentsMap");
+
+    let tales = ctx
+        .dispatch_rpc(&mut session, "taleMgr", None, "GetGlobalWorldEventTales", &[], &kw, None)
+        .await
+        .expect("taleMgr.GetGlobalWorldEventTales");
+    assert!(matches!(tales, PyRep::List(ref l) if !l.is_empty()));
+
+    let tpl_tales = ctx
+        .dispatch_rpc(
+            &mut session,
+            "taleMgr",
+            None,
+            "get_active_tales_by_template",
+            &[PyRep::Integer(5201)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("taleMgr.get_active_tales_by_template");
+    assert!(matches!(tpl_tales, PyRep::List(ref l) if !l.is_empty()));
+
+    let local_inf = ctx
+        .dispatch_rpc(&mut session, "solarsystemInterferenceMgr", None, "GetLocalInterferenceState", &[], &kw, None)
+        .await
+        .expect("GetLocalInterferenceState");
+    assert_eq!(local_inf.dict_get("interferenceBand").and_then(|v| v.as_i64()), Some(1));
+
+    let sys_band = ctx
+        .dispatch_rpc(
+            &mut session,
+            "solarsystemInterferenceMgr",
+            None,
+            "GetSolarSystemInterferenceBand",
+            &[PyRep::Integer(i64::from(jita))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetSolarSystemInterferenceBand");
+    assert_eq!(sys_band.dict_get("interferenceBand").and_then(|v| v.as_i64()), Some(1));
+
+    let all_bands = ctx
+        .dispatch_rpc(&mut session, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
+        .await
+        .expect("GetAllInterferenceBands");
+    assert!(matches!(all_bands, PyRep::Dict(ref d) if !d.is_empty()));
+
+    assert_eq!(ctx.db.state_epoch(), epoch0, "authenticated read-only queries must not bump state_epoch");
+    assert_eq!(ctx.db.tx_commit_count(), commits0, "authenticated read-only queries must not bump tx_commit_count");
+    assert!(read_pve_special_reg(&ctx, |reg| !reg.initialized));
+}
+
 #[cfg(test)]
 #[path = "pve_special_sites_extra_unit_tests.rs"]
 mod pve_special_sites_extra_unit_tests;

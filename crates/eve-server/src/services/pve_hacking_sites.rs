@@ -8,10 +8,12 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_exploration::{
-    ensure_system_pve_sites_seeded, next_pve_seq, now_sec,
-    with_pve_exploration_reg, HackingGameSession, HackingNodeKind, HackingTileState,
-    HackingUtilityKind, PveExplorationRegistry, SpewedLootCan,
+    next_pve_seq, now_sec, read_pve_exploration_reg, with_pve_exploration_reg,
+    HackingGameSession, HackingNodeKind, HackingTileState, HackingUtilityKind,
+    PveExplorationRegistry, SpewedLootCan,
 };
+#[cfg(test)]
+use crate::services::pve_exploration::ensure_system_pve_sites_seeded;
 pub use crate::services::pve_hacking_board::{
     build_hacking_grid_procedural, build_hacking_grid_procedural_with_sde, detonate_ghost_site,
     detonate_ghost_site_with_can, hacking_tile_distance_indicator,
@@ -102,8 +104,177 @@ pub fn spawn_loot_spew_for_container(
     cans
 }
 
+fn hacking_rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError {
+        code: code.into(),
+        message: message.into(),
+        client_error: None,
+    }
+}
+
+fn require_undocked_hacking_space(
+    session: &SessionState,
+) -> Result<(i64, SolarSystemId, i64), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(hacking_rpc_err(
+            "ShipDocked",
+            "Cannot access hacking minigame while docked",
+        ));
+    }
+    let sys_id = session
+        .solar_system_id
+        .ok_or_else(|| hacking_rpc_err("NoSolarSystem", "Session has no active solar system"))?;
+    let ship_id = match session.ship_id {
+        Some(sid) if sid > 0 => sid,
+        _ => return Err(hacking_rpc_err("NoActiveShip", "Session has no active ship")),
+    };
+    Ok((char_id, sys_id, ship_id))
+}
+
+fn is_valid_hackable_target_readonly(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    sys_id: SolarSystemId,
+    container_id: i64,
+) -> bool {
+    if container_id <= 0 {
+        return false;
+    }
+    let in_exploration_site = read_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games
+            .get(&(char_id, container_id))
+            .is_some_and(|g| g.solar_system_id == sys_id)
+            || reg.sites_by_system.get(&sys_id).is_some_and(|sites| {
+                sites
+                    .iter()
+                    .any(|s| !s.cleared && s.hackable_can_ids.contains(&container_id))
+            })
+    });
+    if in_exploration_site {
+        return true;
+    }
+    if matches!(
+        crate::services::pve_homefront_sites::is_homefront_hackable_structure(
+            ctx,
+            char_id,
+            sys_id,
+            container_id,
+        ),
+        Ok(Some(_))
+    ) {
+        return true;
+    }
+    ctx.db.with_snapshot(|s| {
+        let caller_corp = s
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        s.structures.get(&container_id).is_some_and(|st| {
+            st.solar_system_id == sys_id
+                && st.state != "Destroyed"
+                && (caller_corp == 0 || caller_corp != st.owner_corp_id)
+        })
+    })
+}
+
+fn validate_clicked_tile_in_reg(
+    session: &SessionState,
+    reg: &PveExplorationRegistry,
+    char_id: i64,
+    container_id: i64,
+    tile_idx: u32,
+) -> Result<(), BridgeRpcError> {
+    let Some(game) = reg.hacking_games.get(&(char_id, container_id)) else {
+        return Err(hacking_rpc_err(
+            "NoActiveHackingGame",
+            format!("No active hacking game on container {container_id}"),
+        ));
+    };
+    if session.solar_system_id.is_some_and(|s| s != game.solar_system_id) {
+        return Err(hacking_rpc_err(
+            "NotInSiteSystem",
+            "Cannot continue hacking minigame from another solar system",
+        ));
+    }
+    if game.status != "InProgress" {
+        return Err(hacking_rpc_err(
+            "HackingGameAlreadyFinished",
+            format!("Hacking game on container {container_id} is already finished"),
+        ));
+    }
+    if tile_idx >= game.tiles.len() as u32 {
+        return Err(hacking_rpc_err("InvalidTileIndex", "InvalidTileIndex"));
+    }
+    if !game.tiles[tile_idx as usize].revealed {
+        let accessible = game.tiles.iter().any(|adj| {
+            adj.revealed
+                && !is_blocking_defensive_tile(adj)
+                && are_hacking_tiles_adjacent(adj.tile_index, tile_idx)
+        });
+        if !accessible {
+            return Err(hacking_rpc_err("TileNotAccessible", "TileNotAccessible"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_utility_use_in_reg(
+    reg: &PveExplorationRegistry,
+    char_id: i64,
+    container_id: i64,
+    slot_idx: usize,
+    target_tile_opt: Option<u32>,
+    allow_active_status: bool,
+) -> Result<HackingUtilityKind, BridgeRpcError> {
+    let Some(game) = reg.hacking_games.get(&(char_id, container_id)) else {
+        return Err(hacking_rpc_err(
+            "NoActiveHackingGame",
+            format!("No active hacking game on container {container_id}"),
+        ));
+    };
+    let status_ok = game.status == "InProgress" || (allow_active_status && game.status == "active");
+    if !status_ok {
+        return Err(hacking_rpc_err(
+            "HackingGameAlreadyFinished",
+            format!("Hacking game on container {container_id} is already finished"),
+        ));
+    }
+    let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
+        return Err(hacking_rpc_err(
+            "UtilitySlotEmpty",
+            format!("Utility slot {slot_idx} is empty"),
+        ));
+    };
+    if matches!(
+        util,
+        HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector
+    ) {
+        if let Some(tid) = target_tile_opt {
+            let Some(t) = game.tiles.get(tid as usize) else {
+                return Err(hacking_rpc_err("InvalidTileIndex", "InvalidTileIndex"));
+            };
+            if !t.revealed || t.coherence <= 0 {
+                return Err(hacking_rpc_err(
+                    "TargetTileNotRevealed",
+                    "TargetTileNotRevealed",
+                ));
+            }
+        } else if !game.tiles.iter().any(|t| t.revealed && t.coherence > 0) {
+            return Err(hacking_rpc_err(
+                "TargetTileNotRevealed",
+                "TargetTileNotRevealed",
+            ));
+        }
+    }
+    Ok(util)
+}
+
 fn find_active_hacking_container(ctx: &ServerContext, char_id: i64) -> Option<i64> {
-    with_pve_exploration_reg(ctx, |reg| {
+    read_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games
             .iter()
             .find(|((cid, _), g)| *cid == char_id && (g.status == "InProgress" || g.status == "active"))
@@ -151,7 +322,7 @@ async fn validate_active_hacking_ship_and_range(
         ctx.db
             .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(0))
     });
-    let game_meta = with_pve_exploration_reg(ctx, |reg| {
+    let game_meta = read_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games.get(&(char_id, container_id)).map(|g| {
             let spos = reg
                 .sites_by_system
@@ -170,7 +341,9 @@ async fn validate_active_hacking_ship_and_range(
                 client_error: None,
             });
         }
-        let sys_handle = ctx.systems.get_or_spawn(g_sys_id);
+        let Some(sys_handle) = ctx.systems.get_handle(g_sys_id) else {
+            return Ok(());
+        };
         if sys_handle
             .get_combat_state(ship_id)
             .await
@@ -233,13 +406,18 @@ pub async fn handle_pve_hacking(
                 Err(e) => return Some(Err(e)),
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                    client_error: None,
-                }));
+                return Some(Err(hacking_rpc_err(
+                    "NoSolarSystem",
+                    "Session has no active solar system",
+                )));
             };
-            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+            // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Reject hacking while docked before any site lookup or state mutation.
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(hacking_rpc_err(
+                    "ShipDocked",
+                    "Cannot initiate hacking minigame while docked",
+                )));
+            }
             let container_id = if args.len() == 1 && matches!(args.first(), Some(PyRep::None)) {
                 0
             } else if let Some(explicit_id) = args
@@ -252,7 +430,7 @@ pub async fn handle_pve_hacking(
                 second_id
             } else {
                 find_active_hacking_container(ctx, char_id).unwrap_or_else(|| {
-                    with_pve_exploration_reg(ctx, |reg| {
+                    read_pve_exploration_reg(ctx, |reg| {
                         reg.sites_by_system
                             .get(&sys_id)
                             .and_then(|sites| {
@@ -267,7 +445,10 @@ pub async fn handle_pve_hacking(
                 })
             };
             if container_id == 0 {
-                return Some(Err(BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not specified".into(), client_error: None }));
+                return Some(Err(hacking_rpc_err(
+                    "TargetNotFound",
+                    "Target container not specified",
+                )));
             }
 
             let hf_hack = match crate::services::pve_homefront_sites::is_homefront_hackable_structure(
@@ -289,28 +470,29 @@ pub async fn handle_pve_hacking(
             };
             if let Some((_, owner_corp_id, caller_corp)) = struct_info {
                 if caller_corp != 0 && caller_corp == owner_corp_id {
-                    return Some(Err(BridgeRpcError { code: "CannotHackOwnStructure".into(), message: "Cannot run a Data Analyzer hack against a structure owned by your own corporation".into(), client_error: None }));
+                    return Some(Err(hacking_rpc_err(
+                        "CannotHackOwnStructure",
+                        "Cannot run a Data Analyzer hack against a structure owned by your own corporation",
+                    )));
                 }
             }
             let struct_pos = struct_info.map(|(p, _, _)| p);
             let hf_pos_opt = if hf_hack.is_some() {
-                let sys_h = ctx.systems.get_or_spawn(sys_id);
-                sys_h
-                    .get_ball_snapshot(container_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position.to_array())
-                    .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()))
+                if let Some(sys_h) = ctx.systems.get_handle(sys_id) {
+                    sys_h
+                        .get_ball_snapshot(container_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.position.to_array())
+                        .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()))
+                } else {
+                    ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied())
+                }
             } else {
                 None
             };
-            let hacking_rpc_err = |code: &str, msg: &str| BridgeRpcError {
-                code: code.into(),
-                message: msg.into(),
-                client_error: None,
-            };
-            let site_res = with_pve_exploration_reg(ctx, |reg| {
+            let site_res = read_pve_exploration_reg(ctx, |reg| {
                 if let Some((hf_is_relic, _)) = hf_hack {
                     if reg.hacking_games.values().any(|g| g.container_id == container_id && g.status == "InProgress") {
                         return Err(hacking_rpc_err("HackingGameAlreadyInProgress", "Another pilot is already hacking this target"));
@@ -333,8 +515,8 @@ pub async fn handle_pve_hacking(
                     return Ok((format!("STRUCTURE_{container_id}"), false, false, false, st_pos));
                 }
                 let now = now_sec(reg);
-                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
-                let s = sites.iter_mut().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: "Target container not found".into(), client_error: None })?;
+                let sites = reg.sites_by_system.get(&sys_id).ok_or_else(|| hacking_rpc_err("TargetNotFound", "Target container not found"))?;
+                let s = sites.iter().find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared).ok_or_else(|| hacking_rpc_err("TargetNotFound", "Target container not found"))?;
                 let ghost_timer_expired = s.site_category == "Ghost"
                     && !s.ghost_detonated
                     && s.ghost_timer_started_at
@@ -357,56 +539,24 @@ pub async fn handle_pve_hacking(
                 Err(e) => return Some(Err(e)),
             };
 
-            // BF-PVE-HACK-PROXIMITY-FAILOPEN-04: Explicitly reject hacking while docked or without a ship in space
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot initiate hacking minigame while docked".into(), client_error: None }));
-            }
             let ship_id = match session.ship_id {
                 Some(sid) if sid > 0 => sid,
-                _ => return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into(), client_error: None })),
+                _ => return Some(Err(hacking_rpc_err("NoActiveShip", "Session has no active ship"))),
             };
 
-            let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
-                if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
-                    if let Some(s) = sites.iter_mut().find(|x| x.site_id == site_id) {
-                        let dur = s.ghost_detonate_after_sec.max(90);
-                        if is_ghost && s.ghost_timer_started_at.is_none() {
-                            s.ghost_timer_started_at = Some(now);
-                            s.ghost_detonate_after_sec = dur;
-                        }
-                        return is_ghost
-                            && s.ghost_timer_started_at
-                                .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
-                    }
-                }
-                false
-            });
-
-            if ghost_expired {
-                with_pve_exploration_reg(ctx, |reg| {
-                    reg.hacked_containers.insert((sys_id, container_id));
-                });
-                let (dmg, npcs) = detonate_ghost_site(ctx, session, sys_id, &site_id).await;
-                return Some(Ok(PyRep::keyval([
-                    ("status", PyRep::String("GhostSiteDetonated".into())),
-                    ("explosiveDamageApplied", PyRep::Real(dmg)),
-                    (
-                        "spawnedPirateNpcBallIDs",
-                        PyRep::List(npcs.into_iter().map(PyRep::Integer).collect()),
-                    ),
-                ])));
-            }
-
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let Some(sys_handle) = ctx.systems.get_handle(sys_id) else {
+                return Some(Err(hacking_rpc_err(
+                    "ShipNotInSpace",
+                    format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+                )));
+            };
             let sb = match sys_handle.get_ball_snapshot(ship_id).await {
                 Ok(Some((_, ball))) => ball,
                 _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipNotInSpace".into(),
-                        message: format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
-                        client_error: None,
-                    }));
+                    return Some(Err(hacking_rpc_err(
+                        "ShipNotInSpace",
+                        format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
+                    )));
                 }
             };
             if sys_handle
@@ -416,11 +566,10 @@ pub async fn handle_pve_hacking(
                 .flatten()
                 .is_some_and(|cs| cs.is_cloaked)
             {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotHackWhileCloaked".into(),
-                    message: "Cannot initiate hacking minigame while cloaked".into(),
-                    client_error: None,
-                }));
+                return Some(Err(hacking_rpc_err(
+                    "CannotHackWhileCloaked",
+                    "Cannot initiate hacking minigame while cloaked",
+                )));
             }
 
             let (virus_coh, virus_str, utility_slots, analyzer_max_range) =
@@ -439,11 +588,44 @@ pub async fn handle_pve_hacking(
             let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
             let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
             if dist > analyzer_max_range {
-                return Some(Err(BridgeRpcError {
-                    code: "OutOfRange".into(),
-                    message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
-                    client_error: None,
-                }));
+                return Some(Err(hacking_rpc_err(
+                    "OutOfRange",
+                    format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
+                )));
+            }
+
+            if is_ghost {
+                let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
+                    let now = now_sec(reg);
+                    if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
+                        if let Some(s) = sites.iter_mut().find(|x| x.site_id == site_id) {
+                            let dur = s.ghost_detonate_after_sec.max(90);
+                            if s.ghost_timer_started_at.is_none() {
+                                s.ghost_timer_started_at = Some(now);
+                                s.ghost_detonate_after_sec = dur;
+                            }
+                            return s
+                                .ghost_timer_started_at
+                                .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
+                        }
+                    }
+                    false
+                });
+
+                if ghost_expired {
+                    with_pve_exploration_reg(ctx, |reg| {
+                        reg.hacked_containers.insert((sys_id, container_id));
+                    });
+                    let (dmg, npcs) = detonate_ghost_site(ctx, session, sys_id, &site_id).await;
+                    return Some(Ok(PyRep::keyval([
+                        ("status", PyRep::String("GhostSiteDetonated".into())),
+                        ("explosiveDamageApplied", PyRep::Real(dmg)),
+                        (
+                            "spawnedPirateNpcBallIDs",
+                            PyRep::List(npcs.into_iter().map(PyRep::Integer).collect()),
+                        ),
+                    ])));
+                }
             }
 
             let sys_sec = ctx
@@ -454,7 +636,7 @@ pub async fn handle_pve_hacking(
                 .unwrap_or(0.0);
             let is_structure = site_id.starts_with("STRUCTURE_") || site_id.starts_with("HOMEFRONT_");
             let site_tier_from_reg = if !is_structure {
-                with_pve_exploration_reg(ctx, |reg| {
+                read_pve_exploration_reg(ctx, |reg| {
                     reg.sites_by_system.get(&sys_id).and_then(|sites| {
                         sites.iter().find(|s| s.site_id == site_id).and_then(|s| {
                             s.ded_rating.or(s.wormhole_class)
@@ -625,47 +807,21 @@ pub async fn handle_pve_hacking(
             if let Err(e) = validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await {
                 return Some(Err(e));
             }
+            if let Err(e) = read_pve_exploration_reg(ctx, |reg| {
+                validate_clicked_tile_in_reg(session, reg, char_id, container_id, tile_idx)
+            }) {
+                return Some(Err(e));
+            }
 
             let step_res = with_pve_exploration_reg(ctx, |reg| {
                 let _now = now_sec(reg);
-                let Some(mut game) = reg.hacking_games.remove(&(char_id, container_id)) else {
-                    return Err(BridgeRpcError {
-                        code: "NoActiveHackingGame".into(),
-                        message: format!("No active hacking game on container {container_id}"),
-                        client_error: None,
-                    });
-                };
-                if session.solar_system_id.is_some_and(|s| s != game.solar_system_id) {
-                    reg.hacking_games.insert((char_id, container_id), game);
-                    return Err(BridgeRpcError {
-                        code: "NotInSiteSystem".into(),
-                        message: "Cannot continue hacking minigame from another solar system".into(),
-                        client_error: None,
-                    });
-                }
-                if game.status != "InProgress" {
-                    reg.hacking_games.insert((char_id, container_id), game);
-                    return Err(BridgeRpcError {
-                        code: "HackingGameAlreadyFinished".into(),
-                        message: format!("Hacking game on container {container_id} is already finished"),
-                        client_error: None,
-                    });
-                }
-                if tile_idx >= game.tiles.len() as u32 {
-                    reg.hacking_games.insert((char_id, container_id), game);
-                    return Err(BridgeRpcError::user_error("InvalidTileIndex"));
-                }
-                if !game.tiles[tile_idx as usize].revealed {
-                    let accessible = game.tiles.iter().any(|adj| {
-                        adj.revealed
-                            && !is_blocking_defensive_tile(adj)
-                            && are_hacking_tiles_adjacent(adj.tile_index, tile_idx)
-                    });
-                    if !accessible {
-                        reg.hacking_games.insert((char_id, container_id), game);
-                        return Err(BridgeRpcError::user_error("TileNotAccessible"));
-                    }
-                }
+                validate_clicked_tile_in_reg(session, reg, char_id, container_id, tile_idx)?;
+                let mut game = reg.hacking_games.remove(&(char_id, container_id)).ok_or_else(|| {
+                    hacking_rpc_err(
+                        "NoActiveHackingGame",
+                        format!("No active hacking game on container {container_id}"),
+                    )
+                })?;
                 let mut timer_expired = false;
                 if game.is_ghost_site {
                     timer_expired = crate::services::pve_sleeper_caches::is_ghost_site_timer_expired(
@@ -861,7 +1017,7 @@ pub async fn handle_pve_hacking(
                 ).await;
             }
 
-            let dist_indicator = with_pve_exploration_reg(ctx, |reg| {
+            let dist_indicator = read_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games
                     .get(&(char_id, container_id))
                     .map(|g| hacking_tile_distance_indicator(tile_idx, &g.tiles))
@@ -942,17 +1098,37 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(hacking_rpc_err(
+                    "ShipDocked",
+                    "Cannot quit hacking minigame while docked",
+                )));
+            }
+            if session.solar_system_id.is_none() {
+                return Some(Err(hacking_rpc_err(
+                    "NoSolarSystem",
+                    "Session has no active solar system",
+                )));
+            }
             let Some(container_id) = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .or_else(|| find_active_hacking_container(ctx, char_id))
             else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveHackingGame".into(),
-                    message: "No active hacking game for character".into(),
-                    client_error: None,
-                }));
+                return Some(Err(hacking_rpc_err(
+                    "NoActiveHackingGame",
+                    "No active hacking game for character",
+                )));
             };
+            let has_game = read_pve_exploration_reg(ctx, |reg| {
+                reg.hacking_games.contains_key(&(char_id, container_id))
+            });
+            if !has_game {
+                return Some(Err(hacking_rpc_err(
+                    "NoActiveHackingGame",
+                    format!("No active hacking game on container {container_id}"),
+                )));
+            }
             let (removed, second_fail_info, ghost_detonate_info) = with_pve_exploration_reg(ctx, |reg| {
                 reg.self_repair_turns.remove(&(char_id, container_id));
                 if let Some(game) = reg.hacking_games.remove(&(char_id, container_id)) {
@@ -1025,32 +1201,42 @@ async fn handle_hacking_used_utility_on_virus(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(hacking_rpc_err(
+            "ShipDocked",
+            "Cannot continue hacking minigame while docked",
+        ));
+    }
+    if session.solar_system_id.is_none() {
+        return Err(hacking_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    }
     let (container_id, slot_idx) = match args {
         [PyRep::Integer(a), PyRep::Integer(b), ..] => {
             if *a > 1000 { (*a, *b as usize) } else { (*b, *a as usize) }
         }
         [PyRep::Integer(a)] => {
-            let active_cid = with_pve_exploration_reg(ctx, |reg| {
+            let active_cid = read_pve_exploration_reg(ctx, |reg| {
                 reg.hacking_games
                     .keys()
                     .find(|(cid, _)| *cid == char_id)
                     .map(|(_, cont_id)| *cont_id)
             });
             let Some(cid) = active_cid else {
-                return Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: "Target container not specified".into(),
-                    client_error: None,
-                });
+                return Err(hacking_rpc_err(
+                    "TargetNotFound",
+                    "Target container not specified",
+                ));
             };
             (cid, *a as usize)
         }
         _ => {
-            return Err(BridgeRpcError {
-                code: "TargetNotFound".into(),
-                message: "Target container not specified".into(),
-                client_error: None,
-            });
+            return Err(hacking_rpc_err(
+                "TargetNotFound",
+                "Target container not specified",
+            ));
         }
     };
     let target_tile_opt = args.get(2).and_then(|a| a.as_i64());
@@ -1061,44 +1247,25 @@ async fn handle_hacking_used_utility_on_virus(
     }
     validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await?;
     let target_tile_u32 = target_tile_opt.map(|t| t as u32);
+    read_pve_exploration_reg(ctx, |reg| {
+        validate_utility_use_in_reg(reg, char_id, container_id, slot_idx, target_tile_u32, true)
+    })?;
 
     with_pve_exploration_reg(ctx, |reg| {
-        let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
-            return Err(BridgeRpcError {
-                code: "NoActiveHackingGame".into(),
-                message: format!("No active hacking game on container {container_id}"),
-                client_error: None,
-            });
-        };
-        if game.status != "InProgress" && game.status != "active" {
-            return Err(BridgeRpcError {
-                code: "HackingGameAlreadyFinished".into(),
-                message: format!("Hacking game on container {container_id} is already finished"),
-                client_error: None,
-            });
-        }
-        let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
-            return Err(BridgeRpcError {
-                code: "UtilitySlotEmpty".into(),
-                message: format!("Utility slot {slot_idx} is empty"),
-                client_error: None,
-            });
-        };
-        if matches!(
-            util,
-            HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector
-        ) {
-            if let Some(tid) = target_tile_u32 {
-                let Some(t) = game.tiles.get(tid as usize) else {
-                    return Err(BridgeRpcError::user_error("InvalidTileIndex"));
-                };
-                if !t.revealed || t.coherence <= 0 {
-                    return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-                }
-            } else if !game.tiles.iter().any(|t| t.revealed && t.coherence > 0) {
-                return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-            }
-        }
+        let util = validate_utility_use_in_reg(
+            reg,
+            char_id,
+            container_id,
+            slot_idx,
+            target_tile_u32,
+            true,
+        )?;
+        let game = reg.hacking_games.get_mut(&(char_id, container_id)).ok_or_else(|| {
+            hacking_rpc_err(
+                "NoActiveHackingGame",
+                format!("No active hacking game on container {container_id}"),
+            )
+        })?;
         game.utilities[slot_idx] = None;
         match util {
             HackingUtilityKind::SelfRepair => {
@@ -1146,52 +1313,67 @@ fn handle_hacking_values(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
+    let (char_id, sys_id, _) = require_undocked_hacking_space(session)?;
     let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
-        return Err(BridgeRpcError {
-            code: "TargetNotFound".into(),
-            message: "Target container not specified".into(),
-            client_error: None,
-        });
+        return Err(hacking_rpc_err(
+            "TargetNotFound",
+            "Target container not specified",
+        ));
     };
-    let tiles = with_pve_exploration_reg(ctx, |reg| {
-        reg.hacking_games
-            .get(&(char_id, container_id))
-            .map(|g| {
-                g.tiles
-                    .iter()
-                    .map(|t| {
-                        let node_type = if t.revealed {
-                            format!("{:?}", t.kind)
-                        } else {
-                            "Unrevealed".into()
-                        };
-                        let mut kv = vec![
-                            ("tileIndex", PyRep::Integer(t.tile_index as i64)),
-                            ("revealed", PyRep::Bool(t.revealed)),
-                            ("nodeType", PyRep::String(node_type)),
-                            (
-                                "coherence",
-                                PyRep::Integer(if t.revealed { t.coherence as i64 } else { 0 }),
+    let tiles_opt = read_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games.get(&(char_id, container_id)).map(|g| {
+            if g.solar_system_id != sys_id {
+                return Err(hacking_rpc_err(
+                    "NotInSiteSystem",
+                    "Cannot read hacking board from another solar system",
+                ));
+            }
+            let tiles = g
+                .tiles
+                .iter()
+                .map(|t| {
+                    let node_type = if t.revealed {
+                        format!("{:?}", t.kind)
+                    } else {
+                        "Unrevealed".into()
+                    };
+                    let mut kv = vec![
+                        ("tileIndex", PyRep::Integer(t.tile_index as i64)),
+                        ("revealed", PyRep::Bool(t.revealed)),
+                        ("nodeType", PyRep::String(node_type)),
+                        (
+                            "coherence",
+                            PyRep::Integer(if t.revealed { t.coherence as i64 } else { 0 }),
+                        ),
+                        (
+                            "strength",
+                            PyRep::Integer(if t.revealed { t.strength as i64 } else { 0 }),
+                        ),
+                    ];
+                    if t.revealed {
+                        kv.push((
+                            "distanceIndicator",
+                            PyRep::Integer(
+                                hacking_tile_distance_indicator(t.tile_index, &g.tiles) as i64,
                             ),
-                            (
-                                "strength",
-                                PyRep::Integer(if t.revealed { t.strength as i64 } else { 0 }),
-                            ),
-                        ];
-                        if t.revealed {
-                            kv.push((
-                                "distanceIndicator",
-                                PyRep::Integer(hacking_tile_distance_indicator(t.tile_index, &g.tiles) as i64),
-                            ));
-                        }
-                        PyRep::keyval(kv)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+                        ));
+                    }
+                    PyRep::keyval(kv)
+                })
+                .collect::<Vec<_>>();
+            Ok(tiles)
+        })
     });
-    Ok(PyRep::List(tiles))
+    if let Some(res) = tiles_opt {
+        return res.map(PyRep::List);
+    }
+    if is_valid_hackable_target_readonly(ctx, session, char_id, sys_id, container_id) {
+        return Ok(PyRep::List(Vec::new()));
+    }
+    Err(hacking_rpc_err(
+        "NoActiveHackingGame",
+        format!("No active hacking game on container {container_id}"),
+    ))
 }
 
 async fn handle_hacking_used_utility(
@@ -1200,6 +1382,18 @@ async fn handle_hacking_used_utility(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(hacking_rpc_err(
+            "ShipDocked",
+            "Cannot continue hacking minigame while docked",
+        ));
+    }
+    if session.solar_system_id.is_none() {
+        return Err(hacking_rpc_err(
+            "NoSolarSystem",
+            "Session has no active solar system",
+        ));
+    }
     let (container_id, slot_idx, raw_tile_idx) = if args.len() >= 3 {
         (
             args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000),
@@ -1208,11 +1402,10 @@ async fn handle_hacking_used_utility(
         )
     } else {
         let Some(cid) = find_active_hacking_container(ctx, char_id) else {
-            return Err(BridgeRpcError {
-                code: "NoActiveHackingGame".into(),
-                message: "No active hacking session for character".into(),
-                client_error: None,
-            });
+            return Err(hacking_rpc_err(
+                "NoActiveHackingGame",
+                "No active hacking session for character",
+            ));
         };
         let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
         let tile = extract_tile_index(args.get(1)).unwrap_or(0);
@@ -1222,41 +1415,34 @@ async fn handle_hacking_used_utility(
         return Err(BridgeRpcError::user_error("InvalidTileIndex"));
     }
     let target_tile_idx = raw_tile_idx as usize;
+    let target_tile_u32 = raw_tile_idx as u32;
     validate_active_hacking_ship_and_range(ctx, session, char_id, container_id).await?;
+    read_pve_exploration_reg(ctx, |reg| {
+        validate_utility_use_in_reg(
+            reg,
+            char_id,
+            container_id,
+            slot_idx,
+            Some(target_tile_u32),
+            false,
+        )
+    })?;
 
     with_pve_exploration_reg(ctx, |reg| {
-        let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
-            return Err(BridgeRpcError {
-                code: "NoActiveHackingGame".into(),
-                message: format!("No active hacking game on container {container_id}"),
-                client_error: None,
-            });
-        };
-        if game.status != "InProgress" {
-            return Err(BridgeRpcError {
-                code: "HackingGameAlreadyFinished".into(),
-                message: format!("Hacking game on container {container_id} is already finished"),
-                client_error: None,
-            });
-        }
-        let Some(util) = game.utilities.get(slot_idx).and_then(|u| *u) else {
-            return Err(BridgeRpcError {
-                code: "UtilitySlotEmpty".into(),
-                message: format!("Utility slot {slot_idx} is empty"),
-                client_error: None,
-            });
-        };
-        if matches!(
-            util,
-            HackingUtilityKind::KernelRot | HackingUtilityKind::SecondaryVector
-        ) {
-            let Some(t) = game.tiles.get(target_tile_idx) else {
-                return Err(BridgeRpcError::user_error("InvalidTileIndex"));
-            };
-            if !t.revealed || t.coherence <= 0 {
-                return Err(BridgeRpcError::user_error("TargetTileNotRevealed"));
-            }
-        }
+        let util = validate_utility_use_in_reg(
+            reg,
+            char_id,
+            container_id,
+            slot_idx,
+            Some(target_tile_u32),
+            false,
+        )?;
+        let game = reg.hacking_games.get_mut(&(char_id, container_id)).ok_or_else(|| {
+            hacking_rpc_err(
+                "NoActiveHackingGame",
+                format!("No active hacking game on container {container_id}"),
+            )
+        })?;
         game.utilities[slot_idx] = None;
         match util {
             HackingUtilityKind::SelfRepair => {
@@ -1291,13 +1477,41 @@ fn handle_hacking_get_progress(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let container_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .or_else(|| find_active_hacking_container(ctx, char_id))
-        .unwrap_or(0);
-    Ok(with_pve_exploration_reg(ctx, |reg| {
+    let (char_id, sys_id, _) = require_undocked_hacking_space(session)?;
+    let explicit_cid = args.first().and_then(|a| a.as_i64());
+    if let Some(container_id) = explicit_cid {
+        let active_opt = read_pve_exploration_reg(ctx, |reg| {
+            reg.hacking_games.get(&(char_id, container_id)).map(|game| {
+                if game.solar_system_id != sys_id {
+                    return Err(hacking_rpc_err(
+                        "NotInSiteSystem",
+                        "Cannot read hacking progress from another solar system",
+                    ));
+                }
+                Ok(PyRep::keyval([
+                    ("containerID", PyRep::Integer(container_id)),
+                    ("status", PyRep::String(game.status.clone())),
+                    ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+                ]))
+            })
+        });
+        if let Some(res) = active_opt {
+            return res;
+        }
+        if is_valid_hackable_target_readonly(ctx, session, char_id, sys_id, container_id) {
+            return Ok(PyRep::keyval([
+                ("containerID", PyRep::Integer(container_id)),
+                ("status", PyRep::String("NotStarted".into())),
+                ("virusCoherence", PyRep::Integer(0)),
+            ]));
+        }
+        return Err(hacking_rpc_err(
+            "TargetNotFound",
+            format!("Target container {container_id} is not a hackable target"),
+        ));
+    }
+    let container_id = find_active_hacking_container(ctx, char_id).unwrap_or(0);
+    Ok(read_pve_exploration_reg(ctx, |reg| {
         if let Some(game) = reg.hacking_games.get(&(char_id, container_id)) {
             PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)),

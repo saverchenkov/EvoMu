@@ -708,3 +708,250 @@ async fn homefront_hacking_arrays_and_werpost_untether_and_retry() {
         "hacked array must not be re-hackable during open vulnerability window"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hacking_mgr_guards_reject_unauth_docked_invalid_target_and_no_game_without_mutating_db() {
+    let sys_id: SolarSystemId = 30_000_142;
+    let char_id: i64 = 90_042_301;
+    let ship_id: i64 = 1_042_000_301;
+    let can_id: i64 = 1_042_900_301;
+
+    let mut sde = (*shared_sde()).clone();
+    if !sde.types.contains_key(&22_586) {
+        if let Some(mut t) = sde.types.values().next().cloned() {
+            t.type_id = 22_586;
+            t.group_id = 538;
+            t.name = "Data Analyzer I".into();
+            t.published = true;
+            t.default_attributes.insert(1909, 60.0);
+            t.default_attributes.insert(1910, 30.0);
+            t.default_attributes.insert(1911, 2.0);
+            t.default_attributes.insert(54, 5_000.0);
+            sde.types.insert(22_586, t);
+        }
+    }
+    let db = Arc::new(WorldRepository::new_empty());
+    db.provision_gm_account("hk_guard", "pw", char_id, "HackerGuard");
+    db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
+        for (id, tid, loc, flag) in [
+            (ship_id, 587_u32, sys_id as i64, eve_db::InventoryFlag::None),
+            (ship_id + 1, 22_586, ship_id, eve_db::InventoryFlag::MedSlot0),
+        ] {
+            snap.items.insert(
+                id,
+                eve_db::InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: char_id,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_776_800_000)));
+    let kw = HashMap::new();
+
+    let all_methods: &[(&str, Vec<PyRep>)] = &[
+        ("StartNewGameInstance", vec![PyRep::Integer(60_003_760)]),
+        ("ClickedOnTile", vec![PyRep::Integer(60_003_760), PyRep::Integer(1)]),
+        ("QuitHackingAttempt", vec![PyRep::Integer(60_003_760)]),
+        ("UsedUtilityElement", vec![PyRep::Integer(60_003_760), PyRep::Integer(0), PyRep::Integer(0)]),
+        ("UsedUtilityElementOnVirus", vec![PyRep::Integer(60_003_760), PyRep::Integer(0)]),
+        ("GetMyHackProgress", vec![PyRep::Integer(60_003_760)]),
+        ("values", vec![PyRep::Integer(60_003_760)]),
+    ];
+
+    let epoch0 = ctx.db.state_epoch();
+    let commits0 = ctx.db.tx_commit_count();
+
+    // 1. Unauthenticated caller: all 7 methods reject with zero DB mutations.
+    let mut unauth = SessionState::new(701);
+    for (meth, args) in all_methods {
+        let res = handle_pve_hacking(&ctx, &mut unauth, "hackingMgr", meth, args, &kw)
+            .await
+            .expect("handled");
+        assert!(res.is_err(), "unauthenticated hackingMgr.{meth} must reject");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // 2. Docked in NPC station: all 7 methods reject with ShipDocked and zero DB mutations.
+    const DOCKED_CODE: &str = "ShipDocked";
+    let mut docked = SessionState::new(702);
+    docked.user_id = Some(1);
+    docked.character_id = Some(char_id);
+    docked.solar_system_id = Some(sys_id);
+    docked.station_id = Some(60_003_760);
+    docked.ship_id = Some(ship_id);
+    for (meth, args) in all_methods {
+        let err = handle_pve_hacking(&ctx, &mut docked, "hackingMgr", meth, args, &kw)
+            .await
+            .expect("handled")
+            .expect_err(&format!("docked hackingMgr.{meth} must reject"));
+        assert_eq!(err.code, DOCKED_CODE, "docked hackingMgr.{meth} must return {DOCKED_CODE}");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // 3. Docked in Upwell structure: all 7 methods reject with ShipDocked and zero DB mutations.
+    docked.station_id = None;
+    docked.structure_id = Some(1_099_001_000_001);
+    for (meth, args) in all_methods {
+        let err = handle_pve_hacking(&ctx, &mut docked, "hackingMgr", meth, args, &kw)
+            .await
+            .expect("handled")
+            .expect_err(&format!("structure-docked hackingMgr.{meth} must reject"));
+        assert_eq!(err.code, DOCKED_CODE);
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0);
+    assert_eq!(ctx.db.tx_commit_count(), commits0);
+
+    // 4. Undocked in space, invalid target & no active game: all 7 methods reject with zero DB mutations.
+    let mut space = SessionState::new(703);
+    space.user_id = Some(1);
+    space.character_id = Some(char_id);
+    space.solar_system_id = Some(sys_id);
+    space.ship_id = Some(ship_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    for (meth, args) in all_methods {
+        let res = handle_pve_hacking(&ctx, &mut space, "hackingMgr", meth, args, &kw)
+            .await
+            .expect("handled");
+        assert!(res.is_err(), "invalid-target hackingMgr.{meth} must reject");
+    }
+    for (meth, args) in [
+        ("ClickedOnTile", vec![PyRep::Integer(1)]),
+        ("QuitHackingAttempt", vec![]),
+        ("UsedUtilityElement", vec![PyRep::Integer(0), PyRep::Integer(0)]),
+        ("UsedUtilityElementOnVirus", vec![PyRep::Integer(0)]),
+    ] {
+        let res = handle_pve_hacking(&ctx, &mut space, "hackingMgr", meth, &args, &kw)
+            .await
+            .expect("handled");
+        assert!(res.is_err(), "no-active-game hackingMgr.{meth} must reject");
+    }
+    assert_eq!(ctx.db.state_epoch(), epoch0, "rejected hacking calls must not bump state_epoch");
+    assert_eq!(ctx.db.tx_commit_count(), commits0, "rejected hacking calls must not bump tx_commit_count");
+
+    // 5. Valid undocked hacking session succeeds end-to-end, and getters remain read-pure.
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: can_id,
+            type_id: 22_270,
+            position: DVec3::new(10_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    with_pve_exploration_reg(&ctx, |reg| {
+        reg.seeded_systems.insert(sys_id, true);
+        reg.sites_by_system.entry(sys_id).or_default().push(
+            crate::services::pve_exploration::PveSiteInstance {
+                site_id: "DATA_GUARD_1".into(),
+                dungeon_id: 2011,
+                dungeon_name: "Central Data Bank".into(),
+                solar_system_id: sys_id,
+                site_category: "Data".into(),
+                position: [10_500.0, 0.0, 0.0],
+                hackable_can_ids: vec![can_id],
+                ..Default::default()
+            },
+        );
+    });
+    let start_rep = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "StartNewGameInstance",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("valid StartNewGameInstance succeeds");
+    assert_eq!(start_rep.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+
+    let epoch_after_start = ctx.db.state_epoch();
+    let commits_after_start = ctx.db.tx_commit_count();
+    let prog = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "GetMyHackProgress",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("GetMyHackProgress succeeds");
+    assert_eq!(prog.dict_get("status"), Some(&PyRep::String("InProgress".into())));
+    let board = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "values",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("values succeeds");
+    assert!(matches!(board, PyRep::List(ref l) if l.len() == 24));
+    assert_eq!(ctx.db.state_epoch(), epoch_after_start, "hackingMgr getters must not bump state_epoch");
+    assert_eq!(ctx.db.tx_commit_count(), commits_after_start, "hackingMgr getters must not bump tx_commit_count");
+
+    let click_rep = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "ClickedOnTile",
+        &[PyRep::Integer(can_id), PyRep::Integer(1)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("ClickedOnTile succeeds");
+    assert!(click_rep.dict_get("status").is_some());
+
+    let quit_rep = handle_pve_hacking(
+        &ctx,
+        &mut space,
+        "hackingMgr",
+        "QuitHackingAttempt",
+        &[PyRep::Integer(can_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("QuitHackingAttempt succeeds");
+    assert_eq!(quit_rep, PyRep::Bool(true));
+}
