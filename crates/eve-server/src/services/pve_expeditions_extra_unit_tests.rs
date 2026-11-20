@@ -684,10 +684,11 @@ mod w4_ops_pve_mut_extra_tests {
         .expect_err("far from gate must fail GateOutOfRange");
         assert_eq!(err_far.code, "GateOutOfRange");
 
+        let expected_site_id = format!("EXP-{}-{}", entry2.instance_id, entry2.step_index);
         let (gate_pos, wave_npcs) = with_pve_exploration_reg(&ctx, |reg| {
             reg.sites_by_system
                 .get(&dest_sys)
-                .and_then(|v| v.iter().find(|s| s.dungeon_id == entry2.expedition_dungeon_id))
+                .and_then(|v| v.iter().find(|s| !s.cleared && s.site_id == expected_site_id))
                 .map(|s| (DVec3::from(s.position), s.active_npc_ball_ids.clone()))
                 .unwrap()
         });

@@ -4246,3 +4246,291 @@ async fn test_stargate_jump_observer_receives_on_client_controller_event_arrival
     assert_eq!(arrival[4], PyRep::None);
 }
 }
+
+#[tokio::test]
+async fn test_upwell_view_outside_and_undock_ballpark_lifecycle_gh1448() {
+    use eve_testkit::client_harness::{ClientCallOutput, ClientWireFrameKind};
+
+    const PERIMETER_SYS: u32 = 30_000_144;
+    let struct_id: i64 = 1_040_001_448_200;
+    let nearby_ball_id: i64 = 900_000_044_800;
+
+    fn extract_set_states(out: &ClientCallOutput) -> Vec<(Option<i64>, Vec<eve_destiny::wire::DecodedBall>)> {
+        let mut found = Vec::new();
+        for frame in &out.frames {
+            let ClientWireFrameKind::DoDestinyUpdate { updates, .. } = &frame.kind else {
+                continue;
+            };
+            if let PyRep::List(items) = updates {
+                for item in items {
+                    if let PyRep::Tuple(pair) = item {
+                        if let Some(PyRep::Tuple(fa)) = pair.get(1) {
+                            if fa.first().and_then(|v| v.as_str()) == Some("SetState") {
+                                if let Some(PyRep::Tuple(args)) = fa.get(1) {
+                                    if let Some(kv) = args.first() {
+                                        let ego = kv.dict_get("ego").and_then(|v| v.as_i64());
+                                        let balls = match kv.dict_get("state") {
+                                            Some(PyRep::Bytes(b)) => eve_destiny::wire::decode_add_balls(b)
+                                                .map(|(_, _, balls)| balls)
+                                                .unwrap_or_default(),
+                                            _ => Vec::new(),
+                                        };
+                                        found.push((ego, balls));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    let ctx = crate::seasons_and_campaigns::fast_real_sde_ctx();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    let struct_pos = DVec3::new(250_000.0, 0.0, 0.0);
+    let mut ship_id = 0_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&DEMO_PILOT).expect("demo pilot");
+        let corp_id = ch.corporation_id;
+        ship_id = ch.active_ship_id;
+        ch.solar_system_id = PERIMETER_SYS;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        if let Some(item) = snap.items.get_mut(&ship_id) {
+            item.location_id = struct_id;
+            item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832, // Astrahus
+                solar_system_id: PERIMETER_SYS,
+                owner_corp_id: corp_id,
+                name: "Perimeter Astrahus GH1448".into(),
+                position: struct_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(PERIMETER_SYS);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: struct_pos + DVec3::new(3_500.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let mut h = common::new_wire_harness(&ctx, 144_801);
+    h.call_ok(
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+    )
+    .await;
+    let sel_out = h
+        .call_exchange(
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(DEMO_PILOT)],
+            &kw,
+        )
+        .await;
+    assert!(sel_out.result.is_ok());
+    assert!(
+        extract_set_states(&sel_out).is_empty(),
+        "structure Hangar login must stay Detached with zero SetState"
+    );
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+
+    // 1. View Outside: GetFormations -> MachoBindObject observes structure exterior without spawning ship.
+    let form_out = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert!(form_out.result.is_ok(), "View Outside GetFormations failed: {:?}", form_out.result);
+    assert!(
+        form_out.violations.is_empty(),
+        "View Outside GetFormations violations: {:?}",
+        form_out.violations
+    );
+    let view_states = extract_set_states(&form_out);
+    assert_eq!(view_states.len(), 1, "View Outside GetFormations must emit SetState");
+    assert_eq!(view_states[0].0, Some(struct_id));
+    assert!(view_states[0].1.iter().any(|b| b.id == struct_id));
+    // Note: static `Rigid` observers omit dynamic grid balls in `eve-destiny::Ballpark::visible_balls_for_observer`;
+    // `nearby_ball_id` presence is verified on the immediate Undock `SetState(ego == ship_id)` below.
+    assert!(!view_states[0].1.iter().any(|b| b.id == ship_id));
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+
+    let bind_out = h
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(PERIMETER_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(bind_out.result.is_ok());
+    assert!(bind_out.violations.is_empty());
+    assert!(
+        extract_set_states(&bind_out).is_empty(),
+        "View Outside MachoBindObject after GetFormations must NOT replay SetState"
+    );
+
+    let dmg_res = sys_handle
+        .apply_damage(
+            struct_id,
+            eve_destiny::DamageVector {
+                em: 100.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        dmg_res.is_some(),
+        "View Outside Astrahus ball must have active combat state"
+    );
+    sys_handle.step_manual(1.0).await.unwrap();
+    let view_ticks = h.drain_pending_frames();
+    assert!(
+        view_ticks
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::DoDestinyUpdate { .. })),
+        "View Outside must receive live 1Hz DoDestinyUpdate ticks while docked"
+    );
+
+    // 2. View Outside -> ship.Undock with NO subsequent beyonce RPCs.
+    ctx.advance_secs(12);
+    let undock_ship_out = h.call_exchange("ship", None, "Undock", &[], &kw).await;
+    assert!(undock_ship_out.result.is_ok(), "ship.Undock failed: {:?}", undock_ship_out.result);
+    assert!(
+        undock_ship_out.violations.is_empty(),
+        "View Outside -> ship.Undock violations: {:?}",
+        undock_ship_out.violations
+    );
+    assert!(
+        !undock_ship_out.session_change_packets.is_empty(),
+        "ship.Undock must emit SessionChangeNotification clearing structureid"
+    );
+    let ship_undock_states = extract_set_states(&undock_ship_out);
+    assert_eq!(
+        ship_undock_states.len(),
+        1,
+        "View Outside -> ship.Undock must deliver SetState(ego=ship_id) directly"
+    );
+    assert_eq!(ship_undock_states[0].0, Some(ship_id));
+    assert!(ship_undock_states[0].1.iter().any(|b| b.id == ship_id));
+    assert!(ship_undock_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(ship_undock_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+
+    sys_handle
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await
+        .unwrap();
+    sys_handle.step_manual(1.0).await.unwrap();
+    let space_ticks = h.drain_pending_frames();
+    assert!(
+        space_ticks
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::DoDestinyUpdate { .. })),
+        "post-undock stream must receive live DoDestinyUpdate ticks"
+    );
+
+    // 3. Dock back into Astrahus (detaches), re-enter View Outside, and Undock via structureDocking.Undock.
+    ctx.advance_secs(12);
+    let dock1_out = h
+        .call_exchange("structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    assert!(dock1_out.result.is_ok(), "structureDocking.Dock failed: {:?}", dock1_out.result);
+    assert_eq!(h.transport().inner.session.structure_id, Some(struct_id));
+
+    sys_handle.step_manual(1.0).await.unwrap();
+    let hangar_ticks = h.drain_pending_frames();
+    assert!(
+        !hangar_ticks
+            .iter()
+            .any(|f| matches!(f.kind, ClientWireFrameKind::DoDestinyUpdate { .. })),
+        "Hangar after Dock must be Detached and receive zero DoDestinyUpdate ticks"
+    );
+
+    let form2_out = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert_eq!(extract_set_states(&form2_out).len(), 1);
+    assert_eq!(extract_set_states(&form2_out)[0].0, Some(struct_id));
+
+    ctx.advance_secs(12);
+    let undock_struct_out = h
+        .call_exchange("structureDocking", None, "Undock", &[], &kw)
+        .await;
+    assert!(undock_struct_out.result.is_ok());
+    let struct_undock_states = extract_set_states(&undock_struct_out);
+    assert_eq!(struct_undock_states.len(), 1);
+    assert_eq!(struct_undock_states[0].0, Some(ship_id));
+
+    // 4. Dock again and undock directly from Hangar -> GetFormations -> MachoBindObject (no replay).
+    ctx.advance_secs(12);
+    h.call_ok("structureDocking", None, "Dock", &[PyRep::Integer(struct_id)], &kw)
+        .await;
+    ctx.advance_secs(12);
+    let hangar_undock_out = h
+        .call_exchange("structureDocking", None, "Undock", &[], &kw)
+        .await;
+    assert!(hangar_undock_out.result.is_ok());
+    let hangar_undock_states = extract_set_states(&hangar_undock_out);
+    assert_eq!(
+        hangar_undock_states.len(),
+        1,
+        "Hangar -> structureDocking.Undock must emit SetState(ego=ship_id)"
+    );
+    assert_eq!(hangar_undock_states[0].0, Some(ship_id));
+    assert!(hangar_undock_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(hangar_undock_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+
+    let post_form_out = h.call_exchange("beyonce", None, "GetFormations", &[], &kw).await;
+    assert!(post_form_out.result.is_ok());
+    assert!(
+        extract_set_states(&post_form_out).is_empty(),
+        "post-Upwell-Undock GetFormations must NOT emit duplicate SetState"
+    );
+    let post_bind_out = h
+        .call_exchange(
+            "beyonce",
+            None,
+            "MachoBindObject",
+            &[PyRep::Integer(i64::from(PERIMETER_SYS)), PyRep::None],
+            &kw,
+        )
+        .await;
+    assert!(post_bind_out.result.is_ok());
+    assert!(
+        extract_set_states(&post_bind_out).is_empty(),
+        "post-Upwell-Undock MachoBindObject must NOT emit duplicate SetState"
+    );
+}

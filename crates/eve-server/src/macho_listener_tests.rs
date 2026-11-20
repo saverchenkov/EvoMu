@@ -3853,3 +3853,450 @@ async fn test_1237_safe_logoff_to_charsel_from_space_immediately_drops_tick_rece
     assert_eq!(jita.event_tx.receiver_count(), 0);
     assert!(jita.is_hibernated());
 }
+
+fn collect_set_states_from_pyrep_tree(
+    rep: &PyRep,
+    out: &mut Vec<(Option<i64>, Vec<eve_destiny::wire::DecodedBall>)>,
+) {
+    match rep {
+        PyRep::Tuple(items) => {
+            if items.len() == 2 && items[0].as_str() == Some("SetState") {
+                if let PyRep::Tuple(args) = &items[1] {
+                    if let Some(kv) = args.first() {
+                        let ego = kv.dict_get("ego").and_then(|v| v.as_i64());
+                        let balls = kv
+                            .dict_get("state")
+                            .and_then(|v| match v {
+                                PyRep::Bytes(b) => eve_destiny::wire::decode_add_balls(b)
+                                    .ok()
+                                    .map(|(_, _, decoded)| decoded),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        out.push((ego, balls));
+                        return;
+                    }
+                }
+            }
+            for item in items {
+                collect_set_states_from_pyrep_tree(item, out);
+            }
+        }
+        PyRep::List(items) => {
+            for item in items {
+                collect_set_states_from_pyrep_tree(item, out);
+            }
+        }
+        PyRep::Dict(entries) => {
+            for (k, v) in entries {
+                collect_set_states_from_pyrep_tree(k, out);
+                collect_set_states_from_pyrep_tree(v, out);
+            }
+        }
+        PyRep::SubStream(inner) | PyRep::SubStruct(inner) => {
+            collect_set_states_from_pyrep_tree(inner, out);
+        }
+        PyRep::Bytes(bytes) => {
+            if let Ok(decoded) = eve_proto::marshal::decode(bytes) {
+                collect_set_states_from_pyrep_tree(&decoded, out);
+            }
+        }
+        PyRep::Object { args, .. } => collect_set_states_from_pyrep_tree(args, out),
+        PyRep::ObjectEx { header, list, dict, .. } => {
+            collect_set_states_from_pyrep_tree(header, out);
+            for item in list {
+                collect_set_states_from_pyrep_tree(item, out);
+            }
+            for (k, v) in dict {
+                collect_set_states_from_pyrep_tree(k, out);
+                collect_set_states_from_pyrep_tree(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn setup_upwell_docked_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    sys_id: u32,
+    struct_id: i64,
+    nearby_ball_id: i64,
+) -> (i64, crate::system_actor::SystemHandle) {
+    let struct_pos = eve_destiny::DVec3::new(250_000.0, 0.0, 0.0);
+    let mut ship_id = 0_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(acc) = snap.accounts.get_mut("demo") {
+            acc.role |= eve_machonet::service_roles::ROLE_GMS;
+        }
+        let ch = snap.characters.get_mut(&char_id).expect("pilot char");
+        let corp_id = ch.corporation_id;
+        ship_id = ch.active_ship_id;
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = Some(struct_id);
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.location_id = struct_id;
+            ship_item.flag = eve_db::InventoryFlag::Hangar;
+        }
+        snap.structures.insert(
+            struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: struct_id,
+                type_id: 35832, // Astrahus
+                solar_system_id: sys_id,
+                owner_corp_id: corp_id,
+                name: "GH1448 Test Astrahus".into(),
+                position: struct_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 2_500_000.0,
+                armor_hp: 2_500_000.0,
+                hull_hp: 2_500_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // Keep nearby ball in space so SetState payloads include surrounding exterior objects.
+    let _ = nearby_ball_id;
+    (ship_id, sys_handle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1448_upwell_view_outside_and_ship_undock_without_post_beyonce_wire() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32; // Perimeter
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_448_100_i64;
+    let nearby_ball_id = 900_000_020_999_i64;
+    let (ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: eve_destiny::DVec3::new(253_500.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+
+    // 1. Login while docked in Astrahus Hangar: stay Detached (0 subscribers, 0 DoDestinyUpdate, ship not spawned).
+    let (sel_rsp, sel_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !sel_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "structure-docked Hangar SelectCharacterID must NOT emit DoDestinyUpdate"
+    );
+    assert_eq!(sys_handle.event_tx.receiver_count(), 0);
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+
+    // 2. View Outside while STILL docked: beyonce.GetFormations -> beyonce.MachoBindObject.
+    let (form_rsp, form_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "beyonce",
+        "GetFormations",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(form_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut view_set_states = Vec::new();
+    for pkt in &form_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut view_set_states);
+    }
+    assert_eq!(
+        view_set_states.len(),
+        1,
+        "View Outside GetFormations must emit exactly 1 SetState observing structure {struct_id}"
+    );
+    assert_eq!(
+        view_set_states[0].0,
+        Some(struct_id),
+        "View Outside SetState ego must be structure_id={struct_id}"
+    );
+    assert!(
+        view_set_states[0].1.iter().any(|b| b.id == struct_id),
+        "View Outside SetState balls must contain structure_id={struct_id}"
+    );
+    // Note: `Ballpark::visible_balls_for_observer(struct_id)` filters static `Rigid` observers to
+    // static/`Rigid`/`Field` balls until static-observer dynamic-grid support is added in `eve-destiny`.
+    // Dynamic `nearby_ball_id` visibility is asserted immediately below upon undocking (`ego == ship_id`).
+    assert!(
+        !view_set_states[0].1.iter().any(|b| b.id == ship_id),
+        "View Outside SetState must NEVER spawn docked ship_id={ship_id}"
+    );
+    assert!(
+        sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none(),
+        "docked ship ball must stay absent in space during View Outside"
+    );
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    let (bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !bind_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "DoDestinyUpdate")),
+        "View Outside MachoBindObject after GetFormations must NOT replay duplicate SetState"
+    );
+
+    // Stepping simulation after an event on the observed structure while docked in View Outside
+    // delivers live tick updates.
+    let dmg_res = sys_handle
+        .apply_damage(
+            struct_id,
+            eve_destiny::DamageVector {
+                em: 100.0,
+                thermal: 0.0,
+                kinetic: 0.0,
+                explosive: 0.0,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        dmg_res.is_some(),
+        "View Outside Astrahus ball must have active combat state"
+    );
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    test_1237_wait_for_notification(
+        &mut s,
+        "DoDestinyUpdate",
+        "View Outside attached session must receive live 1Hz DoDestinyUpdate ticks",
+    )
+    .await;
+
+    // 3. Undock from View Outside via ship.Undock with ZERO post-undock beyonce calls!
+    let (adv_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "timeControl",
+        "AdvanceClock",
+        vec![PyRep::Integer(12)],
+    )
+    .await;
+    assert_eq!(adv_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let (undock_rsp, undock_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        5,
+        "ship",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut undock_set_states = Vec::new();
+    for pkt in &undock_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut undock_set_states);
+    }
+    assert_eq!(
+        undock_set_states.len(),
+        1,
+        "View Outside -> ship.Undock must deliver SetState(ego=ship_id) directly on Undock without post-undock beyonce RPCs"
+    );
+    assert_eq!(undock_set_states[0].0, Some(ship_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == ship_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    // Subsequent 1Hz ticks deliver live updates observing ship_id.
+    sys_handle
+        .set_movement_mode(ship_id, eve_destiny::MovementMode::Stop)
+        .await
+        .unwrap();
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    test_1237_wait_for_notification(
+        &mut s,
+        "DoDestinyUpdate",
+        "post-undock space session must receive live ticks observing ship_id",
+    )
+    .await;
+
+    // 4. Dock back into Astrahus cleanly detaches listener stream.
+    let (adv2_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        6,
+        "timeControl",
+        "AdvanceClock",
+        vec![PyRep::Integer(12)],
+    )
+    .await;
+    assert_eq!(adv2_rsp.packet_type, MachoPacketType::CallRsp);
+    let (dock_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        7,
+        "structureDocking",
+        "Dock",
+        vec![PyRep::Integer(struct_id)],
+    )
+    .await;
+    assert_eq!(dock_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(
+        sys_handle.event_tx.receiver_count(),
+        0,
+        "Dock back into Upwell structure must immediately detach tick receiver"
+    );
+    assert!(sys_handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    // Clear the synthetic dynamic exterior ball (`nearby_ball_id`) so zero dynamic balls remain;
+    // the static Astrahus ball alone must still allow the system to hibernate once detached.
+    let _ = sys_handle.remove_ball(nearby_ball_id).await;
+    let _ = sys_handle.step_manual(1.0).await.unwrap();
+    assert!(sys_handle.is_hibernated());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_1448_upwell_hangar_undock_delivers_set_state_once_without_replay_on_get_formations() {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let sys_id = 30_000_144_u32;
+    let char_id = 90_000_001_i64;
+    let struct_id = 1_040_001_448_101_i64;
+    let nearby_ball_id = 900_000_020_998_i64;
+    let (ship_id, sys_handle) =
+        setup_upwell_docked_pilot(&ctx, char_id, sys_id, struct_id, nearby_ball_id);
+    sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: nearby_ball_id,
+            type_id: 1230,
+            position: eve_destiny::DVec3::new(254_000.0, 0.0, 0.0),
+            velocity: eve_destiny::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0e6,
+            radius: 120.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_macho_test_server(Arc::clone(&ctx)).await;
+    let (mut s, client_id, user_id) =
+        connect_and_authenticate(addr, "demo", "demo-secret").await;
+
+    let (sel_rsp, _) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        1,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        vec![PyRep::Integer(char_id)],
+    )
+    .await;
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    assert_eq!(sys_handle.event_tx.receiver_count(), 0);
+
+    // Hangar -> structureDocking.Undock (no prior View Outside): SetState(ego=ship_id) emitted on Undock.
+    let (undock_rsp, undock_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        2,
+        "structureDocking",
+        "Undock",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    let mut undock_set_states = Vec::new();
+    for pkt in &undock_notifs {
+        collect_set_states_from_pyrep_tree(&pkt.payload, &mut undock_set_states);
+    }
+    assert_eq!(
+        undock_set_states.len(),
+        1,
+        "Hangar -> structureDocking.Undock must emit SetState once on Undock"
+    );
+    assert_eq!(undock_set_states[0].0, Some(ship_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == ship_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == struct_id));
+    assert!(undock_set_states[0].1.iter().any(|b| b.id == nearby_ball_id));
+    assert_eq!(sys_handle.event_tx.receiver_count(), 1);
+
+    // Client follow-up GetFormations and MachoBindObject must NOT replay duplicate SetState.
+    let (form_rsp, form_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        3,
+        "beyonce",
+        "GetFormations",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(form_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !form_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState")),
+        "Hangar -> Undock follow-up GetFormations must NOT replay SetState"
+    );
+
+    let (bind_rsp, bind_notifs) = test_1386_call_rpc(
+        &mut s,
+        client_id,
+        user_id,
+        4,
+        "beyonce",
+        "MachoBindObject",
+        vec![PyRep::Integer(i64::from(sys_id)), PyRep::None],
+    )
+    .await;
+    assert_eq!(bind_rsp.packet_type, MachoPacketType::CallRsp);
+    assert!(
+        !bind_notifs
+            .iter()
+            .any(|p| test_1386_packet_contains_ascii(&p.to_pyrep(), "SetState")),
+        "Hangar -> Undock follow-up MachoBindObject must NOT replay SetState"
+    );
+}

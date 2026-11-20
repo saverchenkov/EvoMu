@@ -275,6 +275,34 @@ pub fn with_pve_exploration_reg<R>(
     with_pve_exploration_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
+fn find_site_index_by_id_or_dungeon(sites: &[PveSiteInstance], site_id: &str) -> Option<usize> {
+    sites
+        .iter()
+        .position(|s| s.site_id == site_id)
+        .or_else(|| {
+            sites
+                .iter()
+                .position(|s| !s.cleared && s.dungeon_id.to_string() == site_id)
+        })
+        .or_else(|| sites.iter().position(|s| s.dungeon_id.to_string() == site_id))
+}
+
+/// Finds a site by exact `site_id`, preferring active (uncleared) matches on numeric `dungeon_id`.
+pub(crate) fn find_site_by_id_or_dungeon<'a>(
+    sites: &'a [PveSiteInstance],
+    site_id: &str,
+) -> Option<&'a PveSiteInstance> {
+    find_site_index_by_id_or_dungeon(sites, site_id).map(|idx| &sites[idx])
+}
+
+/// Mutable lookup matching [`find_site_by_id_or_dungeon`].
+pub(crate) fn find_site_by_id_or_dungeon_mut<'a>(
+    sites: &'a mut [PveSiteInstance],
+    site_id: &str,
+) -> Option<&'a mut PveSiteInstance> {
+    find_site_index_by_id_or_dungeon(sites, site_id).map(|idx| &mut sites[idx])
+}
+
 pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
     reg.next_id_seq += 1;
     reg.next_id_seq
@@ -367,6 +395,9 @@ async fn handle_pve_site_npc_destruction_core_inner(
     let site_info = with_pve_exploration_reg_db(db, now_unix, |reg| {
         let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
         for site in sites.iter_mut() {
+            if site.cleared {
+                continue;
+            }
             if let Some(pos) = site.active_npc_ball_ids.iter().position(|&bid| bid == npc_ball_id) {
                 site.active_npc_ball_ids.remove(pos);
                 let wave_cleared = site.active_npc_ball_ids.is_empty();
@@ -783,10 +814,7 @@ pub async fn advance_site_wave_or_complete(
 
     let (current_balls, is_sleeper_cache_stabilized) = with_pve_exploration_reg(ctx, |reg| {
         let sites = reg.sites_by_system.entry(solar_system_id).or_default();
-        let Some(site) = sites
-            .iter()
-            .find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-        else {
+        let Some(site) = find_site_by_id_or_dungeon(sites, site_id) else {
             return Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("PvE site {site_id} not found in system {solar_system_id}"),
@@ -846,10 +874,7 @@ pub async fn advance_site_wave_or_complete(
         exp_inst_id,
     ) = with_pve_exploration_reg(ctx, |reg| {
         let sites = reg.sites_by_system.entry(solar_system_id).or_default();
-        let Some(site) = sites
-            .iter_mut()
-            .find(|s| s.site_id == site_id || s.dungeon_id.to_string() == site_id)
-        else {
+        let Some(site) = find_site_by_id_or_dungeon_mut(sites, site_id) else {
             return Err(BridgeRpcError {
                 code: "SiteNotFound".into(),
                 message: format!("PvE site {site_id} not found in system {solar_system_id}"),
@@ -1298,7 +1323,7 @@ fn handle_dungeon_ship_restrictions(
         let (mut matched_seeded, already_seeded) = read_pve_exploration_reg(ctx, |reg| {
             let seeded = reg.seeded_systems.get(&sys_id).copied().unwrap_or(false);
             if let Some(sites) = reg.sites_by_system.get(&sys_id) {
-                if let Some(s) = sites.iter().find(|x| x.site_id == sid || x.dungeon_id.to_string() == sid) {
+                if let Some(s) = find_site_by_id_or_dungeon(sites, sid) {
                     if s.site_category == "SleeperCache" {
                         if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
                             sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
