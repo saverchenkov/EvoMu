@@ -72,6 +72,22 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "RogueDrone";
     }
 
+    // 3a. Empire Gate / Station Sentry Guns (groups 99 Sentry Gun, 180 Protective Sentry Gun).
+    // Sleeper and Zarzakh sentries already matched in steps 1-2; exclude 79_507 and Drifter/EDENCOM
+    // sentries and evaluate ahead of step 3b so group 99/180 sentries named "Navy" or "Police"
+    // classify as "EmpireSentry" rather than "Navy".
+    if npc_type_id != 79_507
+        && !group_name.contains("Drifter")
+        && !type_name.contains("Drifter")
+        && !matches!(faction_id, Some(500_024 | 500_027))
+        && !group_name.contains("EDENCOM")
+        && !type_name.contains("EDENCOM")
+        && (matches!(group_id, 99 | 180)
+            || matches!(group_name, "Sentry Gun" | "Protective Sentry Gun"))
+    {
+        return "EmpireSentry";
+    }
+
     // 3b. Empire Navy / Republic Fleet / Faction Police (must precede group_id == 4034 EDENCOM check,
     // because Empire Navy & Republic Fleet hulls 52923..=52967 / 54000..=54107 share SDE group 4034 and faction_id 500027)
     if group_name.contains("Faction Drone")
@@ -172,16 +188,6 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "Hauler";
     }
 
-    // 10b. Empire Gate / Station Sentry Guns (groups 99 Sentry Gun, 180 Protective Sentry Gun).
-    // Sleeper/Drifter/Zarzakh sentries are matched earlier, and 79_507 keeps its explicit
-    // CounterInsurgencySentry archetype; empire sentries must never fall through to "Pirate".
-    if npc_type_id != 79_507
-        && (matches!(group_id, 99 | 180)
-            || matches!(group_name, "Sentry Gun" | "Protective Sentry Gun"))
-    {
-        return "EmpireSentry";
-    }
-
     // 11. Navy / Faction Police / Faction
     if group_name.contains("Faction Drone")
         || group_name.contains("Navy")
@@ -194,6 +200,29 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
     }
 
     "Pirate"
+}
+
+/// Returns whether `npc` is an Empire gate/station Sentry Gun (`EmpireSentry`, group 99/180),
+/// excluding Counter-Insurgency (`79_507`), Sleeper, and Zarzakh sentries.
+fn is_empire_sentry_npc(ctx: &ServerContext, npc: &ExtendedNpcEntity) -> bool {
+    if npc.type_id == 79_507
+        || crate::services::wormhole_pve_escalations::is_sleeper_sentry_type(npc.type_id)
+        || matches!(
+            npc.archetype.as_str(),
+            "SleeperSentry" | "ZarzakhGateGun" | "CounterInsurgencySentry"
+        )
+    {
+        return false;
+    }
+    npc.archetype == "EmpireSentry"
+        || ctx.sde.types.get(&npc.type_id).is_some_and(|t| {
+            matches!(t.group_id, 99 | 180)
+                || ctx
+                    .sde
+                    .groups
+                    .get(&t.group_id)
+                    .is_some_and(|g| matches!(g.name.as_str(), "Sentry Gun" | "Protective Sentry Gun"))
+        })
 }
 
 /// Deterministically resolves the lowest-ID SDE NPC corporation belonging to `faction_id`,
@@ -469,6 +498,7 @@ struct CandidateOwnerMeta {
     has_criminal_flag: bool,
     has_suspect_flag: bool,
     has_disapproval_flag: bool,
+    has_on_grid_illegal_aggression: bool,
     pilot_is_pirate: bool,
     pilot_is_campaign_pirate: bool,
     is_active_player_ship: bool,
@@ -781,45 +811,85 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
         }
 
-        let owner_cids: Vec<i64> = {
-            let mut s: HashSet<i64> = HashSet::new();
-            for r in &raws {
-                if let Some(cid) = r.owner_cid {
-                    s.insert(cid);
-                }
-            }
-            s.into_iter().collect()
-        };
+        let owner_cid_set: HashSet<i64> = raws.iter().filter_map(|r| r.owner_cid).collect();
+        let owner_cids: Vec<i64> = owner_cid_set.iter().copied().collect();
 
-        let cw_flags: HashMap<i64, (bool, bool)> = if owner_cids.is_empty() {
-            HashMap::new()
-        } else if let Ok(cw) = ctx.crimewatch.read() {
-            owner_cids
-                .iter()
-                .map(|&cid| {
-                    let st = cw.states.get(&cid);
-                    (
-                        cid,
+        let (cw_flags, illegal_aggressor_cids): (HashMap<i64, (bool, bool)>, HashSet<i64>) =
+            if owner_cids.is_empty() {
+                (HashMap::new(), HashSet::new())
+            } else if let Ok(cw) = ctx.crimewatch.read() {
+                let flags = owner_cids
+                    .iter()
+                    .map(|&cid| {
+                        let st = cw.states.get(&cid);
                         (
-                            st.is_some_and(|s| s.is_criminal(now_unix)),
-                            st.is_some_and(|s| s.is_suspect(now_unix)),
-                        ),
-                    )
-                })
-                .collect()
-        } else {
-            HashMap::new()
-        };
+                            cid,
+                            (
+                                st.is_some_and(|s| s.is_criminal(now_unix)),
+                                st.is_some_and(|s| s.is_suspect(now_unix)),
+                            ),
+                        )
+                    })
+                    .collect();
+                let illegals = cw
+                    .aggression_mgr
+                    .records
+                    .values()
+                    .filter(|rec| {
+                        !rec.is_legal
+                            && rec.system_id == solar_system_id
+                            && now_unix < rec.expires_unix
+                            && owner_cid_set.contains(&rec.aggressor_char_id)
+                    })
+                    .map(|rec| rec.aggressor_char_id)
+                    .collect();
+                (flags, illegals)
+            } else {
+                (HashMap::new(), HashSet::new())
+            };
 
-        let disapproval_cids: HashSet<i64> = if owner_cids.is_empty() {
-            HashSet::new()
+        let (
+            disapproval_cids,
+            active_sentry_aggressor_ships,
+            active_sentry_aggressor_chars,
+            cleared_sentry_ships,
+        ): (HashSet<i64>, HashSet<i64>, HashSet<i64>, HashSet<i64>) = if owner_cids.is_empty() {
+            (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new())
         } else {
             crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                owner_cids
+                let dis = owner_cids
                     .iter()
                     .copied()
-                    .filter(|cid| rt.disapproval_flags.get(cid).copied().is_some_and(|exp| now_unix < exp))
-                    .collect()
+                    .filter(|cid| {
+                        rt.disapproval_flags
+                            .get(cid)
+                            .copied()
+                            .is_some_and(|exp| now_unix < exp)
+                    })
+                    .collect();
+                let mut active_ships = HashSet::new();
+                let mut active_chars = HashSet::new();
+                let mut cleared_ships = HashSet::new();
+                for (&(sid, key_ship), st) in &rt.sentry_gun_aggression {
+                    if sid != solar_system_id {
+                        continue;
+                    }
+                    if st.active_on_grid {
+                        active_ships.insert(key_ship);
+                        if st.offender_ship_id > 0 {
+                            active_ships.insert(st.offender_ship_id);
+                        }
+                        if st.offender_char_id > 0 {
+                            active_chars.insert(st.offender_char_id);
+                        }
+                    } else {
+                        cleared_ships.insert(key_ship);
+                        if st.offender_ship_id > 0 {
+                            cleared_ships.insert(st.offender_ship_id);
+                        }
+                    }
+                }
+                (dis, active_ships, active_chars, cleared_ships)
             })
         };
 
@@ -842,6 +912,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let owner = r.owner_cid.map(|cid| {
                     let (has_criminal_flag, has_suspect_flag) =
                         cw_flags.get(&cid).copied().unwrap_or((false, false));
+                    let has_on_grid_illegal_aggression = !r.is_player_drone
+                        && (active_sentry_aggressor_ships.contains(&r.cand_id)
+                            || active_sentry_aggressor_chars.contains(&cid)
+                            || (illegal_aggressor_cids.contains(&cid)
+                                && !cleared_sentry_ships.contains(&r.cand_id)
+                                && !r
+                                    .owner_active_ship_id
+                                    .is_some_and(|osid| cleared_sentry_ships.contains(&osid))));
                     CandidateOwnerMeta {
                         standings: r.standings,
                         is_low_sec_criminal: r.is_low_sec_criminal,
@@ -851,6 +929,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         has_criminal_flag,
                         has_suspect_flag,
                         has_disapproval_flag: disapproval_cids.contains(&cid),
+                        has_on_grid_illegal_aggression,
                         pilot_is_pirate: r
                             .war_faction_id
                             .is_some_and(crate::services::security_mgr::is_pirate_militia_faction),
@@ -888,6 +967,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     let mut destroyed_in_call: HashSet<i64> = HashSet::new();
     let mut cached_c_stage = None;
     let mut cached_s_stage = None;
+    let mut cached_sentry_disabled = None;
 
     let mut group_peer_ids_by_group: HashMap<u32, Vec<i64>> = HashMap::new();
     for n in &npcs_in_sys {
@@ -931,6 +1011,27 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         {
             if npc_ball.mode_is_warp && npc.target_id.is_some() {
                 npc.target_id = None;
+                updated_npcs.push((nid, npc));
+            }
+            continue;
+        }
+
+        let is_empire_sentry = is_empire_sentry_npc(ctx, &npc);
+        if is_empire_sentry
+            && *cached_sentry_disabled.get_or_insert_with(|| {
+                crate::services::combat_npc_police::is_sentry_disabled_by_corruption(
+                    ctx,
+                    solar_system_id,
+                )
+            })
+        {
+            npc.aggression_threat.clear();
+            npc.threat_table.clear();
+            if npc.target_id.is_some() {
+                npc.target_id = None;
+                npc.entropic_cycles = 0;
+            }
+            if npc != orig_npc {
                 updated_npcs.push((nid, npc));
             }
             continue;
@@ -982,9 +1083,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         for (&tid, &threat) in &npc.threat_table {
             npc.aggression_threat.entry(tid).or_insert(threat);
         }
-        // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km, or > 250 km for sentries),
+        // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km, or > 250 km / 500 km for sentries),
         // warped out (`MovementMode::Warp`), lost lock (`is_cloaked`), or destroyed (`structure_hp <= 0.0`).
-        let max_engage_range = if npc.type_id == 79_507 {
+        let max_engage_range = if npc.type_id == 79_507 || is_empire_sentry {
             npc.optimal_range.max(500_000.0)
         } else if npc.archetype == "SleeperSentry" || npc.archetype == "ZarzakhGateGun" {
             npc.optimal_range.max(250_000.0)
@@ -1018,17 +1119,6 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
             let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
             let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
-            let is_empire_sentry = (npc.archetype == "EmpireSentry"
-                || (npc.type_id != 79_507
-                    && ctx
-                        .sde
-                        .types
-                        .get(&npc.type_id)
-                        .is_some_and(|t| matches!(t.group_id, 99 | 180))))
-                && !matches!(
-                    npc.archetype.as_str(),
-                    "SleeperSentry" | "ZarzakhGateGun" | "CounterInsurgencySentry"
-                );
             let is_ambush_tackler = npc.archetype == "InsurgencyAmbushTackler";
             let is_ore_defender = npc.archetype == "InsurgencyAmbushOreDefender";
             let is_ore_rorqual = npc.type_id == 79_589 || npc.archetype == "InsurgencyOreRorqual";
@@ -1054,7 +1144,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let is_zarzakh_gun = npc.archetype == "ZarzakhGateGun";
             let is_zarzakh_patrol = matches!(npc.archetype.as_str(), "ZarzakhPatrol" | "OuterZarzakhPatrol");
 
-            let max_acquire_range = if npc.type_id == 79_507 {
+            let max_acquire_range = if npc.type_id == 79_507 || is_empire_sentry {
                 npc.optimal_range.max(500_000.0)
             } else if npc.archetype == "SleeperSentry" || is_zarzakh_gun {
                 npc.optimal_range.max(250_000.0)
@@ -1131,8 +1221,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         owner.pilot_is_pirate && !owner.has_disapproval_flag
                     } else if is_navy {
                         standing > -5.0 && !is_criminal
-                    } else if is_police || is_empire_sentry {
+                    } else if is_police {
                         !is_criminal && standing > -5.0
+                    } else if is_empire_sentry {
+                        // Gate/station Sentry Guns engage only active criminal timers or on-grid
+                        // illegal aggressors (plus direct retaliation via `aggression_threat`),
+                        // never non-criminal pilots merely for low security status or faction standing.
+                        !owner.has_criminal_flag && !owner.has_on_grid_illegal_aggression
                     } else if is_edencom {
                         standing >= 0.0 && !is_criminal
                     } else {

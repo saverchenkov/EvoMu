@@ -729,6 +729,19 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
             },
         );
         sde.groups.insert(
+            180,
+            eve_sde::GroupInfo {
+                group_id: 180,
+                category_id: 11,
+                name: "Protective Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        sde.groups.insert(
             383,
             eve_sde::GroupInfo {
                 group_id: 383,
@@ -752,14 +765,31 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         amarr_sentry.faction_id = None;
         sde.types.insert(1_194, amarr_sentry);
 
+        let mut navy_sentry = make_fighter_type(990_101, 99, 11, 1_000_000.0, vec![]);
+        navy_sentry.name = "Caldari Navy Sentry Gun".into();
+        navy_sentry.faction_id = Some(500_001);
+        sde.types.insert(990_101, navy_sentry);
+
+        let mut police_sentry = make_fighter_type(990_102, 180, 11, 1_000_000.0, vec![]);
+        police_sentry.name = "State Police Sentry Gun".into();
+        police_sentry.faction_id = None;
+        sde.types.insert(990_102, police_sentry);
+
         let mut ci_sentry = make_fighter_type(79_507, 383, 11, 1_000_000.0, vec![]);
         ci_sentry.name = "Counter-Insurgency Sentry Gun".into();
         ci_sentry.faction_id = Some(500_001);
         sde.types.insert(79_507, ci_sentry);
+
+        // Set 1.0 security so non-outlaw -2.0 security status crosses Faction Police threshold.
+        if let Some(sys) = sde.solar_systems.get_mut(&sys_id) {
+            sys.security_status = 1.0;
+        }
     }
 
     assert_eq!(derive_npc_archetype(&ctx, 3_740), "EmpireSentry");
     assert_eq!(derive_npc_archetype(&ctx, 1_194), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 990_101), "EmpireSentry");
+    assert_eq!(derive_npc_archetype(&ctx, 990_102), "EmpireSentry");
     assert_ne!(derive_npc_archetype(&ctx, 79_507), "EmpireSentry");
 
     // Passing a poisoned "BeltRat" hint must still resolve to EmpireSentry, never Pirate/BeltRat.
@@ -772,10 +802,207 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         DVec3::new(10_000.0, 0.0, 0.0),
     )
     .await;
+    // Also spawn 1_194 at 200 km (> 150 km normal range, within 500 km sentry range).
+    let amarr_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        1_194,
+        "",
+        1,
+        DVec3::new(200_000.0, 0.0, 0.0),
+    )
+    .await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].archetype, "EmpireSentry");
+        let s1 = &rt.npc_entities[&sentry_id];
+        assert_eq!(s1.archetype, "EmpireSentry");
+        assert_eq!(s1.faction_id, 500_001);
+        assert_eq!(s1.orbit_range, 0.0);
+        assert!(s1.optimal_range >= 500_000.0);
+
+        let s2 = &rt.npc_entities[&amarr_sentry_id];
+        assert_eq!(s2.archetype, "EmpireSentry");
+        assert_eq!(s2.faction_id, 500_003);
+        assert_eq!(s2.orbit_range, 0.0);
+        assert!(s2.optimal_range >= 500_000.0);
     });
 
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert_eq!(bp.balls[&sentry_id].max_velocity, 0.0);
+        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
+    }
+    sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Clean non-criminal Venture pilot is never targeted or damaged.
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+    });
+
+    // -10.0 empire and pirate standings alone (without active criminal or on-grid aggression) must not trigger sentries.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.standings.insert(500_001, -10.0);
+        ch.standings.insert(500_003, -10.0);
+        ch.standings.insert(500_010, -10.0);
+    });
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+    });
+
+    // Non-outlaw -2.0 sec status in 1.0 highsec (Faction Police threshold) and -10.0 sec status without
+    // active criminal timer or on-grid illegal aggression must not be engaged by Empire Sentry Guns.
+    for sec in [-2.0, -10.0] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&char_id).unwrap().security_status = sec;
+        });
+        step_extended_npc_ai(&ctx, sys_id).await;
+        with_combat_ephemeral(&ctx, |rt| {
+            assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
+            assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, None);
+        });
+    }
+    assert_eq!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp,
+        5_000.0
+    );
+
+    // Active criminal timer (GCC) IS engaged and damaged up to 500 km.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.clear();
+    });
+    let now = ctx.now_unix();
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(char_id).criminal_flag_until_unix = now + 900;
+    }
+    step_extended_npc_ai(&ctx, sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
+        assert_eq!(rt.npc_entities[&amarr_sentry_id].target_id, Some(ship_id));
+    });
+    assert!(
+        sys_handle
+            .get_combat_state(ship_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shield_hp
+            < 5_000.0
+    );
+}
+
+#[tokio::test]
+async fn empire_sentry_faction_resolution_on_grid_aggression_and_stage5_corruption() {
+    let (mut ctx, _session, char_id, ship_id, sys_id) = make_fighter_ctx_and_session();
+    {
+        let sde = std::sync::Arc::make_mut(&mut ctx.sde);
+        sde.groups.insert(
+            99,
+            eve_sde::GroupInfo {
+                group_id: 99,
+                category_id: 11,
+                name: "Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+        sde.groups.insert(
+            180,
+            eve_sde::GroupInfo {
+                group_id: 180,
+                category_id: 11,
+                name: "Protective Sentry Gun".into(),
+                anchorable: false,
+                anchored: false,
+                fittable_non_singleton: false,
+                use_base_price: false,
+                published: false,
+            },
+        );
+
+        let mut amarr_sentry = make_fighter_type(1_194, 99, 11, 1_000_000.0, vec![]);
+        amarr_sentry.name = "Amarr Sentry Gun".into();
+        amarr_sentry.faction_id = None;
+        sde.types.insert(1_194, amarr_sentry);
+
+        let mut caldari_sentry = make_fighter_type(3_740, 99, 11, 1_000_000.0, vec![]);
+        caldari_sentry.name = "Caldari Sentry Gun I".into();
+        caldari_sentry.faction_id = Some(500_001);
+        sde.types.insert(3_740, caldari_sentry);
+
+        let mut generic_sentry = make_fighter_type(990_103, 180, 11, 1_000_000.0, vec![]);
+        generic_sentry.name = "Protective Sentry Gun".into();
+        generic_sentry.faction_id = None;
+        sde.types.insert(990_103, generic_sentry);
+    }
+
+    // 1. Spawn 1_194 (faction_id: None) and generic group 180 sentry against a non-criminal pilot
+    // with -10.0 regional pirate standing (500_010 Guristas): both must resolve empire factions,
+    // remain static (max_vel == 0.0, orb_range == 0.0), and never target the pilot.
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.security_status = 0.0;
+        ch.standings.insert(500_010, -10.0);
+    });
+    let amarr_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        1_194,
+        "BeltRat",
+        1,
+        DVec3::new(15_000.0, 0.0, 0.0),
+    )
+    .await;
+    let generic_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        990_103,
+        "",
+        1,
+        DVec3::new(20_000.0, 0.0, 0.0),
+    )
+    .await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     sys_handle
         .spawn_ball_with_combat(
@@ -805,36 +1032,150 @@ async fn empire_sentry_gun_archetype_never_engages_non_criminal_venture() {
         .await
         .unwrap();
 
-    // Non-criminal pilot arriving in a Venture must never be targeted or damaged by Empire Sentry Guns.
     step_extended_npc_ai(&ctx, sys_id).await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, None);
-    });
-    assert_eq!(
-        sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .shield_hp,
-        5_000.0
-    );
+        let amarr_ent = &rt.npc_entities[&amarr_sentry_id];
+        assert_eq!(amarr_ent.archetype, "EmpireSentry");
+        assert_eq!(amarr_ent.faction_id, 500_003);
+        assert_eq!(amarr_ent.orbit_range, 0.0);
+        assert_eq!(amarr_ent.target_id, None);
 
-    // Negative contrast: outlaw/criminal pilot (`security_status <= -5.0`) IS engaged.
+        let generic_ent = &rt.npc_entities[&generic_sentry_id];
+        assert_eq!(generic_ent.archetype, "EmpireSentry");
+        assert_eq!(generic_ent.faction_id, 500_001);
+        assert_eq!(generic_ent.orbit_range, 0.0);
+        assert_eq!(generic_ent.target_id, None);
+    });
+    {
+        let bp = sys_handle.ballpark.read().unwrap();
+        assert_eq!(bp.balls[&amarr_sentry_id].max_velocity, 0.0);
+        assert_eq!(bp.balls[&generic_sentry_id].max_velocity, 0.0);
+    }
+
+    // 2. Low-sec on-grid illegal aggression engages sentry, and Stage-5 corruption disables it.
+    let low_sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| 0.05 < s.security_status && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .expect("canonical seed low-sec system");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().security_status = -10.0;
+        snap.characters.get_mut(&char_id).unwrap().solar_system_id = low_sys_id;
     });
-    step_extended_npc_ai(&ctx, sys_id).await;
+    let low_sentry_id = spawn_specialized_npc_entity(
+        &ctx,
+        low_sys_id,
+        3_740,
+        "",
+        1,
+        DVec3::new(10_000.0, 0.0, 0.0),
+    )
+    .await;
+    let low_sys_handle = ctx.systems.get_or_spawn(low_sys_id);
+    low_sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 32_880,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 250.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            CombatState {
+                shield_hp: 5_000.0,
+                max_shield_hp: 5_000.0,
+                armor_hp: 5_000.0,
+                max_armor_hp: 5_000.0,
+                structure_hp: 5_000.0,
+                max_structure_hp: 5_000.0,
+                signature_radius: 40.0,
+                ..CombatState::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Peaceful pilot in lowsec is not targeted.
+    step_extended_npc_ai(&ctx, low_sys_id).await;
     with_combat_ephemeral(&ctx, |rt| {
-        assert_eq!(rt.npc_entities[&sentry_id].target_id, Some(ship_id));
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
     });
-    assert!(
-        sys_handle
-            .get_combat_state(ship_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .shield_hp
-            < 5_000.0
-    );
+
+    // On-grid illegal aggression triggers sentry targeting and damage.
+    let now = ctx.now_unix();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.sentry_gun_aggression.insert(
+            (low_sys_id, ship_id),
+            crate::services::combat_crimewatch::SentryAggressionState {
+                solar_system_id: low_sys_id,
+                offender_char_id: char_id,
+                offender_ship_id: ship_id,
+                sentry_origin: DVec3::new(10_000.0, 0.0, 0.0),
+                active_on_grid: true,
+                total_sentry_damage_dealt: 0.0,
+            },
+        );
+    });
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.aggression_mgr
+            .record_aggression(char_id, 90_000_002, low_sys_id, false, false, now);
+    }
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, Some(ship_id));
+    });
+    let shield_before_corruption = low_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .shield_hp;
+    assert!(shield_before_corruption < 5_000.0);
+
+    // Stage-5 Insurgency corruption disables sentry targeting and clears active threat.
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = eve_db::SystemDynamicState::default();
+        st.solar_system_id = low_sys_id;
+        st.insurgency_corruption_stage = 5;
+        snap.system_states.insert(low_sys_id, st);
+        snap.insurgency_runtime.campaigns.insert(
+            1,
+            eve_db::PersistedInsurgencyCampaign {
+                campaign_id: 1,
+                pirate_faction_id: 500_010,
+                target_faction_id: 500_001,
+                fob_solar_system_id: low_sys_id,
+                systems: vec![low_sys_id],
+                created_at_unix: now.saturating_sub(200),
+                forecasting_end_unix: now.saturating_sub(100),
+                active_end_unix: now + 1_800,
+                winddown_end_unix: now + 3_600,
+                corruption_points: [(low_sys_id, 1_000)].into_iter().collect(),
+                suppression_points: Default::default(),
+            },
+        );
+    });
+    assert!(crate::services::combat_npc_police::is_sentry_disabled_by_corruption(
+        &ctx, low_sys_id
+    ));
+    record_npc_threat_event(&ctx, low_sentry_id, ship_id, 100.0, false, false);
+    step_extended_npc_ai(&ctx, low_sys_id).await;
+    with_combat_ephemeral(&ctx, |rt| {
+        assert_eq!(rt.npc_entities[&low_sentry_id].target_id, None);
+        assert!(rt.npc_entities[&low_sentry_id].aggression_threat.is_empty());
+    });
+    let shield_after_corruption = low_sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .shield_hp;
+    assert_eq!(shield_after_corruption, shield_before_corruption);
 }
