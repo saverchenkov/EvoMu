@@ -29,27 +29,110 @@ fn test_ctx() -> ServerContext {
 }
 
 fn find_nullsec_sys(sde: &SdeRegistry) -> u32 {
+    if sde
+        .solar_systems
+        .get(&30_004_759)
+        .is_some_and(|s| s.security_status <= 0.0)
+    {
+        return 30_004_759;
+    }
     sde.solar_systems
         .values()
-        .find(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .filter(|s| s.solar_system_id < 31_000_000 && s.security_status <= 0.0)
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap_or(30_004_759)
 }
 
 fn find_lowsec_sys(sde: &SdeRegistry) -> u32 {
+    if sde
+        .solar_systems
+        .get(&30_002_813)
+        .is_some_and(|s| s.security_status > 0.0 && s.security_status < 0.45)
+    {
+        return 30_002_813;
+    }
     sde.solar_systems
         .values()
-        .find(|s| {
+        .filter(|s| {
             s.solar_system_id < 31_000_000
                 && s.security_status > 0.0
                 && s.security_status < 0.45
         })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap_or(30_002_813)
 }
 
 fn find_highsec_sys(_sde: &SdeRegistry) -> u32 {
     30_000_142
+}
+
+/// Deterministically selects a Titan hull type ID (`group_id == 30`).
+fn find_titan_type_id(sde: &SdeRegistry) -> u32 {
+    if sde.types.get(&11_567).is_some_and(|t| t.group_id == 30) {
+        return 11_567;
+    }
+    sde.types
+        .values()
+        .filter(|t| t.group_id == 30)
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(11_567)
+}
+
+/// Deterministically selects a non-Lancer Doomsday module type ID (`group_id == 588`).
+fn find_doomsday_type_id(sde: &SdeRegistry) -> u32 {
+    if sde
+        .types
+        .get(&24_550)
+        .is_some_and(|t| t.group_id == 588 && !matches!(t.type_id, 77_398..=77_401))
+    {
+        return 24_550;
+    }
+    sde.types
+        .values()
+        .filter(|t| t.group_id == 588 && !matches!(t.type_id, 77_398..=77_401))
+        .min_by_key(|t| t.type_id)
+        .map(|t| t.type_id)
+        .unwrap_or(24_550)
+}
+
+/// Deterministically selects a Dreadnought hull type ID (`group_id == 485`) with capital HP attributes.
+fn find_dread_type_id(sde: &SdeRegistry) -> u32 {
+    if sde
+        .types
+        .get(&19_720)
+        .is_some_and(|t| t.group_id == 485 && t.default_attributes.contains_key(&263))
+    {
+        return 19_720;
+    }
+    sde.types
+        .values()
+        .filter(|t| t.group_id == 485 && t.default_attributes.contains_key(&263))
+        .min_by_key(|t| t.type_id)
+        .or_else(|| {
+            sde.types
+                .values()
+                .filter(|t| t.group_id == 485)
+                .min_by_key(|t| t.type_id)
+        })
+        .map(|t| t.type_id)
+        .unwrap_or(19_720)
+}
+
+/// Normalizes test superweapon attributes so non-EM damage channels from unrelated SDE types do not leak.
+fn configure_test_superweapon_attrs(t: &mut eve_sde::InvType, fuel_qty: f64, range_m: f64) {
+    t.group_id = 588;
+    t.category_id = 7;
+    t.default_attributes.insert(713, 16_274.0);
+    t.default_attributes.insert(714, fuel_qty);
+    t.default_attributes.insert(6, 1_000.0);
+    t.default_attributes.insert(114, 50_000.0);
+    t.default_attributes.insert(116, 0.0);
+    t.default_attributes.insert(117, 0.0);
+    t.default_attributes.insert(118, 0.0);
+    t.default_attributes.insert(54, range_m);
 }
 
 fn setup_ship_and_module(
@@ -291,13 +374,7 @@ fn parse_vec3_and_fuel_check_deduct_refund_and_target_eligibility() {
     assert!(!is_eligible_single_target_doomsday_target(&ctx, 100_800_111, 587)); // frigate
     assert!(!is_eligible_single_target_doomsday_target(&ctx, 100_800_112, 999_999_999)); // unknown
     // Capital Dreadnought (group 485)
-    let dread_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 485)
-        .map(|t| t.type_id)
-        .unwrap_or(19720);
+    let dread_tid = find_dread_type_id(&ctx.sde);
     assert!(is_eligible_single_target_doomsday_target(&ctx, 100_800_113, dread_tid));
     let _ = Arc::make_mut(&mut ctx.sde);
 }
@@ -314,38 +391,15 @@ async fn activate_superweapon_titan_single_and_slash_and_error_guards() {
     let mod_id = 100_810_002;
 
     // Pick real Titan (group 30) and Doomsday (group 588) from SDE, or synthesize if absent
-    let titan_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 30)
-        .map(|t| t.type_id)
-        .unwrap_or(11567); // Avatar
-    let dd_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 588 && !matches!(t.type_id, 77398..=77401))
-        .map(|t| t.type_id)
-        .unwrap_or(24550);
-    let dread_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 485)
-        .map(|t| t.type_id)
-        .unwrap_or(19720);
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+    let dread_tid = find_dread_type_id(&ctx.sde);
 
     // Ensure dd_tid has reasonable attributes for testing
     {
         let sde_mut = Arc::make_mut(&mut ctx.sde);
         if let Some(m) = sde_mut.types.get_mut(&dd_tid) {
-            m.group_id = 588;
-            m.default_attributes.insert(713, 16274.0);
-            m.default_attributes.insert(714, 100.0);
-            m.default_attributes.insert(6, 1_000.0);
-            m.default_attributes.insert(114, 50_000.0);
-            m.default_attributes.insert(54, 250_000.0);
+            configure_test_superweapon_attrs(m, 100.0, 250_000.0);
         }
     }
 
@@ -900,37 +954,14 @@ async fn doomsday_activation_exact_fuel_deletion_emits_on_item_change_tombstone_
     let tgt_id = 100_830_050_i64;
     let fuel_stack_id = 1_897_129_274_i64;
 
-    let titan_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 30)
-        .map(|t| t.type_id)
-        .unwrap_or(11567);
-    let dd_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 588 && !matches!(t.type_id, 77398..=77401))
-        .map(|t| t.type_id)
-        .unwrap_or(24550);
-    let dread_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 485)
-        .map(|t| t.type_id)
-        .unwrap_or(19720);
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+    let dread_tid = find_dread_type_id(&ctx.sde);
 
     {
         let sde_mut = Arc::make_mut(&mut ctx.sde);
         if let Some(m) = sde_mut.types.get_mut(&dd_tid) {
-            m.group_id = 588;
-            m.default_attributes.insert(713, 16274.0);
-            m.default_attributes.insert(714, 50_000.0);
-            m.default_attributes.insert(6, 1_000.0);
-            m.default_attributes.insert(114, 50_000.0);
-            m.default_attributes.insert(54, 250_000.0);
+            configure_test_superweapon_attrs(m, 50_000.0, 250_000.0);
         }
     }
 
@@ -1019,32 +1050,19 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
 
     let lancer_tid = 77_281_u32;
     let lance_tid = 77_398_u32;
-    let titan_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 30)
-        .map(|t| t.type_id)
-        .unwrap_or(11_567);
-    let dd_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 588 && !matches!(t.type_id, 77_398..=77_401))
-        .map(|t| t.type_id)
-        .unwrap_or(24_550);
-    let dread_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.group_id == 485)
-        .map(|t| t.type_id)
-        .unwrap_or(19_720);
+    let titan_tid = find_titan_type_id(&ctx.sde);
+    let dd_tid = find_doomsday_type_id(&ctx.sde);
+    let dread_tid = find_dread_type_id(&ctx.sde);
 
     {
         let sde_mut = Arc::make_mut(&mut ctx.sde);
         let fallback_ship = sde_mut.types.get(&dread_tid).cloned().unwrap_or_else(|| {
-            sde_mut.types.values().next().cloned().expect("seed type")
+            sde_mut
+                .types
+                .values()
+                .min_by_key(|t| t.type_id)
+                .cloned()
+                .expect("seed type")
         });
         let mut lancer_ship_t = sde_mut.types.get(&lancer_tid).cloned().unwrap_or(fallback_ship.clone());
         lancer_ship_t.type_id = lancer_tid;
@@ -1055,24 +1073,12 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         let fallback_mod = sde_mut.types.get(&dd_tid).cloned().unwrap_or(fallback_ship);
         let mut dd_t = sde_mut.types.get(&dd_tid).cloned().unwrap_or(fallback_mod.clone());
         dd_t.type_id = dd_tid;
-        dd_t.group_id = 588;
-        dd_t.category_id = 7;
-        dd_t.default_attributes.insert(713, 16_274.0);
-        dd_t.default_attributes.insert(714, 100.0);
-        dd_t.default_attributes.insert(6, 1_000.0);
-        dd_t.default_attributes.insert(114, 50_000.0);
-        dd_t.default_attributes.insert(54, 250_000.0);
+        configure_test_superweapon_attrs(&mut dd_t, 100.0, 250_000.0);
         sde_mut.types.insert(dd_tid, dd_t);
 
         let mut lance_t = sde_mut.types.get(&lance_tid).cloned().unwrap_or(fallback_mod);
         lance_t.type_id = lance_tid;
-        lance_t.group_id = 588;
-        lance_t.category_id = 7;
-        lance_t.default_attributes.insert(713, 16_274.0);
-        lance_t.default_attributes.insert(714, 100.0);
-        lance_t.default_attributes.insert(6, 1_000.0);
-        lance_t.default_attributes.insert(114, 50_000.0);
-        lance_t.default_attributes.insert(54, 150_000.0);
+        configure_test_superweapon_attrs(&mut lance_t, 100.0, 150_000.0);
         sde_mut.types.insert(lance_tid, lance_t);
     }
 
