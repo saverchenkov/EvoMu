@@ -113,6 +113,10 @@ fn hacking_client_err(code: &str, message: impl Into<String>) -> BridgeRpcError 
     )
 }
 
+fn invalid_tile_index_err() -> BridgeRpcError {
+    hacking_client_err("InvalidTileIndex", "Tile index missing or malformed")
+}
+
 fn require_undocked_hacking_space(
     ctx: &ServerContext,
     session: &SessionState,
@@ -817,7 +821,7 @@ pub async fn handle_pve_hacking(
                     )));
                 };
                 let Some(coord) = extract_tile_index(args.get(1)) else {
-                    return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
+                    return Some(Err(invalid_tile_index_err()));
                 };
                 (cid, coord)
             } else {
@@ -828,7 +832,7 @@ pub async fn handle_pve_hacking(
                     )));
                 };
                 let Some(coord) = extract_tile_index(args.first()) else {
-                    return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
+                    return Some(Err(invalid_tile_index_err()));
                 };
                 (cid, coord)
             };
@@ -1447,7 +1451,7 @@ async fn handle_hacking_used_utility(
             ));
         };
         let Some(tile) = extract_tile_index(args.get(2)) else {
-            return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+            return Err(invalid_tile_index_err());
         };
         (cid, slot, tile)
     } else {
@@ -1464,8 +1468,7 @@ async fn handle_hacking_used_utility(
             ));
         };
         let tile = match args.get(1) {
-            Some(arg) => extract_tile_index(Some(arg))
-                .ok_or_else(|| BridgeRpcError::user_error("InvalidTileIndex"))?,
+            Some(arg) => extract_tile_index(Some(arg)).ok_or_else(invalid_tile_index_err)?,
             // V24 1-arg UsedUtilityElement([slot]) omits target tile for self-targeted utilities.
             None => 0,
         };
