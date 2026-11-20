@@ -125,7 +125,7 @@ struct ResolvedCycleStart<'a> {
     is_docked: bool,
     sys_id: u32,
     sys: crate::system_actor::SystemHandle,
-    fit: eve_dogma::ShipFittingEngine,
+    fit: Box<eve_dogma::ShipFittingEngine>,
     module_id: i64,
     m: eve_dogma::FittedModule,
     mod_type: &'a eve_sde::InvType,
@@ -184,9 +184,9 @@ async fn try_start_or_resolve_cycle<'a>(
         })
     }) {
         return std::ops::ControlFlow::Break(Some(
-            crate::router::box_fut(|| crate::services::structure_weapons_ops::handle_structure_module_activate(
+            crate::services::structure_weapons_ops::handle_structure_module_activate(
                 ctx, session, char_id, st_id, raw_module_id, &effect_name, target_id_opt, method == "Overload",
-            )).await,
+            ).await,
         ));
     }
     let is_docked = session.station_id.is_some() || session.structure_id.is_some();
@@ -208,9 +208,9 @@ async fn try_start_or_resolve_cycle<'a>(
             }
             let godma_args = [PyRep::Integer(ship_id), PyRep::Integer(raw_module_id)];
             return std::ops::ControlFlow::Break(Some(
-                crate::router::box_fut(|| crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
+                crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
                     ctx, session, &godma_args,
-                )).await,
+                ).await,
             ));
         }
     }
@@ -264,22 +264,27 @@ async fn try_start_or_resolve_cycle<'a>(
     }
     if method == "Overload" && target_id_opt.is_none() {
         return std::ops::ControlFlow::Break(Some(
-            crate::router::box_fut(|| crate::services::fitting_cycles_overheat::handle_early_targetless_overload(
+            crate::services::fitting_cycles_overheat::handle_early_targetless_overload(
                 ctx, &sys, char_id, ship_id, module_id, mod_type, is_weapon, &mut m, fit,
-            )).await,
+            ).await,
         ));
     }
     std::ops::ControlFlow::Continue(ResolvedCycleStart {
         char_id, ship_id, effect_name, target_id_opt, repeat, is_docked,
-        sys_id, sys, fit, module_id, m, mod_type, is_weapon,
+        sys_id, sys, fit: Box::new(fit), module_id, m, mod_type, is_weapon,
     })
+}
+
+enum CycleSafetyRouting {
+    Continue(u32),
+    Ready(Option<Result<PyRep, BridgeRpcError>>),
+    RouteToWeapons,
 }
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 async fn check_cycle_safety_and_weapon_routing(
     ctx: &ServerContext,
-    session: &mut SessionState,
     sys: &crate::system_actor::SystemHandle,
     sys_id: u32,
     char_id: i64,
@@ -289,16 +294,13 @@ async fn check_cycle_safety_and_weapon_routing(
     mod_type: &eve_sde::InvType,
     is_weapon: bool,
     is_in_space: bool,
-    service: &str,
     method: &str,
     effect_name: &str,
     target_id_opt: Option<i64>,
-    args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
-) -> std::ops::ControlFlow<Option<Result<PyRep, BridgeRpcError>>, u32> {
+) -> CycleSafetyRouting {
     let pre_undock_invuln_ticks: u32 = if is_in_space {
         if let Err(e) = check_space_module_cloak_and_warp_readonly(ctx, sys, ship_id, mod_type).await {
-            return std::ops::ControlFlow::Break(Some(Err(e)));
+            return CycleSafetyRouting::Ready(Some(Err(e)));
         }
         sys.get_combat_state(ship_id).await.ok().flatten().map_or(0, |cs| cs.undock_invulnerable_remaining_ticks)
     } else {
@@ -334,12 +336,10 @@ async fn check_cycle_safety_and_weapon_routing(
     let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
         && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
     if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
-        return std::ops::ControlFlow::Break(
-            crate::router::box_fut(|| crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs)).await,
-        );
+        return CycleSafetyRouting::RouteToWeapons;
     }
     if method == "Activate" && is_weapon && ctx.is_module_in_reactivation_delay(ship_id, module_id) {
-        return std::ops::ControlFlow::Break(Some(Err(module_already_active_rpc_error(
+        return CycleSafetyRouting::Ready(Some(Err(module_already_active_rpc_error(
             ctx, Some(module_type_id), format!("Module {module_id} is already active in a cycle"),
         ))));
     }
@@ -347,7 +347,7 @@ async fn check_cycle_safety_and_weapon_routing(
         || is_weapon || matches!(effect_name, "empWave" | "useMissiles" | "targetAttack" | "projectileFired"))
         && sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered)
     {
-        return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError {
+        return CycleSafetyRouting::Ready(Some(Err(BridgeRpcError {
             code: "CantActivateWhileTethered".into(),
             message: "Cannot activate offensive modules, smartbombs, or bomb launchers while tethered".into(),
             client_error: None,
@@ -358,15 +358,15 @@ async fn check_cycle_safety_and_weapon_routing(
             .unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
         let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Red));
         if sys_sec > 0.0 && safety != crate::services::combat_crimewatch::SafetyLevel::Red {
-            return std::ops::ControlFlow::Break(Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"))));
+            return CycleSafetyRouting::Ready(Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"))));
         }
     }
     if method == "Overload" {
         if let Err(e) = crate::services::fitting_cycles_overheat::check_can_overload_module(ctx, char_id, module_type_id) {
-            return std::ops::ControlFlow::Break(Some(Err(e)));
+            return CycleSafetyRouting::Ready(Some(Err(e)));
         }
     }
-    std::ops::ControlFlow::Continue(pre_undock_invuln_ticks)
+    CycleSafetyRouting::Continue(pre_undock_invuln_ticks)
 }
 
 #[inline(never)]
@@ -398,21 +398,19 @@ async fn try_activate_burst_or_scanner(
             .get_attribute(attr_ids::DURATION, &ctx.sde)
             .max(mod_type.default_attributes.get(&73).copied().unwrap_or(60_000.0))
             / 1000.0;
-        let res = crate::router::box_fut(|| {
-            activate_command_burst_module(
-                ctx,
-                sys,
-                char_id,
-                ship_id,
-                sys_id,
-                module_id,
-                mod_type,
-                &mod_state,
-                m.charge_type_id,
-                duration_s,
-                kwargs,
-            )
-        })
+        let res =         activate_command_burst_module(
+            ctx,
+            sys,
+            char_id,
+            ship_id,
+            sys_id,
+            module_id,
+            mod_type,
+            &mod_state,
+            m.charge_type_id,
+            duration_s,
+            kwargs,
+        )
         .await;
         return finish_space_activation(
             ctx,
@@ -425,18 +423,16 @@ async fn try_activate_burst_or_scanner(
         )
         .await;
     }
-    if let Some(res) = crate::router::box_fut(|| {
-        handle_scanner_analyzer_entosis_activation(
-            ctx,
-            sys,
-            char_id,
-            ship_id,
-            module_id,
-            mod_type,
-            &mod_state,
-            target_id_opt,
-        )
-    })
+    if let Some(res) =     handle_scanner_analyzer_entosis_activation(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        module_id,
+        mod_type,
+        &mod_state,
+        target_id_opt,
+    )
     .await
     {
         let finish_ticks = if mod_type.group_id == 815 {
@@ -518,27 +514,23 @@ async fn try_activate_early_special_modules(
         } else {
             "ActivateSinglePointTargetedModule"
         };
-        let res = crate::router::box_fut(|| {
-            crate::services::tactical_modules::activate_superweapon_or_lance(
-                ctx,
-                char_id,
-                ship_id,
-                sys_id,
-                module_id,
-                sw_method,
-                target_id_opt,
-            )
-        })
+        let res =         crate::services::tactical_modules::activate_superweapon_or_lance(
+            ctx,
+            char_id,
+            ship_id,
+            sys_id,
+            module_id,
+            sw_method,
+            target_id_opt,
+        )
         .await;
         return finish_space_activation(ctx, sys, is_in_space, char_id, ship_id, 0, res).await;
     }
     if mod_type.group_id == 1154 {
         let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-        let res = crate::router::box_fut(|| {
-            crate::services::tactical_modules::activate_target_spectrum_breaker(
-                ctx, sys, char_id, ship_id, module_id, mod_type, &mod_state,
-            )
-        })
+        let res =         crate::services::tactical_modules::activate_target_spectrum_breaker(
+            ctx, sys, char_id, ship_id, module_id, mod_type, &mod_state,
+        )
         .await;
         return finish_space_activation(
             ctx,
@@ -552,9 +544,7 @@ async fn try_activate_early_special_modules(
         .await;
     }
 
-    if let Some(res) = crate::router::box_fut(|| {
-        handle_cyno_generator_activation(ctx, sys, char_id, ship_id, sys_id, module_id, mod_type)
-    })
+    if let Some(res) =     handle_cyno_generator_activation(ctx, sys, char_id, ship_id, sys_id, module_id, mod_type)
     .await
     {
         return finish_space_activation(ctx, sys, is_in_space, char_id, ship_id, 0, res).await;
@@ -593,23 +583,21 @@ async fn try_activate_early_special_modules(
     }
 
     if matches!(mod_type.group_id, 1770 | 538 | 47 | 48 | 1313 | 815) {
-        if let Some(res) = crate::router::box_fut(|| {
-            try_activate_burst_or_scanner(
-                ctx,
-                sys,
-                char_id,
-                ship_id,
-                sys_id,
-                module_id,
-                m,
-                mod_type,
-                fit,
-                target_id_opt,
-                is_in_space,
-                pre_undock_invuln_ticks,
-                kwargs,
-            )
-        })
+        if let Some(res) =         try_activate_burst_or_scanner(
+            ctx,
+            sys,
+            char_id,
+            ship_id,
+            sys_id,
+            module_id,
+            m,
+            mod_type,
+            fit,
+            target_id_opt,
+            is_in_space,
+            pre_undock_invuln_ticks,
+            kwargs,
+        )
         .await
         {
             return Some(res);
@@ -622,12 +610,10 @@ async fn try_activate_early_special_modules(
                 .db
                 .with_snapshot(|s| s.sov_runtime.mercenary_dens.contains_key(&tid))
             {
-                let res = crate::router::box_fut(|| {
-                    helpers::try_handle_mercden_remote_shield_repair(
-                        ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, fit, method,
-                        tid,
-                    )
-                })
+                let res =                 helpers::try_handle_mercden_remote_shield_repair(
+                    ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, fit, method,
+                    tid,
+                )
                 .await
                 .and_then(|opt| opt.ok_or_else(|| BridgeRpcError::user_error("MercDenRepairFailed")));
                 return finish_space_activation(
@@ -681,21 +667,19 @@ async fn activate_interdiction_sphere_module(
             client_error: None,
         });
     }
-    let res = crate::router::box_fut(|| {
-        crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
-            ctx,
-            sys,
-            sys_id,
-            char_id,
-            ship_id,
-            ship_type_id,
-            module_id,
-            m,
-            mod_type,
-            effect_name,
-            target_id_opt,
-        )
-    })
+    let res =     crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
+        ctx,
+        sys,
+        sys_id,
+        char_id,
+        ship_id,
+        ship_type_id,
+        module_id,
+        m,
+        mod_type,
+        effect_name,
+        target_id_opt,
+    )
     .await;
     if res.is_ok() {
         if is_in_space {
@@ -925,17 +909,15 @@ async fn reconcile_and_validate_cycle_activation(
         ) {
             Ok(true) => {
                 let overload_fit = fit.clone();
-                let rep = crate::router::box_fut(|| {
-                    crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                        ctx,
-                        sys,
-                        char_id,
-                        ship_id,
-                        module_id,
-                        overload_fit,
-                        true,
-                    )
-                })
+                let rep =                 crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
+                    ctx,
+                    sys,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    overload_fit,
+                    true,
+                )
                 .await;
                 if is_in_space {
                     break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
@@ -1050,9 +1032,7 @@ async fn reconcile_and_validate_cycle_activation(
             })));
         }
         if mod_type.group_id == 82 {
-            match crate::router::box_fut(|| {
-                validate_passive_targeter_activation(ctx, sys, char_id, ship_id, target_id, fit)
-            })
+            match             validate_passive_targeter_activation(ctx, sys, char_id, ship_id, target_id, fit)
             .await
             {
                 Ok(lock) => passive_targeter_lock_opt = Some(lock),
@@ -1132,16 +1112,14 @@ async fn reconcile_and_validate_cycle_activation(
             }
         }
     }
-    if let Err(e) = crate::router::box_fut(|| {
-        precheck_module_cycle_aggression_or_assistance_safety(
-            ctx,
-            sys,
-            sys_id,
-            char_id,
-            mod_type.group_id,
-            target_id_opt,
-        )
-    })
+    if let Err(e) =     precheck_module_cycle_aggression_or_assistance_safety(
+        ctx,
+        sys,
+        sys_id,
+        char_id,
+        mod_type.group_id,
+        target_id_opt,
+    )
     .await
     {
         return std::ops::ControlFlow::Break(Some(Err(e)));
@@ -1153,6 +1131,81 @@ async fn reconcile_and_validate_cycle_activation(
         is_mwd_or_mjd,
         passive_targeter_lock_opt,
     })
+}
+
+struct PendingWeaponVolley {
+    sys: crate::system_actor::SystemHandle,
+    sys_id: u32,
+    ship_id: i64,
+    module_id: i64,
+    is_overloaded: bool,
+    duration_s: f64,
+    max_vel: f64,
+    is_overload_only_resp: bool,
+}
+
+enum CycleExecutionOutcome {
+    Ready(Option<Result<PyRep, BridgeRpcError>>),
+    PendingWeaponVolley(PendingWeaponVolley),
+    RouteToWeapons,
+}
+
+struct NonSpecialCycleStart<'a> {
+    start: ResolvedCycleStart<'a>,
+    is_in_space: bool,
+    pre_undock_invuln_ticks: u32,
+}
+
+enum EarlyCycleOutcome<'a> {
+    Ready(Option<Result<PyRep, BridgeRpcError>>),
+    Continue(NonSpecialCycleStart<'a>),
+    RouteToWeapons,
+}
+
+#[inline(never)]
+fn build_weapon_volley_rpc_rep(
+    module_id: i64,
+    is_overloaded: bool,
+    max_vel: f64,
+    duration_s: f64,
+    is_overload_only_resp: bool,
+    volley_destroyed_target: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if is_overload_only_resp {
+        return Some(Ok(PyRep::keyval([
+            ("moduleID", PyRep::Integer(module_id)),
+            ("overloaded", PyRep::Bool(true)),
+            ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+        ])));
+    }
+    let mut resp = vec![
+        ("moduleID", PyRep::Integer(module_id)),
+        ("active", PyRep::Bool(true)),
+        ("overloaded", PyRep::Bool(is_overloaded)),
+        ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+        ("duration", PyRep::Real(duration_s)),
+    ];
+    if volley_destroyed_target {
+        resp.push(("destroyed", PyRep::Bool(true)));
+    }
+    Some(Ok(PyRep::keyval(resp)))
+}
+
+#[inline(never)]
+async fn fetch_weapon_volley_actions(
+    sys: crate::system_actor::SystemHandle,
+    ship_id: i64,
+    module_id: i64,
+) -> (bool, Option<Vec<crate::system_actor::PendingCycleAction>>) {
+    match sys.fire_weapon_cycle_volley(ship_id, module_id).await {
+        Ok((destroyed, weapon_actions)) => {
+            let volley_destroyed_target = !destroyed.is_empty();
+            drop(destroyed);
+            let actions_opt = (!weapon_actions.is_empty()).then_some(weapon_actions);
+            (volley_destroyed_target, actions_opt)
+        }
+        Err(_) => (false, None),
+    }
 }
 
 #[inline(never)]
@@ -1168,10 +1221,40 @@ pub(crate) async fn handle_module_cycles(
     if !matches!((service, method), ("dogmaIM", "Activate") | ("dogmaIM", "Overload")) {
         return None;
     }
-    crate::router::box_fut(|| {
-        handle_module_cycles_inner(ctx, session, _bound_entry, service, method, args, kwargs)
-    })
-    .await
+    match handle_module_cycles_inner(ctx, session, _bound_entry, method, args, kwargs).await {
+        CycleExecutionOutcome::Ready(res) => res,
+        CycleExecutionOutcome::RouteToWeapons => {
+            crate::services::combat_crimewatch::combat_weapons::handle_weapons(
+                ctx, session, service, method, args, kwargs,
+            )
+            .await
+        }
+        CycleExecutionOutcome::PendingWeaponVolley(volley) => {
+            let PendingWeaponVolley {
+                sys,
+                sys_id,
+                ship_id,
+                module_id,
+                is_overloaded,
+                duration_s,
+                max_vel,
+                is_overload_only_resp,
+            } = volley;
+            let (volley_destroyed_target, actions_opt) =
+                fetch_weapon_volley_actions(sys, ship_id, module_id).await;
+            if let Some(weapon_actions) = actions_opt {
+                execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await;
+            }
+            build_weapon_volley_rpc_rep(
+                module_id,
+                is_overloaded,
+                max_vel,
+                duration_s,
+                is_overload_only_resp,
+                volley_destroyed_target,
+            )
+        }
+    }
 }
 
 #[inline(never)]
@@ -1180,92 +1263,218 @@ async fn handle_module_cycles_inner(
     ctx: &ServerContext,
     session: &mut SessionState,
     _bound_entry: Option<&BoundObjectEntry>,
-    service: &str,
     method: &str,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let ResolvedCycleStart {
-        char_id, ship_id, mut effect_name, target_id_opt, repeat, is_docked,
-        sys_id, sys, mut fit, module_id, mut m, mod_type, is_weapon,
-    } = match crate::router::box_fut(|| try_start_or_resolve_cycle(ctx, session, method, args, kwargs)).await {
+) -> CycleExecutionOutcome {
+    match resolve_and_run_early_cycle_paths(ctx, session, method, args, kwargs).await {
+        EarlyCycleOutcome::Ready(res) => CycleExecutionOutcome::Ready(res),
+        EarlyCycleOutcome::RouteToWeapons => CycleExecutionOutcome::RouteToWeapons,
+        EarlyCycleOutcome::Continue(started) => {
+            run_standard_module_cycle(ctx, method, kwargs, started).await
+        }
+    }
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+async fn resolve_and_run_early_cycle_paths<'a>(
+    ctx: &'a ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> EarlyCycleOutcome<'a> {
+    let start = match try_start_or_resolve_cycle(ctx, session, method, args, kwargs).await {
         std::ops::ControlFlow::Continue(v) => v,
-        std::ops::ControlFlow::Break(res) => return res,
+        std::ops::ControlFlow::Break(res) => return EarlyCycleOutcome::Ready(res),
     };
-    let is_in_space = !is_docked;
-    let pre_undock_invuln_ticks: u32 = match crate::router::box_fut(|| check_cycle_safety_and_weapon_routing(
-        ctx, session, &sys, sys_id, char_id, ship_id, module_id, m.type_id, mod_type,
-        is_weapon, is_in_space, service, method, effect_name.as_str(), target_id_opt, args, kwargs,
-    )).await {
-        std::ops::ControlFlow::Continue(v) => v,
-        std::ops::ControlFlow::Break(res) => return res,
+    let is_in_space = !start.is_docked;
+    let pre_undock_invuln_ticks: u32 = match check_cycle_safety_and_weapon_routing(
+        ctx, &start.sys, start.sys_id, start.char_id, start.ship_id, start.module_id,
+        start.m.type_id, start.mod_type, start.is_weapon, is_in_space, method,
+        start.effect_name.as_str(), start.target_id_opt,
+    ).await {
+        CycleSafetyRouting::Continue(v) => v,
+        CycleSafetyRouting::Ready(res) => return EarlyCycleOutcome::Ready(res),
+        CycleSafetyRouting::RouteToWeapons => {
+            drop(start);
+            return EarlyCycleOutcome::RouteToWeapons;
+        }
     };
 
     // Mining lasers, strip miners, ice and gas harvesters run on the repeating MN-04 cycle engine.
-    if crate::services::mining_cycle::mining_kind_of(&ctx.sde, mod_type).is_some() {
-        let Some(target_id) = target_id_opt.filter(|&t| t > 0) else {
-            return Some(Err(target_not_locked_rpc_error("Mining modules require a locked target asteroid")));
+    if crate::services::mining_cycle::mining_kind_of(&ctx.sde, start.mod_type).is_some() {
+        let Some(target_id) = start.target_id_opt.filter(|&t| t > 0) else {
+            return EarlyCycleOutcome::Ready(Some(Err(target_not_locked_rpc_error("Mining modules require a locked target asteroid"))));
         };
-        let res = crate::router::box_fut(|| crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id)).await;
-        return crate::router::box_fut(|| finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res)).await;
+        let res = crate::services::mining_cycle::activate(ctx, start.char_id, start.ship_id, start.sys_id, start.module_id, target_id).await;
+        return EarlyCycleOutcome::Ready(finish_space_activation(ctx, &start.sys, is_in_space, start.char_id, start.ship_id, pre_undock_invuln_ticks, res).await);
     }
-    if let Some(res) = crate::router::box_fut(|| try_activate_early_special_modules(
-        ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &fit,
-        effect_name.as_str(), target_id_opt, is_weapon, is_in_space, pre_undock_invuln_ticks, method, kwargs,
-    )).await {
-        return Some(res);
+    if let Some(res) = try_activate_early_special_modules(
+        ctx, &start.sys, start.sys_id, start.char_id, start.ship_id, start.module_id, &start.m, start.mod_type, &start.fit,
+        start.effect_name.as_str(), start.target_id_opt, start.is_weapon, is_in_space, pre_undock_invuln_ticks, method, kwargs,
+    ).await {
+        return EarlyCycleOutcome::Ready(Some(res));
     }
     // Scan Probe Launcher (`group_id == 481`, e.g., `Core Probe Launcher I` `17938`)
-    if mod_type.group_id == 481 {
-        let res = crate::router::box_fut(|| crate::services::space_destiny::activate_scan_probe_launcher(
-            ctx, session, &sys, char_id, ship_id, sys_id, module_id, m.type_id, m.flag_id,
-            effect_name.as_str(), target_id_opt, kwargs,
-        )).await;
-        return crate::router::box_fut(|| finish_space_activation(ctx, &sys, is_in_space, char_id, ship_id, pre_undock_invuln_ticks, res)).await;
+    if start.mod_type.group_id == 481 {
+        let res = crate::services::space_destiny::activate_scan_probe_launcher(
+            ctx, session, &start.sys, start.char_id, start.ship_id, start.sys_id, start.module_id, start.m.type_id, start.m.flag_id,
+            start.effect_name.as_str(), start.target_id_opt, kwargs,
+        ).await;
+        return EarlyCycleOutcome::Ready(finish_space_activation(ctx, &start.sys, is_in_space, start.char_id, start.ship_id, pre_undock_invuln_ticks, res).await);
     }
     // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
-    if mod_type.group_id == 589 {
-        return Some(crate::router::box_fut(|| activate_interdiction_sphere_module(
-            ctx, &sys, sys_id, char_id, ship_id, fit.ship.type_id, module_id, &m, mod_type,
-            effect_name.as_str(), target_id_opt, is_docked, is_in_space,
-        )).await);
+    if start.mod_type.group_id == 589 {
+        return EarlyCycleOutcome::Ready(Some(activate_interdiction_sphere_module(
+            ctx, &start.sys, start.sys_id, start.char_id, start.ship_id, start.fit.ship.type_id, start.module_id, &start.m, start.mod_type,
+            start.effect_name.as_str(), start.target_id_opt, start.is_docked, is_in_space,
+        ).await));
     }
     // Survey Probe Launcher (`group_id == 1226`, `33270` Survey Probe Launcher I, `33272` Survey Probe Launcher II)
-    if mod_type.group_id == 1226 {
-        return Some(crate::router::box_fut(|| activate_survey_probe_launcher(
-            ctx, &sys, sys_id, char_id, ship_id, module_id, m.flag_id, mod_type, target_id_opt, is_in_space,
-        )).await);
+    if start.mod_type.group_id == 1226 {
+        return EarlyCycleOutcome::Ready(Some(activate_survey_probe_launcher(
+            ctx, &start.sys, start.sys_id, start.char_id, start.ship_id, start.module_id, start.m.flag_id, start.mod_type, start.target_id_opt, is_in_space,
+        ).await));
     }
+    EarlyCycleOutcome::Continue(NonSpecialCycleStart {
+        start,
+        is_in_space,
+        pre_undock_invuln_ticks,
+    })
+}
+
+#[inline(never)]
+async fn run_standard_module_cycle(
+    ctx: &ServerContext, method: &str, kwargs: &HashMap<String, PyRep>, started: NonSpecialCycleStart<'_>,
+) -> CycleExecutionOutcome {
+    match prepare_committed_cycle_work(ctx, method, kwargs, started).await {
+        std::ops::ControlFlow::Break(res) => CycleExecutionOutcome::Ready(res),
+        std::ops::ControlFlow::Continue(work) => commit_and_finalize_boxed_cycle(ctx, method, kwargs, work).await,
+    }
+}
+
+#[inline(never)]
+async fn prepare_committed_cycle_work<'a>(
+    ctx: &ServerContext, method: &str, kwargs: &HashMap<String, PyRep>, started: NonSpecialCycleStart<'a>,
+) -> std::ops::ControlFlow<Option<Result<PyRep, BridgeRpcError>>, Box<CommittedCycleWork<'a>>> {
+    let NonSpecialCycleStart {
+        start: ResolvedCycleStart {
+            char_id, ship_id, mut effect_name, target_id_opt, repeat, is_docked: _,
+            sys_id, sys, mut fit, module_id, mut m, mod_type, is_weapon,
+        },
+        is_in_space, pre_undock_invuln_ticks,
+    } = started;
 
     let CyclePrecheckResult {
         is_overloaded, is_mwd, is_mjd, is_mwd_or_mjd, passive_targeter_lock_opt,
-    } = match crate::router::box_fut(|| reconcile_and_validate_cycle_activation(
+    } = reconcile_and_validate_cycle_activation(
         ctx, &sys, sys_id, char_id, ship_id, module_id, method, is_weapon, is_in_space,
         target_id_opt, mod_type, &mut m, &mut fit,
-    )).await {
-        std::ops::ControlFlow::Continue(v) => v,
-        std::ops::ControlFlow::Break(res) => return res,
-    };
+    ).await?;
 
-    let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
     let ship_group_id = ctx.sde.types.get(&fit.ship.type_id).map(|t| t.group_id).unwrap_or(0);
-    let mut prep = match crate::router::box_fut(|| prepare_ewar_and_capital_module(
-        ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type, &mod_state,
-        &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
-    )).await {
-        Some(Ok(v)) => v,
-        Some(Err(e)) => {
-            clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
-            return Some(Err(e));
+    let mut prep = {
+        let pre_mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+        match prepare_ewar_and_capital_module(
+            ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type, &pre_mod_state,
+            &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
+        ).await {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => {
+                clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
+                return std::ops::ControlFlow::Break(Some(Err(e)));
+            }
+            None => unreachable!(),
         }
-        None => unreachable!(),
     };
     prep.deferred_post_cycle.passive_targeter_lock = passive_targeter_lock_opt;
-    crate::router::box_fut(|| execute_and_finalize_module_cycle(
-        ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type, mod_state,
-        &mut fit, target_id_opt, is_overloaded, is_mjd, is_mwd_or_mjd, is_weapon, is_in_space,
-        pre_undock_invuln_ticks, method, &mut effect_name, repeat, kwargs, &mut prep,
-    )).await
+
+    let params = {
+        let pre_mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
+        match prepare_cycle_params_sync(
+            ctx, &sys, char_id, ship_id, ship_group_id, module_id, &m, mod_type, &pre_mod_state, &fit,
+            target_id_opt, is_overloaded, is_mjd, &mut effect_name, repeat, &mut prep,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
+                return std::ops::ControlFlow::Break(Some(Err(e)));
+            }
+        }
+    };
+    if mod_type.group_id == 1122 {
+        if let Err(e) = crate::combat::drones_salvage_tractor::validate_wreck_salvage_target(
+            ctx, sys_id, char_id, ship_id, target_id_opt.unwrap_or(0), Some(mod_type.type_id),
+        ).await {
+            clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
+            return std::ops::ControlFlow::Break(Some(Err(e)));
+        }
+    }
+    let (mod_state, kin) = match prepare_weapon_kinematics_sync(
+        ctx, sys_id, char_id, module_id, &m, mod_type, &mut fit, is_overloaded, &params, &prep.deferred_post_cycle,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
+            return std::ops::ControlFlow::Break(Some(Err(e)));
+        }
+    };
+    if (kin.is_missile_group || kin.is_turret_group || kin.is_vorton_group) && target_id_opt.is_some() {
+        let tid = target_id_opt.unwrap_or(0);
+        if let Err(e) = check_weapon_cycle_target_range(ctx, &sys, ship_id, tid, mod_type, &kin).await {
+            clear_projected_ewar_and_recompute_tp(ctx, &sys, ship_id, module_id, mod_type.group_id, target_id_opt);
+            return std::ops::ControlFlow::Break(Some(Err(e)));
+        }
+    }
+    std::ops::ControlFlow::Continue(Box::new(CommittedCycleWork {
+        sys, sys_id, char_id, ship_id, module_id, mod_type, target_id_opt,
+        is_overloaded, is_mwd_or_mjd, is_weapon, is_in_space, pre_undock_invuln_ticks,
+        fit, m, mod_state, prep, params, kin, effect_name,
+    }))
+}
+
+struct CommittedCycleWork<'a> {
+    sys: crate::system_actor::SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+    mod_type: &'a eve_sde::InvType,
+    target_id_opt: Option<i64>,
+    is_overloaded: bool,
+    is_mwd_or_mjd: bool,
+    is_weapon: bool,
+    is_in_space: bool,
+    pre_undock_invuln_ticks: u32,
+    fit: Box<eve_dogma::ShipFittingEngine>,
+    m: eve_dogma::FittedModule,
+    mod_state: eve_dogma::DogmaItemState,
+    prep: EwarCapitalPrep,
+    params: PreparedCycleParams,
+    kin: WeaponKinematics,
+    effect_name: String,
+}
+
+#[inline(never)]
+async fn commit_and_finalize_boxed_cycle(
+    ctx: &ServerContext, method: &str, kwargs: &HashMap<String, PyRep>, mut work: Box<CommittedCycleWork<'_>>,
+) -> CycleExecutionOutcome {
+    let w = &mut *work;
+    let (pre_target_shield_cap, instant_rep_opt) = match commit_cycle_to_actor_and_effects(
+        ctx, &w.sys, w.sys_id, w.char_id, w.ship_id, w.module_id, &w.m, w.mod_type, &w.mod_state, &w.fit,
+        w.target_id_opt, w.is_overloaded, w.is_mwd_or_mjd, w.effect_name.as_str(), w.pre_undock_invuln_ticks,
+        kwargs, &mut w.prep, &w.params, &w.kin,
+    ).await {
+        Ok(v) => v,
+        Err(e) => return CycleExecutionOutcome::Ready(Some(Err(e))),
+    };
+    finalize_cycle_activation_and_response(
+        ctx, &w.sys, w.sys_id, w.char_id, w.ship_id, w.module_id, &w.m, w.mod_type, &w.mod_state, &mut w.fit,
+        w.target_id_opt, w.is_overloaded, w.is_weapon, w.is_in_space, w.pre_undock_invuln_ticks, method,
+        w.effect_name.as_str(), &w.prep, &w.params, &w.kin, pre_target_shield_cap, instant_rep_opt,
+    ).await
 }
 
 struct PreparedCycleParams {
@@ -1781,26 +1990,30 @@ async fn commit_cycle_to_actor_and_effects(
         let code = if e.contains("WarpScrambled") { "WarpScrambled" } else { "NotEnoughCapacitor" };
         return Err(BridgeRpcError { code: code.into(), message: e, client_error: None });
     }
-    let rb = || crate::router::box_fut(|| {
+    if let Err(e) = evaluate_module_cycle_aggression_or_assistance(ctx, sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt).await {
         rollback_post_cycle_activation_snapshot(
             ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt, params.cap_need, pre_undock_invuln_ticks,
             params.cap_drain_target, prep.remote_shield_amount, prep.remote_cap_amount, pre_target_shield_cap,
-        )
-    });
-    if let Err(e) = crate::router::box_fut(|| evaluate_module_cycle_aggression_or_assistance(ctx, sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt)).await {
-        rb().await;
+        ).await;
         return Err(e);
     }
     let deferred = std::mem::take(&mut prep.deferred_post_cycle);
-    if let Err(e) = crate::router::box_fut(|| commit_post_cycle_activation_effects(ctx, sys, char_id, ship_id, module_id, m, mod_type, mod_state, target_id_opt, deferred)).await {
-        rb().await;
+    if let Err(e) = commit_post_cycle_activation_effects(ctx, sys, char_id, ship_id, module_id, m, mod_type, mod_state, target_id_opt, deferred).await {
+        rollback_post_cycle_activation_snapshot(
+            ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt, params.cap_need, pre_undock_invuln_ticks,
+            params.cap_drain_target, prep.remote_shield_amount, prep.remote_cap_amount, pre_target_shield_cap,
+        ).await;
         return Err(e);
     }
-    let instant_rep_opt = match crate::router::box_fut(|| {
-        run_pre_notify_instant_module_effects(ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, mod_state, is_overloaded, target_id_opt, params.duration_s, kwargs)
-    }).await {
+    let instant_rep_opt = match run_pre_notify_instant_module_effects(ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, mod_state, is_overloaded, target_id_opt, params.duration_s, kwargs).await {
         Ok(rep_opt) => rep_opt,
-        Err(e) => { rb().await; return Err(e); }
+        Err(e) => {
+            rollback_post_cycle_activation_snapshot(
+                ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt, params.cap_need, pre_undock_invuln_ticks,
+                params.cap_drain_target, prep.remote_shield_amount, prep.remote_cap_amount, pre_target_shield_cap,
+            ).await;
+            return Err(e);
+        }
     };
     Ok((pre_target_shield_cap, instant_rep_opt))
 }
@@ -1917,17 +2130,17 @@ async fn finalize_cycle_activation_and_response(
     target_id_opt: Option<i64>, is_overloaded: bool, is_weapon: bool, is_in_space: bool, pre_undock_invuln_ticks: u32,
     method: &str, effect_name: &str, prep: &EwarCapitalPrep, params: &PreparedCycleParams, kin: &WeaponKinematics,
     pre_target_shield_cap: Option<(f64, f64)>, instant_rep_opt: Option<PyRep>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
+) -> CycleExecutionOutcome {
     if is_in_space {
         commit_space_action_cloak_and_invuln_break(ctx, sys, char_id, ship_id, pre_undock_invuln_ticks).await;
     }
     let slot_still_has_charge = activate_post_cycle_snapshot_and_fit_sync(ctx, char_id, ship_id, module_id, m, mod_type, fit, is_overloaded, params);
     if mod_type.group_id == 330 || m.type_id == 83485 {
-        crate::router::box_fut(|| crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id)).await;
+        crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     }
     finalize_post_activation_fit_updates_and_push_sync(ctx, char_id, ship_id, module_id, mod_type, fit, is_weapon, is_overloaded, slot_still_has_charge, params);
     if mod_type.group_id == 330 || m.type_id == 83485 {
-        crate::router::box_fut(|| crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id)).await;
+        crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     }
     emit_module_activation_godma_notifications_sync(ctx, char_id, ship_id, module_id, m.type_id, mod_type.group_id, fit, target_id_opt, effect_name, params, kin.is_guided_missile);
     if params.cap_need > 0.0 || params.cap_booster_inject_amount > 0.0 || params.effective_max_capacitor.is_some() {
@@ -1946,97 +2159,69 @@ async fn finalize_cycle_activation_and_response(
     if let (Some(tid), Some((pre_shield_hp, pre_capacitor))) = (target_id_opt, pre_target_shield_cap) {
         finalize_target_combat_hooks(ctx, sys, char_id, ship_id, tid, pre_shield_hp, pre_capacitor, params.cap_drain_target, prep.remote_shield_amount).await;
     }
-    let mut volley_destroyed_target = false;
-    if (kin.is_turret_group || kin.is_missile_group || kin.is_vorton_group) && target_id_opt.is_some() {
-        if let Ok((destroyed, weapon_actions)) = sys.fire_weapon_cycle_volley(ship_id, module_id).await {
-            volley_destroyed_target = !destroyed.is_empty();
-            if !weapon_actions.is_empty() { execute_pending_cycle_actions_list(ctx, sys_id, weapon_actions).await; }
-        }
+    let is_weapon_volley =
+        (kin.is_turret_group || kin.is_missile_group || kin.is_vorton_group) && target_id_opt.is_some();
+    if is_weapon_volley
+        && instant_rep_opt.is_none()
+        && !matches!(mod_type.group_id, 899 | 515 | 1770 | 4174)
+        && !params.is_auto_targeter
+        && mod_type.group_id != 49
+        && !mod_type.default_attributes.contains_key(&197)
+    {
+        let is_overload_only_resp = method == "Overload";
+        let max_vel = if mod_type.group_id == 330 && !is_overload_only_resp {
+            sys.get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.max_velocity)
+                .unwrap_or_else(|| fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+        } else {
+            fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde)
+        };
+        return CycleExecutionOutcome::PendingWeaponVolley(PendingWeaponVolley {
+            sys: sys.clone(),
+            sys_id,
+            ship_id,
+            module_id,
+            is_overloaded,
+            duration_s: params.duration_s,
+            max_vel,
+            is_overload_only_resp,
+        });
     }
-    if let Some(rep) = instant_rep_opt { return Some(Ok(rep)); }
+    if let Some(rep) = instant_rep_opt {
+        return CycleExecutionOutcome::Ready(Some(Ok(rep)));
+    }
     if let Some(res) = build_specialized_module_result(method, fit, ctx, module_id, mod_type, prep.hic_bubble_radius_m, prep.warp_scramble_points, params.active_burst_charge_tid) {
-        Some(Ok(res))
+        CycleExecutionOutcome::Ready(Some(Ok(res)))
     } else if params.is_auto_targeter {
-        Some(crate::router::box_fut(|| crate::services::tactical_modules::activate_auto_targeting_system(ctx, sys, char_id, ship_id, module_id, mod_type, mod_state, fit)).await)
+        CycleExecutionOutcome::Ready(Some(crate::services::tactical_modules::activate_auto_targeting_system(ctx, sys, char_id, ship_id, module_id, mod_type, mod_state, fit).await))
     } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
         let already_applied_dbuffs: Vec<u32> = fit.gang_bursts.iter().filter_map(|b| b.dbuff_id).collect();
-        Some(Ok(crate::router::box_fut(|| handle_survey_scanner_activation_with_excluded_dbuffs(ctx, sys, sys_id, char_id, ship_id, module_id, mod_type, mod_state, &already_applied_dbuffs)).await))
+        CycleExecutionOutcome::Ready(Some(Ok(handle_survey_scanner_activation_with_excluded_dbuffs(ctx, sys, sys_id, char_id, ship_id, module_id, mod_type, mod_state, &already_applied_dbuffs).await)))
     } else {
         let max_vel = if mod_type.group_id == 330 {
             sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.max_velocity).unwrap_or_else(|| fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
         } else {
             fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde)
         };
-        let mut resp = vec![
+        let resp = vec![
             ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
             ("overloaded", PyRep::Bool(is_overloaded)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
             ("duration", PyRep::Real(params.duration_s)),
         ];
-        if volley_destroyed_target { resp.push(("destroyed", PyRep::Bool(true))); }
-        Some(Ok(PyRep::keyval(resp)))
+        CycleExecutionOutcome::Ready(Some(Ok(PyRep::keyval(resp))))
     }
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-async fn execute_and_finalize_module_cycle(
-    ctx: &ServerContext, sys: &crate::system_actor::SystemHandle, sys_id: u32, char_id: i64,
-    ship_id: i64, ship_group_id: u32, module_id: i64, m: &eve_dogma::FittedModule,
-    mod_type: &eve_sde::InvType, mod_state: eve_dogma::DogmaItemState,
-    fit: &mut eve_dogma::ShipFittingEngine, target_id_opt: Option<i64>, is_overloaded: bool,
-    is_mjd: bool, is_mwd_or_mjd: bool, is_weapon: bool, is_in_space: bool,
-    pre_undock_invuln_ticks: u32, method: &str, effect_name: &mut String, repeat: i32,
-    kwargs: &HashMap<String, PyRep>, prep: &mut EwarCapitalPrep,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let params = match prepare_cycle_params_sync(
-        ctx, sys, char_id, ship_id, ship_group_id, module_id, m, mod_type, &mod_state, fit,
-        target_id_opt, is_overloaded, is_mjd, effect_name, repeat, prep,
-    ) {
-        Ok(p) => p,
-        Err(e) => { clear_projected_ewar_and_recompute_tp(ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt); return Some(Err(e)); }
-    };
-    if mod_type.group_id == 1122 {
-        if let Err(e) = crate::router::box_fut(|| crate::combat::drones_salvage_tractor::validate_wreck_salvage_target(
-            ctx, sys_id, char_id, ship_id, target_id_opt.unwrap_or(0), Some(mod_type.type_id),
-        )).await {
-            clear_projected_ewar_and_recompute_tp(ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt);
-            return Some(Err(e));
-        }
-    }
-    let (mod_state, kin) = match prepare_weapon_kinematics_sync(
-        ctx, sys_id, char_id, module_id, m, mod_type, fit, is_overloaded, &params, &prep.deferred_post_cycle,
-    ) {
-        Ok(v) => v,
-        Err(e) => { clear_projected_ewar_and_recompute_tp(ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt); return Some(Err(e)); }
-    };
-    if (kin.is_missile_group || kin.is_turret_group || kin.is_vorton_group) && target_id_opt.is_some() {
-        let tid = target_id_opt.unwrap_or(0);
-        if let Err(e) = crate::router::box_fut(|| check_weapon_cycle_target_range(ctx, sys, ship_id, tid, mod_type, &kin)).await {
-            clear_projected_ewar_and_recompute_tp(ctx, sys, ship_id, module_id, mod_type.group_id, target_id_opt);
-            return Some(Err(e));
-        }
-    }
-    let (pre_target_shield_cap, instant_rep_opt) = match crate::router::box_fut(|| commit_cycle_to_actor_and_effects(
-        ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, &mod_state, fit, target_id_opt,
-        is_overloaded, is_mwd_or_mjd, effect_name.as_str(), pre_undock_invuln_ticks, kwargs, prep, &params, &kin,
-    )).await {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
-    crate::router::box_fut(|| finalize_cycle_activation_and_response(
-        ctx, sys, sys_id, char_id, ship_id, module_id, m, mod_type, &mod_state, fit, target_id_opt,
-        is_overloaded, is_weapon, is_in_space, pre_undock_invuln_ticks, method, effect_name.as_str(),
-        prep, &params, &kin, pre_target_shield_cap, instant_rep_opt,
-    )).await
 }
 
 /// Records post-cycle career goals outside `handle_module_cycles_inner`'s coroutine frame
 /// so debug builds stay under 2 MiB test stacks.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn finalize_target_combat_hooks<'a>(
-    ctx: &'a ServerContext,
-    sys: &'a crate::system_actor::SystemHandle,
+async fn finalize_target_combat_hooks(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
     char_id: i64,
     ship_id: i64,
     target_id: i64,
@@ -2044,37 +2229,35 @@ fn finalize_target_combat_hooks<'a>(
     pre_capacitor: f64,
     cap_drain_target: f64,
     remote_shield_amount: f64,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-    Box::pin(async move {
-        let Ok(Some(post_cs)) = sys.get_combat_state(target_id).await else {
-            return;
-        };
-        let drained = if cap_drain_target > 0.0 {
-            (pre_capacitor - post_cs.capacitor).max(0.0)
-        } else {
-            0.0
-        };
-        if drained > 0.0 {
-            crate::services::quasar_career_goals::record_cap_warfare_career(
-                ctx,
-                char_id,
-                ship_id,
-                target_id,
-                "neutralizer",
-                drained,
-            );
-        }
-        if remote_shield_amount > 0.0 {
-            let boosted = (post_cs.shield_hp - pre_shield_hp).max(0.0);
-            crate::services::quasar_career_goals::record_remote_repair_career(
-                ctx,
-                char_id,
-                target_id,
-                "shield_boost",
-                boosted,
-            );
-        }
-    })
+) {
+    let Ok(Some(post_cs)) = sys.get_combat_state(target_id).await else {
+        return;
+    };
+    let drained = if cap_drain_target > 0.0 {
+        (pre_capacitor - post_cs.capacitor).max(0.0)
+    } else {
+        0.0
+    };
+    if drained > 0.0 {
+        crate::services::quasar_career_goals::record_cap_warfare_career(
+            ctx,
+            char_id,
+            ship_id,
+            target_id,
+            "neutralizer",
+            drained,
+        );
+    }
+    if remote_shield_amount > 0.0 {
+        let boosted = (post_cs.shield_hp - pre_shield_hp).max(0.0);
+        crate::services::quasar_career_goals::record_remote_repair_career(
+            ctx,
+            char_id,
+            target_id,
+            "shield_boost",
+            boosted,
+        );
+    }
 }
 
 fn clear_projected_ewar_and_recompute_tp(
