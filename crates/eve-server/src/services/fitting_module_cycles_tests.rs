@@ -4266,6 +4266,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     .await
     .unwrap();
 
+    let _ = ctx.db.acquire_online_lock(char_id as u64, 1, Some(char_id), true, ctx.now_unix());
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
     });
@@ -4293,6 +4294,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     )
     .await
     .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
     let burst_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(burst_id)], &kw)
         .await
         .unwrap()
@@ -4304,9 +4306,10 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert_eq!(cs_burst.undock_invulnerable_remaining_ticks, 15);
     assert!((cs_burst.capacitor - 200.0).abs() < 1e-6);
     assert!(!sys.has_module_cycle(ship_id, burst_id).await);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
 
-    // 2. Targeted Stasis Webifier enters add_module_cycle (wiping undock_invuln) and fails post-cycle
-    //    aggression safety; rollback MUST restore undock_invuln, refund cap, remove cycle, and keep gate cloak.
+    // 2. Targeted Stasis Webifier fails read-only Crimewatch safety precheck before add_module_cycle,
+    //    preserving undock_invuln, capacitor, and gate cloak with zero notifications.
     let web_args = [
         PyRep::Integer(web_id),
         PyRep::String("activate".into()),
@@ -4332,7 +4335,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
         let web_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &web_args, &kw)
             .await
             .unwrap()
-            .expect_err("Webifier vs neutral in highsec on Green safety must trigger post-cycle rollback");
+            .expect_err("Webifier vs neutral in highsec on Green safety must reject cleanly");
         assert_eq!(web_err.code, "CantDoInCurrentSafetyLevel");
         let cs_after = sys.get_combat_state(ship_id).await.unwrap().unwrap();
         assert_eq!(cs_after.undock_invulnerable_remaining_ticks, 15);
@@ -4347,6 +4350,7 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
     });
+    let _ = ctx.drain_notifications_for_char(char_id);
     let ok = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &web_args, &kw)
         .await
         .unwrap()
@@ -4358,6 +4362,9 @@ async fn f02_post_cycle_safety_rollback_restores_undock_invuln_and_gate_cloak() 
     assert_eq!(cs_ok.undock_invulnerable_remaining_ticks, 0);
     assert!((cs_ok.capacitor - 175.0).abs() < 1e-6);
     assert!(sys.has_module_cycle(ship_id, web_id).await);
+    let commit_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(commit_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert!(commit_notes.iter().any(|n| n.event == "OnInvulnCancelled"));
 }
 
 #[tokio::test]
@@ -4461,6 +4468,789 @@ async fn p2_rapid_launchers_is_weapon_and_targeted_ewar_assist_require_target() 
         assert_eq!(delay_err.code, "ModuleAlreadyActive");
         ctx.module_reactivation_cooldowns.write().unwrap().clear();
     }
+}
+
+#[tokio::test]
+async fn bf1_bf2_highsec_green_ewar_neut_remote_assist_zero_target_mutation_and_tractor_post_cycle_rollback() {
+    let neut_tid = 996_071_u32;
+    let rsb_tid = 996_041_u32;
+    let arsb_tid = 996_697_u32;
+    let rct_tid = 996_067_u32;
+    let tp_tid = 996_379_u32;
+    let tractor_tid = 996_650_u32;
+    let wreck_tid = 996_999_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut neut_t = custom_inv_type(
+            sde,
+            neut_tid,
+            71,
+            7,
+            5.0,
+            0.0,
+            "Test Energy Neutralizer I",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0), (97, 50.0)],
+        );
+        neut_t.effect_ids = vec![13, 16];
+        sde.types.insert(neut_tid, neut_t);
+
+        let mut rsb_t = custom_inv_type(
+            sde,
+            rsb_tid,
+            41,
+            7,
+            5.0,
+            0.0,
+            "Test Remote Shield Booster I",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0), (68, 100.0)],
+        );
+        rsb_t.effect_ids = vec![13, 16];
+        sde.types.insert(rsb_tid, rsb_t);
+
+        let mut arsb_t = custom_inv_type(
+            sde,
+            arsb_tid,
+            1697,
+            7,
+            5.0,
+            0.0,
+            "Test Ancillary Remote Shield Booster",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0), (68, 100.0)],
+        );
+        arsb_t.effect_ids = vec![13, 16];
+        sde.types.insert(arsb_tid, arsb_t);
+
+        let mut rct_t = custom_inv_type(
+            sde,
+            rct_tid,
+            67,
+            7,
+            5.0,
+            0.0,
+            "Test Remote Capacitor Transmitter I",
+            &[(6, 20.0), (54, 15_000.0), (73, 5_000.0), (90, 60.0)],
+        );
+        rct_t.effect_ids = vec![13, 16];
+        sde.types.insert(rct_tid, rct_t);
+
+        let mut tp_t = custom_inv_type(
+            sde,
+            tp_tid,
+            379,
+            7,
+            5.0,
+            0.0,
+            "Test Target Painter I",
+            &[(6, 20.0), (54, 20_000.0), (73, 5_000.0), (554, 30.0), (2044, 10_000.0)],
+        );
+        tp_t.effect_ids = vec![13, 16];
+        sde.types.insert(tp_tid, tp_t);
+
+        let mut tractor_t = custom_inv_type(
+            sde,
+            tractor_tid,
+            650,
+            7,
+            5.0,
+            0.0,
+            "Test Small Tractor Beam I",
+            &[(6, 15.0), (54, 20_000.0), (73, 5_000.0)],
+        );
+        tractor_t.effect_ids = vec![13, 16];
+        sde.types.insert(tractor_tid, tractor_t);
+
+        let wreck_t = custom_inv_type(sde, wreck_tid, 186, 2, 100.0, 0.0, "Test Wreck", &[]);
+        sde.types.insert(wreck_tid, wreck_t);
+    });
+
+    let char_id = 97_994_001_i64;
+    let victim_char_id = 97_994_002_i64;
+    let sys_id = 30_000_142_u32;
+    let ship_id = 1_097_994_001_i64;
+    let victim_ship_id = 1_097_994_002_i64;
+    let mod_id = 1_097_994_003_i64;
+    let far_wreck_id = 1_097_994_004_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, sys_id, ship_id);
+    ensure_char(&ctx, victim_char_id, 98_000_002, sys_id, victim_ship_id);
+    let _ = ctx.db.acquire_online_lock(char_id as u64, 1, Some(char_id), true, ctx.now_unix());
+    insert_item(&ctx, ship_id, 587, char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, victim_ship_id, 587, victim_char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, mod_id, neut_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, far_wreck_id, wreck_tid, victim_char_id, i64::from(sys_id), InventoryFlag::None, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mod_id, true);
+    });
+    spawn_ship(&ctx, sys_id, ship_id, 587, char_id, 500.0).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: victim_ship_id,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 500.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            capacitor: 150.0,
+            max_capacitor: 300.0,
+            shield_hp: 100.0,
+            max_shield_hp: 250.0,
+            signature_radius: 40.0,
+            base_signature_radius: Some(40.0),
+            ..Default::default()
+        },
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: victim_char_id,
+            char_id: Some(victim_char_id),
+            corp_id: 98_000_002,
+            security_status: 5.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: far_wreck_id,
+            type_id: wreck_tid,
+            position: DVec3::new(50_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState::default(),
+        SlimItemMeta {
+            group_id: 186,
+            category_id: 2,
+            owner_id: victim_char_id,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    for tid in [victim_ship_id, far_wreck_id] {
+        sys.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: tid,
+                lock_time_ms: 100.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: Some(100_000.0),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 1. Highsec Green safety blocks targeted Energy Neutralizer (71) and Target Painter (379)
+    //    vs neutral target before mutating target cap / tp_sig_multiplier or attacker state.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Green);
+    });
+    let reset_states = || {
+        let sys_c = sys.clone();
+        async move {
+            sys_c
+                .set_combat_state(
+                    ship_id,
+                    CombatState {
+                        is_cloaked: true,
+                        gate_cloak_remaining_ticks: 30,
+                        undock_invulnerable_remaining_ticks: 15,
+                        capacitor: 500.0,
+                        max_capacitor: 500.0,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            sys_c
+                .set_combat_state(
+                    victim_ship_id,
+                    CombatState {
+                        capacitor: 150.0,
+                        max_capacitor: 300.0,
+                        shield_hp: 100.0,
+                        max_shield_hp: 250.0,
+                        signature_radius: 40.0,
+                        base_signature_radius: Some(40.0),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    for (grp, tid, label) in [
+        (71_u32, neut_tid, "Energy Neutralizer"),
+        (379_u32, tp_tid, "Target Painter"),
+    ] {
+        reset_states().await;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&mod_id).unwrap().type_id = tid;
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        let args = [
+            PyRep::Integer(mod_id),
+            PyRep::String("activate".into()),
+            PyRep::Integer(victim_ship_id),
+        ];
+        let err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("Green highsec offensive module must reject");
+        assert_eq!(err.code, "CantDoInCurrentSafetyLevel", "{label} ({grp})");
+
+        let att_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!((att_cs.capacitor - 500.0).abs() < 1e-6, "{label} attacker cap");
+        assert!(att_cs.is_cloaked && att_cs.gate_cloak_remaining_ticks == 30);
+        assert_eq!(att_cs.undock_invulnerable_remaining_ticks, 15);
+        assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+
+        let tgt_cs = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+        assert!((tgt_cs.capacitor - 150.0).abs() < 1e-6, "{label} target cap leaked");
+        assert!((tgt_cs.shield_hp - 100.0).abs() < 1e-6, "{label} target shield changed");
+        assert!(tgt_cs.tp_sig_multiplier.is_none(), "{label} target tp_sig_multiplier leaked");
+        assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
+        assert!(ctx
+            .projected_ewar
+            .read()
+            .unwrap()
+            .get(&victim_ship_id)
+            .is_none_or(|v| v.is_empty()));
+        let cw_st = ctx.crimewatch.read().unwrap().states.get(&char_id).cloned().unwrap_or_default();
+        assert!(!cw_st.is_criminal(ctx.now_unix()) && !cw_st.is_suspect(ctx.now_unix()));
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+    }
+
+    // 2. Highsec Green safety blocks remote assistance (41, 1697, 67) onto a Suspect pilot
+    //    with zero target shield_hp / capacitor mutation.
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        cw.get_or_create(victim_char_id).suspect_flag_until_unix = ctx.now_unix() + 600;
+    }
+    for (grp, tid, label) in [
+        (41_u32, rsb_tid, "Remote Shield Booster"),
+        (1697_u32, arsb_tid, "Ancillary Remote Shield Booster"),
+        (67_u32, rct_tid, "Remote Cap Transmitter"),
+    ] {
+        reset_states().await;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&mod_id).unwrap().type_id = tid;
+        });
+        ctx.invalidate_ship_fitting(ship_id);
+        let _ = ctx.drain_notifications_for_char(char_id);
+
+        let args = [
+            PyRep::Integer(mod_id),
+            PyRep::String("activate".into()),
+            PyRep::Integer(victim_ship_id),
+        ];
+        let err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &args, &kw)
+            .await
+            .unwrap()
+            .expect_err("Green highsec remote assist vs Suspect must reject");
+        assert_eq!(err.code, "CantDoInCurrentSafetyLevel", "{label} ({grp})");
+
+        let att_cs = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        assert!((att_cs.capacitor - 500.0).abs() < 1e-6);
+        assert!(att_cs.is_cloaked && att_cs.gate_cloak_remaining_ticks == 30);
+        assert_eq!(att_cs.undock_invulnerable_remaining_ticks, 15);
+        assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+
+        let tgt_cs = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+        assert!((tgt_cs.shield_hp - 100.0).abs() < 1e-6, "{label} target shield leaked");
+        assert!((tgt_cs.capacitor - 150.0).abs() < 1e-6, "{label} target cap leaked");
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+    }
+
+    // 3. Target Painter (379) on Red safety with insufficient attacker cap fails in add_module_cycle
+    //    and MUST clear both projected EWAR and target tp_sig_multiplier.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = tp_tid;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 30,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 5.0,
+            max_capacitor: 500.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let tp_cap_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("activate".into()), PyRep::Integer(victim_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("low-cap Target Painter must reject");
+    assert_eq!(tp_cap_err.code, "NotEnoughCapacitor");
+    let tgt_after_tp_err = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert!(tgt_after_tp_err.tp_sig_multiplier.is_none());
+    assert!((ctx.effective_target_painter_multiplier(victim_ship_id) - 1.0).abs() < 1e-9);
+    assert!(ctx
+        .projected_ewar
+        .read()
+        .unwrap()
+        .get(&victim_ship_id)
+        .is_none_or(|v| v.is_empty()));
+
+    // 4. Genuine post-cycle run_pre_notify_instant_module_effects failure (BF-2):
+    //    Out-of-range Tractor Beam (650) enters add_module_cycle (deducts cap & wipes undock_invuln),
+    //    then fails in run_pre_notify_instant_module_effects -> rollback restores cap + undock_invuln + cycle.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = tractor_tid;
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    reset_states().await;
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let tractor_err = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(mod_id), PyRep::String("activate".into()), PyRep::Integer(far_wreck_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("out-of-range Tractor Beam must reject post-cycle in run_pre_notify_instant_module_effects");
+    assert_eq!(tractor_err.code, "TargetOutOfRange");
+    let att_after_tractor = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((att_after_tractor.capacitor - 500.0).abs() < 1e-6);
+    assert_eq!(att_after_tractor.undock_invulnerable_remaining_ticks, 15);
+    assert!(att_after_tractor.is_cloaked && att_after_tractor.gate_cloak_remaining_ticks == 30);
+    assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
+
+    // 5. Direct rollback_post_cycle_activation verification: restores target cap, shield_hp, and tp_sig_multiplier.
+    reset_states().await;
+    let pre_tgt_cs = sys.get_combat_state(victim_ship_id).await.unwrap();
+    ctx.upsert_projected_ewar_on_ship(
+        ship_id,
+        victim_ship_id,
+        eve_dogma::ProjectedEwarEffect {
+            source_module_id: mod_id,
+            source_module_type_id: tp_tid,
+            charge_type_id: None,
+            distance: 1_000.0,
+            overloaded: false,
+            effective_module: eve_dogma::DogmaItemState::from_sde(char_id, tp_tid, &ctx.sde),
+        },
+    );
+    sys.try_recompute_combat_attributes(victim_ship_id, |t_cs| {
+        t_cs.tp_sig_multiplier = Some(1.3);
+    });
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id: mod_id,
+        module_type_id: rct_tid,
+        effect_name: "activate".into(),
+        duration_s: 5.0,
+        cap_need_per_cycle: 20.0,
+        target_id: Some(victim_ship_id),
+        cap_drain_target: 50.0,
+        remote_shield_amount: 40.0,
+        remote_cap_amount: 30.0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    rollback_post_cycle_activation(
+        &ctx,
+        &sys,
+        ship_id,
+        mod_id,
+        379,
+        Some(victim_ship_id),
+        20.0,
+        15,
+        50.0,
+        40.0,
+        30.0,
+        &pre_tgt_cs,
+    )
+    .await;
+    let att_rb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((att_rb.capacitor - 500.0).abs() < 1e-6);
+    assert_eq!(att_rb.undock_invulnerable_remaining_ticks, 15);
+    assert!(!sys.has_module_cycle(ship_id, mod_id).await);
+    let tgt_rb = sys.get_combat_state(victim_ship_id).await.unwrap().unwrap();
+    assert!((tgt_rb.capacitor - 150.0).abs() < 1e-6);
+    assert!((tgt_rb.shield_hp - 100.0).abs() < 1e-6);
+    assert!(tgt_rb.tp_sig_multiplier.is_none());
+    assert!(ctx
+        .projected_ewar
+        .read()
+        .unwrap()
+        .get(&victim_ship_id)
+        .is_none_or(|v| v.is_empty()));
+}
+
+#[tokio::test]
+async fn bf4_p2_non_gate_undock_invuln_and_light_cyno_fuel_rollback() {
+    let web_tid = 995_065_u32;
+    let tsb_tid = 995_154_u32;
+    let cyno_hull_tid = 995_310_u32;
+    let cyno_mod_tid = 21_096_u32;
+    let low_sys_id = 30_002_505_u32;
+
+    let ctx = test_ctx_with_custom(|sde| {
+        let mut low_sys = sde.solar_systems.get(&30_000_142).expect("seed sys").clone();
+        low_sys.solar_system_id = low_sys_id;
+        low_sys.security_status = -0.5;
+        sde.solar_systems.insert(low_sys_id, low_sys);
+
+        let mut web_t = custom_inv_type(
+            sde,
+            web_tid,
+            65,
+            7,
+            5.0,
+            0.0,
+            "Test Stasis Webifier I",
+            &[(54, 10_000.0), (20, -50.0), (73, 5_000.0), (6, 25.0)],
+        );
+        web_t.effect_ids = vec![13, 16];
+        sde.types.insert(web_tid, web_t);
+
+        let mut tsb_t = custom_inv_type(
+            sde,
+            tsb_tid,
+            1154,
+            7,
+            5.0,
+            0.0,
+            "Test Target Spectrum Breaker",
+            &[(6, 10.0), (73, 10_000.0)],
+        );
+        tsb_t.effect_ids = vec![13, 16];
+        sde.types.insert(tsb_tid, tsb_t);
+
+        let hull_t = custom_inv_type(
+            sde,
+            cyno_hull_tid,
+            27,
+            6,
+            500.0,
+            1_000.0,
+            "Test Cyno Battleship",
+            &[
+                (attr_ids::HI_SLOTS, 8.0),
+                (attr_ids::MED_SLOTS, 8.0),
+                (attr_ids::CPU_OUTPUT, 10_000.0),
+                (attr_ids::POWER_OUTPUT, 100_000.0),
+                (attr_ids::CAPACITOR_CAPACITY, 5_000.0),
+                (attr_ids::MAX_LOCKED_TARGETS, 7.0),
+                (attr_ids::MAX_TARGET_RANGE, 100_000.0),
+            ],
+        );
+        sde.types.insert(cyno_hull_tid, hull_t);
+
+        let mut cyno_t = custom_inv_type(
+            sde,
+            cyno_mod_tid,
+            658,
+            7,
+            20.0,
+            0.0,
+            "Cynosural Field Generator I",
+            &[(713, 16273.0), (714, 500.0), (73, 600_000.0), (6, 500.0)],
+        );
+        cyno_t.effect_ids = vec![12, 16];
+        sde.types.insert(cyno_mod_tid, cyno_t);
+    });
+
+    let char_id = 97_995_001_i64;
+    let victim_char_id = 97_995_002_i64;
+    let fleet_id = 777_995_i64;
+    let ship_id = 1_097_995_001_i64;
+    let ship_no_cloak_id = 1_097_995_011_i64;
+    let victim_ship_id = 1_097_995_002_i64;
+    let web_id = 1_097_995_003_i64;
+    let tsb_id = 1_097_995_004_i64;
+    let cyno_mod_id = 1_097_995_005_i64;
+    let cyno_mod_nc_id = 1_097_995_015_i64;
+    let ozone_id = 1_097_995_006_i64;
+    let ozone_nc_id = 1_097_995_016_i64;
+
+    ensure_char(&ctx, char_id, 98_000_001, low_sys_id, ship_id);
+    ensure_char(&ctx, victim_char_id, 98_000_002, low_sys_id, victim_ship_id);
+    let _ = ctx.db.acquire_online_lock(char_id as u64, 1, Some(char_id), true, ctx.now_unix());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().fleet_id = Some(fleet_id);
+        snap.fleets.insert(
+            fleet_id,
+            eve_db::FleetRecord {
+                fleet_id,
+                boss_id: char_id,
+                members: vec![char_id, victim_char_id],
+                ..Default::default()
+            },
+        );
+    });
+
+    insert_item(&ctx, ship_id, cyno_hull_tid, char_id, i64::from(low_sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, ship_no_cloak_id, cyno_hull_tid, char_id, i64::from(low_sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, victim_ship_id, 587, victim_char_id, i64::from(low_sys_id), InventoryFlag::None, 1, true);
+    insert_item(&ctx, web_id, web_tid, char_id, ship_id, InventoryFlag::MedSlot0, 1, true);
+    insert_item(&ctx, tsb_id, tsb_tid, char_id, ship_id, InventoryFlag::MedSlot1, 1, true);
+    insert_item(&ctx, cyno_mod_id, cyno_mod_tid, char_id, ship_id, InventoryFlag::HiSlot0, 1, true);
+    insert_item(&ctx, cyno_mod_nc_id, cyno_mod_tid, char_id, ship_no_cloak_id, InventoryFlag::HiSlot0, 1, true);
+    ctx.db.with_mut_snapshot(|snap| {
+        for mid in [web_id, tsb_id, cyno_mod_id, cyno_mod_nc_id] {
+            snap.module_online_states.insert(mid, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    ctx.invalidate_ship_fitting(ship_no_cloak_id);
+
+    for sid in [ship_id, ship_no_cloak_id] {
+        spawn_ship(&ctx, low_sys_id, sid, cyno_hull_tid, char_id, 5_000.0).await;
+    }
+    let sys = ctx.systems.get_or_spawn(low_sys_id);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: victim_ship_id,
+            type_id: 587,
+            position: DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 500.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        CombatState {
+            capacitor: 200.0,
+            max_capacitor: 200.0,
+            ..Default::default()
+        },
+        SlimItemMeta {
+            group_id: 25,
+            category_id: 6,
+            owner_id: victim_char_id,
+            char_id: Some(victim_char_id),
+            corp_id: 98_000_002,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sys.add_target_lock(
+        ship_id,
+        eve_destiny::TargetLock {
+            target_id: victim_ship_id,
+            lock_time_ms: 100.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: Some(50_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut sess = SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        corporation_id: Some(98_000_001),
+        solar_system_id: Some(low_sys_id),
+        ship_id: Some(ship_id),
+        ..Default::default()
+    };
+    let kw = HashMap::new();
+
+    // 1. Undocked without gate cloak (gate_cloak=0, undock_invuln=15):
+    //    Commit via non-delegated Web (fitting_module_cycles:2077) clears undock_invuln and emits OnInvulnCancelled (no OnJumpCloakCancelled).
+    crate::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(char_id, crate::services::combat_crimewatch::SafetyLevel::Red);
+    });
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: false,
+            gate_cloak_remaining_ticks: 0,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 5_000.0,
+            max_capacitor: 5_000.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(web_id), PyRep::String("activate".into()), PyRep::Integer(victim_ship_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect("non-gate undock invuln Web commit must succeed");
+    let cs_web = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_web.undock_invulnerable_remaining_ticks, 0);
+    let notes_web = ctx.drain_notifications_for_char(char_id);
+    assert!(notes_web.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert!(!notes_web.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // 2. Undocked without gate cloak via delegated finish_space_activation / break_gate_cloak_on_space_action
+    //    (fitting_module_cycles_guards.rs:130) clears undock_invuln and emits OnInvulnCancelled.
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: false,
+            gate_cloak_remaining_ticks: 0,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 5_000.0,
+            max_capacitor: 5_000.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(tsb_id)], &kw)
+        .await
+        .unwrap()
+        .expect("delegated TSB commit with non-gate undock invuln must succeed");
+    let cs_tsb = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert_eq!(cs_tsb.undock_invulnerable_remaining_ticks, 0);
+    let notes_tsb = ctx.drain_notifications_for_char(char_id);
+    assert!(notes_tsb.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert!(!notes_tsb.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // 3. light_cyno with NotEnoughFuel preserves gate cloak & undock invuln (no notifications, no cycle, no beacon);
+    //    lighting with Liquid Ozone clears undock_invuln + gate cloak and emits OnInvulnCancelled + OnJumpCloakCancelled.
+    sys.set_combat_state(
+        ship_id,
+        CombatState {
+            is_cloaked: true,
+            gate_cloak_remaining_ticks: 30,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 5_000.0,
+            max_capacitor: 5_000.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let cyno_no_fuel = handle_module_cycles(
+        &ctx,
+        &mut sess,
+        None,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cyno_mod_id)],
+        &kw,
+    )
+    .await
+    .unwrap()
+    .expect_err("light_cyno without Liquid Ozone must fail NotEnoughFuel");
+    assert_eq!(cyno_no_fuel.code, "NotEnoughFuel");
+    let cs_cyno_err = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_cyno_err.is_cloaked);
+    assert_eq!(cs_cyno_err.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_cyno_err.undock_invulnerable_remaining_ticks, 15);
+    assert!(!sys.has_module_cycle(ship_id, cyno_mod_id).await);
+    assert!(!crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(&ctx, ship_id));
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
+
+    insert_item(&ctx, ozone_id, 16_273, char_id, ship_id, InventoryFlag::Cargo, 1_000, false);
+    handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mod_id)], &kw)
+        .await
+        .unwrap()
+        .expect("light_cyno with fuel must succeed");
+    let cs_cyno_ok = sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(!cs_cyno_ok.is_cloaked);
+    assert_eq!(cs_cyno_ok.gate_cloak_remaining_ticks, 0);
+    assert_eq!(cs_cyno_ok.undock_invulnerable_remaining_ticks, 0);
+    let notes_cyno = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes_cyno.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    assert!(notes_cyno.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+
+    // 4. Same light_cyno fuel rejection + commit for non-gate undock invuln (gate_cloak = 0, undock_invuln = 15).
+    sess.ship_id = Some(ship_no_cloak_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().active_ship_id = ship_no_cloak_id;
+    });
+    sys.set_combat_state(
+        ship_no_cloak_id,
+        CombatState {
+            is_cloaked: false,
+            gate_cloak_remaining_ticks: 0,
+            undock_invulnerable_remaining_ticks: 15,
+            capacitor: 5_000.0,
+            max_capacitor: 5_000.0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let nc_err = handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mod_nc_id)], &kw)
+        .await
+        .unwrap()
+        .expect_err("non-gate light_cyno without fuel must fail NotEnoughFuel");
+    assert_eq!(nc_err.code, "NotEnoughFuel");
+    assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
+
+    insert_item(&ctx, ozone_nc_id, 16_273, char_id, ship_no_cloak_id, InventoryFlag::Cargo, 1_000, false);
+    handle_module_cycles(&ctx, &mut sess, None, "dogmaIM", "Activate", &[PyRep::Integer(cyno_mod_nc_id)], &kw)
+        .await
+        .unwrap()
+        .expect("non-gate light_cyno with fuel must succeed");
+    assert_eq!(sys.get_combat_state(ship_no_cloak_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
+    let notes_nc_ok = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(notes_nc_ok.iter().filter(|n| n.event == "OnInvulnCancelled").count(), 1);
+    assert!(!notes_nc_ok.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 }
 
 

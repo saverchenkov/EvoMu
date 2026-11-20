@@ -222,9 +222,6 @@ pub async fn handle_weapons(
                 char_id,
                 "SAFE_LOGOFF_ABORT_MODULE",
             );
-            if method != "Overload" {
-                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-            }
             let controlling_structure = session.structure_id.is_some() && session.structure_id == session.ship_id;
             if session.station_id.is_some() || (session.structure_id.is_some() && !controlling_structure) {
                 return Some(Err(BridgeRpcError {
@@ -432,6 +429,7 @@ pub async fn handle_weapons(
             })
             .await;
             if !controlling_structure && matches!(res, Some(Ok(_))) {
+                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
                 crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
                     ctx, &sys_handle, char_id, ship_id,
                 )
@@ -478,10 +476,17 @@ async fn handle_weapons_after_cloak_guard(
                     }));
                 }
             }
-            if matches!(
+            if (matches!(
                 mod_type.group_id,
-                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            ) && sys_handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_tethered)
+                52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862
+            ) || crate::services::inventory_fitting::fitting_module_cycles::is_weapon_group(
+                mod_type.group_id,
+            )) && sys_handle
+                .get_combat_state(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|cs| cs.is_tethered)
             {
                 return Some(Err(BridgeRpcError {
                     code: "CantActivateWhileTethered".into(),
@@ -622,9 +627,6 @@ async fn handle_weapons_after_cloak_guard(
                             "Target {tid} is {ewar_dist:.1} m away (exceeds range {eff_max_range:.1} m)"
                         ),
                     )));
-                }
-                if method == "Overload" {
-                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
                 }
                 if let (Some(vc), Some((is_pod_target, v_suspect_or_crim, is_legal, is_mobile_struct))) =
                     (victim_char_opt, pvp_precheck)
@@ -815,9 +817,6 @@ async fn handle_weapons_after_cloak_guard(
                         }
                     }
                 }
-                if method == "Overload" {
-                    crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-                }
                 let mut eff_m = m.clone();
                 if is_overloaded {
                     eff_m.state = eve_dogma::ModuleState::Overloaded;
@@ -850,9 +849,8 @@ async fn handle_weapons_after_cloak_guard(
             }
             // 5. Turrets (Hybrid 74, Projectile 55, Energy Laser 53, Entropic Disintegrator 1986, Vorton Projector 4060)
             //    and Missile Launchers (506..=511, 524, 1674, 4500, 4805, 4807)
-            if !matches!(
+            if !crate::services::inventory_fitting::fitting_module_cycles::is_weapon_group(
                 mod_type.group_id,
-                74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
             ) {
                 return None;
             }
@@ -872,10 +870,10 @@ async fn handle_weapons_after_cloak_guard(
                     })
                     .map(|i| (i.item_id, i.type_id))
             });
-            let is_missile_launcher = matches!(
-                mod_type.group_id,
-                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            );
+            let is_missile_launcher =
+                crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                );
             let is_civilian_turret =
                 mod_type.capacity <= 0.0 || matches!(m.type_id, 3634 | 3636 | 3638 | 3640);
             let mut pending_weapon_autoload: Option<
@@ -1094,10 +1092,10 @@ async fn handle_weapons_after_cloak_guard(
             };
 
             // Weapon classification & pre-validation
-            let is_missile_launcher = matches!(
-                mod_type.group_id,
-                506..=511 | 524 | 1674 | 4500 | 4805 | 4807
-            );
+            let is_missile_launcher =
+                crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                );
             let is_breacher_pod = matches!(mod_type.group_id, 4500 | 4805 | 4807);
             let is_vorton = mod_type.group_id == 4060;
 
@@ -1238,7 +1236,9 @@ async fn handle_weapons_after_cloak_guard(
             // Projectile turrets (`group_id == 55`) and Missile Launchers require 0 capacitor!
             // Hybrid turrets (`74`), Energy Lasers (`53`), Entropic Disintegrators (`1986`), and Vorton Projectors (`4060`) consume capacitor.
             let base_cap_need = if mod_type.group_id == 55
-                || matches!(mod_type.group_id, 506..=511 | 524 | 1674 | 4500 | 4805 | 4807)
+                || crate::services::inventory_fitting::fitting_module_cycles::is_missile_launcher_group(
+                    mod_type.group_id,
+                )
             {
                 0.0
             } else {
@@ -1307,9 +1307,6 @@ async fn handle_weapons_after_cloak_guard(
                 }
                 m.charge_type_id = Some(plan.ammo_type_id);
                 fit.recalculate_stats(&ctx.sde);
-            }
-            if method == "Overload" {
-                crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             }
             if let Some(new_cap) = pending_cap_after {
                 let _ = sys_handle.set_capacitor(ship_id, new_cap).await;

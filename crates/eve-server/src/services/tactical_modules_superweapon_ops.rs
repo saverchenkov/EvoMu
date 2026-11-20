@@ -347,6 +347,13 @@ pub async fn activate_superweapon_with_args(
     target_id_opt: Option<i64>,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let pre_undock_invuln_ticks = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks);
     let res = activate_superweapon_with_args_inner(
         ctx,
         char_id,
@@ -359,9 +366,12 @@ pub async fn activate_superweapon_with_args(
     )
     .await;
     if res.is_ok() {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        crate::services::inventory_fitting::fitting_module_cycles::break_gate_cloak_on_space_action(
-            ctx, &sys, char_id, ship_id,
+        crate::services::inventory_fitting::fitting_module_cycles::commit_space_action_cloak_and_invuln_break(
+            ctx,
+            &sys,
+            char_id,
+            ship_id,
+            pre_undock_invuln_ticks,
         )
         .await;
     }

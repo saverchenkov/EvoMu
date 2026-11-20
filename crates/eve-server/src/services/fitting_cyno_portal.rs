@@ -492,11 +492,12 @@ pub(super) fn effective_jump_drive_consumption_per_ly(
     raw * jfc_mult * jf_mult * econ_mult
 }
 
-/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (fuel bay first, then cargo).
-fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_id: TypeId, qty: i64) -> Result<(), i64> {
-    if qty <= 0 {
-        return Ok(());
-    }
+/// Lists matching fuel stacks in `ship_id` (fuel bay first, then cargo) and total quantity.
+fn ship_fuel_stacks_and_available(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    type_id: TypeId,
+) -> (Vec<(u8, i64)>, i64) {
     let mut stacks: Vec<(u8, i64)> = snap
         .items
         .values()
@@ -511,7 +512,37 @@ fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_i
         .map(|i| (if i.flag == eve_db::InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, i.item_id))
         .collect();
     stacks.sort_by_key(|&(prio, id)| (prio, id));
-    let available: i64 = stacks.iter().filter_map(|&(_, id)| snap.items.get(&id)).map(|i| i.quantity as i64).sum();
+    let available: i64 = stacks
+        .iter()
+        .filter_map(|&(_, id)| snap.items.get(&id))
+        .map(|i| i.quantity as i64)
+        .sum();
+    (stacks, available)
+}
+
+fn has_ship_fuel(
+    snap: &eve_db::WorldStateSnapshot,
+    ship_id: i64,
+    type_id: TypeId,
+    qty: i64,
+) -> Result<(), i64> {
+    if qty <= 0 {
+        return Ok(());
+    }
+    let (_, available) = ship_fuel_stacks_and_available(snap, ship_id, type_id);
+    if available < qty {
+        Err(available)
+    } else {
+        Ok(())
+    }
+}
+
+/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (fuel bay first, then cargo).
+fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_id: TypeId, qty: i64) -> Result<(), i64> {
+    if qty <= 0 {
+        return Ok(());
+    }
+    let (stacks, available) = ship_fuel_stacks_and_available(snap, ship_id, type_id);
     if available < qty {
         return Err(available);
     }
@@ -707,6 +738,16 @@ async fn light_cyno(
         (raw_base * role_mult * cft_mult).max(min_floor).ceil() as i64
     };
     let duration_s = duration_ms / 1000.0;
+    if fuel_qty > 0 {
+        ctx.db
+            .with_snapshot(|snap| has_ship_fuel(snap, ship_id, fuel_type, fuel_qty))
+            .map_err(|have| {
+                err(
+                    "NotEnoughFuel",
+                    format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}"),
+                )
+            })?;
+    }
     let now_reserve = ctx.now_unix_secs();
     {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
@@ -737,6 +778,12 @@ async fn light_cyno(
         }
         st.beacon_cycles.remove(&(ctx_key(ctx), ship_id));
     };
+    let pre_undock_invuln_ticks = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |cs| cs.undock_invulnerable_remaining_ticks);
     let _ = sys.remove_module_cycle(ship_id, module_id).await;
     if let Err(e) = sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
@@ -761,8 +808,27 @@ async fn light_cyno(
         }) {
             clear_cyno_claim();
             let _ = sys.remove_module_cycle(ship_id, module_id).await;
+            if pre_undock_invuln_ticks > 0 {
+                let _ = sys
+                    .modify_combat_state(ship_id, move |cs| {
+                        cs.undock_invulnerable_remaining_ticks = pre_undock_invuln_ticks;
+                    })
+                    .await;
+            }
             return Err(e);
         }
+    }
+    if pre_undock_invuln_ticks > 0
+        && sys
+            .get_combat_state(ship_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks == 0)
+    {
+        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+            ctx, char_id, ship_id, false, true,
+        );
     }
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);

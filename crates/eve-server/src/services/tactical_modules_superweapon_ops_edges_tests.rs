@@ -1180,6 +1180,9 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         DVec3::new(10_000.0, 0.0, 0.0),
     );
     let sys_null = ctx.systems.get_or_spawn(null_sys);
+    let _ = ctx
+        .db
+        .acquire_online_lock(1, 1, Some(char_id), false, ctx.now_unix());
     let set_titan_gate_cloak = |tethered: bool, cap: f64| {
         let mut bp = sys_null.ballpark.write().unwrap();
         let cs = bp.combat_states.get_mut(&titan_id).unwrap();
@@ -1197,14 +1200,20 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         .await
         .expect_err("tethered Doomsday must reject");
     assert_eq!(dd_teth_err.code, "CantActivateWhileTethered");
-    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+    let cs_teth = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert_eq!(cs_teth.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_teth.undock_invulnerable_remaining_ticks, 15);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
 
     set_titan_gate_cloak(false, 200_000.0);
     let dd_lock_err = activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
         .await
         .expect_err("unlocked target Doomsday must reject");
     assert_eq!(dd_lock_err.code, "TargetNotLocked");
-    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().gate_cloak_remaining_ticks, 30);
+    let cs_lock = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert_eq!(cs_lock.gate_cloak_remaining_ticks, 30);
+    assert_eq!(cs_lock.undock_invulnerable_remaining_ticks, 15);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled" || n.event == "OnJumpCloakCancelled"));
 
     sys_null
         .add_target_lock(
@@ -1232,7 +1241,8 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
         let cs = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
         assert!(cs.is_cloaked, "Doomsday {label} must preserve is_cloaked");
         assert_eq!(cs.gate_cloak_remaining_ticks, 30, "Doomsday {label} must preserve gate cloak");
-        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+        assert_eq!(cs.undock_invulnerable_remaining_ticks, 15, "Doomsday {label} must preserve undock invuln");
+        assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled" || n.event == "OnInvulnCancelled"));
     }
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -1257,6 +1267,44 @@ async fn f02_superweapon_and_lance_preserve_gate_cloak_on_rejections_and_break_o
     let cs_dd_ok = sys_null.get_combat_state(titan_id).await.unwrap().unwrap();
     assert!(!cs_dd_ok.is_cloaked);
     assert_eq!(cs_dd_ok.gate_cloak_remaining_ticks, 0);
-    assert!(ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert_eq!(cs_dd_ok.undock_invulnerable_remaining_ticks, 0);
+    let dd_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
+    assert!(dd_notes.iter().any(|n| n.event == "OnInvulnCancelled"));
+
+    // Non-gate-cloaked undock invuln (gate_cloak=0, undock_invuln=15) preserved on rejection, cleared on commit.
+    ctx.module_reactivation_cooldowns.write().unwrap().clear();
+    {
+        let mut bp = sys_null.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+        cs.is_tethered = true;
+        cs.is_cloaked = false;
+        cs.gate_cloak_remaining_ticks = 0;
+        cs.undock_invulnerable_remaining_ticks = 15;
+        cs.capacitor = 200_000.0;
+    }
+    let _ = ctx.drain_notifications_for_char(char_id);
+    assert_eq!(
+        activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+            .await
+            .unwrap_err()
+            .code,
+        "CantActivateWhileTethered"
+    );
+    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 15);
+    assert!(!ctx.drain_notifications_for_char(char_id).iter().any(|n| n.event == "OnInvulnCancelled"));
+
+    {
+        let mut bp = sys_null.ballpark.write().unwrap();
+        let cs = bp.combat_states.get_mut(&titan_id).unwrap();
+        cs.is_tethered = false;
+    }
+    activate_superweapon_with_args(&ctx, char_id, titan_id, null_sys, dd_mod, "Activate", Some(tgt_id), &[])
+        .await
+        .expect("non-gate undock invuln Doomsday commit must succeed");
+    assert_eq!(sys_null.get_combat_state(titan_id).await.unwrap().unwrap().undock_invulnerable_remaining_ticks, 0);
+    let nc_dd_notes = ctx.drain_notifications_for_char(char_id);
+    assert!(nc_dd_notes.iter().any(|n| n.event == "OnInvulnCancelled"));
+    assert!(!nc_dd_notes.iter().any(|n| n.event == "OnJumpCloakCancelled"));
 }
 

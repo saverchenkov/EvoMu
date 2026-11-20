@@ -2805,6 +2805,56 @@ pub(crate) async fn execute_pending_cycle_actions_list(
     }
 }
 
+fn is_targeted_aggression_cycle_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        52 | 53 | 55 | 65 | 68 | 71 | 74 | 201 | 208 | 291 | 379 | 506..=512
+            | 524 | 771 | 899 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
+    )
+}
+
+fn is_remote_assistance_cycle_group(group_id: u32) -> bool {
+    matches!(group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018)
+}
+
+async fn is_target_pod(ctx: &ServerContext, sys: &SystemHandle, target_id: i64) -> bool {
+    sys.get_ball_snapshot(target_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|(_, b)| b.type_id == 670)
+        || ctx
+            .db
+            .with_snapshot(|s| s.items.get(&target_id).is_some_and(|i| i.type_id == 670))
+}
+
+/// Read-only Crimewatch safety precheck run before `prepare_ewar_and_capital_module`
+/// and `sys.add_module_cycle` so blocked targeted EWAR, neutralizer, and remote-assistance
+/// activations fail cleanly without mutating attacker or target state (`#1403`).
+pub(crate) async fn precheck_module_cycle_aggression_or_assistance_safety(
+    ctx: &ServerContext,
+    sys: &SystemHandle,
+    sys_id: u32,
+    char_id: i64,
+    group_id: u32,
+    target_id_opt: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let Some(target_id) = target_id_opt else {
+        return Ok(());
+    };
+    if is_targeted_aggression_cycle_group(group_id) {
+        let is_pod = is_target_pod(ctx, sys, target_id).await;
+        crate::services::combat_crimewatch::crimewatch_timers::precheck_pvp_aggression_safety(
+            ctx, char_id, sys_id, target_id, is_pod,
+        )?;
+    } else if is_remote_assistance_cycle_group(group_id) {
+        crate::services::combat_crimewatch::crimewatch_timers::can_perform_remote_assistance_in_safety(
+            ctx, char_id, sys_id, target_id,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
     ctx: &ServerContext,
     sys: &SystemHandle,
@@ -2815,11 +2865,7 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
     target_id_opt: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
     let Some(target_id) = target_id_opt else { return Ok(()); };
-    if matches!(
-        group_id,
-        52 | 53 | 55 | 65 | 68 | 71 | 74 | 201 | 208 | 291 | 379 | 506..=512
-            | 524 | 771 | 899 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
-    ) {
+    if is_targeted_aggression_cycle_group(group_id) {
         let now_unix = ctx.now_unix();
         let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
             rt.modified_system_securities.get(&sys_id).copied()
@@ -2855,8 +2901,7 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
                     false
                 }
             };
-        let is_pod = sys.get_ball_snapshot(target_id).await.ok().flatten().is_some_and(|(_, b)| b.type_id == 670)
-            || ctx.db.with_snapshot(|s| s.items.get(&target_id).is_some_and(|i| i.type_id == 670));
+        let is_pod = is_target_pod(ctx, sys, target_id).await;
         crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
             ctx, char_id, ship_id, sys_id, target_id, is_pod,
         )?;
@@ -2870,7 +2915,7 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
             }
         }
         Ok(())
-    } else if matches!(group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018) {
+    } else if is_remote_assistance_cycle_group(group_id) {
         crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
             ctx, char_id, ship_id, sys_id, target_id,
         )

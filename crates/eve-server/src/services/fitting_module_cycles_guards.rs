@@ -18,6 +18,19 @@ pub(crate) fn is_warp_safe_cloak_module(ctx: &ServerContext, mod_type: &eve_sde:
             || mod_type.name.contains("Covert Ops"))
 }
 
+/// Returns `true` when `group_id` is a missile launcher or zero-cap launcher-branch weapon (`#1403`).
+pub(crate) fn is_missile_launcher_group(group_id: u32) -> bool {
+    matches!(
+        group_id,
+        506..=511 | 524 | 771 | 1245 | 1674 | 4500 | 4805 | 4807
+    )
+}
+
+/// Returns `true` when `group_id` is a weapon module routed to weapon / combat activation paths (`#1403`).
+pub(crate) fn is_weapon_group(group_id: u32) -> bool {
+    matches!(group_id, 53 | 55 | 74 | 1986 | 4060) || is_missile_launcher_group(group_id)
+}
+
 fn has_active_db_cloak_module(ctx: &ServerContext, ship_id: i64) -> bool {
     ctx.db.with_snapshot(|s| {
         s.items.values().any(|it| {
@@ -127,12 +140,36 @@ pub(crate) async fn break_gate_cloak_on_space_action(
     ship_id: i64,
 ) {
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.gate_cloak_remaining_ticks > 0 {
+        if cs.gate_cloak_remaining_ticks > 0 || cs.undock_invulnerable_remaining_ticks > 0 {
             let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(
                 ctx, sys, char_id, ship_id,
             )
             .await;
         }
+    }
+}
+
+/// Breaks remaining gate cloak or undock invulnerability on commit and ensures
+/// `OnInvulnCancelled` is emitted once even when `add_module_cycle` cleared
+/// `undock_invulnerable_remaining_ticks` prior to commit (`#1403`).
+pub(crate) async fn commit_space_action_cloak_and_invuln_break(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    pre_undock_invuln_ticks: u32,
+) {
+    let post_cycle_still_invuln = sys
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0);
+    break_gate_cloak_on_space_action(ctx, sys, char_id, ship_id).await;
+    if pre_undock_invuln_ticks > 0 && !post_cycle_still_invuln {
+        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
+            ctx, char_id, ship_id, false, true,
+        );
     }
 }
 
