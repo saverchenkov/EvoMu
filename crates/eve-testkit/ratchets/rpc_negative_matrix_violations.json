@@ -1,7 +1,7 @@
 {
   "version": 1,
   "description": "Shrinking baseline ratchet of negative-matrix violations observed on main (first landing is report-only; this list may only shrink).",
-  "total_violations": 337,
+  "total_violations": 332,
   "violation_groups": [
     {"situation":"b","service":"LSC","kind":"unexpected_allow","methods":["Invite"]},
     {"situation":"b","service":"LSC","kind":"world_mutated","methods":["Invite"]},
@@ -25,7 +25,6 @@
     {"situation":"b","service":"crimewatch","kind":"unexpected_allow","methods":["GetClientStates"]},
     {"situation":"b","service":"crimewatch","kind":"world_mutated","methods":["GetClientStates"]},
     {"situation":"b","service":"dogmaIM","kind":"unexpected_allow","methods":["GetDbuffStateForClient","GetMappedDbuffsForItem"]},
-    {"situation":"b","service":"dungeonInstanceCacheMgr","kind":"world_mutated","methods":["GetCombatAnomaliesCount","GetCombatAnomalyInstances","GetIceBeltInstances","GetIceBeltsCount","GetOreAnomaliesCountInRange"]},
     {"situation":"b","service":"entity","kind":"unexpected_allow","methods":["GetBehaviorTreeManager","GetDebugSpawnPoolFleetEnemyClusters","GetExtraFleetMembers"]},
     {"situation":"b","service":"incursion","kind":"unexpected_allow","methods":["UpdateIncursionLPLog"]},
     {"situation":"b","service":"ingamereport","kind":"unexpected_allow","methods":["report_exploit_abuse","report_gambling","report_inappropriate_character_name","report_inappropriate_language","report_macro_use","report_offensive_mail","report_other","report_questionable_transaction"]},
