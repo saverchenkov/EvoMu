@@ -733,6 +733,60 @@ fn test_t2_sde_fsdbinary_characters_economy_and_assets_verification() {
     let gids = sde.load_graphic_ids().expect("load_graphic_ids");
     assert_eq!(gid_raw.records.len(), 6_200);
     assert_eq!(gids.len(), 6_200);
+    assert_eq!(sde.graphics.len(), gids.len());
+    for (&gid, info) in &gids {
+        assert_eq!(sde.graphics.get(&gid), Some(info));
+        for opt in [
+            info.graphic_file.as_deref(),
+            info.icon_folder.as_deref(),
+            info.sof_faction_name.as_deref(),
+            info.sof_hull_name.as_deref(),
+            info.sof_race_name.as_deref(),
+        ] {
+            assert_ne!(opt, Some(""), "empty string leaked on graphic_id {gid}");
+        }
+    }
+    assert_eq!(
+        gids[&10].graphic_file.as_deref(),
+        Some("res:/dx9/model/worldobject/planet/moon.red")
+    );
+    assert_eq!(gids[&10].icon_folder, None);
+    assert_eq!(gids[&10].sof_dna(), None);
+    assert!(gids[&10].albedo_color.is_some());
+    assert_eq!(gids[&46].graphic_file, None);
+    assert_eq!(
+        gids[&46].icon_folder.as_deref(),
+        Some("res:/dx9/model/ship/minmatar/frigate/mf4/icons")
+    );
+    assert_eq!(gids[&46].sof_hull_name.as_deref(), Some("mf4_t1"));
+    assert_eq!(gids[&46].sof_faction_name.as_deref(), Some("minmatarbase"));
+    assert_eq!(gids[&46].sof_race_name.as_deref(), Some("minmatar"));
+    assert_eq!(gids[&46].sof_material_set_id, Some(18));
+    assert_eq!(
+        gids[&46].sof_dna().as_deref(),
+        Some("mf4_t1:minmatarbase:minmatar")
+    );
+    assert_eq!(gids[&235].graphic_location_id, Some(50));
+    assert_eq!(
+        gids[&1011].graphic_file.as_deref(),
+        Some("res:/fisfx/lensflare/blue.red")
+    );
+    assert_eq!(
+        gids[&1011].icon_folder.as_deref(),
+        Some("res:/fisfx/lensflare/icons")
+    );
+    assert!(gids[&21456].emissive_color.is_some());
+    assert_eq!(
+        gids[&24800]
+            .animation_state_objects
+            .get("triglavianOwned")
+            .map(String::as_str),
+        Some("tgstate_large:triglaviansvarog_caldari:triglavian")
+    );
+    assert!(!gids[&25148].controller_variable_overrides.is_empty());
+    assert!(gids.values().any(|g| !g.sof_layout.is_empty()));
+    assert!(gids.values().any(|g| g.ammo_color.is_some()));
+    assert!(gids.values().any(|g| g.explosion_bucket_id.is_some()));
 
     let iid_raw = load(&sde, ICON_IDS, 32);
     let iids = sde.load_icon_ids().expect("load_icon_ids");

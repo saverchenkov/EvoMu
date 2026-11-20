@@ -165,13 +165,61 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
     let s_sf = b_gr.alloc_str("minmatar");
     let s_sh = b_gr.alloc_str("mf1");
     let s_sr = b_gr.alloc_str("minmatar_race");
+    let s_sl0 = b_gr.alloc_str("res:/sof/hull.red");
+    b_gr.buf.extend_from_slice(&1u64.to_le_bytes());
+    let sl_abs = b_gr.buf.len();
+    b_gr.buf.extend_from_slice(&s_sl0.to_le_bytes());
+    let sl_rel = (sl_abs - 32) as u64;
+
+    let anim_k = b_gr.alloc_str("triglavianOwned");
+    let anim_v = b_gr.alloc_str("mf1:minmatar:minmatar_race");
+    b_gr.buf.extend_from_slice(&1u64.to_le_bytes());
+    let anim_entry_abs = b_gr.buf.len();
+    b_gr.buf.extend_from_slice(&anim_k.to_le_bytes());
+    b_gr.buf.extend_from_slice(&anim_v.to_le_bytes());
+    let anim_entry_rel = (anim_entry_abs - 32) as u64;
+    b_gr.buf.extend_from_slice(&1u64.to_le_bytes());
+    let anim_dict_abs = b_gr.buf.len();
+    b_gr.buf.extend_from_slice(&anim_entry_rel.to_le_bytes());
+    let anim_dict_rel = (anim_dict_abs - 32) as u64;
+
+    let ctrl_k = b_gr.alloc_str("Charge");
+    b_gr.buf.extend_from_slice(&1u64.to_le_bytes());
+    let ctrl_entry_abs = b_gr.buf.len();
+    b_gr.buf.extend_from_slice(&ctrl_k.to_le_bytes());
+    b_gr.buf.extend_from_slice(&0.75f32.to_le_bytes());
+    b_gr.buf.extend_from_slice(&0u32.to_le_bytes());
+    let ctrl_entry_rel = (ctrl_entry_abs - 32) as u64;
+    b_gr.buf.extend_from_slice(&1u64.to_le_bytes());
+    let ctrl_dict_abs = b_gr.buf.len();
+    b_gr.buf.extend_from_slice(&ctrl_entry_rel.to_le_bytes());
+    let ctrl_dict_rel = (ctrl_dict_abs - 32) as u64;
+
     let g0 = CfsdBuilder::rec_offset(0, 160);
     b_gr.write_u64(g0, 46);
+    b_gr.write_u64(g0 + 8, anim_dict_rel);
+    b_gr.write_u64(g0 + 16, 1);
+    b_gr.write_u64(g0 + 24, ctrl_dict_rel);
+    b_gr.write_u64(g0 + 32, 1);
     b_gr.write_u64(g0 + 40, s_gf);
     b_gr.write_u64(g0 + 48, s_if);
     b_gr.write_u64(g0 + 64, s_sf);
     b_gr.write_u64(g0 + 72, s_sh);
+    b_gr.write_u64(g0 + 80, sl_rel);
     b_gr.write_u64(g0 + 88, s_sr);
+    for (i, c) in [0.25f32, 0.5, 0.75, 1.0].into_iter().enumerate() {
+        b_gr.write_f32(g0 + 96 + i * 4, c);
+    }
+    for (i, c) in [1.0f32, 0.0, 0.5, 1.0].into_iter().enumerate() {
+        b_gr.write_f32(g0 + 112 + i * 4, c);
+    }
+    for (i, c) in [0.1f32, 0.2, 0.3, 1.0].into_iter().enumerate() {
+        b_gr.write_f32(g0 + 128 + i * 4, c);
+    }
+    b_gr.write_u32(g0 + 144, 18);
+    b_gr.write_u32(g0 + 148, 50);
+    b_gr.write_u32(g0 + 152, 99);
+    b_gr.write_u32(g0 + 156, 0x3fff);
     files.push(register_cfsd_resource(
         &mut sde,
         "res:/staticdata/graphicids.fsdbinary",
@@ -189,7 +237,24 @@ fn units_accounting_metagroups_graphics_icons_sounds_and_raw_types() {
             sof_faction_name: Some("minmatar".to_string()),
             sof_hull_name: Some("mf1".to_string()),
             sof_race_name: Some("minmatar_race".to_string()),
+            collision_file: None,
+            sof_material_set_id: Some(18),
+            graphic_location_id: Some(50),
+            explosion_bucket_id: Some(99),
+            albedo_color: Some([0.25, 0.5, 0.75, 1.0]),
+            ammo_color: Some([1.0, 0.0, 0.5, 1.0]),
+            emissive_color: Some([0.1, 0.2, 0.3, 1.0]),
+            sof_layout: vec!["res:/sof/hull.red".to_string()],
+            animation_state_objects: HashMap::from([(
+                "triglavianOwned".to_string(),
+                "mf1:minmatar:minmatar_race".to_string(),
+            )]),
+            controller_variable_overrides: HashMap::from([("Charge".to_string(), 0.75)]),
         }
+    );
+    assert_eq!(
+        grs[&46].sof_dna().as_deref(),
+        Some("mf1:minmatar:minmatar_race")
     );
 
     let mut b_ic = CfsdBuilder::new(&[vec![0u8; 32]]);

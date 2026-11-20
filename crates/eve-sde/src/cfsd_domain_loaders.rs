@@ -96,7 +96,8 @@ pub struct MetaGroupInfo {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Decoded visual/SOF graphic definition from `res:/staticdata/graphicids.fsdbinary`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphicIdInfo {
     pub graphic_id: u32,
     pub graphic_file: Option<String>,
@@ -104,6 +105,41 @@ pub struct GraphicIdInfo {
     pub sof_faction_name: Option<String>,
     pub sof_hull_name: Option<String>,
     pub sof_race_name: Option<String>,
+    #[serde(default)]
+    pub collision_file: Option<String>,
+    #[serde(default)]
+    pub sof_material_set_id: Option<u32>,
+    #[serde(default)]
+    pub graphic_location_id: Option<u32>,
+    #[serde(default)]
+    pub explosion_bucket_id: Option<u32>,
+    #[serde(default)]
+    pub albedo_color: Option<[f32; 4]>,
+    #[serde(default)]
+    pub ammo_color: Option<[f32; 4]>,
+    #[serde(default)]
+    pub emissive_color: Option<[f32; 4]>,
+    #[serde(default)]
+    pub sof_layout: Vec<String>,
+    #[serde(default)]
+    pub animation_state_objects: HashMap<String, String>,
+    #[serde(default)]
+    pub controller_variable_overrides: HashMap<String, f32>,
+}
+
+impl GraphicIdInfo {
+    /// Derives the combined SOF DNA string (`"<hull>:<faction>:<race>"`) when all three
+    /// non-empty SOF components are present, matching `evegraphics/utils.pyj:CombineSOFDNA`.
+    pub fn sof_dna(&self) -> Option<String> {
+        match (
+            self.sof_hull_name.as_deref().filter(|s| !s.is_empty()),
+            self.sof_faction_name.as_deref().filter(|s| !s.is_empty()),
+            self.sof_race_name.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            (Some(hull), Some(faction), Some(race)) => Some(format!("{hull}:{faction}:{race}")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,27 +531,135 @@ impl SdeRegistry {
             })
             .collect())
     }
+}
 
-    /// Loads `res:/staticdata/graphicids.fsdbinary` (`6,159` graphic definitions, stride `160`).
+fn cfsd_opt_nonempty_str(buf: &[u8], rel: u64) -> Option<String> {
+    cfsd_opt_str(buf, rel).filter(|s| !s.is_empty())
+}
+
+fn read_opt_f32x4(
+    buf: &crate::cfsd_nested_tables::CfsdBuf<'_>,
+    mask: u32,
+    bit: u32,
+    pos: usize,
+) -> Result<Option<[f32; 4]>, SdeError> {
+    if mask & bit == 0 {
+        return Ok(None);
+    }
+    Ok(Some([
+        f32::from_bits(buf.u32(pos)?),
+        f32::from_bits(buf.u32(pos + 4)?),
+        f32::from_bits(buf.u32(pos + 8)?),
+        f32::from_bits(buf.u32(pos + 12)?),
+    ]))
+}
+
+fn read_opt_masked_u32(
+    buf: &crate::cfsd_nested_tables::CfsdBuf<'_>,
+    mask: u32,
+    bit: u32,
+    pos: usize,
+) -> Result<Option<u32>, SdeError> {
+    if mask & bit == 0 {
+        return Ok(None);
+    }
+    Ok(Some(buf.u32(pos)?))
+}
+
+fn decode_cfsd_str_list(
+    buf: &crate::cfsd_nested_tables::CfsdBuf<'_>,
+    rel: u64,
+) -> Result<Vec<String>, SdeError> {
+    if rel == 0 {
+        return Ok(Vec::new());
+    }
+    let (at, n) = buf.counted(rel)?;
+    if n > buf.0.len() / 8 {
+        return Err(SdeError::InvalidSchema(format!(
+            "cfsd string list count {n} out of bounds at byte {at}"
+        )));
+    }
+    (0..n).map(|i| buf.str_at(buf.u64(at + i * 8)?)).collect()
+}
+
+fn decode_cfsd_str_dict<T>(
+    buf: &crate::cfsd_nested_tables::CfsdBuf<'_>,
+    pos: usize,
+    parse_val: impl Fn(&crate::cfsd_nested_tables::CfsdBuf<'_>, usize) -> Result<T, SdeError>,
+) -> Result<HashMap<String, T>, SdeError> {
+    let rel = buf.u64(pos)?;
+    let expected_len = buf.u64(pos + 8)? as usize;
+    let mut out = HashMap::new();
+    if rel != 0 {
+        let abs = usize::try_from(rel)
+            .ok()
+            .and_then(|r| r.checked_add(32))
+            .ok_or_else(|| {
+                SdeError::InvalidSchema(format!("cfsd dict offset out of range at byte {pos}"))
+            })?;
+        for entry in buf.dict_entries(abs, 16)? {
+            let key = buf.str_at(buf.u64(entry)?)?;
+            let val = parse_val(buf, entry + 8)?;
+            out.insert(key, val);
+        }
+    }
+    if out.len() != expected_len {
+        return Err(SdeError::InvalidSchema(format!(
+            "cfsd dict at byte {pos}: decoded {} of {expected_len} entries",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+impl SdeRegistry {
+    /// Loads `res:/staticdata/graphicids.fsdbinary` (`6,200` graphic definitions, stride `160`).
     pub fn load_graphic_ids(&self) -> Result<HashMap<u32, GraphicIdInfo>, SdeError> {
         let (raw, recs) = self.read_cfsd_bytes("res:/staticdata/graphicids.fsdbinary", 160)?;
-        Ok(recs
-            .into_iter()
-            .map(|rec| {
-                let id = u64_le(&raw, rec) as u32;
-                (
-                    id,
-                    GraphicIdInfo {
-                        graphic_id: id,
-                        graphic_file: cfsd_opt_str(&raw, u64_le(&raw, rec + 40)),
-                        icon_folder: cfsd_opt_str(&raw, u64_le(&raw, rec + 48)),
-                        sof_faction_name: cfsd_opt_str(&raw, u64_le(&raw, rec + 64)),
-                        sof_hull_name: cfsd_opt_str(&raw, u64_le(&raw, rec + 72)),
-                        sof_race_name: cfsd_opt_str(&raw, u64_le(&raw, rec + 88)),
-                    },
-                )
-            })
-            .collect())
+        let buf = crate::cfsd_nested_tables::CfsdBuf(&raw);
+        let mut out = HashMap::with_capacity(recs.len());
+        for rec in recs {
+            let id = u64_le(&raw, rec) as u32;
+            let mask = buf.u32(rec + 156)?;
+            let animation_state_objects = if mask & (1 << 2) != 0 {
+                decode_cfsd_str_dict(&buf, rec + 8, |b, p| b.str_at(b.u64(p)?))?
+            } else {
+                HashMap::new()
+            };
+            let controller_variable_overrides = if mask & (1 << 3) != 0 {
+                decode_cfsd_str_dict(&buf, rec + 24, |b, p| Ok(f32::from_bits(b.u32(p)?)))?
+            } else {
+                HashMap::new()
+            };
+            let sof_layout = if mask & (1 << 11) != 0 {
+                decode_cfsd_str_list(&buf, buf.u64(rec + 80)?)?
+            } else {
+                Vec::new()
+            };
+            out.insert(
+                id,
+                GraphicIdInfo {
+                    graphic_id: id,
+                    graphic_file: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 40)),
+                    icon_folder: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 48)),
+                    sof_faction_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 64)),
+                    sof_hull_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 72)),
+                    sof_race_name: cfsd_opt_nonempty_str(&raw, u64_le(&raw, rec + 88)),
+                    // Client `graphicIDsLoader.so` does not ship `collisionFile`.
+                    collision_file: None,
+                    sof_material_set_id: read_opt_masked_u32(&buf, mask, 1 << 5, rec + 144)?,
+                    graphic_location_id: read_opt_masked_u32(&buf, mask, 1 << 7, rec + 148)?,
+                    explosion_bucket_id: read_opt_masked_u32(&buf, mask, 1 << 12, rec + 152)?,
+                    albedo_color: read_opt_f32x4(&buf, mask, 1 << 0, rec + 96)?,
+                    ammo_color: read_opt_f32x4(&buf, mask, 1 << 1, rec + 112)?,
+                    emissive_color: read_opt_f32x4(&buf, mask, 1 << 4, rec + 128)?,
+                    sof_layout,
+                    animation_state_objects,
+                    controller_variable_overrides,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Loads `res:/staticdata/iconids.fsdbinary` (`4,804` icon definitions, stride `32`).

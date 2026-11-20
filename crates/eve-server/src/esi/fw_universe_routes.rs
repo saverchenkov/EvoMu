@@ -418,19 +418,22 @@ pub fn dispatch_fw_universe_route(
             ))
         }
 
-        // `graphicIDs.fsdbinary` is a developer-only authoring file not shipped in the V24 client
-        // install; expose the graphic_ids referenced by `sde_types` with only the schema-required field.
         ("GET", "/universe/graphics") => {
-            let ids: BTreeSet<i64> = ctx
-                .sde
-                .types
-                .values()
-                .filter_map(|t| t.graphic_id.map(|g| g as i64))
-                .collect();
-            Some(RouteExecutionResult::ok_json(
-                json!(ids.into_iter().collect::<Vec<_>>()),
-                3600,
-            ))
+            let mut ids: Vec<i64> = if !ctx.sde.graphics.is_empty() {
+                ctx.sde.graphics.keys().map(|&gid| i64::from(gid)).collect()
+            } else {
+                // Minimal synthetic SDEs without registered `.fsdbinary` resources fall back
+                // to type-referenced graphic IDs.
+                ctx.sde
+                    .types
+                    .values()
+                    .filter_map(|t| t.graphic_id.map(i64::from))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            };
+            ids.sort_unstable();
+            Some(RouteExecutionResult::ok_json(json!(ids), 3600))
         }
 
         ("GET", "/universe/graphics/{graphic_id}") => {
@@ -438,20 +441,37 @@ pub fn dispatch_fw_universe_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let exists = u32::try_from(graphic_id).ok().is_some_and(|gid| {
-                ctx.sde
-                    .types
-                    .values()
-                    .any(|t| t.graphic_id == Some(gid))
-            });
-            if !exists {
+            let Some(graphic) = u32::try_from(graphic_id)
+                .ok()
+                .and_then(|gid| ctx.sde.graphics.get(&gid))
+            else {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Graphic {graphic_id} not found"),
                 ));
+            };
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "graphic_id".to_string(),
+                json!(i64::from(graphic.graphic_id)),
+            );
+            let sof_dna = graphic.sof_dna();
+            // CCP's ESI OpenAPI schema spells `sof_fation_name` without the `c`.
+            for (field, value) in [
+                ("graphic_file", graphic.graphic_file.as_deref()),
+                ("sof_dna", sof_dna.as_deref()),
+                ("sof_fation_name", graphic.sof_faction_name.as_deref()),
+                ("sof_hull_name", graphic.sof_hull_name.as_deref()),
+                ("sof_race_name", graphic.sof_race_name.as_deref()),
+                ("collision_file", graphic.collision_file.as_deref()),
+                ("icon_folder", graphic.icon_folder.as_deref()),
+            ] {
+                if let Some(s) = value.filter(|s| !s.is_empty()) {
+                    obj.insert(field.to_string(), json!(s));
+                }
             }
             Some(RouteExecutionResult::ok_json(
-                json!({ "graphic_id": graphic_id }),
+                serde_json::Value::Object(obj),
                 86400,
             ))
         }

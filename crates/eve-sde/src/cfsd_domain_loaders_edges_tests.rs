@@ -185,6 +185,68 @@ fn domain_loaders_handle_empty_contraband_optional_nones_and_negative_clamps() {
     assert_eq!(gr[&77].sof_faction_name, None);
     assert_eq!(gr[&77].sof_hull_name, None);
     assert_eq!(gr[&77].sof_race_name, None);
+    assert_eq!(gr[&77].collision_file, None);
+    assert_eq!(gr[&77].sof_material_set_id, None);
+    assert_eq!(gr[&77].graphic_location_id, None);
+    assert_eq!(gr[&77].explosion_bucket_id, None);
+    assert_eq!(gr[&77].albedo_color, None);
+    assert_eq!(gr[&77].ammo_color, None);
+    assert_eq!(gr[&77].emissive_color, None);
+    assert!(gr[&77].sof_layout.is_empty());
+    assert!(gr[&77].animation_state_objects.is_empty());
+    assert!(gr[&77].controller_variable_overrides.is_empty());
+    assert_eq!(gr[&77].sof_dna(), None);
+
+    // Non-zero string offsets pointing to empty "" strings (matching real V24 graphicids.fsdbinary)
+    // must decode to None, and partial SOF fields must not fabricate sof_dna.
+    let mut gr_empty_sde = SdeRegistry::default();
+    let mut gr_empty_buf = vec![0u8; 64];
+    gr_empty_buf[40..48].copy_from_slice(&1u64.to_le_bytes());
+    gr_empty_buf[48..56].copy_from_slice(&1u64.to_le_bytes());
+    gr_empty_buf.extend_from_slice(&1u64.to_le_bytes());
+    let rec_pos = gr_empty_buf.len();
+    gr_empty_buf[56..64].copy_from_slice(&((rec_pos - 32) as u64).to_le_bytes());
+    gr_empty_buf.extend_from_slice(&[0u8; 160]);
+    gr_empty_buf[rec_pos..rec_pos + 8].copy_from_slice(&78u64.to_le_bytes());
+    gr_empty_buf.extend_from_slice(&0u64.to_le_bytes());
+    let empty_rel = (gr_empty_buf.len() - 32) as u64;
+    for str_off in [40usize, 48, 64, 72] {
+        gr_empty_buf[rec_pos + str_off..rec_pos + str_off + 8]
+            .copy_from_slice(&empty_rel.to_le_bytes());
+    }
+    gr_empty_buf.extend_from_slice(&("generic".len() as u64).to_le_bytes());
+    let race_rel = (gr_empty_buf.len() - 32) as u64;
+    gr_empty_buf.extend_from_slice(b"generic");
+    gr_empty_buf[rec_pos + 88..rec_pos + 96].copy_from_slice(&race_rel.to_le_bytes());
+    files.push(reg_bytes(
+        &mut gr_empty_sde,
+        "res:/staticdata/graphicids.fsdbinary",
+        "gr_empty_str",
+        &gr_empty_buf,
+    ));
+    let gr_empty = gr_empty_sde.load_graphic_ids().expect("graphicids empty str");
+    assert_eq!(gr_empty[&78].graphic_file, None);
+    assert_eq!(gr_empty[&78].icon_folder, None);
+    assert_eq!(gr_empty[&78].sof_faction_name, None);
+    assert_eq!(gr_empty[&78].sof_hull_name, None);
+    assert_eq!(gr_empty[&78].sof_race_name.as_deref(), Some("generic"));
+    assert_eq!(gr_empty[&78].sof_dna(), None);
+
+    // Out-of-bounds nested list offset when mask bit 11 is set must return Err, not panic.
+    let mut gr_bad_sde = SdeRegistry::default();
+    let mut gr_bad_buf = gr_buf.clone();
+    gr_bad_buf[gr_rec + 80..gr_rec + 88].copy_from_slice(&999_999u64.to_le_bytes());
+    gr_bad_buf[gr_rec + 156..gr_rec + 160].copy_from_slice(&(1u32 << 11).to_le_bytes());
+    files.push(reg_bytes(
+        &mut gr_bad_sde,
+        "res:/staticdata/graphicids.fsdbinary",
+        "gr_bad_nested",
+        &gr_bad_buf,
+    ));
+    assert!(matches!(
+        gr_bad_sde.load_graphic_ids(),
+        Err(SdeError::InvalidSchema(_))
+    ));
 
     let mut ic_buf = vec![0u8; 64];
     ic_buf[40..48].copy_from_slice(&1u64.to_le_bytes());
