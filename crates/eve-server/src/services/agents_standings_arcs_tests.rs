@@ -1751,7 +1751,19 @@ fn npc_kill_faction_standings_group_exclusion_before_attr562_and_wh_sleepers() {
         "unknown NPC type ID absent from SdeRegistry must yield zero standing loss"
     );
     ctx.db.with_snapshot(|snap| {
-        assert!(snap.characters[&char_id].standings.is_empty());
+        let ch = &snap.characters[&char_id];
+        assert_eq!(ch.standings.get(&500_001).copied().unwrap_or(0.0), 0.0);
+        assert_eq!(ch.standings.get(&500_024).copied().unwrap_or(0.0), 0.0);
+        assert_eq!(ch.standings.len(), 0);
+    });
+
+    // Positive control: `56_328` (Sleeper Entities group 4036) in K-space (outside WH range) IS eligible.
+    let k_drifter =
+        apply_npc_kill_faction_standing_loss(&ctx, k_sys, char_id, 56_328, None, None, t0);
+    assert_eq!(k_drifter.len(), 1);
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.characters[&char_id].standings.get(&500_024).copied().unwrap_or(0.0);
+        assert!((st - (-0.142162994)).abs() < 1e-9, "K-space 56328 standing got {st}");
     });
 }
 
